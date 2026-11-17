@@ -286,6 +286,8 @@ const threadStartCommandSchema = hostDaemonThreadTargetSchema
         sourceProviderCheckpointId: z.string().min(1).optional(),
       })
       .optional(),
+    /** A message edit replaces this native session and keeps its Goal (#857). */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {

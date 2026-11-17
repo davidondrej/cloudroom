@@ -1044,10 +1044,10 @@ export const codexHandledEventSchema = z.discriminatedUnion("method", [
     "mcpServer/startupStatus/updated",
     z
       .object({
-        name: z.unknown(),
-        status: z.unknown(),
-        error: z.unknown(),
-        failureReason: z.unknown(),
+        name: z.unknown().optional(),
+        status: z.unknown().optional(),
+        error: z.unknown().optional(),
+        failureReason: z.unknown().optional(),
       })
       .passthrough(),
   ),

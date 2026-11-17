@@ -509,7 +509,7 @@ async function unzipExport(file: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "conductor-export-"));
   const [command, args] = process.platform === "linux" ? ["unzip", ["-q", file, "-d", dir]] : [tarCommand(), ["-xf", file, "-C", dir]];
   try {
-    await execFileAsync(command, args, { timeout: 120_000 });
+    await execFileAsync(command, args, { timeout: 120_000, windowsHide: true });
     return dir;
   } catch (error) {
     await rm(dir, { recursive: true, force: true });

@@ -256,6 +256,8 @@ Read the installed declarations for exact current signatures.
 - `PluginThreadEventPayloads`
 - `PluginThreadHeaderActionProps`
 - `PluginThreadHeaderActionRegistration`
+- `ExperimentalProjectActionProps`
+- `ExperimentalProjectActionRegistration`
 - `PluginThreadListProps`
 - `PluginThreadListRegistration`
 - `PluginThreadPanelActionContext`

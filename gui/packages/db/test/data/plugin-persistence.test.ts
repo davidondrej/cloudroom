@@ -170,6 +170,43 @@ describe("normalized plugin persistence", () => {
     });
   });
 
+  it("strips credentials from Git URLs saved before #1935", () => {
+    const url = 'https://user:pa"s s@github.com/acme/repo';
+    upsertInstalledPlugin(db, {
+      id: "legacy",
+      source: `git:${url}@main`,
+      provenance: { kind: "direct" },
+      sourceIntent: {
+        kind: "git",
+        url,
+        subdirectory: null,
+        selector: { kind: "ref", ref: "main", refKind: "branch" },
+      },
+      exactResolution: { kind: "git", commit: "abcdef1234567" },
+      updateState: {
+        lastCheckAt: null,
+        availableCompatibleVersion: null,
+        newestIncompatibleVersion: null,
+        statusDetail: "git ls-remote 'https://user:pa\"ss@github.com/acme/repo' failed",
+      },
+      activeArtifactId: null,
+      rootDir: "/cache/repo",
+      version: "1.0.0",
+      enabled: true,
+    });
+    for (const row of [
+      getInstalledPlugin(db, "legacy"),
+      getInstalledPluginRegistration(db, "legacy"),
+    ]) {
+      expect(row).toMatchObject({
+        source: "git:https://github.com/acme/repo@main",
+        sourceGitUrl: "https://github.com/acme/repo",
+        updateStatusDetail:
+          "git ls-remote 'https://github.com/acme/repo' failed",
+      });
+    }
+  });
+
   it("retains artifact records when a plugin registration is removed", () => {
     const retainedPlugin: UpsertInstalledPluginInput = {
       id: "retained",

@@ -279,6 +279,13 @@ describe("plugin install sources", () => {
     expect(() =>
       parsePluginSource("git:github.com/acme/repo@-evil"),
     ).toThrowError(/invalid git ref/);
+    for (const source of [
+      "git:https://user:token@github.com/acme/repo@main",
+      "HTTPS://token@github.com/acme/repo@main",
+      "git:user:token@github.com/acme/repo@main",
+    ]) {
+      expect(() => parsePluginSource(source)).toThrowError(/credential helper/);
+    }
   });
 
   it("reads git semver ranges, explicit selectors, and tag prefixes", () => {

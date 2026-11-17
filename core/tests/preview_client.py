@@ -105,6 +105,12 @@ class PreviewTests(unittest.TestCase):
             {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe'},
         ]:
             self.assertEqual(self.request(headers=headers)[0], 403)
+        # Only a plain loopback visit learns the preview's address (#1879).
+        loopback = f'127.0.0.1:{self.server.server_port}'
+        status, _, body = self.request(headers={'Host': loopback})
+        self.assertEqual(status, 403); self.assertIn(f'http://{self.server.authority}/', body.decode())
+        for headers in [{'Host': 'attacker.example'}, {'Host': loopback, 'Origin': 'https://attacker.example'}]:
+            self.assertNotIn(self.server.authority, self.request(headers=headers)[2].decode())
         self.assertEqual(self.request(headers={'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'})[0], 200)
         self.assertEqual(self.request('POST', '/', headers={'Transfer-Encoding': 'chunked'})[0], 411)
 

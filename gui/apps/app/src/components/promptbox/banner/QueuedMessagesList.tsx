@@ -93,7 +93,7 @@ import {
   type QueuedEditorTypeaheadLayout,
 } from "@/components/promptbox/queued-editor-typeahead-layout";
 
-export type QueuedMessageProcessingAction = "send" | "edit" | "delete";
+export type QueuedMessageProcessingAction = "send" | "edit";
 export type QueuedMessageSendAction = "send-now" | "steer-when-ready";
 
 export interface QueuedMessageEditRequest {
@@ -1117,11 +1117,7 @@ export function QueuedMessagesList({
 }: QueuedMessagesListProps) {
   const senderThreadMetadataById = useSenderThreadMetadataById();
   const processingLabel =
-    processingAction === "edit"
-      ? "Editing…"
-      : processingAction === "delete"
-        ? "Deleting…"
-        : "Sending…";
+    processingAction === "edit" ? "Editing…" : "Sending…";
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 },

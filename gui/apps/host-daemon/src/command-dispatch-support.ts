@@ -190,6 +190,10 @@ export function getErrorCode(error: unknown): string {
   if (isStructuredSpawnMissingExecutableError(error)) {
     return "missing_executable";
   }
+  // An agent bridge's own code (`cli_missing`), carried across its JSON-RPC answer.
+  if (error instanceof Error && "reason" in error && typeof error.reason === "string" && error.reason) {
+    return error.reason;
+  }
   if (
     error instanceof Error &&
     "code" in error &&

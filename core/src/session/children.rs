@@ -621,7 +621,30 @@ pub(super) fn claude_effort_refusal(
     refusal.map(Error::Effort)
 }
 
+/// How long a child keeps asking again when its account check could not finish (#1949).
+const UNVERIFIED_RETRY: Duration = Duration::from_secs(20);
+
 impl Manager {
+    /// An account check that could not finish is kept only 2 s (auth.rs), so a child asks again every 3 s for a
+    /// while, like the website's starts (#826). Missing or rejected logins and usage limits fail at once.
+    async fn child_harness_ready(self: &Arc<Self>, kind: runtime::Kind) -> Result<()> {
+        let started = Instant::now();
+        loop {
+            match self.harness_ready(kind).await {
+                Err(Error::Conflict(why)) if why.contains("account could not be verified") => {
+                    if started.elapsed() >= UNVERIFIED_RETRY {
+                        return Err(Error::Refused(format!(
+                            "{why}. Cloudroom retried for {} seconds and started no child; try again in a minute",
+                            UNVERIFIED_RETRY.as_secs()
+                        )));
+                    }
+                }
+                other => return other,
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+        }
+    }
+
     /// Starts a child thread in the parent's folder with any supported harness and model. The parent keeps
     /// working; Core queues it a notice whenever one of the child's turns ends, even while the app is offline.
     pub async fn spawn_child(
@@ -722,7 +745,7 @@ impl Manager {
         if !self.config.harnesses.contains_key(&kind) {
             return Err(Error::Conflict("harness is not configured"));
         }
-        self.harness_ready(kind).await?;
+        self.child_harness_ready(kind).await?;
         let (model, provider) = if kind == runtime::Kind::Pi {
             self.keyed_pi_model(parent, spawn.model.as_deref(), model, provider)
                 .await

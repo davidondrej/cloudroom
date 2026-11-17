@@ -1,13 +1,14 @@
-import type { ReactNode } from "react";
-import { useIsFetching } from "@tanstack/react-query";
+import { useEffect, type ReactNode } from "react";
+import { useIsFetching, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { AgentHoursSection } from "@/components/settings/AgentHoursSection";
-import { CreditsUsageSection, creditsWaveKey } from "@/components/settings/CreditsUsageSection";
+import { CreditsUsageSection, creditsWaveKey, creditsWaveQuery } from "@/components/settings/CreditsUsageSection";
 import { ModelsSection } from "@/components/settings/ModelsSection";
 import { PromptsSection } from "@/components/settings/PromptsSection";
 import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
+import { SIDEBAR_WORKING_STATUS_COLOR_CLASS } from "@/components/sidebar/sidebarRowClasses";
 import { TokensSection } from "@/components/settings/TokensSection";
 import { WrappedButton } from "@/components/Wrapped";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
@@ -27,8 +28,9 @@ const QUERY_KEYS: unknown[] = [creditsWaveKey("")[0], systemSkillUsageQueryKey("
 
 export function AnalyticsTabs() {
   const [params, setParams] = useSearchParams();
-  // Cloud Credits needs an account.
-  const signedIn = Boolean(useCloudroomAccount().data?.account?.id);
+  // Cloud Credits needs an account. It loads in the background on any tab, so it is ready when opened.
+  const accountId = useCloudroomAccount().data?.account?.id ?? "", signedIn = accountId !== "", client = useQueryClient();
+  useEffect(() => { if (accountId) void client.prefetchQuery(creditsWaveQuery(accountId)); }, [client, accountId]);
   const tabs = TABS.filter((tab) => tab.id !== "credits" || signedIn);
   // Settings search opens the tab it found: it passes the tab's label along (settings-search.ts).
   const state: unknown = useLocation().state;
@@ -55,7 +57,8 @@ export function AnalyticsTabs() {
         <span className="mb-2 ml-auto flex shrink-0 items-center gap-2">
           {updating ? (
             <span role="status" aria-label="Updating">
-              <Icon name="Spinner" className="size-4 animate-spin text-muted-foreground" />
+              {/* The same spinner as a running thread in the sidebar. */}
+              <Icon name="Loading" className={cn("size-4 animate-spin", SIDEBAR_WORKING_STATUS_COLOR_CLASS)} />
             </span>
           ) : null}
           <WrappedButton />

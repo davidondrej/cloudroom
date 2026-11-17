@@ -94,3 +94,22 @@ export function isAllowedAppPermission(args: AllowedAppPermissionArgs): boolean 
   }
   return ALLOWED_APP_PERMISSIONS.has(args.permission);
 }
+
+// Chromium's Windows occlusion tracker can use a freed window when a callback changes the window
+// list (CVE-2026-121178, #1944); a compromised renderer could use that to leave its sandbox. No
+// Electron 44 has the fix, so Windows turns the tracker off. Drop this once a fixed Electron ships.
+export const WINDOWS_OCCLUSION_FEATURE = "CalculateNativeWinOcclusion";
+
+// appendSwitch replaces the switch, so keep the other disabled features. Chromium keeps the first
+// entry for a feature (`*Name` means "use the default"), so ours goes first and older ones go.
+export function withDisabledFeature(current: string, feature: string): string {
+  const others = current
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(
+      (entry) =>
+        entry.length > 0 &&
+        entry.replace(/^\*/u, "").split(/[<:]/u)[0] !== feature,
+    );
+  return [feature, ...others].join(",");
+}

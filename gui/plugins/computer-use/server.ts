@@ -14,7 +14,13 @@ import {
   type AppIdentity,
   type HostStatus,
 } from "./contract.js";
-import { BLOCKED_TOOLS, LIME_CURSOR_SUFFIX, PID_REQUIRED_TOOLS, WHOLE_SCREEN } from "./driver.js";
+import {
+  BLOCKED_TOOLS,
+  CLIPBOARD,
+  LIME_CURSOR_SUFFIX,
+  PID_REQUIRED_TOOLS,
+  WHOLE_SCREEN,
+} from "./driver.js";
 
 const APPROVAL_WAIT_MS = 90_000;
 const APP_BUSY_MS = 60_000;
@@ -51,7 +57,13 @@ const threadHostSchema = z.object({
 export function decideGate(args: {
   tool: string;
   input: Record<string, unknown>;
-}): { kind: "free" } | { kind: "pid"; pid: number } | { kind: "name"; name: string } | { kind: "screen" } | { kind: "error"; message: string } {
+}):
+  | { kind: "free" }
+  | { kind: "pid"; pid: number }
+  | { kind: "name"; name: string }
+  | { kind: "screen" }
+  | { kind: "clipboard" }
+  | { kind: "error"; message: string } {
   const { tool, input } = args;
   if (BLOCKED_TOOLS.has(tool))
     return { kind: "error", message: `${tool} changes Cua Driver itself and is not available to agents.` };
@@ -62,6 +74,9 @@ export function decideGate(args: {
       : { kind: "error", message: "launch_app needs bundle_id or name." };
   }
   if (tool === "get_desktop_state") return { kind: "screen" };
+  // The clipboard can hold passwords and tokens, and a write replaces what the user copied (#1960).
+  if (tool === "clipboard_read" || tool === "clipboard_write")
+    return { kind: "clipboard" };
   if (tool === "list_windows") return { kind: "free" };
   if (typeof input.pid === "number") return { kind: "pid", pid: input.pid };
   if (PID_REQUIRED_TOOLS.has(tool))
@@ -218,6 +233,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     if (gate.kind === "pid") return host.call("appForPid", { pid: gate.pid }, { hostId });
     if (gate.kind === "name") return host.call("appForName", { name: gate.name }, { hostId });
     if (gate.kind === "screen") return { ...WHOLE_SCREEN };
+    if (gate.kind === "clipboard") return { ...CLIPBOARD };
     return null;
   }
 
@@ -319,15 +335,31 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       );
     if (gate.kind !== "free" && !app) return fail("app_not_found", "No running app has that pid.");
     seen.app = app?.key ?? null;
+    // The clipboard needs approval but no Accessibility and no app lock:
+    // the driver uses NSPasteboard (#1960).
+    const control = gate.kind !== "clipboard";
     if (app) {
       const holder = busy.get(app.key);
-      if (holder && holder.threadId !== threadId && Date.now() - holder.at < APP_BUSY_MS)
-        return fail("app_busy", `${app.name} is being used by @thread:${holder.threadId}. Wait a minute or pick another app.`);
+      if (
+        control &&
+        holder &&
+        holder.threadId !== threadId &&
+        Date.now() - holder.at < APP_BUSY_MS
+      )
+        return fail(
+          "app_busy",
+          `${app.name} is being used by @thread:${holder.threadId}. Wait a minute or pick another app.`,
+        );
       const blocked = await approve({ threadId, app, tool, purpose, status });
       if (blocked) return blocked;
-      busy.set(app.key, { threadId, at: Date.now() });
+      if (control) busy.set(app.key, { threadId, at: Date.now() });
     }
-    if (app && (await host.call("status", {}, { hostId })).permissions.accessibility === false)
+    if (
+      app &&
+      control &&
+      (await host.call("status", {}, { hostId })).permissions.accessibility ===
+        false
+    )
       return fail(
         "permissions_missing",
         "Cloudroom needs macOS Accessibility permission. Ask the user to grant it in Settings > Plugins > Computer Use (or run `room-cli computer-use setup` while they watch), then retry.",

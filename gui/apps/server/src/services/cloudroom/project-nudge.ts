@@ -213,7 +213,7 @@ async function repoContext(folder: string): Promise<string> {
   };
   await list(folder, "", 1);
   parts.push(`## Folders\n${lines.slice(0, 300).join("\n")}`);
-  const commits = await run("git", ["-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000 })
+  const commits = await run("git", ["-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000, windowsHide: true })
     .then((result) => result.stdout.trim(), () => "");
   if (commits) parts.push(`## Recent commits\n${commits}`);
   return parts.join("\n\n");

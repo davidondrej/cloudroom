@@ -188,6 +188,28 @@ function normalizedColumns(
   } as const;
 }
 
+// Rows saved before #1935 can hold Git URLs with a username or token. Strip
+// them on read so they never reach git argv, update details, or the API.
+// URL userinfo may hold quotes and spaces; only / ? # \ end it.
+const GIT_URL_CREDENTIALS = /(https?:\/\/|^git:)[^/?#\\]*@/giu;
+// Free text: a URL also ends at whitespace.
+const TEXT_GIT_URL_CREDENTIALS = /(https?:\/\/)[^\s/?#\\]*@/giu;
+
+function stripGitUrlCredentials(value: string): string {
+  return value.replace(GIT_URL_CREDENTIALS, "$1");
+}
+
+function withoutGitUrlCredentials(row: InstalledPluginRow): InstalledPluginRow {
+  return {
+    ...row,
+    source: stripGitUrlCredentials(row.source),
+    sourceGitUrl: row.sourceGitUrl && stripGitUrlCredentials(row.sourceGitUrl),
+    updateStatusDetail:
+      row.updateStatusDetail &&
+      row.updateStatusDetail.replace(TEXT_GIT_URL_CREDENTIALS, "$1"),
+  };
+}
+
 export function listInstalledPlugins(db: DbConnection): InstalledPluginRow[] {
   return db
     .select({ plugin: installedPlugins, artifactPath: pluginArtifacts.path })
@@ -198,13 +220,15 @@ export function listInstalledPlugins(db: DbConnection): InstalledPluginRow[] {
     )
     .where(isNull(installedPlugins.removedAt))
     .all()
-    .map(({ plugin, artifactPath }) => ({
-      ...plugin,
-      rootDir:
-        plugin.activeArtifactId !== null && artifactPath !== null
-          ? artifactPath
-          : plugin.rootDir,
-    }));
+    .map(({ plugin, artifactPath }) =>
+      withoutGitUrlCredentials({
+        ...plugin,
+        rootDir:
+          plugin.activeArtifactId !== null && artifactPath !== null
+            ? artifactPath
+            : plugin.rootDir,
+      }),
+    );
 }
 
 export function getInstalledPlugin(
@@ -221,20 +245,25 @@ export function getInstalledPlugin(
     .where(and(eq(installedPlugins.id, id), isNull(installedPlugins.removedAt)))
     .get();
   if (result === undefined) return undefined;
-  return {
+  return withoutGitUrlCredentials({
     ...result.plugin,
     rootDir:
       result.plugin.activeArtifactId !== null && result.artifactPath !== null
         ? result.artifactPath
         : result.plugin.rootDir,
-  };
+  });
 }
 
 export function getInstalledPluginRegistration(
   db: DbConnection,
   id: string,
 ): InstalledPluginRow | undefined {
-  return db.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
+  const row = db
+    .select()
+    .from(installedPlugins)
+    .where(eq(installedPlugins.id, id))
+    .get();
+  return row && withoutGitUrlCredentials(row);
 }
 
 export function listUnnormalizedPluginRegistrations(
@@ -250,7 +279,8 @@ export function listUnnormalizedPluginRegistrations(
     })
     .from(installedPlugins)
     .where(eq(installedPlugins.normalizationVersion, 0))
-    .all();
+    .all()
+    .map((row) => ({ ...row, source: stripGitUrlCredentials(row.source) }));
 }
 
 export function normalizeInstalledPluginRegistration(

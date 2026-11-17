@@ -97,6 +97,7 @@ import { restoreInterruptedThreadStartupRequest } from "./thread-provisioning.js
 import { isHardQueueHeld } from "./thread-parent.js";
 import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { checkRepeatedMessage } from "./repeated-message-guard.js";
+import { failureHold } from "./turn-failed.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 
@@ -514,6 +515,17 @@ async function runDispatchAttempt(
     const held = holdChildOfStoppedParent();
     if (held !== null) {
       continued.outcome = held;
+      return;
+    }
+
+    // A message from another thread waits out a failed login instead of
+    // starting a turn that fails the same way and wakes the parent (#2019).
+    if (
+      !sendNow &&
+      senderThreadId !== null &&
+      failureHold(deps.db, thread) === "sign-in"
+    ) {
+      continued.outcome = waitOn({ kind: "thread-busy" }, null);
       return;
     }
 

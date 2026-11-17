@@ -328,7 +328,13 @@ export function ThreadContextWindowIndicator({
           {...triggerHoverProps}
           onClick={(event) => {
             event.preventDefault();
-            setPinned((value) => !value);
+            // A second click closes it, even while the pointer still hovers.
+            if (!pinned) {
+              setPinned(true);
+              return;
+            }
+            setPinned(false);
+            handleOpenChange(false);
           }}
           className={cn(
             "group -m-1 inline-flex h-8 min-w-8 cursor-pointer items-center justify-center gap-1 rounded-full transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",

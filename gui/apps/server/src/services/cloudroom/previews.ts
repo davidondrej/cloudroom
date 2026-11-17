@@ -93,7 +93,7 @@ export async function setupPreviews(deps: Deps): Promise<void> {
   const launcher = process.platform === "darwin" && process.versions.electron ? ["--launcher", process.execPath] : [];
   const restart = restartedThisLaunch ? [] : ["--restart"];
   try {
-    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024, env: { ...process.env, CLOUDROOM_SERVER_URL: `http://127.0.0.1:${deps.config.serverPort}` } });
+    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true, env: { ...process.env, CLOUDROOM_SERVER_URL: `http://127.0.0.1:${deps.config.serverPort}` } });
     restartedThisLaunch = true;
   } catch (error) {
     // The helper's own reason, such as launchctl's, so Settings and the API say why (#109).
@@ -109,6 +109,6 @@ export const helperRunning = (deps: Deps) => stat(join(folder(deps), "status.jso
 export async function stopPreviews(deps: Deps): Promise<void> {
   if (!await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) return;
   try {
-    await promisify(execFile)(...helper(deps, ["stop", folder(deps)]), { timeout: 20_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(...helper(deps, ["stop", folder(deps)]), { timeout: 20_000, maxBuffer: 64 * 1024, windowsHide: true });
   } catch { throw new ApiError(503, "cloudroom_preview_stop", "Preview shutdown or SSH-key revocation could not be confirmed. Retry sign-out when the cloud is reachable."); }
 }

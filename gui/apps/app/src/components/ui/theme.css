@@ -979,6 +979,61 @@
   }
 
   /*
+   * Working indicator: a 3x3 pixel grid beside "Working..." and "Thinking…". A
+   * wave crosses it from a new direction each pass (diagonal, sideways, up,
+   * down), then ripples out of the center and back in. Every pass is the same
+   * pulse keyframe: a cell runs it six times, each with its own delay, and
+   * `animation-composition: add` sums them onto the resting pixel. Additive
+   * animations run on the main thread, so the grid gets its own layer for the
+   * same reason `.animate-shine` does.
+   */
+  .working-grid {
+    display: inline-grid;
+    flex: none;
+    grid-template-columns: repeat(3, 3px);
+    gap: 2px;
+    place-content: center;
+    width: 14px;
+    height: 14px;
+    will-change: transform;
+  }
+
+  .working-grid i {
+    position: relative;
+    width: 3px;
+    height: 3px;
+  }
+
+  .working-grid i::before,
+  .working-grid i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: scale(0.8);
+  }
+
+  .working-grid i::before {
+    background: var(--muted-foreground);
+    opacity: 0.32;
+  }
+
+  /* --r and --c are the cell's row and column; --k is its ring (0 center, 1 edge, 1.7 corner). */
+  .working-grid i::after {
+    background: var(--primary);
+    opacity: 0;
+    animation: working-grid-pulse 8s ease-in-out infinite;
+    animation-name:
+      working-grid-pulse, working-grid-pulse, working-grid-pulse,
+      working-grid-pulse, working-grid-pulse, working-grid-pulse;
+    animation-composition: add;
+    animation-delay:
+      calc((var(--r) + var(--c)) * 150ms), calc(1350ms + var(--c) * 230ms),
+      calc(2650ms + (2 - var(--r) + var(--c)) * 150ms),
+      calc(4000ms + var(--r) * 230ms), calc(5300ms + var(--k) * 230ms),
+      calc(6500ms + (1.7 - var(--k)) * 230ms);
+  }
+
+  /*
    * Hidden hosts keep shimmering rows mounted: the closed sidebar drawer's
    * inert panel, a collapsed `aria-hidden` banner body, a retained overlay.
    * Pause the sweep and release the layer there so nothing off-screen repaints
@@ -987,8 +1042,10 @@
    */
   [inert] .animate-shine,
   [inert] .animate-shine-icon,
+  [inert] .working-grid i::after,
   [aria-hidden="true"] .animate-shine,
-  [aria-hidden="true"] .animate-shine-icon {
+  [aria-hidden="true"] .animate-shine-icon,
+  [aria-hidden="true"] .working-grid i::after {
     animation-play-state: paused;
     will-change: auto;
   }
@@ -1067,6 +1124,26 @@
       mask-image: none;
       will-change: auto;
     }
+
+    /* The still gray grid plus the label still reads as "busy". */
+    .working-grid i::after {
+      animation: none;
+    }
+  }
+}
+
+/* Added on top of the resting scale(0.8): 180ms in, 40ms hold, 560ms out, then idle. */
+@keyframes working-grid-pulse {
+  0%,
+  9.75%,
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+  2.25%,
+  2.75% {
+    opacity: 1;
+    transform: scale(1.475);
   }
 }
 

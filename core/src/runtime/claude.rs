@@ -12,7 +12,13 @@ use tokio::process::Command;
 
 /// How long a selected skill waits for a new thread's project copy before the agent is told to look for it.
 const SKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+/// 20261117-113618). Never on commits. Local uses the same line: `PR_FOOTER` in the Claude Code plugin's bridge.
+const PR_FOOTER: &str = "Built with [Cloudroom](https://cloudroom.dev)";
 const INSTRUCTIONS: &str = "Cloudroom owns this cloud session. Ask clarifying questions in ordinary chat, not interactive tools. Start child threads with `room-cli thread spawn` (any harness and model; see `room-cli thread --help`); each gets its own sandbox with a copy of your code (add `--shared-sandbox` to run it in yours), shows under this thread, and Cloudroom messages you when it finishes. Do not use native subagents, workflows, or agent teams. Fast mode is unavailable. Rewinding changes conversation history only, never files.";
+
+/// User settings only and no MCP servers but Cloudroom's, as in `claude_login`.
+const PROBE_SOURCES: [&str; 3] = ["--setting-sources", "user", "--strict-mcp-config"];
 
 pub(super) fn uuid() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -46,7 +52,7 @@ pub(super) fn command(
     // Claude keeps only the last `--settings`, so every setting goes in one, the Command Guard's hooks included.
     let mut settings = json!({"fastMode": false, "enableWorkflows": false});
     if strip_ai_co_authors {
-        settings["attribution"] = json!({"commit": "", "pr": ""});
+        settings["attribution"] = json!({"commit": "", "pr": PR_FOOTER});
     }
     // A model-list probe runs no turn, so the user's SessionStart/SessionEnd hooks must not see it (#1014).
     if probe {
@@ -61,6 +67,10 @@ pub(super) fn command(
         command
     };
     profile_env(&mut command, config, profile, false);
+    // A probe ignores the folder's own Claude settings and MCP servers: its env, helpers and hooks (#1958).
+    if probe {
+        command.args(PROBE_SOURCES);
+    }
     command
         .args([
             "-p",
@@ -249,6 +259,7 @@ pub(super) async fn probe(config: &Config, model: &str, reasoning: Option<&str>)
         "--settings",
         r#"{"disableAllHooks":true}"#,
     ];
+    args.extend(PROBE_SOURCES);
     if let Some(effort) = reasoning.filter(|effort| *effort != "none") {
         args.extend(["--effort", effort]);
     }
@@ -1584,6 +1595,40 @@ pub(super) fn recover(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_probe_skips_the_folders_own_claude_settings() {
+        let home = std::env::temp_dir().join("cloudroom-test-1958");
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: home.clone(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: "t".repeat(32),
+            state_dir: home.clone(),
+            repository: home.clone(),
+            api_url: None,
+            store: "test".into(),
+            instance: None,
+            account_home: home,
+            default_harness: super::super::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(1),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+        };
+        let args = |probe| {
+            let (command, _) =
+                command(&config, &profile, None, None, (false, false), None, probe).unwrap();
+            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_owned()).collect();
+            args.windows(3).any(|w| w == PROBE_SOURCES)
+        };
+        assert!(args(true));
+        assert!(!args(false));
+    }
 
     #[test]
     fn a_forked_skill_subagent_runs_but_other_subagents_still_fail() {

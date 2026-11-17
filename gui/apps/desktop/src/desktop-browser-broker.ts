@@ -40,6 +40,8 @@ interface ControlLease {
   threadId: string;
   metadata: DesktopBrowserLease;
   tabs: Map<string, string>;
+  /** Tabs granted at acquire; CDP pages never join it, so the server's set still matches (#1978). */
+  granted: Set<string>;
   /** Pages this lease opened through CDP `Target.createTarget` (#1383). */
   created: Set<string>;
   timer: ReturnType<typeof setTimeout>;
@@ -526,6 +528,7 @@ export function createDesktopBrowserBroker(args: {
             threadId: command.threadId,
             metadata,
             tabs,
+            granted: new Set(tabs.keys()),
             created: new Set(),
             timer,
             bridge: null,
@@ -552,8 +555,8 @@ export function createDesktopBrowserBroker(args: {
             return { ok: true };
           }
           if (
-            command.tabIds.length !== lease.tabs.size ||
-            command.tabIds.some((id) => !lease.tabs.has(id))
+            command.tabIds.length !== lease.granted.size ||
+            command.tabIds.some((id) => !lease.granted.has(id))
           )
             throw new Error("Connection tab set does not match the lease");
           return openConnection(lease);

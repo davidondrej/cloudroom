@@ -84,6 +84,7 @@ async function readBlob(
     [...GIT_READ_ARGS, "cat-file", "blob", oid],
     {
       cwd: options.cwd,
+      windowsHide: true,
       encoding: "buffer",
       env: {
         ...sanitizeInheritedChildProcessEnv({

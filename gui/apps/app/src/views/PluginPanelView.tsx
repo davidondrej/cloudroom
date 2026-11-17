@@ -18,13 +18,41 @@ export function PluginPanelView({
   panelPath,
   subPath,
 }: PluginPanelViewProps) {
-  const { navPanels } = usePluginSlots();
+  const { navPanels, projectActions } = usePluginSlots();
   const pluginsSettled = usePluginFrontendsSettled();
   const panel =
     navPanels.find(
       (candidate) =>
         candidate.pluginId === pluginId && candidate.path === panelPath,
     ) ?? null;
+
+  // A project action's page (`experimental_projectAction`) shares this route: its id is the path and the project's
+  // id the sub-path. It has no sidebar entry, so it is not a nav panel.
+  const projectAction =
+    panel === null
+      ? (projectActions.find(
+          (candidate) =>
+            candidate.pluginId === pluginId && candidate.id === panelPath,
+        ) ?? null)
+      : null;
+  if (projectAction !== null && subPath !== "") {
+    return (
+      <div
+        className="-m-4 flex min-h-0 flex-1 flex-col overflow-hidden md:-m-5"
+        data-testid="plugin-project-action-body"
+      >
+        <PluginSlotMount
+          key={`${projectAction.pluginId}/${projectAction.id}/${projectAction.generation}/${subPath}`}
+          pluginId={projectAction.pluginId}
+          slotKind="projectAction"
+          slotId={projectAction.id}
+          instanceId={subPath}
+        >
+          <projectAction.component projectId={subPath.split("/")[0] ?? ""} />
+        </PluginSlotMount>
+      </div>
+    );
+  }
 
   if (panel === null) {
     if (!pluginsSettled) {

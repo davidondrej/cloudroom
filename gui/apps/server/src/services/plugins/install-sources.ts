@@ -182,7 +182,7 @@ function parseGitSource(spec: string): ParsedPluginSource {
   ) {
     throw new Error(`invalid git repository path "${urlish}"`);
   }
-  if (/^https?:\/\//.test(urlish)) {
+  if (/^https?:\/\//iu.test(urlish)) {
     const parsed = new URL(urlish);
     url = urlish;
     host = parsed.host;
@@ -215,6 +215,14 @@ function parseGitSource(spec: string): ParsedPluginSource {
     repoPath = parsed.pathname.replace(/^\/+/, "").replace(/\.git$/, "");
   } else {
     throw new Error(`invalid git url "${urlish}"`);
+  }
+  if (/^https?:\/\//iu.test(url)) {
+    const { username, password } = new URL(url);
+    if (username !== "" || password !== "") {
+      throw new Error(
+        "git url must not contain a username, password, or token — remove it and sign in through Git's credential helper (https://git-scm.com/docs/gitcredentials)",
+      );
+    }
   }
   if (repoPath.length === 0) {
     throw new Error(`git url "${urlish}" has no repository path`);

@@ -152,13 +152,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ hostId: z.string().min(1) }).strict().parse(await context.req.json());
     return context.json(await importRoomThreads(deps, input.hostId));
   });
-  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps), conductorApp: conductorAppFound() }));
+  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps, context.req.query("claudeConfigDir") || undefined), conductorApp: conductorAppFound() }));
   app.post("/api/v1/cloudroom/import/sessions", async context => {
     const input = z.object({
       hostId: z.string().min(1),
       sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code", "conductor"]), id: z.string().min(1) }).strict()).min(1).max(2000),
+      claudeConfigDir: z.string().min(1).max(4096).optional(),
     }).strict().parse(await context.req.json());
-    return context.json(await importNativeSessions(deps, input.hostId, input.sessions));
+    return context.json(await importNativeSessions(deps, input.hostId, input.sessions, input.claudeConfigDir));
   });
   app.post("/api/v1/cloudroom/import/conductor-export", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
@@ -417,6 +418,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_org", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>);
   });
+  // Shared projects (docs/scopes/shared-projects.md): the Shared projects plugin's requests, passed to the website as this account.
+  app.post("/api/v1/cloudroom/account/project-shares", async (context) => {
+    const body = z.object({ action: z.string().min(1).max(40) }).passthrough().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.projectShares(body).catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_project_shares", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>);
+  });
   // GPUs (docs/scopes/gpus.md): the GPU plugin's `room-cli gpu` steps, passed to the website as this account. Never
   // an approval: this server sends those itself, after a click on the card it shows (services/cloudroom/gpu.ts).
   app.post("/api/v1/cloudroom/account/gpu", async (context) => {
@@ -527,7 +536,9 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
     const { requestId } = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
+    // The token is written only to the Cloudroom sign-in this started under (#1924).
+    const owner = await cloudroom(deps).loginOwner();
+    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan(), false, owner), deps);
     return context.json(await claudeStatus());
   });
   // The Accounts plugin names the accounts a switch moves between, for the line it leaves in limited threads.

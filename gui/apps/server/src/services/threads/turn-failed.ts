@@ -12,6 +12,7 @@ import {
 import {
   providerErrorInfoSchema,
   providerRateLimitStateSchema,
+  systemErrorEventDataSchema,
   systemThreadInterruptedEventDataSchema,
   type ClientTurnRequestId,
   type ProviderErrorInfo,
@@ -222,6 +223,98 @@ function loadProviderError(
   };
 }
 
+/** Who started a turn: a person in the app, a script through the API or CLI, an agent, or Cloudroom itself. */
+export type TurnStarter = "person" | "script" | "agent" | "system";
+
+/**
+ * Facts for the `turn_failed` telemetry event that `turn.failed` doesn't carry.
+ *
+ * `code`: our own fixed code for the failure, read from where it happened,
+ * never guessed from its text: an interruption's reason, then the host's or
+ * runtime's code on the turn's error, then the code the request was rejected
+ * with. Null when the turn left none of them.
+ *
+ * `startedBy`: null when the request didn't record its surface (Cloud
+ * prompts, and apps before this field).
+ */
+export function turnFailureFacts(
+  db: DbConnection,
+  threadId: string,
+): { code: string | null; startedBy: TurnStarter | null } {
+  const failed = loadFailedTurn(db, threadId);
+  if (failed === null) return { code: null, startedBy: null };
+  const args = { threadId, failed };
+  const code =
+    interruptionCode(db, args) ??
+    systemErrorCode(db, args) ??
+    rejectionCode(db, args);
+  return {
+    code: code === null ? null : code.replaceAll("_", "-"),
+    startedBy: turnStarter(failed.request),
+  };
+}
+
+function turnStarter(request: TurnRequestEventData): TurnStarter | null {
+  if (request.initiator !== "user") return request.initiator;
+  if (request.appSurface === undefined) return null;
+  return request.appSurface === "api" ? "script" : "person";
+}
+
+function interruptionCode(
+  db: DbConnection,
+  args: { threadId: string; failed: FailedTurnRecord },
+): string | null {
+  const row = getLatestStoredThreadEventOfTypes(db, {
+    threadId: args.threadId,
+    types: ["system/thread/interrupted"],
+    afterSequence: args.failed.requestSequence,
+  });
+  const data = row
+    ? systemThreadInterruptedEventDataSchema.safeParse(parseRowData(row)).data
+    : undefined;
+  if (data === undefined) return null;
+  switch (data.reason) {
+    case "host-daemon-restarted":
+      return data.cause ?? "host-disconnected";
+    case "provider-turn-idle":
+      return "stalled";
+    case "manual-stop":
+      return "stopped";
+    default:
+      return data.reason;
+  }
+}
+
+function systemErrorCode(
+  db: DbConnection,
+  args: { threadId: string; failed: FailedTurnRecord },
+): string | null {
+  const row = getLatestStoredThreadEventOfTypes(db, {
+    threadId: args.threadId,
+    types: ["system/error"],
+    afterSequence: args.failed.requestSequence,
+  });
+  const data = row
+    ? systemErrorEventDataSchema.safeParse(parseRowData(row)).data
+    : undefined;
+  return data?.cause ?? data?.code ?? null;
+}
+
+function rejectionCode(
+  db: DbConnection,
+  args: { threadId: string; failed: FailedTurnRecord },
+): string | null {
+  const row = listStoredTurnRejectedRowsByClientRequestIds(db, {
+    threadId: args.threadId,
+    clientRequestIds: [args.failed.request.requestId],
+    afterSequence: args.failed.requestSequence,
+  })[0];
+  return row === undefined
+    ? null
+    : (rejectedReasonDataSchema.safeParse(parseRowData(row)).data?.reason ??
+        null);
+}
+
 /**
  * Why the thread's last turn failed, for `thread.failed`: the provider's
  * words ("You've hit your weekly limit") and the same classification
@@ -259,37 +352,43 @@ export function describeFailedTurn(
 }
 
 /**
- * Whether the thread's last turn hit its agent's plan limit and the limit still
- * holds: the thread's next turn uses the same agent and model, and the provider
- * reports a blocked window with a reset still ahead. Any turn that runs, as
- * after a switch of account, ends it (#1723).
+ * What holds messages to a thread in `error`, read from its failed turn once.
+ *
+ * `plan-limit`: the provider still reports a blocked window with a reset ahead,
+ * so child reports wait (#1723). `sign-in`: the agent's login failed, so every
+ * message from another thread waits instead of failing the same way and
+ * notifying its parent again (#2019). Either ends when a turn runs again (an
+ * account switch, a retry, the user's message) or when the thread's next turn
+ * would use another agent or model.
  */
-export function isThreadAtPlanLimit(
+export function failureHold(
   db: DbConnection,
   thread: Thread,
   now = Date.now(),
-): boolean {
-  if (thread.status !== "error") return false;
+): "plan-limit" | "sign-in" | null {
+  if (thread.status !== "error") return null;
   const failed = loadFailedTurn(db, thread.id);
-  if (failed === null) return false;
+  if (failed === null) return null;
   const args = { threadId: thread.id, failed };
-  const errorInfo =
-    loadProviderError(db, args)?.errorInfo ?? doorRejectionErrorInfo(db, args);
-  if (errorInfo?.category !== "rate-limit") return false;
+  const category = (
+    loadProviderError(db, args)?.errorInfo ?? doorRejectionErrorInfo(db, args)
+  )?.category;
+  if (category !== "rate-limit" && category !== "unauthorized") return null;
+  // A switch of agent always sets the model, so it ends the hold like a model switch.
   const model = failed.request.execution.model;
   const override = getThreadExecutionOverride(db, thread.id)?.modelOverride;
-  if ((override ?? model) !== model) return false;
-  // Another agent has its own snapshot, so its switch ends the hold too.
+  if ((override ?? model) !== model) return null;
+  if (category === "unauthorized") return "sign-in";
   const limits = latestRateLimits(db, thread);
-  return (
-    limits?.status === "blocked" &&
+  return limits?.status === "blocked" &&
     limits.windows.some(
       (window) =>
         window.status === "blocked" &&
         window.resetsAtMs !== null &&
         window.resetsAtMs > now,
     )
-  );
+    ? "plan-limit"
+    : null;
 }
 
 function interruptionReason(

@@ -8,7 +8,11 @@ import {
 } from "@cloudroom/db";
 import type { DbConnection, StoredEventRow } from "@cloudroom/db";
 import { toRecord } from "@cloudroom/core-ui";
-import { buildThreadEventRow, parseStoredThreadEvent } from "@cloudroom/domain";
+import {
+  buildThreadEventRow,
+  maskStoredShellEnvValues,
+  parseStoredThreadEvent,
+} from "@cloudroom/domain";
 import { threadScope, turnScope } from "@cloudroom/domain";
 import type {
   ThreadEvent,
@@ -63,7 +67,7 @@ export function parseStoredEventPayload(
     );
   }
 
-  return record;
+  return maskStoredShellEnvValues(row.type, record);
 }
 
 function parseStoredEventScope(row: StoredEventRow): ThreadEventScope {
@@ -213,8 +217,8 @@ export function getTurnErrorText(
     .join(": ");
 }
 
-/** An open turn's silence warning (#977), while nothing has followed it. */
-export function getSilentTurnWarning(
+/** An open turn's silence warning (#977) or provider retry (#1853), while nothing has followed it. */
+export function getOpenTurnWarning(
   db: DbConnection,
   threadId: string,
 ): string | null {
@@ -224,8 +228,16 @@ export function getSilentTurnWarning(
     order: "desc",
     limit: 1,
   });
-  if (newest?.type !== "system/error") return null;
+  if (newest?.type !== "system/error" && newest?.type !== "provider/error")
+    return null;
   const event = parseStoredEventRow(newest);
+  if (event.type === "provider/error" && event.data.willRetry === true) {
+    const retry = (event.data.detail ?? event.data.message).replace(
+      /\s*\n\s*/gu,
+      ": ",
+    );
+    return `The provider is retrying: ${retry}`;
+  }
   return event.type === "system/error" &&
     event.data.code === "provider_turn_silent"
     ? event.data.message

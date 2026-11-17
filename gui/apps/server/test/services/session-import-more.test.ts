@@ -584,6 +584,31 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(threads().map((thread) => [thread.title, thread.createdAt, thread.latestAttentionAt])).toEqual([3, 2, 1].map((month) => [`Chat ${month}`, Date.parse(at(month, 0)), Date.parse(at(month, 5))]));
       for (const type of ["run.preparing", "run.started", "run.succeeded"] as const) applyThreadLifecycleEvent(harness.deps.db, { threadId: result.imported[2]!.threadId, event: { type } });
       expect(threads()[2]!.latestAttentionAt).toBeGreaterThan(Date.now() - 60_000);
+      // `--config-dir` (#1928): a chat in another config folder lists and imports from there, and is copied into the default one so Claude can fork it.
+      const other = join(root, "claude-work"), chat = join(other, "projects", "w", "chat-w.jsonl");
+      await mkdir(dirname(chat), { recursive: true });
+      await writeFile(chat, await readFile(join(root, "claude", "projects", "p", "chat-1.jsonl")));
+      expect((await listNativeSessions(harness.deps, other)).map(({ id }) => id)).toEqual(["chat-w"]);
+      expect((await importAll(harness, hostId, () => importNativeSessions(harness.deps, hostId, [{ harness: "claude-code", id: "chat-w" }], other))).imported).toHaveLength(1);
+      expect(await readFile(join(root, "claude", "projects", "w", "chat-w.jsonl"), "utf8")).toBe(await readFile(chat, "utf8"));
+      // An older, different copy of the same chat in the default folder would be forked instead: skip it, change neither file.
+      const newer = join(other, "projects", "c", "chat-c.jsonl"), older = join(root, "claude", "projects", "c", "chat-c.jsonl");
+      await mkdir(dirname(newer), { recursive: true });
+      await mkdir(dirname(older), { recursive: true });
+      await writeFile(newer, await readFile(join(root, "claude", "projects", "p", "chat-3.jsonl")));
+      await writeFile(older, await readFile(join(root, "claude", "projects", "p", "chat-2.jsonl")));
+      const conflict = await importAll(harness, hostId, () => importNativeSessions(harness.deps, hostId, [{ harness: "claude-code", id: "chat-c" }], other));
+      expect([conflict.imported, conflict.skipped.map(({ reason }) => reason)]).toEqual([[], [`A different copy of this chat is already in ${older}. Remove or update that copy, then import again.`]]);
+      expect([await readFile(newer, "utf8"), await readFile(older, "utf8")]).toEqual(await Promise.all([3, 2].map((month) => readFile(join(root, "claude", "projects", "p", `chat-${month}.jsonl`), "utf8"))));
+      // Claude forks the session from any project folder, so a different copy under another folder alias blocks it too.
+      const aliased = join(other, "projects", "d", "chat-d.jsonl"), alias = join(root, "claude", "projects", "e", "chat-d.jsonl");
+      await mkdir(dirname(aliased), { recursive: true });
+      await mkdir(dirname(alias), { recursive: true });
+      await writeFile(aliased, await readFile(join(root, "claude", "projects", "p", "chat-3.jsonl")));
+      await writeFile(alias, await readFile(join(root, "claude", "projects", "p", "chat-2.jsonl")));
+      const aliasConflict = await importAll(harness, hostId, () => importNativeSessions(harness.deps, hostId, [{ harness: "claude-code", id: "chat-d" }], other));
+      expect([aliasConflict.imported, aliasConflict.skipped.map(({ reason }) => reason), existsSync(join(root, "claude", "projects", "d", "chat-d.jsonl"))]).toEqual([[], [`A different copy of this chat is already in ${alias}. Remove or update that copy, then import again.`], false]);
+      await expect(listNativeSessions(harness.deps, join(root, "nope"))).rejects.toThrow("No Claude Code chats");
     });
   }, 60_000);
 });

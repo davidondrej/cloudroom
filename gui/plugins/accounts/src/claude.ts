@@ -242,6 +242,8 @@ export const claudeSecret = (token: string) => ({
 type ClaudeUsage = {
   windows: UsageWindow[];
   credits: { detail: string | null } | null;
+  // The full login is one Claude Code can't use or renew: Local threads on it fail until Sign in again (#1979).
+  loginEnded?: true;
 };
 
 const usageWindowSchema = z
@@ -282,24 +284,35 @@ const usageSchema = z.object({
 
 const loginSchema = z.object({
   claudeAiOauth: z.object({
-    accessToken: z.string().min(1),
+    accessToken: z.string(),
     expiresAt: z.number().nullish(),
+    refreshToken: z.string().nullish().catch(null),
+    refreshTokenExpiresAt: z.number().nullish().catch(null),
   }),
 });
 
-// A profile's full login, as Claude Code saved it (`readLogin`). Null when it can't be read or has expired.
-async function profileToken(profile: string): Promise<string | null> {
+// A profile's full login, as Claude Code saved it (`readLogin`). Null when it can't be read, or its access token has
+// expired and Claude Code renews it on the account's next turn (#1206). False when Claude Code can't use or renew it:
+// its tokens saved as "", or both expired. Claude Code 2.1.318's own rule, as in provider-claude-code's loginState.
+async function profileToken(profile: string): Promise<string | null | false> {
   const login = loginSchema.safeParse(await readLogin(profile)).data?.claudeAiOauth;
-  return !login || (login.expiresAt != null && Date.now() >= login.expiresAt)
+  if (!login) return null;
+  if (!login.accessToken || login.refreshToken === "") return false;
+  const now = Date.now();
+  if (login.expiresAt == null || now < login.expiresAt)
+    return login.accessToken;
+  return login.refreshToken &&
+    (login.refreshTokenExpiresAt == null || now < login.refreshTokenExpiresAt)
     ? null
-    : login.accessToken;
+    : false;
 }
 
 // A full login reads Claude's usage page data: no reply is used, and each model's weekly limit (Fable) shows too.
-// Null when the login can't be read, has expired, or is rejected; Claude Code renews it on the account's next turn.
-// A short error (429, 5xx, a timeout) throws.
+// Null when the login can't be read, is being renewed, or is rejected; Claude Code renews it on the account's next
+// turn. No bars and `loginEnded` when Claude Code can't renew it. A short error (429, 5xx, a timeout) throws.
 export async function profileUsage(profile: string): Promise<ClaudeUsage | null> {
   const token = await profileToken(profile);
+  if (token === false) return { windows: [], credits: null, loginEnded: true };
   if (!token) return null;
   const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
     headers: {
@@ -377,6 +390,7 @@ export async function profileUsage(profile: string): Promise<ClaudeUsage | null>
 // OAuth replies need the Claude Code system prompt, or Anthropic answers 429.
 // An account with a full login (`profile`) reads /api/oauth/usage first.
 // A short error there keeps the last bars (`previous`): this check would drop each model's row.
+// A full login Claude Code can't renew still gets this check's bars, with `loginEnded`.
 export async function claudeUsage(
   secret: Secret,
   profile?: string,
@@ -385,7 +399,7 @@ export async function claudeUsage(
   const full = profile
     ? await profileUsage(profile).catch(() => previous ?? null)
     : null;
-  if (full) return full;
+  if (full?.windows.length) return full;
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -429,7 +443,11 @@ export async function claudeUsage(
     ((overage === "allowed" || overage === "allowed_warning") &&
       (response.headers.get(`${LIMITS}-status`) === "rejected" ||
         windows.some((window) => window.usedPercent >= 100)));
-  return { windows, credits: credits ? { detail: null } : null };
+  return {
+    windows,
+    credits: credits ? { detail: null } : null,
+    ...(full?.loginEnded ? { loginEnded: true as const } : {}),
+  };
 }
 
 export type MacClaude = { email: string; org: string | null };

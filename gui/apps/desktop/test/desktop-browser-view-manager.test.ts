@@ -1742,6 +1742,15 @@ describe("DesktopBrowserViewManager", () => {
       expect(broker.getControl(91, created!.tabId)?.control?.leaseId).toBe(
         "lease",
       );
+      // The server still sends the acquired tab set after CDP adds a page (#1978).
+      await expect(
+        broker.execute({
+          type: "desktop.browser.open_connection",
+          ...scope,
+          leaseId: "lease",
+          tabIds: ["automation"],
+        }),
+      ).resolves.toEqual(connection);
     } finally {
       socket?.terminate();
       broker.dispose();

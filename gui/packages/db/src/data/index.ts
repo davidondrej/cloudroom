@@ -246,6 +246,7 @@ export {
   findProviderEnvironmentContainingPath,
   listRetiredLoadedEnvironmentIdsOnHost,
   markHostEnvironmentsDestroyed,
+  moveCheckoutEnvironments,
   recordEnvironmentCurrentBranch,
   updateEnvironmentMetadata,
 } from "./environments.js";

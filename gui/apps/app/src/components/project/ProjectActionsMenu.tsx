@@ -23,7 +23,12 @@ import {
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { CompactLongPressMenu } from "@/components/ui/compact-long-press-menu";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
-import { getSettingsProjectRoutePath } from "@/lib/route-paths";
+import { PluginIcon } from "@/components/plugin/PluginIcon";
+import { usePluginSlots } from "@/lib/plugin-slots";
+import {
+  getPluginPanelRoutePath,
+  getSettingsProjectRoutePath,
+} from "@/lib/route-paths";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useProjectActions } from "./ProjectActionsProvider";
 
@@ -58,6 +63,7 @@ export function ProjectActionsMenuItems({
   const { hostId: pickerHostId } = usePathPickerHost();
   const { requestRename, requestHide, requestAddLocalPath } =
     useProjectActions();
+  const { projectActions } = usePluginSlots();
   const showAddLocalPath =
     pickerHostId != null &&
     !findLocalPathProjectSourceForHost(project.sources, pickerHostId);
@@ -93,6 +99,36 @@ export function ProjectActionsMenuItems({
           Add local path
         </ActionMenuItem>
       ) : null}
+      {/* Plugins' project actions (`experimental_projectAction`): each opens its page for this project. */}
+      {projectActions.map((action) => (
+        <ActionMenuItem
+          key={`${action.pluginId}/${action.id}`}
+          surface={surface}
+          icon={
+            <PluginIcon
+              pluginId={action.pluginId}
+              icon={action.icon}
+              fallbackIcon="Zap"
+            />
+          }
+          onSelect={() => {
+            navigate(
+              getPluginPanelRoutePath({
+                pluginId: action.pluginId,
+                path: action.id,
+                subPath: project.id,
+              }),
+            );
+          }}
+        >
+          {action.title}
+          {action.badge ? (
+            <span className="ml-auto rounded-sm bg-primary px-1.5 text-[10px] font-semibold leading-4 tracking-wide text-primary-foreground">
+              {action.badge}
+            </span>
+          ) : null}
+        </ActionMenuItem>
+      ))}
       <ActionMenuSeparator surface={surface} />
       <ActionMenuItem
         surface={surface}

@@ -29,6 +29,7 @@ import { ApiError } from "../../errors.js";
 import {
   appendThreadEventInTransaction,
   createClientTurnRequestId,
+  getLastProviderThreadId,
   parseStoredTurnRequestEvent,
 } from "./thread-events.js";
 import { parseStoredEvent } from "./thread-data.js";
@@ -449,6 +450,12 @@ export async function editThreadMessage(
 
   let stagedProviderThreadId: string | null = null;
   let rewindLeaseId: string | null = null;
+  // The edit's new session keeps the Goal of the session the thread runs on
+  // now, which the history source can predate (#857). Only Codex carries it.
+  const replacesProviderThreadId =
+    editableThread.providerId === "codex"
+      ? getLastProviderThreadId(deps, editableThread.id)
+      : null;
   if (target.precedingProviderCheckpoint !== null) {
     if (target.sourceProviderThreadId === null) {
       conflict("This earlier turn has no provider session");
@@ -563,6 +570,7 @@ export async function editThreadMessage(
       environment: args.environment,
       historyReplacement: {
         forkSourceProviderThreadId: stagedProviderThreadId,
+        replacesProviderThreadId,
         ...(discardStagedRewind !== undefined
           ? { onCommandSettled: discardStagedRewind }
           : {}),

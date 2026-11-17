@@ -1062,6 +1062,35 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
 
+    def test_a_tell_waking_a_thread_survives_a_killed_core_once(self):
+        # #1927: Core killed while a tell wakes an established thread; the restart wakes it again and sends it once.
+        self.seed(self.ran_a_turn + [("state", {"state": "sleeping"})])
+        (self.repo / "hold-resume").touch(); self.start()
+        self.wait(lambda: self.status()["state"] == "sleeping", "asleep")
+        self.prompt("tell", "hello")
+        self.wait(lambda: (self.repo / "resume-ready").exists(), "waking")
+        self.service.stop(crash=True); (self.repo / "release-resume").touch(); self.start()
+        self.wait(lambda: self.status()["receipts"]["tell"]["state"] == "completed", "tell after the restart")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["tell"])
+
+    ran_a_turn = [("receipt", {"request_id": "old", "command": "prompt", "input": {"text": "hello"}, "state": "accepted"}),
+                  ("state", {"state": "starting_turn", "request_id": "old"}),
+                  ("receipt", {"request_id": "old", "command": "prompt", "input": {"text": "hello"}, "state": "completed"})]
+
+    def cut_off_wake(self, end):
+        # #1927: Core killed after an archive or close was saved, mid-wake: its queued tell fails unsent, as before.
+        self.seed(self.ran_a_turn + [("state", {"state": "resuming"}),
+                                     ("receipt", {"request_id": "tell", "command": "prompt", "input": {"text": "hello"}, "state": "accepted"}), end])
+        self.start(); time.sleep(1)
+        self.assertEqual(self.status()["receipts"]["tell"]["state"], "failed")
+        self.assertFalse((self.repo / (self.native + ".requests")).exists())
+
+    def test_a_cut_off_wake_never_sends_to_an_archived_thread(self):
+        self.cut_off_wake(("archive", {"archived": True}))
+
+    def test_a_cut_off_wake_never_sends_to_a_closing_thread(self):
+        self.cut_off_wake(("receipt", {"request_id": "close", "command": "close", "input": {}, "state": "accepted"}))
+
     def test_a_turn_a_killed_core_cut_off_says_why(self):
         # #1763: the supervisor passes the killed run's exit status; without one the reason stays neutral.
         self.seed(); self.start(); self.ready()
@@ -1070,6 +1099,8 @@ class RecoveryTests(unittest.TestCase):
             self.prompt(key, "no-reply")
             self.wait(lambda: (self.repo / "no-reply").exists(), key)
             (self.repo / "no-reply").unlink()
+            # An Accounts switch's sleep still waiting is done by the restart, never an error (#1985).
+            self.service.request("POST", "/v1/sessions/cr_seed/sleep", {"request_id": key + "_sleep"}, 202)
             self.service.stop(crash=True)
             self.env.pop("CLOUDROOM_PREVIOUS_EXIT", None)
             if status: self.env["CLOUDROOM_PREVIOUS_EXIT"] = status
@@ -1077,6 +1108,8 @@ class RecoveryTests(unittest.TestCase):
             receipt = self.status()["receipts"][key]
             self.assertEqual(receipt["state"], "unknown_after_restart")
             self.assertEqual(receipt.get("error"), why + " this ran; its result is unknown.")
+            sleep = self.status()["receipts"][key + "_sleep"]
+            self.assertEqual((sleep["state"], sleep.get("error")), ("completed", None))
         # A child's cut-off turn keeps main's receipt (no error), so its parent's notice stays neutral.
         self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_session": "cr_seed", "prompt": "hold"}, 202)
         child = lambda: self.service.session("cr_child_kid")

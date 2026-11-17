@@ -88,6 +88,7 @@ import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@cloudroom/shared-ui/chrome-style-tokens";
 import { usePluginNavPanelChrome } from "@/lib/plugin-nav-panel-chrome";
+import { usePluginSlots } from "@/lib/plugin-slots";
 import {
   PluginPanelHeaderActions,
   PluginPanelHeaderCenter,
@@ -959,6 +960,22 @@ function WorkspacePaneContent({
   );
 }
 
+/** A project action's page (`experimental_projectAction`) is not a nav panel, so its header comes from the action. */
+function useProjectActionChrome(content: PaneContent) {
+  const { projectActions } = usePluginSlots();
+  const action =
+    content.kind === "plugin-panel"
+      ? projectActions.find(
+          (candidate) =>
+            candidate.pluginId === content.pluginId &&
+            candidate.id === content.panelPath,
+        )
+      : undefined;
+  return action
+    ? { pluginId: action.pluginId, icon: action.icon, title: action.title }
+    : undefined;
+}
+
 function StandalonePaneContent({
   content,
   paneId,
@@ -967,6 +984,7 @@ function StandalonePaneContent({
   paneId?: string;
 }) {
   const navPanelChrome = usePluginNavPanelChrome();
+  const projectActionChrome = useProjectActionChrome(content);
   if (content.kind === "thread") {
     return <ThreadDetailView surface="page" />;
   }
@@ -982,7 +1000,7 @@ function StandalonePaneContent({
       candidate.chrome.path === content.panelPath,
   );
   const panel = panelEntry?.panel ?? undefined;
-  const panelChrome = panelEntry?.chrome;
+  const panelChrome = panelEntry?.chrome ?? projectActionChrome;
   const body = (
     <PluginPanelView
       pluginId={content.pluginId}
@@ -1038,6 +1056,7 @@ function NonThreadPaneContent({
   ownsWindowTopLeft: boolean;
 }) {
   const navPanelChrome = usePluginNavPanelChrome();
+  const projectActionChrome = useProjectActionChrome(content);
   const resourceRouteLabel = useAtomValue(resourceRouteLabelAtom);
   const dimsInactiveSplits = useAtomValue(dimInactiveSplitsAtom);
   const { reservesWindowPanelToggle, isFocused } = useOptionalPaneContext() ?? {
@@ -1057,7 +1076,7 @@ function NonThreadPaneContent({
         )
       : undefined;
   const panel = panelEntry?.panel ?? undefined;
-  const panelChrome = panelEntry?.chrome;
+  const panelChrome = panelEntry?.chrome ?? projectActionChrome;
   const automationBreadcrumbs =
     content.kind === "plugin-panel"
       ? resolveAutomationBreadcrumbs(
@@ -1120,7 +1139,7 @@ function NonThreadPaneContent({
         !isBoundedPane && content.kind === "new-thread" && "-m-4 md:-m-5",
       )}
     >
-      {isBoundedPane || panel ? (
+      {isBoundedPane || panel || projectActionChrome ? (
         <AppPageHeader
           isWindowDragRegion={isTopRow}
           ownsWindowTopLeft={ownsWindowTopLeft}

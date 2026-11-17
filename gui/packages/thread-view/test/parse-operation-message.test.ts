@@ -93,6 +93,9 @@ describe("parseOperationMessage operation titles", () => {
           value: { masked: true },
           reason: "Authenticate provider traffic",
         },
+        // Stored before #1938: raw shell values in history.
+        { name: "GH_TOKEN", source: "shell", value: "fake-stored-token" },
+        { name: "PATH", source: "shell", value: "/usr/bin" },
       ],
     };
     const message = parseOperationMessage(
@@ -111,8 +114,11 @@ describe("parseOperationMessage operation titles", () => {
     expect(message).toMatchObject({
       kind: "operation",
       title: "Provider environment resolved",
-      detail:
+      detail: [
         "PLUGIN_TOKEN=•••••• (auth-proxy) — Authenticate provider traffic",
+        "GH_TOKEN=•••••• (shell)",
+        "PATH=/usr/bin (shell)",
+      ].join("\n"),
     });
   });
 

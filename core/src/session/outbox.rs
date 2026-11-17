@@ -267,7 +267,17 @@ impl Journal {
 
     pub fn append(&mut self, record: &[u8]) -> io::Result<u64> {
         let id = self.next;
-        self.write_atomic(&record_name(id), record)?;
+        // A write refused for space deletes the reserve kept for history (`Guard::reserve`) and tries again (#606).
+        match self.write_atomic(&record_name(id), record) {
+            Err(error)
+                if no_space(&error)
+                    && fs::remove_file(self.directory.join(crate::workspace::storage::RESERVE))
+                        .is_ok() =>
+            {
+                self.write_atomic(&record_name(id), record)?
+            }
+            written => written?,
+        }
         self.next += 1;
         Ok(id)
     }
@@ -287,9 +297,12 @@ impl Journal {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(temporary, self.directory.join(SNAPSHOT))
+        let written = (file.write_all(bytes).and_then(|()| file.sync_all()))
+            .and_then(|()| fs::rename(&temporary, self.directory.join(SNAPSHOT)));
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        written
     }
 
     pub fn read(&mut self, id: u64) -> io::Result<Vec<u8>> {
@@ -370,13 +383,19 @@ impl Journal {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        // A partial write gives its space back at once, so a full disk isn't left at zero.
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
         // A rename refused for space changed nothing (a full disk can refuse a new directory block), so only that
         // write fails (#211). Any other failed rename, or a failed directory fsync after one, has an uncertain outcome:
         // refuse further writes until reopening, rather than overwrite that record.
-        let renamed = fs::rename(temporary, self.directory.join(name));
+        let renamed = fs::rename(&temporary, self.directory.join(name));
         self.writable = renamed.as_ref().is_err_and(no_space);
+        if self.writable {
+            let _ = fs::remove_file(&temporary);
+        }
         renamed?;
         File::open(&self.directory)?.sync_all()?;
         self.writable = true;

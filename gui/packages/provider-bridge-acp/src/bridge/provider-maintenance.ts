@@ -34,6 +34,9 @@ const CURSOR_DASHBOARD_URL =
 const CURSOR_KEYCHAIN_ACCOUNT = "cursor-user";
 const CURSOR_ACCESS_TOKEN_SERVICE = "cursor-access-token";
 const CURSOR_INSTALL_SCRIPT_URL = "https://cursor.com/install";
+/** Cursor's documented native Windows installer (#1897). */
+const CURSOR_WINDOWS_INSTALL_SCRIPT_URL =
+  "https://cursor.com/install?win32=true";
 
 function cursorAuthFilePath(): string {
   if (process.platform === "win32") {
@@ -136,7 +139,8 @@ function readAccountEmail(): string | null {
 
 export interface AcpMaintenanceDialect {
   loginCommand: string;
-  installer(): ProviderInstallationCommand;
+  /** `installedExecutable` is the resolved CLI, or null when it is missing. */
+  installer(installedExecutable: string | null): ProviderInstallationCommand;
   /** The newest released version, when the agent publishes one. */
   latestVersion?(): Promise<string | null>;
   /** `command` is the agent's resolved executable, for agents asked through their own CLI. */
@@ -197,7 +201,9 @@ export function acpInstallerCommand(
 
 export interface AcpMaintenanceTarget {
   maintenance: AcpMaintenanceDialect | undefined;
-  installer: (() => ProviderInstallationCommand) | undefined;
+  installer:
+    | ((installedExecutable: string | null) => ProviderInstallationCommand)
+    | undefined;
   command: string | null;
   /** Older CLIs lack the ACP launch (legacy Kilo 0.x has no `kilo acp`, #1156). */
   minimumVersion?: string;
@@ -349,12 +355,12 @@ export async function getAcpProviderInstallationStatus(
         ? {
             kind: "update" as const,
             label: "Update" as const,
-            command: args.installer().displayCommand,
+            command: args.installer(resolvedExecutable).displayCommand,
           }
         : {
             kind: "install" as const,
             label: "Install" as const,
-            command: args.installer().displayCommand,
+            command: args.installer(resolvedExecutable).displayCommand,
           };
   return {
     executableName,
@@ -400,7 +406,7 @@ function buildAcpProviderInstallationRun(
   }
   return {
     available: true,
-    command: args.installer(),
+    command: args.installer(status.executablePath),
     verification:
       args.action === "update" && status.needsUpdate && status.latestVersion
         ? { kind: "version_at_least", version: status.latestVersion }
@@ -558,7 +564,25 @@ async function readCursorLatestVersion(): Promise<string | null> {
 
 export const CURSOR_ACP_MAINTENANCE: AcpMaintenanceDialect = {
   loginCommand: "cursor-agent login",
-  installer: () => downloadedInstallerCommand(CURSOR_INSTALL_SCRIPT_URL),
+  // Cursor's Windows script first deletes %LOCALAPPDATA%\cursor-agent, running
+  // versions included, so an installed CLI updates itself (#1897). CI=1 skips
+  // what `update` does first in a terminal: switch cursor-agent to Grok's CLI.
+  installer: (installedExecutable) =>
+    process.platform === "win32" && installedExecutable !== null
+      ? {
+          command: "powershell.exe",
+          args: [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            // PowerShell also closes '...' on typographic single quotes.
+            `$env:CI = '1'; & '${installedExecutable.replace(/['‘-‛]/gu, "$&$&")}' update; exit $LASTEXITCODE`,
+          ],
+          displayCommand: "cursor-agent update",
+        }
+      : downloadedInstallerCommand(CURSOR_INSTALL_SCRIPT_URL, {
+          powershellUrl: CURSOR_WINDOWS_INSTALL_SCRIPT_URL,
+        }),
   latestVersion: readCursorLatestVersion,
   readAccount: async () => {
     const accessToken = await readAccessToken();
@@ -633,6 +657,7 @@ async function readAntigravityAccount(
   const signedIn = await execFileAsync(command, ["models"], {
     timeout: USAGE_FETCH_TIMEOUT_MS,
     env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+    windowsHide: true,
   }).then(
     () => true,
     (error: { stdout?: string; stderr?: string }) => {

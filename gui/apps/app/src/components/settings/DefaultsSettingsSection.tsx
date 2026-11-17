@@ -85,7 +85,7 @@ export function DefaultsSettingsSection() {
       </SettingsWithControl>
       <SettingsWithControl
         label="Remove AI co-authors"
-        description="Strip agent Co-authored-by lines from commits. Applies to new sessions."
+        description='Strip agent Co-authored-by lines from commits. Claude Code pull requests end with "Built with Cloudroom". Applies to new sessions.'
       >
         <Switch
           checked={settings?.stripAiCoAuthorsEnabled ?? true}

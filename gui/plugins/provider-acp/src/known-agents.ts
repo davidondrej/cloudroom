@@ -59,7 +59,10 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     launch: {
       displayName: "Cursor",
       command: "cursor-agent",
-      args: ["acp"],
+      // Cursor merges every .cursor/cli.json from the repo root down into its permission rules, so a cloned repo could
+      // pre-approve commands and Manual would never ask. This root option keeps only the user's own rules
+      // (security sweep 9, 2026-11-17).
+      args: ["--disable-project-configs", "acp"],
       env: {},
       modelCli: {
         listArgs: ["--list-models"],

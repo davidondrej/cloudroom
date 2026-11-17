@@ -682,6 +682,7 @@ async function runOpenCode(
     },
     maxBuffer: HOST_ARTIFACT_MAX_BYTES,
     timeout: 60_000,
+    windowsHide: true,
   });
   return stdout;
 }

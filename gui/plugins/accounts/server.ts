@@ -52,6 +52,8 @@ const IDLE_USAGE_TICKS = 12;
 const MAC_NEEDS_CLOUD =
   "Approve this Mac's Claude account for Cloud first: click Use on it in Settings → Agents → Accounts.";
 const DEFAULT_REST_MS = 60 * 60_000;
+const LOGIN_FAILED =
+  "This account's Claude login stopped working. Sign in again.";
 
 const storedSchema = z.object({
   id: z.string(),
@@ -180,6 +182,21 @@ export default async function plugin(room: BbPluginApi) {
     .record(z.string(), z.number())
     .catch({})
     .parse(await kv.get("limits:v1"));
+  // Added Claude accounts whose full login failed here, and when: a Local turn Claude couldn't authenticate, or a login
+  // Claude Code can't renew. Kept apart from usage, which the one-year token can still read. Only Sign in again or a
+  // later Local turn that ends fine clears it (#1979).
+  const loginFailed = z
+    .record(z.string(), z.number())
+    .catch({})
+    .parse(await kv.get("login-failed:v1"));
+  // `at` undefined clears it.
+  const noteLoginFailed = async (id: string, at: number | undefined) => {
+    if (loginFailed[id] === at) return;
+    if (at === undefined) delete loginFailed[id];
+    else loginFailed[id] = at;
+    await kv.set("login-failed:v1", loginFailed);
+    room.realtime.publish(ACCOUNTS_CHANGED, {});
+  };
   // Names given to "This Mac", one per login it has had, keyed "<agent> <login>". A login is its email, plus its
   // organization for Claude: another login never wears the old one's name. Added accounts keep theirs on their record.
   const localNames = z
@@ -534,16 +551,26 @@ export default async function plugin(room: BbPluginApi) {
                 previous?.at && previous.windows.length ? previous : undefined,
               );
       if (!read || gone()) return;
+      const { loginEnded, ...fresh } = read;
+      // Bars the one-year token read say nothing about the Local login; only Sign in again or a good turn clears it.
+      if (loginEnded) {
+        await noteLoginFailed(
+          account.id,
+          loginFailed[account.id] ?? Date.now(),
+        );
+        // A free read has no bars then: the saved ones stay.
+        if (fresh.windows.length === 0) return;
+      }
       // The reply check reads only 5h and 7d. A model's limit it left out keeps its last reading until it resets.
       const kept = (previous?.windows ?? []).filter(
         (window) =>
           window.model &&
           (window.resetsAt ?? 0) > Date.now() &&
-          !read.windows.some((next) => next.label === window.label),
+          !fresh.windows.some((next) => next.label === window.label),
       );
       usage.set(account.id, {
-        ...read,
-        windows: [...read.windows, ...kept],
+        ...fresh,
+        windows: [...fresh.windows, ...kept],
         error: null,
         signInAgain: false,
         at: Date.now(),
@@ -697,7 +724,7 @@ export default async function plugin(room: BbPluginApi) {
             : (account?.plan ?? null),
         inUse: id === using,
         limitedUntil: limitedUntil(provider, id),
-        error: measured?.error ?? null,
+        error: id in loginFailed ? LOGIN_FAILED : (measured?.error ?? null),
         credits: id === using ? (measured?.credits ?? null) : null,
         // Accounts not in use aren't checked, so a window past its reset shows empty.
         windows: (measured?.windows ?? []).map((window) =>
@@ -874,6 +901,7 @@ export default async function plugin(room: BbPluginApi) {
     existing.profile = state.profile;
     existing.org = account.orgId;
     if (old) void dropProfile(old);
+    await noteLoginFailed(existing.id, undefined);
     // Cloud gets the new token on its next follow, even after a restart.
     if (existing.id === inCloud) await markStale();
     await changed(true);
@@ -949,6 +977,7 @@ export default async function plugin(room: BbPluginApi) {
     if (removed?.profile) void dropProfile(removed.profile);
     order[provider] = order[provider].filter((entry) => entry !== id);
     usage.delete(id);
+    await noteLoginFailed(id, undefined);
     await dropSecret(id);
     await saveUsage();
     // Cloud can't follow the Mac's login without its approval, so the next added account goes in use.
@@ -1378,10 +1407,28 @@ export default async function plugin(room: BbPluginApi) {
   );
 
   room.events.on("turn.failed", async (event) => {
-    if (event.errorInfo?.category !== "rate-limit") return;
+    const category = event.errorInfo?.category;
+    if (category !== "rate-limit" && category !== "unauthorized") return;
     const thread = await room.sdk.threads
       .get({ threadId: event.threadId })
       .catch(() => null);
+    // Claude couldn't authenticate a Local turn on an account's full login, even after renewing it ("OAuth session
+    // expired and could not be refreshed"): that login needs Sign in again (#1979). Cloud threads use the one-year
+    // token, and an organization block is no login problem.
+    if (category === "unauthorized") {
+      const account = accounts.find(
+        (entry) => entry.id === threadAccount.get(event.threadId),
+      );
+      if (
+        account?.profile &&
+        event.errorInfo?.providerCode !== "oauth_org_not_allowed" &&
+        thread?.providerId === "claude-code" &&
+        thread.executionTarget !== "cloud" &&
+        !onOwnLogin(thread)
+      )
+        await noteLoginFailed(account.id, Date.now());
+      return;
+    }
     const provider = providerSchema.safeParse(thread?.providerId);
     if (!provider.success) return;
     // The machine's own login hit its limit: no account here is limited, and no switch here moves the thread.
@@ -1447,7 +1494,15 @@ export default async function plugin(room: BbPluginApi) {
     turnBegan.delete(thread.id);
     const provider = providerSchema.safeParse(thread.providerId);
     if (began === undefined || !provider.success || onOwnLogin(thread)) return;
-    const used = threadAccount.get(thread.id) ?? current(provider.data);
+    // A Local turn on an account's full login that began after the login failed, and ended fine: it works again.
+    const ran = threadAccount.get(thread.id);
+    if (
+      ran !== undefined &&
+      thread.executionTarget !== "cloud" &&
+      began > (loginFailed[ran] ?? Infinity)
+    )
+      await noteLoginFailed(ran, undefined);
+    const used = ran ?? current(provider.data);
     const key = `${provider.data}:${used}`;
     if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) return;
     delete limits[key];

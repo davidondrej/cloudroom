@@ -25,7 +25,7 @@ export const sharedThreadSchema = z.object({
 });
 export type SharedThread = z.infer<typeof sharedThreadSchema>;
 export const handoffSchema = z.object({
-  repo: z.string(), branch: z.string(), title: z.string(), harness: z.string().nullable(), model: z.string().nullable(),
+  repo: z.string(), branch: z.string(), title: z.string(), harness: z.string().nullable(), model: z.string().nullable(), reasoning: z.string().nullable().optional(),
   ownerName: z.string(), messages: z.array(messageSchema),
 });
 

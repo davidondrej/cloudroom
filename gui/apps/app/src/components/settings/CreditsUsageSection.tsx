@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { z } from "zod";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -44,6 +44,21 @@ async function loadWave(signal?: AbortSignal): Promise<CreditsWave | null> {
   if (!response.ok) throw new Error(`Cloud Credits wave: ${response.status}`);
   return z.object({ wave: waveSchema.nullable() }).parse(await response.json()).wave;
 }
+
+/** One account's wave: its last saved copy at once, then a refresh. Analytics preloads it, the tab shows it. */
+export const creditsWaveQuery = (accountId: string) => queryOptions({
+  queryKey: creditsWaveKey(accountId),
+  queryFn: async ({ signal }) => {
+    const wave = await loadWave(signal);
+    if (wave) waveCache.write(waveCache.key(accountId), wave);
+    return wave;
+  },
+  enabled: accountId !== "",
+  initialData: () => (accountId ? waveCache.read(waveCache.key(accountId)) ?? undefined : undefined),
+  // Saved data counts as stale, so every first visit refetches.
+  initialDataUpdatedAt: 0,
+  staleTime: 60_000,
+});
 
 type Range = "24h" | "7d" | "30d";
 const RANGES: { id: Range; hours: number; long: string }[] = [
@@ -165,20 +180,7 @@ export function CreditBlocks({ split, from }: { split: CreditSplit; from: number
 export function CreditsUsageSection() {
   const account = useCloudroomAccount().data, accountId = account?.account?.id ?? "";
   const [range, setRange] = useState<Range>("30d");
-  const cacheKey = waveCache.key(accountId);
-  const query = useQuery({
-    queryKey: creditsWaveKey(accountId),
-    queryFn: async ({ signal }) => {
-      const wave = await loadWave(signal);
-      if (wave) waveCache.write(cacheKey, wave);
-      return wave;
-    },
-    enabled: accountId !== "",
-    initialData: () => (accountId ? waveCache.read(cacheKey) ?? undefined : undefined),
-    // Saved data counts as stale, so every first visit refetches.
-    initialDataUpdatedAt: 0,
-    staleTime: 60_000,
-  });
+  const query = useQuery(creditsWaveQuery(accountId));
   const wave = query.data;
   if (!accountId) return null;
   if (!wave) return <p className="text-sm text-muted-foreground">{query.isPending ? "Loading…" : query.isError ? "Couldn't load Cloud Credits." : "No Cloud Credits data yet."}</p>;

@@ -56,7 +56,7 @@ import {
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
 import { captureQueueDeliveryProblem } from "./queue-drain-failure.js";
-import { isThreadAtPlanLimit } from "./turn-failed.js";
+import { failureHold } from "./turn-failed.js";
 import {
   createQueuedMessageAutoSendPausedError,
   isQueuedMessageAutoSendPausedError,
@@ -547,7 +547,7 @@ export async function queueParentSystemMessage(
   }
   const hasPendingInteraction =
     deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id);
-  // A Stop or a plan limit holds the notice (#917, #1723).
+  // A Stop, a plan limit, or a failed login holds the notice (#917, #1723, #2019).
   let held = false;
   // Delivery throws only before it sends anything, so a notice that hit an
   // offline host or a transient fault stays queued instead of being lost: a
@@ -653,8 +653,8 @@ interface DeliverParentSystemMessageArgs extends ParentSystemMessageTaxonomy {
  *
  * Every notice path ends here, so this is where a manual Stop holds them: the
  * parent stays stopped until the user sends a message or `queue send` (#821).
- * A plan limit holds them the same way, so each one doesn't wake the parent
- * into the same refusal (#1723).
+ * A plan limit or a failed login holds them the same way, so each one doesn't
+ * wake the parent into the same refusal (#1723, #2019).
  */
 export async function deliverParentSystemMessage(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -676,7 +676,7 @@ async function deliverParentSystemMessageWithContextGuard(
     parentThread.status === "stopping" ||
     (!args.sendNow &&
       (isThreadQueueAutoSendPaused(deps.db, parentThread.id) ||
-        isThreadAtPlanLimit(deps.db, parentThread)))
+        failureHold(deps.db, parentThread) !== null))
   ) {
     throw createQueuedMessageAutoSendPausedError();
   }

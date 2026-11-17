@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
+import type { SandboxAccount } from "./sandboxes.js";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH = "https://auth.openai.com";
@@ -72,11 +73,13 @@ export class CodexAccounts {
   private cached: Cached | null | undefined;
   private loading: Promise<Cached | null> | null = null;
   private readonly usage = new Map<string, { windows: Window[]; credits: Credits; error: string | null; at: number }>();
-  private readonly signIns = new Map<string, { authId: string; userCode: string; expiresAt: number }>();
+  /** Each pending sign-in keeps the Cloudroom account that started it: its tokens go to that account or nowhere. */
+  private readonly signIns = new Map<string, { authId: string; userCode: string; expiresAt: number; account: SandboxAccount }>();
 
+  /** `call` sends a request only to the given account, refusing once the signed-in account is another one. */
   constructor(
-    private readonly call: (body: Record<string, unknown>) => Promise<unknown>,
-    private readonly user: () => Promise<string | null>,
+    private readonly call: (body: Record<string, unknown>, account: SandboxAccount) => Promise<unknown>,
+    private readonly account: () => Promise<SandboxAccount | null>,
     private readonly path: string,
     private readonly switched: () => void,
   ) {}
@@ -100,6 +103,9 @@ export class CodexAccounts {
     const account = state?.accounts.find(each => each.id === state.selected);
     return account ? account.email ?? account.name ?? "Codex account" : null;
   }
+
+  /** Drops pending sign-ins, on sign-out or an account change. */
+  reset(): void { this.signIns.clear(); }
 
   async request(input: CodexAccountsRequest) {
     if (input.action === "start") return this.start();
@@ -143,28 +149,28 @@ export class CodexAccounts {
 
   /** The website's list, at most every 10 minutes with accounts (an hour without), or sooner if a token is close to expiry. */
   private async load(force = false): Promise<Cached | null> {
-    const userId = await this.user();
-    if (!userId) {
+    const account = await this.account();
+    if (!account) {
       if (this.cached !== null) { this.cached = null; await rm(this.path, { force: true }).catch(() => {}); }
       return null;
     }
     if (this.cached === undefined) this.cached = await readFile(this.path, "utf8").then(text => JSON.parse(text) as Cached, () => null);
-    const cached = this.cached?.userId === userId ? this.cached : null;
+    const cached = this.cached?.userId === account.userId ? this.cached : null;
     const selected = cached?.accounts.find(each => each.id === cached.selected);
     const fresh = cached && Date.now() - cached.at < (cached.accounts.length ? 10 : 60) * 60_000 && (!selected?.expiresAt || selected.expiresAt - Date.now() > TOKEN_MARGIN_MS);
     if (fresh && !force) return cached;
-    this.loading ??= this.remember(userId, { action: "list" }).finally(() => { this.loading = null; });
+    this.loading ??= this.remember(account, { action: "list" }).finally(() => { this.loading = null; });
     return this.loading.catch((error: unknown) => { if (cached && !force) return cached; throw error; });
   }
 
-  private async save(body: Record<string, unknown>): Promise<Cached> {
-    const userId = await this.user();
-    if (!userId) throw new Error("Sign in to Cloudroom to add Codex accounts. They work in Local and Cloud threads.");
-    return this.remember(userId, body);
+  private async save(body: Record<string, unknown>, expected?: SandboxAccount): Promise<Cached> {
+    const account = expected ?? await this.account();
+    if (!account) throw new Error("Sign in to Cloudroom to add Codex accounts. They work in Local and Cloud threads.");
+    return this.remember(account, body);
   }
 
-  private async remember(userId: string, body: Record<string, unknown>): Promise<Cached> {
-    const state: Cached = { ...remoteSchema.parse(await this.call(body)), userId, at: Date.now() };
+  private async remember(account: SandboxAccount, body: Record<string, unknown>): Promise<Cached> {
+    const state: Cached = { ...remoteSchema.parse(await this.call(body, account)), userId: account.userId, at: Date.now() };
     this.cached = state;
     const temp = `${this.path}.${randomUUID()}.tmp`;
     await writeFile(temp, JSON.stringify(state), { mode: 0o600 }).then(() => rename(temp, this.path)).catch(() => rm(temp, { force: true }));
@@ -190,12 +196,13 @@ export class CodexAccounts {
   }
 
   private async start() {
-    if (!await this.user()) throw new Error("Sign in to Cloudroom to add Codex accounts. They work in Local and Cloud threads.");
+    const account = await this.account();
+    if (!account) throw new Error("Sign in to Cloudroom to add Codex accounts. They work in Local and Cloud threads.");
     const response = await postJson(`${AUTH}/api/accounts/deviceauth/usercode`, { client_id: CLIENT_ID });
     if (!response.ok) throw new Error(`OpenAI could not start the Codex sign-in (HTTP ${response.status}).`);
     const started = z.object({ device_auth_id: z.string(), user_code: z.string() }).parse(await response.json());
     const sessionId = randomUUID(), expiresAt = Date.now() + SIGN_IN_MS;
-    this.signIns.set(sessionId, { authId: started.device_auth_id, userCode: started.user_code, expiresAt });
+    this.signIns.set(sessionId, { authId: started.device_auth_id, userCode: started.user_code, expiresAt, account });
     return { sessionId, verificationUri: `${AUTH}/codex/device`, userCode: started.user_code, expiresAt };
   }
 
@@ -218,7 +225,7 @@ export class CodexAccounts {
       this.signIns.delete(sessionId);
       const exchanged = await postJson(`${AUTH}/oauth/token`, { grant_type: "authorization_code", code: approved.data.authorization_code, redirect_uri: `${AUTH}/deviceauth/callback`, client_id: CLIENT_ID, code_verifier: approved.data.code_verifier }, true);
       if (!exchanged.ok) throw new Error(`OpenAI did not finish the Codex sign-in (HTTP ${exchanged.status}).`);
-      await this.save({ action: "add", tokens: tokensSchema.parse(await exchanged.json()) });
+      await this.save({ action: "add", tokens: tokensSchema.parse(await exchanged.json()) }, signIn.account);
       return { status: "complete", message: null };
     } catch (error) {
       return { status: "error", message: error instanceof Error ? error.message : String(error) };

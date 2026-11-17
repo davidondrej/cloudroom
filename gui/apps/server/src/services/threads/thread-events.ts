@@ -25,6 +25,7 @@ import {
   WORKSPACE_PROVISIONING_STEP_KEYS,
 } from "@cloudroom/domain";
 import { randomBytes } from "node:crypto";
+import { currentAppSurface } from "../system/telemetry.js";
 import type {
   ClientTurnRequestId,
   ClientTurnLifecycleEventData,
@@ -134,6 +135,8 @@ interface AppendThreadOwnershipChangeEventArgs {
 
 interface AppendSystemErrorEventArgs {
   code: string;
+  /** The host's own code under a generic `code`; see the schema. */
+  cause?: string | undefined;
   detail?: string;
   environmentId?: string | null;
   message: string;
@@ -214,6 +217,7 @@ function buildClientTurnRequestedEventData(
       ? { queueDelivered: true, queuedMessageId: args.queueDelivered }
       : {}),
     senderThreadId: args.senderThreadId,
+    ...appSurfaceField(),
     ...(args.systemMessageKind !== undefined
       ? { systemMessageKind: args.systemMessageKind }
       : {}),
@@ -227,6 +231,12 @@ function buildClientTurnRequestedEventData(
     target: args.target,
     execution: args.execution,
   };
+}
+
+/** The surface of the request that sent this turn; none outside a request (timers, startup). */
+function appSurfaceField(): { appSurface?: string } {
+  const appSurface = currentAppSurface();
+  return appSurface ? { appSurface } : {};
 }
 
 type AppendClientTurnEvent = (args: AppendThreadEventArgs) => number;
@@ -708,12 +718,13 @@ export function appendSystemErrorEventInTransaction(
 export function buildSystemErrorEventData(
   args: Pick<
     AppendSystemErrorEventArgs,
-    "code" | "detail" | "message" | "reconnectAttempt" | "reconnectTotal"
+    "cause" | "code" | "detail" | "message" | "reconnectAttempt" | "reconnectTotal"
   >,
 ): SystemErrorEventData {
   const reconnectProgress = resolveSystemErrorReconnectProgress(args);
   return systemErrorEventDataSchema.parse({
     code: args.code,
+    ...(args.cause ? { cause: args.cause } : {}),
     message: args.message,
     ...(args.detail ? { detail: args.detail } : {}),
     ...(reconnectProgress

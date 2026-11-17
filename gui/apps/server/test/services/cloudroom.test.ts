@@ -690,7 +690,7 @@ it.each([["drops", 1], ["times out", 11_000]] as const)("clones a new Cloud thre
     let body = "";
     for await (const chunk of req) body += chunk;
     const input = JSON.parse(body || "{}");
-    if (req.url === "/v1/vm/run") {
+    if (req.url?.split("?")[0] === "/v1/vm/run") {
       commands.push(input.command);
       if (input.command.includes(".cloudroom-files")) states.push(Buffer.from(input.stdin, "hex").toString());
       return json({ code: 0, stdout: "", stderr: "" });
@@ -1383,10 +1383,13 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     failStart = false;
     await harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
     await expect.poll(() => prompts.map(untagged), { timeout: 2000 }).toEqual([`first_${thread.id}`, "fourth"]);
-    // A cancel Core can't take yet keeps its cause, here blocked storage, and says the delete is saved.
+    // A message Core can't take yet, here for blocked storage, is deleted at once: its delete is saved, it leaves the
+    // queue, and it is never sent.
     blocked = true;
     await send(thread.id, "fifth");
-    expect(await remove(tagged("fifth"))).toMatchObject({ status: 503, message: expect.stringMatching(/disk.*The delete is saved/is) });
+    expect(await quick(remove(tagged("fifth")))).toMatchObject({ status: 200 });
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).not.toContain("fifth");
+    expect(prompts.map(untagged)).not.toContain("fifth");
   } finally {
     release();
     service.stop();

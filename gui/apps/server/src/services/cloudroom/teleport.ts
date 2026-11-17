@@ -1,4 +1,4 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, maskStoredShellEnvValues } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
 import {
@@ -43,7 +43,7 @@ import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { resolveThreadRuntimeCommandConfig } from "../threads/thread-runtime-config.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
 import { cloudPromptLimit, cloudroom, promptPayload } from "./commands.js";
-import { copyProject, homeFolder, planProjectCopy } from "./project-copy.js";
+import { homeFolder, planProjectCopy } from "./project-copy.js";
 import { SANDBOX_PREFIX } from "./sandboxes.js";
 import {
   CloudroomError,
@@ -954,7 +954,10 @@ class Teleport {
             .where(eq(events.threadId, source.threadId))
             .orderBy(asc(events.sequence))
             .all()
-            .map((row) => ({ ...row, data: JSON.parse(row.data) })),
+            .map((row) => ({
+              ...row,
+              data: maskStoredShellEnvValues(row.type, JSON.parse(row.data)),
+            })),
         })),
         queued: state.queuedDisplay,
         goals,
@@ -1054,14 +1057,14 @@ class Teleport {
               .slice(0, 80) || "project",
           files: capture.files,
           queued: state.queued,
-          handoff: `${state.idle && !state.queued.length ? "This thread was idle when it moved to Cloud, so its last request may already be finished. Read the conversation first and don't repeat work that already succeeded, including laptop-side effects you can't see from here (threads, pushes, messages). If something is still unfinished (a child result, a queued message, a background job), continue only that. If nothing is left, say so in one line." : "Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it."} Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files); wait for missing files instead of recreating them. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
+          handoff: `${state.idle && !state.queued.length ? "This thread was idle when it moved to Cloud, so its last request may already be finished. Read the conversation first and don't repeat work that already succeeded, including laptop-side effects you can't see from here (threads, pushes, messages). If something is still unfinished (a child result, a queued message, a background job), continue only that. If nothing is left, say so in one line." : "Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it."} Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files): run \`room-cli files wait\` before touching project files. It returns once they land, or says the copy failed and where the files are; don't recreate missing files. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
         },
       };
       this.save(state);
     }
     const copy = await planProjectCopy(this.deps, client, state.threadId, state.manifest!.workspace, { localPath: state.workspacePath, teleport: true });
     let remote = await client.prepareTeleport(state.manifest!);
-    if (copy) copyProject(this.deps, client, copy);
+    if (copy) cloudroom(this.deps).copyInto(client, copy);
     // Bytes, not files, so one big chat file never sits at 0 until it lands. Before Cloud starts only the chat text
     // counts. `rate` is the upload speed of the last pieces alone, so a slow Core never reads as a slow connection.
     const sizes = state.manifest!.files.map((file) => file.size);
@@ -1220,6 +1223,8 @@ class Teleport {
       error: undefined,
     });
     if (complete) {
+      // A project copy an app restart cut off waited for the move to finish (#1970).
+      cloudroom(this.deps).resumeCopy(state.threadId, client);
       shortenWorktreeRetirement(this.deps, state.environmentId);
       for (const source of state.sessions.slice(1))
         saveTeleportProgress(this.deps.db, source.threadId, {

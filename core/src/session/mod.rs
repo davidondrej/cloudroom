@@ -544,7 +544,18 @@ impl Manager {
             if session.waiting_start().is_some() {
                 continue;
             }
+            // A wake that a crash cut off runs once more while messages wait for it, so a queued tell isn't lost
+            // (#1927). It claims the one recovery: a wake that keeps crashing Core fails them, as before. Never for an
+            // archived thread or a pending close: those fail them, as before.
+            let retry = session.state == SessionState::Resuming
+                && !session.archived
+                && session.close_request.is_none()
+                && session.has_dispatched
+                && session.native_path.is_some()
+                && !session.recovery_attempted
+                && !session.queue.is_empty();
             let eligible = session.can_resume()
+                || retry
                 || session.startup_error.as_deref() == Some("startup_timeout")
                 || (session.state == SessionState::Resuming
                     && !session.has_dispatched
@@ -559,16 +570,32 @@ impl Manager {
                 }
                 let queued =
                     receipt.command == "prompt" && session.queue.contains(&receipt.request_id);
+                // A sleep still waiting (an Accounts switch's, held by background jobs) is done: the restart stopped
+                // the agent. Never an error on an idle thread (#1985).
+                let slept = receipt.command == "sleep";
                 if !eligible || !queued {
                     receipt.state = if queued {
                         "failed"
+                    } else if slept {
+                        "completed"
                     } else {
                         "unknown_after_restart"
                     }
                     .into();
                     // Top-level threads only, never a self-started turn: a child's errors reach its parent's notices.
-                    if !queued && receipt.command != "auto" && session.parent_session.is_none() {
-                        receipt.error.get_or_insert_with(|| restarted.clone());
+                    if !queued
+                        && !slept
+                        && receipt.command != "auto"
+                        && session.parent_session.is_none()
+                    {
+                        // A turn paused for a full disk says so, or its parent never learns why (#309).
+                        receipt.error.get_or_insert_with(|| {
+                            if session.storage_paused {
+                                format!("{restarted} It was paused because the disk was full.")
+                            } else {
+                                restarted.clone()
+                            }
+                        });
                     }
                     local.append(
                         &session.session_id,
@@ -585,12 +612,11 @@ impl Manager {
                     | SessionState::Failed
                     | SessionState::Sleeping
             ) {
-                local.append(
-                    &session.session_id,
-                    "state",
-                    json!({"state":if eligible { SessionState::Suspended } else { SessionState::ProcessLost }}),
-                    None,
-                )?;
+                let mut state = json!({"state":if eligible { SessionState::Suspended } else { SessionState::ProcessLost }});
+                if retry {
+                    state["recovery"] = json!(true);
+                }
+                local.append(&session.session_id, "state", state, None)?;
             }
         }
         // Native recovery runs helpers (Cursor capture) inside the agent cgroup, so prepare it first.
@@ -2228,10 +2254,17 @@ impl Manager {
             }
             // A prompt starts its native turn immediately only when the harness is
             // idle with nothing queued; otherwise it is accepted and queued in order.
-            if command == "prompt" && self.storage.blocks() {
+            // At the lowest pause line only freed space resumes work, so a prompt to an agent paused there waits in
+            // its queue instead of being refused again and again (#606).
+            let waits = self.storage.stuck() && session.storage_paused && handle.is_some();
+            if command == "prompt" && self.storage.blocks() && !waits {
                 return Err(Error::Conflict("storage unsafe; new execution is blocked"));
             }
-            if command == "interrupt" && session.storage_paused {
+            // A stop on a measured full disk wakes only its agent, until it settles (guard.rs, #606).
+            if command == "interrupt"
+                && session.storage_paused
+                && self.storage.snapshot().reason != "disk_capacity"
+            {
                 return Err(Error::Conflict(
                     "workload is paused for storage; close it or wait for recovery",
                 ));
@@ -2374,6 +2407,7 @@ impl Manager {
                 }
             }
             let deliver_now = command == "prompt"
+                && !self.storage.blocks()
                 && session.ready
                 && session.state == SessionState::Idle
                 && !session.queue_paused
@@ -3802,17 +3836,25 @@ fn stderr_tail(bytes: &[u8]) -> String {
     lines[lines.len().saturating_sub(20)..].join("\n")
 }
 
-/// Whether the kernel killed a process in this sandbox for lack of memory since the last check: cgroup v2's
-/// `memory.events`, which counts kills from this sandbox's own limit and the whole machine's alike.
+/// Processes the kernel killed in this sandbox for lack of memory: cgroup v2's `memory.events`, which counts kills
+/// from this sandbox's own limit and the whole machine's alike. A container's is at the root; a VM's root has none,
+/// so there Core's own cgroup's counts, which holds every agent and tool it starts (#1619).
+fn oom_kills() -> Option<u64> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let own = own.trim().strip_prefix("0::").unwrap_or_default();
+    ["", own].into_iter().find_map(|group| {
+        let events =
+            std::fs::read_to_string(format!("/sys/fs/cgroup{group}/memory.events")).ok()?;
+        let count = events
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "));
+        count?.trim().parse().ok()
+    })
+}
+
+/// Whether the kernel killed a process in this sandbox for lack of memory since the last check.
 fn oom_kills_grew() -> bool {
     static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = std::fs::read_to_string("/sys/fs/cgroup/memory.events")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("oom_kill "))
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(0);
+    let count = oom_kills().unwrap_or(0);
     SEEN.swap(count, Ordering::Relaxed) < count
 }

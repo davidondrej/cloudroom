@@ -1534,6 +1534,31 @@ export interface PluginThreadHeaderActionRegistration {
   component: ComponentType<PluginThreadHeaderActionProps>;
 }
 
+/** Props passed to an `experimental_projectAction` component: the page the action opens. */
+export interface ExperimentalProjectActionProps {
+  /** The project whose menu opened the page. */
+  projectId: string;
+}
+
+/**
+ * Add an item to every project's actions menu (the sidebar's three dots and
+ * its right-click menu). Host-rendered chrome: the plugin supplies the title,
+ * icon, and an optional badge. Selecting it opens `component` as a full page
+ * for that project, at `/plugins/<pluginId>/<id>/<projectId>`. The page has no
+ * sidebar entry of its own.
+ */
+export interface ExperimentalProjectActionRegistration {
+  /** Unique within the plugin; letters, digits, `-`, `_`. */
+  id: string;
+  /** The menu item's label. */
+  title: string;
+  /** Resolved names take precedence over plugin branding; unknown names fall back to branding. */
+  icon: BbIconName;
+  /** A short label after the title, in the accent color, like "NEW". */
+  badge?: string;
+  component: ComponentType<ExperimentalProjectActionProps>;
+}
+
 export interface ExperimentalPluginBrowserToolbarActionRegistration {
   /** Unique within the plugin; letters, digits, `-`, `_`. */
   id: string;
@@ -2392,6 +2417,14 @@ export interface PluginAppSlots {
    */
   experimental_threadAction<Data = undefined>(
     registration: PluginThreadActionRegistration<Data>,
+  ): void;
+  /**
+   * Add an item to every project's actions menu that opens a plugin page for
+   * that project (see {@link ExperimentalProjectActionRegistration}).
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_projectAction(
+    registration: ExperimentalProjectActionRegistration,
   ): void;
   /** Render a component beside each Browser tab's address bar. */
   experimental_browserToolbarAction(

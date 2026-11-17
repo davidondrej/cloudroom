@@ -226,6 +226,7 @@ export async function readGitFacts(path: string): Promise<string> {
   const git = (...args: string[]) =>
     exec("git", ["--no-optional-locks", "-C", path, ...args], {
       timeout: GIT_FACTS_TIMEOUT_MS,
+      windowsHide: true,
     }).then(({ stdout }) => stdout.trim());
   const [status, remotes] = await Promise.all([
     git("status", "--porcelain"),

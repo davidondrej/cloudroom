@@ -34,6 +34,7 @@ async function runGh(args: string[]): Promise<string> {
   const { stdout } = await exec("gh", args, {
     timeout: 15_000,
     maxBuffer: 1024 * 1024,
+    windowsHide: true,
   });
   return stdout;
 }

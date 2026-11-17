@@ -136,7 +136,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     const skipBackoff = () => (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
     // Behind a website 502, out of reach, or awake with its Core not answering (#1699): Stop is saved and says so (its
     // agent may run), and the message never goes out. A refusal is an answer: a repair may come after the sandbox
-    // started, and a Core blocking new work keeps it, so Stop fails as before, cancelling nothing.
+    // started, and a Core blocking new work keeps it, so Stop fails as before, cancelling nothing. A restore is held.
     const asleep = (wake: string | null) => () => { refusal = wake; coreDown = null; state = "asleep"; service.sandboxes.forget(thread.id); };
     const unreachable: [string, () => void, string, string, boolean, number][] = [
       ["sandbox_repairing", asleep("sandbox_repairing"), "sandbox_repairing", "sending", false, 0],
@@ -144,6 +144,7 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
       ["502", asleep("502"), "cloudroom_stop_pending", "cancelled", true, 1],
       ["drop", asleep("drop"), "cloudroom_stop_pending", "cancelled", true, 1],
       ["core-down", () => { refusal = null; coreDown = "502"; }, "cloudroom_stop_pending", "cancelled", true, 1],
+      ["sandbox_restoring", asleep("sandbox_restoring"), "cloudroom_stop_pending", "cancelled", true, 1],
     ];
     const held = () => harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && item.state === "sending").length;
     for (const [failure, fail, code, message, paused, holds] of unreachable) {
@@ -160,7 +161,9 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
         .toEqual([503, code, message, paused, holding + holds]);
     }
     // The repair's message was the current turn, which Core may already have had: it was kept, and goes out as before.
+    refusal = null;
     coreDown = null;
+    skipBackoff();
     await waitFor(() => commandState("unreachable-sandbox_repairing") === "accepted", "kept turn delivered");
     state = "asleep";
     service.sandboxes.forget(thread.id);
@@ -212,9 +215,9 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     const paths = core.map(call => call.path);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeGreaterThan(-1);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeLessThan(paths.lastIndexOf("/v1/sessions/cr_one/prompts"));
-    expect(prompts.some(id => /_(over-limit|unreachable-(storage_blocked|502|drop|core-down))$/.test(id))).toBe(false);
+    expect(prompts.some(id => /_(over-limit|unreachable-(storage_blocked|502|drop|core-down|sandbox_restoring))$/.test(id))).toBe(false);
     // This Core can't scope a stop to its turn, so the ones held while unreachable never go out.
-    expect(harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && JSON.parse(item.input).guarded).map(item => item.state)).toEqual(["cancelled", "cancelled"]);
+    expect(harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && JSON.parse(item.input).guarded).map(item => item.state)).toEqual(["cancelled", "cancelled", "cancelled"]);
     expect(paths.filter(path => /\/(rewind|goal)$/.test(path))).toEqual([]);
 
     // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.
@@ -426,6 +429,122 @@ it("moving back to the VM: new threads start on the VM while sandbox threads sta
   }
 });
 
+it("Connect Claude writes its token only to the Cloudroom sign-in it started under (#1924)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const a = { id: "11111111-1111-4111-8111-111111111111", email: "a@example.com" }, b = { id: "22222222-2222-4222-8222-222222222222", email: "b@example.com" };
+  const vmWrites: string[] = [];
+  let switchBack = false, uploads = 0;
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    // ...then back to A while B's VM answers.
+    if (req.url === "/v1/capabilities" && switchBack && req.headers.authorization === `Bearer ${"b".repeat(64)}`) await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, claude_auth: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url === "/v1/accounts/claude/token") { vmWrites.push(String(req.headers.authorization)); return json({ state: "connected", email: null, plan: null, message: null, login_id: null, verification_url: null, user_code: null }, 202); }
+    json({});
+  });
+  const coreUrl = await listen(coreServer);
+  let switchOnUpload = false;
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    if (input.name === "claude") uploads += 1;
+    // The user switches to B while A's upload is in flight...
+    if (input.name === "claude" && switchOnUpload) await service.configure({ url: coreUrl, token: "b".repeat(64) }, b, undefined, websiteUrl, "b".repeat(64));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "mode" ? { sandboxes: true } : { saved: true, claude: false, codex: false, pi: false, github: false }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  const token = "sk-ant-oat01-fake-token";
+  try {
+    // Older VM accounts have no sandbox sign-in: A's token never reaches B's VM.
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a);
+    const ownerA = await service.loginOwner();
+    await service.configure({ url: coreUrl, token: "b".repeat(64) }, b);
+    await expect(service.claudeAuth("token", "req-1", token, undefined, false, ownerA)).rejects.toThrow("The Cloudroom account changed");
+    expect(vmWrites).toEqual([]);
+    await service.claudeAuth("token", "req-2", token, undefined, false, await service.loginOwner());
+    expect(vmWrites).toEqual([`Bearer ${"b".repeat(64)}`]);
+    // Started signed out: nothing is written anywhere.
+    await expect(service.claudeAuth("token", "req-3", token, undefined, false, null)).rejects.toThrow("Sign in");
+    // Signing in again to the same account rotates its tokens; the pending sign-in still saves to it.
+    vmWrites.length = 0;
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    const ownerA2 = await service.loginOwner();
+    await service.configure({ url: coreUrl, token: "c".repeat(64) }, a, undefined, websiteUrl, "c".repeat(64));
+    await service.claudeAuth("token", "req-4", token, undefined, false, ownerA2);
+    expect(uploads).toBe(1);
+    expect(vmWrites).toEqual([`Bearer ${"c".repeat(64)}`]);
+    // A to B during A's website upload, back to A while B's VM answers: B's VM never gets A's token.
+    vmWrites.length = 0;
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    switchOnUpload = switchBack = true;
+    await service.claudeAuth("token", "req-5", `${token}-2`, undefined, false, await service.loginOwner());
+    expect(uploads).toBe(2);
+    expect(vmWrites).toEqual([]);
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+  }
+});
+
+it("a login copy started under one Cloudroom account never finishes under the next (#1940)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "login-switch-"));
+  const { SandboxDirectory, cloudClaudeEnvironment } = await import("../../src/services/cloudroom/sandboxes.js");
+  // This Mac: Claude signed out, and Codex and Pi signed in (one fake file for both). HOME is empty.
+  await writeFile(join(dir, "claude"), "#!/bin/sh\necho '{\"loggedIn\":false}'\n", { mode: 0o755 });
+  await writeFile(join(dir, "auth.json"), "{}");
+  for (const [name, value] of [["PATH", `${dir}:${process.env.PATH}`], ["HOME", dir], ["CODEX_HOME", dir], ["PI_CODING_AGENT_DIR", dir]]) vi.stubEnv(name, value);
+  const a = { userId: "a", token: "a".repeat(64) }, b = { userId: "b", token: "b".repeat(64) };
+  let signedIn = a, switchOn = "", resetOn = "", resetOnRead = false;
+  const toB: string[] = [], reads: typeof a[] = [];
+  const website = createServer(async (req, res) => {
+    const input = await body(req);
+    if (req.headers.authorization?.includes(Buffer.from(`b:${b.token}`).toString("base64"))) toB.push(`${input.action ?? "save"} ${input.name ?? ""}`);
+    // The user switches to B while A's request is in flight.
+    if (switchOn && `${input.action ?? "save"} ${input.name}` === switchOn) { switchOn = ""; signedIn = b; directory.reset(); }
+    // A to B and back to A, both resets landing on the next account read.
+    if (resetOn && `${input.action ?? "save"} ${input.name}` === resetOn) { resetOn = ""; resetOnRead = true; }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "status" ? { claude: true, codex: true, pi: false, github: false } : { value: JSON.stringify({ token: "sk-ant-oat01-fake-a" }), saved: true }));
+  });
+  const url = await listen(website);
+  const directory = new SandboxDirectory(async () => {
+    if (resetOnRead) { resetOnRead = false; directory.reset(); }
+    return { website: url, ...(reads.shift() ?? signedIn) };
+  });
+  const asA = () => ({ account: { website: url, ...a }, signal: AbortSignal.timeout(5_000) });
+  try {
+    // Cloud → Mac: A's Claude login never becomes this Mac's while B is signed in.
+    switchOn = "get claude";
+    await expect(directory.copyCloudLogins(true)).rejects.toThrow("account changed");
+    expect(cloudClaudeEnvironment()).toEqual([]);
+    // Mac → cloud: a copy A started stops at the switch, so B gets nothing from it.
+    signedIn = a; switchOn = "save codex";
+    directory.skipLogins = async () => new Set(["claude", "opencode", "hermes", "devin", "kimi", "openclaw", "agent-zero", "cursor", "github"]);
+    await expect(directory.copyMacLogins(true)).rejects.toThrow("account changed");
+    expect(toB).toEqual([]);
+    // A → B → A between two account reads: A's login is never sent as B.
+    signedIn = a; reads.push(b, a);
+    await expect(directory.saveLogin("cursor", "{}", asA())).rejects.toThrow("account changed");
+    expect(toB).toEqual([]);
+    // Switched to B during A's own save: B's save of the same value still uploads.
+    reads.length = 0; switchOn = "save cursor";
+    await directory.saveLogin("cursor", "{}", asA());
+    await directory.saveLogin("cursor", "{}");
+    expect(toB).toEqual(["save cursor"]);
+    // A → B → A just before the Codex write: the copy stops and this Mac gets no Codex login.
+    signedIn = a; resetOn = "get codex";
+    vi.stubEnv("CODEX_HOME", join(dir, "codex"));
+    directory.skipLogins = async () => new Set(["claude"]);
+    await expect(directory.copyCloudLogins(true)).rejects.toThrow("account changed");
+    await expect(readFile(join(dir, "codex", "auth.json"))).rejects.toThrow("ENOENT");
+  } finally {
+    vi.unstubAllEnvs();
+    website.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it.each([
   { mode: { sandboxes: true, plan: "free" }, plan: "free", usage: true, queue: null },
   { mode: { sandboxes: true, plan: "free", queue: { position: 3, total: 9 } }, plan: "free", usage: false, queue: { position: 3, total: 9, regionBlocked: false } },
@@ -546,16 +665,17 @@ it.each([
     }
     if (req.url === "/v1/sessions/cr_one/workspace") return fault === "checkout probe" && faults-- > 0 ? json({ error: "busy" }, 500) : json({ path: folder, branch: null, head: checkout().branch ? "head" : null });
     const input = await body(req);
-    if (req.url === "/v1/vm/run") {
+    if (req.url?.split("?")[0] === "/v1/vm/run") {
       // Core runs it in bash; the "GitHub" clone comes from a local repository. The thread's branch setup is slow.
       const command = String(input.command).replaceAll("https://github.com/example/project", origin);
       if (fault?.startsWith("status write") && command.includes(".cloudroom-files") && faults-- > 0) return json({ code: 1, stdout: "", stderr: Buffer.from("disk full").toString("hex"), truncated: false });
       // The agent made its own branch before the thread's branch setup ran: it must stay there (#1377).
       if (fault === "agent branch" && command.includes("git checkout -q -b")) { git(folder, "checkout", "-q", "-b", "feature"); await writeFile(join(folder, "agent.txt"), "agent\n"); git(folder, "add", "-A"); git(folder, "commit", "-qm", "Agent work"); }
       if (command.includes("git checkout -q -b")) await new Promise(resolve => setTimeout(resolve, 800));
-      // A proxy's 504 cuts off every clone's answer, while the clone goes on and lands a moment later (#1524).
+      // A proxy's 504 cuts off every clone's answer. Core keeps only a clone it was asked to keep (#1970), which lands a
+      // moment later (#1524); any other dies with its request.
       if (fault === "clone 504" && command.includes("git clone") && faults-- > 0) {
-        spawn("/bin/bash", ["-c", command.replace("git clone", "sleep 2 && git clone")], { cwd: root, stdio: "ignore" });
+        if (req.url.endsWith("?keep=true")) spawn("/bin/bash", ["-c", command.replace("git clone", "sleep 2 && git clone")], { cwd: root, stdio: "ignore" });
         await new Promise(resolve => setTimeout(resolve, 300));
         return void res.writeHead(504).end("Gateway Timeout");
       }

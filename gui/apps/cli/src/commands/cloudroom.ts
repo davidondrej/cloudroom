@@ -216,7 +216,8 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
       .option("--dry-run", "List the chats without importing them")
       .option("--json", "Print JSON");
     if (harness === "conductor") sub.option("--path <path>", "A Conductor Cloud export: its unzipped folder or the .zip");
-    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string }) => {
+    if (harness === "claude-code") sub.option("--config-dir <folder>", "Read chats from another Claude Code config folder (a CLAUDE_CONFIG_DIR). Each imported chat is copied into the default one; the original stays");
+    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string; configDir?: string }) => {
         if (harness === "conductor" || !options.dryRun) {
           (await import("../plugin-cli-proxy.js")).allowLongRequests();
         }
@@ -237,7 +238,8 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
           return;
         }
         const since = Date.now() - Number(options.days) * 86_400_000;
-        const sessions = (await sdk.nativeSessions()).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
+        const configDir = options.configDir === undefined ? undefined : resolve(options.configDir);
+        const sessions = (await sdk.nativeSessions(undefined, configDir)).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
         if (options.dryRun || !sessions.length) {
           if (outputJson(options, { sessions })) return;
           for (const session of sessions) console.log(`${session.title}  (${session.cwd})`);
@@ -248,7 +250,7 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
         const hostId = await resolveLocalHostId();
         const result: Awaited<ReturnType<typeof sdk.importSessions>> = { imported: [], skipped: [] };
         for (let index = 0; index < sessions.length; index += 20) {
-          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })));
+          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })), configDir);
           result.imported.push(...batch.imported);
           result.skipped.push(...batch.skipped);
           if (options.json) continue;

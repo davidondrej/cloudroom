@@ -41,7 +41,7 @@ function registrySkillsCliInvocation(args: {
 }): {
   args: string[];
   command: string;
-  options: { cwd: string; env: NodeJS.ProcessEnv };
+  options: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true };
 } {
   const allowedKeys =
     process.platform === "win32"
@@ -81,7 +81,7 @@ function registrySkillsCliInvocation(args: {
       "--copy",
       "--yes",
     ],
-    options: { cwd: args.cwd, env },
+    options: { cwd: args.cwd, env, windowsHide: true },
   };
 }
 

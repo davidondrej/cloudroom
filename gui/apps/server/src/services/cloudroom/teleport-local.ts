@@ -319,8 +319,8 @@ async function landLocalForkCode(deps: AppDeps, client: CloudroomClient, source:
   try {
     const file = join(temporary, "code.bundle");
     await writeFile(file, bundle);
-    const fetch = () => exec("git", ["-C", folder, "fetch", "-q", file, `refs/cloudroom/${id}:refs/heads/${branch}`]);
-    await fetch().catch(async () => { await exec("git", ["-C", folder, "fetch", "-q", "origin"]).catch(() => {}); await fetch(); });
+    const fetch = () => exec("git", ["-C", folder, "fetch", "-q", file, `refs/cloudroom/${id}:refs/heads/${branch}`], { windowsHide: true });
+    await fetch().catch(async () => { await exec("git", ["-C", folder, "fetch", "-q", "origin"], { windowsHide: true }).catch(() => {}); await fetch(); });
   } catch (error) {
     const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
     throw new ApiError(409, "fork_code_unavailable", `The Cloud thread's code could not be copied to this ${computer}: ${reason || "git fetch failed"}`);
@@ -365,7 +365,7 @@ export async function copyToMac(deps: AppDeps, threadId: string): Promise<{ bran
       try { await writeFile(file, await download(client, path)); }
       finally { await vm(client, `rm -f ${quote(path)}`).catch(() => {}); }
       if (!full && await git(environment.path, ["bundle", "verify", "-q", file]) === null) continue;
-      try { await exec("git", ["-C", environment.path, "fetch", "-q", file, `refs/heads/${branch}:refs/heads/${branch}`]); }
+      try { await exec("git", ["-C", environment.path, "fetch", "-q", file, `refs/heads/${branch}:refs/heads/${branch}`], { windowsHide: true }); }
       catch (error) {
         const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
         throw new ApiError(409, "copy_unavailable", /checked out|rejected|non-fast-forward/.test(reason)
@@ -627,8 +627,8 @@ async function copyChanges(root: string, real: string, archive: Buffer, id: stri
     const staged = join(folder, "files");
     await writeFile(file, archive);
     await mkdir(staged);
-    await exec(tarCommand(), ["-xzf", file, "-C", staged]);
-    const paths = (await exec(tarCommand(), ["-tzf", file], { maxBuffer: 64 * 1024 * 1024 })).stdout.split(process.platform === "win32" ? /\r?\n/ : "\n")
+    await exec(tarCommand(), ["-xzf", file, "-C", staged], { windowsHide: true });
+    const paths = (await exec(tarCommand(), ["-tzf", file], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })).stdout.split(process.platform === "win32" ? /\r?\n/ : "\n")
       .map((path) => path.split("/").filter((part) => part !== ".").join("/")).filter((path) => path && !path.endsWith("/") && !isAbsolute(path) && !path.split("/").includes("..") && !inGit(path)
         && path.split("/")[0]!.toLowerCase() !== ".cloudroom");
     const top = (await git(root, ["rev-parse", "--show-toplevel"]))?.trim();
@@ -705,7 +705,7 @@ async function same(a: string, b: string): Promise<boolean> {
 }
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
-  return exec("git", ["-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024 }).then((result) => result.stdout, () => null);
+  return exec("git", ["-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true }).then((result) => result.stdout, () => null);
 }
 
 /** `lineage`: a Codex fork's parent file (see `codexLineage`), kept byte-for-byte. A Mac copy that already holds
@@ -787,7 +787,7 @@ async function installCursor(nativeId: string, archive: Buffer, cwd: string) {
   await mkdir(staged, { recursive: true, mode: 0o700 });
   try {
     await writeFile(`${staged}.tgz`, archive, { mode: 0o600 });
-    await exec(tarCommand(), ["-xzf", `${staged}.tgz`, "-C", staged]);
+    await exec(tarCommand(), ["-xzf", `${staged}.tgz`, "-C", staged], { windowsHide: true });
     await assertPlainTree(staged);
     const meta = join(staged, "meta.json");
     await writeFile(meta, JSON.stringify({ ...conversationParser()(await readFile(meta, "utf8")), cwd }));

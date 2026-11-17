@@ -176,3 +176,29 @@ it("excludes hidden diagnostics from rows and budgets while advancing the histor
     ]);
   });
 });
+
+it("masks shell secrets stored before #1938 in the events API", async () => {
+  await withTestHarness(async (harness) => {
+    const { thread } = seedThreadFixture(harness);
+    seedEvent(harness.deps, {
+      threadId: thread.id,
+      providerThreadId: "provider-session",
+      scope: threadScope(),
+      sequence: 1,
+      type: "provider.env-resolved",
+      data: {
+        entries: [
+          { name: "GH_TOKEN", source: "shell", value: "fake-stored-token" },
+          { name: "PATH", source: "shell", value: "/usr/bin" },
+        ],
+      },
+    });
+    const response = await harness.app.request(
+      `/api/v1/threads/${thread.id}/events`,
+    );
+    expect(response.status).toBe(200);
+    const body = JSON.stringify(await readJson(response));
+    expect(body).not.toContain("fake-stored-token");
+    expect(body).toContain("/usr/bin");
+  });
+});

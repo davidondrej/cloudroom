@@ -329,7 +329,7 @@ async function createWorktree(
 }
 
 const localHead = (path: string) =>
-  exec("git", ["-C", path, "rev-parse", "HEAD"]).then(({ stdout }) => stdout.trim(), () => null);
+  exec("git", ["-C", path, "rev-parse", "HEAD"], { windowsHide: true }).then(({ stdout }) => stdout.trim(), () => null);
 
 /** Another computer's HEAD comes from its own host daemon; this process can't read its folders. */
 async function remoteHead(deps: AppDeps, folder: EnvironmentRow): Promise<string | null> {
@@ -390,7 +390,7 @@ async function carriedFiles(folder: string, carry: readonly string[]): Promise<s
   if (carry.length === 0) return [];
   const paths = ["--", ...carry.map((path) => carriedPath(folder, path))];
   const git = async (args: string[]) =>
-    (await exec("git", ["--literal-pathspecs", "-C", folder, ...args], { maxBuffer: 64 * 1024 * 1024 })).stdout;
+    (await exec("git", ["--literal-pathspecs", "-C", folder, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })).stdout;
   const [tracked, untracked] = await Promise.all([
     git(["diff", "--name-only", "--no-renames", "--relative", "-z", "HEAD", ...paths]),
     git(["ls-files", "--others", "--exclude-standard", "-z", ...paths]),
@@ -402,7 +402,7 @@ async function carriedFiles(folder: string, carry: readonly string[]): Promise<s
  *  inside the repo keeps its place, so `gui/package.json` never lands on the root one. The old folder is untouched. */
 async function carryFiles(from: string, worktree: string, files: readonly string[]): Promise<void> {
   if (files.length === 0) return;
-  const prefix = (await exec("git", ["-C", from, "rev-parse", "--show-prefix"])).stdout.trim();
+  const prefix = (await exec("git", ["-C", from, "rev-parse", "--show-prefix"], { windowsHide: true })).stdout.trim();
   const root = await realpath(worktree);
   for (const file of files) {
     const source = resolve(from, file);

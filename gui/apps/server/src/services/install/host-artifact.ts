@@ -88,6 +88,7 @@ async function defaultCommandRunner(
   const result = await execFileAsync(command, [...args], {
     cwd,
     maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
   });
   return result.stdout;
 }

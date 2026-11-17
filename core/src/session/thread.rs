@@ -79,12 +79,12 @@ const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (com
 /// or for another thread, which doesn't (#177). The website words its own relayed tells the same.
 const CHILD_NOTES: [&str; 3] = [
     "Sent into the child's running turn. Cloudroom tells you when that turn finishes.",
-    "Could not confirm the child's running turn got it. Check thread output before sending it again.",
+    "Could not confirm the child's running turn got it. Check room-cli thread show and thread output. Send it again only if the child is idle and its reply shows it never got the task.",
     "Queued. Cloudroom tells you when the child finishes it.",
 ];
 const OTHER_NOTES: [&str; 3] = [
     "Sent into its running turn. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
-    "Could not confirm its running turn got it. Sending it again may deliver it twice.",
+    "Could not confirm its running turn got it. It may have, so don't send it again: it could arrive twice.",
     "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
 ];
 const PAUSED_NOTE: &str = "Queued, paused by a Stop. It sends when that thread is resumed.";
@@ -95,6 +95,9 @@ const LAUNCH_RETRY: Duration = Duration::from_secs(240);
 /// How long a spawn waits for the website to name a child it starts in a sandbox of its own. It stays under Claude
 /// Code's 2-minute command limit; the start goes on after that (relay.rs).
 const SPAWN_WAIT: Duration = Duration::from_secs(75);
+/// How long `thread spawn` waits for Core's answer: longer than any start Core answers itself (SPAWN_WAIT after the
+/// website's 30 s), under Claude Code's 2-minute command limit. Then it says the start is uncertain (#1977).
+const SPAWN_ANSWER: Duration = Duration::from_secs(110);
 /// How long a fork waits for the app. It stays under Claude Code's 2-minute command limit, so the agent always
 /// sees the outcome instead of a killed command it might retry. The app ignores older requests (AGENT_FORK_WAIT).
 const FORK_WAIT: Duration = Duration::from_secs(90);
@@ -870,7 +873,9 @@ async fn list(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread list")?;
     let mut answer = m.children(&parent, None, query.include_archived).await;
-    relay::own_children(&m, &parent, query.include_archived, &mut answer).await;
+    // The list is for these children: it waits for the website's own 30-second limit.
+    let wait = Duration::MAX;
+    relay::own_children(&m, &parent, query.include_archived, &mut answer, wait).await;
     Ok(Json(answer))
 }
 
@@ -1388,7 +1393,20 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
             body[key] = json!(value);
         }
     }
-    let answer = crate::mac::request(crate::mac::SOCKET, "POST", "/children", Some(body)).await?;
+    // Every start has its ID, so one Core answers too late for can be checked and continued, never doubled (#1977).
+    if body["request_id"].is_null() {
+        body["request_id"] = json!(random_key()?);
+    }
+    let key = body["request_id"].as_str().unwrap_or_default().to_owned();
+    let limit = Some(SPAWN_ANSWER);
+    let answer = crate::mac::request_within(crate::mac::SOCKET, "POST", "/children", Some(body), limit)
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => io::Error::other(format!(
+                "{error} The thread may have started: rerun this exact command with --request-id {key} to get its ID; it never starts twice."
+            )),
+            _ => error,
+        })?;
     println!("{answer}");
     Ok(0)
 }
@@ -1473,7 +1491,13 @@ fn plain<'a>(
 }
 
 async fn call(method: &str, path: &str, body: Option<Value>) -> io::Result<Value> {
-    crate::mac::request(crate::mac::SOCKET, method, path, body).await
+    // Reads never hang on a stalled Core (#1977); changes keep waiting for Core's own limits.
+    let limit = match (method, path) {
+        ("GET", "/thread" | "/working") => Some(crate::mac::QUICK),
+        ("GET", _) => Some(crate::mac::READ),
+        _ => None,
+    };
+    crate::mac::request_within(crate::mac::SOCKET, method, path, body, limit).await
 }
 
 /// The same `room-cli thread` commands Local threads use, with flags in any order (ADR 20261110-235800). `--json`
@@ -1543,8 +1567,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             // Every child this wait saw at work, marked in the list it prints (#1752).
             let mut waited: Vec<String> = Vec::new();
             let mut tick = 0;
+            // Each check may take what is left of the wait: a slow Core is ordinary (storage checks, restores), so
+            // only a Core that never answered in the whole wait is an error (#1977).
+            let check = |path: &'static str| {
+                let left = end.saturating_duration_since(Instant::now());
+                let limit = Some(left.max(crate::mac::QUICK));
+                crate::mac::request_within(crate::mac::SOCKET, "GET", path, None, limit)
+            };
+            // Children at work at the last answer.
+            let mut still = 0;
             let working = loop {
-                let answer = call("GET", "/working", None).await?;
+                let answer = match check("/working").await {
+                    Ok(answer) => answer,
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut && tick > 0 => {
+                        break still;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let ids = answer["working"].as_array().into_iter().flatten();
                 let mut ids: Vec<&str> = ids.filter_map(Value::as_str).collect();
                 for id in &ids {
@@ -1556,13 +1595,17 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 tick += 1;
                 // Every 20 seconds the website has the last word: its sandbox died, sleeps, or the user archived it.
                 if tick % 10 == 0 && ids.iter().any(|id| id.starts_with("thr_")) {
-                    let list = call("GET", "/children?include_archived=true", None).await?;
-                    let active = |id: &str| {
-                        let mut children = list["children"].as_array().into_iter().flatten();
-                        children.any(|c| c["id"] == id && c["status"] == "active")
+                    let list = match check("/children?include_archived=true").await {
+                        Ok(list) => Some(list),
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => None,
+                        Err(error) => return Err(error),
                     };
-                    // A list without the website's part says nothing about them.
-                    if !list["note"].is_string() {
+                    // A list without the website's part, or none in time, says nothing about them.
+                    if let Some(list) = list.filter(|list| !list["note"].is_string()) {
+                        let active = |id: &str| {
+                            let mut children = list["children"].as_array().into_iter().flatten();
+                            children.any(|c| c["id"] == id && c["status"] == "active")
+                        };
                         ids.retain(|id| {
                             let stopped = id.starts_with("thr_") && !active(id);
                             if stopped {
@@ -1575,6 +1618,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 if ids.is_empty() || Instant::now() >= end {
                     break ids.len();
                 }
+                still = ids.len();
                 tokio::time::sleep(Duration::from_secs(2)).await;
             };
             let mut answer = call("GET", "/children", None).await?;

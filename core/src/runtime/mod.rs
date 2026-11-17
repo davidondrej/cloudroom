@@ -1115,6 +1115,10 @@ impl Handle {
     pub fn top_writer(&self) -> io::Result<Option<linux::Writer>> {
         self.process.top_writer()
     }
+    /// Ends every tool command, never the harness; see `linux::Workload::stop_commands`.
+    pub fn stop_commands(&self) -> io::Result<()> {
+        self.process.stop_commands()
+    }
     pub fn request_shutdown(&self) {
         self.process.request_shutdown();
     }

@@ -15,7 +15,7 @@ import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, unstartedTurn, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
+import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, teleportProgress, unstartedTurn, unsentDeletes, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
 import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
@@ -32,12 +32,12 @@ import { pruneThreadEventHistory } from "../system/event-pruning.js";
 import { saveCloudImages } from "./teleport-local.js";
 import { cliPlace, reportAgentConnect, reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { cloudSkills, copyLogins, copyMacGithub, copyMacLogin, importCodexLogin, importPiLogin, loginMarkers, macPiSetup, markLogin, setCopyMacLogin, setupSync, skillInCloud, stopSync, syncStatus } from "./sync.js";
-import { macClaudeSignedIn } from "./claude-token.js";
+import { ACCOUNT_CHANGED, macClaudeSignedIn } from "./claude-token.js";
 import { checkPreviewsNow, helperDevice, helperRunning, macAccess, macAccessSupported, noteWake, previewsSetUp, setupPreviews, stopPreviews, previewStatus } from "./previews.js";
 import { GpuApprovals } from "./gpu.js";
 import { CloudSecrets } from "./secrets.js";
 import { CodexAccounts } from "./codex-accounts.js";
-import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, cloudPausedError, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
+import { BUDGET_LIMIT, cancelMacCodexLogin, hasMacCodexLogin, macCodexDigest, macCodexLogin, macCodexLoginExpired, cursorKeyRejected, macCursorLogin, revokeDesktopToken, startMacCodexLogin, CLOUD_REGION, cloudPausedError, SANDBOX_PREFIX, SandboxAsleep, SandboxDirectory, sandboxThread, startRefused, type AutomationRun, type SandboxAccount, type SandboxProject, type SandboxTrigger, type SandboxWakeTrigger } from "./sandboxes.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
 import { cloudTurnsElsewhere, emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
@@ -188,6 +188,13 @@ rm -rf "$trash"
 sync -f "$HOME" 2>/dev/null
 echo $(( $(avail) - before ))`;
 const ROOT_WORKSPACE = "root";
+type SavedConnection = z.infer<typeof savedConnectionSchema> | null;
+const sandboxAccountOf = (saved: SavedConnection): SandboxAccount | null =>
+  saved?.sandboxToken && saved.account ? { website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: saved.sandboxToken } : null;
+/** Who a Connect Claude token belongs to (#1924): the account, website and Core, or an accountless Core's token. Null when signed out.
+ *  Rotating tokens are left out, so signing in again to the same account keeps it. */
+const ownerOf = (saved: SavedConnection): string | null => !saved?.account && !saved?.token ? null
+  : createHash("sha256").update(JSON.stringify(saved.account ? [saved.account.id, saved.websiteUrl ?? HOSTED_WEBSITE, saved.url] : [saved.url, saved.token])).digest("hex");
 const cloudStep = (sandbox: boolean, status: StartStep["status"] = "started"): StartStep => ({ key: "cloud", text: sandbox ? "Starting cloud sandbox" : "Connecting to cloud VM", status });
 
 export function cloudroom(deps: Deps): CloudroomService {
@@ -462,9 +469,11 @@ function connectionFailure(error: unknown): boolean {
     || cloudPausedError(error);
 }
 
-/** Nothing answered (#1699): a lost connection, a time-out, or a 5xx without a refusal code. A code, a 429 or a
- *  storage block is an answer, and keeps a held Stop from cancelling work. */
+/** Nothing answered (#1699): a lost connection, a time-out, a 5xx without a refusal code, or a paused Cloud (its database
+ *  is down, so nothing reached the sandbox). Any other code, a 429 or a storage block is an answer, and keeps a held Stop
+ *  from cancelling work. */
 function noAnswer(error: unknown): boolean {
+  if (cloudPausedError(error)) return true;
   return error instanceof CloudroomError ? !error.code && (error.status === null || error.status >= 500) : error instanceof DOMException && error.name === "AbortError";
 }
 
@@ -775,10 +784,7 @@ class CloudroomService {
     this.secrets = new CloudSecrets(deps, (threadId) => this.ownsTurn(threadId, binding(deps.db, threadId)?.turnId ?? ""));
     this.threadStates = new CloudThreadStates(join(deps.config.dataDir, "cloudroom-thread-state.json"));
     this.sync = new CloudSync(deps, this);
-    this.sandboxes = new SandboxDirectory(async () => {
-      const saved = await this.savedConnection();
-      return saved?.sandboxToken && saved.account ? { website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: saved.sandboxToken } : null;
-    }, thread => {
+    this.sandboxes = new SandboxDirectory(async () => sandboxAccountOf(await this.savedConnection()), thread => {
       void noteWake(deps, thread).catch(() => {});
       this.macReportDue = 0;
     });
@@ -812,7 +818,7 @@ class CloudroomService {
       return skip;
     };
     this.gpuApprovals = new GpuApprovals(deps, body => this.sandboxes.gpu(body));
-    this.codexAccounts = new CodexAccounts(body => this.sandboxes.codexAccounts(body), async () => (await this.sandboxes.account())?.userId ?? null,
+    this.codexAccounts = new CodexAccounts((body, account) => this.sandboxes.codexAccounts(body, account), () => this.sandboxes.account(),
       join(deps.config.dataDir, "cloudroom-codex-accounts.json"), () => this.restartAwake("codex"));
     // Renames, generated titles, agent renames, and new parents (a promoted subagent loses its parent's access) all
     // reach the website. Read after the change's transaction ends. A change that came from Core or the website goes nowhere.
@@ -1117,8 +1123,8 @@ class CloudroomService {
     }
   }
 
-  private async connection(): Promise<Connection> {
-    const saved = await this.savedConnection();
+  private async connection(snapshot?: SavedConnection): Promise<Connection> {
+    const saved = snapshot === undefined ? await this.savedConnection() : snapshot;
     if (saved?.sandboxToken && (!saved.token || !saved.url)) throw new ApiError(409, "cloudroom_sandbox_only", "This action needs a cloud thread. Each cloud thread has its own sandbox, not one shared VM.");
     if (!saved?.token) throw new ApiError(503, "cloudroom_not_configured", "Cloud needs a free Cloudroom account. Sign in to use it.");
     const { account: _account, websiteUrl: _website, onboarding: _onboarding, sandboxToken: _sandboxToken, ...connection } = saved;
@@ -1270,6 +1276,7 @@ class CloudroomService {
         await stopPreviews(this.deps).catch(() => {});
         stampBindings(this.deps.db, previousAccount);
         this.sandboxes.reset();
+        this.codexAccounts.reset();
       }
       await this.saveConnection({
         ...(connection ?? {}), ...(account ? { account: accountSchema.parse(account) } : {}),
@@ -1277,6 +1284,8 @@ class CloudroomService {
         ...(sandboxToken ? { sandboxToken } : {}),
         ...(account && existing?.account?.id === account.id && existing.url === connection?.url ? { onboarding: existing.onboarding } : {}),
       });
+      // Again once the new account is saved, so a request the old one sent during the save can't fill its state (#1940).
+      if (previousAccount) this.sandboxes.reset();
       if (signal?.aborted) {
         if (existing) await this.saveConnection(existing); else await rm(this.path, { force: true });
         if (existing?.token || existing?.sandboxToken) this.start();
@@ -1306,6 +1315,7 @@ class CloudroomService {
         if (!refused && sandboxToken && saved.account) revokeDesktopToken({ website: saved.websiteUrl ?? HOSTED_WEBSITE, userId: saved.account.id, token: sandboxToken });
       }
       this.sandboxes.reset();
+      this.codexAccounts.reset();
       await stopSync(this.deps);
     });
   }
@@ -1630,8 +1640,9 @@ class CloudroomService {
   }
 
   /** `follow` marks the Accounts plugin keeping Cloud on the account in use, not the user connecting (ADR 0327). */
-  async claudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false) {
-    const status = await this.claudeAuthStatus(action, requestId, code, state, follow);
+  /** `owner` is the `loginOwner()` a Connect Claude sign-in started under: its token is written only there (#1924). */
+  async claudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false, owner?: string | null) {
+    const status = await this.claudeAuthStatus(action, requestId, code, state, follow, owner);
     const connected = status.state === "connected";
     // The code sign-in finishes in the background, so a status check that first sees Claude connected also resumes.
     if (connected && (action || !this.claudeConnected)) this.resumeStarts("claude-code");
@@ -1745,26 +1756,41 @@ class CloudroomService {
     return [...issues.values()];
   }
 
-  private async claudeAuthStatus(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false) {
+  async loginOwner(): Promise<string | null> { return ownerOf(await this.savedConnection()); }
+
+  /** Before each write of a Connect Claude token: the saved connection, refused once it isn't the owner's (#1924).
+   *  Writes use this snapshot, never a fresh read, so a switch after the check can't redirect them. */
+  private async requireOwner(owner: string | null | undefined): Promise<SavedConnection> {
+    const saved = await this.savedConnection();
+    if (owner === undefined) return saved;
+    if (!owner) throw new ApiError(503, "cloudroom_not_configured", "Cloud needs a free Cloudroom account. Sign in to use it.");
+    if (owner !== ownerOf(saved)) throw new ApiError(409, "cloudroom_account_changed", ACCOUNT_CHANGED);
+    return saved;
+  }
+
+  private async claudeAuthStatus(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow = false, owner?: string | null) {
+    await this.requireOwner(owner);
     const sandbox = await this.sandboxLogin("claude");
     if (sandbox) {
       if ((action === "token" || action === "key") && code) {
         if (!follow) await markLogin(this.deps, "claude", null);
         const value = action === "token" ? { token: code, ...(state ? { plan: state } : {}) } : { apiKey: code };
-        if (!await this.sandboxes.saveLogin("claude", JSON.stringify(value), undefined, follow)) return sandbox;
+        const account = sandboxAccountOf(await this.requireOwner(owner));
+        if (owner !== undefined && !account) throw new ApiError(409, "cloudroom_account_changed", ACCOUNT_CHANGED);
+        if (!await this.sandboxes.saveLogin("claude", JSON.stringify(value), owner !== undefined && account ? { account, signal: AbortSignal.timeout(120_000) } : undefined, follow)) return sandbox;
       }
       if (action === "login" || action === "complete") throw new ApiError(409, "claude_auth_unsupported", `Cloud sandboxes connect Claude with a one-year token from this ${COMPUTER}. Use Connect Claude.`);
       if ((action === "token" || action === "key") && code) {
         void this.syncLogins(true);
-        if ((await this.savedConnection())?.token) await this.vmClaudeAuth(action, requestId, code, state).catch(error => this.warn("Claude could not be connected on the VM", error));
+        if ((await this.savedConnection())?.token) await this.vmClaudeAuth(action, requestId, code, state, owner).catch(error => this.warn("Claude could not be connected on the VM", error));
       }
       return action === "token" || action === "key" ? { ...sandbox, state: "connected" as const } : sandbox;
     }
-    return this.vmClaudeAuth(action, requestId, code, state);
+    return this.vmClaudeAuth(action, requestId, code, state, owner);
   }
 
-  private async vmClaudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string) {
-    const client = await this.client();
+  private async vmClaudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, owner?: string | null) {
+    const client = owner === undefined ? await this.client() : new CloudroomClient(await this.connection(await this.requireOwner(owner)));
     const capabilities = await this.capabilities(client);
     if (!capabilities.claude_auth) throw new ApiError(409, "claude_auth_unsupported", "Update the cloud core to connect Claude from this app.");
     try { return await client.claudeAuth(action, requestId, code, state); }
@@ -2642,8 +2668,10 @@ class CloudroomService {
       // The website refused the wake before starting the sandbox (out of credits, a plan limit, Free's daily budget), so
       // nothing runs there. The stop waits for the next wake, ahead of later work.
       const refusedWake = startRefused(error) || (error instanceof CloudroomError && error.code === BUDGET_LIMIT);
-      // A 429 hold (a repair, a restore) still fails: the sandbox may be running there.
-      if (holds && (refusedWake || (noAnswer(error) && saved.turnId))) {
+      // A repair's 429 still fails: the sandbox may be running there. A restore's is held like no answer: its sandbox
+      // waits in the server's restore line, often for many minutes (Metal, 2026-11-17), and Stop failed all that time.
+      const restoring = error instanceof CloudroomError && error.code === "sandbox_restoring";
+      if (holds && (refusedWake || ((noAnswer(error) || restoring) && saved.turnId))) {
         hold(refusedWake);
         // Held for the next wake, it stops only the turn it was clicked for: another computer may start one meanwhile.
         this.enqueue(threadId, randomUUID(), "stop", saved.turnId ? { after: saved.turnId, ...(refusedWake ? {} : { guarded: true }) } : {});
@@ -3037,24 +3065,48 @@ class CloudroomService {
   async cancelQueued(thread: Thread, queuedMessageId: string) {
     const saved = binding(this.deps.db, thread.id);
     const current = command(this.deps.db, queuedMessageId);
-    if (!saved || !current || current.threadId !== thread.id) throw new ApiError(404, "invalid_request", "Queued message not found");
+    // Only a queued message: never the first prompt or the turn the thread is on, which the chat already shows.
+    if (!saved || !current || current.threadId !== thread.id || current.command !== "prompt" || (current.state !== "sending" && current.state !== "accepted")
+      || current.id === `first_${thread.id}` || current.id === saved.turnId || JSON.parse(current.input).teleport_handoff) {
+      throw new ApiError(404, "invalid_request", "Queued message not found");
+    }
     await this.requireOwnThread(saved);
     // Before its session starts, Core has never seen a follow-up, so it is removed here without waking anything (#866).
     // Read from saved state, whatever the thread's status: a failed start hides its queue but a retry still sends it.
     // Check and write with no await between: delivery saves the session before it reads which prompts to send.
     const target = command(this.deps.db, queuedMessageId);
-    if (!binding(this.deps.db, thread.id)?.sessionId && target?.command === "prompt" && target.state === "sending" && target.id !== `first_${thread.id}` && !JSON.parse(target.input).teleport_handoff) {
+    if (!binding(this.deps.db, thread.id)?.sessionId && target?.state === "sending") {
       saveCommandState(this.deps.db, thread.id, queuedMessageId, "cancelled");
       return this.notify(thread.id);
     }
     if (!feature(await this.queueCapabilities(saved), "queue_cancel")) throw new ApiError(409, "cloudroom_unsupported", "Cloud queue cancellation is not enabled.");
     const id = randomUUID();
     this.enqueue(thread.id, id, "cancel", { target_request_id: queuedMessageId });
-    await this.deliver(thread.id).catch((error: unknown) => {
-      if (!(error instanceof ApiError && error.status === 503) || command(this.deps.db, id)?.state !== "sending") throw error;
-      throw new ApiError(503, error.body.code, `${error.body.message} The delete is saved and is sent once the cloud thread can take it, unless the agent starts this message first.`);
+    const delivery = this.deliver(thread.id);
+    // A message Core never confirmed is not sent while its delete is on its way, so that delete is done once saved.
+    if (command(this.deps.db, queuedMessageId)?.state === "sending") return void delivery.catch(() => {});
+    // One Core holds waits for Core's answer. A sandbox that can't take the delete yet gets it once it can: it is
+    // saved, and the message stays out of the queue meanwhile. Other work failing in the same pass is not this delete's.
+    await delivery.catch((error: unknown) => {
+      if (command(this.deps.db, id)?.state === "sending" && !(error instanceof ApiError && error.status === 503)) throw error;
     });
     if (command(this.deps.db, id)?.state === "failed") throw new ApiError(409, "queued_message_started", "Too late: the agent already started this message.");
+  }
+
+  /** Settles a delete Core refused. True when Core never confirmed the message, or it is deleted already: the delete
+   *  wins and the message is never sent. False when Core took the message, so only Core can delete it. */
+  private dropUnsent(threadId: string, cancel: Command): boolean {
+    return this.deps.db.transaction((tx) => {
+      const target = command(tx, JSON.parse(cancel.input).target_request_id);
+      if (target?.threadId !== threadId || !["sending", "cancelled"].includes(target.state)) return false;
+      if (target.state === "sending") {
+        saveCommandState(tx, threadId, target.id, "cancelled");
+        // It may have carried the custom instructions; the next message must.
+        if (JSON.parse(target.input).customInstructions) markCustomInstructionsLost(tx, threadId);
+      }
+      saveCommandState(tx, threadId, cancel.id, "completed");
+      return true;
+    });
   }
 
   async reorderQueued(thread: Thread, request: { queuedMessageId: string; previousQueuedMessageId: string | null; nextQueuedMessageId: string | null }) {
@@ -3506,12 +3558,15 @@ class CloudroomService {
       const sessionId = saved.sessionId!;
       this.follow(saved, client);
       const harness = getThread(this.deps.db, threadId)?.providerId;
-      const pendingCommands = commands(this.deps.db, threadId).filter((c) => c.state === "sending");
+      // Queue deletes go first, so a message that can't be sent yet never holds one back.
+      const pendingCommands = commands(this.deps.db, threadId).filter((c) => c.state === "sending").sort((a, b) => Number(b.command === "cancel") - Number(a.command === "cancel"));
       step = "deliver";
       for (const pending of pendingCommands) {
         if (epoch !== this.epoch) return;
         // A Stop may cancel work after this list was read (#1699): never send it.
         if (command(this.deps.db, pending.id)?.state !== "sending") continue;
+        // Nor a message whose delete is on its way, even one saved mid-pass: Core's answer to the delete settles it.
+        if (pending.command === "prompt" && unsentDeletes(this.deps.db, threadId).has(pending.id)) continue;
         deliveringCommand = true;
         try {
           if (pending.command === "title") {
@@ -3556,6 +3611,8 @@ class CloudroomService {
             const attachments = capabilities.attachments
               ? await this.uploadAttachments(client, sessionId, pending.id, parsed.attachments ?? [], getThread(this.deps.db, threadId)?.projectId ?? "", capabilities.upload_parts)
               : [];
+            // An upload can take minutes: a delete or a Stop saved meanwhile still wins.
+            if (command(this.deps.db, pending.id)?.state !== "sending" || unsentDeletes(this.deps.db, threadId).has(pending.id)) continue;
             const enriched = prepareCloudInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
             // A fork's first message is a native fork of the copied conversation (fork.ts).
             const fork = pending.id === `first_${threadId}` ? cloudForkOf(pending.input) : null;
@@ -3656,8 +3713,15 @@ class CloudroomService {
               this.keepModel(threadId, pending);
               continue;
             }
+            if (pending.command === "cancel") {
+              // A refused queue delete fails its own request, never the thread. Unless the agent already runs the
+              // message, one Core never confirmed is deleted here all the same: a refusal must not get it sent.
+              const started = error instanceof CloudroomError && error.message.includes("queued message is already being sent");
+              if (started || !this.dropUnsent(threadId, pending)) saveCommandState(this.deps.db, threadId, pending.id, "failed", { ...refusal(error), step });
+              continue;
+            }
             saveCommandState(this.deps.db, threadId, pending.id, "failed", { ...refusal(error), step });
-            if (["edit", "cancel"].includes(pending.command) && error instanceof CloudroomError && /queued message is (no longer pending|already being sent)/.test(error.message)) continue;
+            if (pending.command === "edit" && error instanceof CloudroomError && /queued message is (no longer pending|already being sent)/.test(error.message)) continue;
             rejectedCommand = true;
           }
           throw error;
@@ -4352,10 +4416,11 @@ class CloudroomService {
    *  and the copy ends as cut short. */
   private async resumeCutCopy(threadId: string, client: CloudroomClient): Promise<void> {
     const saved = binding(this.deps.db, threadId);
-    const input = command(this.deps.db, `first_${threadId}`)?.input;
-    const workspace = copyWorkspace(input);
+    const target = this.copyTarget(threadId);
+    const input = target?.input, workspace = target?.workspace;
     if (!saved?.sessionId || !workspace) {
       reportProjectCopy(this.deps, threadId, { phase: "complete", completed: 0, total: 0 });
+      if (workspace) void this.filesState(client, threadId, workspace, `failed: ${CUT_SHORT}`, true);
       return;
     }
     // Set for a new thread's copy that was never planned (#1040): it fails instead, as it would have at once.
@@ -4367,14 +4432,21 @@ class CloudroomService {
     try {
       // A sandbox that can't be reached, or a folder another copy is filling, throws, so the copy waits for the next connection.
       const key = copyKey(sandboxThread(saved.coreUrl), workspace);
-      const job = await planProjectCopyOrThrow(this.deps, client, threadId, workspace, { key, branch: baseBranch(input), ...(unplanned ? { signal: AbortSignal.timeout(30_000) } : {}) }).catch((error: unknown) => {
+      const plan = target.moved ? { localPath: target.moved, teleport: true, resumed: true } : { branch: baseBranch(input) };
+      const job = await planProjectCopyOrThrow(this.deps, client, threadId, workspace, { key, ...plan, ...(unplanned ? { signal: AbortSignal.timeout(30_000) } : {}) }).catch((error: unknown) => {
         if (!unplanned || keyCopying(key) || this.copyBusy(threadId) || ended()) throw error;
         this.unplannedFailed(client, threadId, workspace, unplanned);
         return undefined;
       });
       if (job === undefined || ended()) return;
       // A move, or another copy, that started meanwhile brings its own.
-      if (this.copyBusy(threadId) || copyWorkspace(command(this.deps.db, `first_${threadId}`)?.input) !== workspace) return;
+      if (this.copyBusy(threadId) || this.copyTarget(threadId)?.workspace !== workspace) return;
+      // A move's copy still marked `copying` goes on: a clone that landed isn't repeated, and its edits go aside (#1970).
+      if (target.moved) {
+        if (job) return this.copyInto(client, job);
+        reportProjectCopy(this.deps, threadId, { phase: "complete", completed: 0, total: 0 });
+        return void this.filesState(client, threadId, workspace, `failed: ${CUT_SHORT}`, true);
+      }
       if (job && (job.clone || job.copyAll)) {
         // Only a first copy cut off before its fork's or child's code landed lost that code; a move's or a retry's never had it.
         const lost = startStepRunning(this.deps.db, threadId, "fork") ? "The app restarted while copying the source thread's code, so it was not copied." : undefined;
@@ -4403,9 +4475,11 @@ class CloudroomService {
     return copyRunning(threadId) || this.switching.has(threadId) || teleportBlocked(this.deps.db, threadId) || localTeleports.has(threadId);
   }
 
-  /** A folder that already has files gets only its `.env` files again, so a copy cut short stays failed, never ready. */
-  private copyInto(client: CloudroomClient, job: ProjectCopyJob, done?: () => void): void {
-    const full = job.clone || job.copyAll;
+  /** A folder that already has files gets only its `.env` files again, so a copy cut short stays failed, never ready.
+   *  A moved thread's copy (Teleport's, into an empty folder) is full too: `room-cli files wait` waits for it and says if
+   *  it failed, and one a dropped request or a sleeping sandbox cut off resumes on the next connection (#1970). */
+  copyInto(client: CloudroomClient, job: ProjectCopyJob, done?: () => void): void {
+    const full = job.clone || job.copyAll || job.teleport;
     const marked = full ? this.filesState(client, job.threadId, job.workspace, "copying") : Promise.resolve();
     this.copy(client, job, (error, current = client, partial) => marked.then(() => this.filesState(current, job.threadId, job.workspace,
       error ?? partial ? `failed: ${error ?? partial}` : full ? "ready" : `failed: ${CUT_SHORT}`, !full)).then(done));
@@ -4416,7 +4490,9 @@ class CloudroomService {
       .catch(error => this.warn("Could not save the project copy state for `room-cli files wait`", error, { threadId }));
   }
 
-  private resumeCopy(threadId: string, client: CloudroomClient): void {
+  /** Goes on with a paused copy: when the thread's stream connects, and when a move finishes, since a restarted app's copy
+   *  of a move still running waits for it, while the stream may stay connected (#1970). */
+  resumeCopy(threadId: string, client: CloudroomClient): void {
     const paused = this.pausedCopies.get(threadId);
     // After an app restart only the saved phase is left (`pauseCutCopy`), so the copy is planned again.
     if (!paused) {
@@ -4425,15 +4501,26 @@ class CloudroomService {
       return;
     }
     this.pausedCopies.delete(threadId);
-    this.copy(client, paused.job, paused.landed, undefined, paused.tries);
+    // The agent may have started meanwhile, so a move's edits go aside (#1970).
+    this.copy(client, { ...paused.job, resumed: true }, paused.landed, undefined, paused.tries);
   }
 
   /** A copy the last app run cut off before it landed waits as paused, and resumeCopy plans it again once the thread's
-   *  stream connects (#106). A copy still running in this app, or Teleport's own, is left alone. */
+   *  stream connects (#106), a move's too (#1970). A copy still running in this app is left alone. */
   private pauseCutCopy(threadId: string): void {
     const phase = projectCopyProgress(this.deps.db, threadId)?.phase;
-    if ((phase === "cloning" || phase === "uploading") && !copyRunning(threadId) && copyWorkspace(command(this.deps.db, `first_${threadId}`)?.input))
+    if ((phase === "cloning" || phase === "uploading") && !copyRunning(threadId) && this.copyTarget(threadId))
       reportProjectCopy(this.deps, threadId, { phase: "waiting", completed: 0, total: 0 });
+  }
+
+  /** The folder a thread's project copy fills: its first message's, or, for a moved thread, which has none, the one in
+   *  Teleport's saved transfer, with the Mac folder it left (`moved`), so an app restart can resume it (#1970). */
+  private copyTarget(threadId: string): { workspace: string; input?: string; moved?: string } | null {
+    const input = command(this.deps.db, `first_${threadId}`)?.input;
+    if (input) { const workspace = copyWorkspace(input); return workspace ? { workspace, input } : null; }
+    const id = teleportProgress(this.deps.db, threadId)?.id;
+    const state = z.object({ workspacePath: z.string(), manifest: z.object({ workspace: z.string() }) }).safeParse(JSON.parse((id && command(this.deps.db, id)?.input) || "{}")).data;
+    return state ? { workspace: state.manifest.workspace, moved: state.workspacePath } : null;
   }
 
   private setConnectionIssue(threadId: string, phase: ConnectionPhase, error?: unknown): void {

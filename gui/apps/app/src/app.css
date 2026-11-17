@@ -932,6 +932,9 @@
 [data-window-blurred] .animate-shine-icon {
   animation-timing-function: steps(10) !important;
 }
+[data-window-blurred] .working-grid i::after {
+  animation-timing-function: steps(2) !important;
+}
 
 .bb-search-flash {
   border-radius: var(--radius-lg, 0.5rem);

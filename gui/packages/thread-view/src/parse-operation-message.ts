@@ -12,6 +12,7 @@ import {
   THREAD_HARNESS_SWITCH_OPERATION,
   THREAD_IMPORT_OPERATION,
   THREAD_TELEPORT_LOCAL_OPERATION,
+  diagnosticShellEnvValue,
   isApprovalInteractionLifecycle,
   isUserQuestionInteractionLifecycle,
   ownershipChangeOperationMetadataSchema,
@@ -497,7 +498,12 @@ export function parseOperationMessage(
             : "plugin" in entry.source
               ? entry.source.plugin
               : entry.source.core;
-        const value = typeof entry.value === "string" ? entry.value : "••••••";
+        // Older stored events kept raw shell values; mask them here too.
+        const shown =
+          entry.source === "shell"
+            ? diagnosticShellEnvValue(entry.name, entry.value)
+            : entry.value;
+        const value = typeof shown === "string" ? shown : "••••••";
         const reason = entry.reason ? ` — ${entry.reason}` : "";
         return `${entry.name}=${value} (${source})${reason}`;
       })

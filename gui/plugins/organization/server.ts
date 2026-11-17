@@ -4,8 +4,8 @@ import { handoffSchema, messageSchema, orgRpcContract, settingsSchema, sharedThr
 
 // Organizations v1 (docs/scopes/organizations.md). Off by default; the website (web/lib/org.ts) holds everything, and
 // this plugin only asks it: a poll paced by the website, one sharing check per new Cloud thread, and clicks.
-const RETRY_MS = 5 * 60_000, MIN_POLL_MS = 30_000, SAVED = "state";
-const PROVIDERS = new Set(["claude-code", "codex", "pi", "opencode", "cursor", "hermes", "devin", "droid", "kimi", "openclaw", "agent-zero"]);
+const RETRY_MS = 5 * 60_000, MIN_POLL_MS = 30_000, SAVED = "state", ARCHIVE_TRIES = 10;
+const EFFORT = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 const repoKey = (url: string | null | undefined) => url?.trim().match(/github\.com[:/]([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+?)(?:\.git)?\/?$/i)?.[1]?.toLowerCase() ?? null;
 
@@ -24,7 +24,7 @@ export default async function plugin(room: BbPluginApi) {
   let error: string | null = null;
   let repos = new Map<string, string>();
   let wake: (() => void) | null = null;
-  const archived = new Set<string>(), checked = new Set<string>();
+  const checked = new Set<string>(), archiveTries = new Map<string, number>();
   const website = (input: { action: string } & Record<string, unknown>) => room.sdk.cloudroom.org(input);
   const publish = () => room.realtime.publish(STATE_CHANNEL, { at: Date.now() });
   const save = () => { if (state?.account) void room.storage.kv.set(SAVED, { account: state.account, state }).catch(() => {}); };
@@ -73,12 +73,19 @@ export default async function plugin(room: BbPluginApi) {
     publish();
   }
 
-  // A teammate took this thread over: it leaves the owner's sidebar.
+  // A teammate took this thread over: it leaves the owner's sidebar. A thread this computer doesn't have yet, or an
+  // archive that failed, is tried again at the next polls.
   async function archiveTaken(threadId: string) {
-    if (archived.has(threadId)) return;
-    archived.add(threadId);
+    const tries = archiveTries.get(threadId) ?? 0;
+    if (tries >= ARCHIVE_TRIES) return;
+    archiveTries.set(threadId, tries + 1);
     const thread = await room.sdk.threads.get({ threadId }).catch(() => null);
-    if (thread && !thread.archivedAt) await room.sdk.threads.archive({ threadId }).catch((failure) => room.log.warn(`Could not archive taken-over thread ${threadId}: ${message(failure)}`));
+    if (!thread) return;
+    if (!thread.archivedAt) {
+      try { await room.sdk.threads.archive({ threadId }); }
+      catch (failure) { room.log.warn(`Could not archive taken-over thread ${threadId}: ${message(failure)}`); return; }
+    }
+    archiveTries.set(threadId, ARCHIVE_TRIES);
   }
 
   room.background.service("poll", {
@@ -131,16 +138,31 @@ export default async function plugin(room: BbPluginApi) {
     }
   });
 
+  // A Cloud thread needs an agent and a model: the owner's first, at the owner's effort, then the ones this project
+  // last used on this computer. If none starts, the take over is undone, so the thread stays with its owner and can
+  // be taken again.
+  async function startTaken(projectId: string, owner: string, thread: string, handoff: z.infer<typeof handoffSchema>) {
+    const base = { projectId, executionTarget: "cloud" as const, baseBranch: handoff.branch, environment: { type: "project-default" as const }, title: handoff.title, input: takeoverInput(handoff) };
+    const usual = await room.sdk.projects.defaultExecutionOptions({ projectId }).catch(() => null);
+    const effort = EFFORT.safeParse(handoff.reasoning);
+    const agents = [{ providerId: handoff.harness, model: handoff.model, effort: effort.success ? effort.data : undefined }, { providerId: usual?.providerId, model: usual?.model, effort: usual?.reasoningLevel }]
+      .flatMap(({ providerId, model, effort: reasoningLevel }) => (providerId && model ? [{ providerId, model, ...(reasoningLevel ? { reasoningLevel } : {}) }] : []))
+      .filter((agent, index, all) => all.findIndex((other) => other.providerId === agent.providerId && other.model === agent.model) === index);
+    let failure: unknown = new Error("Start one Cloud thread in this project first, so Cloudroom knows which agent to use. Then take over again.");
+    for (const agent of agents) {
+      try { return { threadId: (await room.sdk.threads.spawn({ ...base, ...agent })).id }; } catch (error) { failure = error; }
+    }
+    await website({ action: "release", owner, thread }).catch((error) => room.log.warn(`Could not undo the take over of ${thread}: ${message(error)}`));
+    throw failure;
+  }
+
   async function takeover(owner: string, thread: string) {
     const handoff = handoffSchema.parse(await website({ action: "takeover", owner, thread }));
     const projects = await room.sdk.projects.list();
     const projectId = projects.find((project) => repoKey(project.gitRemoteUrl) === handoff.repo)?.id ?? (await room.sdk.cloudroom.addGithubRepo({ repo: handoff.repo })).projectId;
-    const base = { projectId, executionTarget: "cloud" as const, baseBranch: handoff.branch, environment: { type: "project-default" as const }, title: handoff.title, input: takeoverInput(handoff) };
-    const harness = handoff.harness && PROVIDERS.has(handoff.harness) ? handoff.harness : null;
-    // Their agent if this account can run it, else this account's default.
-    const created = harness ? await room.sdk.threads.spawn({ ...base, providerId: harness }).catch(() => room.sdk.threads.spawn(base)) : await room.sdk.threads.spawn(base);
+    const started = await startTaken(projectId, owner, thread, handoff);
     wake?.();
-    return { threadId: created.id };
+    return started;
   }
 
   room.rpc.register(orgRpcContract, {

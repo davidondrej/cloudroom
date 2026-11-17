@@ -448,7 +448,7 @@ export function usePromptEditor(
 
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
-    if (editor.isEditable !== editable) editor.setEditable(editable);
+    if (editor.isEditable !== editable) editor.setEditable(editable, false);
     editor.view.dom.tabIndex = editable ? 0 : -1;
     if (editable) editor.view.dom.removeAttribute("aria-readonly");
     else editor.view.dom.setAttribute("aria-readonly", "true");

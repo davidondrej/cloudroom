@@ -89,7 +89,7 @@ import { computeTimelineRowDelta } from "@cloudroom/server-contract";
 import {
   findThreadEvent,
   getLastThreadOutput,
-  getSilentTurnWarning,
+  getOpenTurnWarning,
   getTurnErrorText,
   listThreadEventRows,
 } from "../../services/threads/thread-data.js";
@@ -578,12 +578,12 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     return context.json({
       output: getLastThreadOutput(deps.db, thread.id),
       // `thread show` reports why a thread failed (feedback #571, #390), or
-      // that an active one may be stalled (#977).
+      // that an active one may be stalled (#977) or is retrying (#1853).
       error:
         thread.status === "error"
           ? getTurnErrorText(deps.db, thread.id)
           : thread.status === "active"
-            ? getSilentTurnWarning(deps.db, thread.id)
+            ? getOpenTurnWarning(deps.db, thread.id)
             : null,
       // The recorded stop, when the last turn was interrupted (#1159).
       interruption: getRootTurnInterruption(deps.db, { threadId: thread.id }),

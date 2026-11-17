@@ -1072,12 +1072,13 @@ const codexConfigRequirementsReadResultSchema = z
 
 
 type CodexSessionConstructionRequest =
-  | { kind: "start" }
+  | { kind: "start"; replacesProviderThreadId?: string }
   | { kind: "resume"; providerThreadId: string }
   | {
       kind: "fork";
       sourceProviderThreadId: string;
       sourceProviderCheckpointId?: string;
+      replacesProviderThreadId?: string;
     };
 
 interface ConstructThreadSessionArgs {
@@ -1341,6 +1342,21 @@ async function constructThreadSession(
     );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
+    // A message edit's start or fork replaces the thread's current native
+    // session and keeps its Goal. A fork into a new Cloudroom thread starts
+    // without one.
+    if (
+      args.request.kind !== "resume" &&
+      args.request.replacesProviderThreadId !== undefined
+    ) {
+      const replaced = args.request.replacesProviderThreadId;
+      if (await carryGoalIntoEdit(connection, replaced, codexThreadId)) {
+        // Drops a Goal the kept history still shows.
+        handleChildNotification(args.threadId, serial, "thread/goal/cleared", {
+          threadId: codexThreadId,
+        });
+      }
+    }
     translator.activateThreadGitWritableRoots({
       providerThreadId: codexThreadId,
       threadId: args.threadId,
@@ -1939,6 +1955,19 @@ const goalClearResultSchema = z.object({ cleared: z.boolean() }).passthrough();
 const goalGetResultSchema = z
   .object({ goal: z.object({ status: z.string() }).passthrough().nullable() })
   .passthrough();
+const carriedGoalResultSchema = z
+  .object({
+    goal: z
+      .object({
+        status: z.string(),
+        objective: z.string(),
+        tokenBudget: z.number().nullish(),
+        tokensUsed: z.number(),
+      })
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough();
 
 /** User goal changes carry `origin: "user"` so Codex treats them as the user's instruction. */
 async function handleThreadGoal(
@@ -2001,6 +2030,48 @@ async function pauseActiveGoal(
   } catch (error) {
     process.stderr.write(`could not pause the Goal before Stop: ${String(error)}\n`);
   }
+}
+
+/**
+ * Codex keeps a Goal per native thread, and a message edit forks a new one
+ * (#857). Never active, or it would start a Goal turn at once. Codex cannot
+ * set the usage counters, so the budget becomes what was left (at least 1,
+ * Codex's minimum). Resolves true when the replaced session has no Goal.
+ */
+async function carryGoalIntoEdit(
+  connection: CodexAppServerConnection,
+  replacedCodexThreadId: string,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    const { goal } = await connection.request({
+      method: "thread/goal/get",
+      params: { threadId: replacedCodexThreadId },
+      resultSchema: carriedGoalResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+    if (goal === null) return true;
+    await connection.request({
+      method: "thread/goal/set",
+      params: {
+        threadId: codexThreadId,
+        objective: goal.objective,
+        status: goal.status === "active" ? "paused" : goal.status,
+        tokenBudget:
+          goal.tokenBudget == null
+            ? null
+            : Math.max(1, goal.tokenBudget - goal.tokensUsed),
+        origin: "user",
+      },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `could not carry the Goal into the edit: ${String(error)}\n`,
+    );
+  }
+  return false;
 }
 
 /** Resolves false on timeout, or at once when `signal` aborts. */
@@ -2199,6 +2270,11 @@ async function handleRequest(
     case "thread/start":
       await handleThreadConstruction(request.id, request.params, {
         kind: "start",
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
+            }
+          : {}),
       });
       break;
     case "thread/resume":
@@ -2215,6 +2291,11 @@ async function handleRequest(
           ? {
               sourceProviderCheckpointId:
                 request.params.sourceProviderCheckpointId,
+            }
+          : {}),
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
             }
           : {}),
       });

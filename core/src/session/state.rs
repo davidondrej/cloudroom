@@ -700,7 +700,11 @@ impl Local {
                         None => reason.into(),
                     }
                 });
-                if session.state == SessionState::Resuming && record.data["recovery"] == true {
+                if matches!(
+                    session.state,
+                    SessionState::Resuming | SessionState::Suspended
+                ) && record.data["recovery"] == true
+                {
                     session.recovery_attempted = true;
                 }
                 if let Some(error) = record.data["startup_error"].as_str() {

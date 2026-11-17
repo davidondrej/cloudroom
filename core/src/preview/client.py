@@ -375,7 +375,12 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         expected = self.server.authority
         origin = self.headers.get('Origin')
         if self.headers.get_all('Host') != [expected] or origin is not None and origin != 'http://' + expected:
-            self.send_error(403, 'Preview origin is not allowed'); return
+            # A plain loopback visit, like a Windows browser expecting an app in WSL on the same port, learns why (#1879).
+            port = self.server.server_port
+            hint = None
+            if origin is None and self.headers.get_all('Host') in ([f'localhost:{port}'], [f'127.0.0.1:{port}'], [f'[::1]:{port}']):
+                hint = f"Cloudroom's preview helper uses this port. Open http://{expected}/ for the preview, or run your own app on another port"
+            self.send_error(403, 'Preview origin is not allowed', hint); return
         if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not (self.command in {'GET', 'HEAD'} and self.headers.get('Sec-Fetch-Mode') == 'navigate' and self.headers.get('Sec-Fetch-Dest') == 'document'):
             self.send_error(403, 'Cross-site preview request blocked'); return
         if not self.path.startswith('/') or self.path.startswith('//') or len(self.headers.get_all('Content-Length', [])) > 1:

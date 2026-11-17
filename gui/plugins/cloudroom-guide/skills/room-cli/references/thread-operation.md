@@ -16,7 +16,7 @@ room-cli thread spawn --project PROJECT --machine cloud --provider codex \
 - Retry an unconfirmed start, Local or Cloud, with the same `--request-id` (an unanswered spawn prints it). For a rejected start, use `room-cli cloud retry-start THREAD`. Do not blindly resend uncertain work.
 - A Cloud thread paused on a full disk: run `room-cli cloud clear-disk THREAD`. It deletes package caches and Git-ignored dependency and build folders; code, `.env` files and chats stay. Its waiting message then sends by itself. An archived thread can't be cleared or reached with `vm run`: Cloudroom copies its sandbox to R2, then deletes it on its own. Unarchiving it keeps that disk in use.
 - To fix or set up the VM or a Cloud thread's sandbox, or move files, configs, and logins to it, use `room-cli vm run|pull|push`, with `--thread ID` for a sandbox (see the command index).
-- Cloud agents get Core's `room-cli`: the same commands and flags, for their own thread, children, and automations. They reach this computer with `room-cli mac run|pull|push`, only while "Let cloud agents access this computer" is on. They can rename, archive, move, or change the effort of their own thread with `room-cli thread update --self --title TITLE`, `room-cli thread archive --self`, `room-cli thread move --self --project PROJECT`, and `room-cli thread update --self --reasoning-level LEVEL`, start children in their own sandbox with `room-cli thread spawn`, and stop or archive them with `room-cli thread stop|archive CHILD_ID`. These commands control Cloud threads through the GUI backend while it is running.
+- Cloud agents get Core's `room-cli`: the same commands and flags, for their own thread, children, and automations, but no `thread queue`. They reach this computer with `room-cli mac run|pull|push`, only while "Let cloud agents access this computer" is on. They can rename, archive, move, or change the effort of their own thread with `room-cli thread update --self --title TITLE`, `room-cli thread archive --self`, `room-cli thread move --self --project PROJECT`, and `room-cli thread update --self --reasoning-level LEVEL`, start children in their own sandbox with `room-cli thread spawn`, and stop or archive them with `room-cli thread stop|archive CHILD_ID`. These commands control Cloud threads through the GUI backend while it is running.
 
 ## Coordinating Work
 
@@ -26,7 +26,7 @@ room-cli thread spawn --project PROJECT --machine cloud --provider codex \
   reads, or repeated status reads.
 - Use `room-cli thread wait <thread-id>` to wait for a status or event. It defaults
   to `idle` for up to 20 minutes; this does not prove queued work completed.
-  Check the queue and correlate the final output with the requested task;
+  Check the queue (app CLI only; Cloud threads: see SKILL.md) and correlate the final output with the requested task;
   pass `--status` or `--event` for a different target, and `--timeout
 <seconds>` when you need a shorter or longer budget.
 - After spawning several children, run `room-cli thread wait --children`. It

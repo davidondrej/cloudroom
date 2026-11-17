@@ -33,8 +33,9 @@ export type TeleportCheckResult = { ok: true } | {
 };
 export type Workspace = { id: string; path: string; parent?: string };
 type Upload = { body: ReadableStream<Uint8Array>; length: number; contentType?: string };
-/** Hex-encoded bytes keep binary input and output intact. */
-export type VmRun = { command: string; stdin?: string; cwd?: string };
+/** Hex-encoded bytes keep binary input and output intact. `keep`: the command outlives a request a proxy drops (#1970);
+ *  it goes in the query, which older cores ignore. */
+export type VmRun = { command: string; stdin?: string; cwd?: string; keep?: boolean };
 export type VmRunResult = { code: number | null; stdout: string; stderr: string; truncated: boolean };
 export type Receipt = {
   request_id: string;
@@ -426,8 +427,8 @@ export class CloudroomClient {
 
   /** Runs a shell command on the VM as its agent account (ADR 0113). Without a `signal`, it gives up after
    *  `VM_RUN_TIMEOUT`. Raw `bytes` replace hex stdin, halving the upload; older cores answer 404. */
-  async runOnVm(input: VmRun, signal: AbortSignal = AbortSignal.timeout(VM_RUN_TIMEOUT), bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
-    const raw = bytes ? `/raw?${new URLSearchParams({ command: input.command, ...(input.cwd ? { cwd: input.cwd } : {}) })}` : "";
+  async runOnVm({ keep, ...input }: VmRun, signal: AbortSignal = AbortSignal.timeout(VM_RUN_TIMEOUT), bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
+    const raw = bytes ? `/raw?${new URLSearchParams({ command: input.command, ...(input.cwd ? { cwd: input.cwd } : {}) })}` : keep ? "?keep=true" : "";
     let response: Response;
     try {
       response = await fetch(`${this.#base}/v1/vm/run${raw}`, {

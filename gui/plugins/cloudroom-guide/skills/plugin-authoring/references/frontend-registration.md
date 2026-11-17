@@ -138,6 +138,22 @@ export default definePluginApp((app) => {
 });
 ```
 
+### An item in every project's menu
+
+`app.slots.experimental_projectAction` adds an item to each project's actions
+menu in the sidebar. Selecting it opens `component` as a full page for that
+project. The page has no sidebar entry. `badge` is optional.
+
+```tsx
+app.slots.experimental_projectAction({
+  id: "share",
+  title: "Share project",
+  icon: "UserRoundPlus",
+  badge: "NEW",
+  component: ({ projectId }) => { ... },
+});
+```
+
 ### A control in the thread header
 
 `app.slots.experimental_threadHeaderAction` renders a component in the thread

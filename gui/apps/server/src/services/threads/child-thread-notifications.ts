@@ -41,6 +41,7 @@ import {
 import { getLastThreadOutput, getTurnErrorText } from "./thread-data.js";
 import { waitForHeldMessageDrain } from "./queued-message-dispatch.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
+import { failureHold } from "./turn-failed.js";
 
 export type ChildThreadNotificationSource = ParentSystemThreadMentionSource;
 
@@ -54,6 +55,8 @@ export interface ChildThreadTurnNotificationBatchItem {
   turnId?: string;
   /** The automatic retry already queued for a failed child (#1365). */
   queuedRetry?: { sendAt: number | null };
+  /** A failed login holds messages from other threads (#2019). */
+  signedOut?: boolean;
   terminalOutput: string | null;
   turnStatus: ThreadEventTurnStatus;
 }
@@ -238,6 +241,15 @@ function formatChildThreadQueuedRetry(
   return `Cloudroom will retry ${subject} automatically ${when}. Don't start a replacement. To cancel the retry: room-cli provider-retry cancel ${item.childThread.id}`;
 }
 
+/** Tells the parent why its messages wait and how to continue (#2019). */
+function formatChildThreadSignedOut(
+  item: ChildThreadTurnNotificationBatchItem,
+  subject: string,
+): string | null {
+  if (item.signedOut !== true) return null;
+  return `${subject} can't run until its agent is signed in again, so messages from other threads wait instead of failing the same way. Once the user has signed in, continue it: room-cli thread retry ${item.childThread.id}`;
+}
+
 function buildSingleChildThreadTurnStatusSegments(
   args: FormatChildThreadTurnStatusLineArgs,
 ): ParentSystemInputSegment[] {
@@ -267,7 +279,7 @@ function buildSingleChildThreadTurnStatusSegments(
         { kind: "mention", mention: line.mention },
         {
           kind: "text",
-          text: ` failed.${formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_FAILURE_REASON_CHAR_LIMIT, "\n\nError: ")}\n\n${formatChildThreadQueuedRetry(line.item, "this turn") ?? CHILD_THREAD_INSPECTION_GUIDANCE}`,
+          text: ` failed.${formatChildThreadFailureReason(line.item.failureReason, CHILD_THREAD_FAILURE_REASON_CHAR_LIMIT, "\n\nError: ")}\n\n${formatChildThreadQueuedRetry(line.item, "this turn") ?? formatChildThreadSignedOut(line.item, "It") ?? CHILD_THREAD_INSPECTION_GUIDANCE}`,
         },
       ];
     case "interrupted":
@@ -435,7 +447,9 @@ function buildChildThreadTurnStatusBatchSegments(
     segments.push(...buildChildThreadBatchStatusLineSegments({ line }));
   });
   for (const { item } of args.lines) {
-    const retry = formatChildThreadQueuedRetry(item, item.childThread.id);
+    const retry =
+      formatChildThreadQueuedRetry(item, item.childThread.id) ??
+      formatChildThreadSignedOut(item, item.childThread.id);
     if (retry !== null) segments.push({ kind: "text", text: `\n\n${retry}` });
   }
   if (args.lines.some((line) => line.item.turnStatus === "interrupted")) {
@@ -675,7 +689,8 @@ function findRunnableQueuedRetry(db: DbConnection, threadId: string) {
 
 /**
  * The provider-retry plugin queues its retry on `turn.failed`, so it is read
- * at flush, after the batch delay (#1365).
+ * at flush, after the batch delay (#1365). Without one, a failed login says
+ * its messages wait (#2019).
  */
 function withQueuedRetry(
   db: DbConnection,
@@ -683,7 +698,11 @@ function withQueuedRetry(
 ): ChildThreadTurnNotificationBatchItem {
   if (item.turnStatus !== "failed") return item;
   const retry = findRunnableQueuedRetry(db, item.childThread.id);
-  return retry ? { ...item, queuedRetry: { sendAt: retry.sendAt } } : item;
+  if (retry) return { ...item, queuedRetry: { sendAt: retry.sendAt } };
+  const child = getThread(db, item.childThread.id);
+  return child && failureHold(db, child) === "sign-in"
+    ? { ...item, signedOut: true }
+    : item;
 }
 
 /** A stop can be recorded just after the turn ends, so it is read at flush too (#1159). */

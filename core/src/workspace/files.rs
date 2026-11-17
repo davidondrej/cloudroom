@@ -1,6 +1,8 @@
 //! `room-cli files wait`: a new Cloud thread's agent waits for its project copy itself (ADR 0209).
 //! The Mac app writes `<project folder>.cloudroom-files` next to the folder, so Git never sees it:
-//! `copying`, then `ready` or `failed: REASON`.
+//! `copying`, then `ready` or `failed: REASON`. Whenever `wait` lets the agent go ahead (`ready` too, and when SIGTERM or
+//! SIGHUP stops it), it leaves `<project folder>.cloudroom-files-gave-up`, so a move's uncommitted edits that land later
+//! go aside instead of over the agent's work (#1970).
 use std::{
     io,
     path::{Path, PathBuf},
@@ -14,10 +16,23 @@ const POLL: Duration = Duration::from_secs(2);
 /// The app writes the status file right after the session starts, so an agent can ask a moment before it exists.
 const GRACE: Duration = Duration::from_secs(10);
 const LIMIT: Duration = Duration::from_secs(600);
+/// Core puts every project's folder right under it.
+const ROOT: &str = "/code";
+const GAVE_UP: &str = ".cloudroom-files-gave-up";
 
 pub async fn cli(args: &[String]) -> io::Result<i32> {
     match args {
-        [command] if command == "wait" => wait(&std::env::current_dir()?).await,
+        [command] if command == "wait" => {
+            let cwd = std::env::current_dir()?;
+            tokio::select! {
+                code = wait(&cwd) => code,
+                // A harness's timeout that stops the wait lets the agent go ahead too.
+                () = stopped() => {
+                    go_ahead(&cwd);
+                    Ok(143)
+                }
+            }
+        }
         [help] if help == "--help" => {
             println!("{USAGE}");
             Ok(0)
@@ -54,7 +69,7 @@ fn check(cwd: &Path, waited: Duration) -> Option<Copy> {
         }
         (Some(_), _) => None,
         // Threads without a project start in the bare workspace root, where nothing is ever copied.
-        (None, _) if cwd == Path::new("/code") => Some(Copy::NoProject),
+        (None, _) if cwd == Path::new(ROOT) => Some(Copy::NoProject),
         (None, _) if !looks_empty(cwd) => Some(Copy::NotRunning),
         // No status and no files: the copy never started, or its status never arrived (#337).
         (None, _) if waited >= GRACE => Some(Copy::Missing),
@@ -75,7 +90,12 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
     let start = Instant::now();
     let mut announced = false;
     loop {
-        match check(cwd, start.elapsed()) {
+        let copy = check(cwd, start.elapsed());
+        // The agent goes ahead once this returns, so mark it first.
+        if copy.is_some() || start.elapsed() >= LIMIT {
+            go_ahead(cwd);
+        }
+        match copy {
             // A copy that says ready but left nothing here may have failed quietly (#604). A new project can be empty
             // on purpose, so warn instead of failing.
             Some(Copy::Ready(folder)) if looks_empty(&folder) => {
@@ -134,6 +154,51 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
         }
         tokio::time::sleep(POLL).await;
     }
+}
+
+/// Resolves once SIGTERM or SIGHUP stops `wait`.
+async fn stopped() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let (Ok(mut term), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => {},
+        _ = hup.recv() => {},
+    }
+}
+
+/// Tells the app the agent may now edit the project folder: its status file's, or, before the app wrote one, the
+/// project folder `cwd` is in. The app holds the folder's lock while it checks for this and unpacks a move's edits over
+/// the folder, so the two never overlap. Nothing removes it, since a second app resuming the same move can write
+/// `copying` again after `ready` (#1970).
+fn go_ahead(cwd: &Path) {
+    let Some(folder) = status_file(cwd)
+        .map(|(folder, _)| folder)
+        .or_else(|| project_folder(cwd))
+    else {
+        return;
+    };
+    let lock = std::fs::File::open(&folder);
+    let _held = lock.as_ref().map(std::fs::File::lock);
+    let _ = std::fs::write(marker(&folder), "");
+}
+
+fn marker(folder: &Path) -> PathBuf {
+    let mut marker = folder.as_os_str().to_owned();
+    marker.push(GAVE_UP);
+    marker.into()
+}
+
+/// The folder right under the workspace root that `cwd` is in, which is where the app copies the project.
+fn project_folder(cwd: &Path) -> Option<PathBuf> {
+    let root = std::fs::canonicalize(ROOT).ok()?;
+    cwd.ancestors()
+        .find(|folder| folder.parent() == Some(root.as_path()))
+        .map(Path::to_path_buf)
 }
 
 /// The status file of the nearest project folder at or above `cwd`.

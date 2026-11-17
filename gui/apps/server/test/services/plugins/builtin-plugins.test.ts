@@ -302,6 +302,7 @@ describe("builtin plugin reconciliation", () => {
       ["secrets", "Lock"],
       ["side-chat", "SideChat"],
       ["organization", "UserRound"],
+      ["shared-projects", "UserRoundPlus"],
       ["time-in-cloudroom", "Clock"],
       ["wallpaper", "Image"],
       ["workflows", "Workflow"],

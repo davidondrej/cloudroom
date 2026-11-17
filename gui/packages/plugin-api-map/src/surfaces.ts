@@ -153,6 +153,19 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         experimental: true,
       },
       {
+        id: "project-action",
+        title: "Project menu actions",
+        summary:
+          "Adds an item to every project's actions menu in the sidebar. With this, a plugin can:",
+        bullets: [
+          "Open its own full page for the project the menu belongs to",
+          "Show a short badge next to the item, like NEW",
+          "Keep that page out of the sidebar's navigation",
+        ],
+        apiSymbols: ["ExperimentalProjectActionRegistration"],
+        experimental: true,
+      },
+      {
         id: "browser-toolbar",
         title: "Browser toolbar controls",
         summary:

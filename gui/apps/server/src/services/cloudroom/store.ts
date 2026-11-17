@@ -152,6 +152,11 @@ export function queuedPrompts(db: DbQueryConnection, threadId: string): Command[
   return queued.map((item, index) => ({ item, index })).sort((a, b) => rank(a.item.id) - rank(b.item.id) || a.index - b.index).map(({ item }) => item);
 }
 
+/** Messages whose delete has not reached Core yet. Delivery never sends them meanwhile. */
+export function unsentDeletes(db: DbQueryConnection, threadId: string): Set<string> {
+  return new Set(commands(db, threadId).filter(item => item.command === "cancel" && item.state === "sending").map(item => JSON.parse(item.input).target_request_id));
+}
+
 /** The branch a new cloud thread starts from, saved on its first prompt. Validated by the create request schema. */
 export function baseBranch(input: string | undefined): string | undefined {
   const branch: unknown = input ? JSON.parse(input).base_branch : undefined;

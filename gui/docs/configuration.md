@@ -160,7 +160,9 @@ room-cli keep-awake hosts <host-id>...
 The **Remove AI co-authors** toggle in Settings → Defaults defaults to on. Cloudroom
 adds a Git config hook to every process it starts, so commits drop agent
 `Co-authored-by` lines (Claude, Cursor, Codex, Copilot, Gemini, and similar) and
-keep human ones. It also turns off Claude Code's own commit and PR attribution.
+keep human ones. It also turns off Claude Code's own commit attribution, and
+ends the pull requests Claude Code opens with `Built with [Cloudroom](https://cloudroom.dev)`
+in place of Claude's own line ([ADR](../../docs/adr/20261117-113618-built-with-cloudroom-pr-footer.md)).
 The hook needs Git 2.54 or newer; older Git ignores it. When it removes a line,
 it prints one line to stderr naming the setting below. In Cloud it only touches
 real repositories: the session's own (any worktree or submodule), `/repos/<name>`,
@@ -1109,7 +1111,9 @@ Dependency resolution and bundling run on install and update-apply only —
 never on an update check, which reads the manifest and stops. An omitted npm
 spec tracks the newest compatible stable release, ranges track within the
 range, dist-tags track the tag, and exact versions are pinned. A bare HTTP(S)
-Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`; an
+Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`. Git
+URLs must not embed a username, password, or token; private repositories sign
+in through Git's credential helper. An
 omitted ref tracks the repository's default branch, explicit branches track
 their head, and tags and commits are pinned. A semver range
 (`git:<url>@^1.2.0`, or `@semver:<range>` to state the intent explicitly)

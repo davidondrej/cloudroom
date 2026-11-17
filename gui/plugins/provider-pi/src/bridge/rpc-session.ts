@@ -590,7 +590,9 @@ export class PiRpcSession {
    * Pi reports a context overflow as a failed run, then may compact and retry
    * on its own. Hold a failed agent_end until Pi decides: a retry is passed on
    * as `willRetry`, so the turn stays open and stoppable like Pi's other
-   * retries. Anything else releases it unchanged.
+   * retries. A failed overflow compaction attaches its error, so the run
+   * fails even when Pi's reply was only cut off. Anything else releases it
+   * unchanged.
    */
   private holdPossibleOverflowEnd(event: PiRpcEvent): boolean {
     const held = this.heldOverflowEnd;
@@ -625,8 +627,10 @@ export class PiRpcSession {
       return false;
     }
     if (event.reason === "overflow" && event.type === "compaction_end") {
+      const willRetry = event.willRetry === true && event.aborted !== true;
       this.releaseOverflowEnd(
-        event.willRetry === true && event.aborted !== true,
+        willRetry,
+        willRetry || event.aborted === true ? undefined : event.errorMessage,
       );
       return false;
     }
@@ -636,7 +640,10 @@ export class PiRpcSession {
     return false;
   }
 
-  private releaseOverflowEnd(willRetry: boolean): void {
+  private releaseOverflowEnd(
+    willRetry: boolean,
+    recoveryError?: unknown,
+  ): void {
     const held = this.heldOverflowEnd;
     if (held === null) {
       return;
@@ -646,7 +653,11 @@ export class PiRpcSession {
       clearTimeout(held.timer);
     }
     this.handleEvent(
-      willRetry ? { ...held.event, willRetry } : held.event,
+      willRetry
+        ? { ...held.event, willRetry }
+        : typeof recoveryError === "string"
+          ? { ...held.event, recoveryError }
+          : held.event,
       true,
     );
   }
@@ -669,6 +680,10 @@ export class PiRpcSession {
     const last = messages[messages.length - 1] as
       | { role?: string; stopReason?: string; errorMessage?: string }
       | undefined;
+    if (typeof event.recoveryError === "string") {
+      pending.resolve({ error: new Error(event.recoveryError) });
+      return;
+    }
     if (
       last?.role === "assistant" &&
       last.stopReason === "error" &&

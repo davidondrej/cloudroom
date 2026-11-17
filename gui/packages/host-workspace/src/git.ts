@@ -248,6 +248,7 @@ export async function runGit(
       maxBuffer: options.maxBufferBytes ?? DEFAULT_BUFFER_BYTES,
       signal: options.signal,
       timeout: options.timeoutMs,
+      windowsHide: true,
     } as const;
     const stderrListener = options.onStderr;
     const result =
@@ -877,6 +878,7 @@ export async function readGitBlob(
   try {
     const result = await execFileAsync("git", ["cat-file", "blob", target], {
       cwd,
+      windowsHide: true,
       encoding: "buffer",
       env: resolveGitProcessEnv({
         env: undefined,

@@ -59,6 +59,7 @@
  * - FAKE_ACP_READY_FILE      → written once the agent process is up
  * - FAKE_ACP_SIGNAL_FILE     → written with "SIGTERM" when the agent is reaped
  * - FAKE_ACP_WRITE_PATH      → target path for the "write-file" prompt
+ * - FAKE_ACP_READ_PATH       → target path for the "read-file" prompt
  * - FAKE_ACP_LAUNCH_LOG      → append one line per process launch (used to
  *                              count model-discovery spawns in cache/TTL tests)
  * - FAKE_ACP_PROMPT_LOG      → append one JSON-encoded prompt text per request
@@ -573,6 +574,16 @@ async function handlePrompt(message) {
       notifyUpdate(messageChunk("write:ok"));
     } catch {
       notifyUpdate(messageChunk("write:denied"));
+    }
+  } else if (text.includes("read-file")) {
+    try {
+      const result = await requestClient("fs/read_text_file", {
+        sessionId: activeSessionId,
+        path: process.env.FAKE_ACP_READ_PATH,
+      });
+      notifyUpdate(messageChunk(`read:${result.content}`));
+    } catch {
+      notifyUpdate(messageChunk("read:denied"));
     }
   } else if (text.includes("hang")) {
     // Stay pending until the client sends session/cancel.

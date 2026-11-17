@@ -63,6 +63,16 @@ describe("isPathInsideRoots", () => {
     ).toBe(false);
   });
 
+  it("denies .. after a directory symlink that points outside", async () => {
+    mkdirSync(join(outside, "child"));
+    symlinkSync(join(outside, "child"), join(workspace, "link"), "dir");
+    for (const name of ["secret.txt", "new.txt"]) {
+      expect(
+        await isPathInsideRoots(`${workspace}/link/../${name}`, [workspace]),
+      ).toBe(false);
+    }
+  });
+
   it("denies dangling symlinks that point outside", async () => {
     symlinkSync(join(outside, "missing.txt"), join(workspace, "dangling.md"));
     symlinkSync(

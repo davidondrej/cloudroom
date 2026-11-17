@@ -50,3 +50,4 @@ export const BLOCKED_TOOLS = new Set([
 export const LIME_CURSOR_SUFFIX = "-8";
 
 export const WHOLE_SCREEN = { key: "whole-screen", name: "the whole screen" } as const;
+export const CLIPBOARD = { key: "clipboard", name: "the clipboard" } as const;

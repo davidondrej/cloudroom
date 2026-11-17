@@ -1585,12 +1585,29 @@ function sliceFileContent(
 }
 
 async function handleFsReadTextFile(
+  session: AcpThreadSession,
   params: unknown,
   responder: AcpAgentRequestResponder,
 ): Promise<void> {
   const parsed = acpReadTextFileParamsSchema.safeParse(params);
   if (!parsed.success) {
     responder.error(-32602, "Invalid fs/read_text_file params");
+    return;
+  }
+  // Skill folders stay readable: session instructions point at their SKILL.md.
+  if (
+    session.policy.permissionMode === "accept-edits" &&
+    !(await isPathInsideRoots(parsed.data.path, [
+      ...session.policy.workspaceWriteRoots,
+      ...(configuredSkillRoots ?? []).map(
+        (root) => root.skillDirectoryRootPath,
+      ),
+    ]))
+  ) {
+    responder.error(
+      -32000,
+      `File reads outside the workspace are denied by Cloudroom's accept-edits permission mode: ${parsed.data.path}`,
+    );
     return;
   }
   try {
@@ -2546,7 +2563,7 @@ function handleAgentRequest(
       handlePermissionRequest(session, params, responder);
       return;
     case "fs/read_text_file":
-      void handleFsReadTextFile(params, responder);
+      void handleFsReadTextFile(session, params, responder);
       return;
     case "fs/write_text_file":
       void handleFsWriteTextFile(session, params, responder);

@@ -142,6 +142,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "organization",
     defaultEnabled: false,
   },
+  // Shared projects (docs/scopes/shared-projects.md): on for everyone, so "Share project" is in every project's menu.
+  {
+    name: "shared-projects",
+    pluginId: "shared-projects",
+    defaultEnabled: true,
+  },
   {
     name: "time-in-cloudroom",
     pluginId: "time-in-cloudroom",

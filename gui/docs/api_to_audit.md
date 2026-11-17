@@ -2626,6 +2626,26 @@ deliberately: it mounts once, and a crash there should disable it everywhere.
 Confirm that split before stabilizing, and decide whether other multi-mount
 slots need the same treatment.
 
+## `app.slots.experimental_projectAction` (`@get-bb/plugin-sdk/app`)
+
+**Added 2026-11-16** for the built-in Shared projects plugin, its only consumer.
+
+**What it does.** Adds an item to every project's actions menu (the sidebar's
+three dots and its right-click menu). The host draws the item from `title`,
+`icon`, and an optional `badge` (a short accent label, like "NEW"). Selecting
+it opens `component` as a full page for that project, at
+`/plugins/<pluginId>/<id>/<projectId>`. The page has no sidebar entry.
+
+**Audit before stabilizing.**
+
+1. **Page or `run`.** Every other action slot takes `run`. Decide whether this
+   one should too, with the page as one thing `run` can open.
+2. **Route.** The page shares the nav panels' route, so an action id must not
+   match a nav panel path of the same plugin. Decide whether the collector
+   should refuse that.
+3. **Budget.** Decide a cap, or a submenu, before several plugins add an item.
+4. **Badge.** Free text today. Decide whether it should be a fixed set.
+
 ## `app.slots.experimental_browserToolbarAction` (`@get-bb/plugin-sdk/app`)
 
 **What it does.** Renders a plugin component beside the address bar in each

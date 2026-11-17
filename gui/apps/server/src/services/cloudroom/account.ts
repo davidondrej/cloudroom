@@ -6,6 +6,7 @@ import { getProject, type DbConnection } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { cloudroom, configuredWebsite, trustedWebsite } from "./commands.js";
+import { cancelClaudeToken } from "./claude-token.js";
 import { cancelGithubLogin } from "./github-login.js";
 import { macAccess, macAccessSupported, supportedMacAccessLevels } from "./previews.js";
 import { hasMacCodexLogin } from "./sandboxes.js";
@@ -81,6 +82,7 @@ export class CloudroomAccountService {
   async logout(): Promise<void> {
     this.cancel();
     cancelGithubLogin();
+    cancelClaudeToken();
     await cloudroom(this.deps).disconnect();
   }
 

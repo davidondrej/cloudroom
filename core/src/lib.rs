@@ -114,6 +114,7 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     }
     manager.start_storage_guard();
     manager.start_idle_sleeper();
+    manager.start_memory_guard();
     manager.start_limit_resumer();
     manager.start_uploader();
     manager.start_auth_monitor();

@@ -330,6 +330,8 @@ export interface CloudroomArea {
   tokenUsage(input: TokenUsageRequest): Promise<TokenUsageResponse>;
   /** Organizations (docs/scopes/organizations.md): passes one request to the website's `/api/desktop/org`, signed in as this account. */
   org(input: { action: string } & Record<string, unknown>): Promise<unknown>;
+  /** Shared projects (docs/scopes/shared-projects.md): passes one request to the website's `/api/desktop/project-shares`, signed in as this account. */
+  projectShares(input: { action: string } & Record<string, unknown>): Promise<unknown>;
   /** GPUs (docs/scopes/gpus.md): one `room-cli gpu` step for `/api/desktop/gpu`, signed in as this account. */
   gpu(input: { argv: string[]; thread?: string }): Promise<unknown>;
   setAutoDelete(days: AutoDeleteDays): Promise<AutoDeleteSetting>;
@@ -379,10 +381,10 @@ export interface CloudroomArea {
   moveToSandbox(threadId: string): Promise<TeleportProgress>;
   /** Copies open BB threads into idle Local threads by forking their native sessions. Sends no prompts. */
   importBb(hostId: string): Promise<RoomImportResult>;
-  /** Claude Code and Codex chats on this Mac that are not in Cloudroom yet, newest first. */
-  nativeSessions(signal?: AbortSignal): Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>;
+  /** Claude Code and Codex chats on this Mac that are not in Cloudroom yet, newest first. `claudeConfigDir` reads Claude Code chats from another config folder. */
+  nativeSessions(signal?: AbortSignal, claudeConfigDir?: string): Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>;
   /** Copies chosen chats into idle Local threads by forking their native sessions. Sends no prompts. */
-  importSessions(hostId: string, sessions: { harness: NativeSession["harness"]; id: string }[]): Promise<SessionImportResult>;
+  importSessions(hostId: string, sessions: { harness: NativeSession["harness"]; id: string }[], claudeConfigDir?: string): Promise<SessionImportResult>;
   /** Lists the chats in a Conductor Cloud export (its unzipped folder, or the .zip). */
   conductorExport(path: string): Promise<{ sessions: NativeSession[] }>;
   importConductorExport(hostId: string, path: string): Promise<SessionImportResult>;
@@ -484,6 +486,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     automations: (input) => transport.readJson(request("/automations", input)) as Promise<CloudAutomationResponse>,
     tokenUsage: (input) => transport.readJson(request("/token-usage", input)) as Promise<TokenUsageResponse>,
     org: (input) => transport.readJson(request("/org", input)),
+    projectShares: (input) => transport.readJson(request("/project-shares", input)),
     gpu: (input) => transport.readJson(request("/gpu", input)),
     setAutoDelete: (days) => transport.readJson(request("/auto-delete", { days })) as Promise<AutoDeleteSetting>,
     macVariables: (signal) => transport.readJson(request("/environment/mac", undefined, signal)) as Promise<{ names: string[] }>,
@@ -506,8 +509,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     copyToMac: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "copy" }) })) as Promise<{ branch: string }>,
     openCloudFile: (threadId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/open-file`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ path: string }>,
     importBb: (hostId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/bb`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId }) })) as Promise<RoomImportResult>,
-    nativeSessions: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { signal })) as Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>,
-    importSessions: (hostId, sessions) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, sessions }) })) as Promise<SessionImportResult>,
+    nativeSessions: (signal, claudeConfigDir) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions${claudeConfigDir ? `?claudeConfigDir=${encodeURIComponent(claudeConfigDir)}` : ""}`, { signal })) as Promise<{ sessions: NativeSession[]; conductorApp?: boolean }>,
+    importSessions: (hostId, sessions, claudeConfigDir) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/sessions`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, sessions, claudeConfigDir }) })) as Promise<SessionImportResult>,
     conductorExport: (path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ path }) })) as Promise<{ sessions: NativeSession[] }>,
     importConductorExport: (hostId, path) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/import/conductor-export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hostId, path }) })) as Promise<SessionImportResult>,
     exportableChats: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { signal })) as Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>,

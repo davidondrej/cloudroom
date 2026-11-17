@@ -63,7 +63,7 @@ import {
   settleQueueRowDispatched,
 } from "./queue-waits.js";
 import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
-import { isThreadAtPlanLimit } from "./turn-failed.js";
+import { failureHold } from "./turn-failed.js";
 import {
   captureUserMessageSentTelemetry,
   ensureThreadQueueIsWritable,
@@ -110,7 +110,7 @@ export function createAutomaticQueuedMessageEligibility(
   const stopInFlight = hasLiveThreadStopInFlight(args.thread.id);
   let retryQueued: boolean | undefined;
   let releaseSpent: boolean | undefined;
-  let atPlanLimit: boolean | undefined;
+  let hold: ReturnType<typeof failureHold> | undefined;
   const isFailedAndReleasable = (row: QueuedThreadMessageRow) => {
     if (args.thread.status !== "error") return false;
     releaseSpent ??= isErrorQueueReleaseHeld(deps.db, {
@@ -119,10 +119,13 @@ export function createAutomaticQueuedMessageEligibility(
       threadId: args.thread.id,
     });
     if (releaseSpent) return false;
-    // A child notice waits out its parent's plan limit (#1723).
-    if (row.systemNotice !== null) {
-      atPlanLimit ??= isThreadAtPlanLimit(deps.db, args.thread, args.now);
-      if (atPlanLimit) return false;
+    // A child notice waits out its parent's plan limit (#1723), and any
+    // message from another thread waits out a failed login (#2019).
+    if (row.systemNotice !== null || row.senderThreadId !== null) {
+      if (hold === undefined)
+        hold = failureHold(deps.db, args.thread, args.now);
+      if (hold === "sign-in") return false;
+      if (hold === "plan-limit" && row.systemNotice !== null) return false;
     }
     if (row.payloadKind === "retry") return true;
     retryQueued ??= listQueuedThreadMessages(deps.db, args.thread.id).some(

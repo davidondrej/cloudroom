@@ -20,6 +20,7 @@ import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/life
 import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
 import { queueParentSystemMessage } from "../../src/services/threads/parent-system-messages.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
+import { acceptThreadSendRequest } from "../../src/services/threads/thread-send-request.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
 import { buildTurnFailedEvent } from "../../src/services/threads/turn-failed.js";
 import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
@@ -462,6 +463,49 @@ describe("the turn.failed announcement", () => {
       expect(turnRequests(harness, thread.id)).toHaveLength(1);
       expect(queuedRows(harness, thread.id)).toHaveLength(2);
 
+      setThreadExecutionOverride(harness.db, {
+        threadId: thread.id,
+        modelOverride: "gpt-5-mini",
+      });
+      await sweep();
+      expect(turnRequests(harness, thread.id)).toHaveLength(2);
+    });
+  });
+
+  it("holds messages from other threads while the thread's login failed (#2019)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedFailableThread(harness, "host-2019");
+      seedRateLimitFailure(harness, {
+        environmentId: environment.id,
+        threadId: thread.id,
+        resetsAtMs: 0,
+        category: "unauthorized",
+      });
+      failThread(harness, thread.id);
+      const sender = seedThread(harness.deps, {
+        environmentId: environment.id,
+        projectId: thread.projectId,
+      });
+      const sent = await acceptThreadSendRequest(harness.deps, {
+        thread: requireThread(harness, thread.id),
+        payload: {
+          input: textInput("Status?"),
+          mode: "steer-if-active",
+          senderThreadId: sender.id,
+        },
+      });
+      const sweep = () =>
+        runQueuedMessageDispatch(harness.deps, {
+          kind: "idle-recovery",
+          now: Date.now() + 60_000,
+        });
+      await sweep();
+      // Before, each one started a turn that failed on the same login and
+      // notified the parent again.
+      expect(sent.delivery).toBe("queued");
+      expect(turnRequests(harness, thread.id)).toHaveLength(1);
+
+      // Switching agent or model ends the hold.
       setThreadExecutionOverride(harness.db, {
         threadId: thread.id,
         modelOverride: "gpt-5-mini",

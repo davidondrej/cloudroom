@@ -39,6 +39,7 @@
     "bb-plugin-scheduled-send": "workspace:*",
     "bb-plugin-secrets": "workspace:*",
     "bb-plugin-organization": "workspace:*",
+    "bb-plugin-shared-projects": "workspace:*",
     "bb-plugin-time-in-cloudroom": "workspace:*",
     "bb-plugin-wallpaper": "workspace:*",
     "bb-plugin-side-chat": "workspace:*",

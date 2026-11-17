@@ -1,4 +1,12 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -144,6 +152,109 @@ describe("bridge recorder", () => {
       '{"jsonrpc":"2.0","id":1,"result":{}}',
       '{"jsonrpc":"2.0","method":"turn/started"}',
     ]);
+  });
+
+  it("masks credentials and keeps recordings owner-only", () => {
+    dir = mkdtempSync(join(tmpdir(), "bb-bridge-recorder-"));
+    // An older run left a world-readable scope folder and lane behind.
+    mkdirSync(join(dir, "thr_old"), { mode: 0o755 });
+    writeFileSync(join(dir, "thr_old", "bridge→provider.ndjson"), "", {
+      mode: 0o644,
+    });
+    const fakeOauth = "fake-oauth-token-0123456789abcdef";
+    const fakeAccess = "fake-access-token-0123456789abcdef";
+    const fakeBearer = "fakebearer0123456789abcdef";
+    const plain = '{"jsonrpc":"2.0", "method":"turn/started","params":{}}';
+    const recorder = createBridgeRecorder({ dir });
+
+    recorder.recordRuntimeLine(
+      "runtime→bridge",
+      JSON.stringify({
+        id: 1,
+        method: "thread/start",
+        params: {
+          threadId: "thr_new",
+          config: {
+            envVars: { CLAUDE_CODE_OAUTH_TOKEN: fakeOauth, LANG: "C" },
+          },
+        },
+      }),
+    );
+    recorder.record({
+      direction: "bridge→provider",
+      threadId: "thr_old",
+      line: JSON.stringify({
+        method: "account/login/start",
+        params: { accessToken: fakeAccess, chatgptAccountId: "acct_1" },
+      }),
+    });
+    recorder.record({
+      direction: "bridge→provider",
+      threadId: "thr_old",
+      line: `Authorization: Bearer ${fakeBearer}`,
+    });
+    recorder.record({
+      direction: "provider→bridge",
+      threadId: "thr_new",
+      line: plain,
+    });
+    recorder.close();
+
+    const lanes = [
+      ["thr_new", "runtime→bridge"],
+      ["thr_new", "provider→bridge"],
+      ["thr_old", "bridge→provider"],
+    ] as const;
+    const text = lanes
+      .map(([scope, lane]) =>
+        readFileSync(join(dir, scope, `${lane}.ndjson`), "utf8"),
+      )
+      .join("");
+    for (const secret of [fakeOauth, fakeAccess, fakeBearer]) {
+      expect(text).not.toContain(secret);
+    }
+    expect(text).toContain("LANG");
+    expect(text).toContain("acct_1");
+    expect(readLane("thr_new", "provider→bridge")[0]?.line).toBe(plain);
+
+    if (process.platform !== "win32") {
+      for (const scope of ["thr_new", "thr_old"]) {
+        expect(statSync(join(dir, scope)).mode & 0o777).toBe(0o700);
+      }
+      for (const [scope, lane] of lanes) {
+        expect(statSync(join(dir, scope, `${lane}.ndjson`)).mode & 0o777).toBe(
+          0o600,
+        );
+      }
+    }
+  });
+
+  it("stays fast on long whitespace and never writes a line it cannot mask", () => {
+    dir = mkdtempSync(join(tmpdir(), "bb-bridge-recorder-"));
+    const recorder = createBridgeRecorder({ dir });
+    const fakeAccess = "fake-access-token-0123456789abcdef";
+    const spaced = `{"a":1${" ".repeat(1_000_000)}}`;
+    const started = performance.now();
+    recorder.record({
+      direction: "provider→bridge",
+      threadId: null,
+      line: spaced,
+    });
+    expect(performance.now() - started).toBeLessThan(500);
+    const deep = `{"accessToken":"${fakeAccess}","x":${"[".repeat(100_000)}${"]".repeat(100_000)}}`;
+    recorder.record({
+      direction: "bridge→provider",
+      threadId: null,
+      line: deep,
+    });
+    recorder.close();
+
+    expect(
+      readLane(BRIDGE_RECORDING_PROCESS_SCOPE, "provider→bridge")[0]?.line,
+    ).toBe(spaced);
+    expect(
+      readLane(BRIDGE_RECORDING_PROCESS_SCOPE, "bridge→provider")[0]?.line,
+    ).toBe('{"redacted":"unparseable"}');
   });
 
   it("drops an oversized line instead of holding it", () => {

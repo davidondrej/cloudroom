@@ -882,6 +882,7 @@ function settleThreadCommandFailure(
     threadId: thread.id,
     environmentId: thread.environmentId,
     code: "thread_command_failed",
+    cause: args.report.errorCode,
     message: `Command ${args.report.type} failed`,
     detail: errorMessage,
     scope: getThreadFailureCommandErrorScope(args.command),

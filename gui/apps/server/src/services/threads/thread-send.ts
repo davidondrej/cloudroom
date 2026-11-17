@@ -100,6 +100,8 @@ interface SendThreadMessageArgs {
   environment: EnvironmentRow;
   historyReplacement?: {
     forkSourceProviderThreadId: string | null;
+    /** The native session the edit replaces, whose Goal it keeps (#857). */
+    replacesProviderThreadId?: string | null;
     onCommandSettled?: () => void | Promise<void>;
   };
   /** Hears once whether the host started the new turn (null) or refused it. */
@@ -704,16 +706,24 @@ async function sendThreadMessageWithoutContextClear(
     };
     const command = args.historyReplacement
       ? {
-          command: await buildThreadStartCommand(deps, {
-            ...commandArgs,
-            fork:
-              args.historyReplacement.forkSourceProviderThreadId === null
-                ? null
-                : {
-                    sourceProviderThreadId:
-                      args.historyReplacement.forkSourceProviderThreadId,
-                  },
-          }),
+          command: {
+            ...(await buildThreadStartCommand(deps, {
+              ...commandArgs,
+              fork:
+                args.historyReplacement.forkSourceProviderThreadId === null
+                  ? null
+                  : {
+                      sourceProviderThreadId:
+                        args.historyReplacement.forkSourceProviderThreadId,
+                    },
+            })),
+            ...(args.historyReplacement.replacesProviderThreadId
+              ? {
+                  replacesProviderThreadId:
+                    args.historyReplacement.replacesProviderThreadId,
+                }
+              : {}),
+          },
           mode: "thread.start" as const,
         }
       : await prepareReadyThreadTurnCommand(deps, commandArgs);

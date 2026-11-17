@@ -722,6 +722,7 @@ export async function createHostDaemonApp(
   });
   const terminalManager = new TerminalManager({
     logger: options.logger,
+    refreshShellEnv: refreshRuntimeShellEnv,
     runtimeManager,
     sendMessage: (message) => sendServerMessage(message),
   });

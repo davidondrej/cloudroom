@@ -286,10 +286,16 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
     options.turnStartWatchdog?.thresholdMs ?? 120_000;
   const turnStartStopAfterMs =
     options.turnStartWatchdog?.stopAfterMs ?? 10 * 60_000;
-  /** Open turns: when the provider last sent an event, and its running commands and tool calls (#977). */
+  /** Open turns: when the provider last made progress, its retries since, and its running commands and tool calls (#977, #1853). */
   const openTurnActivity = new Map<
     string,
-    { lastEventMs: number; warned: boolean; runningItemIds: Set<string> }
+    {
+      lastEventMs: number;
+      warned: boolean;
+      runningItemIds: Set<string>;
+      retries: number;
+      lastRetry: string;
+    }
   >();
   const turnSilenceThresholdMs =
     options.turnSilenceWatchdog?.thresholdMs ?? 10 * 60_000;
@@ -887,13 +893,25 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       return;
     }
     const entry = openTurnActivity.get(event.threadId) ?? {
-      lastEventMs: 0,
+      lastEventMs: Date.now(),
       warned: false,
       runningItemIds: new Set<string>(),
+      retries: 0,
+      lastRetry: "",
     };
     openTurnActivity.set(event.threadId, entry);
+    // A transport retry ("Reconnecting... 2/5") is not progress (#1853).
+    if (event.type === "provider/error" && event.willRetry === true) {
+      entry.retries += 1;
+      entry.lastRetry = (event.detail ?? event.message).replace(
+        /\s*\n\s*/gu,
+        ": ",
+      );
+      return;
+    }
     entry.lastEventMs = Date.now();
     entry.warned = false;
+    entry.retries = 0;
     if (
       event.type === "item/started" &&
       (event.item.type === "commandExecution" || event.item.type === "toolCall")
@@ -905,10 +923,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   }
 
   /**
-   * Warns once per silence period when an open turn has sent nothing for the
-   * threshold (#977). Running commands, tool calls, pending requests, and
-   * background work are real waits, so they restart the clock. The turn is
-   * never ended here: a slow provider may still answer.
+   * Warns once per silence period when an open turn has sent nothing but
+   * retries for the threshold (#977, #1853). Running commands, tool calls,
+   * pending requests, and background work are real waits, so they restart the
+   * clock. The turn is never ended here: a slow provider may still answer.
    */
   function warnSilentTurns(nowMs: number): void {
     for (const [threadId, entry] of openTurnActivity) {
@@ -929,12 +947,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         continue;
       }
       entry.warned = true;
+      const minutes = Math.round(turnSilenceThresholdMs / 60_000);
       options.onEvent({
         type: "system/error",
         threadId,
         scope: { kind: "thread" },
         code: "provider_turn_silent",
-        message: `The provider has sent nothing for ${Math.round(turnSilenceThresholdMs / 60_000)} minutes. It may be stalled. Stop the thread, then send the message again.`,
+        message: `The provider ${entry.retries > 0 ? `has made no progress for ${minutes} minutes, only ${entry.retries} retries (last: ${entry.lastRetry})` : `has sent nothing for ${minutes} minutes`}. It may be stalled. Stop the thread, then send the message again.`,
       });
     }
   }
@@ -1640,6 +1659,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       disallowedTools,
       instructionMode = "append",
       fork,
+      replacesProviderThreadId,
     }) {
       return runThreadOperation({
         threadId,
@@ -1704,6 +1724,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                         fork.sourceProviderCheckpointId,
                     }
                   : {}),
+                ...(replacesProviderThreadId !== undefined
+                  ? { replacesProviderThreadId }
+                  : {}),
                 options: providerExecutionContext,
                 dynamicTools,
                 disallowedTools,
@@ -1713,6 +1736,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
                 type: "thread/start",
                 threadId,
                 cwd: options.workspacePath,
+                ...(replacesProviderThreadId !== undefined
+                  ? { replacesProviderThreadId }
+                  : {}),
                 options: providerExecutionContext,
                 dynamicTools,
                 disallowedTools,

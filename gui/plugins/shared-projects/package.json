@@ -1,0 +1,37 @@
+{
+  "name": "bb-plugin-shared-projects",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Share a project with a friend: read each other's Cloud threads in it, and take them over.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Shared projects",
+    "description": "Share a project with a friend: read each other's Cloud threads in it, and take them over.",
+    "branding": {
+      "icon": "UserRoundPlus"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

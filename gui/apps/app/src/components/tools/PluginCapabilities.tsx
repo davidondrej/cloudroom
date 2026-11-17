@@ -290,6 +290,12 @@ function pluginAppSurfaceItems(
     ),
     ...namedSlotItems(
       pluginId,
+      slots.projectActions,
+      "project-action",
+      "Adds an action to project menus.",
+    ),
+    ...namedSlotItems(
+      pluginId,
       slots.browserToolbarActions,
       "browser-toolbar",
       "Adds an action to Browser tab toolbars.",

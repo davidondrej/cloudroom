@@ -5,7 +5,7 @@ import {
   isAbsolute,
   join,
   relative,
-  resolve,
+  sep,
 } from "node:path";
 
 export async function isPathInsideRoots(
@@ -33,8 +33,14 @@ export async function isPathInsideRoots(
   });
 }
 
+// Never collapse ".." before the OS resolves symlinks: "link/../x" must
+// follow "link" first, the way fs.readFile does.
+function rawJoin(base: string, path: string): string {
+  return isAbsolute(path) ? path : `${base}${sep}${path}`;
+}
+
 async function realPath(path: string): Promise<string> {
-  const absolutePath = resolve(path);
+  const absolutePath = rawJoin(process.cwd(), path);
   try {
     return await fs.realpath(absolutePath);
   } catch (error) {
@@ -47,7 +53,7 @@ async function realPath(path: string): Promise<string> {
   const stat = await fs.lstat(absolutePath).catch(() => null);
   if (stat?.isSymbolicLink()) {
     const linkTarget = await fs.readlink(absolutePath);
-    return realPath(resolve(dirname(absolutePath), linkTarget));
+    return realPath(rawJoin(dirname(absolutePath), linkTarget));
   }
   const parent = dirname(absolutePath);
   if (parent === absolutePath) {

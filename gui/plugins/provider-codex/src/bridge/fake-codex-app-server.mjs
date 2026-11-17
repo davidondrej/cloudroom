@@ -188,6 +188,11 @@ const stallThreadStart = script?.stallThreadStart ?? false;
  */
 const steerFindsEndedTurn = script?.steerFindsEndedTurn ?? false;
 const sigtermDelayMs = script?.sigtermDelayMs ?? 0;
+/**
+ * `goalStatePath`: a JSON file of Goals by thread id, shared by every fake
+ * child like the real app-server's database. `thread/fork` does not copy them.
+ */
+const goalStatePath = script?.goalStatePath ?? null;
 
 function logProcessStep(step) {
   if (processLogPath === null) {
@@ -608,6 +613,25 @@ async function handleRequest(message) {
     case "thread/goal/clear":
       respond(id, {});
       return;
+    case "thread/goal/get":
+    case "thread/goal/set": {
+      const goals = goalStatePath
+        ? JSON.parse(readFileSync(goalStatePath, "utf8"))
+        : {};
+      if (method === "thread/goal/set" && goalStatePath) {
+        const goal = {
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          ...goals[params.threadId],
+          ...params,
+        };
+        goals[params.threadId] = goal;
+        writeFileSync(goalStatePath, JSON.stringify(goals));
+        notify("thread/goal/updated", { threadId: params.threadId, goal });
+      }
+      respond(id, { goal: goals[params.threadId] ?? null });
+      return;
+    }
     default:
       respondError(id, -32601, `Unknown method "${method}"`);
   }

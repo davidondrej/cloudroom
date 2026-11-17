@@ -13,6 +13,7 @@ import {
   listProjectSourcesByProjectIds,
   listThreadSections,
   listThreadsWithPendingInteractionStateForProjects,
+  moveCheckoutEnvironments,
   reorderProject,
   updateProject,
   updateProjectSource,
@@ -46,6 +47,7 @@ import {
   requirePublicStandardProject,
 } from "../services/lib/entity-lookup.js";
 import {
+  areHostPathsEqual,
   isAbsoluteHostPath,
   isWindowsHostPath,
   isWindowsNetworkOrDevicePath,
@@ -108,6 +110,7 @@ import {
   scanProviderNativeRoots,
 } from "../services/providers/native-roots.js";
 import { assertUsableHostId } from "../services/hosts/primary-host.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../services/environments/environment-provider-ids.js";
 import {
   resolveProjectCommandWorkspace,
   resolveProjectWorkspaceTarget,
@@ -115,6 +118,29 @@ import {
 
 type ProjectResponseProjectFields = Omit<ProjectResponse, "sources">;
 const ATTACHMENT_CONTENT_CACHE_CONTROL = "private, immutable, max-age=31536000";
+
+/** The old folder is gone and the new one exists: a rename, not another checkout. */
+async function hostFolderMoved(
+  deps: AppDeps,
+  hostId: string,
+  fromPath: string,
+  toPath: string,
+): Promise<boolean> {
+  try {
+    const { existence } = await callHostRetryableOnlineRpc(deps, {
+      hostId,
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      command: { type: "host.paths_exist", paths: [fromPath, toPath] },
+    });
+    return existence[fromPath] === false && existence[toPath] === true;
+  } catch (error) {
+    deps.logger.warn(
+      { err: error, hostId, path: toPath },
+      "Unable to check the project's folders; its threads keep the old one",
+    );
+    return false;
+  }
+}
 
 function toProjectResponseProjectFields(
   project: ProjectResponseProjectFields,
@@ -536,6 +562,30 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
         400,
         "invalid_request",
         `Source type mismatch: source is ${existing.type} but request specifies ${payload.type}`,
+      );
+    }
+    // The folder was renamed: its existing threads follow it (#1842).
+    if (
+      payload.path &&
+      !areHostPathsEqual(existing.path, payload.path) &&
+      (await hostFolderMoved(
+        deps,
+        existing.hostId,
+        existing.path,
+        payload.path,
+      )) &&
+      moveCheckoutEnvironments(deps.db, deps.hub, {
+        checkoutProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.projectCheckout,
+        fromPath: existing.path,
+        hostId: existing.hostId,
+        projectId,
+        toPath: payload.path,
+      }) === "busy"
+    ) {
+      throw new ApiError(
+        409,
+        "invalid_request",
+        "A thread in this project's folder is running or has background work. Wait for it to finish, then change the folder again.",
       );
     }
     const source = updateProjectSource(

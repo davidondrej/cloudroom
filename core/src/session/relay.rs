@@ -40,6 +40,8 @@ const APP_NOTE: &str = "Passed to the user's Cloudroom app, which applies it whi
 const MAYBE_NOTE: &str = "Not linked to this thread, so it went to the user's Cloudroom app. The app applies it only to a thread this one started (such as one the user moved here), while it is open; otherwise nothing happens.";
 /// The website's answer when the parent's Core refused the message (web/lib/mobile.ts).
 const PARENT_BUSY: &str = "The other thread's Cloudroom is busy or updating. Try again shortly.";
+/// The website's answer when the other thread's disk is full or unmeasured (web/lib/mobile.ts, #309): a refusal.
+const DISK_FULL: &str = "Not delivered: the other thread's cloud disk is full or can't be measured, so its work is paused. The user can free space there with Clear caches & builds.";
 fn unconfirmed(why: &str) -> String {
     format!(
         "Could not confirm your parent got it ({why}). It may have, so sending it again may deliver it twice."
@@ -183,6 +185,12 @@ pub(super) async fn command(
         // Core had no parent, and the website has none it can reach: as before (#994).
         Err(ApiError::Status(404, _)) if id == "parent" => {
             return Err(fail(StatusCode::CONFLICT, NO_PARENT));
+        }
+        Err(ApiError::Status(503, ref message)) if id == "parent" && message == DISK_FULL => {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Not delivered: your parent's cloud disk is full or can't be measured, so its work is paused. The user can free space in your parent's thread with Clear caches & builds; send it again after that.",
+            ));
         }
         // The parent may have it already, and a resend gets a new request ID, so never ask for one. Only the
         // website's own "parent busy" 503 means the parent refused it.
@@ -416,6 +424,17 @@ async fn receive(
         prompt["sender_thread_id"] = json!(sender);
     }
     let queue = input.action == "tell" && request.ends_with(QUEUE);
+    // A full or unmeasured disk refuses a tell, also where the user's own message would wait (#606), so its sender
+    // hears why (web/lib/mobile.ts, #309) instead of waiting on a paused agent. A retry of one already accepted
+    // gets its receipt from `deliver`, so its sender never sends it twice.
+    let known = || {
+        let steer = m.receipt(&id, &format!("{request}_steer"));
+        m.receipt(&id, &request).is_some() || steer.is_some_and(|s| s.state != "failed")
+    };
+    if input.action == "tell" && m.storage.blocks() && !known() {
+        let refused = super::Error::Conflict("storage unsafe; new execution is blocked");
+        return Err(session_failure(refused));
+    }
     if input.action == "tell" && from.is_none() {
         revive(&m, &id, &request, None);
     }
@@ -504,8 +523,14 @@ fn next_due(local: &Local) -> Option<u64> {
 
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
 /// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
-/// `starting` until their sandbox wakes, linked or not.
-pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
+/// `starting` until their sandbox wakes, linked or not. `wait` caps the website's answer: `status` must not hang on it.
+pub(super) async fn own_children(
+    m: &Manager,
+    caller: &str,
+    archived: bool,
+    answer: &mut Value,
+    wait: Duration,
+) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
     let (shared, known, mine, others, archiving) = {
@@ -542,7 +567,9 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     };
     let flag = if archived { "1" } else { "0" };
     // Without the website's list, the children started in the last few minutes still show.
-    let found = match api.get("children", &[("archived", flag)]).await {
+    let asked = tokio::time::timeout(wait, api.get("children", &[("archived", flag)])).await;
+    let late = || ApiError::Network(format!("no answer within {} s", wait.as_secs()));
+    let found = match asked.unwrap_or_else(|_| Err(late())) {
         Ok(found) => found,
         Err(error) => {
             answer["note"] = json!(format!(

@@ -12,6 +12,7 @@ import type { DbConnection, DbTransaction } from "../connection.js";
 import type { DbNotifier } from "../notifier.js";
 import { environments, threads } from "../schema.js";
 import { createEnvironmentId } from "../ids.js";
+import { listActiveBackgroundTaskCountsByThreadIds } from "./events.js";
 import { hostPathContains, hostPathEquals, sameHostPath } from "./host-path-sql.js";
 
 type EnvironmentReadConnection = DbConnection | DbTransaction;
@@ -575,6 +576,55 @@ export function findEnvironmentSharingPath(db: EnvironmentWriteConnection, owner
     ne(environments.id, owner.id),
     ne(environments.status, "destroyed"),
   )).limit(1).get() ?? findEnvironmentPathClaim(db, owner.hostId, owner.path, owner);
+}
+
+export interface MoveCheckoutEnvironmentsArgs {
+  checkoutProviderId: string;
+  fromPath: string;
+  hostId: string;
+  projectId: string;
+  toPath: string;
+}
+
+/**
+ * A project's checkout environments at its old folder follow it to `toPath` (#1842), so their threads keep working.
+ * Managed worktrees and other projects' environments stay. Into this project's environment already at `toPath`, only
+ * the threads move. "busy" changes nothing: running or background work keeps its folder until it ends.
+ */
+export function moveCheckoutEnvironments(db: DbConnection, notifier: DbNotifier, args: MoveCheckoutEnvironmentsArgs): "busy" | "moved" {
+  const isCheckout = or(isNull(environments.environmentProviderId), eq(environments.environmentProviderId, args.checkoutProviderId));
+  const changed = db.transaction((tx) => {
+    const rows = tx.select().from(environments).where(and(eq(environments.projectId, args.projectId), eq(environments.hostId, args.hostId), hostPathEquals(environments.path, args.fromPath), inArray(environments.status, ["ready", "error"]), isNull(environments.teardownStatus), isCheckout)).all();
+    if (rows.length === 0) return { environmentIds: [], threadIds: [] };
+    const threadRows = tx.select({ id: threads.id, status: threads.status }).from(threads).where(inArray(threads.environmentId, rows.map((row) => row.id))).all();
+    // A turn or open background work (a build, a subagent) keeps the folder it runs in.
+    if (threadRows.some((thread) => thread.status === "starting" || thread.status === "active" || thread.status === "stopping")) return "busy";
+    if (threadRows.length > 0 && listActiveBackgroundTaskCountsByThreadIds(tx, { threadIds: threadRows.map((thread) => thread.id) }).length > 0) return "busy";
+    const environmentIds: string[] = [];
+    const threadIds: string[] = [];
+    for (const row of rows) {
+      const target = tx.select().from(environments).where(and(eq(environments.projectId, args.projectId), eq(environments.hostId, args.hostId), hostPathEquals(environments.path, args.toPath))).get();
+      if (target === undefined) {
+        const selection = row.environmentProviderSelection;
+        const inputs = selection?.inputs;
+        const movedInputs = typeof inputs === "object" && inputs !== null && !Array.isArray(inputs) && typeof inputs.path === "string" && sameHostPath(inputs.path, args.fromPath);
+        tx.update(environments).set({
+          path: args.toPath,
+          ...(row.claimPath !== null && sameHostPath(row.claimPath, args.fromPath) ? { claimPath: args.toPath } : {}),
+          ...(movedInputs ? { environmentProviderSelection: { ...selection!, inputs: { ...inputs, path: args.toPath } } } : {}),
+          updatedAt: Date.now(),
+        }).where(eq(environments.id, row.id)).run();
+        environmentIds.push(row.id);
+      } else if (target.status === "ready" && target.teardownStatus === null && (target.environmentProviderId === null || target.environmentProviderId === args.checkoutProviderId)) {
+        threadIds.push(...tx.update(threads).set({ environmentId: target.id }).where(eq(threads.environmentId, row.id)).returning({ id: threads.id }).all().map((thread) => thread.id));
+      }
+    }
+    return { environmentIds, threadIds };
+  }, { behavior: "immediate" });
+  if (changed === "busy") return "busy";
+  for (const id of changed.environmentIds) notifier.notifyEnvironment(id, ["metadata-changed"]);
+  for (const id of changed.threadIds) notifier.notifyThread(id, ["environment-changed"]);
+  return "moved";
 }
 
 export function bindEnvironmentPath(db: DbConnection, provisioning: EnvironmentRow, path: string): EnvironmentRow {

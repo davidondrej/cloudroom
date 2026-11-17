@@ -2735,22 +2735,30 @@ describe("acp bridge", () => {
     );
   });
 
-  it("denies client fs writes outside the workspace in accept-edits mode", async () => {
+  it("denies client fs reads and writes outside the workspace in accept-edits mode", async () => {
     const outsideDir = mkdtempSync(join(tmpdir(), "bb-acp-outside-"));
     const targetPath = join(outsideDir, "outside.txt");
+    const secretPath = join(outsideDir, "secret.txt");
+    writeFileSync(secretPath, "secret\n");
     try {
       const { providerThreadId } = await startThread({
         permissionMode: "accept-edits",
         permissionEscalation: "ask",
-        envVars: { FAKE_ACP_WRITE_PATH: targetPath },
+        envVars: {
+          FAKE_ACP_WRITE_PATH: targetPath,
+          FAKE_ACP_READ_PATH: secretPath,
+        },
       });
-      const turnId = sendTurnRequest("turn/start", providerThreadId, {
-        input: [{ type: "text", text: "write-file", mentions: [] }],
-      });
-      await waitForResponse(turnId);
-      await waitForTurnCompleted();
+      for (const [index, text] of ["write-file", "read-file"].entries()) {
+        const turnId = sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text, mentions: [] }],
+        });
+        await waitForResponse(turnId);
+        await waitFor(() => threadEventsOfType("turn/completed")[index], text);
+      }
 
       expect(agentMessageTexts()).toContain("write:denied");
+      expect(agentMessageTexts()).toContain("read:denied");
       expect(existsSync(targetPath)).toBe(false);
     } finally {
       rmSync(outsideDir, { recursive: true, force: true });

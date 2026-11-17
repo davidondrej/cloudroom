@@ -1321,6 +1321,10 @@ function buildSessionTrackingHooks(
   };
 }
 
+/** The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+ *  20261117-113618). Never on commits. Cloud uses the same line: `PR_FOOTER` in core/src/runtime/claude.rs. */
+const PR_FOOTER = "Built with [Cloudroom](https://cloudroom.dev)";
+
 function buildTrackedSessionOptions(
   params: SessionConstructionParams,
   env: NodeJS.ProcessEnv,
@@ -1337,7 +1341,7 @@ function buildTrackedSessionOptions(
   if (params.stripAiCoAuthorsEnabled !== false) {
     sessionOptions.settings = {
       ...(typeof sessionOptions.settings === "object" ? sessionOptions.settings : {}),
-      attribution: { commit: "", pr: "" },
+      attribution: { commit: "", pr: PR_FOOTER },
     };
   }
   if (params.commandGuardEnabled !== false) {

@@ -295,6 +295,9 @@ export async function startThread(
       disallowedTools: command.disallowedTools,
       instructionMode: command.instructionMode,
       ...(command.fork ? { fork: command.fork } : {}),
+      ...(command.replacesProviderThreadId
+        ? { replacesProviderThreadId: command.replacesProviderThreadId }
+        : {}),
     });
     return result;
   } catch (error) {

@@ -27,6 +27,8 @@ describe("decideGate", () => {
       name: "com.apple.TextEdit",
     });
     expect(decideGate({ tool: "get_desktop_state", input: {} })).toEqual({ kind: "screen" });
+    for (const tool of ["clipboard_read", "clipboard_write"])
+      expect(decideGate({ tool, input: { pid: 42 } }).kind).toBe("clipboard");
     expect(decideGate({ tool: "set_config", input: {} }).kind).toBe("error");
   });
 });
@@ -97,6 +99,34 @@ it("keeps an approval saved with the bundle ID in another case", async () => {
     session: expect.any(String),
     shotsKey: "thr_1",
   });
+});
+
+// #1960: an approved clipboard read needs no Accessibility and no app lock.
+it("lets approved threads read the clipboard without Accessibility", async () => {
+  const status = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: false, screenRecording: true },
+  };
+  const replies: Record<string, unknown> = {
+    prepare: { ...status, installMs: null },
+    status,
+    call: { exitCode: 0, stdout: "", stderr: "", driverExits: 0 },
+  };
+  const fake = createFakePluginHost({
+    sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+    experimental_callHostRpc: ({ method }) => replies[method],
+  });
+  const clipboard = { key: "clipboard", name: "the clipboard" };
+  await fake.bb.storage.kv.set("always-allowed", [clipboard]);
+  await computerUsePlugin(fake.bb);
+  const read = ["call", "clipboard_read", "{}"];
+  for (const threadId of ["thr_1", "thr_2"])
+    expect((await fake.harness.runCli(read, { threadId })).exitCode).toBe(0);
 });
 
 // Cua Driver 0.35.2's exact_result for #1506: focused, but a 41 px Chrome helper is front in-process.

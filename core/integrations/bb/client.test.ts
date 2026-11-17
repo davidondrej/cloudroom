@@ -613,14 +613,18 @@ test("times out a stalled command without resubmitting", async (t) => {
 });
 
 test("a VM command answer cut off after HTTP 200 is a retryable dropped connection, not a rejection", async (t) => {
-  const service = await fixture((_req, res) => {
+  const bodies: unknown[] = [];
+  const service = await fixture((_req, res, body) => {
+    bodies.push(body);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.write('{"code":0,"stdout":"');
     setTimeout(() => res.socket?.destroy(), 20);
   });
   t.after(() => service.close());
-  await assert.rejects(service.client.runOnVm({ command: "true", stdin: "" }), (error: unknown) =>
+  await assert.rejects(service.client.runOnVm({ command: "true", stdin: "", keep: true }), (error: unknown) =>
     error instanceof CloudroomConnectionError && error.retryable && /answer was cut off/.test(error.message));
+  // `keep` goes in the query: older Cores refuse unknown body fields, and would fail every clone (#1970).
+  assert.deepEqual([service.requests, bodies], [["POST /v1/vm/run?keep=true"], [{ command: "true", stdin: "" }]]);
 });
 
 test("reads core status without exposing private fields as client configuration", async (t) => {

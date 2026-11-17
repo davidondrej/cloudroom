@@ -12,11 +12,15 @@ use axum::{
     routing::get,
 };
 use serde_json::{Value, json};
-use std::{io, sync::Arc};
+use std::{io, sync::Arc, time::Duration};
 
 const USAGE: &str = "room-cli status
 room-cli provider list
 room-cli provider models PROVIDER";
+
+/// How long `status` waits for the website's list of children in sandboxes of their own before it answers without
+/// them: the thread's own state must come back fast, even while the website is slow (#1977).
+const CHILDREN_WAIT: Duration = Duration::from_secs(5);
 
 /// Served on the agent-only socket, next to the `thread` commands.
 pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
@@ -33,7 +37,7 @@ async fn status(
 ) -> Result<Json<Value>, Failure> {
     let id = caller(&m, peer, "status")?;
     let mut children = m.children(&id, None, false).await;
-    relay::own_children(&m, &id, false, &mut children).await;
+    relay::own_children(&m, &id, false, &mut children, CHILDREN_WAIT).await;
     let mut answer = json!({"thread":m.thread(&id),"childThreads":children["children"]});
     // Children in sandboxes of their own are missing while the website can't be reached.
     if children["note"].is_string() {
@@ -146,8 +150,9 @@ pub fn on_computer(command: &str) -> String {
     )
 }
 
-async fn print(path: &str) -> io::Result<i32> {
-    let answer = crate::mac::request(crate::mac::SOCKET, "GET", path, None).await?;
+async fn print(path: &str, limit: Duration) -> io::Result<i32> {
+    let answer = crate::mac::request_within(crate::mac::SOCKET, "GET", path, None, Some(limit));
+    let answer = answer.await?;
     println!("{answer}");
     Ok(0)
 }
@@ -155,7 +160,7 @@ async fn print(path: &str) -> io::Result<i32> {
 /// `room-cli status`. `--json` is accepted and ignored because the answer is always JSON.
 pub async fn status_cli(args: &[String]) -> io::Result<i32> {
     match args.iter().find(|word| *word != "--json") {
-        None => print("/thread").await,
+        None => print("/thread", crate::mac::QUICK).await,
         Some(word) => {
             println!("{USAGE}");
             Ok(if matches!(word.as_str(), "--help" | "-h") {
@@ -175,8 +180,10 @@ pub async fn provider_cli(args: &[String]) -> io::Result<i32> {
         .filter(|word| *word != "--json")
         .collect();
     match words.as_slice() {
-        ["list"] => print("/providers").await,
-        ["models", id] if !id.starts_with('-') => print(&format!("/providers/{id}/models")).await,
+        ["list"] => print("/providers", crate::mac::QUICK).await,
+        ["models", id] if !id.starts_with('-') => {
+            print(&format!("/providers/{id}/models"), crate::mac::READ).await
+        }
         _ => {
             println!("{USAGE}");
             let help = words.iter().any(|word| matches!(*word, "--help" | "-h"));

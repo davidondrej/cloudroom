@@ -92,6 +92,8 @@ export const turnRequestEventDataSchema = z.object({
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
   senderThreadId: z.string().nullable(),
+  /** Where the request came from (`desktop`, `web`, `mobile`, `api`), so telemetry can tell a person from a script. */
+  appSurface: z.string().optional(),
   systemMessageKind: systemMessageKindSchema.optional(),
   systemMessageSubject: systemMessageSubjectSchema.nullable().optional(),
   input: z.array(promptInputSchema),
@@ -137,6 +139,8 @@ export const turnRequestRejectedEventDataSchema = z.object({
 export const systemErrorEventDataSchema = z
   .object({
     code: z.string().optional(),
+    /** The host's own code under a generic `code` (`path_not_found` under `thread_command_failed`), for telemetry. */
+    cause: z.string().optional(),
     message: z.string(),
     detail: z.string().optional(),
     reconnectAttempt: z.number().int().positive().optional(),

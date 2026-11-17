@@ -2,6 +2,21 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 157
+
+Animated grid while agents work (2026-11-17)
+
+### Changes
+
+- A small animated grid now shows next to "Working" and "Thinking", so you can see an agent is busy.
+- Sending a voice prompt on your phone leaves the message box empty.
+- Deleting a queued message in a Cloud thread is instant, and the deleted message is never sent.
+- Cloud Codex threads no longer lose replies that come after a follow-up message.
+- Messages to a thread whose agent login failed now wait, and switching its agent sends them again.
+- Loop templates have a compact repo picker, one line per repo.
+- On Windows, Cloudroom no longer flashes console windows during Git work and chat imports.
+- Security fixes.
+
 ## 156
 
 Start fresh when context fills up (2026-11-16)

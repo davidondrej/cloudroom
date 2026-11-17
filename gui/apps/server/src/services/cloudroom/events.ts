@@ -64,6 +64,10 @@ function turnStarted(db: DbQueryConnection, threadId: string, turnId: string): b
   return Boolean(db.select({ id: events.id }).from(events).where(and(eq(events.threadId, threadId), eq(events.turnId, turnId), eq(events.type, "turn/started"))).get());
 }
 
+function lastStartedTurn(db: DbQueryConnection, threadId: string): string | null {
+  return db.select({ turnId: events.turnId }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "turn/started"))).orderBy(desc(events.sequence)).limit(1).get()?.turnId ?? null;
+}
+
 const CHILD_NOTICE = /^\[Cloudroom\] Child thread (?:"(.*)" \((\S+)\)|(\S+)) (completed:|was interrupted\.|failed or)/;
 
 function childNotice(db: DbQueryConnection, saved: Binding, request: Command, text: unknown) {
@@ -275,6 +279,8 @@ export function projectRecords(
   return db.transaction((tx) => {
     // The newest streamed piece, not yet written, so the next piece can join it.
     const held: { piece: AppendStoredThreadEventArgs | null } = { piece: null };
+    // Where Codex output goes for the newest request, looked up once per request and started turn, not per frame.
+    let codexTurn: { request: string; turn: string | null } | null = null;
     const takeHeld = () => {
       const piece = held.piece;
       held.piece = null;
@@ -410,7 +416,7 @@ export function projectRecords(
         contextWindowUsage: { usedTokens: used, modelContextWindow: total, estimated: harness === "pi" },
       });
       // Core reads usage after the turn ends, so a follow-up may already own saved.turnId. Credit the last started turn.
-      const usageTurn = tx.select({ turnId: events.turnId }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "turn/started"))).orderBy(desc(events.sequence)).limit(1).get()?.turnId;
+      const usageTurn = lastStartedTurn(tx, threadId);
       if (data.tokens && data.lastUsage && usageTurn) {
         const totals = object.parse(data.tokens);
         const last = object.parse(data.lastUsage);
@@ -533,10 +539,14 @@ export function projectRecords(
       const parsed = nativeFrame.safeParse(JSON.parse(record.native));
       if (parsed.success && saved.nativeId && saved.turnId) {
         const { method, params = {} } = parsed.data;
-        const late = method !== "turn/started" && method !== "error" && !method.startsWith("thread/goal/") && !turnStarted(tx, threadId, saved.turnId);
+        // A follow-up can own saved.turnId before its turn starts while the turn before it still runs (shown idle
+        // meanwhile, or taken by Codex into that turn): that turn's output stays with it, never dropped (#2022).
+        if (codexTurn?.request !== saved.turnId) codexTurn = { request: saved.turnId, turn: turnStarted(tx, threadId, saved.turnId) ? saved.turnId : lastStartedTurn(tx, threadId) };
+        const turn = method === "turn/started" ? saved.turnId : codexTurn.turn;
+        const late = !turn && method !== "error" && !method.startsWith("thread/goal/");
         if ((!params.threadId || params.threadId === saved.nativeId) && !late) {
-          const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(saved.turnId) };
-          const itemId = (id: unknown) => `${saved.turnId}:${z.string().parse(id)}`;
+          const base = { threadId, providerThreadId: saved.nativeId, scope: turnScope(turn ?? saved.turnId) };
+          const itemId = (id: unknown) => `${turn ?? saved.turnId}:${z.string().parse(id)}`;
           if (method === "turn/started") {
             emit({ ...base, type: method });
             const request = command(tx, saved.turnId);
@@ -587,7 +597,7 @@ export function projectRecords(
             const error = object.parse(params.error);
             // Like Local, a started turn owns its errors (#949): a turn that recovers folds its retries into its work, and
             // a failed one ends on its error card, not on a stale Reconnecting row.
-            const scope = turnStarted(tx, threadId, saved.turnId) ? base.scope : threadScope();
+            const scope = turn === saved.turnId ? base.scope : threadScope();
             emit({ type: "system/error", scope, threadId, ...codexErrorFrameFields(z.string().parse(error.message), error, params.willRetry, codexOutage) });
           }
         }
@@ -603,6 +613,7 @@ export function projectRecords(
       else writes.push(args);
     }
     appendThreadEventsInTransaction(tx, writes);
+    if (record.kind === "rewind" || projected.some((event) => event.type === "turn/started")) codexTurn = null;
     saveBinding(tx, threadId, { cursor: record.sequence, error: null });
     return projected.map((event) => event.type);
     });

@@ -140,7 +140,13 @@ async fn browser_path_streaming_upload_readiness_and_privacy() {
         assert_eq!(request(port, get("/", extra), b"").await.0, 403);
     }
     let attacker = "GET / HTTP/1.1\r\nHost: attacker.example\r\n\r\n".to_owned();
-    assert_eq!(request(port, attacker, b"").await.0, 403);
+    let (status, _, body) = request(port, attacker, b"").await;
+    assert!(status == 403 && !String::from_utf8_lossy(&body).contains(&host));
+    // Only a plain loopback visit learns the preview's address (#1879).
+    let loopback = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let (status, head, body) = request(port, loopback, b"").await;
+    assert!(status == 403 && head.starts_with("HTTP/1.1 403 Preview origin is not allowed\r\n"));
+    assert!(String::from_utf8_lossy(&body).contains(&format!("http://{host}/")));
     assert_eq!(request(port, get("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"), b"").await.0, 200);
     let chunked = format!("POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n");
     assert_eq!(request(port, chunked, b"").await.0, 411);

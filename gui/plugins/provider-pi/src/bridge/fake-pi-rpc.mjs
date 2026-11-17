@@ -37,7 +37,9 @@
  *   (tool_execution_start/end). A prompt while a run is live is queued and
  *   surfaces through `queue_update`, the way pi's follow-up queue does; it
  *   runs after the live run ends. `/hold` opens a run that never ends until
- *   `abort`; `/fail-run` ends the run with an assistant error.
+ *   `abort`; `/fail-run` ends the run with an assistant error;
+ *   `/overflow-fail` and `/overflow-retry` end it cut off ("length"), then
+ *   run pi's overflow compaction, which fails or retries the run.
  * - `abort`: ends a live run with stopReason "aborted".
  * - `--version` prints FAKE_PI_VERSION (default 0.84.0) and exits.
  * - `compact`: compaction_start/end {reason: "manual"}; before any turn ran
@@ -458,7 +460,9 @@ async function runPrompt(text) {
       .join("\n");
   }
   const failed = text === "/fail-run";
-  const reply = failed ? "" : toolMatch ? `Tool said: ${toolResultText}` : `Response to: ${text}`;
+  // A reply cut off by the context window; pi then compacts after agent_end.
+  const overflow = text === "/overflow-fail" || text === "/overflow-retry";
+  const reply = failed || overflow ? "" : toolMatch ? `Tool said: ${toolResultText}` : `Response to: ${text}`;
   const assistant = {
     role: "assistant",
     content: [{ type: "text", text: reply }],
@@ -467,7 +471,7 @@ async function runPrompt(text) {
     usage: { input: 12, output: 5, totalTokens: 17 },
     ...(failed
       ? { stopReason: "error", errorMessage: "scripted run failure" }
-      : { stopReason: "stop" }),
+      : { stopReason: overflow ? "length" : "stop" }),
   };
   event({ type: "message_start", message: { role: "assistant", content: [] } });
   if (!failed) {
@@ -487,6 +491,22 @@ async function runPrompt(text) {
   // stream gets it after, exactly pi's order.
   await emitExtensionEvent("agent_end", { messages });
   event({ type: "agent_end", messages });
+  if (overflow) {
+    // pi's overflow recovery: compact, then retry the run or give up.
+    const retry = text === "/overflow-retry";
+    event({ type: "compaction_start", reason: "overflow" });
+    event({
+      type: "compaction_end",
+      reason: "overflow",
+      aborted: false,
+      willRetry: retry,
+      ...(retry ? {} : { errorMessage: "Context overflow recovery failed: Summarization failed: scripted token cap" }),
+    });
+    if (retry) {
+      await runPrompt("retried after compaction");
+      return;
+    }
+  }
   isStreaming = false;
 }
 

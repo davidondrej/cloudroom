@@ -127,7 +127,12 @@ export type TelemetryEvent =
   | {
       name: "turn_failed";
       properties: {
-        execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true;
+        /** The provider's category, else Cloud's, else our own code (`host-disconnected`, `rpc-timeout`), else `unknown`. */
+        execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message: string | null; first_agent?: true;
+        /** The provider's HTTP status and code, when it gave them. */
+        http_status?: number; provider_code?: string;
+        /** `person` (typed in the app), `script` (API or CLI), `agent`, or `system`; absent when the request didn't record it. */
+        started_by?: string;
         /** A Cloud prompt Cloud refused (auth-failure-telemetry.ts): Core's code, this computer's logins, and the default agent. */
         cloud_code?: string | null; local_logins?: string; default_agent?: string;
       };
@@ -211,6 +216,11 @@ const noopTelemetryService: TelemetryService = {
 
 export function createNoopTelemetryService(): TelemetryService {
   return noopTelemetryService;
+}
+
+/** The surface of the request being handled (`desktop`, `web`, `mobile`, `api`); undefined outside a request. */
+export function currentAppSurface(): RequestAppSurface | undefined {
+  return telemetryAppSurfaceStorage.getStore();
 }
 
 export function runWithTelemetryAppSurface<T>(

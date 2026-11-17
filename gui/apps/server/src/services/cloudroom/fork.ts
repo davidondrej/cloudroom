@@ -361,11 +361,11 @@ export async function sourceCode(from: CloudroomClient, workspace: string, id: s
 async function localShell(script: string): Promise<string> {
   if (process.platform !== "win32") return (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout;
   const shell = await gitShell();
-  return (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024 })).stdout;
+  return (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024, windowsHide: true })).stdout;
 }
 
 async function localCode(workspace: string, id: string): Promise<Code | null> {
-  if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"]).then(() => false, () => true)) return null;
+  if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"], { windowsHide: true }).then(() => false, () => true)) return null;
   const windows = process.platform === "win32";
   return packCode({
     run: localShell,
@@ -448,7 +448,7 @@ async function forkWorktreeSource(
       "rev-parse",
       "--path-format=absolute",
       "--git-common-dir",
-    ]).then(
+    ], { windowsHide: true }).then(
       ({ stdout }) => {
         // Git before 2.31 prints the unknown --path-format flag back and exits 0: then act as before.
         const commonDir = stdout.trim();

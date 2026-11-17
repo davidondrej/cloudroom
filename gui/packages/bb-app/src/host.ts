@@ -175,9 +175,14 @@ export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Pro
   assertArtifacts(context, "host");
   let serverUrl = runtime.env.ROOM_SERVER_URL ?? context.serverUrl;
   if (proxyUrl !== null && (await refusesConnection(serverUrl))) serverUrl = proxyUrl;
+  // ROOM_CLI can lead back here, e.g. through ~/.local/bin/room-cli, so follow it at most once (#1929).
+  const override =
+    runtime.env.ROOM_CLI_REEXEC === "1"
+      ? undefined
+      : toOptionalString(runtime.env.ROOM_CLI);
   const launch = resolveBundledCliLaunch({
     args: cliArgs,
-    cliPath: toOptionalString(runtime.env.ROOM_CLI) ?? join(context.daemonBundleDir, "room-cli"),
+    cliPath: override ?? join(context.daemonBundleDir, "room-cli"),
     nodePath: process.execPath,
     platform: process.platform,
   });
@@ -186,6 +191,7 @@ export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Pro
     stdio: "inherit",
     env: {
       ...runtime.env,
+      ...(override === undefined ? {} : { ROOM_CLI_REEXEC: "1" }),
       BB_APP_VERSION: context.appVersion,
       ROOM_HOST_DAEMON_PORT: runtime.env.ROOM_HOST_DAEMON_PORT ?? String(context.daemonPort),
       ROOM_DATA_DIR: runtime.env.ROOM_DATA_DIR ?? context.dataDir,

@@ -315,6 +315,22 @@ it("accounts not in use keep their usage bars and reset times across a restart",
       c: weekly(0, null),
       d: weekly(55),
     });
+    // D's full login ended and Claude Code can't renew it (#1979): Sign in again, even after a restart.
+    await fs.writeFile(
+      path.join(home, "profiles", "pd", ".credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: {
+          accessToken: "d-full",
+          refreshToken: "r",
+          expiresAt: 1,
+          refreshTokenExpiresAt: 1,
+        },
+      }),
+    );
+    next = await next.harness.lifecycle.reload(plugin);
+    await vi.waitFor(async () =>
+      expect((await rows(next.harness)).d).toMatch(/Sign in again/),
+    );
     // Removing an account drops its saved bars.
     await next.harness.callRpc("accounts.remove", {
       provider: "claude-code",

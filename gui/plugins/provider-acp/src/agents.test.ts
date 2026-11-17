@@ -244,7 +244,7 @@ describe("acpProviderDeclaration", () => {
       reasoningProbePriorityModelIds: ["grok-4.6", "grok-4.5"],
       acpLaunchSpec: {
         command: "cursor-agent",
-        args: ["acp"],
+        args: ["--disable-project-configs", "acp"],
         modelCli: {
           listArgs: ["--list-models"],
           primaryModels: [],

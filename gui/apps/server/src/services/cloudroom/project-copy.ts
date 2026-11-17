@@ -21,8 +21,9 @@ type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // New threads get a clone of the chosen branch (default branch if none) and `.env` files, or all files of a small project not on GitHub.
 // A GitHub project with no folder on the Mac (`localPath` null) is cloned only.
 // Teleport also brings the local branch and uncommitted work.
-/** `noEnv`: the thread's sandbox may not have the project's `.env` files (ADR 0342), so none are sent. */
-export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean };
+/** `noEnv`: the thread's sandbox may not have the project's `.env` files (ADR 0342), so none are sent. `resumed`: a copy
+ *  that goes on after a pause or an app restart, while the agent may already be working, so a move's edits go aside (#1970). */
+export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean; resumed?: boolean };
 
 const exec = promisify(execFile);
 // A stalled piece counts as dropped, so the retry sends it again.
@@ -37,6 +38,8 @@ export const SKIPPED = new Set(["node_modules", ".git", ".venv", "venv", ".next"
 // Running copies, by copy key, with their thread.
 const copying = new Map<string, string>();
 export const FAILURE_NOTE = ".cloudroom/project-copy-failed.txt";
+// Next to the folder: `room-cli files wait` let the agent go ahead, so it may be working in it. The app never removes it (#1970).
+const GAVE_UP = ".cloudroom-files-gave-up";
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** The Core workspace and folder a project's Cloud threads use. */
@@ -112,8 +115,10 @@ export function planNewProjectCopy(deps: Deps, client: CloudroomClient, threadId
 }
 
 /** Like planProjectCopy, but a sandbox that can't be reached, or a folder another copy is filling, throws instead of
- *  reading as nothing left to copy. */
-export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = workspace, teleport = false, branch, signal }: { localPath?: string; key?: string; teleport?: boolean; branch?: string; signal?: AbortSignal } = {}): Promise<ProjectCopyJob | null> {
+ *  reading as nothing left to copy. `resumed`: a move's copy an app restart cut off, which goes on in a folder that already
+ *  has files too, but only while its status still reads `copying`: older apps wrote none for a move. Its clone isn't
+ *  repeated once it landed (#1970). */
+export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = workspace, teleport = false, resumed = false, branch, signal }: { localPath?: string; key?: string; teleport?: boolean; resumed?: boolean; branch?: string; signal?: AbortSignal } = {}): Promise<ProjectCopyJob | null> {
   const project = getProject(deps.db, getThread(deps.db, threadId)?.projectId ?? "");
   if (!project) return null;
   if (copying.has(key)) throw new Error("Another copy is filling this project folder.");
@@ -125,13 +130,18 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   const check = existing && (await client.runOnVm({ command: `[ -z "$(ls -A -- ${quote(existing.path)} 2>/dev/null | grep -Fvx .cloudroom)" ]`, stdin: "" }, signal)).code;
   if (existing && check !== 0 && check !== 1) throw new CloudroomError(`Could not check the cloud project folder (exit code ${check}).`);
   const empty = !existing || check === 0;
-  if (!empty && teleport) return null;
-  const clone = empty && Boolean(repository);
+  if (!empty && teleport && !resumed) return null;
+  if (resumed) {
+    const status = existing ? (await client.runOnVm({ command: `[ "$(cat -- ${quote(`${existing.path}.cloudroom-files`)} 2>/dev/null)" = copying ]`, stdin: "" }, signal)).code : 1;
+    if (status !== 0 && status !== 1) throw new CloudroomError(`Could not check the cloud project copy (exit code ${status}).`);
+    if (status === 1) return null;
+  }
+  const clone = (empty || resumed) && Boolean(repository);
   // A home folder is never uploaded whole, since it holds other projects and logins (#1120).
   const copyAll = empty && !repository && !teleport && path !== null && !envRefusal(path, repository) && await smallProject(path);
   // A Cloud loop's run that didn't pick `.env` files passes none to its children and forks (keyFields in commands.ts).
   const noEnv = z.object({ no_env: z.boolean().optional() }).safeParse(JSON.parse(command(deps.db, `first_${threadId}`)?.input ?? "{}")).data?.no_env === true;
-  const job = { threadId, workspace, key, localPath: path, repository, clone, copyAll, teleport, ...(branch ? { branch } : {}), ...(noEnv ? { noEnv } : {}) };
+  const job = { threadId, workspace, key, localPath: path, repository, clone, copyAll, teleport, ...(branch ? { branch } : {}), ...(noEnv ? { noEnv } : {}), ...(resumed ? { resumed } : {}) };
   // A Mac folder that can't be read has no `.env` files to send, so it reads as nothing left, never as a reason to wait.
   return clone || copyAll || teleport || (path !== null && !noEnv && (await localFiles(path, "env").catch(() => [])).length) ? job : null;
 }
@@ -209,19 +219,27 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
   if (!cloned) report({ phase: "uploading", completed: 0, total: 0 });
   // A failed clone of a small project falls back to uploading it, like a project not on GitHub.
   const scope = job.teleport ? (job.localPath && homeFolder(job.localPath) ? "env" : cloned ? "changed" : "all") : job.copyAll || (cloneError && job.localPath && !envRefusal(job.localPath, job.repository) && await smallProject(job.localPath)) ? "all" : "env";
-  let partial: string | undefined;
+  let partial: string | undefined, late: string | undefined;
   if (job.localPath) {
     const folder = await mkdtemp(join(tmpdir(), "cloudroom-copy-"));
     const archive = join(folder, "project.tgz");
     try {
       const packed = await packProject(job.localPath, scope, archive, job.noEnv, job.repository);
       partial = packed.partial;
-      if (packed.files) await send(client, archive, target, scope !== "changed", report);
+      // Uncommitted edits replace checkout files only in a move's first, uninterrupted copy (#1970).
+      const edits = scope === "changed" && packed.files.length ? {
+        aside: `.cloudroom/local-edits/${new Date().toISOString().slice(0, 19).replaceAll(":", "-")}`,
+        env: packed.files.filter(isEnv),
+        apply: !job.resumed,
+      } : undefined;
+      if (packed.files.length && !(await send(client, archive, target, report, edits)) && edits)
+        late = `The uncommitted edits and \`.env\` files from the ${COMPUTER} arrived after you may have started working here${job.resumed ? " (the copy was cut off and resumed)" : ""}, so they replaced no file: they are in \`${edits.aside}\`, and only \`.env\` files missing here were added. Compare them with the checkout and apply what still fits.${partial ? ` ${partial}` : ""}`;
     } finally {
       await rm(folder, { recursive: true, force: true });
     }
   }
   if (cloneError) throw new Error(`The GitHub clone failed${scope === "all" && !partial ? ", so your files were copied without Git history" : ""}. ${cloneError}`);
+  if (late) throw new Error(late);
   return partial;
 }
 
@@ -268,7 +286,7 @@ export async function retry<T>(attempt: () => Promise<T>): Promise<T> {
 }
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
-  return await exec("git", ["-C", cwd, ...args], { maxBuffer: 256 * 1024 * 1024 }).then((result) => result.stdout, () => null);
+  return await exec("git", ["-C", cwd, ...args], { maxBuffer: 256 * 1024 * 1024, windowsHide: true }).then((result) => result.stdout, () => null);
 }
 
 /** Returns null once the clone is in place, or why it failed. gc.auto=0: auto-packing during `git log -S` in a blobless
@@ -277,6 +295,7 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
   const token = (await copyMacGithub(deps))
     ? await exec("gh", ["auth", "token", "--hostname", "github.com"], {
         timeout: 15_000,
+        windowsHide: true,
       }).then(
         (result) => result.stdout.trim(),
         () => "",
@@ -284,28 +303,37 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
     : "";
   const temporary = quote(`${target}.cloudroom-clone`);
   // Holds the clone's shell PID while it runs, so an answer the connection lost can be checked against what really happened.
+  // A clone a dropped request left running (#1970) ends before this one replaces its folder.
   const running = quote(`${target}.cloudroom-clone.pid`);
   const deadline = Date.now() + CLONE_TIMEOUT;
   const result = await client.runOnVm({
     command: [
-      `p=${running}; echo $$ > "$p"; trap 'rm -f -- "$p"' EXIT`,
+      // Never on itself: after a cold restart, a stale PID can be this shell's own.
+      `p=${running}; while q=$(cat -- "$p" 2>/dev/null) && [ "$q" != $$ ] && grep -qs cloudroom-clone "/proc/$q/cmdline"; do sleep 2; done`,
+      // A clone that already landed (a resumed copy) is not repeated.
+      `[ -e ${quote(`${target}/.git`)} ] && [ ! -e ${temporary} ] && exit 0`,
+      `echo $$ > "$p"; trap 'rm -f -- "$p"' EXIT`,
       "export GIT_TERMINAL_PROMPT=0",
       // `gh auth status` asks GitHub's API, so a used-up quota reads as a bad token (#1182). Log in only when gh has no token.
       token ? "{ gh auth token --hostname github.com || gh auth login --hostname github.com --with-token; gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
       `rm -rf -- ${temporary}`,
       `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { printf '\\035'; timeout 10 gh api user --jq .login 2>/dev/null; exit 1; }`,
       branch && branch !== "HEAD" ? `git -C ${temporary} checkout --quiet ${quote(branch)} 2>/dev/null || true` : "",
-      `mkdir -p -- ${quote(target)} && (shopt -s dotglob && mv -n -- ${temporary}/* ${quote(target)}/) || true`,
+      // Merged, never skipping a folder or replacing a file: Teleport may have put a file the chat mentioned (`src/new.ts`) in
+      // the folder already, and it wins over the clone's copy. Hard links are fast; a plain copy covers another disk.
+      `mkdir -p -- ${quote(target)} && { cp -a -l -n -- ${temporary}/. ${quote(target)}/ 2>/dev/null || cp -a -n -- ${temporary}/. ${quote(target)}/; } || true`,
       `rm -rf -- ${temporary}`,
       `test -e ${quote(`${target}/.git`)} || { echo 'The clone did not reach the project folder.' >&2; exit 1; }`,
     ].join("\n"),
     stdin: Buffer.from(token).toString("hex"),
+    keep: true,
   }, AbortSignal.timeout(CLONE_TIMEOUT)).catch((error: unknown) => {
     if (error instanceof CloudroomError && error.retryable) return error;
     throw error;
   });
-  // A proxy's 504 or a dropped connection loses the answer, not the clone, which goes on and can land later (#1524). So wait
-  // for its shell to end: a clone that landed is done, and only one that didn't fails as before, so no copy competes with it.
+  // A proxy's 504 or 524 or a dropped connection loses the answer, not the clone: Core keeps it running (`keep`, #1970) and it
+  // can land later (#1524). So wait for its shell to end: a clone that landed is done, and only one that didn't fails as
+  // before, so no copy competes with it. Older Cores end the clone with its request, so it is found dead.
   // Each check waits up to 44 s in the sandbox, under a proxy's timeout, since Core saves every VM command as a diagnostic row.
   if (result instanceof CloudroomError) {
     const check = `for _ in $(seq 22); do kill -0 "$(cat -- ${running} 2>/dev/null)" 2>/dev/null || { [ ! -e ${temporary} ] && [ -e ${quote(`${target}/.git`)} ]; exit; }; sleep 2; done; exit 3`;
@@ -416,34 +444,39 @@ async function* walk(root: string, folder: string): AsyncGenerator<string> {
 
 /** Lists and packs the files on the Mac. A full copy that fails here for any reason (too large, cloud-only Dropbox or
  *  iCloud files, unreadable files) packs only the `.env` files instead and says why. Clones and uncommitted edits never fall back. */
-async function packProject(root: string, scope: "all" | "changed" | "env", archive: string, noEnv = false, repository: string | null = null): Promise<{ files: number; partial?: string }> {
+async function packProject(root: string, scope: "all" | "changed" | "env", archive: string, noEnv = false, repository: string | null = null): Promise<{ files: string[]; partial?: string }> {
   // `.env` files other projects own stay here, and the agent is told why (#1120).
   const refused = noEnv ? undefined : envRefusal(root, repository);
   try {
     const listed = await localFiles(root, scope);
     const files = listed.filter(path => !(noEnv || refused) || !isEnv(path));
     if (files.length) await pack(root, files, archive);
-    return { files: files.length, ...(refused && files.length < listed.length ? { partial: refused } : {}) };
+    return { files, ...(refused && files.length < listed.length ? { partial: refused } : {}) };
   } catch (error) {
     if (scope !== "all" || noEnv || refused) throw error;
     const files = await localFiles(root, "env").catch(() => { throw error; });
     if (files.length) await pack(root, files, archive).catch(() => { throw error; });
     const reason = error instanceof Error ? error.message : String(error);
-    return { files: files.length, partial: `Only the \`.env\` files were copied, because the ${COMPUTER} could not pack the rest: ${reason}`.slice(0, 500) };
+    return { files, partial: `Only the \`.env\` files were copied, because the ${COMPUTER} could not pack the rest: ${reason}`.slice(0, 500) };
   }
 }
 
 export async function pack(root: string, files: string[], archive: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     let stderr = "";
-    const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"], timeout: PACK_TIMEOUT });
+    const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"], timeout: PACK_TIMEOUT, windowsHide: true });
     tar.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-300); });
     tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error(`Could not pack the project files${tar.killed ? ` within ${PACK_TIMEOUT / 60_000} minutes` : ""}. ${stderr.trim()}`.trim())));
     tar.stdin.end(files.map((path) => `${path}\0`).join(""));
   });
 }
 
-async function send(client: CloudroomClient, archive: string, target: string, keepExisting: boolean, report: (progress: ProjectCopyProgress) => void): Promise<void> {
+/** Unpacks the archive into the project folder, never replacing a file. With `edits` (Teleport's uncommitted edits), it
+ *  replaces checkout files, but only with `apply` and while `room-cli files wait` hasn't let the agent start: the status
+ *  still reads `copying` and no go-ahead is marked, under the folder's lock Core takes to mark one (older Cores mark
+ *  none). Otherwise the agent may be working, as a lost answer or a resumed copy can land hours later, so the archive
+ *  goes to `edits.aside` and only missing `.env` files are added; then it returns false (#1970). */
+async function send(client: CloudroomClient, archive: string, target: string, report: (progress: ProjectCopyProgress) => void, edits?: { aside: string; env: string[]; apply: boolean }): Promise<boolean> {
   const remote = `.cache/cloudroom/copy-${randomUUID()}.tgz`;
   try {
     const size = (await stat(archive)).size;
@@ -466,7 +499,18 @@ async function send(client: CloudroomClient, archive: string, target: string, ke
     } finally {
       await handle.close();
     }
-    await vm(client, `mkdir -p -- ${quote(target)} && tar -xzf ${remote} -C ${quote(target)}${keepExisting ? " --skip-old-files" : ""}; code=$?; rm -f ${remote}; exit $code`);
+    const t = quote(target);
+    const unpack = edits ? [
+      edits.apply ? `{ flock -x -w 60 9 && [ "$(cat -- ${quote(`${target}.cloudroom-files`)} 2>/dev/null)" = copying ] && [ ! -e ${quote(`${target}${GAVE_UP}`)} ] && { tar -xzf ${remote} -C ${t}; exit; }; } 9< ${t}` : "",
+      // A folder that ignores itself, so the edits never get committed by accident.
+      `a=${t}/${quote(edits.aside)}; mkdir -p -- "$a" && printf '*\\n' > "$a/../.gitignore" && tar -xzf ${remote} -C "$a" || exit 1`,
+      edits.env.length ? `tar -xzf ${remote} -C ${t} --skip-old-files -- ${edits.env.map(quote).join(" ")} || exit 1` : "",
+      "exit 3",
+    ].join("\n") : `tar -xzf ${remote} -C ${t} --skip-old-files`;
+    const { code, stderr } = await client.runOnVm({ command: `mkdir -p -- ${t} && (\n${unpack}\n); code=$?; rm -f ${remote}; exit $code`, stdin: "" });
+    if (code === 3 && edits) return false;
+    if (code !== 0) throw new Error(Buffer.from(stderr, "hex").toString().trim() || `Cloud command failed (${code})`);
+    return true;
   } finally {
     await client.runOnVm({ command: `rm -f ${remote}`, stdin: "" }).catch(() => {});
   }

@@ -164,6 +164,8 @@ enum Group {
 pub struct Workload {
     group: Group,
     paused: watch::Sender<bool>,
+    /// The agent account (uid, gid), whose write counters Core may read as that account (`written`).
+    agent: Option<(u32, u32)>,
 }
 
 /// A process group's disk writes, and the command line of its heaviest member.
@@ -194,7 +196,11 @@ impl Workload {
             None => Group::Marked(id),
         };
         let (paused, _) = watch::channel(false);
-        Ok(Self { group, paused })
+        Ok(Self {
+            group,
+            paused,
+            agent: Some((policy.agent_uid, policy.agent_gid)),
+        })
     }
     pub fn attach(&self, command: &mut Command, policy: &Policy) -> io::Result<()> {
         let (uid, gid) = (policy.agent_uid, policy.agent_gid);
@@ -280,20 +286,11 @@ impl Workload {
     /// The process group, other than the harness's own, that wrote the most to disk: a tool command, never the
     /// harness or its helpers. The youngest group wins ties. None when nothing but the harness remains.
     pub fn top_writer(&self, harness: u32) -> io::Result<Option<Writer>> {
-        let pids = self.pids()?;
-        let own_group = stat(harness as i32).map(|(_, group, _)| group);
+        let tools = self.tools(harness)?;
+        let bytes = written(tools.iter().map(|(pid, ..)| *pid).collect(), self.agent);
         let mut groups: std::collections::HashMap<i32, Vec<(i32, u64, u64)>> = Default::default();
-        for pid in pids {
-            if let Some((_, group, started)) = stat(pid)
-                && pid != harness as i32
-                && Some(group) != own_group
-                && !helper(pid)
-            {
-                groups
-                    .entry(group)
-                    .or_default()
-                    .push((pid, written(pid), started));
-            }
+        for ((pid, group, started), bytes) in tools.into_iter().zip(bytes) {
+            groups.entry(group).or_default().push((pid, bytes, started));
         }
         let Some(members) = groups.into_values().max_by_key(|m| {
             (
@@ -318,6 +315,26 @@ impl Workload {
             pids: members.iter().map(|p| p.0).collect(),
             command,
         }))
+    }
+    /// Kills every tool command group, leaving the harness and its helpers: a stop on a full disk then wakes only the
+    /// agent, never what filled the disk (#606). Never the virtual screen or the shared browser, which other agents use.
+    pub fn stop_commands(&self, harness: u32) -> io::Result<()> {
+        for (pid, ..) in self.tools(harness)? {
+            if !desktop(pid) {
+                signal(pid, SIGKILL);
+            }
+        }
+        Ok(())
+    }
+    /// Its processes outside the harness's own group, other than helpers (tool commands): pid, group, start time.
+    fn tools(&self, harness: u32) -> io::Result<Vec<(i32, i32, u64)>> {
+        let own_group = stat(harness as i32).map(|(_, group, _)| group);
+        Ok((self.pids()?.into_iter())
+            .filter_map(|pid| stat(pid).map(|(_, group, started)| (pid, group, started)))
+            .filter(|(pid, group, _)| {
+                *pid != harness as i32 && Some(*group) != own_group && !helper(*pid)
+            })
+            .collect())
     }
     pub fn terminate(&self) -> io::Result<()> {
         match &self.group {
@@ -635,15 +652,70 @@ fn stat(pid: i32) -> Option<(u32, i32, u64)> {
         fields.get(19)?.parse().ok()?,
     ))
 }
-/// Bytes a process sent to disk. Zero when unreadable: another account's counters need ptrace rights.
-fn written(pid: i32) -> u64 {
-    fs::read_to_string(format!("/proc/{pid}/io"))
-        .ok()
-        .and_then(|io| {
-            io.lines()
-                .find_map(|line| line.strip_prefix("write_bytes: ")?.parse().ok())
+/// Processes' disk writes, zero where unreadable. The agent account's counters need ptrace rights, which Core lacks when it runs as another
+/// account (cgroups): those are read on a short-lived thread whose file system identity is the agent's (CAP_SETUID,
+/// CAP_SETGID), so no other thread's identity or capabilities change. Never as anyone else, root included (#606).
+fn written(pids: Vec<i32>, agent: Option<(u32, u32)>) -> Vec<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fn read(pid: i32) -> Option<u64> {
+        let io = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+        io.lines()
+            .find_map(|line| line.strip_prefix("write_bytes: ")?.parse().ok())
+    }
+    let mut bytes: Vec<_> = pids.iter().map(|pid| read(*pid)).collect();
+    let Some((uid, gid)) = agent else {
+        return bytes.into_iter().map(Option::unwrap_or_default).collect();
+    };
+    let agents: Vec<_> = (pids.iter().zip(&bytes))
+        .filter(|(pid, b)| {
+            b.is_none() && fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid)
         })
-        .unwrap_or(0)
+        .map(|(pid, _)| *pid)
+        .collect();
+    // A thread that can't start (the process limit) leaves them unread, never panics the disk guard.
+    let read_as_agent = (!agents.is_empty())
+        .then(|| std::thread::Builder::new().spawn(move || read_as(uid, gid, &agents, read)))
+        .and_then(Result::ok);
+    if let Some(read_as_agent) = read_as_agent {
+        for (pid, found) in read_as_agent.join().unwrap_or_default() {
+            if let Some(i) = pids.iter().position(|p| *p == pid) {
+                bytes[i] = found;
+            }
+        }
+    }
+    bytes.into_iter().map(Option::unwrap_or_default).collect()
+}
+/// Reads `pids` with this thread's file system identity set to `uid`/`gid`, then sets it back and restores the
+/// process's dumpable flag, which a changed identity clears and crash dumps need. Only on a thread of its own.
+#[cfg(target_os = "linux")]
+fn read_as(
+    uid: u32,
+    gid: u32,
+    pids: &[i32],
+    read: fn(i32) -> Option<u64>,
+) -> Vec<(i32, Option<u64>)> {
+    unsafe extern "C" {
+        fn setfsuid(uid: u32) -> i32;
+        fn setfsgid(gid: u32) -> i32;
+        fn prctl(option: i32, ...) -> i32;
+    }
+    const PR_GET_DUMPABLE: i32 = 3;
+    const PR_SET_DUMPABLE: i32 = 4;
+    let dumpable = unsafe { prctl(PR_GET_DUMPABLE) };
+    let (own_gid, own_uid) = unsafe { (setfsgid(gid), setfsuid(uid)) };
+    let found = pids.iter().map(|pid| (*pid, read(*pid))).collect();
+    unsafe {
+        setfsuid(own_uid as u32);
+        setfsgid(own_gid as u32);
+        if (0..=1).contains(&dumpable) {
+            prctl(PR_SET_DUMPABLE, dumpable as std::ffi::c_ulong);
+        }
+    }
+    found
+}
+#[cfg(not(target_os = "linux"))]
+fn read_as(_: u32, _: u32, _: &[i32], _: fn(i32) -> Option<u64>) -> Vec<(i32, Option<u64>)> {
+    Vec::new()
 }
 fn signal(pid: i32, number: i32) {
     send(pid, number);
@@ -942,6 +1014,7 @@ bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
         let workload = Workload {
             group: Group::Marked(id),
             paused: watch::channel(false).0,
+            agent: None,
         };
         let top = workload.top_writer(harness.id()).unwrap().unwrap();
         assert!(top.command.starts_with("sh -c i=0"), "{}", top.command);

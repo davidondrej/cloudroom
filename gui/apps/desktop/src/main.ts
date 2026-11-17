@@ -79,6 +79,8 @@ import {
   isAppWindowMainFrame,
   isHttpOrigin,
   isSensitiveAppSender,
+  WINDOWS_OCCLUSION_FEATURE,
+  withDisabledFeature,
 } from "./desktop-app-window-policy.js";
 import { createLocalViewUrl, STARTUP_RETRY_CHANNEL } from "./local-view.js";
 import { installApplicationMenu } from "./menu.js";
@@ -2669,6 +2671,17 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
 }
 
 async function runDesktopApp(): Promise<void> {
+  // Must run before the first await: Electron reads feature switches once the main script's
+  // synchronous part has finished.
+  if (process.platform === "win32") {
+    app.commandLine.appendSwitch(
+      "disable-features",
+      withDisabledFeature(
+        app.commandLine.getSwitchValue("disable-features"),
+        WINDOWS_OCCLUSION_FEATURE,
+      ),
+    );
+  }
   if (app.isPackaged) {
     applyPackagedDesktopRuntimeEnv({ env: process.env, homeDir: homedir() });
   }

@@ -416,9 +416,19 @@ async fn read_head(
     }
 }
 
+/// Text after a newline in `message` goes only into the page, like the `explain` of Python's `send_error`.
 fn error_page(status: u16, message: &str, head_only: bool) -> Vec<u8> {
+    let (message, explain) =
+        message
+            .split_once('\n')
+            .map_or((message, String::new()), |(message, explain)| {
+                (
+                    message,
+                    format!("<p>Error code explanation: {status} - {explain}.</p>"),
+                )
+            });
     let body = format!(
-        "<!DOCTYPE HTML>\n<html><head><title>Error response</title></head><body><h1>Error response</h1><p>Error code: {status}</p><p>Message: {message}.</p></body></html>\n"
+        "<!DOCTYPE HTML>\n<html><head><title>Error response</title></head><body><h1>Error response</h1><p>Error code: {status}</p><p>Message: {message}.</p>{explain}</body></html>\n"
     );
     let mut out = format!("HTTP/1.1 {status} {message}\r\nConnection: close\r\nContent-Type: text/html;charset=utf-8\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     if !head_only {
@@ -478,6 +488,19 @@ async fn forward(
     let origin = request.get("origin");
     let own = format!("http://{expected}");
     if request.all("host") != [expected.as_str()] || origin.is_some_and(|origin| origin != own) {
+        // A plain loopback visit, like a Windows browser expecting an app in WSL on the same port, learns why (#1879).
+        let port = info.local_port;
+        let direct = ["localhost", "127.0.0.1", "[::1]"]
+            .iter()
+            .any(|host| request.all("host") == [format!("{host}:{port}").as_str()]);
+        if origin.is_none() && direct {
+            return deny(
+                403,
+                &format!(
+                    "Preview origin is not allowed\nCloudroom's preview helper uses this port. Open http://{expected}/ for the preview, or run your own app on another port"
+                ),
+            );
+        }
         return deny(403, "Preview origin is not allowed");
     }
     let navigation = ["GET", "HEAD"].contains(&method)
