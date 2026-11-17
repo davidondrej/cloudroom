@@ -8,6 +8,7 @@ import {
   threadActivityStateSchema,
   threadRuntimeStateSchema,
   threadStatusSchema,
+  threadExecutionObservationSchema,
 } from "./thread.js";
 
 export const THREAD_CHANGE_KINDS = [
@@ -199,6 +200,7 @@ export function realtimeSubscriptionTargetKey(
 
 export const threadStatusChangeMetadataSchema = z
   .object({
+    execution: threadExecutionObservationSchema.optional(),
     status: threadStatusSchema,
     runtime: threadRuntimeStateSchema,
     activity: threadActivityStateSchema,

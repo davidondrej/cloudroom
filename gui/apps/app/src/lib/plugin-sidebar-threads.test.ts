@@ -168,3 +168,30 @@ describe("toPluginSidebarThread", () => {
     expect(toPluginSidebarThread(makeThread()).host).toBeNull();
   });
 });
+
+it("exposes unknown execution settings honestly instead of guessing from the provider", () => {
+  expect(toPluginSidebarThread(makeThread({ status: "active" }))).toMatchObject(
+    {
+      execution: {
+        status: "active",
+        source: "thread",
+        freshness: "unknown",
+        observedAt: null,
+        model: null,
+        effort: null,
+      },
+    },
+  );
+});
+
+it("groups children even when the parent has not been delivered", async () => {
+  const { groupPluginSidebarChildren } =
+    await import("./plugin-sidebar-threads");
+  const child = toPluginSidebarThread(
+    makeThread({ id: "child", parentThreadId: "absent-parent" }),
+  );
+  const root = toPluginSidebarThread(makeThread({ id: "root" }));
+  expect(groupPluginSidebarChildren([child, root])).toEqual({
+    "absent-parent": [child],
+  });
+});

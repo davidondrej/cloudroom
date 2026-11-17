@@ -33,6 +33,13 @@ function removeProjectFromSidebarNavigation(
 ): SidebarBootstrapResponse {
   return {
     ...currentNavigation,
+    ...(currentNavigation.runningThreads
+      ? {
+          runningThreads: currentNavigation.runningThreads.filter(
+            (thread) => thread.projectId !== projectId,
+          ),
+        }
+      : {}),
     projects: currentNavigation.projects.filter(
       (project) => project.id !== projectId,
     ),
