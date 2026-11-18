@@ -1808,6 +1808,10 @@ function ProjectListComponent({
   const pinnedSection: BuiltInSidebarSectionOptions = {
     activity: getCollapsedChildActivity(pinnedSectionThreads, draftThreadIds),
     collapsedThreads: pinnedSectionThreads,
+    collapsedNavigation: pinnedRootThreads.map((thread) => ({
+      threadId: thread.id,
+      projectId: thread.projectId,
+    })),
     label: "Pinned",
     content: pinnedSectionContent,
     actions: renderSectionDisplayOptions("pinned", "Pinned"),

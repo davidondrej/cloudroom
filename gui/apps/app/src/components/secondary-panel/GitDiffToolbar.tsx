@@ -1,5 +1,5 @@
 import { useRef } from "react";
-import { useResizeObserver } from "usehooks-ts";
+import { useResizeObserver } from "@/hooks/useElementObservers";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
   COARSE_POINTER_COMPACT_ICON_BUTTON_CLASS,

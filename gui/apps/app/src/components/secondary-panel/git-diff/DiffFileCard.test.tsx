@@ -22,13 +22,9 @@ import { DiffFileCard } from "./DiffFileCard";
 import { makeDiffFileEntry } from "@/test/fixtures/diff-files";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
-vi.mock("usehooks-ts", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("usehooks-ts")>()),
-  useIntersectionObserver: () => ({
-    ref: () => {},
-    isIntersecting: true,
-    entry: undefined,
-  }),
+vi.mock("@/hooks/useElementObservers", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/hooks/useElementObservers")>()),
+  useIntersectionObserver: () => ({ ref: () => {}, isIntersecting: true }),
 }));
 
 const IMAGE_DATA_URL =

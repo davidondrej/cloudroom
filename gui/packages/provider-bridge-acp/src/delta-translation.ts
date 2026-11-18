@@ -12,6 +12,7 @@ import type {
   ProviderRuntimeEvent,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type {
+  ProviderErrorCategory,
   ThreadEventItemStatus,
   ThreadEventPlanStep,
   ThreadEventTurnStatus,
@@ -103,6 +104,13 @@ const ACP_PLAN_STEP_STATUS_BY_ENTRY_STATUS = {
 } as const;
 
 const PLAN_STEPS_CHANNEL = "planSteps";
+// The agent's HTTP status says whose problem it is: the user's login, plan balance, or limit, not ours.
+const HTTP_STATUS_CATEGORY: Partial<Record<number, ProviderErrorCategory>> = {
+  401: "unauthorized",
+  402: "billing",
+  403: "unauthorized",
+  429: "rate-limit",
+};
 const RATE_LIMIT_PATTERN =
   /\b429\b|rate[ _-]?limit|too many requests|usage limit|free limit reached|clinepass limit|FreeUsageLimitError|PROMOTION_MODEL_LIMIT_REACHED|free-models-per-day|USAGE_LIMIT|hit your limit|out of usage|weekly (?:usage|pool)/iu;
 
@@ -878,19 +886,19 @@ export function createAcpDeltaTranslator(
     if (errorEnvelope.success) {
       clearThreadCalls(context);
       const detail = errorEnvelope.data.params?.message ?? "unknown error";
+      const status = errorEnvelope.data.params?.httpStatus;
+      const httpStatusCode = typeof status === "number" ? status : null;
+      const category =
+        (httpStatusCode === null ? undefined : HTTP_STATUS_CATEGORY[httpStatusCode]) ??
+        (RATE_LIMIT_PATTERN.test(detail) ? "rate-limit" : undefined) ??
+        (httpStatusCode === null ? undefined : "unknown");
       return [
         {
           kind: "provider.error",
           message: "Provider error",
           detail,
-          ...(RATE_LIMIT_PATTERN.test(detail)
-            ? {
-                errorInfo: {
-                  category: "rate-limit",
-                  providerCode: null,
-                  httpStatusCode: null,
-                },
-              }
+          ...(category
+            ? { errorInfo: { category, providerCode: null, httpStatusCode } }
             : {}),
           settlesTurn: true,
         },

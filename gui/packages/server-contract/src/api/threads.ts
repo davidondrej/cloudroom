@@ -684,12 +684,18 @@ export const updateThreadRequestSchema = z
     /** Another harness for this thread (ADR 0211); needs `model`. */
     providerId: z.string().min(1),
     model: z.string().min(1).nullable(),
+    /** Model shortcut: the named harness must still own this stopped session. */
+    idleSessionOnly: z.literal(true),
     reasoningLevel: reasoningLevelSchema.nullable(),
     visibility: threadVisibilitySchema,
     /** After a harness switch, the new agent continues the conversation right away. */
     resend: z.boolean(),
   })
   .partial()
+  .refine(
+    (value) => !value.idleSessionOnly || (value.providerId && typeof value.model === "string" && !value.resend),
+    "An idle-session model pick needs a harness and model and cannot resend.",
+  )
   .refine(
     (value) => value.providerId === undefined || typeof value.model === "string",
     "providerId needs a model",

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { BbPluginApi, PluginTurnFailedEvent } from "@get-bb/plugin-sdk";
+import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
@@ -9,6 +9,7 @@ import {
   claudePlanName,
   claudeSecret,
   claudeUsage,
+  type ClaudeUsage,
   localClaudeAccount,
   profileAccount,
   profileUsage,
@@ -41,6 +42,7 @@ import {
   type Provider,
   type UsageWindow,
 } from "./src/contract.js";
+import { afterUsage, limitMark, limitMarkSchema } from "./src/limit-mark.js";
 import { limitedThreads } from "./src/limited-threads.js";
 import { accountTelemetry, errorCode, type AddKind } from "./src/telemetry.js";
 import { prepareProfile, releaseProfile, startMcpSync } from "./src/profile.js";
@@ -51,7 +53,6 @@ const USAGE_EVERY_MS = 5 * 60_000;
 const IDLE_USAGE_TICKS = 12;
 const MAC_NEEDS_CLOUD =
   "Approve this Mac's Claude account for Cloud first: click Use on it in Settings → Agents → Accounts.";
-const DEFAULT_REST_MS = 60 * 60_000;
 const LOGIN_FAILED =
   "This account's Claude login stopped working. Sign in again.";
 
@@ -99,17 +100,6 @@ type Usage = {
   signInAgain: boolean;
   at: number;
 };
-
-function blockedUntil(
-  rateLimits: PluginTurnFailedEvent["rateLimits"],
-): number | null {
-  const windows = rateLimits?.windows ?? [];
-  const blocked = windows.filter((window) => window.status === "blocked");
-  const resets = (blocked.length > 0 ? blocked : windows).flatMap((window) =>
-    window.resetsAtMs === null ? [] : [window.resetsAtMs],
-  );
-  return resets.length === 0 ? null : Math.max(...resets);
-}
 
 // What the usage bars show: each one's name, whole percent, and reset time to the minute.
 const bars = (windows: UsageWindow[] = []) =>
@@ -179,7 +169,7 @@ export default async function plugin(room: BbPluginApi) {
     .catch({ "claude-code": [LOCAL], "acp-cursor": [LOCAL] })
     .parse(await kv.get("order:v1"));
   const limits = z
-    .record(z.string(), z.number())
+    .record(z.string(), limitMarkSchema)
     .catch({})
     .parse(await kv.get("limits:v1"));
   // Added Claude accounts whose full login failed here, and when: a Local turn Claude couldn't authenticate, or a login
@@ -209,11 +199,23 @@ export default async function plugin(room: BbPluginApi) {
   let inCloud = z.string().nullable().catch(null).parse(await kv.get("cloud:v1"));
   // The Mac's own Claude login, and the organization of the one-year token Cloud uses for it.
   let mac: MacClaude | null = (await localClaudeAccount()) ?? null;
+  const macLogin = () => (mac ? `${mac.email} ${mac.org ?? ""}` : null);
+  const limitKey = (provider: Provider, id: string) =>
+    provider === "claude-code" && id === LOCAL && mac
+      ? `claude-code:local:${macLogin()}`
+      : `${provider}:${id}`;
+  const oldLocal = limits["claude-code:local"];
+  if (mac && oldLocal !== undefined) {
+    limits[limitKey("claude-code", LOCAL)] ??= oldLocal;
+    delete limits["claude-code:local"];
+    await kv.set("limits:v1", limits);
+  }
   // Signing the Mac in or out can change the account in use; Cloud then follows it.
   const refreshMac = async () => {
     const read = await localClaudeAccount();
     if (read === undefined) return mac;
     const before = current("claude-code");
+    if (read?.email !== mac?.email || read?.org !== mac?.org) usage.delete(LOCAL);
     mac = read;
     if (current("claude-code") !== before) void changed();
     return mac;
@@ -266,10 +268,10 @@ export default async function plugin(room: BbPluginApi) {
         ),
       ),
     );
-  const threadAccount = new Map<string, string>();
+  const threadAccount = new Map<string, { id: string; key: string }>();
   // A helper call, such as thread naming, uses the account in use but has no thread to note.
-  const noteThreadAccount = (threadId: string | undefined, account: string) => {
-    if (threadId !== undefined) threadAccount.set(threadId, account);
+  const noteThreadAccount = (threadId: string | undefined, provider: Provider, id: string) => {
+    if (threadId !== undefined) threadAccount.set(threadId, { id, key: limitKey(provider, id) });
   };
   // A message that joins a running turn asks for the env again, but that turn keeps the Claude it began on until it
   // ends. Only a new turn notes its thread, so a late limit stays the old account's (#1300).
@@ -379,7 +381,8 @@ export default async function plugin(room: BbPluginApi) {
   const current = (provider: Provider): string =>
     provider === "codex" ? codexInUse : (ids(provider)[0] ?? LOCAL);
   const limitedUntil = (provider: Provider, id: string): number | null => {
-    const until = limits[`${provider}:${id}`];
+    const mark = limits[limitKey(provider, id)];
+    const until = typeof mark === "object" ? mark.until : mark;
     return until !== undefined && until > Date.now() ? until : null;
   };
   // Cloud keeps one Claude login (ADR 0197). The Mac's own login has no one-year token, so once Cloud is on
@@ -524,91 +527,130 @@ export default async function plugin(room: BbPluginApi) {
     }
   };
 
-  // `idle` reads a Claude account that isn't in use: a failed read keeps its saved bars and shows no error. "free"
-  // reads only when that uses no reply: with its full login, which lasts 8 hours after the account's last Local turn.
-  const refreshUsage = async (
-    account: Stored,
+  type ReadMode = "free" | "reply" | "failure";
+  const readAccountUsage = async (
+    account: Stored | typeof LOCAL,
+    mode: ReadMode | undefined,
+    previous: Usage | undefined,
+  ): Promise<ClaudeUsage | null> => {
+    if (account === LOCAL) {
+      const read = await profileUsage();
+      await refreshMac();
+      return read;
+    }
+    if (account.provider === "acp-cursor")
+      return { windows: await cursorUsage(await readCursorKey(account)), credits: null };
+    const profile = account.profile ? profilePath(account.profile) : undefined;
+    if (mode === "free" || mode === "failure") return profile ? profileUsage(profile) : null;
+    return claudeUsage(
+      await readSecret(account.id),
+      profile,
+      previous?.at && previous.windows.length ? previous : undefined,
+    );
+  };
+  const pendingReads = new Map<
+    string,
+    { mark: (typeof limits)[string] | undefined; mode?: ReadMode; done: Promise<void> }
+  >();
+  const refreshUsage = (
+    account: Stored | typeof LOCAL,
     force = false,
-    idle?: "free" | "reply",
-  ) => {
-    const previous = usage.get(account.id);
-    if (!force && previous && Date.now() - previous.at < USAGE_EVERY_MS) return;
-    const before = previous?.error ?? null;
-    // The read can take seconds: by then this run may be disposed, or the account removed.
-    const gone = () => disposed || !accounts.includes(account);
-    try {
-      const read =
-        idle === "free"
-          ? account.profile
-            ? await profileUsage(profilePath(account.profile))
-            : null
-          : account.provider === "acp-cursor"
-            ? { windows: await cursorUsage(await readCursorKey(account)), credits: null }
-            : await claudeUsage(
-                await readSecret(account.id),
-                account.profile ? profilePath(account.profile) : undefined,
-                // Only bars read since this start: saved ones may be days old, and would hide a failed read.
-                previous?.at && previous.windows.length ? previous : undefined,
-              );
-      if (!read || gone()) return;
-      const { loginEnded, ...fresh } = read;
-      // Bars the one-year token read say nothing about the Local login; only Sign in again or a good turn clears it.
-      if (loginEnded) {
-        await noteLoginFailed(
-          account.id,
-          loginFailed[account.id] ?? Date.now(),
-        );
-        // A free read has no bars then: the saved ones stay.
-        if (fresh.windows.length === 0) return;
+    mode?: ReadMode,
+  ): Promise<void> => {
+    const local = account === LOCAL;
+    const id = local ? LOCAL : account.id;
+    const key = limitKey(local ? "claude-code" : account.provider, id);
+    const mark = limits[key];
+    const pending = pendingReads.get(key);
+    if (pending && pending.mark === mark) {
+      // Reload after a failure must get its own observation after the baseline.
+      if (pending.mode === "failure" && mode !== "failure")
+        return pending.done.then(() => refreshUsage(account, force, mode));
+      if (pending.mode === mode || !force) return pending.done;
+    }
+    const previous = usage.get(id);
+    if (!force && previous && Date.now() - previous.at < USAGE_EVERY_MS) return Promise.resolve();
+    const stale = () =>
+      disposed ||
+      limits[key] !== mark ||
+      (local ? !mac || limitKey("claude-code", LOCAL) !== key : !accounts.includes(account)) ||
+      pendingReads.get(key)?.done !== done;
+    const load = async () => {
+      let read: ClaudeUsage | null;
+      try {
+        read = await readAccountUsage(account, mode, previous);
+        if (!read || stale()) return;
+        if (read.loginEnded) {
+          if (!local) await noteLoginFailed(id, loginFailed[id] ?? Date.now());
+          if (!read.windows.length || stale()) return;
+        }
+      } catch (error) {
+        if (mode || stale()) return;
+        usage.set(id, {
+          windows: previous?.windows ?? [],
+          credits: previous?.credits ?? null,
+          error: error instanceof Error ? error.message : String(error),
+          signInAgain: error instanceof SignInAgainError,
+          at: Date.now(),
+        });
+        if (usage.get(id)?.error !== previous?.error) await changed();
+        return;
       }
-      // The reply check reads only 5h and 7d. A model's limit it left out keeps its last reading until it resets.
+
       const kept = (previous?.windows ?? []).filter(
         (window) =>
           window.model &&
           (window.resetsAt ?? 0) > Date.now() &&
-          !fresh.windows.some((next) => next.label === window.label),
+          (!read.reportedModels || read.reportedModels.includes(window.model)) &&
+          !read.windows.some((next) => next.label === window.label),
       );
-      usage.set(account.id, {
-        ...fresh,
-        windows: [...fresh.windows, ...kept],
+      const windows = [...read.windows, ...kept];
+      usage.set(id, {
+        windows,
+        credits: read.credits,
         error: null,
         signInAgain: false,
         at: Date.now(),
       });
-    } catch (error) {
-      if (idle || gone()) return;
-      usage.set(account.id, {
-        windows: previous?.windows ?? [],
-        credits: previous?.credits ?? null,
-        error: error instanceof Error ? error.message : String(error),
-        signInAgain: error instanceof SignInAgainError,
-        at: Date.now(),
-      });
-    }
-    const measured = usage.get(account.id);
-    if (JSON.stringify(measured?.windows) !== JSON.stringify(previous?.windows))
-      await saveUsage();
-    if (
-      (measured?.error ?? null) !== before ||
-      !measured?.credits !== !previous?.credits
-    )
-      await changed();
-    // Open pages read again when a bar moved.
-    else if (bars(measured?.windows) !== bars(previous?.windows))
-      room.realtime.publish(ACCOUNTS_CHANGED, {});
+      const next = mark === undefined ? undefined : afterUsage(mark, read, mode === "failure");
+      if (next !== mark) {
+        if (next === null) {
+          delete limits[key];
+          limitedAt.delete(key);
+        } else if (next !== undefined) limits[key] = next;
+        await kv.set("limits:v1", limits);
+      }
+      if (!local && JSON.stringify(windows) !== JSON.stringify(previous?.windows))
+        await saveUsage();
+      if (
+        next !== mark ||
+        previous?.error ||
+        !read.credits !== !previous?.credits ||
+        bars(windows) !== bars(previous?.windows)
+      )
+        room.realtime.publish(ACCOUNTS_CHANGED, {});
+    };
+    const done: Promise<void> = load().finally(() => {
+      if (pendingReads.get(key)?.done === done) pendingReads.delete(key);
+    });
+    pendingReads.set(key, { mark, mode, done });
+    return done;
   };
   // A Claude check is a real 1-token reply that can open a 5-hour window,
   // so only the account in use is checked in the background. Cursor's usage is a plain read.
+  const readMacUsage = () =>
+    mac &&
+    (limitedUntil("claude-code", LOCAL) ||
+      (current("claude-code") === LOCAL && accounts.some((a) => a.provider === "claude-code")));
   const refreshAll = (force = false) =>
-    Promise.all(
-      accounts
+    Promise.all([
+      readMacUsage() ? refreshUsage(LOCAL, force) : undefined,
+      ...accounts
         .filter(
-          (account) =>
-            account.provider === "acp-cursor" ||
-            account.id === current("claude-code"),
+          (account) => account.provider === "acp-cursor" || account.id === current("claude-code"),
         )
         .map((account) => refreshUsage(account, force)),
-    );
+    ]);
   // Claude accounts not in use get a free read at start and every hour, one at a time. An account with no bars saved
   // yet (added before they were kept, or its first check failed) gets one reply at start, so its row isn't empty.
   const refreshIdle = async (fill = false) => {
@@ -713,7 +755,7 @@ export default async function plugin(room: BbPluginApi) {
     const using = current(provider);
     return shown(provider).map((id) => {
       const account = accounts.find((entry) => entry.id === id);
-      const measured = usage.get(id);
+      const measured = id === LOCAL && (provider !== "claude-code" || !readMacUsage()) ? undefined : usage.get(id);
       return {
         id,
         name: id === LOCAL ? localName(provider, localLogin) : (account?.name ?? null),
@@ -738,9 +780,21 @@ export default async function plugin(room: BbPluginApi) {
       };
     });
   };
-  const macLogin = () => (mac ? `${mac.email} ${mac.org ?? ""}` : null);
-  const claudeView = async (): Promise<AccountView[]> => {
+  const claudeView = async (refresh = false): Promise<AccountView[]> => {
     await refreshMac();
+    if (refresh) {
+      const active = current("claude-code");
+      await Promise.all([
+        ...accounts
+          .filter(
+            (a) =>
+              a.provider === "claude-code" &&
+              (a.id === active || (a.profile && limitedUntil("claude-code", a.id))),
+          )
+          .map((a) => refreshUsage(a, true, a.id === active ? undefined : "free")),
+        readMacUsage() ? refreshUsage(LOCAL, true) : undefined,
+      ]);
+    }
     const needsCloud = macNeedsCloud();
     return rows("claude-code", mac?.email ?? null, macLogin()).map((row) =>
       row.id === LOCAL && needsCloud ? { ...row, needsSignIn: true } : row,
@@ -966,7 +1020,7 @@ export default async function plugin(room: BbPluginApi) {
 
   const remove = async (provider: Provider, id: string) => {
     stored(id);
-    delete limits[`${provider}:${id}`];
+    delete limits[limitKey(provider, id)];
     if (provider === "codex") {
       await codex({ action: "remove", id });
       await kv.set("limits:v1", limits);
@@ -1034,7 +1088,7 @@ export default async function plugin(room: BbPluginApi) {
     cloud: boolean | undefined,
     threadId: string | undefined,
   ): Promise<{ following: Promise<string | null> | null }> => {
-    delete limits[`${provider}:${id}`];
+    if (provider !== "claude-code") delete limits[limitKey(provider, id)];
     // The thread it was picked from continues too: the user asked, even after a Stop or a limit this plugin
     // never noted.
     if (threadId)
@@ -1070,6 +1124,7 @@ export default async function plugin(room: BbPluginApi) {
     const following = provider === "acp-cursor" ? follow.cursor : follow.cloud;
     const account = accounts.find((entry) => entry.id === id);
     if (account) background(refreshUsage(account, true));
+    else if (provider === "claude-code" && id === LOCAL && mac) background(refreshUsage(LOCAL, true));
     await follow.resumed;
     const failed = cloud ? await following : null;
     if (failed) throw new Error(`Cloud didn't switch accounts: ${failed}`);
@@ -1079,7 +1134,8 @@ export default async function plugin(room: BbPluginApi) {
   room.rpc.register(
     accountsRpcContract,
     {
-      "accounts.list": ({ provider }) => views(provider),
+      "accounts.list": ({ provider, refresh }) =>
+        provider === "claude-code" && refresh ? claudeView(true) : views(provider),
       "accounts.use": async ({ provider, id, cloud, threadId, where }) => {
         const startedAt = Date.now();
         // Read before the switch changes them.
@@ -1353,7 +1409,7 @@ export default async function plugin(room: BbPluginApi) {
       noteOwnLogin(threadId, remote);
       await refreshMac();
       const id = current("claude-code");
-      noteThreadAccount(threadId, id);
+      noteThreadAccount(threadId, "claude-code", id);
       const account = accounts.find((entry) => entry.id === id);
       if (!account) return [];
       const reason = `Cloudroom account ${account.email ?? account.id}`;
@@ -1393,7 +1449,7 @@ export default async function plugin(room: BbPluginApi) {
     "acp-cursor",
     async (context: { threadId?: string }) => {
       const id = current("acp-cursor");
-      noteThreadAccount(context.threadId, id);
+      noteThreadAccount(context.threadId, "acp-cursor", id);
       const account = accounts.find((entry) => entry.id === id);
       const key = account ? await readCursorKey(account).catch(() => null) : null;
       if (!account || !key) return [];
@@ -1417,7 +1473,7 @@ export default async function plugin(room: BbPluginApi) {
     // token, and an organization block is no login problem.
     if (category === "unauthorized") {
       const account = accounts.find(
-        (entry) => entry.id === threadAccount.get(event.threadId),
+        (entry) => entry.id === threadAccount.get(event.threadId)?.id,
       );
       if (
         account?.profile &&
@@ -1433,10 +1489,10 @@ export default async function plugin(room: BbPluginApi) {
     if (!provider.success) return;
     // The machine's own login hit its limit: no account here is limited, and no switch here moves the thread.
     if (onOwnLogin(thread)) return;
-    // Cloud threads use the selected account, so they have no entry here. A Local thread without one started its turn
-    // before this plugin did (a restart): the account it ran on is unknown, so no account is marked limited.
-    const ran = threadAccount.get(event.threadId);
-    const used = ran ?? current(provider.data);
+    // Local turns started before plugin startup have no known account. Cloud uses the selected login.
+    const observed = threadAccount.get(event.threadId);
+    const ran = observed?.key.startsWith(`${provider.data}:`) ? observed : undefined;
+    const used = ran?.id ?? current(provider.data);
     const several =
       provider.data === "codex"
         ? codexAccounts > 0
@@ -1445,18 +1501,15 @@ export default async function plugin(room: BbPluginApi) {
       (ran !== undefined || thread?.executionTarget === "cloud") &&
       (used !== LOCAL || several)
     ) {
-      limits[`${provider.data}:${used}`] =
-        blockedUntil(event.rateLimits) ?? Date.now() + DEFAULT_REST_MS;
-      limitedAt.set(`${provider.data}:${used}`, Date.now());
-      await changed();
-      // A full login's usage read is free, so its bars show the limit right away instead of minutes later.
+      const key = ran?.key ?? limitKey(provider.data, used);
+      limits[key] = limitMark(event.rateLimits, usage.get(used)?.windows);
+      limitedAt.set(key, Date.now());
+      // Start the baseline read before publishing the rejection to open panels.
       const account = accounts.find((entry) => entry.id === used);
-      if (account?.profile)
-        background(
-          refreshUsage(account, true).then(() =>
-            room.realtime.publish(ACCOUNTS_CHANGED, {}),
-          ),
-        );
+      if (provider.data === "claude-code" && used === LOCAL && mac && key === limitKey("claude-code", LOCAL))
+        background(refreshUsage(LOCAL, true, "failure"));
+      else if (account?.profile) background(refreshUsage(account, true, "failure"));
+      await changed();
     }
     // Core continues Cloud threads on a new login (ADR 0117).
     if (thread?.executionTarget === "cloud") return;
@@ -1485,6 +1538,8 @@ export default async function plugin(room: BbPluginApi) {
   // A turn already running when the limit hit proves nothing, so it never clears it.
   room.events.on("thread.active", ({ thread }) => {
     turnBegan.set(thread.id, Date.now());
+    if (thread.executionTarget === "cloud" && thread.providerId === "claude-code")
+      noteThreadAccount(thread.id, "claude-code", current("claude-code"));
   });
   room.events.on("thread.failed", ({ thread }) => {
     turnBegan.delete(thread.id);
@@ -1495,35 +1550,41 @@ export default async function plugin(room: BbPluginApi) {
     const provider = providerSchema.safeParse(thread.providerId);
     if (began === undefined || !provider.success || onOwnLogin(thread)) return;
     // A Local turn on an account's full login that began after the login failed, and ended fine: it works again.
-    const ran = threadAccount.get(thread.id);
+    const observed = threadAccount.get(thread.id);
+    const ran = observed?.key.startsWith(`${provider.data}:`) ? observed : undefined;
     if (
       ran !== undefined &&
       thread.executionTarget !== "cloud" &&
-      began > (loginFailed[ran] ?? Infinity)
+      began > (loginFailed[ran.id] ?? Infinity)
     )
-      await noteLoginFailed(ran, undefined);
-    const used = ran ?? current(provider.data);
-    const key = `${provider.data}:${used}`;
+      await noteLoginFailed(ran.id, undefined);
+    const used = ran?.id ?? current(provider.data);
+    const key = ran?.key ?? limitKey(provider.data, used);
     if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) return;
+    const mark = limits[key];
+    if (typeof mark === "object" && (mark.windowKey === "overage" || mark.windowKey.startsWith("seven_day_"))) {
+      // Success on another model or on the base plan cannot clear a model or spending limit.
+      const account = accounts.find((entry) => entry.id === used);
+      if (used === LOCAL && mac) background(refreshUsage(LOCAL, true));
+      else if (account) background(refreshUsage(account, true));
+      return;
+    }
     delete limits[key];
     limitedAt.delete(key);
     await kv.set("limits:v1", limits);
     room.realtime.publish(ACCOUNTS_CHANGED, {});
-    // The bars read when the limit hit still say 100%, so a full login's are read again at once.
+    // Read the bars recorded at failure again for the login that actually recovered.
     const account = accounts.find((entry) => entry.id === used);
-    if (account?.profile)
-      background(
-        refreshUsage(account, true).then(() =>
-          room.realtime.publish(ACCOUNTS_CHANGED, {}),
-        ),
-      );
+    if (account?.profile) background(refreshUsage(account, true));
+    else if (used === LOCAL && key === limitKey("claude-code", LOCAL) && provider.data === "claude-code" && mac)
+      background(refreshUsage(LOCAL, true));
   });
 
   // Codex signs in from the app (codex-accounts.ts); this only notes which account each thread starts on.
   room.providers.experimental_contributeEnv(
     "codex",
     async (context: { threadId?: string }) => {
-      noteThreadAccount(context.threadId, codexInUse);
+      noteThreadAccount(context.threadId, "codex", codexInUse);
       return [];
     },
   );

@@ -206,6 +206,9 @@ vi.mock("react-resizable-panels", async () => {
 
 vi.mock("@/components/ui/sidebar.js", () => ({
   useIsSidebarShowing: () => sidebarState.showing,
+  useBlockSidebarOverlay: () => {},
+  useSidebarOverlay: () => false,
+  useSidebarOverlayInset: () => null,
 }));
 
 vi.mock("@/views/RootComposeView", () => ({

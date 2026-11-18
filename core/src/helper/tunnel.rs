@@ -50,7 +50,8 @@ pub(super) struct Info {
     stopped: AtomicBool,
     /// Core found nothing listening on the port, as after a sleep.
     down: AtomicBool,
-    /// An HTTP answer other than 101 or Core's 409, as from the relay in front of a VPS (#1798).
+    /// Nothing came back through the last tunnel attempt: turned away, as by the relay in front of a VPS (#1798), failed,
+    /// or no app answer yet, as through a stalled sandbox (#2016). Core's 409 is an answer: nothing listens on the port.
     refused: AtomicBool,
 }
 
@@ -583,6 +584,7 @@ async fn forward(
         else {
             return Err(unavailable());
         };
+        info.refused.store(false, Ordering::SeqCst); // The app's answer came back through the tunnel.
         let Some(response) = Head::parse(&head) else {
             return Err(unavailable());
         };
@@ -669,7 +671,7 @@ impl Info {
             ));
         }
         self.down.store(false, Ordering::SeqCst); // Only this attempt's answer counts, never an older one's.
-        self.refused.store(false, Ordering::SeqCst);
+        self.refused.store(true, Ordering::SeqCst);
         // Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         match self.connect("websocket").await {
             Err(Some(400)) => self.connect("cloudroom-tunnel").await,
@@ -698,8 +700,7 @@ impl Info {
             .map_err(|_| None)?
             .map_err(|_| None)?;
         let status = response.status().as_u16();
-        self.refused
-            .store(status != 101 && status != 409, Ordering::SeqCst);
+        self.refused.store(status != 409, Ordering::SeqCst);
         if status == 400 {
             return Err(Some(400));
         }
@@ -710,7 +711,7 @@ impl Info {
         Ok(Box::new(response.upgrade().await.map_err(|_| None)?))
     }
 
-    /// The last tunnel attempt got an HTTP answer other than 101 or Core's 409.
+    /// Nothing came back through the last tunnel attempt, so a failure says nothing about the app.
     pub(super) fn refused(&self) -> bool {
         self.refused.load(Ordering::SeqCst)
     }

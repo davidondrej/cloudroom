@@ -98,6 +98,14 @@ export function formatAgentError(error: AgentErrorObject): string {
   return details === undefined ? message : `${message}: ${details}`;
 }
 
+/** The HTTP status an agent put in its error's data (Grok: `http_status`), when it gave one. */
+export function agentErrorHttpStatus(data: unknown): number | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const fields = data as Record<string, unknown>;
+  const status = fields.http_status ?? fields.httpStatus ?? fields.status;
+  return typeof status === "number" && status >= 100 && status < 600 ? status : undefined;
+}
+
 function formatAgentErrorData(data: unknown): string | undefined {
   if (data === undefined || data === null) {
     return undefined;

@@ -300,20 +300,11 @@ function UsageLine({
   );
 }
 
-function PlanUsage({
-  plan,
-  className,
-}: {
-  plan: PlanSummary;
-  className?: string;
-}) {
+function PlanUsage({ plan }: { plan: PlanSummary }) {
   return (
     <section
       aria-label="Cloudroom plan"
-      className={cn(
-        "border-b border-dashed border-sidebar-border pb-1.5",
-        className,
-      )}
+      className="border-b border-dashed border-sidebar-border pb-1.5"
     >
       {/* Too narrow for one line, "+ buy more" wraps whole onto its own; the plan name gives way first. */}
       <h2 className="flex min-w-0 flex-wrap items-center gap-x-2 font-normal">
@@ -795,29 +786,7 @@ const PLAN_RETRY_MS = 10_000;
 const MONO_CLASS = "font-mono text-[10.5px] leading-[1.75]";
 const CARD_HEADER_CLASS =
   "mx-1.5 flex h-9 min-w-0 shrink-0 items-center gap-1 border-b border-sidebar-border pr-1 font-mono text-[10.5px] text-subtle-foreground";
-const USAGE_CARD_CLASS =
-  "overflow-hidden rounded-xl border border-border bg-card text-sidebar-foreground";
 const BILLING_URL = "https://www.cloudroom.dev/billing";
-const FREE_WITHOUT_CREDITS = [
-  "new cloud agents",
-  "idle cloud threads",
-  "sleeping sandboxes",
-  "waiting for you",
-  "local threads",
-  "your ai tokens",
-  "your own computers",
-  "chat history",
-  "archived threads",
-  "spare sandboxes",
-  "the cloud queue",
-  "desktop app",
-  "phone app",
-  "plugins and skills",
-  "voice input",
-  "share links",
-  "inviting friends",
-  "reviewing diffs",
-];
 
 function usePlanSummary(): [PlanSummary | null, () => void] {
   const [plan, setPlan] = useState(lastPlan);
@@ -856,7 +825,7 @@ export function ProviderUsageStatusContent({
   plan = null,
   reloadPlan,
   refreshEnabled = true,
-}: Partial<ExperimentalSidebarFooterDisclosureProps> & {
+}: ExperimentalSidebarFooterDisclosureProps & {
   snapshot: UsageStoreSnapshot;
   threadMachineId: string | null;
   plan?: PlanSummary | null;
@@ -946,7 +915,7 @@ export function ProviderUsageStatusContent({
   }, []);
 
   return (
-    <div className={cn("flex flex-col", dismiss && "max-h-80")}>
+    <div className="flex max-h-80 flex-col">
       <div data-provider-usage-header="" className={CARD_HEADER_CLASS}>
         <div className="flex min-w-0 flex-1">
           <MachineSelector
@@ -978,16 +947,14 @@ export function ProviderUsageStatusContent({
             }
           />
         </button>
-        {dismiss ? (
-          <button
-            type="button"
-            aria-label="Collapse provider usage"
-            className="flex size-6 shrink-0 items-center justify-center rounded-md text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-            onClick={dismiss}
-          >
-            <Icon name="ChevronDown" aria-hidden="true" className="size-3.5" />
-          </button>
-        ) : null}
+        <button
+          type="button"
+          aria-label="Collapse provider usage"
+          className="flex size-6 shrink-0 items-center justify-center rounded-md text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          onClick={dismiss}
+        >
+          <Icon name="ChevronDown" aria-hidden="true" className="size-3.5" />
+        </button>
       </div>
       <div
         className={cn(
@@ -1001,6 +968,7 @@ export function ProviderUsageStatusContent({
         {feedback === null ? null : (
           <UsageFeedback
             message={feedback}
+            compact={!!dismiss && feedback === usageFeedbackMessages.refreshFailed}
             loading={feedback === usageFeedbackMessages.loading}
           />
         )}
@@ -1094,130 +1062,6 @@ export function ProviderUsageStatusContent({
   );
 }
 
-function PriceChip({ label, className }: { label: string; className: string }) {
-  return (
-    <span
-      className={cn(
-        "rounded-[3px] px-1.5 font-bold tracking-wider text-primary-foreground",
-        className,
-      )}
-    >
-      {label}
-    </span>
-  );
-}
-
-function CreditsPriceList() {
-  const columnLength = Math.ceil(FREE_WITHOUT_CREDITS.length / 2);
-  return (
-    <section aria-label="What uses credits" className={USAGE_CARD_CLASS}>
-      <h2 className={cn(CARD_HEADER_CLASS, "pl-[5px] font-normal")}>
-        ~/what uses credits
-      </h2>
-      <div
-        className={cn(
-          "grid gap-x-4 gap-y-3 px-[11px] pb-2.5 pt-2 sm:grid-cols-3",
-          MONO_CLASS,
-        )}
-      >
-        <div>
-          <p className="mb-1 flex items-center gap-2">
-            <PriceChip label="PAID" className="bg-primary" />
-            <span className="text-subtle-foreground">uses credits</span>
-          </p>
-          <p className="flex gap-[7px] font-bold text-foreground">
-            <span
-              aria-hidden="true"
-              className="font-normal text-subtle-foreground"
-            >
-              └
-            </span>
-            agents actively running
-          </p>
-        </div>
-        <div className="sm:col-span-2 sm:border-l sm:border-dashed sm:border-border sm:pl-4">
-          <p className="mb-1 flex items-center gap-2">
-            <PriceChip label="FREE" className="bg-success" />
-            <span className="text-subtle-foreground">0 credits</span>
-          </p>
-          <ul className="grid gap-x-6 sm:auto-cols-fr sm:grid-flow-col sm:grid-rows-9">
-            {FREE_WITHOUT_CREDITS.map((item, index) => (
-              <li key={item} className="flex min-w-0 gap-[7px]">
-                <span aria-hidden="true" className="text-subtle-foreground">
-                  {(index + 1) % columnLength === 0 ||
-                  index === FREE_WITHOUT_CREDITS.length - 1
-                    ? "└"
-                    : "├"}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item}</span>
-                <span className="font-bold text-success">0</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export function UsagePageContent({
-  snapshot,
-  plan,
-  reloadPlan,
-  refreshEnabled = true,
-}: {
-  snapshot: UsageStoreSnapshot;
-  plan: PlanSummary | null;
-  reloadPlan?: () => void;
-  refreshEnabled?: boolean;
-}) {
-  return (
-    <div className="space-y-3 [zoom:1.25]">
-      {plan === null || plan.meters.length === 0 ? null : (
-        <div
-          className={cn(
-            USAGE_CARD_CLASS,
-            "flex items-start gap-3 px-[11px] py-2",
-            MONO_CLASS,
-          )}
-        >
-          <PlanUsage plan={plan} className="min-w-0 flex-1 border-0 pb-0" />
-          <UrlLink
-            href={BILLING_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 text-foreground no-underline hover:bg-muted"
-          >
-            billing
-            <Icon name="ExternalLink" aria-hidden="true" className="size-3" />
-          </UrlLink>
-        </div>
-      )}
-      <CreditsPriceList />
-      <div className={USAGE_CARD_CLASS}>
-        <ProviderUsageStatusContent
-          snapshot={snapshot}
-          threadMachineId={null}
-          reloadPlan={reloadPlan}
-          refreshEnabled={refreshEnabled}
-        />
-      </div>
-    </div>
-  );
-}
-
-function UsageSettings() {
-  const snapshot = useSyncExternalStore(
-    subscribeStore,
-    getStoreSnapshot,
-    getStoreSnapshot,
-  );
-  const [plan, reloadPlan] = usePlanSummary();
-  return (
-    <UsagePageContent snapshot={snapshot} plan={plan} reloadPlan={reloadPlan} />
-  );
-}
-
 function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
   const snapshot = useSyncExternalStore(
     subscribeStore,
@@ -1245,7 +1089,6 @@ function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
 }
 
 export default definePluginApp((app) => {
-  app.slots.settingsSection({ id: "usage", component: UsageSettings });
   const footer = app.experimental_sidebarFooter.register({
     kind: "disclosure",
     id: "usage",

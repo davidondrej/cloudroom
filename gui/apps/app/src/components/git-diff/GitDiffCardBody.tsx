@@ -11,7 +11,7 @@ import {
 import type { FileContents } from "@pierre/diffs";
 import type { GitDiffFileChangeKind } from "@cloudroom/server-contract";
 import type { ExperimentalDiffFullFileContents } from "@get-bb/plugin-sdk";
-import { useIntersectionObserver } from "usehooks-ts";
+import { useIntersectionObserver } from "@/hooks/useElementObservers";
 import { Button } from "@cloudroom/shared-ui/button";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { DiffHost } from "@/components/code/DiffHost";

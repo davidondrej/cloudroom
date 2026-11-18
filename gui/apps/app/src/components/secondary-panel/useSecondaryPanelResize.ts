@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import type { ImperativePanelHandle } from "react-resizable-panels";
-import { useResizeObserver } from "usehooks-ts";
+import { useResizeObserver } from "@/hooks/useElementObservers";
 import {
   secondaryPanelWidthPercentAtom,
   threadSecondaryPanelResizingAtom,

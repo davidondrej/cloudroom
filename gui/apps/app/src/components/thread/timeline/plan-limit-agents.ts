@@ -81,6 +81,7 @@ export function usePlanLimitAgents(threadId: string) {
   const local = useThreadDefaultExecutionOptions(threadId, {
     enabled: !isCloud,
   });
+  const currentModelLoaded = isCloud ? cloud.isFetched : local.isFetched;
   const currentModel = (isCloud ? cloud.data?.model : local.data?.model) ?? "";
   const currentReasoning = reasoningLevelSchema.safeParse(
     isCloud ? cloud.data?.reasoning : local.data?.reasoningLevel,
@@ -139,7 +140,8 @@ export function usePlanLimitAgents(threadId: string) {
         models: catalog.models,
         selectedOnlyModels: catalog.selectedOnlyModels,
         selectedModel:
-          sameLevelModel(currentModel, providerId, provider.id) ?? "",
+          sameLevelModel(currentModel, providerId, provider.id, catalog.models) ??
+          "",
         preferredReasoningLevel: currentReasoning,
         provider,
         catalogIsVerified: true,
@@ -182,10 +184,12 @@ export function usePlanLimitAgents(threadId: string) {
     // The agent list, the thread's model, every agent's models, and usage: before then, `agents` can be short.
     agentsLoaded:
       current.isFetched &&
-      (isCloud ? cloud.isFetched : local.isFetched) &&
+      currentModelLoaded &&
       !usageLoading &&
       catalogs.every((query) => !query.isPending),
-    primary: agents.find((agent) => agent.resetsAt === null) ?? null,
+    primary: currentModelLoaded
+      ? (agents.find((agent) => agent.resetsAt === null) ?? null)
+      : null,
   };
 }
 

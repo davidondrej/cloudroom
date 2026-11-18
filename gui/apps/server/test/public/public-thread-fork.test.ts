@@ -1248,9 +1248,9 @@ describe("fork branch point and inherited history", () => {
     });
   });
 
-  it("rejects an anchor inside a running turn or before the first turn", async () => {
+  it("forks a saved Claude message during a turn and rejects unavailable anchors", async () => {
     await withTestHarness(async (harness) => {
-      const { sourceThread } = seedConversationForkSource(harness);
+      const { sourceThread, environment } = seedConversationForkSource(harness, { providerId: "claude-code" });
 
       const running = await postFork(harness, {
         sourceThreadId: sourceThread.id,
@@ -1262,6 +1262,43 @@ describe("fork branch point and inherited history", () => {
         message:
           "Cannot fork at sequence 14: the turn containing it has not completed",
       });
+
+      const preview = async (seq: number) => readJson(await harness.app.request(`/api/v1/threads/${sourceThread.id}/fork-point/${seq}`));
+      expect(await preview(14)).toEqual({ exact: false, sequence: 11 });
+      for (const [sequence, text] of [[15, "Merging the two now."], [16, "Finished the merge."]] as const) {
+        seedEvent(harness.deps, {
+          threadId: sourceThread.id, environmentId: environment.id, providerThreadId: HISTORY_PROVIDER_THREAD_ID,
+          sequence, scope: turnScope("turn-3"), type: "item/completed",
+          data: { providerThreadId: HISTORY_PROVIDER_THREAD_ID, item: { type: "agentMessage", id: `msg-${sequence}`, text, providerCheckpointId: `claude-${sequence}` } },
+        });
+      }
+      expect(await preview(15)).toEqual({ exact: true, sequence: 15 });
+      const created = await postFork(harness, { sourceThreadId: sourceThread.id, sourceSeqEnd: 15, input: [{ type: "text", text: "What changed?" }] });
+      expect(created.status).toBe(201);
+      const fork = threadResponseSchema.parse(await readJson(created));
+      const start = await waitForForkStart(harness, fork.id);
+      expect(start.fork?.sourceProviderCheckpointId).toBe("claude-15");
+      expect(await readConversationTexts(harness, fork.id)).toEqual([
+        "Reply only with ok.", "ok", "Reply only with the word second.", "second",
+        "Reply only with the word third.", "Merging the two now.", "What changed?",
+      ]);
+      expect(listEvents(harness.db, { threadId: fork.id }).find(row => row.turnId === "turn-3" && row.type === "turn/completed")).toBeDefined();
+      expect(listEvents(harness.db, { threadId: sourceThread.id }).find(row => row.turnId === "turn-3" && row.type === "turn/completed")).toBeUndefined();
+
+      // A saved draft may be submitted after the parent has finished. Keep its selected cutoff.
+      const base = { threadId: sourceThread.id, environmentId: environment.id, providerThreadId: HISTORY_PROVIDER_THREAD_ID, scope: turnScope("turn-3") };
+      for (const sequence of [17, 18]) {
+        seedEvent(harness.deps, { ...base, sequence, type: "item/completed", data: {
+          providerThreadId: HISTORY_PROVIDER_THREAD_ID, item: { type: "agentMessage", id: `old-${sequence}`, text: "Legacy reply" },
+        } });
+      }
+      seedEvent(harness.deps, { ...base, sequence: 19, type: "turn/completed", data: {
+        providerThreadId: HISTORY_PROVIDER_THREAD_ID, status: "completed", providerCheckpointId: "final",
+      } });
+      expect(await preview(15)).toEqual({ exact: true, sequence: 15 });
+      expect(await preview(17)).toEqual({ exact: false, sequence: 11 });
+      expect(await preview(18)).toEqual({ exact: true, sequence: 19 });
+      expect((await postFork(harness, { sourceThreadId: sourceThread.id, sourceSeqEnd: 17 })).status).toBe(400);
 
       const beforeFirstTurn = await postFork(harness, {
         sourceThreadId: sourceThread.id,
@@ -1310,6 +1347,22 @@ describe("fork branch point and inherited history", () => {
         runningThirdTurn: false,
       });
 
+      const preview = await harness.app.request(`/api/v1/threads/${sourceThread.id}/fork-point/5`);
+      expect(await readJson(preview)).toEqual({ exact: true, sequence: 7, textOnly: true });
+      const switched = await harness.app.request("/api/v1/threads", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: "app", originKind: "fork", sourceThreadId: sourceThread.id, sourceSeqEnd: 7,
+          projectId: sourceThread.projectId, environment: { type: "reuse", environmentId: sourceThread.environmentId },
+          providerId: "codex", permissionMode: "full", input: textInput("Continue"),
+        }),
+      });
+      expect(switched.status, await switched.clone().text()).toBe(201);
+      const switchedFork = threadResponseSchema.parse(await readJson(switched));
+      expect(await readConversationTexts(harness, switchedFork.id)).toEqual(["Reply only with ok.", "ok", "Continue"]);
+      const switchedStart = await waitForForkStart(harness, switchedFork.id);
+      expect(JSON.stringify(switchedStart.input)).toContain("Reply only with ok.");
+      expect(JSON.stringify(switchedStart.input)).not.toContain("word second");
       const earlier = await postFork(harness, {
         sourceThreadId: sourceThread.id,
         sourceSeqEnd: 5,

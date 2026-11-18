@@ -237,6 +237,7 @@ impl Manager {
                     harness["service_tier"] = json!(kind.fast());
                     harness["skill_mentions"] = json!(*kind == runtime::Kind::Claude);
                     harness["set_model"] = json!(*kind == runtime::Kind::Claude);
+                    harness["idle_set_model"] = json!(*kind == runtime::Kind::Claude);
                     harness["rewind"] = json!(true);
                     harness["attachments"] = json!({"images":true,"files":true});
                     harness["subagents"] = json!(true);

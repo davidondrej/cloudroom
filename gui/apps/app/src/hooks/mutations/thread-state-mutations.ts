@@ -11,6 +11,7 @@ import type {
   ThreadResponse,
   UpdateThreadRequest,
 } from "@cloudroom/server-contract";
+import { useCommittedRef } from "@/hooks/useLatestRef";
 import { sdk } from "@/lib/sdk";
 import type { LifecycleErrorOperation } from "@/lib/lifecycle-errors";
 import {
@@ -148,6 +149,22 @@ interface DeleteThreadMutationRequest {
 interface ThreadReadMutationInput {
   signal?: AbortSignal;
   threadId: string;
+}
+
+/** A Local picker or a same-session shortcut saves through the queue that follow-up sends already wait for. */
+export function useSaveThreadModel(threadId: string, onSaved: (model: string) => void) {
+  const { mutateAsync, isPending, variables } = useUpdateThread({
+    threadId,
+    errorMessage: "Failed to save the thread model.",
+  });
+  const currentThread = useCommittedRef(threadId);
+  const save = useCallback(async (model: string, shortcutProvider?: string) => {
+    await mutateAsync(
+      { id: threadId, model, ...(shortcutProvider ? { providerId: shortcutProvider, idleSessionOnly: true } : {}) },
+      { onSuccess: () => { if (currentThread.current === threadId) onSaved(model); } },
+    );
+  }, [currentThread, mutateAsync, onSaved, threadId]);
+  return { save, pendingModel: isPending && variables.id === threadId ? variables.model : null };
 }
 
 export function useUpdateThread(options?: UpdateThreadMutationOptions) {

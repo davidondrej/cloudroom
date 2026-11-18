@@ -42,7 +42,7 @@ import { requireThreadStoragePath } from "../threads/thread-storage.js";
 import { cloudroom } from "./commands.js";
 import { RECORD_VALUES, values, type CloudroomClient } from "./client.js";
 import { SKIPPED } from "./project-copy.js";
-import { cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
+import { claudeTranscriptThrough, cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
 import { binding, localTeleports, teleportProgress } from "./store.js";
 
 type Harness = "codex" | "pi" | "claude-code" | "acp-cursor" | "acp-opencode";
@@ -242,15 +242,15 @@ export async function prepareLocalFork(deps: AppDeps, source: Thread, request: {
   const harness = source.providerId as Harness;
   if (!saved?.sessionId || !saved.nativeId || !/^[A-Za-z0-9_-]+$/.test(saved.nativeId) || !FORK_HARNESSES.includes(harness))
     throw new ApiError(409, "fork_source_unavailable", `Only a started Claude Code or Codex Cloud thread can be forked to this ${computer}.`);
-  const point = cloudForkPoint(deps.db, source, request.sourceSeqEnd);
+  const point = await cloudForkPoint(deps, source, request.sourceSeqEnd);
   const client = await cloudroom(deps).threadClient(source.id, true, "teleport_local");
   const vmPath = (await vm(client, findNative(harness, saved.nativeId))).toString().trim();
   if (!vmPath) throw new ApiError(409, "fork_source_unavailable", "The source conversation file was not found in its sandbox.");
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
   const allowed = allowance();
   const [file, parents] = await Promise.all([download(client, vmPath, allowed), downloadEach(client, lineage, allowed)]);
-  const session = file.subarray(0, file.lastIndexOf(10) + 1);
-  const checkpoint = localCheckpoint(harness, session, point);
+  const session = point.through ? claudeTranscriptThrough(file, point.through) : file.subarray(0, file.lastIndexOf(10) + 1);
+  const checkpoint = point.through ?? localCheckpoint(harness, session, point);
   const nativeId = harness === "claude-code" ? randomUUID() : saved.nativeId;
   const parse = conversationParser();
   const data = harness === "claude-code" ? Buffer.from(session.toString("utf8").split("\n").map((line) => line && JSON.stringify({ ...parse(line), sessionId: nativeId })).join("\n")) : session;

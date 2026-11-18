@@ -15,6 +15,10 @@ import {
   type ThreadRetryResult,
   type ThreadSendResult,
 } from "@cloudroom/sdk";
+import {
+  BbRequestTimeoutError,
+  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+} from "@cloudroom/sdk/node";
 import type { QueuedMessageWaitingOn } from "@cloudroom/domain";
 import {
   collectOption,
@@ -850,7 +854,8 @@ export async function postThreadMessage(
   args: PostThreadMessageArgs,
 ): Promise<PostThreadMessageResult> {
   requirePromptContent(args);
-  const sdk = createCliRoomSdk(args.getUrl());
+  // Bounded like spawn's send, so a server that never answers can't hang the caller (#1832).
+  const sdk = createCliRoomSdk(args.getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
   // A retry's lookup decides whether it may send, so a hung server can't hang it.
   const thread =
     args.mode === undefined || args.requestId !== undefined
@@ -880,7 +885,8 @@ export async function postThreadMessage(
     resolveProjectId: async () =>
       (thread ?? (await sdk.threads.get({ threadId: args.threadId })))
         .projectId,
-    sdk,
+    // Uploads keep no deadline: a large file may take longer.
+    sdk: createCliRoomSdk(args.getUrl()),
   });
   const sending = sdk.threads.send({
     threadId: args.threadId,
@@ -962,10 +968,17 @@ async function describeFailedSend(
     error instanceof BbHttpError
       ? (error.body as { errorId?: unknown } | null)?.errorId
       : undefined;
-  const reason = `${getErrorMessage(error)}${typeof errorId === "string" ? `, error ID ${errorId}` : ""}`;
+  const timedOut = error instanceof BbRequestTimeoutError;
+  const reason = timedOut
+    ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
+    : `${getErrorMessage(error)}${typeof errorId === "string" ? `, error ID ${errorId}` : ""}`;
+  // The server may still be working on it, so the log and queue can lag (#1832).
+  const lag = timedOut
+    ? " The server may still be handling it, so an empty log and queue don't prove it wasn't sent: wait a minute and check again before resending."
+    : "";
   // A sent message shows in the log, a queued one in the queue; `thread show` lists neither.
   return new UnconfirmedSendError(
-    `Cloudroom did not confirm the message, so it may already have been sent (${reason}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${retry}`,
+    `Cloudroom did not confirm the message, so it may already have been sent (${reason}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${lag}${retry}`,
     requestId,
   );
 }

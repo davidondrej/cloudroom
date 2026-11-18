@@ -11,6 +11,7 @@ Commands:
   loop          Schedule work for this thread (alias: automation)
   mac           Run commands and copy files on the user's computer
   secret        Ask the user for API keys
+  snippets      Manage synced personal and Organization snippets
   files         Wait for the project's files
   preview       Show a web app through the user's browser
   computer-use  Control this sandbox's screen
@@ -20,7 +21,7 @@ Commands:
 
 Add --help to any command. Other threads, projects, settings and plugins live in the Cloudroom app on the user's computer: see the room-cli skill.";
 
-/// Windows has only `cloudroom git`: the app's Git panel (see lib.rs).
+/// Windows has only `cloudroom git` and `cloudroom fs`: the app's Git panel and files (see lib.rs).
 #[cfg(windows)]
 fn main() {
     let args: Vec<String> = std::env::args_os()
@@ -29,17 +30,17 @@ fn main() {
         .collect();
     match args.first().map(String::as_str) {
         Some("git") => std::process::exit(cloudroom::git::cli(&args[1..])),
+        Some("fs") => std::process::exit(cloudroom::fs::cli(&args[1..])),
         Some("--version") => println!("cloudroom {} ({})", cloudroom::VERSION, cloudroom::COMMIT),
         _ => {
-            eprintln!("On Windows, this build has only `cloudroom git`.");
+            eprintln!("On Windows, this build has only `cloudroom git` and `cloudroom fs`.");
             std::process::exit(2);
         }
     }
 }
 
 #[cfg(unix)]
-#[tokio::main(worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `std::env::args()` panics on an argument that isn't UTF-8 (#705).
     let mut args = Vec::new();
     for (index, arg) in std::env::args_os().enumerate().skip(1) {
@@ -65,6 +66,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("git") {
         std::process::exit(cloudroom::git::cli(&args[1..]));
     }
+    if args.first().map(String::as_str) == Some("fs") {
+        std::process::exit(cloudroom::fs::cli(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("terminal") {
+        std::process::exit(cloudroom::runtime::terminal::local_cli(&args[1..]));
+    }
+    // Everything else runs on the async runtime; the short commands above, which the app runs often, skip its start.
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(run(args))
+}
+
+#[cfg(unix)]
+async fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     if args.first().map(String::as_str) == Some("helper") {
         if let Err(error) = cloudroom::helper::cli(&args[1..]).await {
             eprintln!("{error}");
@@ -87,6 +104,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("secret") {
         match cloudroom::secrets::cli(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.first().map(String::as_str) == Some("snippets") {
+        match cloudroom::session::snippets::cli(&args[1..]).await {
             Ok(code) => std::process::exit(code),
             Err(error) => {
                 eprintln!("{error}");

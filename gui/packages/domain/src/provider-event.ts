@@ -386,6 +386,7 @@ export const threadEventItemSchema = z.discriminatedUnion("type", [
     .strict(),
   z.object({
     type: z.literal("agentMessage"),
+    providerCheckpointId: z.string().min(1).optional(),
     id: z.string(),
     text: z.string(),
     ...itemPresentationField,

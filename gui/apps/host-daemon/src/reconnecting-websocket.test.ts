@@ -4,11 +4,11 @@ import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile);
 
-describe("PartySocket", () => {
+describe("ReconnectingWebSocket", () => {
   it("absorbs a late error after timing out a connecting WebSocket", async () => {
     const script = `
       import { EventEmitter } from "node:events";
-      import PartySocket from "partysocket/ws";
+      import { ReconnectingWebSocket } from "@cloudroom/domain/reconnecting-websocket";
 
       let closeCount = 0;
       let failureDeadline;
@@ -42,14 +42,16 @@ describe("PartySocket", () => {
       }
 
       failureDeadline = setTimeout(() => {
-        throw new Error("Timed out waiting for PartySocket to close the connection");
+        throw new Error("Timed out waiting for the socket to close the connection");
       }, 5_000);
 
-      new PartySocket("ws://unreachable.test", [], {
+      new ReconnectingWebSocket("ws://unreachable.test", [], {
         WebSocket: ConnectingWebSocket,
         connectionTimeout: 1,
         maxRetries: 0,
         minReconnectionDelay: 0,
+        maxReconnectionDelay: 0,
+        reconnectionDelayGrowFactor: 1,
       });
     `;
 

@@ -192,7 +192,7 @@ export function buildTurnFailedEvent(
       providerError?.errorInfo ??
       doorRejectionErrorInfo(db, { threadId, failed }),
     inputAccepted: wasFailedTurnInputAccepted(db, { threadId, failed }),
-    rateLimits: latestRateLimits(db, thread),
+    rateLimits: latestRateLimits(db, thread, failed.requestSequence, providerError?.turnId),
     attemptNumber: retryChain(failed.request).attemptNumber,
     interruptionReason: interruptionReason(db, { threadId, failed }),
     turnStartedBeforeBoot:
@@ -252,6 +252,13 @@ export function turnFailureFacts(
     code: code === null ? null : code.replaceAll("_", "-"),
     startedBy: turnStarter(failed.request),
   };
+}
+
+/** Who started the thread's last turn, if it was requested at or after `afterSequence`: Local sends are recorded just
+ *  after their own request is saved. */
+export function turnStarterAfter(db: DbConnection, threadId: string, afterSequence: number): TurnStarter | null {
+  const turn = loadFailedTurn(db, threadId);
+  return turn !== null && turn.requestSequence >= afterSequence ? turnStarter(turn.request) : null;
 }
 
 function turnStarter(request: TurnRequestEventData): TurnStarter | null {
@@ -379,7 +386,7 @@ export function failureHold(
   const override = getThreadExecutionOverride(db, thread.id)?.modelOverride;
   if ((override ?? model) !== model) return null;
   if (category === "unauthorized") return "sign-in";
-  const limits = latestRateLimits(db, thread);
+  const limits = latestRateLimits(db, thread, failed.requestSequence);
   return limits?.status === "blocked" &&
     limits.windows.some(
       (window) =>
@@ -410,12 +417,15 @@ function interruptionReason(
 function latestRateLimits(
   db: DbConnection,
   thread: Thread,
+  requestSequence: number,
+  turnId?: string | null,
 ): ProviderRateLimitState | null {
   const row = getLatestStoredRateLimitsEventForProvider(db, {
     threadId: thread.id,
     providerId: thread.providerId,
   });
-  if (row === null) return null;
+  if (!row || row.sequence <= requestSequence || (turnId && row.turnId && row.turnId !== turnId))
+    return null;
   return (
     rateLimitsDataSchema.safeParse(parseRowData(row)).data?.rateLimits ?? null
   );

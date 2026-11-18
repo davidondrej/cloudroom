@@ -147,10 +147,10 @@ export function AppSidebar({
 
   const activateThreadShortcut = useCallback(
     (index: number): boolean => {
-      const target =
+      return openNavigationTarget(
         threadShortcutTargetsRef.current[index] ??
-        getSidebarThreadShortcutTargets(sidebarRef.current)[index];
-      return target?.element ? openNavigationTarget(target) : false;
+          getSidebarThreadShortcutTargets(sidebarRef.current)[index],
+      );
     },
     [openNavigationTarget],
   );
@@ -356,13 +356,7 @@ export function AppSidebar({
           {body}
         </div>
       ) : (
-        <Sidebar
-          ref={sidebarRef}
-          // The footer popup spills past the sidebar; lift the sidebar above the thread composer while it is open.
-          className={pluginSidebarFooter.activeItem ? "md:z-40" : undefined}
-        >
-          {body}
-        </Sidebar>
+        <Sidebar ref={sidebarRef}>{body}</Sidebar>
       )}
     </SidebarThreadShortcutKeysContext.Provider>
   );

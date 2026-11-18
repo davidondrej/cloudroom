@@ -70,6 +70,8 @@ const MAC_ONLY_CONNECT_RPCS = new Set(["relayCredential", "revokeMachine", "runS
 const APP_HANDLE = "app";
 const LOGIN_TOKEN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const MAC_HEADER = "x-cloudroom-mac";
+// Non-secret browser marker for the offline snippet library. It grants no server access.
+const OFFLINE_COOKIE = "__Host-cloudroom-offline-session";
 const NEXT_COOKIE = "__Host-cloudroom-next";
 /** The Mac a phone picked, kept while the relay shows it another Mac because that one is offline. */
 const HOME_COOKIE = "__Host-cloudroom-home";
@@ -228,7 +230,7 @@ export function requestForTunnelDo(
   const cookie = (headers.get("cookie") ?? "")
     .split(";")
     .map((part) => part.trim())
-    .filter((part) => part && !part.startsWith(`${SESSION_COOKIE}=`) && !part.startsWith(`${HOME_COOKIE}=`))
+    .filter((part) => part && !part.startsWith(`${SESSION_COOKIE}=`) && !part.startsWith(`${HOME_COOKIE}=`) && !part.startsWith(`${OFFLINE_COOKIE}=`))
     .join("; ");
   if (cookie) headers.set("cookie", cookie);
   else headers.delete("cookie");
@@ -272,6 +274,8 @@ export function returnUrl(origin: string, value: string | null): string {
   } catch {}
   return `${origin}/`;
 }
+
+const clearOfflineCookie = () => `${OFFLINE_COOKIE}=; Path=/; Secure; SameSite=Strict; Max-Age=0`;
 
 function sessionCookie(token: string): string {
   return `${SESSION_COOKIE}=${token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}`;
@@ -831,6 +835,15 @@ function guardFromOtherAddresses(request: Request, response: Response): Response
   if (response.webSocket) return response;
   const guarded = new Response(response.body, response);
   guarded.headers.append("content-security-policy", "frame-ancestors 'self'");
+  const previous = readCookie(request.headers.get("cookie"), OFFLINE_COOKIE);
+  const snippets = new URL(request.url).pathname === "/__cloud/snippets";
+  const signingIn = previous && response.headers.getAll("Set-Cookie").some(cookie => cookie.startsWith(SESSION_COOKIE + "="));
+  const loginPage = wantsHtml(request) && (response.headers.get("location")?.endsWith("/m") || !sessionToken(request));
+  if (previous && (signingIn || loginPage || (response.status === 401 && (snippets || wantsHtml(request))))) {
+    guarded.headers.append("set-cookie", clearOfflineCookie());
+  } else if (!previous && response.ok && snippets) {
+    guarded.headers.append("set-cookie", `${OFFLINE_COOKIE}=${crypto.randomUUID()}; Path=/; Secure; SameSite=Strict; Max-Age=${SESSION_TTL_MS / 1000}`);
+  }
   if (request.headers.get("sec-fetch-mode") === "navigate" && request.headers.get("sec-fetch-site") === "same-site") {
     guarded.headers.delete(OFFLINE_HEADER);
     guarded.headers.delete(TUNNEL_OFFLINE_HEADER);

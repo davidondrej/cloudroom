@@ -124,6 +124,20 @@ export type TelemetryEvent =
       name: "token_usage";
       properties: { day: string; provider: string; model: string; is_child_thread: boolean; input: number; cached: number; cache_write: number; output: number; turns: number };
     }
+  /** Skills run and agents started on this computer per finished UTC `day`; built in skill-telemetry.ts. */
+  | { name: "skill_usage"; properties: { day: string; skill_runs: number; threads: number } }
+  | {
+      /** A sent message that got no reply and no error (first-response-telemetry.ts). */
+      name: "turn_silent";
+      properties: {
+        /** `no_reply`: no output 10 minutes after the send. `empty`: the turn ended as completed with no output. */
+        reason: "no_reply" | "empty"; ms: number; execution: TelemetryExecution; is_child_thread: boolean;
+        message_source: "queued_message" | "thread_create" | "thread_send"; provider: string; model: string | null;
+        /** The thread's status at that moment, and whether the agent started a turn for the message. */
+        thread_status: string; turn_started: boolean;
+        started_by?: string; first_agent?: true;
+      };
+    }
   | {
       name: "turn_failed";
       properties: {
@@ -153,6 +167,8 @@ export type TelemetryEvent =
   /** Monthly Wrapped (docs/scopes/wrapped.md): the top-right card and the Story it opens. `month` is `2026-10`. */
   | { name: "wrapped"; properties: { month: string; action: (typeof WRAPPED_ACTIONS)[number] } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
+  /** The "save as skill" card on a thread that repeats a job (docs/scopes/skill-suggestions.md). */
+  | { name: "skill_suggestion"; properties: { action: "shown" | "accepted" | "dismissed" } }
   | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } }
   /** A Local message the queue failed or dropped (services/threads/queue-drain-failure.ts). */
   | { name: "queue_delivery"; properties: { outcome: "failed" | "dropped"; message: string; waiting_on: string | null; thread_status: string | null; error: string | null; detail: string | null } };
@@ -162,8 +178,8 @@ export const SHARE_CLICKS = ["opened", "copied"] as const;
 export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
 /** `viewed`: the card showed. `opened`: the Story opened. `closed`: the card's X. Then the Story's three buttons. */
 export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
-export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
-export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
+export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local", "switched_agent"] as const;
+export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "claude_not_connected", "queue", "region"] as const;
 export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];

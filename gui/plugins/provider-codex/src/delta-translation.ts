@@ -599,6 +599,15 @@ const BARE_BAD_REQUEST_PATTERN =
 const BAD_REQUEST_RECOVERY =
   "Send a message to try again. If it keeps failing, start a new thread.";
 const BARE_BAD_REQUEST_NOTE = `The model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID. ${BAD_REQUEST_RECOVERY}`;
+/**
+ * The account can't use the thread's model (anymore), as when a ChatGPT plan
+ * drops one. Codex tags it `other`, `badRequest`, or nothing, so one code lets
+ * the server reload the agent's models (#2009).
+ */
+const UNSUPPORTED_MODEL_PATTERN =
+  /model is not supported when using Codex with a ChatGPT account/iu;
+const UNSUPPORTED_MODEL_NOTE =
+  "This account can't use this model now. Pick another one in the model picker (or `room-cli thread update <thread> --model <model>`), then send again. A loop that starts new threads keeps its own model: change it in the loop's Agent setting (or `room-cli loop update <loop> --project <project> --model <model>`).";
 
 function codexProviderErrorDelta(
   state: CodexEventTranslationState,
@@ -617,6 +626,17 @@ function codexProviderErrorDelta(
       httpStatusCode: null,
     };
   }
+  const unsupportedModel =
+    willRetry !== true &&
+    (errorInfo?.providerCode === "modelNotFound" ||
+      UNSUPPORTED_MODEL_PATTERN.test(error.message));
+  if (unsupportedModel) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: "modelNotFound",
+      httpStatusCode: errorInfo?.httpStatusCode ?? null,
+    };
+  }
   return {
     kind: "provider.error",
     message: "Provider error",
@@ -628,6 +648,7 @@ function codexProviderErrorDelta(
           ? BAD_REQUEST_RECOVERY
           : BARE_BAD_REQUEST_NOTE
         : null,
+      unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
     ]
       .filter(Boolean)
       .join("\n"),
@@ -938,7 +959,13 @@ function summarizeCollabAgentsStates(
   agentsStates: Record<string, unknown>,
 ): string | undefined {
   const lines = Object.entries(agentsStates).map(([agentThreadId, state]) => {
-    const rendered = typeof state === "string" ? state : JSON.stringify(state);
+    let rendered: string | undefined;
+    try {
+      rendered = typeof state === "string" ? state : JSON.stringify(state);
+    } catch {
+      // Provider JSON can nest beyond JSON.stringify's stack limit.
+      rendered = "[state too deeply nested]";
+    }
     return `${agentThreadId}: ${rendered}`;
   });
   return lines.length > 0 ? lines.join("\n") : undefined;

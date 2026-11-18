@@ -414,7 +414,7 @@ export function registerSpawnCommand(
     .option("--source-thread <id>", "Source thread for a fork")
     .option(
       "--source-seq-end <seq>",
-      "Fork after the source turn containing this event sequence",
+      "Fork at a saved Claude message or a finished turn",
     )
     .action(
       action(async (opts: ThreadSpawnCommandOptions) => {

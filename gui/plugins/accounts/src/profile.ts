@@ -342,9 +342,9 @@ export async function syncMcpSignIns(
  * account in the background, so once any Keychain read has failed (locked, denied, a timeout) none is tried until the
  * app restarts: each could show a macOS popup.
  */
-export async function readLogin(profile: string): Promise<unknown> {
+export async function readLogin(profile?: string): Promise<unknown> {
   if (process.platform === "darwin" && keychainFailed.size > 0) return null;
-  return readCredentials(profile, profile).catch(() => null);
+  return readCredentials(profile ?? claudeHome(), profile ?? process.env.CLAUDE_CONFIG_DIR).catch(() => null);
 }
 
 const mcpSyncs = new Map<string, Promise<void>>();

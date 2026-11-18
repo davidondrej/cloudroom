@@ -298,6 +298,7 @@ describe("builtin plugin reconciliation", () => {
       ["provider-usage", "ChartColumn"],
       ["push-notifications", "BellDot"],
       ["drafts", "EditFile"],
+      ["snippets", "FileText"],
       ["scheduled-send", "Calendar"],
       ["secrets", "Lock"],
       ["side-chat", "SideChat"],

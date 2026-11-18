@@ -4,15 +4,20 @@ import { z } from "zod";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { CloudroomError } from "./client.js";
-import { cloudroom, isCloudThread } from "./commands.js";
+import { cloudroom } from "./commands.js";
 
-// A Cloud thread's Cloud Credits, split by the commands that used them, for the purpose card (David, 2026-11-16,
-// docs/scopes/thread-purpose.md). The website gives the billed credits and the sandbox's CPU per minute. Each minute's
-// CPU goes to the commands that ran in it, by how long each ran; a minute with no command is "No command running".
+// A thread's Cloud Credits, split by what used them, for the purpose card of every thread, Local or Cloud (David,
+// 2026-11-16 and 2026-11-18, docs/scopes/thread-purpose.md). The website gives the billed credits, the GPU sessions'
+// credits, and the sandbox's CPU per minute. GPU rows come first; the rest goes to the commands that ran in each
+// minute, by how long each ran. A minute with no command is "No command running".
 
 export const threadCreditMinutesSchema = z.object({
   since: z.string(), credits: z.number().nullable(), minutes: z.array(z.tuple([z.number(), z.number()])),
+  // Websites before 2026-11-18 send no GPU rows.
+  gpu: z.array(z.tuple([z.string(), z.number(), z.number().nullable()])).default([]),
 });
+/** One GPU type's sessions in this thread: [name, credits, ms it ran]. */
+export type GpuUse = [string, number, number | null];
 export type ThreadCreditRow = { name: string; credits: number; ms: number | null; rest?: true };
 /** `pending`: credits were billed, but no CPU minutes have arrived yet (Core uploads them every 5 minutes). */
 export type ThreadCredits = { credits: number | null; pending: boolean; awakeMinutes: number; partial: boolean; rows: ThreadCreditRow[] };
@@ -93,9 +98,9 @@ function roundToTotal(values: number[], total: number): number[] {
   return floors;
 }
 
-/** Splits the billed credits across commands by the CPU each used. Rows: the top 4, then the rest in one row. They
- *  always add up to the total. */
-export function splitCredits(credits: number | null, minutes: [number, number][], spans: Span[]): Pick<ThreadCredits, "credits" | "pending" | "rows"> {
+/** Splits the billed credits: GPU sessions first, then the rest across commands by the CPU each used. Rows: the top 4,
+ *  then the rest in one row. They always add up to the total. */
+export function splitCredits(credits: number | null, minutes: [number, number][], spans: Span[], gpu: GpuUse[] = []): Pick<ThreadCredits, "credits" | "pending" | "rows"> {
   if (credits === null) return { credits: null, pending: false, rows: [] };
   const sorted = [...minutes].sort((a, b) => a[0] - b[0]), cpu = new Map<string, number>(), wall = new Map<string, number>();
   const add = (map: Map<string, number>, name: string, value: number) => map.set(name, (map.get(name) ?? 0) + value);
@@ -116,32 +121,41 @@ export function splitCredits(credits: number | null, minutes: [number, number][]
     if (!total) add(cpu, IDLE, used);
     else for (const [name, overlap] of parts) add(cpu, name, used * overlap / total);
   });
-  const total = Math.round(credits);
-  if (total < 1 || all <= 0) return { credits: total, pending: total >= 1, rows: [] };
-  const ranked = [...cpu].map(([name, used]) => ({ name, exact: used / all * total })).sort((a, b) => b.exact - a.exact);
+  const total = Math.round(credits), gpuSum = gpu.reduce((sum, [, used]) => sum + used, 0);
+  if (total < 1 || (all <= 0 && gpuSum <= 0)) return { credits: total, pending: total >= 1, rows: [] };
+  // GPU credits come from the sessions table: never more than the billed total.
+  const toTotal = total / Math.max(credits, gpuSum);
+  const gpuRows = gpu.map(([name, used, ms]) => ({ name, exact: used * toTotal, ms, other: true }));
+  const sandbox = Math.max(0, total - gpuRows.reduce((sum, row) => sum + row.exact, 0));
+  const cpuRows = all > 0 ? [...cpu].map(([name, used]) => ({ name, exact: used / all * sandbox, ms: name === IDLE ? null : wall.get(name) ?? null, other: name === IDLE }))
+    : [{ name: "Not split yet", exact: sandbox, ms: null, other: true }];
+  const ranked = [...gpuRows, ...cpuRows].sort((a, b) => b.exact - a.exact);
   const top = ranked.filter((row) => row.exact >= 0.5).slice(0, TOP), rest = ranked.slice(top.length);
-  const shown = [...top.map((row) => ({ name: row.name, exact: row.exact, rest: false })),
-    ...(rest.length ? [{ name: rest.some((row) => row.name === IDLE) ? "Everything else" : `${rest.length} more command${rest.length === 1 ? "" : "s"}`,
-      exact: total - top.reduce((sum, row) => sum + row.exact, 0), rest: true }] : [])];
+  const shown = [...top.map((row) => ({ ...row, rest: false })),
+    ...(rest.length ? [{ name: rest.some((row) => row.other) ? "Everything else" : `${rest.length} more command${rest.length === 1 ? "" : "s"}`,
+      exact: total - top.reduce((sum, row) => sum + row.exact, 0), ms: null, other: true, rest: true }] : [])];
   const rounded = roundToTotal(shown.map((row) => Math.max(0, row.exact)), total);
   const rows = shown.flatMap((row, i): ThreadCreditRow[] => rounded[i]! < 1 ? [] : [row.rest
     ? { name: row.name, credits: rounded[i]!, ms: null, rest: true }
-    : { name: row.name, credits: rounded[i]!, ms: row.name === IDLE ? null : wall.get(row.name) ?? null }]);
+    : { name: row.name, credits: rounded[i]!, ms: row.ms }]);
   return { credits: total, pending: false, rows };
 }
 
 /** Asked when the purpose card opens; one website read per thread a minute at most. */
 export async function threadCredits(deps: AppDeps, threadId: string): Promise<ThreadCredits> {
   const thread = getThread(deps.db, threadId);
-  if (!thread || !isCloudThread(thread)) throw new ApiError(404, "not_found", "No Cloud thread with this ID.");
+  if (!thread) throw new ApiError(404, "not_found", "No thread with this ID.");
   const cached = cache.get(threadId), now = Date.now();
   if (cached && now - cached.at < CACHE_MS) return cached.value;
-  const site = await cloudroom(deps).sandboxes.threadCredits(threadId).catch((error: unknown) => {
+  const sandboxes = cloudroom(deps).sandboxes;
+  // Signed out, this app can't have used Cloud Credits: no error on every Local thread's card.
+  if (!await sandboxes.account()) return { credits: 0, pending: false, awakeMinutes: 0, partial: false, rows: [] };
+  const site = await sandboxes.threadCredits(threadId).catch((error: unknown) => {
     throw new ApiError(error instanceof CloudroomError && error.status ? 400 : 503, "cloud_thread_credits", error instanceof Error ? error.message : String(error));
   });
   const since = Date.parse(site.since);
   const spans = commandSpans(readCommands(deps.db, threadId, since - MAX_SPAN_MS), thread.status === "active", now);
-  const value = { ...splitCredits(site.credits, site.minutes, spans), awakeMinutes: site.minutes.length, partial: thread.createdAt < since };
+  const value = { ...splitCredits(site.credits, site.minutes, spans, site.gpu), awakeMinutes: site.minutes.length, partial: thread.createdAt < since };
   cache.set(threadId, { at: now, value });
   return value;
 }

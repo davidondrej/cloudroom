@@ -67,7 +67,7 @@ export function SettingsStoryChrome({
       style={{ "--bb-shell-height": "100vh" } as CSSProperties}
     >
       <SettingsSidebarContent
-        account={<SettingsAccountMenu usagePage={false} />}
+        account={<SettingsAccountMenu />}
         appRoutePath="/"
         isResizing={false}
         navigation={{

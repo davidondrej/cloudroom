@@ -403,6 +403,7 @@ function readForkThreadCreateSeedFromLocationState(
     sourceSeqEnd: value.sourceSeqEnd as number | undefined,
     sourceThreadId: value.sourceThreadId,
     sourceThreadTitle: value.sourceThreadTitle.trim(),
+    ...(value.textOnly === true && { textOnly: true }),
   };
 }
 
@@ -688,6 +689,7 @@ export function RootComposeView() {
         : {
             providerId: forkSeed.providerId,
             model: forkSeed.model,
+            textOnly: forkSeed.textOnly === true,
             reasoningLevel: forkSeed.reasoningLevel,
             serviceTier: forkSeed.serviceTier,
             permissionMode: forkSeed.permissionMode,

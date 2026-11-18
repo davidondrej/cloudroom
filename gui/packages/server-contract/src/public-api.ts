@@ -1565,6 +1565,12 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadEventRow | null>(),
     }),
+    messageForkPoint: defineRoute({
+      path: "/threads/:id/fork-point/:sequence",
+      method: "get",
+      request: noRequest<{ param: { id: string; sequence: string } }>(),
+      response: jsonResponse<{ exact: boolean; sequence: number | null; textOnly?: boolean }>(),
+    }),
     defaultExecutionOptions: defineRoute({
       path: "/threads/:id/default-execution-options",
       method: "get",
@@ -1691,7 +1697,10 @@ export const publicApiRoutes = {
         appSettingsUpdateSchema,
       ),
       response: jsonResponse<
-        AppSettings & { showUnhandledProviderEvents?: boolean }
+        AppSettings & {
+          showUnhandledProviderEvents?: boolean;
+          providerOrder?: string[];
+        }
       >(),
     }),
     keyboardSettings: defineRoute({

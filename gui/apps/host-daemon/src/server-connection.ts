@@ -243,7 +243,7 @@ export class ServerConnection {
     return true;
   }
 
-  // close() stops PartySocket for good and its reconnect() retries at once, so
+  // close() stops the socket for good and its reconnect() retries at once, so
   // drop the socket now and reconnect after our own growing delay. A connection
   // that stayed up for the longest delay counts as healthy and resets it.
   private reconnectAfterError(

@@ -17,7 +17,7 @@ import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-displ
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, teleportProgress, unstartedTurn, unsentDeletes, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, refreshProjectRemote, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -134,10 +134,11 @@ const capabilitiesSchema = z.object({
     prompt_reasoning: z.boolean().default(false),
     /** Claude switches models in its session (`POST …/model`), as on Local; the others start a new session (ADR 0211). */
     set_model: z.boolean().default(false),
+    idle_set_model: z.boolean().default(false),
   })),
 });
 /** A queued model pick (changeModel), with what the thread ran before it for when Core doesn't take it. */
-const modelPickSchema = z.object({ model: z.string(), reasoning: z.string(), before: z.object({ model: z.string(), reasoning: z.string(), override: reasoningLevelSchema.nullable() }) });
+const modelPickSchema = z.object({ idleSessionId: z.string().optional(), model: z.string(), reasoning: z.string(), before: z.object({ model: z.string(), reasoning: z.string(), override: reasoningLevelSchema.nullable() }) });
 type Connection = z.infer<typeof connectionSchema>;
 type Capabilities = z.infer<typeof capabilitiesSchema>;
 const storageBytes = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullable().default(null);
@@ -1316,6 +1317,7 @@ class CloudroomService {
       }
       this.sandboxes.reset();
       this.codexAccounts.reset();
+      await this.sandboxes.removeDeepapiKey().catch(error => this.warn("The DeepAPI key could not be removed from this Mac", error));
       await stopSync(this.deps);
     });
   }
@@ -1343,6 +1345,7 @@ class CloudroomService {
     if (!await this.newThreadsInSandboxes()) return;
     await this.syncLogins();
     void this.uploadMacConfig();
+    await refreshProjectRemote(this.deps, projectId).catch(() => {});
     await this.sandboxes.warm(this.sandboxProject(projectId), trigger);
   }
 
@@ -1546,7 +1549,7 @@ class CloudroomService {
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
           queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.sandboxes.cloudQueue(), cloudPaused: this.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
-          plan: this.sandboxes.currentPlan(), planUsage: this.sandboxes.planUsage(),
+          plan: this.sandboxes.currentPlan(), planUsage: this.sandboxes.planUsage(), deepapi: this.sandboxes.deepapiState(),
         };
       }
       const connection = await this.connection();
@@ -1619,10 +1622,12 @@ class CloudroomService {
     ]);
   }
 
-  /** Copies logins both ways when the user allowed it (ADRs 0130, 0175). Only the Mac → cloud copy is awaited.
+  /** Copies logins both ways when the user allowed it (ADRs 0130, 0175), and the DeepAPI key to this Mac
+   *  (ADR 20261111-214204). Only the Mac → cloud copy is awaited.
    *  Without that, only GitHub, which its own card in Settings governs (#1628). */
   private async syncLogins(cloudChanged = false): Promise<void> {
     if (!await this.sandboxMode()) return;
+    void this.sandboxes.copyDeepapiKey().catch(error => this.warn("The DeepAPI key could not be copied to this Mac", error));
     if (await copyLogins(this.deps) !== true) return this.sandboxes.copyMacGithubLogin().catch(error => this.warn("GitHub login could not be copied to cloud sandboxes", error));
     void this.sandboxes.copyCloudLogins(cloudChanged).catch(error => this.warn("Cloud logins could not be copied to this Mac", error));
     await this.sandboxes.copyMacLogins().catch(error => this.warn("Logins could not be copied to cloud sandboxes", error));
@@ -1992,39 +1997,67 @@ class CloudroomService {
    *  command, ahead of the next work. Core owns it, so every turn runs it, whoever sends it. False when this thread's
    *  Core can't, so the caller starts a new session instead (ADR 0211). Never wakes the sandbox: an asleep one wakes
    *  with the pinned Core, which the saved capabilities describe. */
-  async changeModel(thread: Thread, model: string, reasoningLevel: ReasoningLevel | null): Promise<boolean> {
+  async changeModel(thread: Thread, model: string, reasoningLevel: ReasoningLevel | null, checkIdleSession?: () => void): Promise<boolean> {
     const saved = binding(this.deps.db, thread.id);
     if (!saved?.sessionId || thread.archivedAt || thread.deletedAt || this.switching.has(thread.id)) return false;
     await this.requireOwnThread(saved);
     const sandbox = sandboxThread(saved.coreUrl);
     const known = sandbox ? await this.savedCapabilities() : this.lastCapabilities;
-    if (!known || !harnessProfile(known, thread.providerId)?.set_model) return false;
     const asleep = sandbox !== null && !this.sandboxes.isAwake(sandbox);
     const live = async () => this.capabilities(await this.client(saved, false));
-    if (!asleep && !await this.switchesModels(saved.coreUrl, thread.providerId, live).catch(() => false)) return false;
+    const catalog = checkIdleSession && !asleep ? await live() : known;
+    if (!catalog) return false;
+    const profile = harnessProfile(catalog, thread.providerId);
+    if (!profile?.set_model) return false;
+    if (checkIdleSession) {
+      if (!profile.idle_set_model) return false;
+      if (!profile.models?.some((item) => item.model === model)) {
+        throw new ApiError(409, "model_unavailable", "That model is unavailable in this Cloud session.");
+      }
+      checkIdleSession();
+      const current = binding(this.deps.db, thread.id);
+      if (current?.sessionId !== saved.sessionId || this.switching.has(thread.id) || this.sends.has(thread.id)) {
+        throw new ApiError(409, "thread_changed", "The thread changed while checking the model. Try again when it is idle.");
+      }
+      if (current.model === model) return true;
+      if (current.model !== saved.model) throw new ApiError(409, "thread_changed", "Another model was selected. Try again.");
+    } else if (!asleep && !await this.switchesModels(saved.coreUrl, thread.providerId, live).catch(() => false)) return false;
     const current = this.currentReasoning(thread.id, saved);
-    const levels = reasoningLevels(thread.providerId, model, known) as ReasoningLevel[] | undefined;
+    const levels = reasoningLevels(thread.providerId, model, catalog) as ReasoningLevel[] | undefined;
     const reasoning = reasoningLevelSchema.parse(reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current));
-    validateReasoning(thread.providerId, model, reasoning, known);
+    validateReasoning(thread.providerId, model, reasoning, catalog);
     // Core records the effort with the model, so a wake resumes on a level the model takes; edits send it too. A newer
     // pick replaces an unsent one, and keeps what the thread ran before both.
     const waiting = commands(this.deps.db, thread.id).filter((item) => item.command === "model" && item.state === "sending");
     const before = waiting[0] ? JSON.parse(waiting[0].input).before : { model: saved.model, reasoning: saved.reasoning, override: getThreadExecutionOverride(this.deps.db, thread.id)?.reasoningLevelOverride ?? null };
+    const id = randomUUID();
     this.deps.db.transaction((tx) => {
       for (const item of waiting) saveCommandState(tx, thread.id, item.id, "cancelled");
       saveBinding(tx, thread.id, { model, reasoning });
       setThreadExecutionOverride(tx, { threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoning });
+      this.insertCommand(tx, thread, id, "model", { model, reasoning, before, ...(checkIdleSession ? { idleSessionId: saved.sessionId } : {}) });
     });
-    this.enqueue(thread.id, randomUUID(), "model", { model, reasoning, before });
-    void this.deliver(thread.id).catch(() => {});
+    this.notify(thread.id);
+    if (checkIdleSession && !asleep) {
+      // A dropped connection leaves a durable pick ahead of its prompt. A definitive refusal restores the previous model.
+      await this.deliver(thread.id).catch(() => {});
+      const state = command(this.deps.db, id)?.state;
+      if (!state || !["sending", "accepted", "completed"].includes(state)) {
+        throw new ApiError(409, "model_unavailable", "Core declined the model switch. Choose another model.");
+      }
+    } else if (!asleep) {
+      void this.deliver(thread.id).catch(() => {});
+    }
     return true;
   }
 
   /** Core didn't take a model pick (`model` command): the thread shows the model it still runs. */
   private keepModel(threadId: string, pick: Command): void {
-    const { before } = modelPickSchema.parse(JSON.parse(pick.input));
+    const { before, idleSessionId } = modelPickSchema.parse(JSON.parse(pick.input));
+    if (command(this.deps.db, pick.id)?.state !== "sending") return;
     this.deps.db.transaction((tx) => {
       saveCommandState(tx, threadId, pick.id, "failed");
+      if (idleSessionId && binding(tx, threadId)?.sessionId !== idleSessionId) return;
       saveBinding(tx, threadId, { model: before.model, reasoning: before.reasoning });
       setThreadExecutionOverride(tx, { threadId, reasoningLevelOverride: before.override });
     });
@@ -2099,7 +2132,7 @@ class CloudroomService {
     const serviceTier = input.service_tier === "fast" ? "fast" : "default";
     const initial = prompts.find(item => item.id === `first_${threadId}`);
     const issues = Object.values(this.connectionIssues.get(threadId) ?? {});
-    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
+    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), launchCap: !this.sandboxes.usageLimited() && this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? ""), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
   }
 
   async create(request: CreateThreadRequest, awaitingCore = false, fork?: { sourceThreadId: string; endSequence: number }): Promise<Thread> {
@@ -2257,7 +2290,7 @@ class CloudroomService {
     const capabilities = await this.savedCapabilities();
     if (capabilities && !capabilities.fork) throw new ApiError(409, "cloudroom_update", "Update the cloud core to fork Cloud threads.");
     const keys = await this.keyFields(source.id);
-    const fork = saved ? cloudForkPoint(this.deps.db, source, request.sourceSeqEnd) : localForkPoint(this.deps, source, request.sourceSeqEnd);
+    const fork = saved ? await cloudForkPoint(this.deps, source, request.sourceSeqEnd) : localForkPoint(this.deps, source, request.sourceSeqEnd);
     const project = getProject(this.deps.db, source.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
     const profile = capabilities ? harnessProfile(capabilities, source.providerId) : null;
@@ -2348,11 +2381,11 @@ class CloudroomService {
     const client = await this.client(saved);
     const capabilities = await this.capabilities(client);
     if (!capabilities.side_chat) throw new ApiError(409, "cloudroom_update", "This Cloud thread's sandbox runs an older Cloudroom version. Side chats work after its next restart.");
-    const { end_sequence, before, last_turn_id } = cloudForkPoint(this.deps.db, source, request.sourceSeqEnd);
+    const { end_sequence, before, through, last_turn_id } = await cloudForkPoint(this.deps, source, request.sourceSeqEnd);
     const startRequestId = randomUUID();
     let sessionId: string;
     try {
-      sessionId = (await client.start(startRequestId, CLOUD_HARNESSES[providerId], { fork: { session: saved.sessionId, before, last_turn_id } })).session_id;
+      sessionId = (await client.start(startRequestId, CLOUD_HARNESSES[providerId], { fork: { session: saved.sessionId, before, through, last_turn_id } })).session_id;
     } catch (error) {
       throw new ApiError(error instanceof CloudroomError && error.status === 409 ? 409 : 503, "cloudroom_fork_rejected", publicError(error));
     }
@@ -2369,10 +2402,10 @@ class CloudroomService {
 
   /** A fresh side chat's session; a Core that predates `fresh` rejects the field, and copies the conversation instead. */
   private async startSideChat(client: CloudroomClient, threadId: string, requestId: string, harness: CloudProvider, session: string) {
-    const accepted = await client.start(requestId, CLOUD_HARNESSES[harness], { fork: { session, fresh: true } }).catch((error: unknown) => {
+    const accepted = await client.start(requestId, CLOUD_HARNESSES[harness], { fork: { session, fresh: true } }).catch(async (error: unknown) => {
       const source = getThread(this.deps.db, getThread(this.deps.db, threadId)?.sourceThreadId ?? "");
       if (!source || !(error instanceof CloudroomError && (error.status === 400 || error.status === 422))) throw error;
-      const { before, last_turn_id } = cloudForkPoint(this.deps.db, source, undefined);
+      const { before, last_turn_id } = await cloudForkPoint(this.deps, source, undefined);
       return client.start(requestId, CLOUD_HARNESSES[harness], { fork: { session, before, last_turn_id } });
     });
     return { sessionId: accepted.session_id, transfer: `child_${requestId}`, code: null };
@@ -2571,6 +2604,8 @@ class CloudroomService {
       return { ok: true, delivery: "sent" };
     }
     if (payload.model && payload.model !== saved.model) throw new ApiError(409, "cloudroom_launch_settings", `This Cloud thread now runs ${saved.model}. Send again with that model, or to use ${payload.model}, switch first in the model picker or with \`room-cli thread update ${thread.id} --model ${payload.model}\`.`);
+    const pendingModel = this.deps.db.select({ id: cloudroomCommands.id, input: cloudroomCommands.input }).from(cloudroomCommands)
+      .where(and(eq(cloudroomCommands.threadId, thread.id), eq(cloudroomCommands.command, "model"), eq(cloudroomCommands.state, "sending"))).get();
     const id = await this.requestId(thread.id, payload.requestId);
     const steer = (payload.mode === "steer" || payload.mode === "steer-if-active") && thread.status === "active" && saved.turnId && !unstartedTurn(this.deps.db, thread.id);
     const previous = command(this.deps.db, id);
@@ -2610,6 +2645,7 @@ class CloudroomService {
     }
     const stored = {
       ...parsed,
+      ...(pendingModel && JSON.parse(pendingModel.input).idleSessionId ? { modelPickId: pendingModel.id } : {}),
       ...(reasoning !== saved.reasoning ? { reasoning } : {}),
       ...(payload.serviceTier && payload.serviceTier !== "default" ? { service_tier: payload.serviceTier } : {}),
       ...(payload.senderThreadId ? { sender_thread_id: payload.senderThreadId } : {}),
@@ -2961,9 +2997,14 @@ class CloudroomService {
     }
     const thread = getThread(this.deps.db, threadId);
     if (!thread || !binding(this.deps.db, threadId)) throw new ApiError(409, "cloudroom_missing_binding", "Cloud session is unavailable");
-    const createdAt = at ?? Math.max(Date.now(), (commands(this.deps.db, threadId).at(-1)?.createdAt ?? 0) + 1);
-    this.deps.db.insert(cloudroomCommands).values({ id, threadId, command: action, input: JSON.stringify(this.snapshotInstructions(this.deps.db, thread, action, input)), createdAt }).run();
+    this.insertCommand(this.deps.db, thread, id, action, input, at);
     this.notify(threadId);
+  }
+
+  private insertCommand(db: DbQueryConnection, thread: Thread, id: string, action: Command["command"], input: object, at?: number): void {
+    const createdAt = at ?? Math.max(Date.now(), (db.select({ at: max(cloudroomCommands.createdAt) }).from(cloudroomCommands)
+      .where(eq(cloudroomCommands.threadId, thread.id)).get()?.at ?? 0) + 1);
+    db.insert(cloudroomCommands).values({ id, threadId: thread.id, command: action, input: JSON.stringify(this.snapshotInstructions(db, thread, action, input)), createdAt }).run();
   }
 
   private async uploadAttachments(
@@ -3603,8 +3644,12 @@ class CloudroomService {
               service_tier: z.string().optional(),
               customInstructions: z.string().default(""),
               workspaceContext: z.string().nullable().optional(),
+              modelPickId: z.string().optional(),
             }).parse(JSON.parse(pending.input));
             requireClaudeSkillSupport(parsed.content, capabilities, harness);
+            if (parsed.modelPickId && !["accepted", "completed"].includes(command(this.deps.db, parsed.modelPickId)?.state ?? "")) {
+              throw new ApiError(409, "model_unavailable", "The selected model could not be applied. Your message was not sent.");
+            }
             if (parsed.attachments?.length) {
               if (!capabilities.attachments) throw new ApiError(400, "cloudroom_unsupported", "Update the cloud core to use attachments. Your message is saved.");
             }
@@ -3657,7 +3702,11 @@ class CloudroomService {
               this.keepModel(threadId, pending);
               continue;
             }
-            accepted = await client.setModel(sessionId, pending.id, parsed.model, parsed.reasoning);
+            if (parsed.idleSessionId && parsed.idleSessionId !== sessionId) {
+              this.keepModel(threadId, pending);
+              continue;
+            }
+            accepted = await client.setModel(sessionId, pending.id, parsed.model, parsed.reasoning, Boolean(parsed.idleSessionId));
           } else if (pending.command === "cancel") {
             accepted = await client.cancel(sessionId, pending.id, JSON.parse(pending.input).target_request_id);
           } else if (pending.command === "reorder") {
@@ -3698,7 +3747,7 @@ class CloudroomService {
         } catch (error) {
           // A stale sandbox address: the catch below wakes it again, so keep the command unsent.
           const stale = sandboxThread(saved.coreUrl) && staleSandboxAddress(error) && (this.rewoken.get(threadId) ?? 0) < STALE_REWAKES;
-          if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command))) {
+          if (!stale && refused(error, ["steer", "edit", "cancel", "reorder"].includes(pending.command) || (pending.command === "model" && Boolean(JSON.parse(pending.input).idleSessionId)))) {
             if (pending.command === "steer") {
               // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
               const { text, content, attachments } = z.object({ text: z.string(), content: z.unknown().optional(), attachments: z.array(z.unknown()).optional() }).parse(JSON.parse(pending.input));

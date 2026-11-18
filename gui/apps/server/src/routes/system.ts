@@ -244,6 +244,8 @@ export function registerSystemRoutes(
     return {
       ...settings,
       showUnhandledProviderEvents: settings.showDiagnosticEvents,
+      // Retired; older apps and CLIs still require it when they read settings.
+      providerOrder: [] as string[],
     };
   }
   get(routes.machineEnvironment, async (context) =>
@@ -265,7 +267,11 @@ export function registerSystemRoutes(
   });
 
   put(routes.generalSettings, (context, payload) => {
-    const { showUnhandledProviderEvents, ...settings } = payload;
+    const {
+      showUnhandledProviderEvents,
+      providerOrder: _retiredProviderOrder,
+      ...settings
+    } = payload;
     const current = getAppSettings(deps.db);
     const diagnosticValue =
       "showDiagnosticEvents" in settings
@@ -291,6 +297,11 @@ export function registerSystemRoutes(
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
     deps.hub.notifySystem(["config-changed"]);
+    if (current.providerAutoUpdate.some((id) => !updatedSettings.providerAutoUpdate.includes(id))) {
+      for (const hostId of deps.hub.listConnectedHostIds()) {
+        deps.hub.notifyHost(hostId, ["provider-cli-status-changed"]);
+      }
+    }
     if (
       updatedSettings.providerAutoUpdate.some(
         (provider) => !current.providerAutoUpdate.includes(provider),

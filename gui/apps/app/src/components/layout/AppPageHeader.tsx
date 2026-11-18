@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { useIsSidebarShowing } from "@/components/ui/sidebar.js";
+import {
+  useIsSidebarShowing,
+  useSidebarOverlay,
+  useSidebarOverlayInset,
+} from "@/components/ui/sidebar.js";
 import {
   COARSE_POINTER_HEADER_ICON_BUTTON_CLASS,
   COARSE_POINTER_HEADER_REDUCED_GLYPH_ICON_BUTTON_CLASS,
@@ -34,6 +38,10 @@ export const APP_PAGE_HEADER_SURFACE_CLASS = "bg-surface-scrim";
 
 export const COMPACT_SHELF_HIDDEN_PAGE_HEADER_ACTIONS_CLASS =
   "group-data-[panel-shelf=open]/page-inset:invisible group-data-[panel-shelf=shelf]/page-inset:invisible";
+
+// Same timing as the sidebar's own slide.
+const SIDEBAR_OVERLAY_RESERVE_SLIDE_CLASS =
+  "bb-zoom transition-[padding] duration-[220ms] ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none";
 
 // Below this row width the title and actions need the space, so the name hides.
 const BRAND_MARK_MIN_ROW_WIDTH = 640;
@@ -83,10 +91,25 @@ export function AppPageHeader({
     return observeSharedResize(row, { read, write: setRowHasRoom });
   }, [wantsBrandMark]);
   const showBrandMark = wantsBrandMark && rowHasRoom;
-  const topLeftReserveClass = shouldReserveSidebarTrigger
-    ? reserveMacosTrafficLights
-      ? MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS
-      : BROWSER_COLLAPSED_HEADER_RESERVE_CLASS
+  // In overlay mode this header runs under the floating sidebar: clear the
+  // card while it shows, and slide between the two reserves with it.
+  const sidebarOverlay = useSidebarOverlay() && ownsWindowTopLeft;
+  const overlayInset = useSidebarOverlayInset();
+  const cardInset = ownsWindowTopLeft ? overlayInset : null;
+  const isDragRegion = usesDesktopChrome && isWindowDragRegion;
+  // Electron picks drag regions by page order, not by what is painted on top,
+  // so a drag region under the card would swallow the card's buttons. While
+  // the card shows, the window drags only from the part right of it.
+  const dragsRightOfCard = isDragRegion && cardInset !== null;
+  const topLeftReserveClass = cn(
+    shouldReserveSidebarTrigger &&
+      (reserveMacosTrafficLights
+        ? MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS
+        : BROWSER_COLLAPSED_HEADER_RESERVE_CLASS),
+    sidebarOverlay && SIDEBAR_OVERLAY_RESERVE_SLIDE_CLASS,
+  );
+  const topLeftReserveStyle = cardInset
+    ? { paddingLeft: cardInset }
     : undefined;
   return (
     <header
@@ -96,10 +119,17 @@ export function AppPageHeader({
         !compact && HEADER_SEAM_CLASS,
         APP_PAGE_HEADER_SURFACE_CLASS,
         "relative shrink-0 select-none px-4",
-        usesDesktopChrome && isWindowDragRegion && MACOS_WINDOW_DRAG_CLASS,
+        isDragRegion && !dragsRightOfCard && MACOS_WINDOW_DRAG_CLASS,
         className,
       )}
     >
+      {dragsRightOfCard ? (
+        <div
+          aria-hidden="true"
+          className={cn("absolute inset-y-0 right-0", MACOS_WINDOW_DRAG_CLASS)}
+          style={{ left: cardInset }}
+        />
+      ) : null}
       <div
         ref={rowRef}
         data-testid="app-page-header-content-row"
@@ -111,6 +141,7 @@ export function AppPageHeader({
           // the name stays centered on the header.
           !showBrandMark && topLeftReserveClass,
         )}
+        style={showBrandMark ? undefined : topLeftReserveStyle}
       >
         {center ? (
           <div className="flex min-w-0 flex-1 items-center">
@@ -119,6 +150,7 @@ export function AppPageHeader({
                 "flex min-w-0 max-w-full items-center gap-2",
                 showBrandMark && topLeftReserveClass,
               )}
+              style={showBrandMark ? topLeftReserveStyle : undefined}
             >
               {center}
             </div>

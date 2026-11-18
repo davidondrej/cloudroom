@@ -59,7 +59,7 @@ async function projectRepo(deps: AppDeps, project: ProjectRow, token: string | n
   if (!repo?.id) return { id: project.githubRepoId, repo: name };
   if (repo.id !== project.githubRepoId || repo.repo.toLowerCase() !== name) {
     const gitRemoteUrl = project.gitRemoteUrl.replace(/[\w.-]+\/[\w.-]+?(\.git)?\/?$/, (_, git: string | undefined) => `${repo.repo}${git ?? ""}`);
-    setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: repo.id, gitRemoteUrl });
+    setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: repo.id, gitRemoteUrl }, project.gitRemoteUrl);
   }
   return repo;
 }

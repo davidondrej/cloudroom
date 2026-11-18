@@ -4876,11 +4876,15 @@ describe("PromptBoxInternal fast mode command", () => {
 
   it("switches to Opus with Enter without sending or losing the draft", async () => {
     const selectModel = vi.fn();
-    const modelShortcuts = promptModelShortcuts({
+    const execution = {
       provider: { options: [{ value: "claude-code", label: "Claude Code" }] },
       selectModel,
-    });
-    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["fable", "opus"]);
+    };
+    expect(promptModelShortcuts(execution)?.map(({ name }) => name)).toEqual(["fable", "opus"]);
+    expect(promptModelShortcuts(execution, { providerId: "codex", models: ["gpt-6-astra", "claude-fable-5-2"] })?.map(({ name }) => name)).toEqual(["astra"]);
+    execution.provider.options.push({ value: "codex", label: "Codex" });
+    const modelShortcuts = promptModelShortcuts(execution, { providerId: "claude-code", models: ["claude-opus-5-5[1m]"] });
+    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["opus"]);
     const { changes, onSubmit, promptBoxRef } = renderPromptBox(
       "Review this /opus",
       { modelShortcuts },

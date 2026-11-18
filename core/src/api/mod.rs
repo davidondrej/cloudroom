@@ -1345,6 +1345,8 @@ async fn reorder(
 #[serde(deny_unknown_fields)]
 struct Model {
     request_id: String,
+    #[serde(default)]
+    idle_only: bool,
     model: String,
     reasoning: Option<String>,
 }
@@ -1370,7 +1372,10 @@ async fn model(
                 .await?,
         )
     };
-    let input = json!({"model":body.model,"reasoning":reasoning});
+    let mut input = json!({"model":body.model,"reasoning":reasoning});
+    if body.idle_only {
+        input["idle_only"] = json!(true);
+    }
     let receipt = manager.command(&id, body.request_id, "model", input)?;
     Ok(accepted(&manager, &id, receipt))
 }

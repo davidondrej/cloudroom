@@ -4,7 +4,7 @@ import { getMachineEnrollmentService } from "./services/machines/machine-service
 import { withManualMachineProvider } from "./services/machines/manual-provider.js";
 import { registerDesktopBrowserRoutes } from "./routes/desktop-browsers.js";
 import { INSTALL_MACHINE_SCRIPT_PATH } from "./install-machine-asset.js";
-import { createNodeWebSocket } from "@hono/node-ws";
+import { createNodeWebSocket } from "./node-websocket.js";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";

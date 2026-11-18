@@ -28,6 +28,13 @@ When `--permission-mode` is omitted, the plugin chooses Full Access
 (`full`) when the provider supports it and otherwise uses Auto
 (`auto`).
 
+From a thread below Full Access (Manual or Auto), a loop gets at most
+that thread's mode, and a higher `--permission-mode` is refused. A loop
+that would default to Manual is refused, since each run would wait for
+approvals; pass `--permission-mode accept-edits` only if the user asks.
+Such a thread can't make a script loop, or change, run, resume, or get
+a webhook URL for a loop broader than itself. Ask the user instead.
+
 Script mode flags:
 
 ```text

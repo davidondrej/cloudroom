@@ -227,6 +227,7 @@ import { ThreadTimelineNavigationProvider } from "@/components/thread/timeline/T
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getFileExtension, isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -2865,7 +2866,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
           <ThreadShareButton threadId={thread.id} />
         </>
       }
-      isCloudThread={thread.executionTarget === "cloud"}
       threadId={thread.id}
       threadPurpose={thread.purpose ?? null}
       threadTitle={threadTitle}
@@ -3321,13 +3321,24 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                 <ThreadOriginMarker origin={threadOrigin} />
               ) : undefined,
               trailingContent:
-                chatCardInteraction ? (
-                  <div className="pt-2">
-                    <ThreadPendingInteractionBanner
-                      interaction={chatCardInteraction}
-                      threadId={thread.id}
-                    />
-                  </div>
+                chatCardInteraction || cloudThreadState.data?.usageLimit ? (
+                  <>
+                    {/* Out of Cloud Credits: a row where the work stopped (ADR 20261118-214337). */}
+                    {cloudThreadState.data?.usageLimit && (
+                      <CloudUsageLimitNotice
+                        launchCap={cloudThreadState.data.launchCap}
+                        className="mt-1 px-2"
+                      />
+                    )}
+                    {chatCardInteraction && (
+                      <div className="pt-2">
+                        <ThreadPendingInteractionBanner
+                          interaction={chatCardInteraction}
+                          threadId={thread.id}
+                        />
+                      </div>
+                    )}
+                  </>
                 ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,

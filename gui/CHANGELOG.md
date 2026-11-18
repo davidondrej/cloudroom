@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 158
+
+Floating sidebar and snippets (2026-11-18)
+
+### Changes
+
+- The sidebar is now a floating card, so opening or closing it never moves the chat.
+- Snippets: save text you reuse, expand it in any message, and keep it synced across your computers.
+- Fork a Claude thread from any reply, even after edits or agent switches.
+- Switch models with a shortcut in an idle thread and keep the same session.
+- Replies show the quoted message as a chip with a hover preview.
+- Security fixes.
+
 ## 157
 
 Animated grid while agents work (2026-11-17)

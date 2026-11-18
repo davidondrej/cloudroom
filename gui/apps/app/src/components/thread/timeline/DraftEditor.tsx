@@ -144,7 +144,7 @@ function SelectionMenu({
   left: number;
   onAddToChat?: () => void;
 }) {
-  const { copied, copy } = useClipboardCopy({ text, resetMs: 1500 });
+  const { copied, copy } = useClipboardCopy({ text, chatMessage: true, resetMs: 1500 });
   return (
     <div
       className="absolute z-20 flex items-center gap-0.5 rounded-lg border border-foreground/10 bg-popover p-0.5 text-[12px] shadow-lg"
@@ -212,7 +212,7 @@ export function DraftEditor({
   const [text, setText] = useState(original);
   const [revision, setRevision] = useState(0);
   const [selected, setSelectedState] = useState<Selected | null>(null);
-  const { copied, copy } = useClipboardCopy({ text, resetMs: 4000 });
+  const { copied, copy } = useClipboardCopy({ text, chatMessage: true, resetMs: 4000 });
 
   const setSelected = useCallback((next: Selected | null) => {
     selectedRef.current = next;

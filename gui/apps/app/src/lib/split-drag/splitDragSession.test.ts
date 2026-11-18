@@ -211,6 +211,36 @@ describe("beginSplitDrag — sidebar gesture arbitration and fallback", () => {
     container.remove();
   });
 
+  it("does not drop on the floating sidebar card over a pane", () => {
+    const card = document.createElement("div");
+    card.setAttribute("data-sidebar", "panel");
+    const row = document.createElement("a");
+    card.append(row);
+    document.body.append(card);
+    const container = document.createElement("main");
+    Object.defineProperty(container, "getBoundingClientRect", {
+      value: () => fakeRect(0, 0, 1200, 800),
+      configurable: true,
+    });
+    document.body.append(container);
+    // The card floats over the pane's left edge.
+    document.elementsFromPoint = vi.fn((x: number) =>
+      x < 320 ? [row, paneEl] : [paneEl],
+    ) as typeof document.elementsFromPoint;
+
+    const config = baseConfig({
+      fallback: { paneId: "pane-1", container },
+    });
+    beginSplitDrag(config);
+    fireWindowPointer("pointermove", 900, 300);
+    fireWindowPointer("pointermove", 310, 300);
+    fireWindowPointer("pointerup", 310, 300);
+
+    expect(config.onDrop).not.toHaveBeenCalled();
+    card.remove();
+    container.remove();
+  });
+
   it("rejects marked panes outside a supplied target boundary", () => {
     const boundary = document.createElement("aside");
     document.body.append(boundary);

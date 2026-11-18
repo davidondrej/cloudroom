@@ -139,7 +139,7 @@ export interface PromptModelShortcut {
   description: string;
   /** The harness logo, so the row shows where the switch lands. */
   icon?: ComponentType<{ className?: string }>;
-  onSelect: () => void;
+  onSelect: () => void | Promise<void>;
 }
 
 export interface PromptLocationCommand {
@@ -210,22 +210,21 @@ const MODEL_SHORTCUTS = [
   ["astra", "codex", "gpt-6-astra", "GPT-6 Astra in Codex"],
 ] as const;
 
-/** The `/fable`, `/opus` and `/astra` commands, for the harnesses this install has. */
-export function promptModelShortcuts({
-  provider,
-  selectModel,
-}: Pick<ExecutionControlsProps, "provider" | "selectModel">):
-  | PromptModelShortcut[]
-  | undefined {
+/** New drafts use the available harnesses. An existing thread already owns its harness. */
+export function promptModelShortcuts(
+  { provider, selectModel }: Pick<ExecutionControlsProps, "provider" | "selectModel">,
+  thread?: { providerId: string; models: readonly string[] },
+): PromptModelShortcut[] | undefined {
   if (!selectModel) return undefined;
   const shortcuts: PromptModelShortcut[] = [];
   for (const [name, providerId, model, label] of MODEL_SHORTCUTS) {
     const harness = provider.options?.find(({ value }) => value === providerId);
-    if (!harness) continue;
+    const available = thread ? providerId === thread.providerId && thread.models.includes(model) : Boolean(harness);
+    if (!available) continue;
     shortcuts.push({
       name,
       description: `Switch to ${label}`,
-      icon: harness.icon,
+      icon: harness?.icon,
       onSelect: () => selectModel({ providerId, model }),
     });
   }

@@ -1,4 +1,5 @@
 import { CONNECT_AGENT_IDS, ConnectAgentsButton } from "@/components/ConnectAgentsButton";
+import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 import {
   useCloudroomConnection,
   cloudHarness,
@@ -14,6 +15,7 @@ import { CLOUD_LOCKED_REASON, showCloudSignIn, useCloudLocked } from "@/hooks/us
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
+import { CloudClaudeStrip, useCloudClaudeMissing } from "./banner/CloudClaudeStrip";
 import { CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
 import { StarterPrompts } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
@@ -34,6 +36,7 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import {
+  usesTextFork,
   findLocalPathProjectSourceForHost,
   PERSONAL_PROJECT_ID,
   type EnvironmentMachineSelection,
@@ -138,6 +141,7 @@ import {
 type NewThreadComposerSelectionScope = "new-thread" | "component-local";
 
 export interface NewThreadComposerSeed {
+  textOnly?: boolean;
   providerId?: string;
   model?: string;
   reasoningLevel?: ReasoningLevel;
@@ -900,15 +904,19 @@ export function NewThreadComposer({
   // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
   const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
   const cloudAgentMissing = cloudKnown && !cloudHarness(cloudConnection.data, selectedProviderId);
+  // Most first Cloud prompts that failed were Claude Code with no Claude login anywhere: the strip in the composer says so first.
+  const claudeMissing = useCloudClaudeMissing(executionTarget === "cloud" && !vps.isLoading && !vps.isError && !landsOnVps && !cloudQueue && !cloudAgentMissing && selectedProviderId === "claude-code");
   const cloudChoiceReason: CloudChoiceReason | null = cloudLocked
     ? "signed_out"
     : storedExecutionTarget === "cloud" && executionTarget === "local"
       ? "agent_unsupported"
       : cloudAgentMissing
         ? "agent_not_in_cloud"
-        : cloudQueue
-          ? cloudQueue.regionBlocked ? "region" : "queue"
-          : null;
+        : claudeMissing
+          ? "claude_not_connected"
+          : cloudQueue
+            ? cloudQueue.regionBlocked ? "region" : "queue"
+            : null;
   const cloudChoiceAction = selectionScope !== "new-thread" || cloudChoiceReason === null
     ? null
     : executionTarget === "cloud"
@@ -1634,10 +1642,14 @@ export function NewThreadComposer({
     : selectedProviderId === "claude-code"
       ? "Claude Code is not configured in Cloud yet."
       : `${selectedProviderDisplayName ?? "This agent"} isn't available in Cloud. Available: ${cloudHarnessNames(cloudConnection.data)}.`;
-  const submitDisabledReason =
-    executionTarget === "cloud"
+  const needsTextFork = seed?.textOnly && seed.providerId &&
+    !usesTextFork(seed.providerId, seed.model, selectedProviderId, selectedThreadModel, executionTarget === "cloud");
+  const submitDisabledReason = needsTextFork
+    ? "Choose another agent to fork from this reply."
+    : executionTarget === "cloud"
       ? (cloudBlockedReason
-          ?? (cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
+          ?? (claudeMissing ? "Connect Claude Code to send in Cloud"
+          : cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
           // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
           // still shows: it would fail as "Project not found", then quietly turn into no project (#1347).
           : !isProjectless && (!sidebarNavigationSettled || sidebarNavigationQuery.isPlaceholderData)
@@ -1802,6 +1814,11 @@ export function NewThreadComposer({
     setSelectedProviderId,
     snapshotDraftBeforeOptionChange,
   );
+  const codexOffered = providerOptions.some((option) => option.value === "codex");
+  const switchToCodex = useCallback(() => {
+    reportCloudChoice("switched_agent", "claude_not_connected");
+    handleProviderChange("codex");
+  }, [handleProviderChange]);
   const handleModelChange = useDraftPreservingOptionChange(
     selectedModel,
     setSelectedModel,
@@ -1843,6 +1860,7 @@ export function NewThreadComposer({
       const locks = options.locks ?? {};
       const disabledReason = options.blockedReason ?? submitDisabledReason;
       return (
+        <PromptDraftContextsContext.Provider value={currentDraft.contexts}>
         <NewThreadPromptBox
           id={options.id}
           focusRequest={promptBoxFocusRequest}
@@ -2037,7 +2055,12 @@ export function NewThreadComposer({
                   />
                 )))
               ),
-            header: options.header,
+            header: claudeMissing ? (
+              <>
+                <CloudClaudeStrip onSwitchToCodex={codexOffered && !locks.provider ? switchToCodex : null} />
+                {options.header}
+              </>
+            ) : options.header,
           }}
           project={{
             projects: projectOptions,
@@ -2086,6 +2109,7 @@ export function NewThreadComposer({
             selectModel: locks.provider ? undefined : handleSelectModel,
           }}
         />
+        </PromptDraftContextsContext.Provider>
       );
     },
     [
@@ -2151,6 +2175,9 @@ export function NewThreadComposer({
       cloudFastSupported,
       submitDisabledReason,
       cloudBlockedReason,
+      claudeMissing,
+      codexOffered,
+      switchToCodex,
       cloudQueue,
       machineServerAccessReason,
       setupRequiredProvider,
@@ -2177,7 +2204,8 @@ export function NewThreadComposer({
     <NewThreadComposerStateRenderer
       render={children}
       state={{
-        connectionFooter: providerOptions.some((provider) => CONNECT_AGENT_IDS.includes(provider.value)) ? (
+        // The Claude strip in the prompt box already offers Connect.
+        connectionFooter: !claudeMissing && providerOptions.some((provider) => CONNECT_AGENT_IDS.includes(provider.value)) ? (
           <ConnectAgentsButton
             target={executionTarget}
             hostId={executionOptionsRouting.hostId}

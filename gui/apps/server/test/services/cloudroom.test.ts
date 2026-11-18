@@ -1085,6 +1085,12 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     expect(created.status, await created.clone().text()).toBe(201);
     const thread = await created.json();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    const shortcut = await harness.app.request(`/api/v1/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idleSessionOnly: true, providerId: "codex", model: "other-model" }),
+    });
+    expect(shortcut.status).toBe(409);
+    expect(service.threadStatus(thread.id)).toMatchObject({ sessionId: "cr_reasoning", model: "test-model" });
     const text = [{ type: "text", text: "queued", mentions: [] }];
     expect((await send(thread.id, { requestId: "same-launch", mode: "auto", reasoningLevel: "high", input: text })).status).toBe(200);
     await expect.poll(() => plain(prompts.at(-1))).toEqual({ request_id: "same-launch", text: "queued" });
@@ -1212,9 +1218,15 @@ it("starts Cloud Claude with no level at the Mac catalog default, after a retry'
   const core = createServer(async (req, res) => {
     let text = ""; for await (const chunk of req) text += chunk;
     const requestId = text ? JSON.parse(text).request_id : undefined;
+    if (req.url === "/v1/sessions/cr_shortcut/model" && JSON.parse(text).idle_only !== true) { res.writeHead(400); res.end(); return; }
+    if (req.url === "/v1/sessions/cr_shortcut/model" && JSON.parse(text).model === "declined") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "invalid_model" }));
+      return;
+    }
     res.writeHead(requestId ? 202 : 200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "claude-code", model: "test-model" }] }
-      : requestId ? { session_id: "cr_effort", receipt: { request_id: requestId, command: req.url === "/v1/sessions" ? "start" : "prompt", state: "accepted", input: {} }, saving: {} } : {}));
+    res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "claude-code", model: "test-model", set_model: true, idle_set_model: true, models: ["test-model", "opus", "declined"].map(model => ({ model, reasoning_levels: ["low", "medium", "xhigh"] })) }] }
+      : requestId ? { session_id: req.url?.endsWith("/model") ? "cr_shortcut" : "cr_effort", receipt: { request_id: requestId, command: req.url === "/v1/sessions" ? "start" : req.url?.endsWith("/model") ? "model" : "prompt", state: "accepted", input: {} }, saving: {} } : {}));
   });
   core.listen(0, "127.0.0.1"); await once(core, "listening");
   const address = core.address();
@@ -1233,6 +1245,16 @@ it("starts Cloud Claude with no level at the Mac catalog default, after a retry'
     upsertProjectExecutionDefaults(harness.db, { projectId: project.id, providerId: "claude-code", model: "test-model", reasoningLevel: "low", permissionMode: "full", serviceTier: "default" });
     expect((await start("third")).status).toBe(201);
     expect(level("third")).toBe("low"); // the project's remembered effort beats the catalog
+    const thread = createThread(harness.db, harness.hub, { projectId: project.id, providerId: "claude-code", executionTarget: "cloud", status: "error" });
+    harness.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `http://127.0.0.1:${address.port}`, sessionId: "cr_shortcut", startRequestId: "shortcut", model: "test-model", reasoning: "medium" }).run();
+    const pick = (model: string) => harness.app.request(`/api/v1/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idleSessionOnly: true, providerId: "claude-code", model }),
+    });
+    const picked = await pick("opus");
+    expect(picked.status, await picked.clone().text()).toBe(200);
+    for (const unavailable of ["absent", "declined"]) expect((await pick(unavailable)).status).toBe(409);
+    expect(service.threadStatus(thread.id)).toMatchObject({ model: "opus", sessionId: "cr_shortcut" });
   } finally {
     service.stop();
     core.closeAllConnections();

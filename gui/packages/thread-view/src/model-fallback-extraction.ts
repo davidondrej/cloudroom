@@ -1,5 +1,6 @@
 import {
   THREAD_HARNESS_SWITCH_OPERATION,
+  THREAD_MODEL_SELECTION_OPERATION,
   type JsonObject,
   type JsonValue,
   type ThreadEvent,
@@ -80,7 +81,7 @@ export function extractThreadTimelineModelFallback(
     if (
       event.type === "client/turn/requested" ||
       (event.type === "system/operation" &&
-        event.operation === THREAD_HARNESS_SWITCH_OPERATION)
+        (event.operation === THREAD_HARNESS_SWITCH_OPERATION || event.operation === THREAD_MODEL_SELECTION_OPERATION))
     ) {
       latestRelevantSeq = meta.seq;
       fallback = null;

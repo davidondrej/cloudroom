@@ -293,18 +293,21 @@ export interface UpdateProjectInput {
   name?: string;
 }
 
-/** Saves the project's GitHub repo ID, and its remote under the repo's current name after a rename or transfer. */
+/** Saves the project's GitHub repo ID, and its remote under the repo's current name after a rename or transfer. With
+ *  `from`, only while the remote is still the one the lookup started with, so a newer save is never undone. */
 export function setProjectGithubRepo(
   db: DbConnection,
   notifier: DbNotifier,
   id: string,
   input: { githubRepoId: number; gitRemoteUrl: string },
+  from?: string,
 ) {
-  db.update(projects)
+  const updated = db.update(projects)
     .set({ ...input, updatedAt: Date.now() })
-    .where(eq(projects.id, id))
-    .run();
-  notifier.notifyProject(id, ["project-updated"]);
+    .where(and(eq(projects.id, id), from === undefined ? undefined : eq(projects.gitRemoteUrl, from)))
+    .returning({ id: projects.id })
+    .get();
+  if (updated) notifier.notifyProject(id, ["project-updated"]);
 }
 
 export function setProjectGitRemoteUrlIfMissing(
@@ -317,6 +320,27 @@ export function setProjectGitRemoteUrlIfMissing(
     .update(projects)
     .set({ gitRemoteUrl, updatedAt: Date.now() })
     .where(and(eq(projects.id, id), isNull(projects.gitRemoteUrl)))
+    .returning()
+    .get();
+  if (updated) {
+    notifier.notifyProject(id, ["project-updated"]);
+  }
+  return updated ?? null;
+}
+
+/** Swaps a project's Git remote only while it still holds `from`, so a newer save is never overwritten. The old repo's
+ *  GitHub ID goes too, so a rename check can't bring the old remote back. */
+export function replaceProjectGitRemoteUrl(
+  db: DbConnection,
+  notifier: DbNotifier,
+  id: string,
+  from: string,
+  gitRemoteUrl: string,
+) {
+  const updated = db
+    .update(projects)
+    .set({ gitRemoteUrl, githubRepoId: null, updatedAt: Date.now() })
+    .where(and(eq(projects.id, id), eq(projects.gitRemoteUrl, from)))
     .returning()
     .get();
   if (updated) {

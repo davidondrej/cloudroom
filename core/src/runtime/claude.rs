@@ -627,23 +627,30 @@ pub(super) fn fork_source(handle: &Handle, before: &str) -> io::Result<(Resume, 
     let id = handle.native()?;
     let path = transcript(&handle.profile, &id)?;
     let saved = resume(handle, id, path);
-    let parent = checkpoint_parent(&handle.profile, &saved, before, handle.file_identity)?;
+    let parent = fork_checkpoint(&handle.profile, &saved, before, handle.file_identity, false)?;
     Ok((saved, parent))
 }
 
-/// The message a fork of `saved` resumes at: the saved parent of user message `before`.
-pub(super) fn checkpoint_parent(
+/// Resolve an inclusive assistant message or the parent of a user rewind point.
+pub(super) fn fork_checkpoint(
     profile: &HarnessConfig,
     saved: &Resume,
-    before: &str,
+    checkpoint: &str,
     identity: files::Identity,
+    inclusive: bool,
 ) -> io::Result<String> {
     let file = validate(profile, &saved.path, &saved.id, identity)?;
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0))?;
     while let Some(raw) = next_line(&mut reader)? {
         let value: Value = serde_json::from_str(&raw)?;
-        if value["uuid"] == before && value["type"] == "user" && value["isMeta"] != true {
+        if value["uuid"] != checkpoint {
+            continue;
+        }
+        if inclusive && value["type"] == "assistant" && value["isSidechain"] != true {
+            return Ok(checkpoint.to_owned());
+        }
+        if !inclusive && value["type"] == "user" && value["isMeta"] != true {
             let parent = value["parentUuid"].as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -683,6 +690,8 @@ pub(super) struct Protocol {
     compacted: bool,
     bootstrapped: bool,
     close_confirmed: bool,
+    // Core asked Claude to stop (`close`): a turn this cuts ends with Claude's opaque `[ede_diagnostic]` (#1967).
+    closing: bool,
     last_result_failed: bool,
     // Claude's plan limit rejected this turn: when it resets, if Claude said (ms), and whether it is the account's
     // (not one model's own window).
@@ -726,6 +735,7 @@ impl Protocol {
             compacted: false,
             bootstrapped: false,
             close_confirmed: false,
+            closing: false,
             last_result_failed: false,
             limit: None,
             credits: None,
@@ -1065,6 +1075,30 @@ impl Adapter for Protocol {
                 native: None,
             });
         }
+        // Claude sends the transcript UUID on the assistant frame, adjacent to the streamed
+        // block's stop. Only a whole, root text message is an independent fork point.
+        let checkpoint = (kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["error"].is_null()
+            && value["isReplay"] != true)
+            .then(|| value["uuid"].as_str())
+            .flatten()
+            .filter(|id| !id.is_empty());
+        if let Some(uuid) = checkpoint
+            && value["message"]["id"] == self.message_id
+            && let Some([block]) = value["message"]["content"].as_array().map(Vec::as_slice)
+            && block["type"] == "text"
+        {
+            let mut candidates = self
+                .blocks
+                .values_mut()
+                .filter(|item| item["item_type"] == "text" && item["text"] == block["text"]);
+            if let Some(item) = candidates.next()
+                && candidates.next().is_none()
+            {
+                item["provider_checkpoint_id"] = json!(uuid);
+            }
+        }
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
@@ -1189,13 +1223,19 @@ impl Adapter for Protocol {
                     if let Some(name) = block["name"].as_str() {
                         self.track(&id, name);
                     }
-                    let part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
+                    let mut part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
                     events.push(Event::Record {
                         kind: "item_started",
                         data: part.clone(),
                         native: None,
                     });
                     if block["type"] != "tool_use" {
+                        if block["type"] == "text"
+                            && content.len() == 1
+                            && let Some(uuid) = checkpoint
+                        {
+                            part["provider_checkpoint_id"] = json!(uuid);
+                        }
                         events.push(Event::Record {
                             kind: "item_completed",
                             data: part,
@@ -1355,7 +1395,16 @@ impl Adapter for Protocol {
                 {
                     events.push(Event::Authentication { accepted: true });
                 }
-                let mut error = (status == "failed").then(|| result_error(value));
+                // Claude's other errors stay its own; its raw result stays in history either way.
+                let cut = self.closing && value["subtype"] == "error_during_execution";
+                let mut error = (status == "failed").then(|| {
+                    if cut {
+                        "Cloudroom stopped Claude mid-turn, for example to restart its sandbox"
+                            .into()
+                    } else {
+                        result_error(value)
+                    }
+                });
                 if let (Some((resets, account_wide)), Some(text)) = (self.limit.take(), &mut error)
                 {
                     let mut limited = super::plan_limited("claude-code", resets);
@@ -1430,6 +1479,7 @@ impl Adapter for Protocol {
         self.capture.more
     }
     fn close(&mut self) -> Vec<Value> {
+        self.closing = true;
         vec![
             json!({"type":"control_request","request_id":"close","request":{"subtype":"interrupt","cancel_queued":true}}),
         ]

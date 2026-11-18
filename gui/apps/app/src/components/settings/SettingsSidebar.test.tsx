@@ -22,7 +22,6 @@ const pluginEntries = [
   "provider-claude-code",
   "provider-codex",
   "provider-retry",
-  "provider-usage",
   "push-notifications",
 ].map((id) => ({ id, label: id, icon: null }));
 

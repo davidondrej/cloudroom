@@ -25,6 +25,8 @@ const SMALL: u64 = LIMIT as u64 - MIB;
 const SHA: &str = "{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64";
 /// Read-only Mac access may write in /tmp.
 const MKTEMP: &str = "mktemp -d /tmp/cloudroom.XXXXXX";
+/// Starts each pull's random mark, the line its archive follows.
+const MARK: &str = "cloudroom-copy-";
 /// Turns a source `$p` of `.`, `..`, `dir/.`, or `link/` into the real folder it names, and its entry name into
 /// `$n`, as `realpath` would.
 const RESOLVE: &str = "case $p in */) [ -L \"${p%/}\" ] && p=$p.;; esac; \
@@ -35,10 +37,20 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     // a logout's after (#1012). The Mac temp folder is named after the same mark, so cleanup never trusts the output.
     let mut random = [0; 8];
     fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let mark = format!("cloudroom-copy-{}", hex(&random));
+    let mark = format!("{MARK}{}", hex(&random));
     let dir = format!("/tmp/{mark}");
     let copy = copy_in(socket, source, target, &mark, &dir);
     stoppable(socket, Some(&dir), copy).await
+}
+
+/// A copy a disconnect cut off says to run it again, only once the whole copy fails: a piece retries first (#1936).
+fn rerun(error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::ConnectionAborted => io::Error::other(
+            "The Mac disconnected during this copy, so nothing was copied. Run the copy again once room-cli mac status shows the Mac connected.",
+        ),
+        _ => error,
+    }
 }
 
 /// Runs a copy until it ends or `kill` stops room-cli (SIGTERM, #1274). Stopping drops the copy: its VM temp files go,
@@ -51,10 +63,10 @@ pub(super) async fn stoppable(
 ) -> io::Result<i32> {
     use tokio::signal::unix::{SignalKind, signal};
     let Ok(mut term) = signal(SignalKind::terminate()) else {
-        return copy.await;
+        return copy.await.map_err(rerun);
     };
     tokio::select! {
-        copied = copy => return copied,
+        copied = copy => return copied.map_err(rerun),
         _ = term.recv() => {},
     }
     if let Some(dir) = dir {
@@ -363,12 +375,21 @@ async fn run(
     copy: Value,
 ) -> io::Result<(Option<i32>, Vec<u8>, Vec<u8>)> {
     let mut body = json!({"command":command,"stdin":hex(stdin),"write":write});
-    if !copy.is_null() {
+    let unpack = !copy.is_null();
+    if unpack {
         body["copy"] = copy;
     }
     let value = request(socket, "POST", "/jobs", Some(body)).await?;
     if let Some(id) = value["job"].as_str().filter(|_| value["state"] == "done") {
         let _ = request(socket, "DELETE", &format!("/jobs/{id}"), None).await;
+    }
+    // Only a push's unpack may still land after a disconnect, and `mac result` shows where. Any other copy job's
+    // output is copy data or nothing, which `mac result` can't use (#1936), so `rerun` advises.
+    if value["state"] == "unknown" && !unpack {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "The Mac disconnected during this copy",
+        ));
     }
     finished(value)
 }
@@ -440,6 +461,27 @@ fn framed<'a>(stdout: &'a [u8], mark: &str) -> io::Result<(&'a str, &'a [u8])> {
     let end = rest.iter().position(|&b| b == b'\n').ok_or_else(invalid)?;
     let line = std::str::from_utf8(&rest[..end]).map_err(|_| invalid())?;
     Ok((line, &rest[end + 1..]))
+}
+
+/// A pull job's output (#1936): its mark line, then a size and the gzip archive, a staged archive's size and SHA-256,
+/// or an empty line and a binary piece. Text that only names a mark, like `ls /tmp`, is no pull.
+pub(super) fn archive(stdout: &[u8]) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    let marks = stdout
+        .split(|&b| b == b'\n')
+        .filter(|line| line.starts_with(MARK.as_bytes()));
+    marks
+        .filter_map(|line| std::str::from_utf8(line).ok())
+        .any(|mark| match framed(stdout, mark) {
+            Ok(("", data)) => std::str::from_utf8(data).is_err(),
+            Ok((head, data)) => match head.split_once(' ') {
+                Some((size, sha)) => {
+                    digits(size) && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+                }
+                None => digits(head) && data.starts_with(b"\x1f\x8b"),
+            },
+            Err(_) => false,
+        })
 }
 
 fn invalid() -> io::Error {

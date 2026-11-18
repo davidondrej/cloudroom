@@ -186,6 +186,7 @@ describe("claude turn and checkpoint lifecycle", () => {
     const harness = createClaudeDeltaHarness();
     const events = harness.translate({
       type: "assistant",
+      uuid: "hello-checkpoint",
       message: {
         id: "msg-1",
         role: "assistant",
@@ -207,6 +208,7 @@ describe("claude turn and checkpoint lifecycle", () => {
           type: "agentMessage",
           id: expect.stringMatching(ITEM_ID_PATTERN),
           text: "Hello world",
+          providerCheckpointId: "hello-checkpoint",
         }),
       }),
     );

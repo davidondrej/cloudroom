@@ -27,3 +27,5 @@ description: 'Inspect and control the user’s Cloudroom threads, projects, and 
 - `Mac unavailable` means their computer is offline, Mac access is off, or the user is on Windows (no Mac access there yet), and says which when Cloudroom knows, including why an online computer can't connect. `room-cli mac status` gives the same `reason`. Don't retry. Ask the user to do it in the Cloudroom app instead.
 - Phone: the user opens cloudroom.dev/m, signs in with their Cloudroom account, and adds the app to the Home Screen. With their computer off, the phone still shows and runs Cloud threads, but starting a new thread needs that computer.
 - Never inspect, message, or launch other threads unless the user asks.
+
+Use `room-cli snippets --help` to manage account-synced or Organization chat snippets. Import Raycast JSON with `room-cli snippets import --file snippets.json` and export with `room-cli snippets export > snippets.json`.

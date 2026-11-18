@@ -14,10 +14,13 @@ import {
   browseHostDirectory,
   isWindowsNetworkPath,
   normalizeWindowsDrivePath,
+  readHostFile as legacyReadHostFile,
+} from "./host-files.js";
+import {
   readHostFile,
   readHostFileMetadata,
   readHostRelativeFile,
-} from "./host-files.js";
+} from "./files.js";
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -60,9 +63,10 @@ async function mountSubstDrive(target: string): Promise<string> {
 
 async function captureReadHostFileError(
   command: CommandOf<"host.read_file">,
+  read: typeof readHostFile = readHostFile,
 ): Promise<unknown> {
   try {
-    await readHostFile(command);
+    await read(command);
   } catch (error) {
     return error;
   }
@@ -247,10 +251,11 @@ describe("readHostFile (no ref — disk read)", () => {
           Object.assign(new Error(`${code}: denied`), { code }),
         );
       try {
+        // Mocks Node's fs, so it checks the TypeScript fallback; Core maps the same errors in core/src/fs.rs.
         const thrown = await captureReadHostFileError({
           type: "host.read_file",
           path: path.join(dir, "notes.md"),
-        });
+        }, legacyReadHostFile);
         expect(thrown).toMatchObject({
           code: expectedCode,
           message: expectedMessage,

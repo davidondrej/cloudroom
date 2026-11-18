@@ -1530,7 +1530,8 @@ Ids are flat and first-wins: a live id collision fails the later plugin's
 load, and no id is reserved ahead of time (`RESERVED_PROVIDER_ID_OWNERS` is
 gone). Listing order is plugin install order — bundled first-party plugins
 rank first, in their bundled-list order, then every other plugin by install
-time — under the user's `providerOrder` / `defaultProviderId` app settings
+time — under the user's `defaultProviderId` (first) and their thread counts
+per provider over the last 30 days (most used next)
 (`PRODUCT_PROVIDER_ORDER` and `PRODUCT_DEFAULT_PROVIDER_ID` are gone).
 `experimental_visibility: "installed"` withholds a provider from unscoped
 listings until its own `provider/health` result is not `not_installed`.
@@ -1544,9 +1545,8 @@ bridge as provider-scoped static options. Core does not interpret its keys.
    `BUNDLED_PLUGINS`; other plugins by `installedAt`. Confirm that a
    reinstalled builtin (tombstone then reinstall) keeping its bundled rank is
    right, and that `installedAt` is the fact users expect for third-party
-   order (vs. first-load time). The user overlay (`providerOrder`) is an
-   ordered id list that ignores unknown ids; decide whether stale ids should
-   be pruned on write.
+   order (vs. first-load time). Usage order only counts threads, so a new
+   provider sits behind the ones already used until it is used.
 2. **Icon URL shape.** `icon` uses the `bb.branding.icon` grammar (a named host
    glyph, or a `./`-prefixed plugin-relative SVG) plus the plugin's own
    declared icons as `"<pluginId>/<name>"` (`bb.branding.experimental_icons`;

@@ -97,6 +97,7 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.reasoningEffort",
   "promptSuggestions.enabled",
   "promptSuggestions.prompt",
+  "skillSuggestions.enabled",
   "projectNudge.enabled",
   "projectNudge.confidence",
   "search.smart",
@@ -272,6 +273,11 @@ export const uiPreferenceDefinitions = {
     z.string().trim().min(1).max(THREAD_NAMING_RULES_MAX_LENGTH),
     DEFAULT_PROMPT_SUGGESTION_PROMPT,
     "The instructions the small model follows when predicting the user's next prompt.",
+  ),
+  "skillSuggestions.enabled": defineUiPreference(
+    z.boolean(),
+    true,
+    "When a thread finishes a job the user keeps asking for by hand, offer to save it as a skill, on a card above the chat input. Uses Haiku 5.5 on Claude Code, else GPT-6 Luna on Codex, at low effort, at most once a day.",
   ),
   "threadPurpose.showInSidebar": defineUiPreference(
     z.boolean(),

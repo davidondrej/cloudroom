@@ -96,25 +96,30 @@ async function request(
 /** Sign-ins whose link came after Connect returned (Claude Code was still installing or starting); opened once it arrives. */
 const openWhenReady = new Set<string>();
 
+/** `quiet`: for screens open all day, like the composer. One check, then again only after a sign-in or 5 minutes
+ *  (db-load-budget: no polling every app makes all the time). */
 export function useClaudeConnection(
   target: ClaudeConnectionTarget,
   enabled = true,
+  quiet = false,
 ) {
   const account = useCloudroomAccount();
   const query = useQuery({
     queryKey: [
       "claude-connection",
       target.target,
-      target.environmentId ?? target.hostId ?? "primary",
+      // Cloud's login is per account, never per host: one cache for every Cloud caller.
+      target.target === "cloud" ? "primary" : target.environmentId ?? target.hostId ?? "primary",
       target.target === "cloud" ? account.data?.account?.id : null,
     ],
     queryFn: ({ signal }) => request(target, undefined, signal),
     enabled:
       enabled && (target.target === "local" || account.data?.ready === true),
     retry: false,
-    staleTime: 30_000,
+    staleTime: quiet ? 5 * 60_000 : 30_000,
+    refetchOnWindowFocus: !quiet,
     refetchInterval: (query) =>
-      query.state.data?.state === "waiting" ? 1500 : 60_000,
+      query.state.data?.state === "waiting" ? 1500 : quiet ? false : 60_000,
   });
   const { state, login_id: loginId, verification_url: url } = query.data ?? {};
   useEffect(() => {
@@ -130,13 +135,16 @@ export function ClaudeConnectionButton({
   className,
   text,
   onConnected,
+  quiet = false,
 }: ClaudeConnectionTarget & {
   className?: string;
   text?: string;
   onConnected?: () => void;
+  /** See useClaudeConnection. The open panel still checks on its own. */
+  quiet?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const auth = useClaudeConnection({ target, hostId, environmentId });
+  const auth = useClaudeConnection({ target, hostId, environmentId }, true, quiet);
   const connected = useRefreshOnClaudeConnect(auth.data?.state === "connected", onConnected);
   if (auth.isPending || connected) return null;
   return (

@@ -447,3 +447,72 @@ it("fetches every provider on a selected machine when no provider is named", asy
     await harness.lifecycle.dispose();
   }
 });
+
+it("reloads saved Claude usage only on a forced machine refresh", async () => {
+  const windows = [{ label: "Five-hour limit", usedPercent: 98, resetsAt: null }];
+  const callRpc = vi.fn(async ({ method, input }) => {
+    if (method !== "accounts.list" || input.provider !== "claude-code") return [];
+    return [
+      {
+        id: "added",
+        name: "Saved",
+        email: null,
+        plan: "Max",
+        inUse: true,
+        windows: input.refresh ? [{ ...windows[0], usedPercent: 0 }] : windows,
+        limitedUntil: input.refresh ? null : Date.now() + 3_600_000,
+      },
+    ];
+  });
+  const { bb, harness } = createFakePluginHost({
+    sdk: {
+      system: { config: async () => ({ primaryHostId: "here" }) },
+      hosts: { list: async () => [makeHostResponse({ id: "here", status: "connected" })] },
+      providers: {
+        list: async () => [{ id: "claude-code", displayName: "Claude Code", logoUrl: null }],
+      },
+      plugins: {
+        experimental_discoverRpc: async ({ method } = {}) =>
+          method === "accounts.list"
+            ? [{ pluginId: "accounts", method, displayName: "Accounts" }]
+            : [],
+        callRpc,
+      },
+    },
+  });
+  plugin(bb);
+  const request = { providerId: null, machineIds: ["here"], maxAgeMs: 0 };
+  try {
+    const panel = (force: boolean) => harness.callRpc("getUsage", { ...request, force });
+    expect(await panel(false)).toMatchObject({
+      machines: [
+        {
+          providers: [
+            {
+              usage: {
+                windows: [{ usedPercent: 98 }, { label: "Limit hit", usedPercent: 100 }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(await panel(true)).toMatchObject({
+      machines: [
+        {
+          providers: [
+            {
+              usage: {
+                windows: [{ usedPercent: 0 }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await harness.callRpc("getUsage", { ...request, force: true, machineIds: ["source:pool"] });
+    expect(callRpc.mock.calls.filter(([{ input }]) => input.refresh)).toHaveLength(1);
+  } finally {
+    await harness.dispose();
+  }
+});

@@ -434,6 +434,7 @@ class CloudServer {
   constructor(private readonly network: typeof fetch) {}
 
   install() {
+    document.documentElement.dataset.cloudroomCloudOnly = "true";
     const network = this.network;
     window.fetch = (input, init) => {
       const request = new Request(input, init);

@@ -181,7 +181,7 @@ describe("PluginProviderModelPicker", () => {
     );
     expect(trigger.getAttribute("aria-keyshortcuts")).toBeNull();
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByTitle("Cursor"));
+    fireEvent.click(screen.getByRole("button", { name: "Cursor" }));
 
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledTimes(1);
@@ -265,7 +265,7 @@ describe("PluginProviderModelPicker", () => {
       }),
     );
 
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
     await waitFor(() =>
       expect(onChange).toHaveBeenLastCalledWith({
         providerId: "claude-code",
@@ -395,7 +395,7 @@ describe("PluginProviderModelPicker", () => {
       { wrapper },
     );
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
     await waitFor(() =>
       expect(sdk.system.executionOptions).toHaveBeenCalledWith(
         expect.objectContaining({ providerId: "claude-code" }),
@@ -475,7 +475,7 @@ describe("PluginProviderModelPicker", () => {
     });
     const rehydrate = screen.getByRole("button", { name: "Rehydrate" });
     fireEvent.click(trigger);
-    fireEvent.click(screen.getByTitle("Cursor"));
+    fireEvent.click(screen.getByRole("button", { name: "Cursor" }));
     await waitFor(() => {
       expect(onChange).toHaveBeenLastCalledWith({
         providerId: "cursor",
@@ -540,7 +540,7 @@ describe("PluginProviderModelPicker", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
-    expect(screen.queryByTitle("Cursor")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cursor" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "GPT Light" }));
 
     expect(onChange).toHaveBeenCalledWith({

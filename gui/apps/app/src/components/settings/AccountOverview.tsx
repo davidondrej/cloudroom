@@ -14,6 +14,7 @@ import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/se
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
+import { CLOUD_CREDITS_SETTINGS_PATH } from "@/lib/route-paths";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { getSettingsSectionRoutePath } from "./settings-sections";
@@ -97,7 +98,7 @@ function MembershipCard({ email, plan, login, usage }: { email: string; plan: st
 /** Opens Analytics → Cloud Credits, which shows the threads that used the credits. */
 function SeeUsage() {
   const navigate = useNavigate();
-  return <button type="button" onClick={() => navigate(`${getSettingsSectionRoutePath("analytics")}?tab=credits`)}
+  return <button type="button" onClick={() => navigate(CLOUD_CREDITS_SETTINGS_PATH)}
     className="-my-1 inline-flex shrink-0 items-center gap-1 rounded-full bg-primary-foreground px-2.5 py-1 font-semibold text-primary hover:brightness-125">
     See usage<Icon name="ArrowRight" className="size-3" aria-hidden />
   </button>;

@@ -501,7 +501,9 @@ class Relay:
     def __init__(self, core, port, device, path):
         self.core, self.port, self.device, self.stopped = core, port, device, False
         self.down = False  # Core found nothing listening on the port, as after a sleep.
-        self.refused = False  # An HTTP answer other than 101 or Core's 409, as from the relay in front of a VPS (#1798).
+        # Nothing came back through the last tunnel attempt: turned away, as by the relay in front of a VPS (#1798), failed,
+        # or no app answer yet, as through a stalled sandbox (#2016). Core's 409 is an answer: nothing listens on the port.
+        self.refused = False
         self.stderr = io.BytesIO()
         self.path, self.listener = path, None
         if WINDOWS:
@@ -528,7 +530,7 @@ class Relay:
         return local
 
     def open(self):
-        self.down = self.refused = False  # Only this attempt's answer counts, never an older one's.
+        self.down, self.refused = False, True  # Only this attempt's answer counts, never an older one's.
         # Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         try:
             return self.connect('websocket')
@@ -550,7 +552,7 @@ class Relay:
                 raise OSError('Preview tunnel closed')
             head += chunk
         status, rest = head.split(b'\r\n', 1)[0].split(), head.split(b'\r\n\r\n', 1)[1]
-        self.refused = status[1:2] not in ([b'101'], [b'409'])
+        self.refused = status[1:2] != [b'409']
         if len(status) >= 2 and status[1] == b'400':
             remote.close()
             raise PermissionError('Preview tunnel protocol refused')
@@ -568,6 +570,8 @@ class Relay:
         def copy(source, target):
             with contextlib.suppress(OSError):
                 while data := source.recv(65536):
+                    if source is remote:
+                        self.refused = False  # The app's answer came back through the tunnel.
                     target.sendall(data)
             with contextlib.suppress(OSError):
                 target.shutdown(socket.SHUT_WR)
@@ -1610,7 +1614,7 @@ def run(folder):
                         ready = tunnel.healthy()
                         error = None
                         if not ready:
-                            # The tunnel itself was turned away, so this says nothing about the app (#1798).
+                            # Nothing came back through the tunnel, so this says nothing about the app (#1798, #2016).
                             if tunnel.process.poll() is not None or getattr(tunnel.process, 'refused', False):
                                 error = 'Tunnel unavailable' if tunnel.relay else 'SSH connection unavailable'
                             elif reachable(tunnel.socket_path):

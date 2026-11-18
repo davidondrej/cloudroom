@@ -26,6 +26,7 @@ import {
   useUnpinAndMoveThread,
   THREAD_STOP_MUTATION_KEY,
   useUpdateThread,
+  useSaveThreadModel,
   waitForThreadExecutionSave,
 } from "./thread-state-mutations";
 
@@ -113,16 +114,10 @@ describe("thread state mutations", () => {
               : reject(new Error("switch failed"));
         }),
     );
-    const { result } = renderHook(
-      () => useUpdateThread({ threadId: "thread-1" }),
-      { wrapper },
-    );
+    const saved = vi.fn();
+    const { result } = renderHook(() => useSaveThreadModel("thread-1", saved), { wrapper });
     act(() => {
-      result.current.mutate({
-        id: "thread-1",
-        providerId: "claude-code",
-        model: "claude-opus-5",
-      });
+      void result.current.save("claude-opus-5", "claude-code").catch(() => {});
     });
     await waitFor(() => expect(queryClient.isMutating()).toBe(1));
 
@@ -139,6 +134,9 @@ describe("thread state mutations", () => {
     expect(settled).toHaveBeenCalledWith(
       succeeds ? "sent" : "The model switch failed, so this message wasn't sent.",
     );
+    expect(sdk.threads.update).toHaveBeenCalledWith({
+      threadId: "thread-1", providerId: "claude-code", model: "claude-opus-5", idleSessionOnly: true,
+    });
     // Another thread never waits for this switch.
     await expect(
       waitForThreadExecutionSave(queryClient, "thread-2"),

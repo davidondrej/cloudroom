@@ -54,6 +54,8 @@ export interface CloudroomStatus {
   /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
    *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
   planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number } | null;
+  /** The switch in Settings → General → DeepAPI. Null hides it. */
+  deepapi?: { enabled: boolean } | null;
 }
 
 export interface CloudroomCodexAuth {
@@ -305,6 +307,9 @@ export interface CloudroomArea {
   projectSuggestion(input: { prompt: string; projectId: string }, signal?: AbortSignal): Promise<{ projectId: string | null }>;
   promptSuggestion(input: { threadId: string }, signal?: AbortSignal): Promise<{ suggestion: string | null }>;
   promptSuggestionEvent(input: { threadId: string; action: "shown" | "accepted" }): Promise<{ ok: boolean }>;
+  /** A skill to save, when this thread just finished a job the user keeps repeating (docs/scopes/skill-suggestions.md). */
+  skillSuggestion(input: { threadId: string }, signal?: AbortSignal): Promise<{ suggestion: { name: string; what: string; count: number; prompt: string } | null }>;
+  skillSuggestionEvent(input: { threadId: string; action: "shown" | "accepted" | "dismissed" }): Promise<{ ok: boolean }>;
   searchRank(input: { query: string; items: { id: string; title: string; text: string }[] }, signal?: AbortSignal): Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>;
   /** Cmd+K "Search deeper": a Claude Code agent reads threads and returns its best 5, best first. */
   deepSearch(input: { query: string }, signal?: AbortSignal): Promise<{ threads: ThreadListEntry[] }>;
@@ -318,6 +323,8 @@ export interface CloudroomArea {
   /** `true` means Full access. */
   setMacAccess(access: boolean | MacAccessLevel): Promise<void>;
   setCopyLogins(enabled: boolean): Promise<void>;
+  /** Whether DeepAPI is paid from the account's Cloud Credits (Settings → General → DeepAPI). */
+  setDeepapi(enabled: boolean): Promise<void>;
   environment(signal?: AbortSignal): Promise<CloudEnvironment>;
   updateEnvironment(change: CloudEnvironmentChange): Promise<CloudEnvironment>;
   autoDelete(signal?: AbortSignal): Promise<AutoDeleteSetting>;
@@ -328,6 +335,8 @@ export interface CloudroomArea {
   automations(input: CloudAutomationRequest): Promise<CloudAutomationResponse>;
   /** Loop usage estimates (docs/scopes/loops.md): tokens a loop's runs used, and all of the provider's. */
   tokenUsage(input: TokenUsageRequest): Promise<TokenUsageResponse>;
+  /** The Snippets plugin reads this device’s identity and exchanges libraries with the account API. */
+  snippets(input: { action: string } & Record<string, unknown>): Promise<unknown>;
   /** Organizations (docs/scopes/organizations.md): passes one request to the website's `/api/desktop/org`, signed in as this account. */
   org(input: { action: string } & Record<string, unknown>): Promise<unknown>;
   /** Shared projects (docs/scopes/shared-projects.md): passes one request to the website's `/api/desktop/project-shares`, signed in as this account. */
@@ -462,6 +471,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     projectSuggestion: (input, signal) => transport.readJson(request("/project-suggestion", input, signal)) as Promise<{ projectId: string | null }>,
     promptSuggestion: (input, signal) => transport.readJson(request("/prompt-suggestion", input, signal)) as Promise<{ suggestion: string | null }>,
     promptSuggestionEvent: (input) => transport.readJson(request("/prompt-suggestion/event", input)) as Promise<{ ok: boolean }>,
+    skillSuggestion: (input, signal) => transport.readJson(request("/skill-suggestion", input, signal)) as Promise<{ suggestion: { name: string; what: string; count: number; prompt: string } | null }>,
+    skillSuggestionEvent: (input) => transport.readJson(request("/skill-suggestion/event", input)) as Promise<{ ok: boolean }>,
     searchRank: (input, signal) => transport.readJson(request("/search-rank", input, signal)) as Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>,
     deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
@@ -478,6 +489,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     cancel: () => transport.readVoid(request("/cancel", {})),
     setMacAccess: (access) => transport.readVoid(request("/mac-access", typeof access === "boolean" ? { enabled: access } : { level: access })),
     setCopyLogins: (enabled) => transport.readVoid(request("/copy-logins", { enabled })),
+    setDeepapi: (enabled) => transport.readVoid(request("/deepapi", { enabled })),
     environment: (signal) => transport.readJson(request("/environment", undefined, signal)) as Promise<CloudEnvironment>,
     updateEnvironment: (change) => transport.readJson(request("/environment", change)) as Promise<CloudEnvironment>,
     autoDelete: (signal) => transport.readJson(request("/auto-delete", undefined, signal)) as Promise<AutoDeleteSetting>,
@@ -485,6 +497,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     vpsAction: (input) => transport.readJson(request("/vps", input)) as Promise<CloudVps | { code: string; expiresAt: number; command: string } | { ok: true }>,
     automations: (input) => transport.readJson(request("/automations", input)) as Promise<CloudAutomationResponse>,
     tokenUsage: (input) => transport.readJson(request("/token-usage", input)) as Promise<TokenUsageResponse>,
+    snippets: (input) => transport.readJson(request("/snippets", input)),
     org: (input) => transport.readJson(request("/org", input)),
     projectShares: (input) => transport.readJson(request("/project-shares", input)),
     gpu: (input) => transport.readJson(request("/gpu", input)),

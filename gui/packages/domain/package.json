@@ -73,6 +73,11 @@
       "source": "./src/plugin-interaction-limits.ts",
       "types": "./src/plugin-interaction-limits.ts",
       "default": "./src/plugin-interaction-limits.ts"
+    },
+    "./reconnecting-websocket": {
+      "source": "./src/reconnecting-websocket.ts",
+      "types": "./src/reconnecting-websocket.ts",
+      "default": "./src/reconnecting-websocket.ts"
     }
   },
   "types": "./src/index.ts",

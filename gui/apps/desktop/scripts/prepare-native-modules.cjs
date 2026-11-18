@@ -362,7 +362,7 @@ async function stampBbAppVersion(appOutDir, version) {
 }
 
 // bb-app depends on these only for its SDK's type declarations; the app's code has them bundled.
-const BUNDLED_PACKAGE_NAMES = new Set(["hono", "picocolors", "zod"]);
+const BUNDLED_PACKAGE_NAMES = new Set(["hono", "zod"]);
 
 // Deletes top-level packages that nothing reaches from bb-app's runtime dependencies: ones bundled into dist
 // (the desktop's own, zod, hono) and, on Windows, a second copy of npm's bundled packages. Each file costs the

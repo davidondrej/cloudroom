@@ -7,12 +7,14 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
-import { getProject, getThread, listProjectSourcesByProjectIds, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
+import { getProject, getThread, listProjectSourcesByProjectIds, replaceProjectGitRemoteUrl, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
 import { tarCommand } from "@cloudroom/process-utils";
 import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
+import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
 import { macAccessSupported } from "./previews.js";
+import { redactSecrets } from "./shares.js";
 import { command, saveProjectCopyProgress } from "./store.js";
 import { copyMacGithub } from "./sync.js";
 
@@ -56,12 +58,40 @@ export function localProjectPath(deps: Deps, projectId: string): string | undefi
   return (sources.find((source) => source.isDefault) ?? sources[0])?.path;
 }
 
-/** A project added before it had a GitHub remote picks the remote up here, at its next cloud thread. */
-async function projectRemote(deps: Deps, project: { id: string; gitRemoteUrl: string | null }, path: string | null | undefined): Promise<string | null> {
-  if (project.gitRemoteUrl !== null || !path) return project.gitRemoteUrl;
+/** Compares remotes across https and ssh forms, case, a trailing slash and `.git`. */
+export function remoteKey(remote: unknown): string | null {
+  if (typeof remote !== "string") return null;
+  return remote.trim().toLowerCase().replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):/, "$1/").replace(/\/+$/, "").replace(/\.git$/, "") || null;
+}
+
+/** A project added before it had a GitHub remote picks the remote up here, at its next cloud thread. A folder on this
+ *  computer added while it was inside another repo saved that repo's remote: once the folder is a checkout of its own,
+ *  its own origin is saved instead, so the copy, template, loops and sync agree (#1850). */
+export async function projectRemote(deps: Deps, project: { id: string; gitRemoteUrl: string | null }, path: string | null | undefined): Promise<string | null> {
+  if (!path) return project.gitRemoteUrl;
+  const saved = project.gitRemoteUrl;
+  if (saved !== null) {
+    // Another computer's folder path can exist here too, as an unrelated checkout.
+    const host = resolvePrimaryHostId(deps);
+    const own = listProjectSourcesByProjectIds(deps.db, [project.id]).some((source) => source.hostId === host && source.path === path);
+    const real = own ? (() => { try { return realpathSync(path); } catch { return null; } })() : null;
+    if (!real || (await git(real, ["rev-parse", "--show-prefix"], 5_000))?.trim() !== "" || remoteKey(await git(dirname(real), ["remote", "get-url", "origin"], 5_000)) !== remoteKey(saved)) return saved;
+    // A folder whose own repo has no origin keeps main's behavior for now.
+    const remote = (await git(real, ["remote", "get-url", "origin"], 5_000))?.trim() || null;
+    if (!remote || remoteKey(remote) === remoteKey(saved)) return saved;
+    // A remote saved meanwhile wins.
+    return replaceProjectGitRemoteUrl(deps.db, deps.hub, project.id, saved, remote) ? remote : getProject(deps.db, project.id)?.gitRemoteUrl ?? null;
+  }
   const remote = (await git(path, ["remote", "get-url", "origin"]))?.trim() || null;
   if (remote) setProjectGitRemoteUrlIfMissing(deps.db, deps.hub, project.id, remote);
   return remote;
+}
+
+/** Fixes a stale saved remote before a project's sandbox is warmed, so its template clones the right repo (#1850). */
+export async function refreshProjectRemote(deps: Deps, projectId: string): Promise<void> {
+  const project = getProject(deps.db, projectId);
+  const path = project?.gitRemoteUrl ? localProjectPath(deps, project.id) : undefined;
+  if (project && path) await projectRemote(deps, project, path);
 }
 
 /** Small projects not on GitHub are uploaded whole. Counting stops at the limit, so a huge folder answers fast. */
@@ -285,8 +315,8 @@ export async function retry<T>(attempt: () => Promise<T>): Promise<T> {
   }
 }
 
-async function git(cwd: string, args: string[]): Promise<string | null> {
-  return await exec("git", ["-C", cwd, ...args], { maxBuffer: 256 * 1024 * 1024, windowsHide: true }).then((result) => result.stdout, () => null);
+async function git(cwd: string, args: string[], timeout = 0): Promise<string | null> {
+  return await exec("git", ["-C", cwd, ...args], { maxBuffer: 256 * 1024 * 1024, windowsHide: true, timeout }).then((result) => result.stdout, () => null);
 }
 
 /** Returns null once the clone is in place, or why it failed. gc.auto=0: auto-packing during `git log -S` in a blobless
@@ -345,7 +375,8 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
     }
   }
   if (result.code === 0) return null;
-  const error = Buffer.from(result.stderr, "hex").toString().trim().slice(-300) || `git clone exited with code ${result.code}`;
+  // Redacted before the cut, since the message reaches the failure note, the copy status, and `room-cli files wait` (#1847).
+  const error = redactSecrets(Buffer.from(result.stderr, "hex").toString(), [token]).trim().slice(-300) || `git clone exited with code ${result.code}`;
   const stdout = Buffer.from(result.stdout, "hex");
   const mark = stdout.indexOf(0x1d);
   const login = mark < 0 ? "" : stdout.subarray(mark + 1).toString().trim();

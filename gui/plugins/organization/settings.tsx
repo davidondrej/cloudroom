@@ -86,11 +86,13 @@ function Members({ org, email, busy, change }: { org: Org; email: string; busy: 
     <Section title="Members" count={org.members.length} action={admin && (
       <button type="button" className={inviting ? button : primary} onClick={() => setInviting(!inviting)}><Icon name={inviting ? "X" : "Plus"} className="size-3.5" />{inviting ? "Cancel" : "Invite"}</button>
     )}>
+      {inviting && org.inviteLink && <InviteLink link={org.inviteLink} seats={org.seats} busy={busy} change={change} />}
       {inviting && (
         <form className="flex gap-2 border-b border-border p-3" onSubmit={send}>
-          <input autoFocus type="email" value={invite} onChange={(event) => setInvite(event.target.value)} placeholder="teammate@company.com" aria-label="Email to invite"
+          <input autoFocus={!org.inviteLink} type="email" value={invite} onChange={(event) => setInvite(event.target.value)} aria-label="Email to invite"
+            placeholder={org.inviteLink ? "Or invite by email: teammate@company.com" : "teammate@company.com"}
             className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-xs outline-none focus:border-foreground/30" />
-          <button className={primary} disabled={busy || !invite.trim()}>Send invite</button>
+          <button className={org.inviteLink ? button : primary} disabled={busy || !invite.trim()}>Send invite</button>
         </form>
       )}
       <ul className="divide-y divide-border">{org.members.map((member) => {
@@ -106,12 +108,30 @@ function Members({ org, email, busy, change }: { org: Org; email: string; busy: 
               : <span className={roleClass}>{role}</span>}
             {admin && !you && (
               <button type="button" className="text-muted-foreground enabled:hover:text-destructive" disabled={busy} aria-label={`Remove ${member.email}`}
-                onClick={() => confirm(`Remove ${member.email}?`) && void change({ action: "remove", email: member.email })}><Icon name="Trash2" className="size-3.5" /></button>
+                onClick={() => confirm(`Remove ${member.email}?${org.inviteLink ? " They can join again with the invite link until you reset it." : ""}`) && void change({ action: "remove", email: member.email })}><Icon name="Trash2" className="size-3.5" /></button>
             )}
           </li>
         );
       })}</ul>
     </Section>
+  );
+}
+
+// The invite link (ADR 20261118-120824): one link for the whole team. Anyone who opens it joins with the account they
+// sign in with, until the seats run out. Reset makes a new link and ends the old one. Matches /org on the website.
+function InviteLink({ link, seats, busy, change }: { link: string; seats: number | null; busy: boolean; change: Change }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => void navigator.clipboard.writeText(link).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }, () => undefined);
+  return (
+    <div className="space-y-2 border-b border-border p-3">
+      <div className="flex gap-2">
+        <input readOnly value={link} aria-label="Invite link" onFocus={(event) => event.target.select()}
+          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-xs text-muted-foreground outline-none focus:border-foreground/30" />
+        <button type="button" className={primary} onClick={copy}><Icon name={copied ? "Check" : "Copy"} className="size-3.5" />{copied ? "Copied" : "Copy link"}</button>
+        <button type="button" className={button} disabled={busy} onClick={() => confirm("Reset the invite link? The old link stops working.") && void change({ action: "link" })}>Reset</button>
+      </div>
+      <p className="text-xs text-muted-foreground">Anyone with this link can join{seats === null ? "" : `, until all ${seats} seats are taken`}. Paste it in your team chat.</p>
+    </div>
   );
 }
 

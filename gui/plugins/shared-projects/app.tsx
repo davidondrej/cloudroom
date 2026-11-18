@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { definePluginApp, experimental_Icon as Icon, Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import { STATE_CHANNEL, type Invite, type Person, type SharedMessage, type SharedThread, type SharePage, type sharesRpcContract } from "./contract.js";
+import { STATE_CHANNEL, type Invite, type Person, type SharedMessage, type SharedThread, type SharePage, type sharesRpcContract, type Teammate } from "./contract.js";
 
 // Shared projects (docs/scopes/shared-projects.md): "Share project" in every project's menu, the page it opens, the
 // lock button on threads in shared projects, and the invite popup.
@@ -48,6 +48,7 @@ function ShareProjectPage({ projectId }: { projectId: string }) {
   };
   const others = page?.people.filter((person) => !person.you && person.joined).length ?? 0;
   const full = !!limit && limit.max !== null && limit.used >= limit.max;
+  const team = page?.team ?? [], unshared = team.filter((mate) => mate.state === "none").length;
 
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
@@ -69,6 +70,17 @@ function ShareProjectPage({ projectId }: { projectId: string }) {
               </div>
             ) : (
               <form onSubmit={(event) => void invite(event)} className={`${card} space-y-2 px-4 py-3`}>
+                {!!team.length && (
+                  <div className="space-y-2 pb-1">
+                    <div className="flex min-h-7 items-center justify-between gap-3">
+                      <span className="text-xs font-medium text-muted-foreground">Your team</span>
+                      {unshared > 1 && <button type="button" className={button} disabled={busy || full} onClick={() => void run(() => rpc.call("share", { projectId, team: true }))}>Share with whole team</button>}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {team.map((mate) => <TeammateChip key={mate.email} mate={mate} disabled={busy || full} onShare={() => void run(() => rpc.call("share", { projectId, email: mate.email }))} />)}
+                    </div>
+                  </div>
+                )}
                 <div className="flex items-center gap-2">
                   <input type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Their email" aria-label="Email to share this project with"
                     disabled={full} className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50" />
@@ -153,6 +165,25 @@ function ShareProjectPage({ projectId }: { projectId: string }) {
         {problem && <p role="alert" className="text-xs text-destructive">{problem}</p>}
       </div>
     </div>
+  );
+}
+
+// One teammate, one click. Someone already invited or sharing shows as that; they are removed in the list below.
+function TeammateChip({ mate, disabled, onShare }: { mate: Teammate; disabled: boolean; onShare: () => void }) {
+  const initial = <span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[10px] font-semibold text-foreground">{mate.name[0]?.toUpperCase()}</span>;
+  const shape = "inline-flex items-center gap-1.5 rounded-full border border-border py-1 pl-1 pr-2.5 text-xs";
+  if (mate.state !== "none") {
+    return (
+      <span title={mate.email} className={`${shape} bg-muted/50 text-muted-foreground`}>
+        {initial}{mate.name}<Icon name="Check" className="size-3" /><span>{mate.state === "joined" ? "Joined" : "Invited"}</span>
+      </span>
+    );
+  }
+  return (
+    <button type="button" title={`Share with ${mate.email}`} aria-label={`Share with ${mate.email}`} disabled={disabled} onClick={onShare}
+      className={`${shape} text-foreground disabled:opacity-50 enabled:hover:bg-muted`}>
+      {initial}{mate.name}<Icon name="Plus" className="size-3 text-muted-foreground" />
+    </button>
   );
 }
 

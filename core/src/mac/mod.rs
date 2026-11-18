@@ -916,6 +916,7 @@ fn agent_router() -> Router<Arc<Manager>> {
         .merge(crate::secrets::agent_routes())
         .merge(crate::session::thread::agent_routes())
         .merge(crate::session::report::agent_routes())
+        .merge(crate::session::snippets::agent_routes())
         .merge(crate::session::automation::agent_routes())
         .merge(crate::computer_use::agent_routes())
         .merge(crate::gpu::agent_routes())
@@ -1214,7 +1215,14 @@ else under that new name, which must not exist yet.";
         }
         ("result", [job]) if job.bytes().all(|b| b.is_ascii_digit() || b == b'-') => {
             let path = format!("/jobs/{job}");
-            print_result(request_within(&socket, "GET", &path, None, Some(QUICK)).await?).await
+            let value = request_within(&socket, "GET", &path, None, Some(QUICK)).await?;
+            let stdout = value["stdout"].as_str().and_then(unhex);
+            if stdout.is_some_and(|stdout| transfer::archive(&stdout)) {
+                return Err(io::Error::other(format!(
+                    "Mac job {job} was part of a room-cli mac pull. Its output is copy data only that pull could use, so it isn't printed. Nothing was copied to the VM: run the pull again."
+                )));
+            }
+            print_result(value).await
         }
         ("status", []) => {
             println!("{}", request(&socket, "GET", "/status", None).await?);
@@ -1240,19 +1248,28 @@ else under that new name, which must not exist yet.";
 
 async fn print_result(value: Value) -> io::Result<i32> {
     let mac = value["mac"].as_str().map(str::to_owned);
+    // #1817: cut output must not pass `&&` or `set -e` as complete. A failed command keeps its own code.
+    let cut = value["truncated"] == true;
     let (code, stdout, stderr) = finished(value)?;
     use std::io::Write;
     std::io::stdout().write_all(&stdout)?;
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&stderr)?;
+    let gap = if stderr.is_empty() || stderr.ends_with(b"\n") {
+        ""
+    } else {
+        "\n"
+    };
     // Only after the Mac changed; stderr, so piped output and `mac pull` archives stay unchanged (#608).
-    if let Some(mac) = mac {
-        let gap = if stderr.is_empty() || stderr.ends_with(b"\n") {
-            ""
-        } else {
-            "\n"
-        };
+    if let Some(mac) = &mac {
         eprintln!("{gap}Ran on the Mac \"{mac}\".");
+    }
+    if cut && code == Some(0) {
+        let gap = if mac.is_some() { "" } else { gap };
+        eprintln!(
+            "{gap}The command exited 0, but its output passed 16 MiB and was cut, so this exits 1. Do not rerun it as is: write the output to a file on the Mac and copy it with `room-cli mac pull`."
+        );
+        return Ok(1);
     }
     Ok(code.unwrap_or(1))
 }
@@ -1292,6 +1309,19 @@ mod tests {
             let old = now.checked_sub(super::REPORTED).unwrap();
             mac.report.lock().unwrap().as_mut().unwrap().1 = old;
             assert!(!mac.unsupported(), "{report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cut_output_fails_a_successful_command_but_keeps_a_failed_ones_code() {
+        // #1817: a shell check must not take output cut at 16 MiB as complete.
+        for (code, truncated, want) in [(0, true, 1), (3, true, 3), (0, false, 0)] {
+            let value = serde_json::json!({"state":"done","code":code,"stdout":"","stderr":"","truncated":truncated});
+            assert_eq!(
+                super::print_result(value).await.unwrap(),
+                want,
+                "{code} {truncated}"
+            );
         }
     }
 

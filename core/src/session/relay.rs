@@ -604,7 +604,7 @@ pub(super) async fn own_children(
             continue;
         }
         let status = super::children::status(state, false);
-        let mut item = json!({"id":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
+        let mut item = json!({"id":id,"threadId":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
         // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
         let refused = start_error(m, caller, id).filter(|_| state == "error");
         if let Some(issue) = refused.as_deref().or(child["issue"].as_str()) {
@@ -617,7 +617,7 @@ pub(super) async fn own_children(
         let archived = known.get(&id).is_some_and(|s| s == "archived");
         if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
             list.push(
-                json!({"id":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
+                json!({"id":id,"threadId":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
             );
         }
     }

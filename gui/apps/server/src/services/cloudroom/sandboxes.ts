@@ -76,6 +76,18 @@ export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "op
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
+const DEEPAPI_RECHECK_MS = 30 * 60_000;
+const DEEPAPI_FOLDER = () => join(homedir(), ".deepapi");
+const DEEPAPI_MARK = "# Added by Cloudroom.";
+/** The files DeepAPI's own installer writes, `env` for bash and zsh and `env.ps1` for PowerShell, marked with the
+ *  Cloudroom account the key belongs to. */
+function deepapiFiles(userId: string): Record<string, (key: string) => string> {
+  const mark = `${DEEPAPI_MARK} Account ${userId}. Settings → General → DeepAPI turns it off.`;
+  return {
+    env: key => `${mark}\nexport DEEPAPI_API_BASE_URL="https://deepapi.co"\nexport DEEPAPI_API_KEY="${key}"\n`,
+    ...(process.platform === "win32" ? { "env.ps1": (key: string) => `${mark}\r\n$env:DEEPAPI_API_BASE_URL = 'https://deepapi.co'\r\n$env:DEEPAPI_API_KEY = '${key}'\r\n` } : {}),
+  };
+}
 // After "Run now": check the awake list every 2 s for 90 s, so the run's new thread shows within seconds.
 const SOON_MS = 2_000, SOON_FOR_MS = 90_000;
 const insideLoginLock = new AsyncLocalStorage<true>();
@@ -86,6 +98,8 @@ export type CloudQueue = { position: number; total: number; regionBlocked: boole
 /** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
  *  left in live packs (ADR 0317): 0 from older websites. */
 export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number };
+/** The switch in Settings → General → DeepAPI (ADR 20261115-235507). */
+export type DeepapiState = { enabled: boolean };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
@@ -741,6 +755,11 @@ export class SandboxDirectory {
     return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
   }
 
+  /** Whether the website ranks this account in the bottom 20% by skills run per agent (docs/scopes/skill-suggestions.md). */
+  async skillBottom(): Promise<boolean> {
+    return z.object({ bottom: z.boolean() }).parse(await this.call({}, "skill-rank")).bottom;
+  }
+
   /** Whether the website judges a generated thread title too vague to keep, at the user's sensitivity (2–5). */
   async titleTooVague(check: { title: string; firstMessage: string; agentReply: string; sensitivity: number }): Promise<boolean> {
     const value = await this.call({ ...check, sensitivity: String(check.sensitivity) }, "thread-title");
@@ -1058,6 +1077,8 @@ export class SandboxDirectory {
     this.mcpNames = null;
     this.mcpAt = 0;
     this.mcpDigest = "";
+    this.deepapiNext = 0;
+    this.deepapi = null;
     this.views.clear();
     this.awake = new Map();
     this.awakeNext = 0;
@@ -1259,6 +1280,14 @@ export class SandboxDirectory {
     // The website starts the run at once, so its thread shows within seconds, not at the next minute's check.
     if (body.action === "run") { this.soonUntil = Date.now() + SOON_FOR_MS; this.awakeNext = 0; }
     return value;
+  }
+
+  /** Snippets use local account identity and the existing membership cache before contacting hosting. */
+  async snippets(body: Record<string, unknown>): Promise<unknown> {
+    if (body.action === "identity") return (await this.account())?.userId ?? null;
+    if (body.action === "team" && (await this.orgMember()) === false) return { org: null, items: [] };
+    const bound = await this.bind();
+    return this.call(body, "snippets", { ...bound, signal: AbortSignal.any([bound.signal, AbortSignal.timeout(8_000)]) });
   }
 
   /** Organizations live on the website (docs/scopes/organizations.md); the Organization plugin's requests pass through. */
@@ -1506,6 +1535,54 @@ export class SandboxDirectory {
       }
       if (!only.signal.aborted) this.uploaded.set("codex", createHash("sha256").update(value).digest("hex"));
     }
+  }
+
+  private deepapiNext = 0;
+  private deepapi: DeepapiState | null = null;
+  /** The DeepAPI switch, from the last key check. Null hides the switch: signed out, before the website
+   *  offers it, or when this computer uses its own DeepAPI setup. */
+  deepapiState(): DeepapiState | null { return this.deepapi; }
+
+  /** Gives this computer the signed-in account's DeepAPI key for the built-in DeepAPI skill, paid from Cloud Credits
+   *  (ADR 20261115-235507). Our files name their account, so another account's key is replaced. The user's own DeepAPI
+   *  setup always wins and is never touched. Every 30 minutes; after a failure, at most once a minute. `enabled` is the
+   *  switch in Settings → General → DeepAPI, saved on the website. */
+  async copyDeepapiKey(enabled?: boolean): Promise<void> {
+    if (enabled === undefined && Date.now() < this.deepapiNext) return;
+    this.deepapiNext = Date.now() + RECHECK_MS;
+    // Bound to the account signed in now: its key and its name in the files belong together.
+    const only = await this.bind().catch(() => null);
+    if (!only) return;
+    const files = deepapiFiles(only.account.userId);
+    const found = await Promise.all(Object.keys(files).map(name => readFile(join(DEEPAPI_FOLDER(), name), "utf8").then(text => text.startsWith(DEEPAPI_MARK) ? text : "theirs", () => null)));
+    const theirs = found.includes("theirs") || (!found.some(text => text?.startsWith(DEEPAPI_MARK)) && Boolean((await macVariables()).DEEPAPI_API_KEY));
+    if (theirs && enabled === undefined) {
+      this.deepapi = null;
+      this.deepapiNext = Date.now() + DEEPAPI_RECHECK_MS;
+      return;
+    }
+    // The key goes into shell files, so only the letters of a DeepAPI key are accepted.
+    const answer = z.object({ key: z.string().regex(/^[\w-]+$/).nullable(), enabled: z.boolean().optional() })
+      .parse(await this.call({ action: "deepapi", ...(enabled === undefined ? {} : { enabled }) }, "logins", only));
+    this.deepapi = answer.enabled === undefined || theirs ? null : { enabled: answer.enabled };
+    this.deepapiNext = Date.now() + DEEPAPI_RECHECK_MS;
+    if (theirs) return;
+    const names = Object.keys(files), wanted = answer.key;
+    if (wanted && names.every((name, i) => found[i] === files[name]!(wanted))) return;
+    // Our old files go first: no key (the switch is off), another account's key, or a new key.
+    await Promise.all(names.map((name, i) => found[i] ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined));
+    if (!wanted) return;
+    await mkdir(DEEPAPI_FOLDER(), { recursive: true, mode: 0o700 });
+    // `wx` never replaces a key DeepAPI's own installer wrote meanwhile.
+    for (const name of names) {
+      await writeFile(join(DEEPAPI_FOLDER(), name), files[name]!(wanted), { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    }
+  }
+
+  /** Signing out removes the key Cloudroom wrote, so the next person on this computer never spends this account's credits. */
+  async removeDeepapiKey(): Promise<void> {
+    await Promise.all(Object.keys(deepapiFiles("")).map(name => readFile(join(DEEPAPI_FOLDER(), name), "utf8")
+      .then(text => text.startsWith(DEEPAPI_MARK) ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined, () => undefined)));
   }
 
   private async cloudLogin(name: "claude" | "codex" | "mcp", only?: AccountRequest): Promise<string | null> {

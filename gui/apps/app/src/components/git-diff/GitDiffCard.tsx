@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { useIntersectionObserver } from "usehooks-ts";
+import { useIntersectionObserver } from "@/hooks/useElementObservers";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import type { DiffPresentation } from "@/components/code/code-rendering";
 import {

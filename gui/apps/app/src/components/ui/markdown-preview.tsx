@@ -863,9 +863,7 @@ function MarkdownCodeCopyButton({ codeText }: { codeText: string }) {
           <button
             type="button"
             aria-label="Copy code"
-            onClick={() => {
-              void copy();
-            }}
+            onClick={copy}
             className="absolute right-2 top-0 inline-flex size-5.5 cursor-pointer items-center justify-center rounded-md border border-transparent bg-surface-recessed-solid text-subtle-foreground transition-[width,height,color,background-color,border-color,box-shadow] duration-200 ease-out group-hover/codeblock:size-7 group-hover/codeblock:border-border group-hover/codeblock:text-muted-foreground group-hover/codeblock:shadow-sm hover:bg-muted hover:text-foreground pointer-coarse:size-7 pointer-coarse:border-border pointer-coarse:shadow-sm"
           >
             <Icon
@@ -903,7 +901,7 @@ function MarkdownInlineCode({
         ) {
           return;
         }
-        void copy();
+        void copy(event);
       }}
     >
       {children}

@@ -86,8 +86,10 @@ import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSetti
 import {
   FeaturePromptsSettingsSection,
   ProjectNudgeSettingsSection,
+  DeepapiSettingsSection,
   SmartSearchSettingsSection,
   PromptSuggestionsSetting,
+  SkillSuggestionsSetting,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -977,6 +979,7 @@ export function GeneralSettingsSection({
           </SettingsWithControl>
 
           <PromptSuggestionsSetting />
+          <SkillSuggestionsSetting />
 
           <SettingsWithControl
             label={FOLLOW_UP_BEHAVIOR_SETTING_LABEL}
@@ -1510,6 +1513,7 @@ export function SettingsView() {
         <ThreadPurposeSettingsSection />
         <ProjectNudgeSettingsSection />
         <SmartSearchSettingsSection />
+        <DeepapiSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
           telemetryEnabled={generalSettings.telemetryEnabled}

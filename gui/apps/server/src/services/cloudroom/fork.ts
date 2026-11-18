@@ -1,10 +1,10 @@
-import { COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, type GitBranchSelection, type PromptInput } from "@cloudroom/domain";
+import { CLOUD_NATIVE_FORK_PROVIDERS as FORK_HARNESSES, COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, type GitBranchSelection, type PromptInput } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection, type EnvironmentRow } from "@cloudroom/db";
 import type { Thread, ThreadCreateOrigin } from "@cloudroom/domain";
 import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
@@ -12,7 +12,7 @@ import { z } from "zod";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
-import { resolveThreadForkPoint } from "../threads/thread-fork-history.js";
+import { checkTurnForkCutoff, messageForkPoint, resolveThreadForkPoint } from "../threads/thread-fork-history.js";
 import { getLastExecutionOptions } from "../threads/thread-events.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
@@ -33,6 +33,7 @@ import { allowance, codexLineage, conversationParser, download, findNative, vm }
 export const cloudForkSchema = z.object({
   source_thread_id: z.string(),
   end_sequence: z.number(),
+  through: z.string().min(1).optional(),
   before: z.string().optional(),
   last_turn_id: z.string().optional(),
   transfer: z.string().optional(),
@@ -88,7 +89,7 @@ for n in names:
     if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
 `;
 
-export const FORK_HARNESSES: readonly string[] = ["claude-code", "codex"];
+export { FORK_HARNESSES };
 export const FORK_HINT = "[Cloud fork]\nThis conversation was forked from another thread and now runs in its own new sandbox. Cloudroom is copying that thread's code (its commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 // Core takes teleport uploads in 1 MB parts.
 const PART = 1024 * 1024;
@@ -105,32 +106,88 @@ export function codeFromOf(input: string | undefined): string | undefined {
   return input ? z.object({ code_from: z.string().optional() }).parse(JSON.parse(input)).code_from : undefined;
 }
 
-export function forkTurn(db: DbConnection, threadId: string, sourceSeqEnd: number | undefined): { turnId: string; endSequence: number } {
+export function forkTurn(db: DbConnection, threadId: string, sourceSeqEnd: number | undefined) {
   const started = sourceSeqEnd === undefined ? findLastCompletedRootStoredTurn(db, { threadId }) : findLastRootStoredTurnStarted(db, { threadId, atOrBeforeSequence: sourceSeqEnd });
   const completed = started && listStoredTurnCompletedRowsByTurnIds(db, { threadId, turnIds: [started.turnId] }).at(-1);
   if (!started || !completed) throw new ApiError(400, "fork_source_session_unavailable", "Fork from a message whose turn has finished.");
-  return { turnId: started.turnId, endSequence: completed.sequence };
+  if (sourceSeqEnd !== undefined) checkTurnForkCutoff(db, threadId, started.turnId, sourceSeqEnd, completed.sequence);
+  return { turnId: started.turnId, endSequence: completed.sequence, nativeId: completed.providerThreadId };
 }
 
-/** Keeps the turn holding `sourceSeqEnd` (or the last finished turn) and everything before it, like a Local fork. */
-export function cloudForkPoint(db: DbConnection, source: Thread, sourceSeqEnd: number | undefined): CloudFork {
-  const turn = forkTurn(db, source.id, sourceSeqEnd);
-  const completed = { sequence: turn.endSequence };
-  const started = { turnId: turn.turnId };
-  const checkpoints = db.select({ sequence: events.sequence, data: events.data }).from(events)
-    .where(and(eq(events.threadId, source.id), eq(events.type, "system/operation"))).orderBy(asc(events.sequence)).all()
-    .map((row) => ({ sequence: row.sequence, ...(JSON.parse(row.data) as { operation?: string; metadata?: { id?: unknown; request_id?: unknown } }) }))
-    .filter((event) => event.operation === "checkpoint" && typeof event.metadata?.id === "string");
-  const fork = { source_thread_id: source.id, end_sequence: completed.sequence };
-  // Codex checkpoints a turn when it ends. Claude checkpoints the user message that starts the next turn;
-  // with no next turn yet, the fork copies the whole conversation.
-  if (source.providerId === "codex") {
-    const own = checkpoints.find((event) => event.metadata?.request_id === started.turnId);
-    if (!own) throw new ApiError(400, "fork_source_session_unavailable", "That turn has no saved checkpoint to fork from.");
-    return { ...fork, last_turn_id: own.metadata!.id as string };
+export function textForkSequence(db: DbConnection, source: Thread, selected: number | undefined): number {
+  return selected !== undefined && messageForkPoint(db, source, selected)
+    ? selected : forkTurn(db, source.id, selected).endSequence;
+}
+
+/** A rewind can copy old messages under new UUIDs. Only accept a retained
+ * checkpoint if the active transcript still contains it. Return only the match from the VM. */
+async function retainedClaudeCheckpoint(
+  deps: Parameters<typeof cloudroom>[0], threadId: string, nativeId: string,
+  checkpoint: string, role: "assistant" | "user",
+) {
+  if (!/^[A-Za-z0-9_-]+$/.test(nativeId)) return false;
+  const client = await cloudroom(deps).threadClient(threadId);
+  const script = `import json, pathlib, sys
+root = pathlib.Path.home() / ".claude/projects"
+files = list(root.glob("*/" + sys.argv[1] + ".jsonl"))
+if len(files) == 1:
+    with files[0].open("rb") as rows:
+        for line in rows:
+            if not line.endswith(b"\\n") or not line.strip(): continue
+            row = json.loads(line)
+            if row.get("uuid") != sys.argv[2] or row.get("type") != sys.argv[3] or row.get("isSidechain"): continue
+            if sys.argv[3] == "assistant" or (not row.get("isMeta") and row.get("parentUuid")):
+                print("found")
+                sys.exit(0)`;
+  const match = await vm(client, `python3 -c ${quote(script)} ${quote(nativeId)} ${quote(checkpoint)} ${role}`);
+  if (binding(deps.db, threadId)?.nativeId !== nativeId) {
+    throw new ApiError(409, "fork_source_unavailable", "The source was edited again. Choose the reply again.");
   }
-  const next = checkpoints.find((event) => event.sequence > completed.sequence);
-  return next ? { ...fork, before: next.metadata!.id as string } : fork;
+  return match.toString().trim() === "found";
+}
+
+export async function cloudForkPoint(deps: Parameters<typeof cloudroom>[0], source: Thread, sourceSeqEnd: number | undefined): Promise<CloudFork> {
+  const { db } = deps;
+  const exact = messageForkPoint(db, source, sourceSeqEnd);
+  const nativeId = source.providerId === "claude-code" ? binding(db, source.id)?.nativeId : null;
+  if (exact && sourceSeqEnd !== undefined && nativeId) {
+    const through = exact.sourceProviderCheckpointId;
+    if (nativeId === exact.sourceProviderThreadId || await retainedClaudeCheckpoint(deps, source.id, nativeId, through, "assistant")) {
+      return { source_thread_id: source.id, end_sequence: sourceSeqEnd, through };
+    }
+  }
+  const turn = forkTurn(db, source.id, sourceSeqEnd);
+  const codex = source.providerId === "codex";
+  const previousSession = exact !== null || (source.providerId === "claude-code" && !!turn.nativeId && turn.nativeId !== nativeId);
+  const next = codex ? null : db.select({ turnId: events.turnId, nativeId: events.providerThreadId }).from(events).where(and(
+    eq(events.threadId, source.id), eq(events.type, "turn/started"), isNull(events.parentToolCallId), gt(events.sequence, turn.endSequence),
+  )).orderBy(asc(events.sequence)).limit(1).get();
+  // The prompt starting the very next turn is the exclusive cutoff. A later prompt would leak intervening work.
+  const checkpoint = db.select({ id: sql<string>`json_extract(${events.data}, '$.metadata.id')` })
+    .from(events)
+    .where(and(
+      eq(events.threadId, source.id),
+      eq(events.type, "system/operation"),
+      sql`json_extract(${events.data}, '$.operation') = 'checkpoint'`,
+      sql`json_type(${events.data}, '$.metadata.id') = 'text'`,
+      sql`json_extract(${events.data}, '$.metadata.request_id') = ${codex ? turn.turnId : next?.turnId ?? null}`,
+      codex ? undefined : gt(events.sequence, turn.endSequence),
+    ))
+    .orderBy(asc(events.sequence)).limit(1).get();
+  const fork = { source_thread_id: source.id, end_sequence: turn.endSequence };
+  if (codex) {
+    if (!checkpoint) throw new ApiError(400, "fork_source_session_unavailable", "That turn has no saved checkpoint to fork from.");
+    return { ...fork, last_turn_id: checkpoint.id };
+  }
+  if (checkpoint) {
+    const before = checkpoint.id;
+    if (!previousSession || (nativeId && nativeId === next?.nativeId)) return { ...fork, before };
+    if (nativeId && await retainedClaudeCheckpoint(deps, source.id, nativeId, before, "user")) return { ...fork, before };
+  }
+  if (previousSession || next) {
+    throw new ApiError(409, "fork_source_session_unavailable", "The next turn has no saved checkpoint yet.");
+  }
+  return fork;
 }
 
 type ForkFile = { path: string; kind: "native" | "lineage"; data: Buffer };
@@ -143,7 +200,12 @@ export function localForkPoint(deps: Pick<AppDeps, "db" | "providerRegistry">, s
   if (point?.history?.kind !== "thread" || !nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(400, "fork_source_session_unavailable", "Fork from a message whose turn has finished.");
   const checkpoint = point.descriptor.sourceProviderCheckpointId;
-  return { source_thread_id: source.id, end_sequence: point.history.endSequence, local: { native_id: nativeId, ...(checkpoint ? { checkpoint } : {}) } };
+  return {
+    source_thread_id: source.id,
+    end_sequence: point.history.endSequence,
+    ...(source.providerId === "claude-code" && checkpoint ? { through: checkpoint } : {}),
+    local: { native_id: nativeId, ...(source.providerId === "codex" && checkpoint ? { checkpoint } : {}) },
+  };
 }
 
 /** Copies the source conversation into this thread's new sandbox and waits until its agent is ready. The code
@@ -174,8 +236,12 @@ export async function startCloudFork(
   const files = await source.files(transfer);
   if (files.some((entry) => entry.kind === "lineage") && (await client.capabilities()).teleport_lineage !== true)
     throw new ApiError(409, "fork_update", "Forking this Codex chat needs a newer cloud core. Try again after the next Cloudroom update.");
-  const native = files.find((entry) => entry.kind === "native")!.data;
-  save({ transfer, ...(fork.local ? corePoint(harness, native, fork.local.checkpoint) : {}) });
+  const native = files.find((entry) => entry.kind === "native")!;
+  // An older destination Core can fork at the tip too. Give it only the selected prefix.
+  const through = fork.through ?? (harness === "claude-code" ? fork.local?.checkpoint : undefined);
+  if (through) native.data = claudeTranscriptThrough(native.data, through);
+  const codexTurn = harness === "codex" ? fork.local?.checkpoint?.replace(/^bt[0-9a-f]{8}-\d+-/, "") : undefined;
+  save({ transfer, ...(codexTurn ? { last_turn_id: codexTurn } : {}) });
   const entries = files.map((entry) => ({ ...entry, sha256: createHash("sha256").update(entry.data).digest("hex") }));
   await client.prepareTeleport({
     ...start, request_id: transfer, harness: harness as Harness, native_id: source.nativeId, handoff: "", queued: [], fork: true,
@@ -256,22 +322,18 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
 const lines = (native: Buffer, parse = conversationParser()) => native.toString("utf8").split("\n").filter(Boolean).map((line) => parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
 const prompt = (entry: ReturnType<typeof lines>[number]) => entry.type === "user" && entry.isMeta !== true;
 
-export function corePoint(harness: string, native: Buffer, checkpoint: string | undefined): Pick<CloudFork, "before" | "last_turn_id"> {
-  if (!checkpoint) return {};
-  if (harness === "codex") return { last_turn_id: checkpoint.replace(/^bt[0-9a-f]{8}-\d+-/, "") };
-  const entries = lines(native);
-  const byId = new Map(entries.map((entry) => [entry.uuid, entry]));
-  if (!byId.has(checkpoint)) throw new ApiError(409, "fork_source_session_unavailable", "That message is not in the saved conversation.");
-  const after = entries.find((entry) => {
-    if (!prompt(entry)) return false;
-    for (let id = entry.parentUuid; id; id = byId.get(id)?.parentUuid) {
-      if (id === checkpoint) return true;
-      const parent = byId.get(id);
-      if (!parent || prompt(parent)) return false;
-    }
-    return false;
-  });
-  return after?.uuid ? { before: after.uuid } : {};
+export function claudeTranscriptThrough(native: Buffer, uuid: string): Buffer {
+  const parse = conversationParser();
+  for (let offset = 0; offset < native.length;) {
+    const newline = native.indexOf(10, offset);
+    if (newline < 0) break;
+    const line = native.toString("utf8", offset, newline);
+    offset = newline + 1;
+    if (!line.trim()) continue;
+    const entry = parse(line);
+    if (entry?.type === "assistant" && entry.uuid === uuid && !entry.isSidechain) return native.subarray(0, offset);
+  }
+  throw new ApiError(409, "fork_source_session_unavailable", "That message is missing from the saved Claude conversation.");
 }
 
 export function localCheckpoint(harness: string, native: Buffer, fork: Pick<CloudFork, "before" | "last_turn_id">): string | undefined {
@@ -280,6 +342,48 @@ export function localCheckpoint(harness: string, native: Buffer, fork: Pick<Clou
   const parent = lines(native).find((entry) => entry.uuid === fork.before && prompt(entry))?.parentUuid;
   if (!parent) throw new ApiError(409, "fork_source_session_unavailable", "That message is not in the saved conversation.");
   return parent;
+}
+
+/** A row click promises the conversation through that message. Legacy turn checkpoints
+ * are equivalent only when no more messages or tool work followed it in that turn. */
+export async function previewMessageFork(deps: Parameters<typeof cloudroom>[0], source: Thread, sequence: number) {
+  const { db } = deps;
+  async function available(read: () => number | null | Promise<number | null>) {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof ApiError && error.body.code === "fork_source_session_unavailable") return null;
+      throw error;
+    }
+  }
+  async function cutoff(at: number) {
+    const native = await available(async () => {
+      if (source.executionTarget === "cloud") return (await cloudForkPoint(deps, source, at)).end_sequence;
+      const point = resolveThreadForkPoint(deps, { sourceThread: source, sourceSeqEnd: at });
+      return point?.history?.kind === "thread" ? point.history.endSequence : null;
+    });
+    if (native !== null) return { sequence: native };
+    if (source.executionTarget === "local") {
+      const text = await available(() => textForkSequence(db, source, at));
+      if (text !== null) return { sequence: text, textOnly: true };
+    }
+    return null;
+  }
+  const point = await cutoff(sequence);
+  if (point?.sequence === sequence) return { exact: true, ...point };
+  const turn = findLastRootStoredTurnStarted(db, { threadId: source.id, atOrBeforeSequence: sequence });
+  if (!turn) return { exact: false, sequence: null };
+  if (point && point.sequence > sequence) {
+    const finalReply = db.select({ id: events.id }).from(events).where(and(
+      eq(events.threadId, source.id), eq(events.sequence, sequence), eq(events.turnId, turn.turnId),
+      eq(events.type, "item/completed"), eq(events.itemKind, "agentMessage"), isNull(events.parentToolCallId),
+    )).get();
+    if (finalReply) return { exact: true, ...point };
+  }
+  const previous = findLastCompletedRootStoredTurn(db, { threadId: source.id, atOrBeforeSequence: turn.sequence - 1 });
+  const at = previous?.completedSequence;
+  const fallback = at !== undefined && at < sequence ? await cutoff(at) : null;
+  return { exact: false, ...(fallback && fallback.sequence === at ? fallback : { sequence: null }) };
 }
 
 export function forkModel(deps: Pick<AppDeps, "db">, threadId: string): string | undefined {

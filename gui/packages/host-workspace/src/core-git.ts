@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { WorkspaceDiffTarget } from "@cloudroom/domain";
@@ -13,7 +13,7 @@ const TIMEOUT_MS = 25_000;
 const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
 
 /** Core's binary: an explicit path, the app's bundled copy beside the server, or a source checkout's own build. */
-function coreBinary(): string | null {
+export function coreBinary(): string | null {
   const candidates = [
     process.env.CLOUDROOM_HELPER_BINARY,
     // The packaged host: host-daemon/dist/daemon-bundle.mjs, with the server's assets beside it.
@@ -31,6 +31,25 @@ function coreBinary(): string | null {
     if (existsSync(path)) return path;
   }
   return null;
+}
+
+const coreFeatures = new Map<string, Set<string>>();
+
+/** Core's binary if it has `feature` (`cloudroom --features`), so a stale build is never asked for a command it lacks.
+ *  Windows builds list no features: they have only `git` and `fs`, and the app uses only `git` there for now. */
+export function coreWith(feature: string): string | null {
+  const binary = coreBinary();
+  if (!binary) return null;
+  let features = coreFeatures.get(binary);
+  if (!features) {
+    try {
+      features = new Set(execFileSync(binary, ["--features"], { encoding: "utf8", timeout: 5_000, windowsHide: true }).split("\n"));
+    } catch {
+      features = new Set();
+    }
+    coreFeatures.set(binary, features);
+  }
+  return features.has(feature) ? binary : null;
 }
 
 export function coreGitTarget(target: WorkspaceDiffTarget): string {

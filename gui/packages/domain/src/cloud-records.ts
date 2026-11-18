@@ -24,7 +24,8 @@ export function cloudItemEvent(kind: string, data: Data, base: CloudEventBase, i
   if (!completed && kind !== "item_started" && kind !== "tool_snapshot") return null;
   const type = completed ? "item/completed" : "item/started";
   if (kind !== "tool_snapshot" && (data.item_type === "text" || data.item_type === "agentMessage")) {
-    return { ...base, type, item: { type: "agentMessage", id, text: text(data.text) } };
+    const checkpoint = completed && data.harness === "claude-code" && text(data.provider_checkpoint_id);
+    return { ...base, type, item: { type: "agentMessage", id, text: text(data.text), ...(checkpoint ? { providerCheckpointId: checkpoint } : {}) } };
   }
   if (kind !== "tool_snapshot" && (data.item_type === "thinking" || data.item_type === "reasoning")) {
     return { ...base, type, item: { type: "reasoning", id, summary: [], content: text(data.text) ? [text(data.text)] : [] } };

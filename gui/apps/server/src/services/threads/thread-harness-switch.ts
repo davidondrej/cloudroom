@@ -258,7 +258,7 @@ async function resendAfterSwitch(
     : { delivery: "started" };
 }
 
-function requireSwitchableThread(
+export function requireSwitchableThread(
   deps: LoggedPendingInteractionWorkSessionDeps,
   threadId: string,
 ): Thread {

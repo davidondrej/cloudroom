@@ -279,6 +279,7 @@ pub struct Resume {
 pub struct Fork {
     pub source: Resume,
     pub before: Option<String>,
+    pub through: Option<String>,
     pub last_turn_id: Option<String>,
 }
 
@@ -543,9 +544,12 @@ impl Handle {
             .ok_or_else(|| io::Error::other("harness not configured"))?;
         let identity = config.storage.as_ref().map(|p| (p.agent_uid, p.agent_gid));
         // An empty checkpoint copies the whole conversation.
-        let at = match &fork.before {
-            Some(before) => claude::checkpoint_parent(profile, &fork.source, before, identity)?,
-            None => String::new(),
+        let at = match (&fork.through, &fork.before) {
+            (Some(id), _) => claude::fork_checkpoint(profile, &fork.source, id, identity, true)?,
+            (_, Some(before)) => {
+                claude::fork_checkpoint(profile, &fork.source, before, identity, false)?
+            }
+            _ => String::new(),
         };
         let resume = Some(fork.source.clone());
         Self::spawn_inner(

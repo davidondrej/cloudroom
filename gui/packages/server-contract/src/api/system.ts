@@ -216,6 +216,7 @@ export const systemConfigResponseSchema = z.object({
   serverAccess: serverAccessStatusSchema,
   generalSettings: appSettingsSchema.extend({
     showUnhandledProviderEvents: z.boolean().optional(),
+    providerOrder: z.array(z.string()).optional(),
   }),
   keybindings: appKeybindingsSchema,
   defaultKeybindings: appDefaultKeybindingsSchema,

@@ -1,10 +1,11 @@
+import { realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import type {
   BbPluginApi,
   PluginCliContext,
   PluginCliResult,
 } from "@get-bb/plugin-sdk";
-import { looksLikePath } from "@cloudroom/domain";
+import { looksLikePath, permissionModeRank } from "@cloudroom/domain";
 import { z } from "zod";
 import type { AutomationService } from "./service.js";
 import { LOOP_TEMPLATES } from "../templates.js";
@@ -245,7 +246,11 @@ async function requireTemplatesPlan(room: Pick<BbPluginApi, "sdk">): Promise<voi
 
 /** `create --template ID`: the template fills every setting the flags leave out, like the Templates tab: a Cloud loop
  *  unless --local, and the template's agent when it is set up here, else the project's default agent. */
-async function applyTemplate(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs): Promise<void> {
+async function applyTemplate(
+  room: Pick<BbPluginApi, "sdk">,
+  args: ParsedArgs,
+  ceiling: PermissionMode | undefined,
+): Promise<void> {
   if (!args.flags.has("template")) return;
   const id = requireFlag(args, "template");
   const template = LOOP_TEMPLATES.find((candidate) => candidate.id === id);
@@ -271,6 +276,7 @@ async function applyTemplate(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs): 
     (provider) => provider.id === template.providerId && provider.available,
   );
   const agent = ownAgent || defaults === null ? template : defaults;
+  const mode = defaults?.permissionMode ?? "full";
   const scheduled = ["cron", "at", "in", "webhook"].some((name) =>
     args.flags.has(name),
   );
@@ -281,7 +287,12 @@ async function applyTemplate(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs): 
     model: agent.model,
     reasoning: agent.reasoningLevel,
     priority: String(template.priority),
-    ...(local ? { "permission-mode": defaults?.permissionMode ?? "full" } : {}),
+    // Above a thread's own mode, the mode is left out, so creation picks the agent's highest one within it.
+    ...(local &&
+    (ceiling === undefined ||
+      permissionModeRank(mode) <= permissionModeRank(ceiling))
+      ? { "permission-mode": mode }
+      : {}),
     ...(scheduled
       ? {}
       : {
@@ -451,7 +462,7 @@ const scriptFileHostListSchema = z.array(
 const threadEnvironmentHostSchema = z
   .object({
     environment: z
-      .object({ hostId: z.string().min(1) })
+      .object({ hostId: z.string().min(1), path: z.string().nullish() })
       .passthrough()
       .nullable()
       .optional(),
@@ -502,6 +513,91 @@ async function threadHostId(
     await room.sdk.threads.get({ threadId, include: "environment" }),
   );
   return thread.environment?.hostId;
+}
+
+const MODE_LABELS: Record<PermissionMode, string> = {
+  "accept-edits": "Manual",
+  auto: "Auto",
+  full: "Full Access",
+};
+
+/** The mode a thread's next turn runs at; null when it can't be read. */
+async function threadPermissionMode(
+  room: Pick<BbPluginApi, "sdk">,
+  threadId: string,
+): Promise<PermissionMode | null> {
+  const own = await room.sdk.threads
+    .defaultExecutionOptions({ threadId })
+    .catch(() => null);
+  return own?.permissionMode ?? null;
+}
+
+/** A thread below Full Access can't make, change, run or turn on a Local loop with more power than itself (#2093).
+ *  Undefined means no limit: the user, the app, or a Full Access thread. A thread we can't read counts as Manual. */
+async function callerCeiling(
+  room: Pick<BbPluginApi, "sdk">,
+  ctx: Pick<PluginCliContext, "threadId">,
+): Promise<PermissionMode | undefined> {
+  if (ctx.threadId === undefined) return undefined;
+  const mode =
+    (await threadPermissionMode(room, ctx.threadId)) ?? "accept-edits";
+  return mode === "full" ? undefined : mode;
+}
+
+type LoopPower = {
+  mode?: "agent" | "script";
+  permissionMode?: PermissionMode;
+  targetThreadId?: string;
+};
+
+/** A script runs outside the thread's sandbox; a same-thread loop runs at its target thread's mode, and at its own
+ *  once it leaves that thread. */
+async function refuseBroaderLoop(
+  room: Pick<BbPluginApi, "sdk">,
+  ceiling: PermissionMode | undefined,
+  ...loops: Array<LoopPower | undefined>
+): Promise<void> {
+  if (ceiling === undefined) return;
+  for (const loop of loops) {
+    if (loop === undefined) continue;
+    let power =
+      loop.mode === "script" ? null : (loop.permissionMode ?? ceiling);
+    if (power !== null && loop.targetThreadId !== undefined) {
+      const target =
+        (await threadPermissionMode(room, loop.targetThreadId)) ?? "full";
+      if (permissionModeRank(target) > permissionModeRank(power))
+        power = target;
+    }
+    if (
+      power !== null &&
+      permissionModeRank(power) <= permissionModeRank(ceiling)
+    )
+      continue;
+    throw new Error(
+      `This thread runs in ${MODE_LABELS[ceiling]}, so it can't make, change, run or turn on this loop: ${power === null ? "its script would run outside this thread's sandbox" : `it runs in ${MODE_LABELS[power]}`}. Ask the user to do it, or to switch this thread to Full Access.`,
+    );
+  }
+}
+
+/** Refuses a caller below Full Access a saved loop broader than itself, or one we can't read. */
+async function refuseBroaderSavedLoop(
+  room: Pick<BbPluginApi, "sdk">,
+  service: Pick<AutomationService, "get">,
+  ceiling: PermissionMode | undefined,
+  args: ParsedArgs,
+): Promise<void> {
+  const automationId = args.positionals[0];
+  if (ceiling === undefined || automationId === undefined) return;
+  const found = await service.get({
+    projectId: requireFlag(args, "project"),
+    automationId,
+  });
+  if (!("execution" in found)) {
+    throw new Error(
+      `This thread runs in ${MODE_LABELS[ceiling]}, and Cloudroom can't read loop ${automationId}, so it can't change, run or turn it on. Ask the user to.`,
+    );
+  }
+  await refuseBroaderLoop(room, ceiling, found.execution);
 }
 
 // Agents copy the short Claude ID from their system prompt (claude-opus-5-5),
@@ -562,10 +658,31 @@ async function readCliTextFile(
     }
     path = resolve(ctx.cwd, file);
   }
-  const hostId = await resolveScriptFileHostId(room, ctx, hostOverride);
+  let hostId: string | undefined;
+  let rootPath: string | undefined;
+  // A Manual or Auto thread reads only inside its own folder, on its own machine (#2096).
+  const ceiling = await callerCeiling(room, ctx);
+  if (ceiling === undefined) {
+    hostId = await resolveScriptFileHostId(room, ctx, hostOverride);
+  } else {
+    const own = threadEnvironmentHostSchema.parse(
+      await room.sdk.threads.get({ threadId: ctx.threadId!, include: "environment" }),
+    ).environment;
+    const asked = hostOverride === undefined || !own ? undefined : await resolveScriptFileHostId(room, ctx, hostOverride);
+    if (!own?.path || (asked !== undefined && asked !== own.hostId)) {
+      throw new Error(
+        `This thread runs in ${MODE_LABELS[ceiling]}, so ${flagName} must be a file in its own folder on its own machine. Ask the user to read it, or to switch this thread to Full Access.`,
+      );
+    }
+    hostId = own.hostId;
+    // The daemon refuses a symlinked root, so pass the real folder. Only this computer's path can be resolved here:
+    // another machine gets the stored path, and its daemon refuses a symlinked one.
+    const local = (await room.sdk.system.config().catch(() => null))?.primaryHostId === own.hostId;
+    rootPath = local ? await realpath(own.path).catch(() => own.path!) : own.path;
+  }
   // Every caller reads before it writes, so a failed or timed-out read never saved anything (#1653).
   const read = await room.sdk.files
-    .read({ ...(hostId !== undefined ? { hostId } : {}), path })
+    .read({ ...(hostId !== undefined ? { hostId } : {}), path, ...(rootPath !== undefined ? { rootPath } : {}) })
     .catch((error: unknown) => {
       throw new Error(
         `Could not read ${flagName} on ${hostId === undefined ? "this Cloudroom's machine" : `host ${hostId}`}, so nothing was saved and a retry is safe: ${error instanceof Error ? error.message : String(error)}`,
@@ -608,6 +725,7 @@ async function buildExecution(
   args: ParsedArgs,
   ctx: Pick<PluginCliContext, "cwd" | "threadId">,
   current?: ScriptExecution,
+  ceiling?: PermissionMode,
 ): Promise<BuiltExecution> {
   const prompt = flag(args, "prompt");
   const script = optionalFlag(args, "script");
@@ -668,6 +786,7 @@ async function buildExecution(
           provider,
           parsePermissionMode(flag(args, "permission-mode")),
           providerRoutingForEnvironment(environment),
+          ceiling,
         ),
         environment,
         ...(targetThreadId ? { targetThreadId } : {}),
@@ -1493,7 +1612,11 @@ export function registerAutomationCli(args: {
         if (command === "create" || command === "update") {
           await applyPromptFile(bb, parsed, ctx);
         }
-        if (command === "create") await applyTemplate(bb, parsed);
+        const limited = ["create", "update", "run", "resume", "hook"];
+        const ceiling = limited.includes(command)
+          ? await callerCeiling(bb, ctx)
+          : undefined;
+        if (command === "create") await applyTemplate(bb, parsed, ceiling);
         // A loop made in a Workflow scan's thread is what the scan is for. Tracking never fails the command.
         const trackScanLoop = async (cloud: boolean) => {
           if (command !== "create" || !ctx.threadId) return;
@@ -1508,6 +1631,10 @@ export function registerAutomationCli(args: {
           const result = await runCloudCommand(bb, parsed, ctx);
           await trackScanLoop(true);
           return result;
+        }
+        // Anyone with a webhook URL runs its loop, so `hook` counts as a run.
+        if (["update", "run", "resume", "hook"].includes(command)) {
+          await refuseBroaderSavedLoop(bb, service, ceiling, parsed);
         }
         if (command === "review") return await runReviewCommand(service, parsed);
         if (command === "report") return await runReportCommand(service, argv, parsed, ctx);
@@ -1543,7 +1670,23 @@ export function registerAutomationCli(args: {
             bb,
             parsed,
             ctx,
+            undefined,
+            ceiling,
           );
+          await refuseBroaderLoop(bb, ceiling, execution);
+          // A Manual loop waits for approvals at every run, so a thread gets one only when it asks for it. A
+          // same-thread loop runs at its thread's mode instead.
+          if (
+            ceiling !== undefined &&
+            execution.mode === "agent" &&
+            execution.permissionMode === "accept-edits" &&
+            execution.targetThreadId === undefined &&
+            !parsed.flags.has("permission-mode")
+          ) {
+            throw new Error(
+              `This thread runs in ${MODE_LABELS[ceiling]}, so a loop it makes would run in Manual and wait for approvals. Ask the user to create it in the Loops panel, or switch this thread to ${ceiling === "auto" ? "Full Access" : "Auto or Full Access"}.`,
+            );
+          }
           const trigger = buildTrigger(parsed);
           // A missing ROOM_THREAD_ID doesn't prove a person ran this, so every Local webhook loop the CLI makes starts
           // paused, and a person turns it on in the Loops panel (ADR 0262).
@@ -1595,6 +1738,18 @@ export function registerAutomationCli(args: {
             service,
             parsed,
             ctx,
+          );
+          const target = request.agent?.target;
+          await refuseBroaderLoop(
+            bb,
+            ceiling,
+            request.execution,
+            request.agent && {
+              permissionMode: request.agent.permissionMode,
+              ...(target?.type === "target-thread"
+                ? { targetThreadId: target.threadId }
+                : {}),
+            },
           );
           const updated = await service.update(request);
           const json = optionalJson(parsed, updated);

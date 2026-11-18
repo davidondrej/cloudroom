@@ -7,7 +7,7 @@ import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { sdk } from "@/lib/sdk";
-import { threadReasoningSaveKey } from "@/hooks/queries/query-keys";
+import { sidebarNavigationQueryKey, threadReasoningSaveKey } from "@/hooks/queries/query-keys";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { appToast } from "@/components/ui/app-toast";
 import { getMutationErrorMessage, showMutationErrorToast } from "@/lib/mutation-errors";
@@ -47,6 +47,7 @@ export const cloudroomStatusSchema = z.object({
     models: z.array(z.object({ model: z.string(), reasoning_levels: z.array(z.string()) })).nullable().optional(),
     service_tier: z.boolean().default(false),
     steer: z.boolean().optional(),
+    idle_set_model: z.boolean().optional(),
     compact: z.boolean().optional(),
     rewind: z.boolean().optional(),
     prompt_reasoning: z.boolean().optional(),
@@ -94,7 +95,7 @@ export function cloudFeatureSupported(status: z.infer<typeof cloudroomStatusSche
 }
 const cloudDiskSchema = z.object({ paused: z.boolean(), reason: z.enum(["disk_capacity", "measurement_unavailable"]), usedBytes: z.number().nullable(), totalBytes: z.number().nullable() });
 export type CloudDisk = z.infer<typeof cloudDiskSchema>;
-const threadStatusSchema = z.object({ authRequired: z.boolean().default(false), starting: z.boolean().default(false), sessionId: z.string().nullable(), paused: z.boolean(), failedStart: z.boolean().default(false), model: z.string(), reasoning: reasoningLevelSchema, serviceTier: serviceTierSchema.default("default"), error: z.string().nullable(), reconnecting: z.boolean().default(false), usageLimit: z.boolean().default(false), disk: cloudDiskSchema.nullable().default(null), awake: z.boolean().default(false), vps: z.boolean().default(false), move: z.enum(["moving", "failed"]).nullable().default(null), waiting: z.string().nullable().default(null), fromCopy: z.boolean().default(false), outOfMemory: z.boolean().default(false), pendingDelivery: z.number() }).nullable();
+const threadStatusSchema = z.object({ authRequired: z.boolean().default(false), starting: z.boolean().default(false), sessionId: z.string().nullable(), paused: z.boolean(), failedStart: z.boolean().default(false), model: z.string(), reasoning: reasoningLevelSchema, serviceTier: serviceTierSchema.default("default"), error: z.string().nullable(), reconnecting: z.boolean().default(false), usageLimit: z.boolean().default(false), launchCap: z.boolean().default(false), disk: cloudDiskSchema.nullable().default(null), awake: z.boolean().default(false), vps: z.boolean().default(false), move: z.enum(["moving", "failed"]).nullable().default(null), waiting: z.string().nullable().default(null), fromCopy: z.boolean().default(false), outOfMemory: z.boolean().default(false), pendingDelivery: z.number() }).nullable();
 
 export function useCloudroomAccount() {
   return useQuery({ queryKey: ["cloudroom-account"], queryFn: async ({ signal }) => {
@@ -295,6 +296,25 @@ export function useSetMacAccess(onSaved?: (access: MacAccessChoice) => void) {
   });
 }
 
+/** Settings → General → DeepAPI: whether DeepAPI is paid from the account's Cloud Credits (ADR 20261115-235507). The
+ *  account cache changes at once and rolls back on failure. */
+export function useSetDeepapi() {
+  const client = useQueryClient();
+  type Account = Awaited<ReturnType<typeof sdk.cloudroom.status>>;
+  return useMutation({
+    meta: { errorMessage: "Couldn't change DeepAPI." },
+    mutationFn: (enabled: boolean) => sdk.cloudroom.setDeepapi(enabled),
+    onMutate: async (enabled) => {
+      await client.cancelQueries({ queryKey: ["cloudroom-account"] });
+      const previous = client.getQueryData<Account>(["cloudroom-account"]);
+      if (previous?.deepapi) client.setQueryData<Account>(["cloudroom-account"], { ...previous, deepapi: { ...previous.deepapi, enabled } });
+      return { previous };
+    },
+    onError: (_error, _enabled, context) => { if (context?.previous) client.setQueryData(["cloudroom-account"], context.previous); },
+    onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
+  });
+}
+
 /** "Copy my logins and model providers to my VM" (ADR 0130). */
 export function useSetCopyLogins() {
   const client = useQueryClient();
@@ -316,6 +336,8 @@ export function useNativeSessions() {
   return useQuery({ queryKey: ["cloudroom-native-sessions"], queryFn: ({ signal }) => sdk.cloudroom.nativeSessions(signal), retry: false, staleTime: 30_000 });
 }
 
+const suggestionKey = (repo: RepoSuggestion) => repo.source === "mac" ? repo.path : repo.repo;
+
 /** Repos on this Mac and GitHub that are not projects yet, newest first. Adding one makes it a project and picks it for the next thread.
  *  Mac repos come from a fast scan with no network calls, so they show while GitHub answers. */
 export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined {
@@ -328,8 +350,14 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
     mutationFn: async ({ hostId, repo }: { hostId: string; repo: RepoSuggestion }) => repo.source === "mac"
       ? (await sdk.projects.create({ name: deriveProjectNameFromPath(repo.path), source: { type: "local_path", hostId, path: repo.path } })).id
       : (await sdk.cloudroom.addGithubRepo({ repo: repo.repo })).projectId,
-    // The composer drops a selected project it can't find, so the project list refreshes first.
-    onSuccess: async (projectId) => { await client.invalidateQueries(); setProjectId(projectId); },
+    onSuccess: async (projectId, { repo }) => {
+      // The new project replaces its suggestion as soon as the picker lists it, not after every query refreshes (#2126).
+      await client.invalidateQueries({ queryKey: sidebarNavigationQueryKey() });
+      client.setQueriesData<{ repos: RepoSuggestion[] }>({ queryKey: ["cloudroom-repo-suggestions"] }, (data) => data && { ...data, repos: data.repos.filter((other) => suggestionKey(other) !== suggestionKey(repo)) });
+      // The composer drops a selected project it can't find, so the project list refreshes first.
+      await client.invalidateQueries();
+      setProjectId(projectId);
+    },
     onError: (error) => appToast.error(error.message),
   });
   if (!hostId) return undefined;
@@ -340,7 +368,7 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
     githubConnected: query.data?.githubConnected ?? true,
     isLoading: query.isPending && mac.isPending,
     githubLoading: query.isPending,
-    addingKey: adding ? (adding.source === "mac" ? adding.path : adding.repo) : null,
+    addingKey: adding ? suggestionKey(adding) : null,
     onAdd: (repo) => add.mutateAsync({ hostId, repo }),
   };
 }

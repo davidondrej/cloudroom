@@ -33,7 +33,7 @@ import {
   projectNudgeEnabledAtom,
   projectNudgeConfidenceAtom,
 } from "@/components/promptbox/ProjectNudge";
-import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomAccount, useSetDeepapi } from "@/hooks/queries/cloudroom-queries";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
 import {
   SETTINGS_DROPDOWN_CONTENT_CLASS,
@@ -312,6 +312,33 @@ export function SmartSearchSettingsSection() {
   );
 }
 
+/** Whether DeepAPI is paid from the account's Cloud Credits (ADR 20261115-235507). The website keeps the switch, so it
+ *  is the same on every computer. Hidden while signed out, before the website offers it, or when this computer uses its
+ *  own DeepAPI setup. */
+export function DeepapiSettingsSection() {
+  const enabled = useCloudroomAccount().data?.deepapi?.enabled;
+  const save = useSetDeepapi();
+  if (enabled === undefined) return null;
+  return (
+    <SettingsSection
+      title="DeepAPI"
+      description="Your agents search the web, research, and scrape pages with DeepAPI. No DeepAPI account needed."
+    >
+      <SettingsWithControl
+        label="Pay with Cloud Credits"
+        description="On by default. Charged at DeepAPI's price, with no extra margin. Off: agents use their built-in web tools."
+      >
+        <Switch
+          aria-label="Pay with Cloud Credits"
+          checked={enabled}
+          disabled={save.isPending}
+          onCheckedChange={(next) => save.mutate(next)}
+        />
+      </SettingsWithControl>
+    </SettingsSection>
+  );
+}
+
 const promptSuggestionsEnabledAtom = createSyncedPreferenceAtom(
   "promptSuggestions.enabled",
 );
@@ -325,6 +352,26 @@ export function PromptSuggestionsSetting() {
     >
       <Switch
         aria-label="Prompt suggestions"
+        checked={enabled}
+        onCheckedChange={setEnabled}
+      />
+    </SettingsWithControl>
+  );
+}
+
+const skillSuggestionsEnabledAtom = createSyncedPreferenceAtom(
+  "skillSuggestions.enabled",
+);
+
+export function SkillSuggestionsSetting() {
+  const [enabled, setEnabled] = useAtom(skillSuggestionsEnabledAtom);
+  return (
+    <SettingsWithControl
+      label="Skill suggestions"
+      description="When a thread finishes a job you keep asking for by hand, a card offers to save it as a skill. Checks at most once a day with the smallest model (Haiku 5.5 or GPT-6 Luna) at low effort, and shows at most one card a week."
+    >
+      <Switch
+        aria-label="Skill suggestions"
         checked={enabled}
         onCheckedChange={setEnabled}
       />

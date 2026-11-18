@@ -1,5 +1,5 @@
 export { provisionWorkspace } from "./provision.js";
-export { coreGitTarget } from "./core-git.js";
+export { coreGitTarget, coreWith } from "./core-git.js";
 export type { HostWorkspace, ProvisionWorkspaceArgs } from "./provision.js";
 
 export type { PullRequestActionOptions } from "./provision.js";

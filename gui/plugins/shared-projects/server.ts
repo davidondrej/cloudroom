@@ -163,8 +163,8 @@ export default async function plugin(room: BbPluginApi) {
       return { projectId };
     },
     page: ({ projectId }) => pageOf(projectId, (repo) => ({ action: "page", repo })),
-    share: async ({ projectId, email }) => {
-      const result = await pageOf(projectId, (repo) => ({ action: "share", repo, project: projectId, email }));
+    share: async ({ projectId, email, team }) => {
+      const result = await pageOf(projectId, (repo) => ({ action: "share", repo, project: projectId, ...(team ? { team: true } : { email }) }));
       pollNow();
       return result;
     },

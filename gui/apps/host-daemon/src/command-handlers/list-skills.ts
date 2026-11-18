@@ -21,7 +21,7 @@ import {
   type DeclaredScanRootResolution,
   resolveDeclaredScanRoots,
 } from "./list-commands.js";
-import { writeHostFile } from "./file-write.js";
+import { writeHostFile } from "./files.js";
 
 type SkillRootResolution = DeclaredScanRootResolution;
 

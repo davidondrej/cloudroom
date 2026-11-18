@@ -50,8 +50,9 @@ function ThreadPurposeCardBody({ purpose }: { purpose: ThreadPurpose }) {
   );
 }
 
-// Cloud threads: the purpose on lime and the thread's Cloud Credits, split by the commands that used them, on black
-// (David, 2026-11-16, docs/scopes/thread-purpose.md). Asked when the card opens; the app server caches it a minute.
+// Every thread, Local or Cloud: the purpose on lime and the thread's Cloud Credits on black, split by GPU sessions and
+// the commands that used them (David, 2026-11-16 and 2026-11-18, docs/scopes/thread-purpose.md). Asked when the card
+// opens; the app server caches it a minute.
 const threadCreditsSchema = z.object({
   credits: z.number().nullable(),
   pending: z.boolean(),
@@ -69,7 +70,7 @@ async function loadThreadCredits(threadId: string, signal?: AbortSignal) {
 const updatedText = (purpose: ThreadPurpose) =>
   `updated ${formatRelativeTime({ timestamp: purpose.updatedAt, now: Date.now() }).toLowerCase()}`;
 
-function CloudThreadCredits({ threadId }: { threadId: string }) {
+function ThreadCredits({ threadId }: { threadId: string }) {
   const query = useQuery({
     queryKey: ["cloudroom-thread-credits", threadId],
     queryFn: ({ signal }) => loadThreadCredits(threadId, signal),
@@ -100,7 +101,7 @@ function CloudThreadCredits({ threadId }: { threadId: string }) {
       )}
       {data && total !== null && data.rows.length > 0 ? (
         <div className="mt-auto flex justify-between gap-3 border-t border-dashed border-white/15 pt-2.5 text-white/45">
-          <span>{durationToCompactString(data.awakeMinutes * 60_000)} awake{data.partial ? " · last 7 days" : ""}</span>
+          <span>{[data.awakeMinutes > 0 ? `${durationToCompactString(data.awakeMinutes * 60_000)} awake` : "", data.partial ? "last 7 days" : ""].filter(Boolean).join(" · ")}</span>
           <span>total <span className="text-white">{Math.round(total).toLocaleString("en-US")}</span></span>
         </div>
       ) : null}
@@ -108,7 +109,7 @@ function CloudThreadCredits({ threadId }: { threadId: string }) {
   );
 }
 
-function CloudPurposeCard({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
+function PurposeCreditsCard({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
   return (
     <div className="flex">
       <div className="flex min-w-0 flex-1 basis-0 flex-col gap-3 bg-primary p-5 text-primary-foreground">
@@ -120,7 +121,7 @@ function CloudPurposeCard({ purpose, threadId }: { purpose: ThreadPurpose; threa
         <p className="text-sm leading-relaxed font-medium">{purpose.text}</p>
         <div className="mt-auto pt-2 text-xs opacity-60">{updatedText(purpose)}</div>
       </div>
-      <CloudThreadCredits threadId={threadId} />
+      <ThreadCredits threadId={threadId} />
     </div>
   );
 }
@@ -128,37 +129,22 @@ function CloudPurposeCard({ purpose, threadId }: { purpose: ThreadPurpose; threa
 export function ThreadPurposeHoverCard({
   children,
   purpose,
-  cloudThreadId,
+  threadId,
 }: {
   children: ReactNode;
   purpose: ThreadPurpose | null;
-  /** Set for Cloud threads: the card also shows the thread's Cloud Credits. */
-  cloudThreadId?: string | null;
+  threadId: string;
 }) {
   if (!purpose) return children;
-  if (cloudThreadId) {
-    return (
-      <HoverCard openDelay={250} closeDelay={100}>
-        <HoverCardTrigger asChild>{children}</HoverCardTrigger>
-        <HoverCardContent
-          align="start"
-          sideOffset={8}
-          className="w-[660px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-xl"
-        >
-          <CloudPurposeCard purpose={purpose} threadId={cloudThreadId} />
-        </HoverCardContent>
-      </HoverCard>
-    );
-  }
   return (
     <HoverCard openDelay={250} closeDelay={100}>
       <HoverCardTrigger asChild>{children}</HoverCardTrigger>
       <HoverCardContent
         align="start"
         sideOffset={8}
-        className="w-[420px] max-w-[calc(100vw-2rem)] space-y-3 px-[18px] py-4"
+        className="w-[660px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-xl"
       >
-        <ThreadPurposeCardBody purpose={purpose} />
+        <PurposeCreditsCard purpose={purpose} threadId={threadId} />
       </HoverCardContent>
     </HoverCard>
   );

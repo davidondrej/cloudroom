@@ -14,20 +14,17 @@ function event(
 
 describe("extractThreadTimelineModelFallback", () => {
   it("returns the latest active fallback", () => {
-    expect(
-      extractThreadTimelineModelFallback([
-        event(2, {
-          type: "provider/modelFallback",
-          threadId: "thread-1",
-          providerThreadId: "session-1",
-          scope: { kind: "turn", turnId: "turn-1" },
-          originalModel: "claude-fable-5",
-          fallbackModel: "claude-opus-4-8",
-          reason: "refusal",
-          message: "Switched to Opus.",
-        }),
-      ]),
-    ).toEqual({
+    const fallback = event(2, {
+      type: "provider/modelFallback",
+      threadId: "thread-1",
+      providerThreadId: "session-1",
+      scope: { kind: "turn", turnId: "turn-1" },
+      originalModel: "claude-fable-5",
+      fallbackModel: "claude-opus-4-8",
+      reason: "refusal",
+      message: "Switched to Opus.",
+    });
+    expect(extractThreadTimelineModelFallback([fallback])).toEqual({
       sourceSeq: 2,
       detectedAt: 20,
       originalModel: "claude-fable-5",
@@ -35,6 +32,11 @@ describe("extractThreadTimelineModelFallback", () => {
       reason: "refusal",
       message: "Switched to Opus.",
     });
+    const pick = event(3, {
+      type: "system/operation", threadId: "thread-1", scope: { kind: "thread" },
+      operation: "model_selection", operationId: "pick", status: "completed", message: "Selected Opus.",
+    });
+    expect(extractThreadTimelineModelFallback([fallback, pick])).toBeNull();
   });
 
   it("clears the fallback after a later explicit turn request", () => {

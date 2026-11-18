@@ -1,3 +1,4 @@
+import type { AvailableModel } from "./provider-types.js";
 import type { ReasoningLevel } from "./shared-types.js";
 
 /** Claude and Codex models of about the same level, newest per level (docs/scopes/loop-fallback.md). */
@@ -38,11 +39,12 @@ export const MODEL_LEVELS: readonly {
   },
 ];
 
-/** The other provider's model at the same level, for Claude Code ↔ Codex only. An unknown model counts as Opus ↔ Sol. */
+/** An unknown model counts as Opus ↔ Sol. With a Codex catalog, a missing family leaves the choice to the CLI default. */
 export function sameLevelModel(
   model: string,
   fromProviderId: string,
   toProviderId: string,
+  availableModels?: readonly AvailableModel[],
 ): string | null {
   const toCodex = fromProviderId === "claude-code" && toProviderId === "codex";
   if (
@@ -56,5 +58,13 @@ export function sameLevelModel(
     MODEL_LEVELS.find((entry) =>
       name.includes(toCodex ? entry.claude : entry.codex),
     ) ?? MODEL_LEVELS[1]!;
-  return toCodex ? level.codexModel : level.claudeModel;
+  if (!toCodex) return level.claudeModel;
+  if (!availableModels) return level.codexModel;
+
+  const family = new RegExp(`^gpt-\\d+(?:\\.\\d+)*-${level.codex}$`);
+  const matches = availableModels
+    .map(({ model }) => model)
+    .filter((id) => family.test(id));
+  matches.sort((a, b) => b.localeCompare(a, "en", { numeric: true }));
+  return matches[0] ?? null;
 }

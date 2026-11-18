@@ -13,6 +13,7 @@ pub(crate) mod prompt;
 pub(crate) mod relay;
 pub mod report;
 mod sleep;
+pub mod snippets;
 mod state;
 mod tokens;
 pub use state::SessionState;
@@ -264,6 +265,10 @@ pub struct Session {
     // after a restart, or when a copied-in history's totals were not counted yet.
     #[serde(skip)]
     turn_tokens: Option<tokens::Tokens>,
+    // The effort a turn was sent to the harness with, by request: `thread show` reports it while that turn runs, even
+    // after the thread's effort changes (#2028). Memory only: after a restart it says the prompt's or the thread's.
+    #[serde(skip)]
+    turn_reasoning: Option<(String, Option<String>)>,
     // A copied-in history (teleport, move, rewind): Codex and Pi bring back its old totals, so the next reading only
     // sets the base.
     #[serde(skip)]
@@ -400,6 +405,25 @@ impl Session {
         self.receipts
             .values()
             .find(|r| r.command == "start" && r.state == "accepted")
+            .map(|r| r.request_id.clone())
+    }
+
+    /// The start of an agent that failed before it existed: no native conversation, no turn, no process. Starting it
+    /// again repeats nothing, so a parent's tell or the user's resume may (#2036).
+    fn failed_start(&self) -> Option<String> {
+        if self.state != SessionState::Failed
+            || self.native_id.is_some()
+            || self.has_dispatched
+            || self.handle.is_some()
+            || self.harness_pid.is_some()
+            || self.current_request.is_some()
+            || self.close_request.is_some()
+        {
+            return None;
+        }
+        self.receipts
+            .values()
+            .find(|r| r.command == "start" && r.state == "failed")
             .map(|r| r.request_id.clone())
     }
 
@@ -2128,6 +2152,7 @@ impl Manager {
             Rewind(runtime::Handle, Value, String),
             Close(Option<runtime::Handle>),
             Resume,
+            Start(String),
         }
         let (receipt, next) = {
             let mut local = self.local.lock().unwrap();
@@ -2241,16 +2266,36 @@ impl Manager {
                     "saved conversation is unavailable; inspect session recovery before retrying",
                 ));
             }
+            // It also starts again an agent whose start failed before it existed, with the same start (#2036).
+            let retry_start = (command == "resume")
+                .then(|| session.failed_start())
+                .flatten();
+            if command == "model"
+                && input["idle_only"] == true
+                && (session.current_request.is_some()
+                    || session.compacting
+                    || !matches!(
+                        session.state,
+                        SessionState::Idle
+                            | SessionState::Failed
+                            | SessionState::ProcessLost
+                            | SessionState::Sleeping
+                            | SessionState::Suspended
+                    ))
+            {
+                return Err(Error::Conflict(
+                    "wait for the active turn to finish before switching models",
+                ));
+            }
             // A model pick needs no agent, so it can rescue one that lost its agent to its model.
             if matches!(
                 session.state,
                 SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
             ) && !retry_lost
+                && retry_start.is_none()
                 && !(command == "model" && session.state != SessionState::Closed)
             {
-                return Err(Error::Conflict(
-                    "process unavailable; history does not restore execution",
-                ));
+                return Err(Error::Conflict(GONE));
             }
             // A prompt starts its native turn immediately only when the harness is
             // idle with nothing queued; otherwise it is accepted and queued in order.
@@ -2460,6 +2505,12 @@ impl Manager {
                     self.schedule_resume(&mut local, id, false)?;
                     Next::None
                 }
+                // Pending takes prompts, which wait for the agent; its start's outcome settles them.
+                "resume" if retry_start.is_some() => {
+                    local.finish_receipt(id, &request, "completed")?;
+                    local.append(id, "state", json!({"state":SessionState::Pending}), None)?;
+                    Next::Start(retry_start.expect("checked failed start"))
+                }
                 "resume" => {
                     local.finish_receipt(id, &request, "completed")?;
                     Next::Resume
@@ -2517,6 +2568,10 @@ impl Manager {
         match next {
             Next::None => {}
             Next::Resume => self.advance(&mut self.local.lock().unwrap(), id, false),
+            Next::Start(start) => {
+                let (manager, id) = (self.clone(), id.to_owned());
+                tokio::spawn(async move { manager.launch(id, start).await });
+            }
             Next::Close(handle) => {
                 if let Some(handle) = handle {
                     handle.request_shutdown();
@@ -2619,12 +2674,13 @@ impl Manager {
     fn deliver(self: Arc<Self>, id: String, request: String, handle: runtime::Handle) {
         tokio::spawn(async move {
             let (input, reasoning) = {
-                let local = self.local.lock().unwrap();
-                let session = &local.sessions[&id];
+                let mut local = self.local.lock().unwrap();
+                let session = local.sessions.get_mut(&id).unwrap();
                 let input = prompt::latest(&session.prompts, &session.receipts, &request)
                     .cloned()
                     .unwrap_or_else(|| json!({"text":""}));
                 let reasoning = prompt::reasoning(&input).or_else(|| session.reasoning.clone());
+                session.turn_reasoning = Some((request.clone(), reasoning.clone()));
                 // Every turn runs the session's model, whoever sent it: Claude switches first (`set_model`).
                 let mut input = input;
                 if let (runtime::Kind::Claude, Some(model)) = (session.harness, &session.model) {
@@ -3180,7 +3236,7 @@ impl Manager {
             {
                 runtime::wait_for_exit(pid).await?;
             }
-            let (handle, events, native) = {
+            let (handle, events, native, fresh) = {
                 let mut local = self.local.lock().unwrap();
                 let session = &local.sessions[&id];
                 if session.close_request.is_some() || self.is_stopping() {
@@ -3199,21 +3255,43 @@ impl Manager {
                     .harnesses
                     .get(&kind)
                     .ok_or_else(|| io::Error::other("harness not configured"))?;
-                // Capture any final orphan writes after ownership reconciliation.
-                runtime::recover_records(
-                    profile,
-                    kind,
-                    &saved,
-                    self.config.storage.as_ref(),
-                    |event| {
-                        if let runtime::Event::Record { kind, data, native } = event {
-                            local.append(&id, kind, data, native)?;
-                        }
-                        Ok(())
-                    },
-                )?;
-                saved.cursor = local.sessions[&id].native_cursor.clone();
+                // An agent that never ran a turn has no saved chat: Codex writes it on the first turn. One that slept
+                // before then (a switch or project move, then 30 idle minutes) starts again fresh, losing nothing;
+                // its first prompt still carries the switch's history note.
+                let fresh = !session.has_dispatched
+                    && runtime::check_resume_history(
+                        kind,
+                        profile,
+                        &saved,
+                        self.config.storage.as_ref(),
+                    )
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+                let reasoning = saved.reasoning.clone();
                 let mut config = self.config.clone();
+                if fresh {
+                    let profile = config.harnesses.get_mut(&kind).expect("checked harness");
+                    if let Some(model) = &saved.model {
+                        profile.model = model.clone();
+                    }
+                    if let Some(provider) = &saved.provider {
+                        profile.provider = Some(provider.clone());
+                    }
+                } else {
+                    // Capture any final orphan writes after ownership reconciliation.
+                    runtime::recover_records(
+                        profile,
+                        kind,
+                        &saved,
+                        self.config.storage.as_ref(),
+                        |event| {
+                            if let runtime::Event::Record { kind, data, native } = event {
+                                local.append(&id, kind, data, native)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+                saved.cursor = local.sessions[&id].native_cursor.clone();
                 config.repository = local.sessions[&id]
                     .workspace
                     .as_ref()
@@ -3223,7 +3301,7 @@ impl Manager {
                 let (handle, events) = runtime::Handle::spawn_guarded(
                     &config,
                     kind,
-                    Some(saved),
+                    (!fresh).then_some(saved),
                     local.sessions[&id].command_guard_enabled(),
                     local.sessions[&id].strip_ai_co_authors(),
                     crate::workspace::repo_sync::RepoSync::prompt(
@@ -3232,12 +3310,18 @@ impl Manager {
                     ),
                     local.sessions[&id].room_env(),
                 )?;
+                let handle = if fresh {
+                    handle.with_reasoning(reasoning)
+                } else {
+                    handle
+                };
                 local.sessions.get_mut(&id).unwrap().handle = Some(handle.clone());
                 local.append(&id, "harness", json!({"pid":handle.pid()}), None)?;
-                (handle, events, native)
+                (handle, events, native, fresh)
             };
             self.watch_events(id.clone(), handle.clone(), events);
-            handle.start_session().await?;
+            let started = handle.start_session().await?;
+            let native = if fresh { started } else { native };
             let mut local = self.local.lock().unwrap();
             self.remember_launch_reasoning(&mut local, &id, &handle)?;
             if local.sessions[&id].close_request.is_some() || self.is_stopping() {
@@ -3788,6 +3872,8 @@ impl Manager {
 /// What other clients get while Teleport to Local or an agent switch holds a session (#237).
 pub const MOVING: &str = "This thread is moving to a computer. Send it again when that's done.";
 pub const SWITCHING: &str = "This thread is switching agents. Send it again in a moment.";
+/// Core's refusal of work for an agent that isn't running and can't be restarted from its saved chat.
+pub(crate) const GONE: &str = "process unavailable; history does not restore execution";
 /// A switch waits this long for the website before it answers "pending" and keeps trying (#237).
 const CONTINUE_WAIT: Duration = Duration::from_secs(60);
 /// How long a Teleport's freeze holds without a renewal (#237).

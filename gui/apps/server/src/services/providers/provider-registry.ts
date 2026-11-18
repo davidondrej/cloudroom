@@ -9,6 +9,7 @@ import type {
   ReasoningLevel,
 } from "@cloudroom/domain";
 import { parseExtensionKind } from "@cloudroom/domain";
+import { countThreads, type DbQueryConnection } from "@cloudroom/db";
 import type {
   PluginProviderExtensionKindDeclaration,
   PluginProviderOptionsContext,
@@ -91,11 +92,38 @@ export interface ProviderRegistryService {
 }
 
 const REGISTRATIONS_SETTLED_TIMEOUT_MS = 30_000;
+const PROVIDER_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const PROVIDER_USAGE_CACHE_MS = 60_000;
+
+/** Threads started per harness in the last 30 days, re-read at most once a minute. */
+export function createProviderUsageReader(
+  db: DbQueryConnection,
+  cacheMs = PROVIDER_USAGE_CACHE_MS,
+): () => ReadonlyMap<string, number> {
+  let cached = { readAt: Number.NEGATIVE_INFINITY, usage: new Map<string, number>() };
+  return () => {
+    const now = Date.now();
+    if (now - cached.readAt < cacheMs) return cached.usage;
+    const { groups = [] } = countThreads(db, {
+      groupBy: "provider",
+      includeArchived: true,
+      includeHidden: true,
+      createdAfter: now - PROVIDER_USAGE_WINDOW_MS,
+    });
+    const usage = new Map<string, number>();
+    for (const { key, count } of groups) if (key !== null) usage.set(key, count);
+    cached = { readAt: now, usage };
+    return usage;
+  };
+}
 
 interface ProviderRegistryDeps {
   readUserProviderPreferences?: () => {
-    providerOrder: readonly string[];
     defaultProviderId: string | null;
+    /** Threads started per harness lately; the picker lists the most used first. */
+    usage: ReadonlyMap<string, number>;
+    /** Harnesses the user removed; they go last, so they never become the default. */
+    hiddenProviderIds?: readonly string[];
   };
   deferRegistrationsSettled?: boolean;
 }
@@ -196,16 +224,19 @@ export function createProviderRegistryService(
       const entries = [...pluginRegistrations.values()].sort(
         compareInstallRank,
       );
-      const userOrder =
-        deps.readUserProviderPreferences?.().providerOrder ?? [];
-      if (userOrder.length === 0) {
+      const preferences = deps.readUserProviderPreferences?.();
+      if (preferences === undefined) {
         return entries;
       }
-      const pinned = (entry: ProviderRegistration): number => {
-        const index = userOrder.indexOf(entry.info.id);
-        return index === -1 ? userOrder.length : index;
-      };
-      return entries.sort((a, b) => pinned(a) - pinned(b));
+      // The default harness first, then the most used, removed ones last; ties keep install order.
+      const { defaultProviderId, usage, hiddenProviderIds = [] } = preferences;
+      const rank = ({ info: { id } }: ProviderRegistration): number =>
+        hiddenProviderIds.includes(id)
+          ? -1
+          : id === defaultProviderId
+            ? Number.MAX_SAFE_INTEGER
+            : (usage.get(id) ?? 0);
+      return entries.sort((a, b) => rank(b) - rank(a));
     },
 
     getUserDefaultProviderId() {

@@ -645,10 +645,14 @@ impl Local {
                 let id = record.data["id"]
                     .as_str()
                     .ok_or_else(|| io::Error::other("missing native identity"))?;
-                if session.native_id.as_deref().is_some_and(|old| old != id)
-                    && record.data["replaced"] != true
-                {
+                // Before its first turn there is no chat to lose: a fresh start replaces it (Manager::relaunch).
+                let changed = session.native_id.as_deref().is_some_and(|old| old != id);
+                if changed && record.data["replaced"] != true && session.has_dispatched {
                     return Err(io::Error::other("native identity changed"));
+                }
+                if changed {
+                    session.native_cursor = Value::Null;
+                    session.native_offset = 0;
                 }
                 session.native_id = Some(id.into());
                 if let Some(capabilities) = record.data.get("capabilities") {

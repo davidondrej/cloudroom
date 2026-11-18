@@ -129,6 +129,7 @@ if (viewingOtherMac()) {
   keepOtherMacOnScreen();
   render();
 } else if (isPhoneRelay()) {
+  document.documentElement.dataset.cloudroomPhone = "true";
   keepOfflineCopy();
   void macOffline().then((offline) => {
     if (offline) installCloudServer();

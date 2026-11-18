@@ -238,6 +238,8 @@ export type OwnershipChangeOperationMetadata = z.infer<
 >;
 
 export const THREAD_CONTEXT_CLEAR_OPERATION = "context_clear";
+/** A saved Local model pick supersedes the last provider fallback. */
+export const THREAD_MODEL_SELECTION_OPERATION = "model_selection";
 /** The thread moved to another harness or model (ADR 0211): the next turn starts a fresh native session. Hidden in the timeline. */
 export const THREAD_HARNESS_SWITCH_OPERATION = "harness_switch";
 /** Another account of the same agent continued a turn its plan limit stopped (ADR 20261107-082836). Hidden; the limit row shows it. */

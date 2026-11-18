@@ -29,12 +29,15 @@ import {
 } from "./services/system/periodic-sweeps.js";
 import { installProviderModelCatalogPrewarm } from "./services/providers/provider-model-catalog-prewarm.js";
 import {
-  PROVIDER_AUTO_UPDATE_FIRST_RUN_MS,
   PROVIDER_AUTO_UPDATE_INTERVAL_MS,
   runProviderAutoUpdates,
 } from "./services/system/provider-auto-update.js";
-import { createProviderRegistryService } from "./services/providers/provider-registry.js";
+import {
+  createProviderRegistryService,
+  createProviderUsageReader,
+} from "./services/providers/provider-registry.js";
 import { installFirstResponseTelemetry } from "./services/system/first-response-telemetry.js";
+import { installSkillTelemetry } from "./services/system/skill-telemetry.js";
 import { installTokenTelemetry } from "./services/system/token-telemetry.js";
 import { startOrgPlugin } from "./services/cloudroom/org-plugin.js";
 import { startSetupTelemetry } from "./services/cloudroom/setup-telemetry.js";
@@ -121,14 +124,12 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     (error: unknown) => logger.warn({ error }, "Could not move user skills to ~/.cloudroom/skills"),
   );
 
+  const readProviderUsage = createProviderUsageReader(db);
   const providerRegistry = createProviderRegistryService({
     deferRegistrationsSettled: true,
     readUserProviderPreferences: () => {
-      const settings = getAppSettings(db);
-      return {
-        providerOrder: settings.providerOrder,
-        defaultProviderId: settings.defaultProviderId,
-      };
+      const { defaultProviderId, hiddenProviderIds } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, usage: readProviderUsage() };
     },
   });
 
@@ -251,6 +252,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
   const stopPlanLimitTelemetry = installPlanLimitTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
   const stopTokenTelemetry = installTokenTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
+  const stopSkillTelemetry = installSkillTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
 
   const sweepDeps = {
     config: runtimeConfig,
@@ -325,18 +327,22 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     });
   pluginCatalogService.startPeriodicRefresh();
 
+  // Wall time advances during sleep, even on hosts that pause Node's interval timers.
+  let nextProviderCheck = Date.now() + PROVIDER_AUTO_UPDATE_INTERVAL_MS;
   const sweepInterval = setInterval(() => {
     void runPeriodicSweeps(sweepDeps);
+    if (Date.now() >= nextProviderCheck) {
+      nextProviderCheck = Date.now() + PROVIDER_AUTO_UPDATE_INTERVAL_MS;
+      void runProviderAutoUpdates(sweepDeps);
+    }
   }, 10_000);
   sweepInterval.unref();
-  const providerAutoUpdateFirstRun = setTimeout(() => {
-    void runProviderAutoUpdates(sweepDeps);
-  }, PROVIDER_AUTO_UPDATE_FIRST_RUN_MS);
-  providerAutoUpdateFirstRun.unref();
-  const providerAutoUpdateInterval = setInterval(() => {
-    void runProviderAutoUpdates(sweepDeps);
-  }, PROVIDER_AUTO_UPDATE_INTERVAL_MS);
-  providerAutoUpdateInterval.unref();
+  const stopProviderReconnectChecks = sweepDeps.hub.onChangedMessage((message) => {
+    if (message.entity === "host" && message.changes.includes("host-connected")) {
+      void runProviderAutoUpdates(sweepDeps, message.id);
+    }
+  });
+  void runProviderAutoUpdates(sweepDeps);
 
   let shutdownPromise: Promise<void> | null = null;
   const runShutdown = (): Promise<void> => {
@@ -354,12 +360,12 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       stopAuthFailureTelemetry();
       stopPlanLimitTelemetry();
       stopTokenTelemetry();
+      stopSkillTelemetry();
       stopTitleRecheck();
       stopThreadPurpose();
       stopProjectSummaries();
       clearInterval(sweepInterval);
-      clearTimeout(providerAutoUpdateFirstRun);
-      clearInterval(providerAutoUpdateInterval);
+      stopProviderReconnectChecks();
       pluginCatalogService.stopPeriodicRefresh();
       await pluginService.stopPeriodicUpdateChecks();
       await pluginService.stop().catch((error: unknown) => {

@@ -117,9 +117,12 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     });
   });
 
-  it("honors the user's default provider and picker order", async () => {
+  it("honors the user's default provider, then the most used", async () => {
     const preferences = {
-      providerOrder: ["pi", "claude-code"],
+      usage: new Map([
+        ["pi", 2],
+        ["claude-code", 1],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: null as string | null,
     };
     const userRegistry = createProviderRegistryService({
@@ -168,7 +171,10 @@ describe("resolveCreateThreadExecutionDefaults", () => {
 
   it("orders fallback candidates behind the chosen default, preferred provider first", async () => {
     const preferences = {
-      providerOrder: ["pi", "claude-code"],
+      usage: new Map([
+        ["pi", 2],
+        ["claude-code", 1],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: "codex" as string | null,
     };
     const userRegistry = createProviderRegistryService({

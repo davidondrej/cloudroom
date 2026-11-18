@@ -36,6 +36,8 @@ export const settingsSchema = z.object({
     name: z.string(), role, repos: z.array(z.string()), instructions: z.string(), repo_rules: z.record(z.string(), z.string()),
     rules_editors: z.enum(["admins", "everyone"]), member_view: z.enum(["none", "shared", "all"]), admin_view: z.boolean(),
     sharing: z.string(), canEditRules: z.boolean(), members: z.array(z.object({ email: z.string(), role, joined: z.boolean() })),
+    // The invite link, for admins (ADR 20261118-120824). A website from before it sends neither.
+    inviteLink: z.string().nullable().default(null), seats: z.number().nullable().default(null),
   }).nullable(),
 });
 export type OrgSettings = z.infer<typeof settingsSchema>;

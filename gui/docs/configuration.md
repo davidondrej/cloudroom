@@ -230,22 +230,23 @@ Archiving a thread saves its worktree's work to its branch and removes the
 folder; unarchiving the thread or sending it a message brings it back. There
 is no setting. See [Worktrees](worktrees.md#cleanup).
 
-Settings → Agents → Harness lists every registered agent provider in picker order.
-Move a provider up or down to change the order and choose the default for new
-threads. Both are persisted preferences: `providerOrder` is the list of ids
-that lead the picker (ids not listed follow in plugin install order, and an id
-that names no registered provider is ignored) and `defaultProviderId` is the
-provider new threads use when neither the caller nor the project chose one
-(`null` means the first available provider in picker order). Set them with
-`bb settings general providerOrder '["claude-code","codex"]'` and
-`bb settings general defaultProviderId claude-code` (or `null`).
+Settings → Agents → Harness lists every registered agent provider in picker order:
+the default first, then the providers you started the most threads with in the
+last 30 days, then the rest in plugin install order. The order is not set by
+hand. `defaultProviderId` is the provider new threads use when neither the
+caller nor the project chose one (`null` means the first available provider in
+picker order). Set it with `bb settings general defaultProviderId claude-code`
+(or `null`).
 
 Each provider row also shows its login on this Mac and in the Cloud (Log in or
 Connect when missing), its CLI version, the Auto-update switch
-(`providerAutoUpdate`), and its update status (Update, Retry, or a check).
-With Auto-update on, Cloudroom checks every 10 minutes and updates at once,
-even while threads run; a failed update retries after an hour. Native Claude
-Code installs compare against Claude's own release channel, not npm.
+(`providerAutoUpdate`), and its update status.
+With Auto-update on, Cloudroom checks connected machines on startup, on
+reconnect, and every two minutes. It installs updates as soon as it finds them,
+even while threads run. Settings shows progress. A failed update retries
+on the first check at least two minutes later. After two failures, the sidebar
+offers Retry and automatic checks retry that version hourly. Standalone Codex and native Claude Code use their
+own release channels.
 The switch is off by default and shows for agents whose newest version
 Cloudroom can read: npm CLIs and Cursor (from its install script).
 Agents that can be installed but are not appear under "Not installed" with an
@@ -808,7 +809,8 @@ the CLI and Cloudroom never refresh the same token.
 Every Local and Cloud thread, old and new, uses the selected account from its
 next turn (ADR 0197). **Use** selects another; nothing switches automatically. A
 turn that hits a subscription limit marks the account "Limit hit". The mark goes
-at the reset time, or as soon as a new turn on that account ends fine. The sidebar
+at the reset time or when that limit lifts. Reload checks Claude again after a
+plan upgrade. A new successful turn also clears a general account limit. The sidebar
 usage box shows each provider's in-use account in a chip; with several accounts,
 the chip's dropdown switches between them.
 

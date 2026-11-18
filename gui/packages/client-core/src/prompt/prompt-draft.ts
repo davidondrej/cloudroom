@@ -152,8 +152,27 @@ function countWords(text: string): number {
   return text.split(/\s+/u).filter((word) => word.length > 0).length;
 }
 
-function messageContextLine(label: string): string {
+export function messageContextLine(label: string): string {
   return `<context> ${label} </context>`;
+}
+
+export interface MessageContextLineRange {
+  start: number;
+  end: number;
+  label: string;
+}
+
+/** Finds every `<context> [label] </context>` line, which the composer shows as a reply chip. */
+export function findMessageContextLines(
+  text: string,
+): MessageContextLineRange[] {
+  return [...text.matchAll(/<context> (\[[^\]\n]+\]) <\/context>/gu)].map(
+    (match) => ({
+      start: match.index,
+      end: match.index + match[0].length,
+      label: match[1]!,
+    }),
+  );
 }
 
 function messageContextLabel(
@@ -166,7 +185,8 @@ function messageContextLabel(
 
 /**
  * Adds a chat message as a short `<context> [message #7 - 494 words] </context>`
- * line. The full text is kept in `contexts` and swapped in on send.
+ * reply chip, followed by a space so the user types on the same line. The full
+ * text is kept in `contexts` and swapped in on send.
  */
 export function appendMessageContextToDraft(
   state: PromptDraftState,
@@ -178,15 +198,14 @@ export function appendMessageContextToDraft(
   if (text === "") return appendAttachmentsToDraft(state, attachments);
 
   const label = messageContextLabel(text, messageNumber);
-  const separator =
-    state.text === "" || state.text.endsWith("\n") ? "" : "\n\n";
+  const separator = state.text === "" || /\s$/u.test(state.text) ? "" : " ";
   const contexts = (state.contexts ?? []).filter(
     (context) => context.label !== label,
   );
   return appendAttachmentsToDraft(
     {
       ...state,
-      text: `${state.text}${separator}${messageContextLine(label)}\n\n`,
+      text: `${state.text}${separator}${messageContextLine(label)} `,
       contexts: [...contexts, { label, text }],
     },
     attachments,

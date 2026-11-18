@@ -247,8 +247,8 @@ export interface PluginTurnFailedEvent {
    */
   inputAccepted: boolean;
   /**
-   * The most recent rate-limit snapshot this thread's provider reported, or
-   * null when the provider reports no windows.
+   * The most recent rate-limit snapshot from the failed request, or null when
+   * its provider reported none during that request.
    */
   rateLimits: ProviderRateLimitState | null;
   /**

@@ -403,6 +403,8 @@ pub struct ForkFrom {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub through: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_turn_id: Option<String>,
 }
 
@@ -506,6 +508,7 @@ pub(super) fn fork_history(
     Ok(Some(runtime::Fork {
         source: source.ok_or_else(|| io::Error::other("the side chat's source is unavailable"))?,
         before: fork.before,
+        through: fork.through,
         last_turn_id: fork.last_turn_id,
     }))
 }
@@ -528,10 +531,48 @@ fn legacy_notice_id(child: &str, request: &str) -> String {
     format!("notice_{child}_{request}")
 }
 
-/// A thread as `room-cli thread list`, `show` and `status` print it.
-fn item(c: &Session) -> Value {
+/// A thread as `room-cli thread list`, `show` and `status` print it. `reasoningLevel`, `threadId` and `projectId` are the
+/// Local CLI's names (ADR 20261110-235800): the running turn's effort as sent to the agent, else the session's, and the
+/// app's IDs from the start. Null when Core wasn't told: an effort left to the agent's default, a shared child the app
+/// hasn't named yet. Its parent is named as the parent's own `status` names it: the app's thread ID when Core has it
+/// (#1803).
+fn item(local: &Local, c: &Session) -> Value {
     let busy = c.current_request.is_some() || c.has_work() || c.compacting;
-    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"state":c.state,"status":status(c.state.name(), busy),"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":c.parent_session})
+    let reasoning = match &c.turn_reasoning {
+        Some((request, sent)) if c.current_request.as_ref() == Some(request) => sent.clone(),
+        _ => (c.current_request.as_ref())
+            .and_then(|r| prompt::latest(&c.prompts, &c.receipts, r))
+            .and_then(prompt::reasoning)
+            .or_else(|| c.reasoning.clone()),
+    };
+    let parent = c.parent_session.as_deref().map(|p| {
+        let session = local.sessions.get(p);
+        session.and_then(Session::thread_id).unwrap_or(p)
+    });
+    json!({"id":c.session_id,"title":title(c),"harness":c.harness,"model":c.model,"reasoningLevel":reasoning,"state":c.state,"status":status(c.state.name(), busy),"busy":busy,"error":c.failure.clone().or_else(|| c.last_prompt_error.clone()),"archived":c.archived,"parent":parent.or(c.parent_thread()),"threadId":c.thread_id(),"projectId":c.project_id()})
+}
+
+/// The shared child's parent session when `id` is the thread ID its `status` names that parent by, so a `tell` to it
+/// stays in this sandbox, as `tell --parent` does, instead of going to the website, which can't send it back (#1803).
+pub(super) fn local_parent(local: &Local, sender: &str, id: &str) -> Option<String> {
+    let parent = local.sessions.get(sender)?.parent_session.as_deref()?;
+    (local.sessions.get(parent)?.thread_id() == Some(id)).then(|| parent.to_owned())
+}
+
+/// The calling thread under the app's thread ID, as `ROOM_THREAD_ID`, spawn and the website name it, not Core's
+/// session ID (#1803). A shared child or an older start has none: its session ID, which its parent's commands take,
+/// stays.
+fn this_thread(local: &Local, id: &str) -> Option<Value> {
+    let session = local.sessions.get(id)?;
+    let mut thread = item(local, session);
+    if let Some(thread_id) = session.thread_id() {
+        thread["id"] = json!(thread_id);
+    }
+    // The app names a top-level thread, so Core often has no title: leave it out instead of saying null.
+    if thread["title"].is_null() {
+        thread.as_object_mut()?.remove("title");
+    }
+    Some(thread)
 }
 
 /// The Local CLI's word for a Cloud `state`, so one filter reads both (ADR 20261110-235800).
@@ -890,13 +931,18 @@ impl Manager {
                 "the side chat's source thread was not found",
             ))?;
             let checkpoint_fits = match s.harness {
-                _ if fork.fresh => fork.before.is_none() && fork.last_turn_id.is_none(),
-                runtime::Kind::Claude => fork.last_turn_id.is_none(),
-                runtime::Kind::Codex => fork.before.is_none(),
+                _ if fork.fresh => {
+                    fork.before.is_none() && fork.through.is_none() && fork.last_turn_id.is_none()
+                }
+                runtime::Kind::Claude => {
+                    fork.last_turn_id.is_none() && (fork.before.is_none() || fork.through.is_none())
+                }
+                runtime::Kind::Codex => fork.before.is_none() && fork.through.is_none(),
                 _ => return Err(Error::Conflict("side chats support Claude Code and Codex")),
             };
             if !checkpoint_fits
                 || invalid(&fork.before)
+                || invalid(&fork.through)
                 || invalid(&fork.last_turn_id)
                 || harness.is_some_and(|kind| kind != s.harness)
             {
@@ -927,6 +973,7 @@ impl Manager {
             }
             if !fork.fresh
                 && fork.before.is_none()
+                && fork.through.is_none()
                 && fork.last_turn_id.is_none()
                 && (s.busy() || s.compacting)
             {
@@ -1146,12 +1193,7 @@ impl Manager {
 
     /// The calling thread itself, for `room-cli status` and `thread show`.
     pub(crate) fn thread(&self, id: &str) -> Option<Value> {
-        let mut thread = self.local.lock().unwrap().sessions.get(id).map(item)?;
-        // The app names a top-level thread, so Core often has no title: leave it out instead of saying null.
-        if thread["title"].is_null() {
-            thread.as_object_mut()?.remove("title");
-        }
-        Some(thread)
+        this_thread(&self.local.lock().unwrap(), id)
     }
 
     /// The caller's children, or one child with its latest reply: live when idle, else its last completed one.
@@ -1164,7 +1206,7 @@ impl Manager {
                 .values()
                 .filter(|c| may_use(&local, parent, c))
                 .filter(|c| only.map_or(archived || !c.archived, |id| c.session_id == id))
-                .map(item)
+                .map(|c| item(&local, c))
                 .collect();
             let child = only.and_then(|id| local.sessions.get(id));
             let handle = child
@@ -1212,6 +1254,53 @@ mod tests {
         // A file left from an older turn never stands in for a newer reply.
         let newer = ("p2".to_owned(), "newer".to_owned());
         assert_eq!(saved_reply(&dir, "cr_child_a", &newer), "newer");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #1803: `status` names a thread by the app's ID, which `thread show` and `ROOM_THREAD_ID` use, and a shared
+    /// child's parent the same way; a session without one keeps its session ID.
+    #[test]
+    fn status_names_threads_by_the_app_thread_id() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-status-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (id, input) in [
+            ("cr_top", json!({"thread_id":"thr_top"})),
+            ("cr_sub_kid", json!({"parent_session":"cr_top"})),
+            (
+                "cr_own",
+                json!({"thread_id":"thr_own","parent_thread":"thr_boss"}),
+            ),
+            ("cr_old", json!({})),
+        ] {
+            let start =
+                json!({"request_id":"s","command":"start","state":"completed","input":input});
+            local.append(id, "receipt", start, None).unwrap();
+        }
+        let ids = |id| {
+            let t = this_thread(&local, id).unwrap();
+            (t["id"].clone(), t["parent"].clone())
+        };
+        assert_eq!(ids("cr_top"), (json!("thr_top"), json!(null)));
+        assert_eq!(ids("cr_sub_kid"), (json!("cr_sub_kid"), json!("thr_top")));
+        assert_eq!(ids("cr_own"), (json!("thr_own"), json!("thr_boss")));
+        assert_eq!(ids("cr_old"), (json!("cr_old"), json!(null)));
+        // `thread tell` to the parent `status` printed reaches the parent session here, not the website.
+        let parent = ids("cr_sub_kid").1;
+        let tell = |sender, id| local_parent(&local, sender, id);
+        assert_eq!(
+            tell("cr_sub_kid", parent.as_str().unwrap()),
+            Some("cr_top".to_owned())
+        );
+        assert_eq!(tell("cr_sub_kid", "thr_other"), None);
+        assert_eq!(tell("cr_top", "thr_top"), None);
+        // An own-sandbox child's parent thread goes to the website, as on main (relay.rs).
+        assert_eq!(tell("cr_own", "thr_boss"), None);
+        // In the parent's child list, the child keeps the session ID its commands take.
+        assert_eq!(
+            item(&local, &local.sessions["cr_sub_kid"])["id"],
+            "cr_sub_kid"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

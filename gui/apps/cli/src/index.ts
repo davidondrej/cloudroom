@@ -107,15 +107,16 @@ async function tryPluginCommandProxy(
   }
   const argv = process.argv.slice(3);
   // `room-cli PLUGIN --help` always prints help: the plugin's own, or one built from its commands.
-  if (match.rendersHelp !== true && isCommandHelp(argv)) {
+  const snippet = match.pluginId === "snippets" ? proxy.snippetArguments(argv) : undefined;
+  if (match.rendersHelp !== true && (snippet ? snippet.help && !snippet.command : isCommandHelp(argv))) {
     const help = await import("./plugin-cli-help.js");
     process.exit(await help.printPluginCommandHelp(getUrl(), match));
   }
-  const command = match.commands.find((entry) => entry.name === argv[0]);
+  const command = match.commands.find((entry) => entry.name === (snippet?.command ?? argv[0]));
   if (
     command !== undefined &&
     match.rendersHelp !== true &&
-    argv.slice(1).some((arg) => arg === "--help" || arg === "-h")
+    (snippet?.help ?? argv.slice(1).some((arg) => arg === "--help" || arg === "-h"))
   ) {
     console.log(command.usage.replace(/^(bb|room|cloudroom) /, "room-cli "));
     return 0;

@@ -37,7 +37,7 @@ export function startSetupTelemetry(appDeps: Deps): void {
   setTimeout(() => {
     linkInstall();
     void reportUpdateAttempt(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Update report failed"));
-    if (process.platform === "win32") void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
+    void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
     if (process.platform === "win32") void reportWindowsInstall().catch(error => appDeps.logger.debug({ err: error }, "Install report failed"));
     void readFile(marker).then(() => {}, async () => {
       await sendSnapshot("first_launch");
@@ -76,6 +76,7 @@ export function reportSignInFailed(message: string): void {
 
 /** A file path: `~/…`, `C:\…` (with `Program Files`), or `/…` not inside a URL or a word like `and/or`. */
 const PATH = /(?:~|(?<!\w)[A-Za-z]:|(?<![\w.:/\\~-]))[\\/](?:Program Files(?: \(x86\))?[\\/])?[^\s"'`<>|,;()]+/g;
+const WORKTREE = /[\\/]worktrees(?:[\\/]|$)/i;
 /** Tool and system folders: they say which install ran and name nothing of the user's. Any other path may name a project. */
 const TOOL_PATH = /^(?:~[\\/](?:\.|AppData|Library)|[A-Za-z]:[\\/](?:Program Files|ProgramData|Windows)|\/(?:usr|opt|bin|sbin|etc|nix|snap|Applications|System|Library)(?:\/|$))/i;
 
@@ -94,8 +95,9 @@ export function scrub(text: string | null | undefined): string | null {
     .replaceAll(homedir(), "~")
     .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"':]+/gi, "~")
     .replace(/file:\/\/\S+/gi, "<path>")
-    // One segment from the root is a slash command, like Claude's `/login`.
-    .replace(PATH, path => TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path) ? path : "<path>")
+    // One segment from the root is a slash command, like Claude's `/login`. A worktree under a dot folder
+    // (`~/.gui-cloudroom/.../worktrees/`, `~/.codex/worktrees/`) holds a project, so it is never a tool folder.
+    .replace(PATH, path => !WORKTREE.test(path) && (TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path)) ? path : "<path>")
     .replace(/\s+/g, " ")
     .trim()
     .slice(-300) || null;
@@ -153,7 +155,7 @@ export function reportAppReady(): void {
   });
 }
 
-/** Windows: crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. */
+/** Crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. Every platform. */
 async function reportCrashes(dataDir: string): Promise<void> {
   const file = join(dataDir, "last-crash.json");
   const text = await readFile(file, "utf8").catch(() => null);

@@ -1,4 +1,5 @@
 import { HEADER_SEAM_CLASS } from "@/components/layout/AppPageHeader";
+import { useSidebarOverlayInset } from "@/components/ui/sidebar.js";
 import { CHROME_ROW_CLASS } from "@/lib/room-desktop";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -13,6 +14,9 @@ const STANDALONE_SHELL_BLEED_CLASS = "-mx-4 -mt-4 md:-mx-5 md:-mt-5";
 export function RouteLoadingSkeleton({
   isBoundedPane,
 }: RouteLoadingSkeletonProps) {
+  // Under the floating sidebar, line the title up with the loaded header's.
+  const overlayInset = useSidebarOverlayInset();
+  const sidebarOverlayInset = isBoundedPane ? null : overlayInset;
   return (
     <div
       className={cn(
@@ -31,6 +35,11 @@ export function RouteLoadingSkeleton({
           "shrink-0 gap-2",
           isBoundedPane ? "px-4" : "px-3 pl-12",
         )}
+        style={
+          sidebarOverlayInset
+            ? { paddingLeft: `calc(${sidebarOverlayInset} + 1rem)` }
+            : undefined
+        }
       >
         <Skeleton className="h-4 w-40 max-w-[50%]" />
       </div>

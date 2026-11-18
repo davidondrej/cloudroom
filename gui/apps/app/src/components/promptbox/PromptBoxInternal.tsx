@@ -256,7 +256,7 @@ export function PromptBoxInternal({
   const submit = () => {
     const blur = blurAfterSubmit.current;
     blurAfterSubmit.current = false;
-    if (!canSubmit) return;
+    if (typeahead.guardSubmit(submitAfterRender) || !canSubmit) return;
     onSubmit();
     if (isPointerCoarse) popSentControl(formRef.current);
     if (blur) blurPromptEditor(doc.ref.current);
@@ -277,6 +277,7 @@ export function PromptBoxInternal({
   // The editor's features.
   const typeahead = usePromptTypeahead({
     editor: doc,
+    scopeKey: composerScopeIdentity(composerView.scope),
     typeahead: typeaheadConfig,
     promptActions,
     hidden: isVoiceActive,
@@ -346,7 +347,7 @@ export function PromptBoxInternal({
           submitAfterRender,
           submitWithModifier: onModifierSubmit
             ? () => {
-                if (!isBlocked) onModifierSubmit();
+                if (!typeahead.guardSubmit(submitAfterRender) && !isBlocked) onModifierSubmit();
               }
             : undefined,
         }),
@@ -358,7 +359,7 @@ export function PromptBoxInternal({
       const isInEditor =
         target instanceof Node && doc.ref.current?.view.dom.contains(target);
       if (!isInEditor) return false;
-      if (canSubmit) onHardQueueSubmit?.();
+      if (!typeahead.guardSubmit(submitAfterRender) && canSubmit) onHardQueueSubmit?.();
       return true;
     },
     0,
@@ -484,6 +485,11 @@ export function PromptBoxInternal({
       <form
         ref={formRef}
         data-promptbox=""
+        data-composer-key={pluginHost?.textEffectKey}
+        data-composer-thread={
+          composerView.scope.kind === "side-chat" ? composerView.scope.parentThreadId
+            : "threadId" in composerView.scope ? composerView.scope.threadId : ""
+        }
         data-promptbox-compact={isCompact ? "" : undefined}
         data-promptbox-voice-active={isVoiceActive ? "" : undefined}
         onSubmit={(event) => {

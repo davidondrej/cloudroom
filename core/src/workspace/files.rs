@@ -141,7 +141,7 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
         }
         if start.elapsed() >= LIMIT {
             println!(
-                "The project is still copying after 10 minutes. Work with the files that are here, or pull what you need from the user's Mac with `room-cli mac pull`."
+                "The project is still copying after 10 minutes. The copy may have stopped (for example, if the sandbox restarted during setup), or it may still finish later. If the project is on GitHub, clone it into a separate sibling folder and work there; otherwise work with the files that are here, or pull what you need from the user's Mac with `room-cli mac pull`."
             );
             return Ok(1);
         }

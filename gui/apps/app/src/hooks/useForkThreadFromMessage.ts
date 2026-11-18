@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import type { Thread } from "@cloudroom/domain";
+import { appToast } from "@/components/ui/app-toast";
 import { sdk } from "@/lib/sdk";
 import {
   FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY,
@@ -53,44 +54,63 @@ export function useForkThreadFromMessage({
 
       forkInFlightRef.current = true;
       try {
-        const executionOptions = await queryClient.fetchQuery({
-          queryKey: threadDefaultExecutionOptionsQueryKey(source.id),
-          queryFn: ({ signal }) =>
-            sdk.threads.defaultExecutionOptions({
-              signal,
-              threadId: source.id,
-            }),
-        });
-        if (executionOptions === null) {
+        const [point, executionOptions] = await Promise.all([
+          sdk.threads.messageForkPoint({ threadId: source.id, sequence: target.sourceSeqEnd }),
+          queryClient.fetchQuery({
+            queryKey: threadDefaultExecutionOptionsQueryKey(source.id),
+            queryFn: ({ signal }) =>
+              sdk.threads.defaultExecutionOptions({
+                signal,
+                threadId: source.id,
+              }),
+          }),
+        ]);
+        if (sourceThreadRef.current?.id !== source.id || executionOptions === null) {
           return;
         }
 
-        const seed: ForkThreadCreateSeed = {
-          environmentId: source.environmentId,
-          model: executionOptions.model,
-          permissionMode: executionOptions.permissionMode,
-          projectId: source.projectId,
-          providerId: source.providerId,
-          reasoningLevel: executionOptions.reasoningLevel,
-          serviceTier: executionOptions.serviceTier,
-          sourceSeqEnd: target.sourceSeqEnd,
-          sourceThreadId: source.id,
-          sourceThreadTitle: getThreadDisplayTitle(source),
+        const openComposer = (sequence: number) => {
+          if (sourceThreadRef.current?.id !== source.id) return;
+          const seed: ForkThreadCreateSeed = {
+            environmentId: source.environmentId,
+            model: executionOptions.model,
+            permissionMode: executionOptions.permissionMode,
+            projectId: source.projectId,
+            providerId: source.providerId,
+            reasoningLevel: executionOptions.reasoningLevel,
+            serviceTier: executionOptions.serviceTier,
+            sourceSeqEnd: sequence,
+            ...(point.textOnly && { textOnly: true }),
+            sourceThreadId: source.id,
+            sourceThreadTitle: getThreadDisplayTitle(source),
+          };
+          if (target.context !== undefined) {
+            getPromptDraftAccessor({ kind: "new-thread" }).addQuote(
+              target.context.text,
+              undefined,
+              { messageNumber: target.context.messageNumber },
+            );
+          }
+          setRootComposeProjectId(source.projectId);
+          navigate(getRootComposeRoutePath(), {
+            state: {
+              focusPrompt: true,
+              [FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY]: seed,
+            },
+          });
         };
-        if (target.context !== undefined) {
-          getPromptDraftAccessor({ kind: "new-thread" }).addQuote(
-            target.context.text,
-            undefined,
-            { messageNumber: target.context.messageNumber },
-          );
+        const sequence = point.sequence;
+        if (sequence === null) {
+          appToast.message("No saved reply is available to fork here yet.");
+        } else if (point.exact) {
+          openComposer(sequence);
+        } else {
+          appToast.message("This message can’t be forked on its own.", {
+            action: { label: "Use previous finished turn", onClick: () => openComposer(sequence) },
+          });
         }
-        setRootComposeProjectId(source.projectId);
-        navigate(getRootComposeRoutePath(), {
-          state: {
-            focusPrompt: true,
-            [FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY]: seed,
-          },
-        });
+      } catch (error) {
+        appToast.error(error instanceof Error ? error.message : "Could not check this fork point.");
       } finally {
         forkInFlightRef.current = false;
       }

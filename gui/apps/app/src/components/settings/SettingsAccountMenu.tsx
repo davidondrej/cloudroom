@@ -12,7 +12,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CreditsBar } from "@/components/CloudQueue";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
-import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
+import { CLOUD_CREDITS_SETTINGS_PATH } from "@/lib/route-paths";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { SignOutDialog } from "./CloudroomAccountSettings";
 import { getSettingsSectionRoutePath } from "./settings-sections";
@@ -74,7 +74,7 @@ function MenuItem({
   );
 }
 
-export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
+export function SettingsAccountMenu() {
   const status = useCloudroomAccount().data;
   const navigate = useNavigate();
   const closeOnMobile = useCloseMobileSidebar();
@@ -220,15 +220,7 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
                   </span>
                 )
               }
-              onSelect={() =>
-                usagePage
-                  ? go(
-                      getPluginConfigurationRoutePath({
-                        pluginId: "provider-usage",
-                      }),
-                    )
-                  : openUrlInExternalBrowser(BILLING_URL)
-              }
+              onSelect={() => go(CLOUD_CREDITS_SETTINGS_PATH)}
             />
           )}
           <MenuItem

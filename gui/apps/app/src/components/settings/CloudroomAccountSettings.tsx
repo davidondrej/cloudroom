@@ -137,7 +137,7 @@ export function MacAccessSection() {
 // The confirm step keeps sign-out from being a single stray click.
 export function SignOutDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const refresh = useRefreshCloudroom();
-  const logout = useMutation({ mutationFn: () => sdk.cloudroom.logout(), onSuccess: async () => { onOpenChange(false); await refresh(); } });
+  const logout = useMutation({ mutationFn: () => sdk.cloudroom.logout(), onSuccess: async () => { onOpenChange(false); window.dispatchEvent(new Event("cloudroom:signed-out")); await refresh(); } });
   const resetLogout = logout.reset;
   useEffect(() => { if (open) resetLogout(); }, [open, resetLogout]);
   return <ConfirmDeleteDialog open={open} onOpenChange={onOpenChange}>

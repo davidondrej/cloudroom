@@ -8,6 +8,7 @@ export interface BundledPluginDefinition {
   autoInstall: boolean;
   defaultEnabled: boolean;
   alwaysEnabled?: boolean;
+  refuseMachineCli?: boolean;
   relayRefusedRpcs?: Readonly<Record<string, "machine" | "all">>;
 }
 
@@ -37,7 +38,7 @@ export const RENAMED_BUILTIN_PLUGINS = [
 export const WINDOWS_HIDDEN_PLUGIN_NAMES: readonly string[] =
   process.platform === "win32" ? ["computer-use"] : [];
 
-export const BUILTIN_PLUGINS = [
+const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
   {
     name: "cloudroom-guide",
     pluginId: "cloudroom-guide",
@@ -214,6 +215,13 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "snippets",
+    pluginId: "snippets",
+    defaultEnabled: true,
+    relayRefusedRpcs: { view: "machine", run: "machine" },
+    refuseMachineCli: true,
+  },
+  {
     name: "scheduled-send",
     pluginId: "scheduled-send",
     defaultEnabled: true,
@@ -228,7 +236,9 @@ export const BUILTIN_PLUGINS = [
     pluginId: "workflows",
     defaultEnabled: false,
   },
-]
+];
+
+export const BUILTIN_PLUGINS = builtinDefinitions
   .filter((plugin) => !WINDOWS_HIDDEN_PLUGIN_NAMES.includes(plugin.name))
   .map((plugin): BundledPluginDefinition => ({
     ...plugin,

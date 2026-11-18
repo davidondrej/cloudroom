@@ -55,6 +55,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Navigate to threads on creation", "open jump new thread"],
     ["Markdown formatting in prompt box", "rich text composer editor"],
     ["Prompt suggestions", "predict next prompt ghost text tab autocomplete"],
+    ["Skill suggestions", "save as skill card repeat workflow hint nudge"],
     ["Default thread followup behavior", "queue steer enter follow up message"],
   ]),
   ...entries("general", "Links", [
@@ -80,6 +81,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Confidence", "wrong project hint nudge sensitivity percent"],
   ]),
   ...entries("general", "Smart search", [["Smart search", "cmd k jev find thread search"]]),
+  ...entries("general", "DeepAPI", [
+    ["DeepAPI", "web search research scrape agents"],
+    ["Pay with Cloud Credits", "deepapi cloud credits charge cost"],
+  ]),
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -92,7 +97,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("push-notifications", undefined, [["Notifications", "alerts push"]]),
   ...entries("keep-awake", undefined, [["Keep Awake", "sleep caffeinate"]]),
-  ...entries("provider-usage", undefined, [["Usage", "limits quota tokens"]]),
   ...entries("custom-instructions", undefined, [
     ["Custom instructions", "agents.md prompt rules"],
   ]),

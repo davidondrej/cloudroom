@@ -611,6 +611,7 @@ export interface ThreadsArea {
     args: ThreadStatusArgs,
   ): Promise<ThreadConversationOutlineResult>;
   count(args?: ThreadCountArgs): Promise<ThreadCountResult>;
+  messageForkPoint(args: ThreadStatusArgs & { sequence: number }): Promise<{ exact: boolean; sequence: number | null; textOnly?: boolean }>;
   defaultExecutionOptions(
     args: ThreadStatusArgs,
   ): Promise<ThreadDefaultExecutionOptionsResult>;
@@ -725,8 +726,10 @@ function updateJson(args: ThreadUpdateArgs): UpdateThreadRequest {
     parentThreadId: args.parentThreadId,
     providerId: args.providerId,
     model: args.model,
+    idleSessionOnly: args.idleSessionOnly,
     reasoningLevel: args.reasoningLevel,
     visibility: args.visibility,
+    resend: args.resend,
   };
 }
 
@@ -1199,6 +1202,13 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         transport.api.v1.threads.running.$get(
           {},
           ...signalRequestArgs(input?.signal),
+        ),
+      );
+    },
+    async messageForkPoint(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["fork-point"][":sequence"].$get(
+          { param: { id: input.threadId, sequence: String(input.sequence) } }, ...signalRequestArgs(input.signal),
         ),
       );
     },

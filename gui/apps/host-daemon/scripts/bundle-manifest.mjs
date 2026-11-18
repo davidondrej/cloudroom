@@ -17,9 +17,12 @@ const NODE_ESM_REQUIRE_BANNER = [
 // Inside Cloudroom.app, the Linux app, or the Windows app (Git Bash), run room-cli
 // on the app's own runtime, so the computer needs no Node (ADR 0202). Elsewhere,
 // use `node`. Line 2 is valid sh and, to JS, a string plus a comment.
+// Git Bash gives a /c/... path, and with MSYS_NO_PATHCONV=1 it hands that to the exe as is,
+// which Node can't load, so pass the Windows form from cygpath when it names this file (#2004).
+// Git's usr/bin/bash.exe started directly has no /usr/bin on PATH, hence the full path too.
 export const ROOM_CLI_HASHBANG = [
   "#!/bin/sh",
-  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly "${f%/resources/app.asar.unpacked/*}"/Cloudroom.exe "${f%/resources/app.asar.unpacked/*}/Cloudroom Nightly.exe"; do [ -x "$e" ] && ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; done; exec node "$f" "$@"',
+  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for c in cygpath /usr/bin/cygpath; do command -v "$c" >/dev/null && w=$("$c" -m "$f" 2>/dev/null) && [ -f "$w" ] && f=$w && break; done; for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly "${f%/resources/app.asar.unpacked/*}"/Cloudroom.exe "${f%/resources/app.asar.unpacked/*}/Cloudroom Nightly.exe"; do [ -x "$e" ] && ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; done; exec node "$f" "$@"',
 ].join("\n");
 
 // The same for cmd.exe and PowerShell, from

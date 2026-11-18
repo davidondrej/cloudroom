@@ -1643,6 +1643,7 @@ export function requestThreadStopForCurrentState(
 }
 
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
+import { forgetSentMessage } from "../system/first-response-telemetry.js";
 
 export async function stopThreadForCurrentState(
   deps: RequestThreadStopForCurrentStateDeps,
@@ -1658,6 +1659,7 @@ export async function stopThreadForCurrentState(
     keepSession?: true;
   },
 ): Promise<void> {
+  forgetSentMessage(thread.id);
   // Work sent after the stop begins keeps its jobs (#607).
   const release = { ...options, startsSent: countThreadStartsSent(thread.id) };
   const target = getThread(deps.db, thread.id);

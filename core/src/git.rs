@@ -66,7 +66,7 @@ const SQUASH_SCAN: &str = "1000";
 const READ_ONLY: &str = "-c core.hooksPath=/dev/null -c hook.post-index-change.enabled=false -c color.ui=never \
     -c diff.noprefix=false -c diff.mnemonicPrefix=false -c diff.relative=false -c core.splitIndex=false \
     -c core.untrackedCache=false -c core.fsmonitor=false -c diff.autoRefreshIndex=false";
-const READ_ENV: &[(&str, &str)] = &[
+pub(crate) const READ_ENV: &[(&str, &str)] = &[
     ("GIT_OPTIONAL_LOCKS", "0"),
     ("GIT_LITERAL_PATHSPECS", "1"),
     ("GIT_TERMINAL_PROMPT", "0"),
@@ -328,7 +328,7 @@ struct Repo {
     scratch: Option<Arc<Scratch>>,
 }
 
-fn git_command() -> Command {
+pub(crate) fn git_command() -> Command {
     #[allow(unused_mut)]
     let mut command = Command::new("git");
     // Without this, every Git run flashes a console window on Windows.

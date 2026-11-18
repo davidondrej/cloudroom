@@ -4,7 +4,9 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -1735,7 +1737,7 @@ describe("automation service", () => {
 });
 
 describe("automation CLI --script-file", () => {
-  type FileReadCall = { hostId: string | undefined; path: string };
+  type FileReadCall = { hostId: string | undefined; path: string; rootPath?: string };
 
   async function setup() {
     const db = createTestDb();
@@ -1762,11 +1764,25 @@ describe("automation CLI --script-file", () => {
         get: async ({ threadId }: { threadId: string }) =>
           threadId === "thr_env"
             ? { id: threadId, environment: { hostId: "host_laptop" } }
-            : { id: threadId, environment: null },
+            : threadId === "thr_ws"
+              ? { id: threadId, environment: { hostId: "host_laptop", path: join(srcDir, "ws-link") } }
+              : threadId === "thr_far"
+                ? { id: threadId, environment: { hostId: "host_server", path: join(srcDir, "root-link") } }
+                : { id: threadId, environment: null },
+        defaultExecutionOptions: async ({
+          threadId,
+        }: {
+          threadId: string;
+        }) => ({
+          permissionMode:
+            { thr_manual: "accept-edits", thr_auto: "auto", thr_ws: "auto", thr_far: "auto" }[threadId] ??
+            "full",
+        }),
       },
+      system: { config: async () => ({ primaryHostId: "host_laptop" }) },
       files: {
-        read: async ({ hostId, path }: { hostId?: string; path: string }) => {
-          reads.push({ hostId, path });
+        read: async ({ hostId, path, rootPath }: { hostId?: string; path: string; rootPath?: string }) => {
+          reads.push({ hostId, path, ...(rootPath !== undefined ? { rootPath } : {}) });
           if (path.endsWith("stalled.md")) throw new Error("HTTP 504: Timed out waiting for command result");
           const content = await readFile(path, "utf8");
           return {
@@ -2042,6 +2058,79 @@ describe("automation CLI --script-file", () => {
       expect(JSON.parse(one.stdout!).execution.agents).toBeUndefined();
       expect((await t.cli.run(["update", id, ...base, "--agent", "codex"], {})).stderr).toContain("use PROVIDER,MODEL[,REASONING]");
       expect((await t.cli.run(["update", id, ...base, "--agent", "codex,gpt-5", "--model", "x"], {})).stderr).toContain("not both");
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("a thread below Full Access makes, changes and runs only loops within its own mode (#2093)", async () => {
+    const t = await setup();
+    const loop = "--project proj_test --name a --in 30m --json";
+    const agent = `create ${loop} --prompt hi --provider codex --model gpt-5`;
+    const script = ["create", ...loop.split(" "), "--script", "echo hi"];
+    const run = (argv: string[] | string, threadId?: string) =>
+      t.cli.run(
+        typeof argv === "string" ? argv.split(" ") : argv,
+        threadId ? { threadId } : {},
+      );
+    const refused = "so it can't make, change, run or turn on this loop";
+    try {
+      // Auto gets an Auto loop; Manual gets one only when it asks, since it waits for approvals.
+      const auto = JSON.parse((await run(agent, "thr_auto")).stdout!);
+      expect(auto.execution.permissionMode).toBe("auto");
+      expect((await run(agent, "thr_manual")).stderr).toContain(
+        "This thread runs in Manual, so a loop it makes would run in Manual and wait for approvals.",
+      );
+      const manual = `${agent} --permission-mode accept-edits`;
+      const capped = JSON.parse((await run(manual, "thr_manual")).stdout!);
+      expect(capped.execution.permissionMode).toBe("accept-edits");
+      const higher = await run(`${agent} --permission-mode full`, "thr_manual");
+      expect(higher.stderr).toContain(`${refused}: it runs in Full Access.`);
+      expect((await run(script, "thr_manual")).stderr).toContain(
+        `${refused}: its script would run outside this thread's sandbox.`,
+      );
+      // The user's own and a Full Access thread's loops are unchanged, and out of a Manual thread's reach.
+      const full = JSON.parse((await run(agent)).stdout!);
+      expect(full.execution.permissionMode).toBe("full");
+      const scripted = JSON.parse((await run(script, "thr_env")).stdout!);
+      for (const id of [full.id, scripted.id]) {
+        for (const command of ["run", "resume", "update --name x"]) {
+          const [verb, ...rest] = command.split(" ");
+          const argv = `${verb} ${id} --project proj_test ${rest.join(" ")}`;
+          expect((await run(argv.trim(), "thr_manual")).stderr).toContain(
+            refused,
+          );
+        }
+      }
+      const own = `update ${capped.id} --project proj_test`;
+      expect(
+        (await run(`${own} --permission-mode full`, "thr_manual")).stderr,
+      ).toContain(refused);
+      expect((await run(`${own} --name y`, "thr_manual")).exitCode).toBe(0);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("a Manual or Auto thread reads --prompt-file and --script-file only in its own folder (#2096)", async () => {
+    const t = await setup();
+    await writeFile(join(t.srcDir, "p.md"), "hi");
+    // Its folder is a symlink: the daemon gets the real folder, as it refuses a symlinked root.
+    await symlink(t.srcDir, join(t.srcDir, "ws-link"));
+    const create = "create --project proj_test --name p --in 30m --provider codex --model gpt-5 --permission-mode auto".split(" ");
+    try {
+      // The daemon refuses a path outside rootPath, after resolving symlinks.
+      expect((await t.cli.run([...create, "--prompt-file", "p.md"], { cwd: t.srcDir, threadId: "thr_ws" })).exitCode).toBe(0);
+      expect(t.reads).toEqual([{ hostId: "host_laptop", path: join(t.srcDir, "p.md"), rootPath: await realpath(t.srcDir) }]);
+      // On another machine, a local symlink at the same path (here to /) is never followed: the stored path is sent.
+      await symlink("/", join(t.srcDir, "root-link"));
+      expect((await t.cli.run([...create, "--prompt-file", "p.md"], { cwd: t.srcDir, threadId: "thr_far" })).exitCode).toBe(0);
+      expect(t.reads[1]).toEqual({ hostId: "host_server", path: join(t.srcDir, "p.md"), rootPath: join(t.srcDir, "root-link") });
+      const cloud = ["create", "--cloud", "--project", "proj_test", "--name", "c", "--in", "30m", "--prompt", "x", "--script-file", "/etc/hosts"];
+      for (const [argv, threadId] of [[[...cloud, "--host", "server"], "thr_ws"], [cloud, "thr_manual"]] as const) {
+        expect((await t.cli.run([...argv], { threadId })).stderr).toContain("must be a file in its own folder on its own machine");
+      }
+      expect(t.reads).toHaveLength(2);
     } finally {
       await t.cleanup();
     }

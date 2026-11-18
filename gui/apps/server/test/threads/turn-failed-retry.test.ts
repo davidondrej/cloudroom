@@ -353,14 +353,24 @@ describe("the turn.failed announcement", () => {
 
   it("labels a typed door rejection and reports the input as never accepted", async () => {
     await withTestHarness(async (harness) => {
-      const { environment, requestId, thread } = seedFailableThread(
+      const { environment, thread } = seedFailableThread(
         harness,
         "host-door",
       );
+      // A previous account reported a real limit. This new request fails before reporting one.
+      seedRateLimitFailure(harness, {
+        environmentId: environment.id, threadId: thread.id, resetsAtMs: Date.now() + 3_600_000,
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id, threadId: thread.id, inputText: "Try the other account",
+        providerThreadId: "provider-host-door",
+        sequenceStart: getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+      });
+      const newRequest = lastTurnRequest(harness, thread.id);
       seedDoorRejection(harness, {
         environmentId: environment.id,
         threadId: thread.id,
-        requestId,
+        requestId: newRequest.requestId,
         reason: "rate_limited",
       });
       failThread(harness, thread.id);
@@ -369,6 +379,7 @@ describe("the turn.failed announcement", () => {
       // The rejection never reached a provider turn, so the typed code on the
       // rejection row is the failure's only classification — without this
       // mapping a door-rejected rate limit is invisible to a retry policy.
+      expect(event?.rateLimits).toBeNull();
       expect(event?.errorInfo).toEqual({
         category: "rate-limit",
         providerCode: null,

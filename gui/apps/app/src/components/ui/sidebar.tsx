@@ -417,6 +417,42 @@ function useOptionalIsSidebarShowing(): boolean | null {
   return React.useContext(SidebarShowingContext);
 }
 
+// Overlay: the chat area runs under the floating desktop sidebar instead of
+// being pushed by it, so toggling the sidebar never moves the chat. The layout
+// asks for it; pages veto it while their content would end up under the card.
+const SidebarOverlayContext = React.createContext(false);
+const SidebarOverlayBlockContext = React.createContext<React.Dispatch<
+  React.SetStateAction<number>
+> | null>(null);
+
+function useSidebarOverlay(): boolean {
+  return React.useContext(SidebarOverlayContext);
+}
+
+// How much of the page's left edge sits under the open card, or null when
+// the sidebar pushes the page or is closed.
+function useSidebarOverlayInset(): string | null {
+  const overlay = React.useContext(SidebarOverlayContext);
+  const isShowing = React.useContext(SidebarShowingContext);
+  const width = React.useContext(SidebarWidthContext);
+  return overlay && isShowing === true ? width : null;
+}
+
+// Vetoes the overlay while `blocked`. The veto outlives `blocked` by
+// `releaseDelayMs`, for content that keeps its space while it animates away.
+function useBlockSidebarOverlay(blocked: boolean, releaseDelayMs = 0) {
+  const setBlocks = React.useContext(SidebarOverlayBlockContext);
+  React.useEffect(() => {
+    if (!blocked || setBlocks === null) return;
+    setBlocks((count) => count + 1);
+    const release = () => setBlocks((count) => count - 1);
+    return () => {
+      if (releaseDelayMs > 0) window.setTimeout(release, releaseDelayMs);
+      else release();
+    };
+  }, [blocked, releaseDelayMs, setBlocks]);
+}
+
 function useCloseMobileSidebar() {
   const { closeMobileSidebar } = useSidebar();
   return closeMobileSidebar;
@@ -429,6 +465,7 @@ const SidebarProvider = React.forwardRef<
     open?: boolean;
     onOpenChange?: (open: boolean) => void;
     width?: string;
+    overlay?: boolean;
   }
 >(
   (
@@ -437,6 +474,7 @@ const SidebarProvider = React.forwardRef<
       open: openProp,
       onOpenChange: setOpenProp,
       width = SIDEBAR_WIDTH,
+      overlay: overlayProp = false,
       className,
       style,
       children,
@@ -616,29 +654,35 @@ const SidebarProvider = React.forwardRef<
     );
 
     const isSidebarShowing = isCompactViewport ? openMobile : open;
+    const [overlayBlocks, setOverlayBlocks] = React.useState(0);
+    const overlay = overlayProp && !isCompactViewport && overlayBlocks === 0;
 
     return (
       <SidebarContext.Provider value={contextValue}>
         <SidebarShowingContext.Provider value={isSidebarShowing}>
-          <SidebarWidthContext.Provider value={width}>
-            {}
-            <div
-              style={
-                {
-                  ...sidebarMobileWidthStyle,
-                  ...style,
-                } as React.CSSProperties
-              }
-              className={cn(
-                "group/sidebar-wrapper flex h-full min-h-0 w-full max-md:overflow-clip",
-                className,
-              )}
-              ref={ref}
-              {...props}
-            >
-              {children}
-            </div>
-          </SidebarWidthContext.Provider>
+          <SidebarOverlayBlockContext.Provider value={setOverlayBlocks}>
+            <SidebarOverlayContext.Provider value={overlay}>
+              <SidebarWidthContext.Provider value={width}>
+                {}
+                <div
+                  style={
+                    {
+                      ...sidebarMobileWidthStyle,
+                      ...style,
+                    } as React.CSSProperties
+                  }
+                  className={cn(
+                    "group/sidebar-wrapper flex h-full min-h-0 w-full max-md:overflow-clip",
+                    className,
+                  )}
+                  ref={ref}
+                  {...props}
+                >
+                  {children}
+                </div>
+              </SidebarWidthContext.Provider>
+            </SidebarOverlayContext.Provider>
+          </SidebarOverlayBlockContext.Provider>
         </SidebarShowingContext.Provider>
       </SidebarContext.Provider>
     );
@@ -728,19 +772,19 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           className={cn(
             // The width snaps so the page re-lays out once; animating it re-wrapped every chat on every frame.
             // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
-            "bb-zoom relative hidden h-full w-(--sidebar-width) bg-sidebar md:block",
+            "bb-zoom relative hidden h-full w-(--sidebar-width) md:block",
             "group-data-[collapsible=offcanvas]:w-0",
           )}
         />
         <div
           data-sidebar="panel"
           className={cn(
-            // Slide with translate only: the GPU animates it without layout or paint.
+            // A floating card, inset from the window edge. It sits above the page (z-40) because in overlay mode the chat area runs under it.
+            // Slide and fade with translate and opacity only: the GPU animates them without layout or paint.
             // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
-            "bb-zoom fixed inset-y-0 left-0 z-10 flex h-(--bb-shell-height) w-(--sidebar-width) select-none flex-col bg-sidebar text-sidebar-foreground [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),visibility_0s_linear_0s] motion-reduce:transition-none!",
-            // Closing: stay above the page while sliding, then move truly off-screen so no hidden drag region stays at the left edge.
-            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:z-40 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] group-data-[collapsible=offcanvas]:-translate-x-full group-data-[collapsible=offcanvas]:[transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),visibility_0s_linear_220ms,left_0s_linear_220ms]",
-            "border-border-seam group-data-[side=left]:border-r",
+            "bb-zoom fixed top-2 left-2 z-40 flex h-[calc(var(--bb-shell-height)-1rem)] w-[calc(var(--sidebar-width)-0.875rem)] select-none flex-col rounded-[14px] bg-sidebar text-sidebar-foreground shadow-message [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_0s] motion-reduce:transition-none!",
+            // Closing: slide past the inset, then move truly off-screen so no hidden drag region stays at the left edge.
+            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] group-data-[collapsible=offcanvas]:translate-x-[calc(-100%-1rem)] group-data-[collapsible=offcanvas]:opacity-0 group-data-[collapsible=offcanvas]:[transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_220ms,left_0s_linear_220ms]",
             className,
           )}
           style={{ ...widthStyle, ...style }}
@@ -748,7 +792,7 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
         >
           <div
             data-sidebar="sidebar"
-            className="flex h-full w-full flex-col bg-sidebar pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
+            className="flex h-full w-full flex-col rounded-[inherit] bg-sidebar pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
           >
             {children}
           </div>
@@ -1846,9 +1890,12 @@ export {
   SidebarStickyStack,
   SidebarStickyTier,
   SidebarTrigger,
+  useBlockSidebarOverlay,
   useCloseMobileSidebar,
   useIsSidebarShowing,
   useOptionalIsSidebarShowing,
   useSidebar,
+  useSidebarOverlay,
+  useSidebarOverlayInset,
   useSidebarContentElementRef,
 };

@@ -14,6 +14,7 @@ import { getProviderInstallations } from "../system/provider-installations.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { messagesSeed } from "../threads/thread-harness-switch.js";
 import { localRepos } from "./local-repos.js";
+import { remoteKey } from "./project-copy.js";
 import { claudeHome, compact, headLines, historyRows, mapLimit, parseLine, readLines, shorten, tailLines, type Found, type Line, type Turn } from "./session-import.js";
 
 export type MoreHarness = "pi" | "acp-hermes-agent" | "t3code" | "conductor";
@@ -545,11 +546,6 @@ async function repoFolders(deps: AppDeps): Promise<Map<string, string>> {
     deps.logger.warn({ error }, "Conductor repo scan failed");
   }
   return folders;
-}
-
-function remoteKey(remote: unknown): string | null {
-  if (typeof remote !== "string") return null;
-  return remote.trim().toLowerCase().replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):/, "$1/").replace(/\/+$/, "").replace(/\.git$/, "") || null;
 }
 
 function withDb<T>(path: string, read: (db: Database.Database) => T): T {

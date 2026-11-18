@@ -4,6 +4,7 @@
 //! sends the prompt; it also computes the next run, so Core never parses cron.
 use super::{
     Manager,
+    history::ApiError,
     thread::{Failure, caller, fail},
 };
 use crate::{preview::Peer, runtime};
@@ -109,19 +110,44 @@ async fn automation(
     let mut body =
         serde_json::to_value(&input).map_err(|e| fail(StatusCode::BAD_REQUEST, &e.to_string()))?;
     body["session"] = json!(session);
-    api.post("automation", &body)
-        .await
-        .map(Json)
-        .map_err(|error| match error {
-            super::history::ApiError::Status(status, message) => fail(
-                StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
-                &message,
-            ),
-            error => fail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("Could not save the automation: {error}"),
-            ),
+    let report = input.action == "report";
+    // #1926: the loop run whose turn sends this report, so the website fills that run's row, never a newer one's.
+    let run = report
+        .then(|| {
+            m.local
+                .lock()
+                .unwrap()
+                .sessions
+                .get(&session)?
+                .current_request
+                .clone()
         })
+        .flatten()
+        .filter(|request| super::tokens::loop_run(request));
+    if let Some(run) = run {
+        body["request"] = json!(run.strip_suffix("_p").unwrap_or(&run));
+    }
+    let answer = api.post("automation", &body).await;
+    // A server error or no answer is an outage, not a refusal: say how to save the report.
+    let outage = matches!(
+        answer,
+        Err(ApiError::Network(_)) | Err(ApiError::Status(500.., _))
+    );
+    let again = if report && outage {
+        "\nRun the same `room-cli loop report` again in a minute: a repeat replaces it."
+    } else {
+        ""
+    };
+    answer.map(Json).map_err(|error| match error {
+        ApiError::Status(status, message) => fail(
+            StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY),
+            &format!("{message}{again}"),
+        ),
+        error => fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &format!("Could not save the automation: {error}{again}"),
+        ),
+    })
 }
 
 /// A loop's agent must pass the check a session start runs (#300), so a bad model or effort fails now, while the

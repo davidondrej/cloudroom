@@ -94,9 +94,13 @@ def codex():
                 if Path("reject-resume").exists():
                     send({"id": message["id"], "error": {"code": -32602, "message": "resume rejected"}})
                     continue
-                # Reattach to the caller's existing rollout and append to the same file.
+                # Reattach to the caller's existing rollout and append to the same file. Real Codex writes it on the
+                # first turn, so a thread that never ran one has none to resume.
                 native = params["threadId"]
                 path = Path(os.environ["CODEX_HOME"]) / "sessions" / (native + ".jsonl")
+                if not path.exists():
+                    send({"id": message["id"], "error": {"code": -32600, "message": f"no rollout found for thread id {native}"}})
+                    continue
                 result = {"thread": {"id": native, "path": str(path)}, "model": params["model"]}
             elif method == "turn/start":
                 with path.open("a") as file:
@@ -1238,6 +1242,30 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["native_id"], self.native)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "parent_tell"])
 
+    def test_a_parent_tell_retries_a_child_whose_agent_never_started(self):
+        # #2036: a child whose agent failed to start before any turn refused every tell, which the website called busy.
+        codex = self.root / "codex"; codex.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n')
+        self.env["CLOUDROOM_CODEX_BINARY"] = str(codex)
+        codex.chmod(0o755); self.start()
+        self.service.request("POST", "/v1/sessions", {"request_id": "warm"}, 202)  # Its login check stays cached.
+        codex.chmod(0o644)  # The agent can't be spawned, like a sandbox out of processes.
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_thread": "thr_up"}, 202)
+        kid = lambda: self.service.session("cr_kid")
+        self.wait(lambda: kid()["state"] == "failed", "failed start")
+        relay = lambda key, expected=200: self.service.request("POST", "/v1/sessions/cr_kid/relay", {"request_id": key, "action": "tell", "text": "hello"}, expected)
+        # Still failing: the tell starts it again once and fails with the real cause; nothing ran.
+        relay("still")
+        self.wait(lambda: kid()["receipts"]["still"]["state"] == "failed", "failed retry")
+        self.assertTrue(kid()["receipts"]["still"]["error"])
+        pids = lambda: [r["data"]["pid"] for r in self.service.records("cr_kid") if r["kind"] == "harness"]
+        self.wait(lambda: pids()[-1] is None, "failed agent gone")
+        # Recovered: the next tell starts the agent and runs once, also when the relay is retried.
+        codex.chmod(0o755)
+        relay("fixed")
+        self.wait(lambda: kid()["receipts"]["fixed"]["state"] == "completed", "tell after retry")
+        relay("fixed")
+        self.assertEqual((self.repo / (kid()["native_id"] + ".requests")).read_text().splitlines(), ["fixed"])
+
     def test_a_relayed_tell_keeps_the_sender_the_website_names(self):
         # #1369: a Cloud parent's tell to its own child showed as the user's message. Steered and queued alike.
         self.seed(); self.start(); self.ready()
@@ -1406,6 +1434,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()['native_id'],self.native)
         self.assertFalse(path.exists())
         self.assertTrue(self.service.records('cr_seed'))
+
+    def test_an_agent_asleep_before_its_first_turn_starts_fresh(self):
+        # A switch or project move starts an agent with no turn; Codex saves no chat until one runs. After its idle
+        # sleep the next message started a fresh agent, not "process unavailable" forever.
+        self.seed([("state", {"state": "sleeping"})]); Path(self.env["CLOUDROOM_CODEX_HOME"], "sessions", self.native + ".jsonl").unlink()
+        self.start()
+        self.wait(lambda: self.status()["state"] == "sleeping", "asleep before its first turn")
+        self.prompt("first", "hello")
+        self.wait(lambda: self.status()["receipts"]["first"]["state"] == "completed", "first turn on a fresh agent")
+        self.assertNotEqual(self.status()["native_id"], self.native)
+        self.service.stop(); self.start()
+        self.prompt("second", "again")
+        self.wait(lambda: self.status()["receipts"]["second"]["state"] == "completed", "the fresh agent resumes")
 
     def test_repeated_crash_does_not_loop(self):
         self.seed(); self.start(); self.ready()

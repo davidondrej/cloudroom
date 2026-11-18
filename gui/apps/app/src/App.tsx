@@ -37,6 +37,7 @@ import { useRememberPluginNavPanelChrome } from "@/lib/plugin-nav-panel-chrome";
 import { useWebSocket } from "./hooks/useWebSocket";
 import {
   AUTH_CALLBACK_ROUTE_PATH,
+  CLOUD_CREDITS_SETTINGS_PATH,
   LEGACY_AUTOMATION_DETAIL_ROUTE_PATH,
   LEGACY_AUTOMATIONS_ROUTE_PATH,
   LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH,
@@ -72,7 +73,6 @@ import {
   getAutomationDetailRoutePath,
   getAutomationEditRoutePath,
   getAutomationsRoutePath,
-  getPluginConfigurationRoutePath,
   getSettingsRoutePath,
   getSettingsProjectRoutePath,
 } from "./lib/route-paths";
@@ -117,6 +117,14 @@ function NavigatePreservingLocation({ pathname }: { pathname: string }) {
       replace
     />
   );
+}
+
+function LegacyProviderUsageSettings() {
+  const { search } = useLocation();
+  // The installed plugin details share this path with the former Usage tab.
+  return new URLSearchParams(search).get("view") === "installed"
+    ? <SettingsView />
+    : <Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />;
 }
 
 function LegacyProjectSettingsRedirect() {
@@ -279,14 +287,11 @@ export function AppRoutes() {
         <Routes>
           <Route
             path="/settings/usage"
-            element={
-              <Navigate
-                to={getPluginConfigurationRoutePath({
-                  pluginId: "provider-usage",
-                })}
-                replace
-              />
-            }
+            element={<Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />}
+          />
+          <Route
+            path="/settings/plugins/provider-usage"
+            element={<LegacyProviderUsageSettings />}
           />
           <Route path={SETTINGS_ROUTE_PATH} element={<SettingsView />} />
           <Route

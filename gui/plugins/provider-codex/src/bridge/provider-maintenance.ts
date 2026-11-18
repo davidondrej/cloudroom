@@ -152,6 +152,57 @@ function codexUpdateCommand(
   };
 }
 
+async function releaseVersion(
+  url: string,
+  field: "version" | "tag_name",
+): Promise<string | null> {
+  try {
+    const signal = AbortSignal.timeout(5_000);
+    const response = await fetchWithProxyFallback((init) =>
+      fetch(url, { ...init, signal }),
+    );
+    if (!response.ok) return null;
+    const metadata = z
+      .record(z.string(), z.unknown())
+      .parse(await response.json());
+    const version = metadata[field];
+    return typeof version === "string" ? versionFrom(version) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function latestCodexVersion(
+  executable: string | null,
+): Promise<string | null> {
+  const resolved =
+    executable && (await realpath(executable).catch(() => executable));
+  const path = resolved?.replaceAll("\\", "/") ?? "";
+  if (path.includes("/Caskroom/codex/")) {
+    return releaseVersion(
+      "https://formulae.brew.sh/api/cask/codex.json",
+      "version",
+    );
+  }
+  if (!/\/packages\/standalone\/(?:current|releases)\//iu.test(path)) {
+    return npmLatestVersion(CODEX_NPM_PACKAGE);
+  }
+  // The standalone installer reads OpenAI's channel first and falls back to GitHub.
+  const preferOpenAI =
+    process.env.CODEX_INSTALLER_USE_RELEASES_OPENAI_COM?.trim() || "true";
+  if (/^(1|true|yes)$/iu.test(preferOpenAI)) {
+    const latest = await releaseVersion(
+      "https://releases.openai.com/codex/channels/latest",
+      "tag_name",
+    );
+    if (latest !== null) return latest;
+  }
+  return releaseVersion(
+    "https://api.github.com/repos/openai/codex/releases/latest",
+    "tag_name",
+  );
+}
+
 export async function getCodexProviderInstallationStatus(
   requirement?: "thread_rewind",
 ): Promise<ProviderInstallationStatus> {
@@ -162,7 +213,7 @@ export async function getCodexProviderInstallationStatus(
   const executable = findCliExecutable("codex");
   const [versionOutput, latestVersion, npmGlobal] = await Promise.all([
     executable === null ? null : commandOutput(executable, ["--version"]),
-    npmLatestVersion(CODEX_NPM_PACKAGE),
+    latestCodexVersion(executable),
     probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
   ]);
   // A launcher that can't find its native binary can't run anything, so it

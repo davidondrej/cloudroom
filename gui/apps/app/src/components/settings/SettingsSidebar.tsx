@@ -250,13 +250,7 @@ export function SettingsSidebar({
 
   return (
     <SettingsSidebarContent
-      account={
-        <SettingsAccountMenu
-          usagePage={navigation.pluginEntries.some(
-            ({ id }) => id === "provider-usage",
-          )}
-        />
-      }
+      account={<SettingsAccountMenu />}
       invite={<InviteSidebarRow />}
       appRoutePath={appRoutePath}
       isResizing={isResizing}

@@ -52,6 +52,12 @@ it.each([
     limited: ["claude-code:b"],
   },
   {
+    name: "Cloud turn started on A before the switch to B",
+    target: "started-cloud",
+    ranOnA: false,
+    limited: ["claude-code:a"],
+  },
+  {
     name: "turn on another machine, which runs on its own login (#531)",
     target: "machine",
     ranOnA: true,
@@ -103,6 +109,11 @@ it.each([
   ]);
   await bb.storage.kv.set("order:v1", { "claude-code": ["a", "b"] });
   await plugin(bb);
+  if (target === "started-cloud") {
+    await harness.emitThreadEvent("thread.active", {
+      thread: makeThreadResponse({ id: "t", providerId: "claude-code", executionTarget: "cloud" }),
+    });
+  }
   if (ranOnA)
     await harness.resolveProviderEnv("claude-code", {
       threadId: "t",
@@ -243,6 +254,9 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     usedPercent: number,
     resetsAt: number | null = reset * 1_000,
   ) => [{ label: "Weekly limit", usedPercent, resetsAt }];
+  const fullWeekly = (percent: number) => [
+    { label: "Five-hour limit", usedPercent: 0, resetsAt: null }, ...weekly(percent),
+  ];
   const asked: string[] = [];
   let online = true;
   let full = 40;
@@ -286,7 +300,7 @@ it("accounts not in use keep their usage bars and reset times across a restart",
         a: weekly(20),
         b: weekly(75),
         c: weekly(0, null),
-        d: weekly(40),
+        d: fullWeekly(40),
       }),
     );
     expect(asked.sort()).toEqual(["a", "b", "d-full"]);
@@ -301,7 +315,7 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     full = 55;
     release();
     await vi.waitFor(async () =>
-      expect(await rows(next.harness)).toMatchObject({ d: weekly(55) }),
+      expect(await rows(next.harness)).toMatchObject({ d: fullWeekly(55) }),
     );
 
     // Offline after a restart: every saved bar stays, and D shows no error.
@@ -313,7 +327,7 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     expect(await rows(next.harness)).toMatchObject({
       b: weekly(75),
       c: weekly(0, null),
-      d: weekly(55),
+      d: fullWeekly(55),
     });
     // D's full login ended and Claude Code can't renew it (#1979): Sign in again, even after a restart.
     await fs.writeFile(
@@ -341,5 +355,157 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     ).toEqual(["a", "c", "d"]);
   } finally {
     vi.unstubAllGlobals();
+  }
+});
+
+it.each(["added", "local"])("reconciles %s Claude warnings on Reload", async (login) => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-recovery-"));
+  dirs.push(dataDir);
+  const home = path.join(dataDir, "plugins/accounts");
+  const profile = path.join(home, "profiles/added");
+  await fs.mkdir(profile, { recursive: true });
+  await fs.mkdir(path.join(home, "secrets"));
+  await fs.writeFile(
+    path.join(home, "secrets/added.json"),
+    JSON.stringify({ accessToken: "fixture", refreshToken: "", expiresAt: null }),
+  );
+  const native = path.join(dataDir, "native");
+  await fs.mkdir(native);
+  await fs.writeFile(
+    path.join(native, ".claude.json"),
+    JSON.stringify({
+      oauthAccount: { emailAddress: "mac@example.com", organizationUuid: "mac-org" },
+    }),
+  );
+  for (const dir of [native, profile])
+    await fs.writeFile(
+      path.join(dir, ".credentials.json"),
+      JSON.stringify({
+        claudeAiOauth: { accessToken: path.basename(dir) },
+      }),
+    );
+  vi.stubEnv("CLAUDE_CONFIG_DIR", native);
+  if (process.platform === "darwin") {
+    await fs.writeFile(path.join(dataDir, "security"), "#!/bin/sh\nexit 44\n", { mode: 0o700 });
+    vi.stubEnv("PATH", `${dataDir}:${process.env.PATH}`);
+  }
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "accounts",
+    dataDir,
+    sdk: {
+      threads: {
+        get: async () =>
+          makeThreadResponse({ providerId: "claude-code", executionTarget: "cloud" }),
+      },
+      system: { config: async () => ({ primaryHostId: "here" }) as never },
+    },
+  });
+  const reset = Date.now() + 3_600_000;
+  const window = (utilization: number) => ({
+    utilization,
+    resets_at: new Date(reset).toISOString(),
+  });
+  const usage: Record<string, unknown> = { five_hour: window(98), seven_day: null };
+  let replyProbes = 0;
+  let offline = false;
+  vi.stubGlobal("fetch", async (url: string) => {
+    if (!url.endsWith("/api/oauth/usage")) {
+      replyProbes++;
+      throw new Error("unexpected inference request");
+    }
+    return offline ? new Response(null, { status: 503 }) : Response.json(usage);
+  });
+  const current = async (refresh = false) => {
+    const rows = (await harness.callRpc("accounts.list", {
+      provider: "claude-code",
+      refresh,
+    })) as Array<{
+      id: string;
+      limitedUntil: number | null;
+      windows: { label: string; usedPercent: number }[];
+    }>;
+    return rows.find((row) => row.id === login)!;
+  };
+  const block = async (key: string) => {
+    const { errors } = await harness.emitThreadEvent(
+      "turn.failed",
+      makeTurnFailedEvent({
+        threadId: "t",
+        errorInfo: { category: "rate-limit", providerCode: null, httpStatusCode: 429 },
+        rateLimits: {
+          providerId: "claude-code",
+          kind: "subscription-window",
+          status: "blocked",
+          windows: [{ providerKey: key, label: null, status: "blocked", resetsAtMs: reset }],
+          reachedReason: key,
+          overageStatus: null,
+          overageReason: null,
+        },
+      }),
+    );
+    expect(errors).toEqual([]);
+    expect((await current(true)).limitedUntil).toBe(reset);
+  };
+  try {
+    await bb.storage.kv.set("accounts:v1", [{ ...account("added"), profile: "added", tier: "max_5x" }]);
+    await bb.storage.kv.set("order:v1", {
+      "claude-code": login === "local" ? ["local", "added"] : ["added", "local"],
+    });
+    await bb.storage.kv.set("mac-login:v1", true);
+    await plugin(bb);
+    await current(true);
+    await block("five_hour");
+    offline = true;
+    delete usage.five_hour;
+    expect((await current(true)).limitedUntil).toBe(reset);
+    offline = false;
+    expect(await current(true)).toMatchObject({
+      limitedUntil: null,
+      windows: [
+        { label: "Five-hour limit", usedPercent: 0 },
+        { label: "Weekly limit", usedPercent: 0 },
+      ],
+    });
+    expect(replyProbes).toBe(0);
+
+    usage.five_hour = window(98);
+    await block("five_hour");
+    usage.five_hour = {
+      utilization: 98,
+      resets_at: new Date(Date.now() + 5 * 3_600_000 + 5_000).toISOString(),
+    };
+    expect((await current(true)).limitedUntil).toBeNull();
+
+    usage.limits = [
+      {
+        kind: "weekly_scoped",
+        scope: { model: { display_name: "Fable" } },
+        percent: 100,
+        resets_at: new Date(reset).toISOString(),
+      },
+    ];
+    await block("seven_day_fable");
+    delete usage.limits;
+    expect((await current(true)).limitedUntil).toBe(reset);
+    usage.limits = [];
+    const removed = await current(true);
+    expect(removed.limitedUntil).toBeNull();
+    expect(removed.windows.some((w) => w.label.includes("Fable"))).toBe(false);
+
+    usage.seven_day_overage_included = window(100);
+    await block("seven_day_overage_included");
+    usage.extra_usage = { is_enabled: true, used_credits: 1, monthly_limit: 100 };
+    expect((await current(true)).limitedUntil).toBe(reset);
+    usage.seven_day_overage_included = window(10);
+    expect((await current(true)).limitedUntil).toBeNull();
+
+    usage.extra_usage = { is_enabled: true, used_credits: 100, monthly_limit: 100 };
+    await block("overage");
+    usage.extra_usage = { is_enabled: true, used_credits: 100, monthly_limit: 200 };
+    expect((await current(true)).limitedUntil).toBeNull();
+  } finally {
+    await harness.dispose();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   }
 });

@@ -125,6 +125,7 @@ import {
 } from "../wire.js";
 import {
   AcpAgentResponseError,
+  agentErrorHttpStatus,
   createAcpAgentConnection,
   requestAcpInitialize,
   type AcpAgentConnection,
@@ -341,12 +342,13 @@ function emitContextEstimate(session: AcpThreadSession): void {
   ]);
 }
 
-function emitSessionError(session: AcpThreadSession, message: string): void {
+function emitSessionError(session: AcpThreadSession, message: string, httpStatus?: number): void {
   for (const controller of session.pendingToolCalls) controller.abort();
   if (session.activePromptKind !== null) {
     emitForSession(session, "error", {
       threadId: session.bbThreadId,
       message,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
     });
   }
   sendNotification(BRIDGE_NOTIFICATION_METHODS.error, {
@@ -2453,6 +2455,7 @@ function runTurn(
               : session.sessionLost
                 ? `${message}. The agent lost this session; your next message restarts it.`
                 : message,
+            agentErrorHttpStatus(data),
           );
         }
         session.activePromptKind = null;

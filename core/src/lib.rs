@@ -1,10 +1,11 @@
-// Only `git` (the app's Git panel) builds on Windows; everything else needs Unix.
+// Only `git` (the app's Git panel) and `fs` (its files) build on Windows; everything else needs Unix.
 #[cfg(unix)]
 pub mod api;
 #[cfg(unix)]
 pub mod computer_use;
 #[cfg(unix)]
 pub mod config;
+pub mod fs;
 pub mod git;
 #[cfg(unix)]
 pub mod gpu;
@@ -90,6 +91,10 @@ pub const FEATURES: &[&str] = &[
     "mac_device",
     "credits_usage",
     "room_ids",
+    // `cloudroom fs` (the app's file commands) and `cloudroom terminal` (a program on a new terminal over stdio):
+    // the host daemon checks these before using them, so a stale build falls back to the old TypeScript.
+    "fs",
+    "local_terminal",
 ];
 
 #[cfg(unix)]

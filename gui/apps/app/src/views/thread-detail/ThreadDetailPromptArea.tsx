@@ -3,6 +3,7 @@ import { withDraftEdits } from "@/lib/draft-edits";
 import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/TeleportNotice";
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
+import { SkillSuggestionCard } from "@/components/thread/SkillSuggestionCard";
 import { StarCard } from "@/components/StarPrompt";
 import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import { ProjectCopyNotice } from "@/components/thread/ProjectCopyNotice";
@@ -26,7 +27,7 @@ import { createPortal } from "react-dom";
 import { useIsMutating, useMutationState, useQueryClient } from "@tanstack/react-query";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
-import { CloudDiskNotice, CloudUsageLimitNotice, ContinueFromCopyButton } from "@/components/CloudUsageLimitNotice";
+import { CloudDiskNotice, ContinueFromCopyButton } from "@/components/CloudUsageLimitNotice";
 import { VpsThreadNotice } from "@/components/VpsThreadNotice";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import type { ThreadContextWindowActions } from "@/components/thread/timeline";
@@ -126,6 +127,7 @@ import {
 import { useFreshThread } from "@/hooks/useFreshThread";
 import {
   useUnarchiveThread,
+  useSaveThreadModel,
   useUpdateThread,
 } from "@/hooks/mutations/thread-state-mutations";
 import {
@@ -388,6 +390,7 @@ import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, 
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
+import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 
 export function ThreadDetailPromptArea({
   activeBackgroundAgentCount,
@@ -703,6 +706,7 @@ export function ThreadDetailPromptArea({
     activeModel,
     modelOptions,
     moreModelOptions,
+    modelCatalogIsVerified,
     isLoadingModels,
     modelLoadFailed,
     modelLoadError,
@@ -797,12 +801,19 @@ export function ThreadDetailPromptArea({
     [fallbackIdentity, setSelectedModel],
   );
   const queryClient = useQueryClient();
+  const { save: saveModel } = useSaveThreadModel(thread.id, handleModelChange);
+  const pickLocalModel = useCallback((model: string) => {
+    void saveModel(model).catch(() => {});
+  }, [saveModel]);
+  const selectShortcut = useCallback(({ providerId, model }: { providerId: string; model: string }) =>
+    saveModel(model, providerId), [saveModel]);
+  const shortcutHarness = isCloud && cloudState.data?.sessionId ? cloudHarness(cloudConnection.data, thread.providerId) : undefined;
   // Another harness, or any model change in Cloud, switches this thread in place (ADR 0211).
   const handleSelectModel = useCallback(
     (selection: { providerId: string; model: string } & Partial<ModelReasoningPickerSelection>) => {
       if (selection.providerId === thread.providerId) {
         if (!isCloud) {
-          handleModelChange(selection.model);
+          pickLocalModel(selection.model);
           return;
         }
         if (selection.model === cloudState.data?.model) return;
@@ -825,7 +836,7 @@ export function ThreadDetailPromptArea({
         },
       );
     },
-    [cloudConnection.data, cloudState.data?.model, effectiveSelectedModel, fallbackIdentity, followUpReasoningLevel, handleModelChange, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
+    [cloudConnection.data, cloudState.data?.model, effectiveSelectedModel, fallbackIdentity, followUpReasoningLevel, pickLocalModel, isCloud, queryClient, setProviderModelReasoning, thread.id, thread.providerId, updateExecution],
   );
   const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId: thread.projectId,
@@ -1649,7 +1660,7 @@ export function ThreadDetailPromptArea({
         isLoading: isLoadingModels,
         loadFailed: modelLoadFailed,
         loadError: modelLoadError,
-        onChange: handleModelChange,
+        onChange: pickLocalModel,
       },
       serviceTier: {
         value: serviceTier,
@@ -1664,14 +1675,15 @@ export function ThreadDetailPromptArea({
         onChange: handleReasoningChange,
       },
       onSelectModel: handleSelectModel,
-      selectModel: handleSelectModel,
+      selectModel: selectShortcut,
     }),
     [
       effectiveSelectedModel,
       executionOptionsRouting,
       hasMultipleProviders,
       handleSelectModel,
-      handleModelChange,
+      selectShortcut,
+      pickLocalModel,
       isLoadingModels,
       modelLoadFailed,
       modelLoadError,
@@ -2329,7 +2341,7 @@ export function ThreadDetailPromptArea({
   const cloudWaiting = cloudError ? null : cloudState.data?.waiting ?? null;
   const cloudReconnecting = Boolean(cloudWaiting) || (cloudReconnectingNow && cloudReconnectingLong);
   const vpsNotice = cloudState.data?.vps || cloudState.data?.move ? <VpsThreadNotice threadId={thread.id} move={cloudState.data.move} outOfMemory={cloudState.data.outOfMemory} /> : null;
-  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? <CloudUsageLimitNotice /> : cloudState.data?.disk ? <><CloudDiskNotice threadId={thread.id} disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
+  const cloudLimitNotice = isCloud && !shouldHideComposer ? cloudState.data?.usageLimit ? null : cloudState.data?.disk ? <><CloudDiskNotice threadId={thread.id} disk={cloudState.data.disk} />{vpsNotice}</> : vpsNotice : null;
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
   const cloudStatusKey = `${thread.id}|${cloudState.data?.failedStart ? "failed" : ""}|${cloudError ?? ""}`;
   const cloudStatusDismissed = dismissedCloudStatus === cloudStatusKey;
@@ -2348,7 +2360,7 @@ export function ThreadDetailPromptArea({
       {cloudWaiting && cloudState.data?.fromCopy && <><span aria-hidden>·</span><ContinueFromCopyButton threadId={thread.id} /></>}
     </div>
   ) : null;
-  const cloudNotice = cloudAuthNotice ?? cloudLimitNotice ?? (isCloud && !shouldHideComposer && !loginRow && (cloudError || cloudReconnecting || cloudState.data?.failedStart) ? (<>
+  const cloudNotice = cloudAuthNotice ?? cloudLimitNotice ?? (isCloud && !shouldHideComposer && !loginRow && !cloudState.data?.usageLimit && (cloudError || cloudReconnecting || cloudState.data?.failedStart) ? (<>
     {cloudReconnectingPill}
     {cloudFixPrompt && !cloudStatusDismissed && <div role="alert" aria-label="Cloud thread status" className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background py-1 pl-3 pr-1.5 text-xs text-muted-foreground">
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
@@ -2367,6 +2379,8 @@ export function ThreadDetailPromptArea({
   const slotCards = shouldHideComposer ? null : (
     <>
       {!isCloud && !teleporting && canTeleport && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={cardsOnInput} onMove={startTeleport} />}
+      <SkillSuggestionCard threadId={thread.id} idle={runtimeDisplayStatus === "idle" && !isStopRequested} turnKey={thread.updatedAt} attached={cardsOnInput}
+        onUse={(prompt) => { setBottomComposerText(prompt, []); focusBottomPluginComposer(); }} />
       <StarCard active={thread.status === "active"} attached={cardsOnInput} />
       <DesktopUpdateCard attached={cardsOnInput} />
     </>
@@ -2375,6 +2389,8 @@ export function ThreadDetailPromptArea({
   const bottomContent = (
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
+      threadProviderId={isCloud || (modelCatalogIsVerified && selectedProviderId === thread.providerId) ? thread.providerId : undefined}
+      cloudShortcutModels={isCloud ? (shortcutHarness?.idle_set_model ? shortcutHarness.models?.map(({ model }) => model) ?? [] : []) : undefined}
       attachments={bottomAttachmentsConfig}
       stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && <LocalSignInNotice threadId={thread.id} providerId={thread.providerId} hostId={environmentHostId} environmentId={thread.environmentId} authFailed={providerAuthFailed} started={thread.status !== "pending"} />}{pendingInteractionNode && !pendingInteractionInChat ? pendingInteractionStack : promptStack}</>}
       pendingInteraction={pendingInteractionInChat ? undefined : pendingInteractionNode}
@@ -2403,9 +2419,9 @@ export function ThreadDetailPromptArea({
   );
 
   return (
-    <>
+    <PromptDraftContextsContext.Provider value={currentPromptDraft.contexts}>
       {sentMessageEditorPortal}
       {bottomContent}
-    </>
+    </PromptDraftContextsContext.Provider>
   );
 }

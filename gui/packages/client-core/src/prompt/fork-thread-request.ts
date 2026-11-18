@@ -1,3 +1,4 @@
+import { CLOUD_NATIVE_FORK_PROVIDERS } from "@cloudroom/domain";
 import type {
   PermissionMode,
   PromptInput,
@@ -22,6 +23,7 @@ export interface ForkThreadCreateSeed {
   sourceSeqEnd: number | undefined;
   sourceThreadId: string;
   sourceThreadTitle: string;
+  textOnly?: boolean;
 }
 
 interface BuildForkThreadRequestArgs extends ForkThreadCreateSeed {
@@ -38,9 +40,6 @@ type ForkableThread = Pick<
   "archivedAt" | "environmentId" | "executionTarget" | "providerId"
 >;
 
-/** The harnesses a Cloud thread can fork (the server's FORK_HARNESSES). */
-const CLOUD_FORK_PROVIDERS = new Set(["claude-code", "codex"]);
-
 export function isThreadForkable(
   sourceThread: ForkableThread | null,
   providerSupportsFork: boolean,
@@ -49,7 +48,7 @@ export function isThreadForkable(
     return false;
   }
   if (sourceThread.executionTarget === "cloud") {
-    return CLOUD_FORK_PROVIDERS.has(sourceThread.providerId);
+    return CLOUD_NATIVE_FORK_PROVIDERS.includes(sourceThread.providerId);
   }
   return sourceThread.environmentId !== null && providerSupportsFork;
 }

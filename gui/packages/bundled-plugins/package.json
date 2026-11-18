@@ -36,6 +36,7 @@
     "bb-plugin-provider-usage": "workspace:*",
     "bb-plugin-repo-sync": "workspace:*",
     "bb-plugin-push-notifications": "workspace:*",
+    "bb-plugin-snippets": "workspace:*",
     "bb-plugin-scheduled-send": "workspace:*",
     "bb-plugin-secrets": "workspace:*",
     "bb-plugin-organization": "workspace:*",

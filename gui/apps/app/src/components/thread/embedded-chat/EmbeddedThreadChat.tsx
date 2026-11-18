@@ -64,7 +64,7 @@ import {
   useSendThreadMessage,
   useStopThread,
 } from "@/hooks/mutations/thread-runtime-mutations";
-import { useMarkThreadRead } from "@/hooks/mutations/thread-state-mutations";
+import { useMarkThreadRead, useSaveThreadModel } from "@/hooks/mutations/thread-state-mutations";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
 import { showMutationErrorToast } from "@/lib/mutation-errors";
@@ -82,6 +82,7 @@ import { useComposerTypeahead } from "./useComposerTypeahead";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
 import { useInlineQueuedMessageEditing } from "./useInlineQueuedMessageEditing";
 import { useQueuedMessageActions } from "./useQueuedMessageActions";
+import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 
 const selectContextWindowUsage = (timeline: ThreadTimelineResponse) =>
   timeline.contextWindowUsage ?? null;
@@ -310,6 +311,7 @@ function EmbeddedThreadChatWithComposer({
     activeModel,
     modelOptions,
     moreModelOptions,
+    modelCatalogIsVerified,
     modelLoadFailed,
     modelLoadError,
     reasoningOptions,
@@ -320,7 +322,8 @@ function EmbeddedThreadChatWithComposer({
     serviceTierFastLabel,
     isLoadingModels,
   } = threadCreationOptions;
-  const selectedExecutionModel = activeModel?.model ?? selectedModel;
+  const { save: saveModel, pendingModel } = useSaveThreadModel(threadId, setSelectedModel);
+  const selectedExecutionModel = pendingModel ?? activeModel?.model ?? selectedModel;
   const selectedExecutionServiceTier = supportsServiceTier
     ? serviceTier
     : undefined;
@@ -333,6 +336,7 @@ function EmbeddedThreadChatWithComposer({
   const displayStatus = threadQuery.data?.runtime.displayStatus ?? "idle";
   // A Cloud thread keeps its starting model and full permissions (ADR 0189).
   const isCloud = threadQuery.data?.executionTarget === "cloud";
+  const canPickLocalModel = threadQuery.data?.executionTarget === "local";
   const executionRequestFields = useMemo(
     () => ({
       ...(selectedExecutionModel.length > 0
@@ -931,21 +935,23 @@ function EmbeddedThreadChatWithComposer({
   const bottomExecutionConfig = useMemo<ExecutionControlsProps>(
     () => ({
       providerRouting: executionOptionsRouting,
-      lockModelSelection: isCloud,
+      lockModelSelection: !canPickLocalModel,
+      disabled: Boolean(pendingModel),
+      selectModel: ({ providerId, model }) => saveModel(model, providerId),
       provider: {
         options: providerOptions,
         selectedId: selectedProviderId,
         hasMultiple: hasMultipleProviders && !isCloud,
       },
       model: {
-        active: activeModel,
+        active: pendingModel ? { model: pendingModel } : activeModel,
         selected: selectedModel,
         options: modelOptions,
         moreOptions: moreModelOptions,
         loadError: modelLoadError,
         isLoading: isLoadingModels,
         loadFailed: modelLoadFailed,
-        onChange: setSelectedModel,
+        onChange: (model) => { void saveModel(model).catch(() => {}); },
       },
       serviceTier: {
         value: serviceTier,
@@ -962,6 +968,7 @@ function EmbeddedThreadChatWithComposer({
     }),
     [
       activeModel,
+      canPickLocalModel,
       executionOptionsRouting,
       hasMultipleProviders,
       isCloud,
@@ -978,7 +985,8 @@ function EmbeddedThreadChatWithComposer({
       serviceTier,
       serviceTierSupportByProvider,
       setReasoningLevel,
-      setSelectedModel,
+      saveModel,
+      pendingModel,
       setServiceTier,
       supportsServiceTier,
       serviceTierFastLabel,
@@ -1162,7 +1170,9 @@ function EmbeddedThreadChatWithComposer({
     <div className={cn("relative", surfaceClassName)}>
       <OverflowFade placement="above" tone={surfaceTone} />
       <div className="px-4 pb-4 pt-2">
+        <PromptDraftContextsContext.Provider value={currentPromptDraft.contexts}>
         <FollowUpPromptBox
+          threadProviderId={canPickLocalModel && modelCatalogIsVerified && selectedProviderId === threadQuery.data?.providerId ? selectedProviderId : undefined}
           attachments={bottomAttachmentsConfig}
           stack={queuedMessagesStack}
           pendingInteraction={pendingInteractionBanner}
@@ -1185,6 +1195,7 @@ function EmbeddedThreadChatWithComposer({
           focusEndKey={`${composerFocusNonce}:${composer.focusRequestKey ?? ""}:${pendingInteractionsInitialLoading}`}
           isPrimaryComposer={false}
         />
+        </PromptDraftContextsContext.Provider>
       </div>
     </div>
   );

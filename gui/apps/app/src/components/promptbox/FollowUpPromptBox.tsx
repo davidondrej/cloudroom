@@ -37,6 +37,7 @@ import {
   DEFAULT_COMPOSER_SCOPE,
   PromptBoxInternal,
   promptFastModeCommand,
+  promptModelShortcuts,
   type AttachmentsConfig,
   type HistoryConfig,
   type PromptBoxAction,
@@ -160,6 +161,8 @@ export interface FollowUpPromptBoxProps {
   contextWindowNote?: string | undefined;
   contextWindowActions?: ThreadContextWindowActions | undefined;
   execution: ExecutionControlsProps;
+  threadProviderId?: string | undefined;
+  cloudShortcutModels?: readonly string[] | undefined;
   permission: ExecutionPermissionConfig;
   executionReadOnly?: boolean;
   permissionReadOnly?: boolean;
@@ -234,6 +237,8 @@ function FollowUpPromptBoxWithComposer({
   contextWindowNote,
   contextWindowActions,
   execution,
+  threadProviderId,
+  cloudShortcutModels,
   permission,
   executionReadOnly,
   permissionReadOnly,
@@ -618,6 +623,18 @@ function FollowUpPromptBoxWithComposer({
     onModifierSubmit ? `, ${modifierSubmitShortcutLabel()} to ${action}` : "";
   const executionControlsDisabled =
     (executionReadOnly ?? false) || hasPendingInteraction;
+  const executionCommandsEnabled =
+    !execution.disabled &&
+    !executionControlsDisabled &&
+    !isLoadingExecutionOptions &&
+    !execution.model.isLoading &&
+    !execution.model.loadFailed;
+  const canSwitchModel =
+    executionCommandsEnabled &&
+    !execution.lockModelSelection &&
+    (composer.threadRuntimeDisplayStatus === "idle" || composer.threadRuntimeDisplayStatus === "error") &&
+    submitMode.kind === "ready" &&
+    !composer.isFollowUpSubmitting;
   const { permissionDisplayOverride, permissionPickerDisabledByPlanMode } =
     usePromptModePermissionDisplay({
       execution,
@@ -745,23 +762,17 @@ function FollowUpPromptBoxWithComposer({
           isRunning: canStopRuntime,
         }}
         typeahead={typeahead}
-        reasoning={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : execution.reasoning
-        }
+        reasoning={executionCommandsEnabled ? execution.reasoning : undefined}
         fastMode={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : promptFastModeCommand(execution.serviceTier)
+          executionCommandsEnabled ? promptFastModeCommand(execution.serviceTier) : undefined
+        }
+        modelShortcuts={
+          canSwitchModel && threadProviderId
+            ? promptModelShortcuts(execution, {
+                providerId: threadProviderId,
+                models: cloudShortcutModels ?? [...execution.model.options, ...execution.model.moreOptions].map(({ value }) => value),
+              })
+            : undefined
         }
         attachments={attachments}
         promptActions={promptActions}

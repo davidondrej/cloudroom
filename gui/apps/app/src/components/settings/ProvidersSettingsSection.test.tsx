@@ -17,7 +17,6 @@ import { makeProviderInfo } from "@cloudroom/test-helpers/domain-fixtures";
 import {
   ProviderTurnDisplaySection,
   ProvidersSettingsSection,
-  reorderProviderIds,
 } from "./ProvidersSettingsSection";
 
 const mocks = vi.hoisted(() => ({
@@ -97,13 +96,9 @@ describe("ProvidersSettingsSection", () => {
     ]);
     expect(screen.getAllByText("Default")).toHaveLength(1);
 
-    const reorderHandles = screen.getAllByRole("button", {
-      name: /Reorder (Alpha|Beta|Gamma)/,
-    });
-    expect(reorderHandles).toHaveLength(3);
-    expect(reorderHandles[0]?.parentElement?.className).toContain(
-      "group/provider-row",
-    );
+    expect(
+      screen.queryAllByRole("button", { name: /Reorder (Alpha|Beta|Gamma)/ }),
+    ).toHaveLength(0);
 
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "Gamma actions" }),
@@ -200,14 +195,5 @@ describe("ProvidersSettingsSection", () => {
       ...defaultAppSettings,
       providerCompletedTurnDisplay: {},
     });
-  });
-
-  it("builds the complete picker order after a drag", () => {
-    expect(
-      reorderProviderIds(["alpha", "beta", "gamma"], "gamma", "alpha"),
-    ).toEqual(["gamma", "alpha", "beta"]);
-    expect(
-      reorderProviderIds(["alpha", "beta", "gamma"], "gamma", "gamma"),
-    ).toBeNull();
   });
 });

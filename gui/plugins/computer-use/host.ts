@@ -302,6 +302,8 @@ export function createHostEntry() {
   let lease: ExperimentalHostWorkerLease | null = null;
   let paths: Paths | null = null;
   const sessions = new Set<string>();
+  // Sessions ended at a turn's end while another thread kept the driver running.
+  const ended = new Set<string>();
 
   const dir = () => join(paths!.dataDir, "cua-driver", DRIVER.version);
   const binary = () => join(dir(), "cua-driver");
@@ -367,6 +369,7 @@ export function createHostEntry() {
       if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }, 3_000).unref();
     sessions.clear();
+    ended.clear();
     daemon = null;
     socket = null;
     void lease?.dispose();
@@ -449,6 +452,13 @@ export function createHostEntry() {
         paths = context.experimental_paths;
         sessions.add(input.session);
         const path = await ensureDaemon(context);
+        // A running driver keeps an ended label, and only start_session revives it (#1597).
+        if (ended.delete(input.session)) {
+          const start = JSON.stringify({ session: input.session });
+          const argv = ["call", "--socket", path, "start_session", start];
+          const env = driverEnv(home());
+          await run(binary(), argv, { env, timeout: 10_000 }).catch(() => {});
+        }
         const args: Record<string, unknown> = { ...input.args };
         if (SESSION_TOOLS.has(input.tool) && args.session === undefined) args.session = input.session;
         // On failure the driver launches the app as before.
@@ -478,11 +488,13 @@ export function createHostEntry() {
       async release({ session }) {
         if (!sessions.delete(session) || !daemon || !socket) return null;
         if (sessions.size === 0) stopDaemon();
-        else
+        else {
+          ended.add(session);
           await run(binary(), ["call", "--socket", socket, "end_session", JSON.stringify({ session })], {
             env: driverEnv(home()),
             timeout: 10_000,
           }).catch(() => {});
+        }
         return null;
       },
       async describe(input, context) {

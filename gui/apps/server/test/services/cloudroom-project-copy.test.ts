@@ -4,7 +4,10 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
-import { copyProject, envRefusal, localFiles } from "../../src/services/cloudroom/project-copy.js";
+import { createThread, getProject, replaceProjectGitRemoteUrl, setProjectGithubRepo } from "@cloudroom/db";
+import { copyProject, envRefusal, localFiles, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
+import { redactSecrets } from "../../src/services/cloudroom/shares.js";
+import { seedHostSession, seedPrimaryHost, seedProjectWithSource } from "../helpers/seed.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
 it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .env files", async () => {
@@ -85,6 +88,75 @@ it("sends a Cloud loop run's child no .env files when the run didn't pick them (
     });
     expect(await copied(true)).toEqual(["app.js"]);
     expect(await copied(false)).toEqual([".env", ".env.local", "app.js"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    await harness.cleanup();
+  }
+});
+
+it("removes GitHub tokens from a failed clone's Git output before it is shown (#1847)", () => {
+  // Fake tokens only. Git echoes a credential helper's malformed line verbatim; the Mac's own token is removed wherever it is.
+  const stderr = [
+    "warning: invalid credential line: gho_EXAMPLE_NOT_A_REAL_TOKEN",
+    "warning: url has a password: https://x:FAKE-mac-login-1234@github.com/o/r",
+    "fatal: could not read Password for 'https://FAKEtokenOnly42@github.com': terminal prompts disabled",
+    "remote: ghs_12345_eyJFAKEheader0.eyJFAKEpayload0.FAKE-sig_value0 and Authorization: Basic eC1hY2Nlc3MtdG9rZW46RkFLRQ==",
+    "fatal: Authentication failed for 'https://github.com/o/r.git/'",
+    "see https://user:pa'ssFAKE@example.org/x or https://example.org?email=a@b.org",
+  ].join("\n");
+  const safe = redactSecrets(stderr, ["FAKE-mac-login-1234", ""]);
+  expect(safe).not.toMatch(/gho_|FAKE|eyJ|eC1h/);
+  expect(safe).toContain("invalid credential line: [secret removed]");
+  expect(safe).toContain("could not read Password for 'https://[secret removed]@github.com'");
+  expect(safe).toContain("Authentication failed for 'https://github.com/o/r.git/'");
+  // A whole login, apostrophes included, but never an `@` past the host, like a query's email.
+  expect(safe).toContain("see https://[secret removed]@example.org/x or https://example.org?email=a@b.org");
+});
+
+it("a project folder on this computer that became its own checkout saves and clones its own repo, not the one it was added inside (#1850)", async () => {
+  const harness = await createTestAppHarness();
+  const root = mkdtempSync(join(tmpdir(), "cloudroom-project-copy-"));
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args]);
+  try {
+    const app = join(root, "app");
+    mkdirSync(app);
+    git(root, "init", "-q");
+    git(root, "remote", "add", "origin", "https://github.com/example/outer.git");
+    const { deps } = harness;
+    const { host: mine } = seedHostSession(deps, { id: "host_mine" });
+    const { host: other } = seedHostSession(deps, { id: "host_other" });
+    seedPrimaryHost(deps, mine.id);
+    // Both added while `app` was a plain subfolder, so the outer repo's remote was saved (here in another form).
+    const [here, elsewhere] = [mine, other].map(({ id }) => {
+      const { project } = seedProjectWithSource(deps, { hostId: id, path: app, name: id });
+      setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: 1, gitRemoteUrl: "git@github.com:Example/Outer" });
+      return { project, thread: createThread(deps.db, deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }) };
+    });
+    const client = { workspace: async () => null } as unknown as CloudroomClient;
+    const repository = async (thread: { id: string }) => (await planProjectCopyOrThrow(deps, client, thread.id, "w"))?.repository ?? null;
+    const saved = (project: { id: string }) => { const row = getProject(deps.db, project.id); return [row?.gitRemoteUrl, row?.githubRepoId]; };
+
+    expect(await repository(here!.thread)).toBe("https://github.com/Example/Outer");
+    // Its own repo without an origin changes nothing yet.
+    git(app, "init", "-q");
+    await refreshProjectRemote(deps, here!.project.id);
+    expect(saved(here!.project)).toEqual(["git@github.com:Example/Outer", 1]);
+    expect(await repository(here!.thread)).toBe("https://github.com/Example/Outer");
+    // Warming the sandbox saves the fix first, so its template, loops and sync read it too.
+    git(app, "remote", "add", "origin", "git@github.com:example/app.git");
+    await refreshProjectRemote(deps, here!.project.id);
+    expect(saved(here!.project)).toEqual(["git@github.com:example/app.git", null]);
+    expect(await repository(here!.thread)).toBe("https://github.com/example/app.git");
+    // A rename check that looked up the old repo before the fix can't put it back.
+    setProjectGithubRepo(deps.db, deps.hub, here!.project.id, { githubRepoId: 1, gitRemoteUrl: "git@github.com:Example/Outer" }, "git@github.com:Example/Outer");
+    expect(saved(here!.project)).toEqual(["git@github.com:example/app.git", null]);
+    // A remote saved while the folder was being checked wins.
+    replaceProjectGitRemoteUrl(deps.db, deps.hub, here!.project.id, "git@github.com:example/app.git", "https://github.com/example/newer.git");
+    expect(await projectRemote(deps, { id: here!.project.id, gitRemoteUrl: "git@github.com:Example/Outer" }, app)).toBe("https://github.com/example/newer.git");
+    expect(saved(here!.project)).toEqual(["https://github.com/example/newer.git", null]);
+    // Another computer's folder path that also exists here is left alone.
+    expect(await repository(elsewhere!.thread)).toBe("https://github.com/Example/Outer");
+    expect(saved(elsewhere!.project)).toEqual(["git@github.com:Example/Outer", 1]);
   } finally {
     rmSync(root, { recursive: true, force: true });
     await harness.cleanup();

@@ -7,12 +7,8 @@ import { useThreadStorageBrowser } from "./useThreadStorageBrowser";
 const { treesModuleEvaluated } = vi.hoisted(() => ({
   treesModuleEvaluated: vi.fn<(specifier: string) => void>(),
 }));
-vi.mock("@pierre/trees", async (importOriginal) => {
-  treesModuleEvaluated("@pierre/trees");
-  return importOriginal();
-});
-vi.mock("@pierre/trees/react", async (importOriginal) => {
-  treesModuleEvaluated("@pierre/trees/react");
+vi.mock("./ThreadStorageFileTree", async (importOriginal) => {
+  treesModuleEvaluated("./ThreadStorageFileTree");
   return importOriginal();
 });
 
@@ -27,7 +23,7 @@ afterEach(() => {
 });
 
 describe("useThreadStorageBrowser", () => {
-  it("loads the tree library only once there are files to show", async () => {
+  it("loads the tree module only once there are files to show", async () => {
     const onSelectPath = vi.fn();
     const initialProps: { files: readonly WorkspaceFile[] | undefined } = {
       files: undefined,

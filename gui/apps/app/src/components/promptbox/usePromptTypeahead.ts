@@ -14,7 +14,8 @@ import type { PromptMentionResource } from "@cloudroom/domain";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { Transaction } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { appToast } from "@/components/ui/app-toast";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   promptCommandResourceFromSuggestion,
   promptMentionResourceFromSuggestion,
@@ -143,14 +144,22 @@ function listCommands(
   };
 }
 
+interface PendingModelPick {
+  from: number;
+  to: number;
+  submit?: () => void;
+}
+
 export function usePromptTypeahead({
   editor: api,
   typeahead: { mention, command },
   promptActions,
   hidden,
+  scopeKey,
   ...commandSources
 }: CommandSources & {
   editor: PromptDocument;
+  scopeKey: string;
   typeahead: PromptBoxProps["typeahead"];
   promptActions: readonly PromptBoxAction[] | undefined;
   /** Voice input covers the editor, so no menu shows. */
@@ -158,6 +167,12 @@ export function usePromptTypeahead({
 }) {
   const [active, setActive] = useState<ActiveTrigger | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const pendingPick = useRef<PendingModelPick | null>(null);
+  const offeredShortcut = useRef<{ from: number; query: string; name: string } | null>(null);
+  useLayoutEffect(() => () => {
+    pendingPick.current = null;
+    offeredShortcut.current = null;
+  }, [scopeKey]);
   // Caret bookkeeping that must not re-render the composer on every key.
   const track = useRef({
     dismissal: null as Dismissal | null,
@@ -179,6 +194,17 @@ export function usePromptTypeahead({
 
   const { reasoning, fastMode, modelShortcuts, locationCommands } =
     commandSources;
+  const guardSubmit = (submit: () => void) => {
+    if (pendingPick.current) {
+      pendingPick.current.submit = submit;
+      return true;
+    }
+    if (active && offeredShortcut.current && !modelShortcuts?.some(({ name }) => name === offeredShortcut.current?.name)) {
+      appToast.error("This model shortcut is no longer available. Edit the draft or wait until the thread is ready.");
+      return true;
+    }
+    return false;
+  };
   const mentionChars = mention.triggers ?? DEFAULT_MENTION_TRIGGERS;
   const hasOwnCommands = Boolean(
     reasoning?.options.length ||
@@ -244,8 +270,13 @@ export function usePromptTypeahead({
     announce(next);
   };
 
-  /** Keeps a dismissed range on its text as the document changes around it. */
+  /** Keep command ranges attached to their text as the surrounding draft changes. */
   const trackEdit = (transaction: Transaction) => {
+    const pick = pendingPick.current;
+    if (pick && transaction.docChanged) {
+      pick.from = transaction.mapping.map(pick.from, 1);
+      pick.to = transaction.mapping.map(pick.to, -1);
+    }
     const dismissal = track.current.dismissal;
     if (!dismissal || !transaction.docChanged || track.current.restoringPill)
       return;
@@ -297,6 +328,8 @@ export function usePromptTypeahead({
   };
   /** The parent replaced the draft, so nothing remembered about the old text holds. */
   const forget = () => {
+    pendingPick.current = null;
+    offeredShortcut.current = null;
     track.current.dismissal = null;
     track.current.key = "";
   };
@@ -408,10 +441,33 @@ export function usePromptTypeahead({
         );
       case "fast-mode":
         return runOwnCommand(fastMode?.onToggle);
-      case "model-shortcut":
-        return runOwnCommand(
-          modelShortcuts?.find(({ name }) => name === item.name)?.onSelect,
-        );
+      case "model-shortcut": {
+        const editor = api.ref.current;
+        const shortcut = modelShortcuts?.find(({ name }) => name === item.name);
+        if (!shortcut || pendingPick.current || !editor?.isEditable || active?.kind !== "command") return;
+        const pick: PendingModelPick = { from: active.from, to: active.to };
+        const token = editor.state.doc.textBetween(pick.from, pick.to);
+        const saved = shortcut.onSelect();
+        const consume = () => {
+          if (
+            editor.isDestroyed || api.ref.current !== editor ||
+            pick.to <= pick.from || editor.state.doc.textBetween(pick.from, pick.to) !== token
+          ) return;
+          editor.commands.deleteRange({ from: pick.from, to: pick.to });
+          api.reveal();
+          pick.submit?.();
+        };
+        if (!saved) return consume();
+        pendingPick.current = pick;
+        void saved.then(() => {
+          if (pendingPick.current !== pick) return;
+          pendingPick.current = null;
+          consume();
+        }, () => {
+          if (pendingPick.current === pick) pendingPick.current = null;
+        });
+        return;
+      }
       case "reasoning":
         return runOwnCommand(
           reasoning?.options.some(({ value }) => value === item.name)
@@ -520,6 +576,15 @@ export function usePromptTypeahead({
           (item) => typeaheadSuggestionKey(item) === selectedKey,
         );
   const selectedIndex = Math.max(0, selectedAt);
+  const highlighted = suggestions[selectedIndex];
+  // If the row disappears between typing and Enter, keep the draft and avoid activating the skill below it.
+  useLayoutEffect(() => {
+    if (active?.kind === "command" && highlighted?.kind === "model-shortcut") {
+      offeredShortcut.current = { from: active.from, query: active.query, name: highlighted.name };
+    } else if (selectedKey || offeredShortcut.current?.query !== active?.query || offeredShortcut.current?.from !== active?.from) {
+      offeredShortcut.current = null;
+    }
+  }, [active, highlighted, selectedKey]);
   const select = (index: number) => {
     const item = suggestions[index];
     if (item) setSelectedKey(typeaheadSuggestionKey(item));
@@ -583,6 +648,7 @@ export function usePromptTypeahead({
     mentionQuery.length === 0;
 
   return {
+    guardSubmit,
     isOpen: !hidden && active !== null && !isPlainSlash && !isBarePluginTrigger,
     menuState,
     suggestions,

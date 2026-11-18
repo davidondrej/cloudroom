@@ -1,3 +1,4 @@
+import { createReadStream } from "node:fs";
 import type { Writable } from "node:stream";
 import {
   resolveContextProjectId,
@@ -312,6 +313,51 @@ interface PluginCliInputStream extends AsyncIterable<Buffer | string> {
 const PLUGIN_CLI_STDIN_MAX_BYTES = 16 * 1024;
 const PLUGIN_CLI_STDIN_FLAG = /^--([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)-stdin$/u;
 
+export function snippetArguments(argv: string[]) {
+  let command: string | undefined;
+  let help = false;
+  let source: { flag: string; index: number } | undefined;
+  let duplicate = false;
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i]!;
+    if (flag === "--help" || flag === "-h") help = true;
+    else if (["--file", "--data-stdin", "--text-stdin"].includes(flag)) {
+      if (source) duplicate = true;
+      source = { flag, index: i };
+      if (flag === "--file") i++;
+    } else if (flag.startsWith("--")) {
+      if (flag !== "--json") i++;
+    } else command ??= flag;
+  }
+  return { command, help, source, duplicate };
+}
+
+/** Snippet imports and multi-line prompt text are read on the caller's machine. */
+async function snippetInput(argv: string[], stdin: PluginCliInputStream) {
+  const { command, source, duplicate } = snippetArguments(argv);
+  if (duplicate) throw new Error("Choose one snippet input source.");
+  if (!source) return argv;
+  const { flag, index } = source;
+  const path = argv[index + 1];
+  if (flag === "--file" && (!path || command !== "import")) throw new Error("Use import --file PATH.");
+  if (flag !== "--file" && stdin.isTTY) throw new Error("Pipe input into " + flag + ".");
+  const stream = flag === "--file" ? createReadStream(path!) : stdin;
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 3 * 1024 * 1024) throw new Error("Snippet input exceeds 3 MiB.");
+    chunks.push(buffer);
+  }
+  return [
+    ...argv.slice(0, index),
+    flag === "--text-stdin" ? "--text" : "--data",
+    Buffer.concat(chunks).toString("utf8"),
+    ...argv.slice(index + (flag === "--file" ? 2 : 1)),
+  ];
+}
+
 async function materializeStdinFlag(
   argv: readonly string[],
   input: PluginCliInputStream,
@@ -442,7 +488,7 @@ export async function runPluginCliCommand(
 ): Promise<number> {
   let resolvedArgv: string[];
   try {
-    resolvedArgv = await materializeStdinFlag(argv, input);
+    resolvedArgv = pluginId === "snippets" ? await snippetInput(argv, input) : await materializeStdinFlag(argv, input);
   } catch (error) {
     await writePluginCliOutput(
       streams.stderr,

@@ -866,6 +866,7 @@ export function createClaudeDeltaTranslator(
       });
     }
 
+    const tools = extractToolUses(message);
     const text = extractAssistantText(message);
     if (text) {
       if (parentToolCallId === undefined && text.trim() !== "") {
@@ -876,10 +877,13 @@ export function createClaudeDeltaTranslator(
         key: { channel: ASSISTANT_STREAM_KEY, ...parentRefField },
         channel: "agentMessage",
         text,
+        ...(providerCheckpointId && tools.length === 0 && !message.error && message.isReplay !== true
+          ? { providerCheckpointId }
+          : {}),
       });
     }
 
-    for (const toolUse of extractToolUses(message)) {
+    for (const toolUse of tools) {
       const classified = classifyClaudeToolUse({
         toolName: toolUse.name,
         toolUseId: toolUse.id,

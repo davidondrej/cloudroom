@@ -118,6 +118,10 @@
       "type": "registry:ui"
     },
     {
+      "name": "lucide-icons",
+      "type": "registry:ui"
+    },
+    {
       "name": "menu-item-hover",
       "type": "registry:ui"
     },

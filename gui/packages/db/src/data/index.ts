@@ -9,6 +9,7 @@ export {
   listPublicProjects,
   markProjectDeleted,
   reorderProject,
+  replaceProjectGitRemoteUrl,
   setProjectGitRemoteUrlIfMissing,
   setProjectHidden,
   setProjectGithubRepo,

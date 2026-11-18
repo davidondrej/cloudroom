@@ -56,6 +56,7 @@ const mocks = vi.hoisted(() => ({
   createQueuedMessageMutateAsync: vi.fn(),
   createThreadMutateAsync: vi.fn(),
   updateThreadMutate: vi.fn(),
+  saveThreadModel: vi.fn().mockResolvedValue(undefined),
   defaultExecutionOptions: null as ResolvedThreadExecutionOptions | null,
   executionInputSources: {} as ExistingThreadExecutionInputSources,
   deleteQueuedMessageMutateAsync: vi.fn(),
@@ -108,6 +109,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
     FollowUpPromptBox: ({
       activePromptMode,
       typeahead,
+      threadProviderId,
+      cloudShortcutModels,
       attachments,
       composer,
       environmentSummary,
@@ -124,6 +127,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
     }: {
       activePromptMode?: ThreadTimelineActivePromptMode | null;
       typeahead: TypeaheadConfig;
+      threadProviderId?: string;
+      cloudShortcutModels?: string[];
       attachments: {
         items: readonly unknown[];
         onAttachFiles: (files: File[]) => void | Promise<void>;
@@ -153,6 +158,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           selectedId: string;
           onChange?: (value: string) => void;
         };
+        selectModel?: (selection: { providerId: string; model: string }) => Promise<void>;
         onSelectModel?: (selection: {
           providerId: string;
           model: string;
@@ -352,6 +358,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
             </button>
           </>
         ) : null}
+        {execution.selectModel && threadProviderId && (!cloudShortcutModels || cloudShortcutModels.length > 0) && (
+          <button onClick={() => execution.selectModel?.({ providerId: threadProviderId, model: cloudShortcutModels?.[0] ?? "gpt-6-astra" })}>Pick model shortcut</button>
+        )}
         {execution.onSelectModel ? (
           <button
             type="button"
@@ -590,6 +599,7 @@ vi.mock("@/hooks/useThreadCreationOptions", async () => {
         isLoadingModels: false,
         modelLoadError: null,
         modelLoadFailed: false,
+        modelCatalogIsVerified: true,
         modelOptions: [
           { value: "openai-codex/gpt-6-astra", label: "GPT-6 Astra" },
           { value: "gpt-6-astra", label: "GPT-6 Astra" },
@@ -690,6 +700,7 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
 }));
 
 vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
+  useSaveThreadModel: () => ({ save: mocks.saveThreadModel, pendingModel: null }),
   useUpdateThread: () => ({ mutate: mocks.updateThreadMutate }),
   useUnarchiveThread: () => ({
     isPending: false,
@@ -1013,6 +1024,7 @@ describe("ThreadDetailPromptArea", () => {
     ["codex", "openai-codex/gpt-6-astra", "GPT-6 Astra"],
     ["codex", "gpt-6-astra", "GPT-6 Astra"],
     ["pi", "anthropic/claude-opus-4-20250514", "Claude Opus 4"],
+    ["claude-code", "anthropic/claude-opus-4-20250514", "Claude Opus 4"],
   ])(
     "keeps the %s agent and model label for %s in a cloud follow-up",
     (providerId, model, label) => {
@@ -1028,6 +1040,9 @@ describe("ThreadDetailPromptArea", () => {
         pendingDelivery: 0,
       });
 
+      testQueryClient.setQueryData(["cloudroom-connection"], { harnesses: [{
+        id: providerId, idle_set_model: providerId === "claude-code", models: [{ model: "claude-fable-5-2" }],
+      }] });
       renderPromptArea({
         thread: makeThread({ executionTarget: "cloud", providerId }),
       });
@@ -1037,6 +1052,12 @@ describe("ThreadDetailPromptArea", () => {
       );
       expect(screen.getByTestId("selected-model").textContent).toBe(model);
       expect(screen.getByTestId("selected-model-label").textContent).toBe(label);
+      if (providerId === "claude-code") {
+        fireEvent.click(screen.getByText("Pick model shortcut"));
+        expect(mocks.saveThreadModel).toHaveBeenCalledWith("claude-fable-5-2", "claude-code");
+      } else {
+        expect(screen.queryByText("Pick model shortcut")).toBeNull();
+      }
     },
   );
 
@@ -2048,6 +2069,8 @@ describe("ThreadDetailPromptArea", () => {
 
   it("switches the harness in place instead of starting a new thread (ADR 0211)", () => {
     renderPromptArea();
+    fireEvent.click(screen.getByText("Pick model shortcut"));
+    expect(mocks.saveThreadModel).toHaveBeenCalledWith("gpt-6-astra", "codex");
     fireEvent.click(screen.getByRole("button", { name: "Switch harness" }));
     expect(mocks.updateThreadMutate).toHaveBeenCalledWith(
       expect.objectContaining({

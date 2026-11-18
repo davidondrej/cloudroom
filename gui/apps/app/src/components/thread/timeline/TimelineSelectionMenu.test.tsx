@@ -91,6 +91,7 @@ describe("TimelineSelectionMenu", () => {
 
     expect(copyToClipboardWithToast).toHaveBeenCalledExactlyOnceWith(
       "    first()\n    second()\n",
+      { chatMessage: true },
     );
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });

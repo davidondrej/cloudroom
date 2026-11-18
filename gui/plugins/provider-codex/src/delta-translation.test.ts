@@ -1218,6 +1218,44 @@ describe("codex item translation", () => {
     );
   });
 
+  it("survives deeply nested collab agent state", () => {
+    const harness = createHarness();
+    let state: unknown = null;
+    for (let depth = 0; depth < 5_000; depth++) state = { x: state };
+
+    const events = harness.translate({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-deep-1",
+          tool: "spawnAgent",
+          status: "completed",
+          senderThreadId: "t1",
+          receiverThreadIds: ["sub-thread-1"],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: { "sub-thread-1": state },
+        },
+      },
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "item/completed",
+        item: expect.objectContaining({
+          type: "delegation",
+          childRef: "sub-thread-1",
+          summary: "sub-thread-1: [state too deeply nested]",
+        }),
+      }),
+    );
+  });
+
   it("keeps a collabAgentToolCall without a receiver a generic tool call", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1964,6 +2002,33 @@ describe("codex error and warning translation", () => {
         errorInfo: {
           category: "bad-request",
           providerCode: "other",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+
+  it("tags a model the ChatGPT account can't use and says how to pick another (#2009)", () => {
+    const harness = createHarness();
+    const events = harness.translate(
+      codexEvent("error", {
+        threadId: "t1",
+        turnId: "turn-1",
+        error: {
+          message:
+            '{"detail":"The \'gpt-6.1-sol\' model is not supported when using Codex with a ChatGPT account."}',
+          codexErrorInfo: "other",
+          additionalDetails: null,
+        },
+        willRetry: false,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining("Pick another one in the model picker"),
+        errorInfo: {
+          category: "bad-request",
+          providerCode: "modelNotFound",
           httpStatusCode: null,
         },
       }),

@@ -25,14 +25,16 @@ export function assetFor(platform: string, arch: string) {
   return null;
 }
 
+// The driver lets kill_app stop only apps launch_app started in the same session (#1950).
 export const SESSION_TOOLS = new Set([
   "browser_click", "browser_dialog", "browser_download", "browser_navigate", "browser_pointer",
   "browser_prepare", "browser_set_input_files", "browser_type", "click", "clipboard_read",
   "clipboard_write", "double_click", "drag", "end_session", "get_agent_cursor_state",
   "get_browser_state", "get_cursor_position", "get_desktop_state", "get_screen_size", "get_session",
-  "get_window_state", "hotkey", "invoke_menu", "move_cursor", "press_key", "right_click", "scroll",
-  "set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme", "set_value",
-  "set_window_frame", "start_recording", "start_session", "type_text", "verify_state",
+  "get_window_state", "hotkey", "invoke_menu", "kill_app", "launch_app", "move_cursor",
+  "press_key", "right_click", "scroll", "set_agent_cursor_enabled", "set_agent_cursor_motion",
+  "set_agent_cursor_theme", "set_value", "set_window_frame", "start_recording", "start_session",
+  "type_text", "verify_state",
 ]);
 
 export const PID_REQUIRED_TOOLS = new Set([

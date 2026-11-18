@@ -6,6 +6,7 @@ import type {
 } from "@cloudroom/server-contract";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   buildProviderCliIssue,
   hasProviderCliAction,
@@ -34,6 +35,8 @@ function shortReason(error: SystemExecutionOptionsModelLoadError | null) {
 }
 
 const signInsInProgress = new Set<string>();
+// A filled chip instead of an outline, like the chat input.
+const QUIET_FILL = "border-transparent bg-surface-recessed";
 
 /** The machine a provider's models are checked on: the route's host, its environment's, or the primary. */
 export function useRoutedHostId(
@@ -266,7 +269,10 @@ export function ModelUnavailable({
         aria-label={`Retry loading ${providerLabel} models`}
         disabled={retry.isPending}
         onClick={() => retry.mutate(error?.canRestart === true)}
-        className="flex size-7 items-center justify-center rounded-md border border-border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60"
+        className={cn(
+          "flex size-7 items-center justify-center rounded-lg border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60",
+          QUIET_FILL,
+        )}
       >
         <Icon
           name={retry.isPending ? "Spinner" : "RotateCcw"}
@@ -295,7 +301,12 @@ function SignInStep({
       {done ? (
         <Icon name="CircleCheck" className="size-6 shrink-0 text-success" aria-label="Done" />
       ) : (
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-full border border-border font-medium text-foreground">
+        <span
+          className={cn(
+            "flex size-6 shrink-0 items-center justify-center rounded-full border font-medium text-foreground",
+            QUIET_FILL,
+          )}
+        >
           {n}
         </span>
       )}
@@ -344,7 +355,7 @@ function SignInSteps({
           <Button
             size="sm"
             variant={opened ? "outline" : "default"}
-            className="h-7 px-3"
+            className={cn("h-7 px-3", opened && QUIET_FILL)}
             aria-label={`Sign in to ${providerLabel}`}
             onClick={onSignIn}
           >
@@ -355,7 +366,7 @@ function SignInSteps({
           <Button
             size="sm"
             variant={opened ? "default" : "outline"}
-            className="h-7 gap-1.5 px-2.5"
+            className={cn("h-7 gap-1.5 px-2.5", !opened && QUIET_FILL)}
             disabled={checking}
             onClick={onReload}
           >

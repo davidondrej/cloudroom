@@ -55,6 +55,10 @@ export function threadMessages(
     )
     .orderBy(asc(events.sequence))
     .all();
+  return messagesFromRows(rows);
+}
+
+export function messagesFromRows(rows: readonly { type: string; data: string }[]): ThreadMessage[] {
   return rows.flatMap((row): ThreadMessage[] => {
     const data = JSON.parse(row.data) as {
       input?: unknown;

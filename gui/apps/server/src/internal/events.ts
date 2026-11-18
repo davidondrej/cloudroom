@@ -3,6 +3,7 @@ import { and, desc, eq, gt, lt, sql } from "drizzle-orm";
 import {
   appendDaemonEventsInTransaction,
   deriveStoredEventItemFields,
+  getEnvironment,
   getThread,
   listStoredTurnCompletedKeys,
   listThreadEnvironmentAssignmentsOnHost,
@@ -50,6 +51,7 @@ import {
   runtimeErrorLogFields,
 } from "../services/lib/error-log-fields.js";
 import { applyLoggedThreadLifecycleEvent } from "../services/threads/lifecycle-outcome.js";
+import { loadFailedTurn } from "../services/threads/turn-failed.js";
 import { applyTurnCompletedEvent } from "./turn-completed-events.js";
 import { settleCompactFollowUp } from "../services/threads/compact-follow-up.js";
 import { forgetLostBackgroundTask } from "./session-owner-side-effects.js";
@@ -522,6 +524,14 @@ async function applyEventEffects(
         }
         continue;
       }
+
+      if (
+        event.type === "provider/error" &&
+        event.willRetry !== true &&
+        event.errorInfo?.providerCode === "modelNotFound"
+      ) {
+        refreshThreadModelCatalog(deps, entry.threadId);
+      }
     } catch (error) {
       deps.logger.error(
         {
@@ -534,6 +544,35 @@ async function applyEventEffects(
     }
   }
   return followUps;
+}
+
+/**
+ * The account can't use the thread's model (anymore): list its agent's models
+ * again now, not in up to 10 minutes. The push makes the picker drop the model
+ * and offer one the account has (#2009).
+ */
+function refreshThreadModelCatalog(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  threadId: string,
+): void {
+  const thread = getThread(deps.db, threadId);
+  const hostId =
+    thread?.environmentId == null
+      ? undefined
+      : getEnvironment(deps.db, thread.environmentId)?.hostId;
+  const provider = thread
+    ? deps.providerRegistry.get(thread.providerId)?.info
+    : undefined;
+  if (!hostId || !provider) return;
+  const model = loadFailedTurn(deps.db, threadId)?.request.execution.model;
+  void deps.lifecycleDedupers.providerModelCatalogs
+    .refreshRefusedModel(deps, { hostId, provider, model: model ?? null })
+    .catch((error: unknown) =>
+      deps.logger.warn(
+        { hostId, threadId, ...runtimeErrorLogFields(deps.config, error) },
+        "Provider model catalog refresh after an unsupported model failed",
+      ),
+    );
 }
 
 async function executeEventFollowUpBestEffort(

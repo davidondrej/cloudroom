@@ -4,7 +4,6 @@ import {
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { arrayMove } from "@dnd-kit/sortable";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";
@@ -40,6 +39,8 @@ import {
   SettingsSection,
 } from "@/components/ui/settings-section";
 import {
+  autoUpdateProgress,
+  withAutoUpdateSetting,
   buildProviderCliIssue,
   canAutoUpdateProviderCli,
   hasProviderCliAction,
@@ -71,10 +72,6 @@ import { getProviderIconInfo } from "@/lib/provider-icon";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ProviderIconMark } from "./ProviderIconMark";
 import { ProviderLoginButton } from "./ProviderLoginButton";
-import {
-  SortableSettingsRowList,
-  useSortableSettingsRow,
-} from "./sortable-settings-rows";
 
 interface ProvidersSettingsSectionProps {
   disabled: boolean;
@@ -91,39 +88,6 @@ const CELL = {
 } as const;
 
 const TABLE_BUTTON = "h-7 px-2.5 text-xs";
-
-function applyProviderOrder(
-  providers: readonly ProviderInfo[],
-  ids: readonly string[] | null,
-): readonly ProviderInfo[] {
-  if (
-    ids === null ||
-    providers.length !== ids.length ||
-    providers.some((provider) => !ids.includes(provider.id))
-  ) {
-    return providers;
-  }
-  const providersById = new Map(
-    providers.map((provider) => [provider.id, provider]),
-  );
-  return ids.flatMap((id) => {
-    const provider = providersById.get(id);
-    return provider === undefined ? [] : [provider];
-  });
-}
-
-export function reorderProviderIds(
-  ids: readonly string[],
-  activeId: string,
-  overId: string,
-): string[] | null {
-  const activeIndex = ids.indexOf(activeId);
-  const overIndex = ids.indexOf(overId);
-  if (activeIndex === -1 || overIndex === -1 || activeIndex === overIndex) {
-    return null;
-  }
-  return arrayMove([...ids], activeIndex, overIndex);
-}
 
 function withProviderCompletedTurnDisplay(
   settings: AppSettings,
@@ -414,10 +378,15 @@ function UpdateStatus({
   if (status === undefined) return null;
   const issue = buildProviderCliIssue({ provider: provider.id, status });
   if (busy) return <RowStateControl live state="in-progress" />;
+  const progress = autoUpdateProgress(status);
+  if (progress) return (
+    <span role="status" className="text-xs text-muted-foreground">{progress}</span>
+  );
   if (issue === null) return <RowStateControl state="up-to-date" />;
   if (hostId === null || !hasProviderCliAction(issue))
     return <RowStateControl state="update-manually" />;
-  const failed = failure?.issueFingerprint === issue.fingerprint;
+  const failed = status.autoUpdateState === "failed" ||
+    failure?.issueFingerprint === issue.fingerprint;
   return (
     <TableButton
       label={`${failed ? "Retry" : "Update"} ${provider.displayName}`}
@@ -619,7 +588,7 @@ interface ProviderRowProps {
   status: ProviderCliStatus | undefined;
 }
 
-function SortableProviderRow({
+function ProviderRow({
   canRemove,
   disabled,
   generalSettings,
@@ -630,25 +599,15 @@ function SortableProviderRow({
   provider,
   showCloud,
   state,
-  status,
+  status: hostStatus,
 }: ProviderRowProps) {
-  const { setNodeRef, style, isDragging, handle } = useSortableSettingsRow({
-    id: provider.id,
-    disabled,
-    label: provider.displayName,
-  });
+  const status = hostStatus && withAutoUpdateSetting(
+    hostStatus, generalSettings.providerAutoUpdate?.includes(provider.id) ?? false,
+  );
   const notInstalled = state?.status === "not_installed";
 
   return (
-    <SettingsRow
-      ref={setNodeRef}
-      style={style}
-      className={cn(
-        "group/provider-row flex-wrap sm:flex-nowrap",
-        isDragging && "relative z-10 rounded-md bg-card opacity-90 shadow-lift",
-      )}
-    >
-      {handle}
+    <SettingsRow className="group/provider-row flex-wrap sm:flex-nowrap">
       <ProviderRowIcon provider={provider} />
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <span className="max-w-[60%] shrink-0 truncate font-medium">
@@ -780,7 +739,6 @@ function NotInstalledRow({
   const { busy, startInstall } = useCliJob(hostId, provider.id);
   return (
     <SettingsRow className="flex-wrap sm:flex-nowrap">
-      <span className="-ml-2 w-7 shrink-0" />
       <span className="opacity-50">
         <ProviderRowIcon provider={provider} />
       </span>
@@ -821,7 +779,7 @@ function NotInstalledRow({
 function TableHeader({ showCloud }: { showCloud: boolean }) {
   return (
     <div className="mb-2.5 hidden items-center gap-3 border-b border-border pb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground sm:flex">
-      <span className="flex-1 pl-16">Agent</span>
+      <span className="flex-1 pl-8">Agent</span>
       <span className={cn("text-center", CELL.mac)}>{COMPUTER_TITLE}</span>
       {showCloud ? (
         <span className={cn("text-center", CELL.cloud)}>Cloud</span>
@@ -904,14 +862,12 @@ export function ProvidersSettingsSection({
   const hiddenInstallable = useInstallableProviders({ hostId }).data ?? [];
   const showCloud = useCloudroomAccount().data?.ready === true;
   const serverProviders: ProviderInfo[] = providersQuery.data ?? [];
-  const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
-  const allProviders = applyProviderOrder(serverProviders, optimisticOrder);
-  const allIds = allProviders.map((provider) => provider.id);
+  // The server lists the default harness first, then the most used.
+  const allProviders = serverProviders;
   const hidden = new Set(generalSettings.hiddenProviderIds);
   const providers = allProviders.filter(
     (provider) => isInstalled(provider) && !hidden.has(provider.id),
   );
-  const ids = providers.map((provider) => provider.id);
   const defaultProviderId =
     generalSettings.defaultProviderId ?? allProviders[0]?.id ?? null;
   const statesQuery = useSystemProviderStates({
@@ -958,33 +914,10 @@ export function ProvidersSettingsSection({
       list.findIndex((entry) => entry.id === provider.id) === index,
   );
 
-  const handleReorder = (activeId: string, overId: string): void => {
-    const reordered = reorderProviderIds(ids, activeId, overId);
-    if (reordered === null) return;
-    const next = [
-      ...reordered,
-      ...allIds.filter((id) => !reordered.includes(id)),
-    ];
-    setOptimisticOrder(next);
-    let write: Promise<unknown> | void;
-    try {
-      write = onGeneralSettingsChange({
-        ...generalSettings,
-        providerOrder: next,
-      });
-    } catch {
-      setOptimisticOrder(null);
-      return;
-    }
-    void Promise.resolve(write)
-      .catch(() => undefined)
-      .finally(() => setOptimisticOrder(null));
-  };
-
   return (
     <SettingsSection
       title="Harness"
-      description="Your agents: logins, versions, updates, and the default. Provider-specific settings are in the tabs above."
+      description="Your agents: logins, versions, updates, and the default. The default comes first everywhere, then the agents you use most. Provider-specific settings are in the tabs above."
     >
       {providersQuery.isPending ? (
         <p className="text-sm text-muted-foreground">Loading providers…</p>
@@ -1010,13 +943,9 @@ export function ProvidersSettingsSection({
               No agent is installed yet. Install one below.
             </p>
           ) : (
-            <SortableSettingsRowList
-              ids={ids}
-              disabled={disabled}
-              onReorder={handleReorder}
-            >
+            <SettingsRowList>
               {providers.map((provider) => (
-                <SortableProviderRow
+                <ProviderRow
                   key={provider.id}
                   canRemove={providers.length > 1}
                   disabled={disabled}
@@ -1031,7 +960,7 @@ export function ProvidersSettingsSection({
                   status={cliStatus?.[provider.id]}
                 />
               ))}
-            </SortableSettingsRowList>
+            </SettingsRowList>
           )}
           {hostId === null || installable.length === 0 ? null : (
             <>
@@ -1083,7 +1012,6 @@ function RemovedRow({
   const action = useAgentAction(onDone);
   return (
     <SettingsRow>
-      <span className="-ml-2 w-7 shrink-0" />
       <span className="opacity-50">
         <ProviderRowIcon provider={provider} />
       </span>

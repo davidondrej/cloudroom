@@ -114,7 +114,6 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       plugin("provider-claude-code", "Claude Code"),
       plugin("provider-codex", "Codex"),
       plugin("provider-acp", "ACP"),
-      plugin("provider-usage", "Usage"),
       plugin("provider-retry", "Retry"),
       plugin("internet-watch", "Internet"),
     ],

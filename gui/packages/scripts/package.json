@@ -39,8 +39,7 @@
     "@cloudroom/db": "workspace:*",
     "@cloudroom/domain": "workspace:*",
     "@cloudroom/host-daemon-contract": "workspace:*",
-    "@cloudroom/process-utils": "workspace:*",
-    "picocolors": "^1.1.1"
+    "@cloudroom/process-utils": "workspace:*"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",

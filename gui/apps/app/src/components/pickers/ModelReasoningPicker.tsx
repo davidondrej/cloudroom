@@ -26,11 +26,7 @@ import { showUltraEffortsAtom, withoutHiddenUltraEfforts } from "@/lib/ultra-eff
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
-import {
-  COARSE_POINTER_ICON_SIZE_CLASS,
-  COARSE_POINTER_ICON_SIZE_SHRINK_CLASS,
-  COARSE_POINTER_TEXT_SM_CLASS,
-} from "@cloudroom/shared-ui/coarse-pointer-sizing";
+import { COARSE_POINTER_ICON_SIZE_SHRINK_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -41,7 +37,6 @@ import {
 } from "@cloudroom/shared-ui/dropdown-menu";
 import {
   Popover,
-  PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from "@cloudroom/shared-ui/popover";
@@ -77,6 +72,7 @@ import {
   OPTION_TRIGGER_CONTENT_CLASS_NAME,
 } from "@cloudroom/shared-ui/option-display";
 import { type PickerOption } from "./OptionPicker";
+import { ModelPickerHarnessStrip, useEdgeFade } from "./ModelPickerHarnessStrip";
 import { PickerLoadingRows } from "./PickerLoadingRows";
 import {
   ModelUnavailable,
@@ -149,7 +145,10 @@ const REASONING_CYCLE_COMMANDS = [
 ] as const;
 
 const MODEL_SEARCH_MIN_OPTIONS = 5;
-const MODEL_PICKER_MENU_WIDTH_CLASS_NAME = "w-max min-w-64 max-w-80";
+const FIVE_MODEL_ROWS =
+  "max-h-[calc(5*var(--model-row-height))] [&>button]:h-(--model-row-height) [&>button]:shrink-0";
+// The chat input's own surface: no outline, a soft shadow.
+const QUIET_SURFACE_CLASS_NAME = "rounded-xl border-0 bg-composer shadow-message";
 
 const COMPACT_SHEET_PADDING_CLASS_NAME =
   "px-3.5 pt-0 pb-[max(1.5rem,env(safe-area-inset-bottom))]";
@@ -171,13 +170,11 @@ type ModelNavRow =
 export function buildModelNavRows({
   modelOptions,
   moreModelOptions,
-  isCompactViewport,
   isSearching,
   showMoreModels,
 }: {
   modelOptions: readonly ModelPickerOption[];
   moreModelOptions: readonly ModelPickerOption[];
-  isCompactViewport: boolean;
   isSearching: boolean;
   showMoreModels: boolean;
 }): ModelNavRow[] {
@@ -192,15 +189,12 @@ export function buildModelNavRows({
     return rows;
   }
 
-  if (isCompactViewport) {
-    rows.push({ kind: "more-toggle" });
-    if (showMoreModels) {
-      for (const option of moreModelOptions) {
-        rows.push({ kind: "model", option });
-      }
+  rows.push({ kind: "more-toggle" });
+  if (showMoreModels) {
+    for (const option of moreModelOptions) {
+      rows.push({ kind: "model", option });
     }
   }
-
   return rows;
 }
 
@@ -303,8 +297,10 @@ export function ModelReasoningPicker({
     : null;
   const [searchQuery, setSearchQuery] = useState("");
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
+  const listFade = useEdgeFade(listRef, "y");
   const [activeIndex, setActiveIndex] = useState(-1);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const activeHarnessRef = useRef<HTMLButtonElement>(null);
   const isSearching = searchQuery.trim().length > 0;
   const navId = useId();
   const listboxId = `${navId}-listbox`;
@@ -314,7 +310,6 @@ export function ModelReasoningPicker({
     null,
   );
   const [showMoreModels, setShowMoreModels] = useState(false);
-  const [moreModelsOpen, setMoreModelsOpen] = useState(false);
   const [trackedSelectedProviderId, setTrackedSelectedProviderId] =
     useState(selectedProviderId);
 
@@ -322,7 +317,6 @@ export function ModelReasoningPicker({
     setTrackedSelectedProviderId(selectedProviderId);
     setPreviewProviderId(null);
     setShowMoreModels(false);
-    setMoreModelsOpen(false);
     setSearchQuery("");
     setActiveIndex(-1);
   }
@@ -565,14 +559,12 @@ export function ModelReasoningPicker({
       buildModelNavRows({
         modelOptions: filteredModelOptions,
         moreModelOptions: filteredMoreModelOptions,
-        isCompactViewport,
         isSearching,
         showMoreModels,
       }),
     [
       filteredModelOptions,
       filteredMoreModelOptions,
-      isCompactViewport,
       isSearching,
       showMoreModels,
     ],
@@ -597,7 +589,6 @@ export function ModelReasoningPicker({
   const resetBrowseState = useCallback(() => {
     setPreviewProviderId(null);
     setShowMoreModels(false);
-    setMoreModelsOpen(false);
     setSearchQuery("");
     setActiveIndex(-1);
   }, []);
@@ -609,10 +600,6 @@ export function ModelReasoningPicker({
     },
     [resetBrowseState],
   );
-
-  const openSub = useCallback(() => {
-    setMoreModelsOpen(true);
-  }, []);
 
   const handleModelSelect = useCallback(
     (model: string, close = true) => {
@@ -639,7 +626,6 @@ export function ModelReasoningPicker({
       } else {
         onModelChange(model);
       }
-      setMoreModelsOpen(false);
       setPreviewProviderId(null);
     },
     [
@@ -1029,7 +1015,7 @@ export function ModelReasoningPicker({
       {providerLogin.drawer}
       {showEffortControl ? (
         <>
-          <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
+          <span aria-hidden className="h-4 w-px shrink-0 bg-foreground/10" />
           {disabled ? (
             effortTrigger
           ) : (
@@ -1078,80 +1064,40 @@ export function ModelReasoningPicker({
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
       <PopoverContent
         align={align}
+        sideOffset={isCompactViewport ? undefined : 6}
         mobileTitle="Model"
-        mobileClassName={FLOATING_DRAWER_CLASS_NAME}
+        mobileClassName={cn(FLOATING_DRAWER_CLASS_NAME, "border-foreground/10 bg-composer")}
         onKeyDown={handleReasoningArrowKeyDown}
         onMobileContentAnimationEnd={handleMobileContentAnimationEnd}
-        autoFocusRef={showSearchInput ? searchInputRef : undefined}
+        autoFocusRef={
+          showSearchInput ? searchInputRef : showProviderTabs ? activeHarnessRef : undefined
+        }
         className={cn(
-          "group/model-picker flex min-h-0 w-72 flex-col",
+          "group/model-picker flex min-h-0 flex-col",
           isCompactViewport
-            ? cn("overflow-y-hidden", COMPACT_SHEET_PADDING_CLASS_NAME)
-            : "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] max-w-[calc(100vw-1rem)] overflow-hidden p-0",
-          !isCompactViewport && !lockModelSelection && "data-[side=top]:h-80",
+            ? cn(
+                "w-[19rem] overflow-y-hidden [--model-row-height:42px]",
+                COMPACT_SHEET_PADDING_CLASS_NAME,
+              )
+            : cn(
+                "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] w-80 max-w-[calc(100vw-1rem)] overflow-hidden p-0 [--model-row-height:1.75rem]",
+                QUIET_SURFACE_CLASS_NAME,
+                // Opening upward, a fixed height keeps the harness row still.
+                !lockModelSelection && "data-[side=top]:h-[16.5rem]",
+              ),
         )}
       >
         <ResetBrowseStateOnContentUnmount onReset={resetBrowseState} />
         <div className="flex min-h-0 flex-1 flex-col">
           {showProviderTabs ? (
-            <div
-              className={cn(
-                "flex shrink-0 items-center",
-                isCompactViewport
-                  ? "gap-1 rounded-full bg-surface-recessed p-1"
-                  : "gap-0.5 border-b border-border bg-background px-1.5",
-              )}
+            <ModelPickerHarnessStrip
+              options={providerOptions}
+              activeId={activeProviderId}
+              activeButtonRef={activeHarnessRef}
+              onSelect={handleProviderSelect}
             >
-              {providerOptions.map((provider) => {
-                const TabIcon = provider.icon;
-                const isActive = provider.value === activeProviderId;
-                return (
-                  <button
-                    key={provider.value}
-                    type="button"
-                    title={provider.label}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      if (provider.value === activeProviderId) {
-                        return;
-                      }
-                      handleProviderSelect(provider.value);
-                    }}
-                    className={cn(
-                      "relative flex items-center justify-center focus-visible:outline-none",
-                      LIST_HOVER_TRANSITION,
-                      isCompactViewport
-                        ? "aspect-square min-w-0 max-w-10 flex-1 rounded-full"
-                        : "h-8 w-7 max-md:pointer-coarse:h-10 max-md:pointer-coarse:w-9",
-                      isActive
-                        ? isCompactViewport
-                          ? "bg-composer text-foreground shadow-message"
-                          : "text-foreground after:absolute after:inset-x-1 after:-bottom-px after:h-0.5 after:rounded-full after:bg-foreground"
-                        : "text-subtle-foreground hover:text-foreground",
-                    )}
-                  >
-                    {TabIcon ? (
-                      <TabIcon className={COARSE_POINTER_ICON_SIZE_CLASS} />
-                    ) : (
-                      <span
-                        className={cn(
-                          "font-medium",
-                          COARSE_POINTER_TEXT_SM_CLASS,
-                        )}
-                      >
-                        {provider.label.charAt(0)}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-              {inRouter ? (
-                <ConnectHarnessButton
-                  compact={isCompactViewport}
-                  onClose={() => setOpen(false)}
-                />
-              ) : null}
-            </div>
+              {inRouter && <ConnectHarnessButton onClose={() => setOpen(false)} />}
+            </ModelPickerHarnessStrip>
           ) : null}
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1173,23 +1119,21 @@ export function ModelReasoningPicker({
             <MenuHoverProvider>
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {lockModelSelection ? (
-                  <div className="flex shrink-0 items-center gap-2 px-3 py-2.5 text-xs">
+                  <div className="flex h-10 shrink-0 items-center gap-2 px-3 text-xs">
                     {TriggerIcon ? (
                       <TriggerIcon className="size-4 shrink-0" />
                     ) : null}
                     <span className="min-w-0 truncate font-medium">
                       {triggerModelBase}
                       {triggerModelTag ? (
-                        <span className="ml-1 font-normal text-subtle-foreground">
+                        <span className="ml-1.5 font-normal text-subtle-foreground">
                           {triggerModelTag}
                         </span>
                       ) : null}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1.5 text-subtle-foreground">
-                      <span title="Fixed in this thread">
-                        <Icon name="Lock" className="size-3" aria-hidden />
-                        <span className="sr-only">Fixed in this thread</span>
-                      </span>
+                      Fixed in this thread
+                      <Icon name="Lock" className="size-3" aria-hidden />
                     </span>
                   </div>
                 ) : (
@@ -1199,12 +1143,28 @@ export function ModelReasoningPicker({
                     role={showSearchInput ? "listbox" : undefined}
                     id={showSearchInput ? listboxId : undefined}
                     aria-label={showSearchInput ? "Models" : undefined}
+                    onScroll={isCompactViewport ? undefined : listFade.measure}
+                    style={isCompactViewport ? undefined : listFade.style}
                     className={cn(
-                      "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain p-1",
-                      showSearchInput && "pt-0.5",
+                      "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain [scrollbar-width:thin]",
                       isCompactViewport
-                        ? "fade-clip-bottom -mx-3.5 max-h-[15.25rem] px-3.5 pb-8 pt-1.5"
-                        : "max-h-64 group-data-[side=top]/model-picker:max-h-none",
+                        ? cn(
+                            "my-1 px-0",
+                            hasActiveModelOptions && !activeModelIsLoading && FIVE_MODEL_ROWS,
+                          )
+                        : cn(
+                            "px-1.5 pb-1.5 group-data-[side=top]/model-picker:max-h-none",
+                            !showSearchInput &&
+                              (!showProviderTabs
+                                ? "pt-1.5"
+                                : hasActiveModelOptions && !activeModelIsLoading
+                                  ? "pt-1"
+                                  : undefined),
+                            // Five rows plus the bottom padding, then scroll.
+                            hasActiveModelOptions &&
+                              !activeModelIsLoading &&
+                              "max-h-[calc(5*var(--model-row-height)+0.5rem)] [&>button]:h-(--model-row-height) [&>button]:shrink-0",
+                          ),
                     )}
                   >
                     {activeModelIsLoading ? (
@@ -1250,25 +1210,13 @@ export function ModelReasoningPicker({
                             />
                           );
                         })}
-                        {!isCompactViewport &&
-                        !isSearching &&
-                        filteredMoreModelOptions.length > 0 ? (
-                          <MoreModelsSubmenu
-                            open={moreModelsOpen}
-                            onOpenChange={setMoreModelsOpen}
-                            openSub={openSub}
-                            activeBrandPrefix={activeBrandPrefix}
-                            isPreviewing={isPreviewing}
-                            modelValue={modelValue}
-                            options={filteredMoreModelOptions}
-                            onSelect={handleModelSelect}
-                          />
-                        ) : null}
                         {isSearching && navRows.length === 0 ? (
                           <div
                             className={cn(
-                              "px-2 text-xs text-muted-foreground",
-                              isCompactViewport ? "py-2" : "py-[0.3125rem]",
+                              "px-2 text-xs",
+                              isCompactViewport
+                                ? "py-2 text-muted-foreground"
+                                : "py-1.5 text-subtle-foreground",
                             )}
                           >
                             No models match your search
@@ -1315,29 +1263,45 @@ export function ModelReasoningPicker({
                 )}
 
                 {effectiveShowFastModeToggle ? (
-                  <>
-                    <div className="shrink-0 border-t border-border" />
-                    <div className="shrink-0 p-1">
-                      <label className="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-[0.3125rem] text-xs">
-                        <span className="flex min-w-0 items-center gap-2">
-                          <Icon
-                            name="Zap"
-                            className="size-4 fill-current text-muted-foreground"
+                  isCompactViewport ? (
+                    <>
+                      <div className="shrink-0 border-t border-foreground/10" />
+                      <div className="shrink-0 p-1">
+                        <label className="flex min-h-6 cursor-pointer items-center justify-between gap-3 rounded-sm px-2 text-xs text-muted-foreground">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <Icon
+                              name="Zap"
+                              className="size-3.5 fill-current text-muted-foreground"
+                            />
+                            <span>{fastModeText}</span>
+                          </span>
+                          <Switch
+                            checked={fastModeEnabled}
+                            onCheckedChange={onFastModeChange}
+                            aria-label={fastModeText}
+                            className={cn(
+                              LIST_HOVER_TRANSITION,
+                              "focus-visible:ring-foreground/50 data-[state=unchecked]:bg-foreground/15 data-[state=checked]:border-transparent data-[state=checked]:bg-foreground/60 [&>span]:size-3.5 [&>span]:bg-background",
+                            )}
                           />
-                          <span>{fastModeText}</span>
-                        </span>
+                        </label>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="h-px shrink-0 bg-foreground/[0.07]" />
+                      <label className="flex h-9 shrink-0 cursor-pointer items-center gap-2 px-3 text-xs text-muted-foreground">
+                        <Icon name="Zap" className="size-3.5 fill-current" />
+                        <span className="mr-auto">{fastModeText}</span>
                         <Switch
                           checked={fastModeEnabled}
                           onCheckedChange={onFastModeChange}
                           aria-label={fastModeText}
-                          className={cn(
-                            LIST_HOVER_TRANSITION,
-                            "[&>span]:size-3.5",
-                          )}
+                          className={cn(LIST_HOVER_TRANSITION, "[&>span]:size-3.5")}
                         />
                       </label>
-                    </div>
-                  </>
+                    </>
+                  )
                 ) : null}
               </div>
             </MenuHoverProvider>
@@ -1368,11 +1332,13 @@ function MoreModelsToggleRow({
       onClick={onToggle}
       aria-expanded={expanded}
       className={cn(
-        "relative flex w-full cursor-default select-none items-center gap-1 rounded-sm px-2 text-xs text-muted-foreground outline-none hover:bg-state-hover hover:text-foreground",
+        "relative flex w-full cursor-default select-none items-center gap-1 px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
         LIST_HOVER_TRANSITION,
         MENU_ITEM_LAST_HOVERED_CLASS,
-        isActive && "bg-state-active",
-        isCompactViewport ? COMPACT_ROW_CLASS_NAME : "py-[0.3125rem]",
+        isActive && "bg-state-active text-foreground",
+        isCompactViewport
+          ? cn(COMPACT_ROW_CLASS_NAME, "text-muted-foreground")
+          : "rounded-lg text-subtle-foreground",
       )}
       {...hoverProps}
     >
@@ -1382,117 +1348,6 @@ function MoreModelsToggleRow({
         className="size-3.5 shrink-0"
       />
     </button>
-  );
-}
-
-function MoreModelsSubmenu({
-  open,
-  onOpenChange,
-  openSub,
-  activeBrandPrefix,
-  isPreviewing,
-  modelValue,
-  options,
-  onSelect,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  openSub: () => void;
-  activeBrandPrefix: string | undefined;
-  isPreviewing: boolean;
-  modelValue: string;
-  options: readonly ModelPickerOption[];
-  onSelect: (value: string) => void;
-}) {
-  const { isLastHovered, hoverProps } = useMenuItemHover();
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const focusFirstSubItem = useCallback(() => {
-    window.setTimeout(() => {
-      contentRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    }, 0);
-  }, []);
-
-  useEffect(() => {
-    if (open && !isLastHovered) {
-      onOpenChange(false);
-    }
-  }, [open, isLastHovered, onOpenChange]);
-
-  return (
-    <Popover open={open} onOpenChange={onOpenChange}>
-      <PopoverAnchor asChild>
-        <button
-          ref={triggerRef}
-          type="button"
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={openSub}
-          onPointerEnter={(event) => {
-            hoverProps.onPointerEnter(event);
-            openSub();
-          }}
-          onKeyDown={(event) => {
-            hoverProps.onKeyDown(event);
-
-            if (
-              event.key === "Enter" ||
-              event.key === " " ||
-              event.key === "Spacebar" ||
-              event.key === "ArrowRight"
-            ) {
-              event.preventDefault();
-              openSub();
-              focusFirstSubItem();
-              return;
-            }
-
-            if (event.key === "Escape" || event.key === "ArrowLeft") {
-              event.preventDefault();
-              onOpenChange(false);
-            }
-          }}
-          className={cn(
-            "relative flex w-full cursor-default select-none items-center gap-1 rounded-sm px-2 py-[0.3125rem] text-xs text-muted-foreground outline-none hover:bg-state-hover hover:text-foreground",
-            LIST_HOVER_TRANSITION,
-            MENU_ITEM_LAST_HOVERED_CLASS,
-          )}
-          data-last-hovered={hoverProps["data-last-hovered"]}
-        >
-          <span>More models</span>
-          <Icon name="ChevronRight" className="size-3.5 shrink-0" />
-        </button>
-      </PopoverAnchor>
-      <PopoverContent
-        ref={contentRef}
-        side="right"
-        align="start"
-        sideOffset={6}
-        className={cn(
-          "flex flex-col p-1 data-[state=closed]:animate-none",
-          MODEL_PICKER_MENU_WIDTH_CLASS_NAME,
-        )}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" || event.key === "ArrowLeft") {
-            event.preventDefault();
-            onOpenChange(false);
-            triggerRef.current?.focus();
-          }
-        }}
-      >
-        <MenuHoverProvider>
-          {options.map((option) => (
-            <MenuRowButton
-              key={option.value}
-              label={stripModelBrandPrefix(option.label, activeBrandPrefix)}
-              qualifier={option.routeProviderId}
-              selected={!isPreviewing && option.value === modelValue}
-              onClick={() => onSelect(option.value)}
-            />
-          ))}
-        </MenuHoverProvider>
-      </PopoverContent>
-    </Popover>
   );
 }
 
@@ -1536,13 +1391,14 @@ function MenuRowButton({
       aria-selected={role === "option" ? Boolean(isActive) : undefined}
       onClick={onClick}
       className={cn(
-        "relative flex w-full cursor-default select-none items-center justify-between gap-3 rounded-sm px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
+        "relative flex w-full cursor-default select-none items-center justify-between gap-3 px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
         LIST_HOVER_TRANSITION,
         MENU_ITEM_LAST_HOVERED_CLASS,
-        isActive && "bg-state-active",
+        isActive && "bg-state-active text-foreground",
         disabled && "cursor-not-allowed opacity-60",
-        isCompactViewport ? COMPACT_ROW_CLASS_NAME : "py-1",
-        isCompactViewport && selected && COMPACT_SELECTED_ROW_CLASS_NAME,
+        isCompactViewport
+          ? cn(COMPACT_ROW_CLASS_NAME, selected && "bg-foreground/5 font-medium")
+          : cn("rounded-lg", selected ? "text-foreground" : "text-muted-foreground"),
       )}
       {...hoverProps}
     >
@@ -1562,7 +1418,7 @@ function MenuRowButton({
         name="Check"
         className={cn(
           COARSE_POINTER_ICON_SIZE_SHRINK_CLASS,
-          "text-subtle-foreground dark:text-primary",
+          isCompactViewport ? "text-muted-foreground" : "text-foreground",
           selected ? "opacity-100" : "opacity-0",
         )}
       />
@@ -1599,9 +1455,12 @@ function ReasoningEffortMenu({
         align={align}
         mobileTitle="Effort"
         mobileClassName={FLOATING_DRAWER_CLASS_NAME}
+        sideOffset={isCompactViewport ? undefined : 6}
         className={cn(
           "min-w-36",
-          isCompactViewport && COMPACT_SHEET_PADDING_CLASS_NAME,
+          isCompactViewport
+            ? COMPACT_SHEET_PADDING_CLASS_NAME
+            : cn("p-1.5", QUIET_SURFACE_CLASS_NAME),
         )}
       >
         <DropdownMenuLabel className="font-normal text-subtle-foreground">
@@ -1621,17 +1480,30 @@ function ReasoningEffortMenu({
                       COMPACT_ROW_CLASS_NAME,
                       selected && COMPACT_SELECTED_ROW_CLASS_NAME,
                     )
-                  : selected &&
-                      "bg-background text-foreground shadow-message dark:bg-surface-recessed",
+                  : cn(
+                      "justify-between gap-3 rounded-lg py-1.5",
+                      selected ? "text-foreground" : "text-muted-foreground",
+                    ),
               )}
             >
               {option.label}
+              {isCompactViewport ? null : (
+                <Icon
+                  name="Check"
+                  className={cn(
+                    "size-3.5 shrink-0 text-foreground",
+                    selected ? "opacity-100" : "opacity-0",
+                  )}
+                />
+              )}
             </DropdownMenuItem>
           );
         })}
         {shortcut ? (
           <>
-            <DropdownMenuSeparator />
+            <DropdownMenuSeparator
+              className={isCompactViewport ? undefined : "bg-foreground/[0.07]"}
+            />
             <div className="flex items-center gap-2 px-2 py-1 text-xs text-subtle-foreground">
               Cycle
               <AppCommandShortcutPill shortcut={shortcut} ariaHidden={false} />
@@ -1709,14 +1581,7 @@ function ReasoningStepButtons({
   );
 }
 
-// Last tab in the harness row: opens Settings → Harness to connect another agent.
-function ConnectHarnessButton({
-  compact,
-  onClose,
-}: {
-  compact: boolean;
-  onClose: () => void;
-}) {
+function ConnectHarnessButton({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   return (
     <Tooltip>
@@ -1729,21 +1594,9 @@ function ConnectHarnessButton({
             onClose();
             void navigate(getSettingsRoutePath("providers"));
           }}
-          className={cn(
-            "group/connect flex items-center justify-center text-subtle-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none",
-            LIST_HOVER_TRANSITION,
-            compact
-              ? "aspect-square min-w-0 max-w-10 flex-1 rounded-full"
-              : "h-8 w-7 max-md:pointer-coarse:h-10 max-md:pointer-coarse:w-9",
-          )}
+          className="group/connect flex h-8 w-7 shrink-0 items-center justify-center text-subtle-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none pointer-coarse:size-10"
         >
-          <span
-            className={cn(
-              "flex items-center justify-center bg-foreground/5 group-hover/connect:bg-foreground/10 group-focus-visible/connect:bg-foreground/10",
-              LIST_HOVER_TRANSITION,
-              compact ? "size-7 rounded-full" : "size-5 rounded-md",
-            )}
-          >
+          <span className="flex size-5 items-center justify-center rounded-md bg-foreground/5 group-hover/connect:bg-foreground/10 group-focus-visible/connect:bg-foreground/10 pointer-coarse:size-7">
             <Icon name="Plus" className="size-3" aria-hidden />
           </span>
         </button>
@@ -1771,39 +1624,42 @@ function ModelSearchInput({
   activeOptionId,
 }: ModelSearchInputProps) {
   const isCompactViewport = useIsCompactViewport();
+  const input = (
+    <Input
+      ref={inputRef}
+      value={query}
+      onChange={(event) => onQueryChange(event.target.value)}
+      onKeyDown={onKeyDown}
+      placeholder="Search models"
+      aria-label="Search models"
+      role="combobox"
+      aria-expanded
+      aria-controls={listboxId}
+      aria-autocomplete="list"
+      aria-activedescendant={activeOptionId}
+      className={
+        isCompactViewport
+          ? "h-10 rounded-full border-transparent bg-surface-recessed pl-10 pr-4 text-xs text-foreground shadow-none placeholder:text-subtle-foreground focus-visible:ring-0"
+          : "h-7 min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 text-xs text-foreground shadow-none placeholder:text-subtle-foreground focus-visible:ring-0 dark:bg-transparent"
+      }
+    />
+  );
+  if (!isCompactViewport) {
+    return (
+      <label className="flex h-8 shrink-0 items-center gap-2 px-3">
+        <Icon name="Search" className="size-3.5 shrink-0 text-subtle-foreground" />
+        {input}
+      </label>
+    );
+  }
   return (
-    <div
-      className={cn(
-        "shrink-0",
-        isCompactViewport ? "pt-2.5" : "px-1.5 pb-1 pt-1.5",
-      )}
-    >
+    <div className="shrink-0 pt-2.5">
       <div className="relative">
         <Icon
           name="Search"
-          className={cn(
-            "pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground",
-            isCompactViewport ? "left-4 size-4" : "left-2 size-3.5",
-          )}
+          className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
         />
-        <Input
-          ref={inputRef}
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Search models"
-          aria-label="Search models"
-          role="combobox"
-          aria-expanded
-          aria-controls={listboxId}
-          aria-autocomplete="list"
-          aria-activedescendant={activeOptionId}
-          className={cn(
-            "h-7 rounded-md border border-border bg-foreground/5 pl-7 pr-2 text-xs text-foreground placeholder:text-subtle-foreground shadow-none focus-visible:border-primary/50 focus-visible:ring-0",
-            isCompactViewport &&
-              "h-10 rounded-full border-transparent bg-surface-recessed pl-10 pr-4",
-          )}
-        />
+        {input}
       </div>
     </div>
   );

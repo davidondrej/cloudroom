@@ -210,7 +210,7 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
               {entries.map((entry) => {
                 const { issue } = entry;
                 const jobKey = providerCliJobKey(entry.hostId, issue.provider);
-                const failed =
+                const failed = issue.status.autoUpdateState === "failed" ||
                   failuresByJobKey.get(jobKey)?.issueFingerprint ===
                   issue.fingerprint;
                 return (

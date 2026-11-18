@@ -30,11 +30,16 @@ export const personSchema = z.object({
   id: z.string().nullable(), name: z.string(), email: z.string().nullable(), role: z.enum(["owner", "member"]), joined: z.boolean(), you: z.boolean(),
 });
 export type Person = z.infer<typeof personSchema>;
+// A teammate in the account's organization, as a one-click choice: not shared with yet, invited, or sharing already.
+export const teammateSchema = z.object({ name: z.string(), email: z.string(), state: z.enum(["none", "invited", "joined"]) });
+export type Teammate = z.infer<typeof teammateSchema>;
 export const pageSchema = z.object({
   repo: z.string(),
   // Shares this account owns, of what its plan includes. `max` 0 is a plan without sharing; null is no limit.
   limit: z.object({ used: z.number(), max: z.number().nullable() }),
   paused: z.boolean().default(false),
+  // Empty outside an organization.
+  team: z.array(teammateSchema).default([]),
   people: z.array(personSchema),
   threads: z.array(sharedThreadSchema),
 });
@@ -55,7 +60,8 @@ export const sharesRpcContract = defineRpcContract({
   refresh: { input: z.object({}).strict(), output: z.object({}) },
   answer: { input: z.object({ id: z.string(), accept: z.boolean() }).strict(), output: z.object({ projectId: z.string().nullable() }) },
   page: { input: project.strict(), output: page },
-  share: { input: project.extend({ email: z.string() }).strict(), output: page },
+  // One person by `email`, or with `team`, every teammate the project isn't shared with yet.
+  share: { input: project.extend({ email: z.string().optional(), team: z.boolean().optional() }).strict(), output: page },
   remove: { input: project.extend({ id: z.string() }).strict(), output: page },
   view: { input: ref, output: z.object({ title: z.string(), messages: z.array(messageSchema) }) },
   takeover: { input: ref, output: z.object({ threadId: z.string() }) },

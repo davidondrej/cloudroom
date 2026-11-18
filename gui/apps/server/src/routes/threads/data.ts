@@ -1,3 +1,4 @@
+import { previewMessageFork } from "../../services/cloudroom/fork.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import {
   cloudFile,
@@ -677,6 +678,13 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
     }
 
     return context.json(match);
+  });
+
+  get(routes.messageForkPoint, async (context) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const sequence = Number(context.req.param("sequence"));
+    if (!Number.isSafeInteger(sequence) || sequence < 1) throw new ApiError(400, "invalid_request", "Invalid fork sequence.");
+    return context.json(await previewMessageFork(deps, thread, sequence));
   });
 
   get(routes.defaultExecutionOptions, async (context) => {

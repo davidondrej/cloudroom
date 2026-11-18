@@ -2,6 +2,9 @@
 //! app reconnects. After `101 Switching Protocols` both sides send frames: a kind byte, a big-endian u32
 //! length, then the data. To the app: OUTPUT bytes, EXIT `{"code"}`, HELLO `{"offset","cwd","shell"}` (first,
 //! and again after skipped output), PING. From the app: INPUT bytes, RESIZE (cols, rows as u16), PING.
+//!
+//! `cloudroom terminal` runs one program on a new terminal for the app's Local terminals and installs, with the same
+//! frames on stdin and stdout (see `local_cli`).
 use super::{Kind, linux};
 use crate::{config::Config, session::Manager};
 use axum::{
@@ -117,6 +120,18 @@ fn open_pty() -> io::Result<(File, File)> {
     Ok((master, open(&path)?))
 }
 
+/// The program leads its own session, with its terminal as its own: only system calls after fork.
+fn lead_session(process: &mut std::process::Command) {
+    unsafe {
+        process.pre_exec(|| {
+            if setsid() < 0 || ioctl(0, sys::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
 fn set_size(pty: &impl AsRawFd, cols: u16, rows: u16) -> io::Result<()> {
     let size = WindowSize {
         rows: rows.max(1),
@@ -212,15 +227,7 @@ impl Terminal {
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
-        // Only system calls after fork: the shell leads its own session, with this terminal as its own.
-        unsafe {
-            process.as_std_mut().pre_exec(|| {
-                if setsid() < 0 || ioctl(0, sys::TIOCSCTTY, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        lead_session(process.as_std_mut());
         let child = process.spawn()?;
         // Closes this side's copies of the shell's terminal, so reading ends when the shell's processes do.
         drop(process);
@@ -594,4 +601,130 @@ async fn close(
 ) -> Json<Value> {
     manager.terminals.close(&id);
     Json(json!({"closed":true}))
+}
+
+/// From the caller of `cloudroom terminal`: a signal number for the program's process group.
+const SIGNAL: u8 = 2;
+/// How long output may keep coming after the program exits, as node-pty waits: background jobs can hold the
+/// terminal open for good.
+const EXIT_DRAIN: Duration = Duration::from_millis(200);
+const LOCAL_USAGE: &str = "Usage: cloudroom terminal --cwd DIR --cols N --rows N -- PROGRAM [ARGS]
+Runs PROGRAM on a new terminal, in its own session, with this process's environment. Frames on stdin and stdout:
+a kind byte, a big-endian u32 length, then the data. In: 0 input, 1 resize (cols, rows as u16), 2 signal (one byte,
+sent to the program's process group). Out: 0 output, 1 exit {\"code\",\"signal\"}. Closing stdin hangs up.";
+
+/// `cloudroom terminal`: one program on a new terminal for the app's Local terminals and installs. Unlike Cloud
+/// terminals there is no replay here; the app keeps the scrollback.
+pub fn local_cli(args: &[String]) -> i32 {
+    let mut options = HashMap::new();
+    let mut rest = args;
+    while let [flag, value, tail @ ..] = rest
+        && flag.starts_with("--")
+        && flag != "--"
+    {
+        options.insert(flag.as_str(), value.as_str());
+        rest = tail;
+    }
+    let (Some(cwd), Some(Ok(cols)), Some(Ok(rows)), [separator, program, program_args @ ..]) = (
+        options.get("--cwd"),
+        options.get("--cols").map(|n| n.parse::<u16>()),
+        options.get("--rows").map(|n| n.parse::<u16>()),
+        rest,
+    ) else {
+        eprintln!("{LOCAL_USAGE}");
+        return 2;
+    };
+    if separator != "--" {
+        eprintln!("{LOCAL_USAGE}");
+        return 2;
+    };
+    match run_local(Path::new(cwd), cols, rows, program, program_args) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("cloudroom terminal: {error}");
+            1
+        }
+    }
+}
+
+fn run_local(cwd: &Path, cols: u16, rows: u16, program: &str, args: &[String]) -> io::Result<()> {
+    let (master, slave) = open_pty()?;
+    set_size(&master, cols, rows)?;
+    let mut process = std::process::Command::new(program);
+    process
+        .args(args)
+        .current_dir(cwd)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    lead_session(&mut process);
+    let mut child = process.spawn()?;
+    // Closes this side's copies of the program's terminal, so reading ends when its processes do.
+    drop(process);
+    let group = -(child.id() as i32);
+    let out = Arc::new(Mutex::new(io::stdout()));
+
+    let (drained, output_done) = std::sync::mpsc::channel();
+    let mut reader = master.try_clone()?;
+    let to_caller = out.clone();
+    std::thread::spawn(move || {
+        let mut buffer = vec![0; 64 * 1024];
+        // Linux reports EIO once the program's side is closed.
+        while let Ok(n @ 1..) = reader.read(&mut buffer) {
+            if local_frame(&to_caller, OUTPUT, &buffer[..n]).is_err() {
+                unsafe { kill(group, 1) }; // The caller is gone: hang up, as closing a terminal does.
+                break;
+            }
+        }
+        let _ = drained.send(());
+    });
+
+    let mut writer = master.try_clone()?;
+    std::thread::spawn(move || {
+        let mut from_caller = io::stdin().lock();
+        loop {
+            let mut header = [0; 5];
+            if from_caller.read_exact(&mut header).is_err() {
+                break;
+            }
+            let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
+            if length > MAX_FRAME {
+                break;
+            }
+            let mut data = vec![0; length];
+            if from_caller.read_exact(&mut data).is_err() {
+                break;
+            }
+            let _ = match (header[0], data.as_slice()) {
+                (INPUT, bytes) => writer.write_all(bytes),
+                (RESIZE, [c1, c2, r1, r2]) => set_size(
+                    &writer,
+                    u16::from_be_bytes([*c1, *c2]),
+                    u16::from_be_bytes([*r1, *r2]),
+                ),
+                (SIGNAL, [signal]) => {
+                    unsafe { kill(group, i32::from(*signal)) };
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+        }
+        unsafe { kill(group, 1) }; // stdin closed: hang up.
+    });
+
+    let status = child.wait()?;
+    let _ = output_done.recv_timeout(EXIT_DRAIN);
+    let exit = json!({
+        "code": status.code().unwrap_or(0),
+        "signal": std::os::unix::process::ExitStatusExt::signal(&status),
+    });
+    local_frame(&out, EXIT, &serde_json::to_vec(&exit)?)
+}
+
+fn local_frame(out: &Mutex<io::Stdout>, kind: u8, data: &[u8]) -> io::Result<()> {
+    let mut out = out.lock().unwrap();
+    out.write_all(&[kind])?;
+    out.write_all(&(data.len() as u32).to_be_bytes())?;
+    out.write_all(data)?;
+    out.flush()
 }

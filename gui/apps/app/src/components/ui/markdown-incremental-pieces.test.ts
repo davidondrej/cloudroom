@@ -8,7 +8,6 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import type { Root } from "mdast";
-import rehypeKatex from "rehype-katex";
 import remarkDirective from "remark-directive";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -25,6 +24,7 @@ import {
   type MarkdownPieceCache,
   type MarkdownPieceRenderConfig,
 } from "./markdown-incremental-pieces";
+import rehypeKatex from "./markdown-katex";
 import { normalizeMathFences } from "./markdown-math-fences";
 import {
   buildMessageDirectiveRegistry,

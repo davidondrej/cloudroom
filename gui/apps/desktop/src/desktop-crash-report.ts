@@ -15,7 +15,7 @@ interface Crash {
 
 let target: { dataDir: string; version: string; isQuitting: () => boolean } | null = null;
 let runningFile: string | null = null;
-// Windows is shutting down or logging off. It ends our processes, which isn't a crash.
+// Windows is shutting down or logging off. It ends our processes, which isn't a crash. macOS quits apps normally.
 let sessionEnding = false;
 
 const clearRunningFile = () => {
@@ -23,7 +23,6 @@ const clearRunningFile = () => {
 };
 
 export function startCrashReports(dataDir: string, version: string, isQuitting: () => boolean): void {
-  if (process.platform !== "win32") return;
   target = { dataDir, version, isQuitting };
   app.on("child-process-gone", (_event, details) => {
     if (details.reason !== "clean-exit") saveCrash({ what: (details.name ?? details.type).toLowerCase(), reason: details.reason, exit_code: details.exitCode });
@@ -44,7 +43,6 @@ export function startCrashReports(dataDir: string, version: string, isQuitting: 
 }
 
 export function watchWindowCrashes(window: BrowserWindow): void {
-  if (process.platform !== "win32") return;
   window.webContents.on("render-process-gone", (_event, details) => {
     if (details.reason !== "clean-exit") saveCrash({ what: "window", reason: details.reason, exit_code: details.exitCode });
   });

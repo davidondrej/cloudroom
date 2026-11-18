@@ -114,6 +114,10 @@
     "category": "security",
     "screenshots": []
   },
+  "snippets": {
+    "category": "thread-content",
+    "screenshots": []
+  },
   "scheduled-send": {
     "category": "tasks-and-workflows",
     "screenshots": []

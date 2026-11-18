@@ -23,6 +23,7 @@ import { runtimeErrorLogFields } from "../error-utils.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 import { ExpectedCommandDispatchError } from "../command-dispatch-support.js";
 import { openCloudPty } from "./cloud-pty.js";
+import { corePtyAdapter } from "./core-pty.js";
 import {
   resolveWindowsTerminalShell,
   terminalShellArgs,
@@ -548,7 +549,7 @@ export class TerminalManager {
   constructor(private readonly options: TerminalManagerOptions) {
     this.closeGracePeriodMs =
       options.closeGracePeriodMs ?? DEFAULT_TERMINAL_CLOSE_GRACE_PERIOD_MS;
-    this.ptyAdapter = options.ptyAdapter ?? nodePtyAdapter;
+    this.ptyAdapter = options.ptyAdapter ?? corePtyAdapter() ?? nodePtyAdapter;
     this.resolveShell = options.resolveShell ?? resolveDefaultTerminalShell;
   }
 

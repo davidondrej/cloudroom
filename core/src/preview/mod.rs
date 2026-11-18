@@ -37,6 +37,12 @@ const FRESH_SECONDS: u64 = 15;
 /// every 10 s, one sandbox at a time with 5 s timeouts, so a slow sandbox can delay a report past FRESH_SECONDS. The
 /// app's `previewStatus` uses the same 45 s.
 const BROWSING_SECONDS: u64 = 45;
+/// An awake helper pairs every 60 s plus one check (PAIR_SECONDS, POLL_SECONDS in client.py). A longer gap may be a
+/// sleep, so the next pairing starts a new streak; a slow helper then just keeps the usual message.
+const PAIRING_GAP: Duration = Duration::from_secs(75);
+/// A helper that kept pairing this long without reporting a preview isn't asleep, so its pending message says so (#1839).
+/// Generous: a helper checking many slow sandboxes can take over 100 s between reports.
+const SILENT: Duration = Duration::from_secs(180);
 const MAX_PAIRING_SEEN: usize = 16;
 pub const SKILL: &str = include_str!("cloud-preview/SKILL.md");
 
@@ -113,8 +119,13 @@ pub struct Previews {
     active: AtomicU64,
     /// Each device's last recorded pairing outcome and holder. Helpers retry every few seconds; only changes are recorded.
     pairing_seen: Mutex<BTreeMap<String, (&'static str, Option<String>)>>,
-    /// The paired device and when it last paired: an awake helper does once a minute, a sleeping Mac never.
-    checked_in: Mutex<Option<(String, Instant)>>,
+    /// The paired device, when it last paired, and since when it has kept pairing: an awake helper does once a minute,
+    /// a sleeping Mac never.
+    checked_in: Mutex<Option<(String, Instant, Instant)>>,
+    /// When each port was last reported, and when a preview was last registered or reports were cleared (initially,
+    /// Core's start). Monotonic, unlike the reports' own times, so a clock change can't fake a silence.
+    reported: Mutex<BTreeMap<u16, Instant>>,
+    reset: Mutex<Instant>,
     /// A pairing just freed for a Mac that asked for jobs waits a few seconds for it, so the device that lost it
     /// can't pair again first (#608).
     reserved: Mutex<Option<(String, Instant)>>,
@@ -228,6 +239,8 @@ impl Previews {
             active: AtomicU64::new(0),
             pairing_seen: Mutex::default(),
             checked_in: Mutex::default(),
+            reported: Mutex::default(),
+            reset: Mutex::new(Instant::now()),
             reserved: Mutex::default(),
             sandbox: config
                 .instance
@@ -276,8 +289,8 @@ impl Previews {
             .lock()
             .unwrap()
             .as_ref()
-            .filter(|(device, _)| *device == holder)
-            .map(|(_, at)| *at);
+            .filter(|(device, _, _)| *device == holder)
+            .map(|(_, at, _)| *at);
         if browsing || !may_free(&holder, checked_in) {
             return false;
         }
@@ -288,7 +301,7 @@ impl Previews {
         }
         *saved = after;
         *self.reserved.lock().unwrap() = Some((next.to_owned(), Instant::now()));
-        self.reports.lock().unwrap().clear();
+        self.clear_reports();
         let _ = self.disconnect(|live| live.device == holder);
         true
     }
@@ -300,6 +313,10 @@ impl Previews {
             attach();
         }
         paired
+    }
+    fn clear_reports(&self) {
+        self.reports.lock().unwrap().clear();
+        *self.reset.lock().unwrap() = Instant::now();
     }
     /// The device that holds this sandbox's pairing, shortened for diagnostics.
     pub(crate) fn holder(&self) -> Option<String> {
@@ -410,6 +427,7 @@ impl Previews {
             next.previews.insert(port, Entry { generation });
             self.save(&next)?;
             *saved = next;
+            *self.reset.lock().unwrap() = Instant::now();
         }
         drop(saved);
         self.view(port)
@@ -421,7 +439,7 @@ impl Previews {
         next.previews.remove(&port);
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.clear_reports();
         self.disconnect(|live| live.port == port)?;
         Ok(json!({"port":port,"state":"closed"}))
     }
@@ -450,6 +468,29 @@ impl Previews {
             ),
             Some(_) => "The paired Mac is still opening its tunnel to this preview".into(),
         } + "; check again with room-cli preview status";
+        // A helper that kept pairing all along but hasn't reported this preview for SILENT is online (#1839).
+        let silent = self
+            .checked_in
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(device, at, _)| {
+                saved.devices.contains_key(device) && at.elapsed() < PAIRING_GAP
+            })
+            .map(|(_, _, since)| {
+                let reported = self.reported.lock().unwrap().get(&port).copied();
+                let waiting = (*since).max(*self.reset.lock().unwrap());
+                reported.map_or(waiting, |at| at.max(waiting)).elapsed()
+            })
+            .filter(|waited| *waited > SILENT);
+        let pending = match silent {
+            Some(waited) => format!(
+                "The paired Mac is online but its preview helper hasn't reported this preview for {} seconds. \
+                 If this doesn't clear, the user can restart Cloudroom on that Mac; check again with room-cli preview status",
+                waited.as_secs()
+            ),
+            None => pending,
+        };
         let ready = active.clone().find(|(_, r)| r.local_port.is_some());
         let error = active.filter_map(|(_, r)| r.error.as_ref()).next();
         let url = ready.map(|(_, r)| {
@@ -518,7 +559,13 @@ impl Previews {
             self.save(&next)?;
             *saved = next;
         }
-        *self.checked_in.lock().unwrap() = Some((device.device, Instant::now()));
+        let mut checked_in = self.checked_in.lock().unwrap();
+        let since = checked_in
+            .as_ref()
+            .filter(|(held, at, _)| *held == device.device && at.elapsed() < PAIRING_GAP)
+            .map_or_else(Instant::now, |(_, _, since)| *since);
+        *checked_in = Some((device.device, Instant::now(), since));
+        drop(checked_in);
         if setup.tunnel {
             return Ok(json!({"tunnel":true}));
         }
@@ -540,7 +587,7 @@ impl Previews {
         next.devices.remove(device);
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.clear_reports();
         self.disconnect(|live| live.device == device)?;
         Ok(json!({"revoked":true}))
     }
@@ -570,6 +617,10 @@ impl Previews {
         {
             return Err(conflict("Invalid preview status"));
         }
+        self.reported
+            .lock()
+            .unwrap()
+            .insert(input.port, Instant::now());
         self.reports
             .lock()
             .unwrap()

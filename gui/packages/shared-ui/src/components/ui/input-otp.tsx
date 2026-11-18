@@ -1,6 +1,6 @@
 import * as React from "react";
 import { OTPInput, OTPInputContext } from "input-otp";
-import { Minus } from "lucide-react";
+import { Minus } from "../../components/ui/lucide-icons";
 
 import { cn } from "../../lib/utils";
 

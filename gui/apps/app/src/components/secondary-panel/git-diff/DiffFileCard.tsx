@@ -1,6 +1,6 @@
 import { DiffLoadingSkeleton } from "@/components/code/code-loading-skeletons";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { useIntersectionObserver } from "usehooks-ts";
+import { useIntersectionObserver } from "@/hooks/useElementObservers";
 import type { DiffFileEntry } from "@cloudroom/server-contract";
 import type { DiffPresentation } from "@/components/code/code-rendering";
 import {

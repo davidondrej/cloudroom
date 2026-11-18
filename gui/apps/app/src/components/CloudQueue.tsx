@@ -86,7 +86,7 @@ const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom
 const SHRINK_MS = 72 * 3_600_000;
 
 export function PlanCard() {
-  const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const account = useCloudroomAccount().data, usage = account?.planUsage ?? null;
   const calmShrink = useHiddenUntil(SHRUNK_KEY), lowShrink = useHiddenUntil(SHRUNK_LOW_KEY);
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";

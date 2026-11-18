@@ -240,9 +240,11 @@ class UpstreamTimeoutTests(unittest.TestCase):
     def test_tunnel_refused_before_core_is_not_blamed_on_the_app(self):
         # #1798: the relay in front of a user's VPS answers the upgrade with 400, then a plain 200, so the report must
         # say "Tunnel unavailable", not "Cloud HTTP server unavailable". Core's own 409 still means the app is down.
+        # #2016: no answer, or a 101 with no app answer back yet (a stalled sandbox), is the tunnel's too.
         rows = [({'websocket': 400, 'cloudroom-tunnel': 200}, True, False),
                 ({'websocket': 409}, False, True),
-                ({'websocket': 101}, False, False)]
+                ({'websocket': None}, True, False),
+                ({'websocket': 101}, True, False)]
         for answers, refused, down in rows:
             with self.subTest(answers=answers), socket.create_server(('127.0.0.1', 0)) as listener, \
                     tempfile.TemporaryDirectory(prefix='cr-preview-') as folder:
@@ -252,7 +254,8 @@ class UpstreamTimeoutTests(unittest.TestCase):
                         with client:
                             head = client.recv(4096).decode()
                             code = answers[head.split('Upgrade: ', 1)[1].split('\r\n', 1)[0]]
-                            client.sendall(f'HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n'.encode())
+                            if code:
+                                client.sendall(f'HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n'.encode())
                 threading.Thread(target=answer, daemon=True).start()
                 core = SimpleNamespace(url=f'http://127.0.0.1:{listener.getsockname()[1]}', headers={})
                 relay = preview.Relay(core, 3000, 'device', Path(folder) / 'relay.sock')

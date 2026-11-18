@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { createMemoryRouter, MemoryRouter, RouterProvider } from "react-router-dom";
 import { afterEach, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
@@ -53,10 +53,15 @@ it("opens the settings account menu and confirms before signing out", async () =
   vi.mocked(sdk.cloudroom.logout).mockImplementation(async () => { vi.mocked(sdk.cloudroom.status).mockResolvedValue(signedOut); });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   clients.push(client);
-  render(<QueryClientProvider client={client}><MemoryRouter><SidebarProvider><SettingsAccountMenu usagePage /></SidebarProvider></MemoryRouter></QueryClientProvider>);
+  const router = createMemoryRouter([{ path: "*", element: <SidebarProvider><SettingsAccountMenu /></SidebarProvider> }]);
+  render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
   fireEvent.pointerDown(await screen.findByRole("button", { name: /member@example\.invalid/u }), { button: 0 });
   expect(await screen.findByText("Pro plan · Cloud connected")).toBeDefined();
-  expect(screen.getByRole("menuitem", { name: /Usage/u }).textContent).toContain("37,700 credits left");
+  const usage = screen.getByRole("menuitem", { name: /Usage/u });
+  expect(usage.textContent).toContain("37,700 credits left");
+  fireEvent.click(usage);
+  await waitFor(() => expect(router.state.location).toMatchObject({ pathname: "/settings/analytics", search: "?tab=credits" }));
+  fireEvent.pointerDown(screen.getByRole("button", { name: /member@example\.invalid/u }), { button: 0 });
   fireEvent.click(screen.getByRole("menuitem", { name: "Sign out" }));
   fireEvent.click(within(await screen.findByRole("dialog", { name: "Sign out of this app?" })).getByRole("button", { name: "Sign out" }));
   await waitFor(() => expect(sdk.cloudroom.logout).toHaveBeenCalledOnce());

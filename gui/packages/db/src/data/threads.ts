@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -1226,6 +1227,8 @@ export interface CountThreadsOptions {
   archivedOnly?: boolean;
   /** Hidden rows are excluded unless this is true. */
   includeHidden?: boolean;
+  /** Only threads created at or after this time (ms since epoch). */
+  createdAfter?: number;
 }
 
 export interface ThreadCountGroupRow {
@@ -1282,6 +1285,9 @@ export function countThreads(
           : eq(threads.parentThreadId, options.parent.parentThreadId),
     options.hostId !== undefined
       ? eq(environments.hostId, options.hostId)
+      : undefined,
+    options.createdAfter !== undefined
+      ? gte(threads.createdAt, options.createdAfter)
       : undefined,
   ].filter((value) => value !== undefined);
 

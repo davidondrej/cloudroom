@@ -1013,7 +1013,7 @@ async fn tell(
             None => return Err(fail(StatusCode::CONFLICT, NO_PARENT)),
         }
     } else {
-        id
+        super::children::local_parent(&m.local.lock().unwrap(), &sender, &id).unwrap_or(id)
     };
     if relay::thread_id(&id) || id == "parent" {
         let text = Some(input.text.as_str());
@@ -1035,13 +1035,17 @@ async fn tell(
 }
 
 /// A tell from a thread that started this one first restarts its lost agent (a crash after its one automatic
-/// recovery) from its saved chat, as the app's message does (#154, #1629). Never one stopped (its queue paused) or
-/// archived, and never for a tell already steered or queued. `resume` checks that no agent runs, the chat is intact
-/// and, with `sender`, the tell's own ancestry, in the step that accepts it; a refusal leaves the tell refused as before.
+/// recovery) from its saved chat, as the app's message does (#154, #1629), or starts again one whose start failed
+/// before it existed (#2036). Never one stopped (its queue paused) or archived, and never for a tell already steered
+/// or queued. `resume` checks that no agent runs, the chat is intact or none was started, and, with `sender`, the
+/// tell's own ancestry, in the step that accepts it; a refusal leaves the tell refused as before.
 pub(super) fn revive(m: &Arc<Manager>, id: &str, request: &str, sender: Option<&str>) {
     let local = m.local.lock().unwrap();
-    let lost = (local.sessions.get(id))
-        .is_some_and(|s| s.state == SessionState::ProcessLost && !s.archived && !s.queue_paused);
+    let lost = (local.sessions.get(id)).is_some_and(|s| {
+        (s.state == SessionState::ProcessLost || s.failed_start().is_some())
+            && !s.archived
+            && !s.queue_paused
+    });
     drop(local);
     let sent = [request.to_owned(), format!("{request}_steer")]
         .iter()
@@ -1094,7 +1098,7 @@ pub(super) async fn deliver(
     }
     let receipt = m
         .command_from(id, request.to_owned(), "prompt", input, true, sender)
-        .map_err(session_failure)?;
+        .map_err(|error| never_started(m, id, error))?;
     let local = m.local.lock().unwrap();
     if local.sessions.get(id).is_some_and(|s| s.queue_paused) {
         return Ok(Json(
@@ -1102,6 +1106,26 @@ pub(super) async fn deliver(
         ));
     }
     Ok(Json(json!({"id":id,"state":receipt.state,"note":notes[2]})))
+}
+
+/// A tell refused because its agent never started (a stopped or archived one isn't started again) says why, with its
+/// own code: the website otherwise calls Core's refusals busy, and its sender retries in vain (#2036).
+fn never_started(m: &Manager, id: &str, error: super::Error) -> Failure {
+    let failed =
+        (m.local.lock().unwrap().sessions.get(id)).is_some_and(|s| s.failed_start().is_some());
+    match (&error, failed.then(|| m.start_failure(id)).flatten()) {
+        (super::Error::Conflict(super::GONE), Some(why)) => {
+            let why = why
+                .rsplit_once("Cause: ")
+                .map_or(&why[..], |(_, cause)| cause);
+            let error = format!("its agent never started: {why}");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error":error,"code":"never_started"})),
+            )
+        }
+        _ => session_failure(error),
+    }
 }
 
 /// A website call failed: its own refusal as is, or why it could not be reached.
@@ -1639,8 +1663,9 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             println!("{answer}");
             return Ok(if working > 0 { 2 } else { 0 });
         }
-        // This thread, or one child as `thread list` shows it.
-        "show" => match own(&[], &["--self"]) {
+        // This thread, or one child as `thread list` shows it. Nothing here looks up a pull request, so the Local
+        // `--no-pr` is accepted and changes nothing, like `--json`.
+        "show" => match own(&[], &["--self", "--no-pr"]) {
             Ok(ids) if ids.is_empty() => call("GET", "/thread", None).await?["thread"].take(),
             Ok(ids) if ids.len() == 1 && !rest.contains(&"--self") => {
                 let mut list = call("GET", "/children?include_archived=true", None).await?;
@@ -1650,6 +1675,12 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     .flatten()
                     .find(|child| child["id"] == ids[0]);
                 let Some(child) = child else {
+                    // This thread's own ID, as `status` prints it (#1803).
+                    let thread = call("GET", "/thread", None).await?["thread"].take();
+                    if thread["id"] == ids[0] {
+                        println!("{thread}");
+                        return Ok(0);
+                    }
                     eprintln!(
                         "{} is not a child thread of this thread. See room-cli thread list.",
                         ids[0]

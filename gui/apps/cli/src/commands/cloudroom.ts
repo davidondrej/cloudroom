@@ -146,7 +146,7 @@ export async function placePull(archive: Buffer, source: string, target: string,
 
 export function registerVmCommands(program: Command, getUrl: () => string): void {
   const vm = program.command("vm").description("Run commands and copy files on your cloud VM or a Cloud thread's sandbox, as its agent account");
-  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code.")
+  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code, except 1 when it succeeded but its output passed 16 MiB and was cut (it still ran; redirect output there if only the status matters).")
     .option(...THREAD_OPTION)
     .option("--cwd <dir>", "Folder, relative to the agent home")
     .option("--stdin", "Forward standard input")
@@ -156,7 +156,10 @@ export function registerVmCommands(program: Command, getUrl: () => string): void
       process.stdout.write(Buffer.from(result.stdout, "hex"));
       process.stderr.write(Buffer.from(result.stderr, "hex"));
       if (result.truncated) process.stderr.write("Output exceeded 16 MiB and was truncated.\n");
-      process.exitCode = result.code ?? 1;
+      // #1817: cut output must not pass `&&` or `set -e` as complete. A failed command keeps its own code.
+      const cut = result.truncated && result.code === 0;
+      if (cut) process.stderr.write("The command exited 0, but its output was cut, so this exits 1. Write it to a file and copy it with `room-cli vm pull`.\n");
+      process.exitCode = cut ? 1 : result.code ?? 1;
     }));
   vm.command("pull <vm-path> [local-path]").description(`Copy a VM or sandbox file or folder to ${THIS_COMPUTER}, like cp: into an existing folder or a path ending in / (default: current folder), else under that new name, which must not exist yet.`)
     .option(...THREAD_OPTION)

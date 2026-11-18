@@ -4,6 +4,8 @@ type PanelCollapseTransitionStyle = CSSProperties & {
   "--panel-collapse-duration": string;
 };
 
+export const PANEL_COLLAPSE_DURATION_MS = 220;
+
 export const PANEL_COLLAPSE_TRANSITION_CLASS =
   "duration-[var(--panel-collapse-duration,220ms)] ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none";
 
@@ -11,7 +13,9 @@ export function getPanelCollapseTransitionStyle(
   transitionsReady: boolean,
 ): PanelCollapseTransitionStyle {
   return {
-    "--panel-collapse-duration": transitionsReady ? "220ms" : "0ms",
+    "--panel-collapse-duration": transitionsReady
+      ? `${PANEL_COLLAPSE_DURATION_MS}ms`
+      : "0ms",
   };
 }
 

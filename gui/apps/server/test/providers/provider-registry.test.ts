@@ -189,9 +189,13 @@ describe("provider registry ordering", () => {
     ]);
   });
 
-  it("lets the user's providerOrder lead and reads a default only when registered", () => {
+  it("lists the default first, then the most used, and reads a default only when registered", () => {
     const preferences = {
-      providerOrder: ["acp-cursor", "ghost", "pi"],
+      usage: new Map([
+        ["acp-cursor", 9],
+        ["ghost", 5],
+        ["pi", 2],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: "ghost" as string | null,
     };
     const registry = createProviderRegistryService({
@@ -218,7 +222,25 @@ describe("provider registry ordering", () => {
     expect(registry.getUserDefaultProviderId()).toBeNull();
     preferences.defaultProviderId = "codex";
     expect(registry.getUserDefaultProviderId()).toBe("codex");
-    preferences.providerOrder = [];
+    expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
+      "codex",
+      "acp-cursor",
+      "pi",
+    ]);
+    const hidden = createProviderRegistryService({
+      readUserProviderPreferences: () => ({
+        ...preferences,
+        hiddenProviderIds: ["acp-cursor"],
+      }),
+    });
+    for (const entry of registry.list()) hidden.register(entry);
+    expect(hidden.list().map((entry) => entry.info.id)).toStrictEqual([
+      "codex",
+      "pi",
+      "acp-cursor",
+    ]);
+    preferences.defaultProviderId = null;
+    preferences.usage = new Map();
     expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
       "codex",
       "pi",

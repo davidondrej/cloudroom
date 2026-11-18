@@ -2,13 +2,12 @@ import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { appToast } from "@/components/ui/app-toast";
 import { useCloudroomAccount, type CloudDisk } from "@/hooks/queries/cloudroom-queries";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { sdk } from "@/lib/sdk";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
-import { refillText } from "@/components/CloudQueue";
 
 async function askForMoreUsage() {
   const response = await fetchWithAppSurface("/api/v1/cloudroom/account/more-usage", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -17,43 +16,53 @@ async function askForMoreUsage() {
 }
 
 /** The next plan up at a cloud limit (docs/scopes/pricing.md). Ultra has none, so it only asks the team. */
-const UPGRADES: Record<string, { name: string; price: string; pitch: string }> = {
-  free: { name: "Pro", price: "$50/mo", pitch: "Pro gives you 50,000 Cloud Credits a month." },
-  pro: { name: "Super", price: "$150/mo", pitch: "Super gives you 3× more Cloud Credits." },
-  super: { name: "Ultra", price: "$500/mo", pitch: "Ultra gives you 3× more Cloud Credits." },
+const UPGRADES: Record<string, { name: string; price: string }> = {
+  free: { name: "Pro", price: "$50/mo" },
+  pro: { name: "Super", price: "$150/mo" },
+  super: { name: "Ultra", price: "$500/mo" },
 };
+/** One-click amounts of extra credits, in dollars. $1 buys 1,000 credits. */
+const AMOUNTS = [10, 25, 50];
 
-/** Every plan can also buy extra credits on the website (ADR 20261112-235440). Free picks an amount there, after the
- *  upgrade button. Paid plans go straight to a $50 checkout. Plans with no upgrade (Ultra, Business) still ask the
- *  team. No credits button or ask until the plan is known. */
-export function CloudUsageLimitNotice() {
+/** Out of Cloud Credits, as a row in the chat where the work stopped (ADR 20261118-214337): one title, the next plan
+ *  up, then one-click amounts of extra credits (ADR 20261112-235440). An amount opens its checkout on the website, and
+ *  "Other" opens the billing page. Plans with no upgrade (Ultra, Business) can still ask the team. `launchCap` is
+ *  Free's daily cap on new cloud threads: credits don't lift it, so it offers the upgrade only. No buttons until the
+ *  plan is known. */
+export function CloudUsageLimitNotice({ launchCap = false, className }: { launchCap?: boolean; className?: string }) {
   const ask = useMutation({ mutationFn: askForMoreUsage });
-  const account = useCloudroomAccount().data, plan = account?.plan ?? null;
+  const plan = useCloudroomAccount().data?.plan ?? null;
   const upgrade = plan ? UPGRADES[plan] : undefined;
-  const paid = Boolean(plan && plan !== "free");
   useUpgradePromptViewed(upgrade ? "limit_notice" : null);
   return (
-    <PromptStackCard ariaLabel="Cloud usage limit" className="space-y-2 p-3 text-xs">
-      <p className="text-sm font-medium">{plan === "free" ? "You hit the Free plan's cloud limit." : "You hit your plan's cloud limit."}</p>
-      <p className="text-muted-foreground">Your messages are saved, and Local threads still work. {refillText(account?.planUsage?.resetsAt)}{upgrade ? ` ${upgrade.pitch}` : ""}</p>
-      <div className="flex flex-wrap items-center gap-2">
-        {upgrade && (
-          <Button type="button" size="sm" onClick={() => openUpgrade("limit_notice")}>
-            Upgrade to {upgrade.name}<span className="font-normal opacity-70">{upgrade.price}</span><Icon name="ArrowRight" aria-hidden />
-          </Button>
-        )}
-        {plan && (
-          <Button type="button" size="sm" variant={upgrade ? "outline" : "default"} onClick={() => openUpgrade("limit_notice_pack", paid ? "https://www.cloudroom.dev/billing?buy=50000" : undefined)}>
-            {paid ? "Buy 50,000 credits" : "Add credits"}<span className="font-normal opacity-70">{paid ? "$50 once" : "from $5"}</span>
-          </Button>
-        )}
-        {paid && !upgrade && (ask.isSuccess
-          ? <p role="status" className="text-muted-foreground">Sent. The Cloudroom team will reach out to set up a quick call.</p>
-          : <Button type="button" size="sm" variant="outline" disabled={ask.isPending} onClick={() => ask.mutate()}>Ask for more usage</Button>)}
-      </div>
-      {plan && <p className="text-muted-foreground">One-time credits never refill. They last 12 months and are used after your plan's credits.</p>}
-      {ask.error && <p role="alert" className="text-destructive">{ask.error.message}</p>}
-    </PromptStackCard>
+    <div role="status" aria-label="Cloud usage limit" className={cn("flex flex-col gap-3 py-1", className)}>
+      <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
+        <Icon name="Cloud" className="size-[18px] shrink-0 text-muted-foreground" aria-hidden />
+        {launchCap ? "You hit Free's daily limit of new Cloud threads" : "You're out of Cloud Credits"}
+      </p>
+      {plan && (
+        <div className="flex flex-wrap items-center gap-2 pl-7">
+          {upgrade && (
+            <Button type="button" size="sm" onClick={() => openUpgrade("limit_notice")}>
+              Upgrade to {upgrade.name}<span className="font-normal opacity-70">{upgrade.price}</span>
+            </Button>
+          )}
+          {!launchCap && (
+            <>
+              <span className="px-1 text-sm text-muted-foreground">{upgrade ? "or add" : "Add credits"}</span>
+              {AMOUNTS.map((usd) => (
+                <Button key={usd} type="button" size="sm" variant="outline" aria-label={`Add $${usd} of credits`} onClick={() => openUpgrade("limit_notice_pack", `https://www.cloudroom.dev/billing?buy=${usd * 1000}`)}>${usd}</Button>
+              ))}
+              <Button type="button" size="sm" variant="outline" onClick={() => openUpgrade("limit_notice_pack")}>Other</Button>
+            </>
+          )}
+          {plan !== "free" && !upgrade && (ask.isSuccess
+            ? <p role="status" className="text-sm text-muted-foreground">Sent. The Cloudroom team will reach out to set up a quick call.</p>
+            : <Button type="button" size="sm" variant="outline" disabled={ask.isPending} onClick={() => ask.mutate()}>Ask for more usage</Button>)}
+        </div>
+      )}
+      {ask.error && <p role="alert" className="pl-7 text-sm text-destructive">{ask.error.message}</p>}
+    </div>
   );
 }
 

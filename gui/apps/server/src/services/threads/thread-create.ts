@@ -1,5 +1,6 @@
 import {
   COMPUTER,
+  usesTextFork,
   personalProjectAllowsEnvironment,
   reasoningLevelSchema,
 } from "@cloudroom/domain";
@@ -8,9 +9,8 @@ import { rememberFirstAgent } from "../system/first-agent.js";
 import { noteMessageSent } from "../system/first-response-telemetry.js";
 import type { TelemetryExecution } from "../system/telemetry.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
-import { FORK_HARNESSES, forkModel, forkTurn, prepareLocalForkWorktree } from "../cloudroom/fork.js";
+import { forkModel, textForkSequence, prepareLocalForkWorktree } from "../cloudroom/fork.js";
 import { messagesSeed } from "./thread-harness-switch.js";
-import { threadMessages } from "./thread-transcript.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { eq } from "drizzle-orm";
@@ -42,6 +42,7 @@ import {
   copyForkSourceHistory,
   recordImportFork,
   recordTextImport,
+  textForkMessages,
   resolveThreadForkPoint,
   type ThreadForkHistory,
   type ThreadForkPoint,
@@ -725,22 +726,22 @@ export async function createThreadFromRequest(
   const localFork = cloudSourceFork && rawRequestInput.executionTarget !== "cloud" && (rawRequestInput.executionTarget === "local" || rawRequestInput.environment.type !== "project-default");
   const cloudFork = cloudSourceFork && !localFork;
   const toCloud = rawRequestInput.executionTarget === "cloud" || (cloudSourceFork && !localFork);
-  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && (
-    (rawRequestInput.providerId !== undefined && rawRequestInput.providerId !== source.providerId) ||
-    (toCloud && rawRequestInput.model !== undefined && rawRequestInput.model !== forkModel(deps, source.id)) ||
-    (toCloud && !FORK_HARNESSES.includes(source.providerId)));
+  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && usesTextFork(
+    source.providerId, toCloud && rawRequestInput.model !== undefined ? forkModel(deps, source.id) : undefined,
+    rawRequestInput.providerId, rawRequestInput.model, toCloud,
+  );
   if (source !== null && textFork && rawRequestInput.sourceThreadId) {
     if (toCloud && rawRequestInput.input.length === 0) {
       throw new ApiError(400, "invalid_request", "A Cloud fork needs a first message");
     }
     requireLiveSourceThread(deps, { projectId: rawRequestInput.projectId, sourceThreadId: source.id });
     assertValidParentThread(deps, { parentThreadId: source.id, cloudChild: isCloudThread(source) });
-    const { endSequence } = forkTurn(deps.db, source.id, rawRequestInput.sourceSeqEnd);
+    const endSequence = textForkSequence(deps.db, source, rawRequestInput.sourceSeqEnd);
     const cleared = getLatestCompletedThreadContextClearSequence(deps.db, { threadId: source.id });
     const seed = await messagesSeed(
       deps.config.dataDir,
       source.projectId,
-      threadMessages(deps.db, source.id, { ...(cleared != null && cleared < endSequence ? { after: cleared } : {}), before: endSequence + 1 }),
+      textForkMessages(deps, source.id, endSequence, cleared !== null && cleared < endSequence ? cleared : 0),
       (rawRequestInput.providerId ?? source.providerId) === source.providerId
         ? `[Cloudroom] This conversation was forked from another thread. You are continuing it in a fresh ${source.providerId} session.`
         : `[Cloudroom] This conversation was forked from a thread with another agent (${source.providerId}). You are now continuing it as ${rawRequestInput.providerId}.`,
@@ -758,7 +759,7 @@ export async function createThreadFromRequest(
       ...rawRequestInput,
       executionTarget: "local",
       environment: code?.environment ?? rawRequestInput.environment,
-      input: code && rawRequestInput.input.length > 0 ? [code.note, ...rawRequestInput.input] : rawRequestInput.input,
+      input: rawRequestInput.input.length ? [...seed, ...(code ? [code.note] : []), ...rawRequestInput.input] : [],
     }, { ...options, importedText: { history: { kind: "thread", sourceThreadId: source.id, endSequence }, seed } });
   }
   if (localFork && !options.forkPoint && !options.importedText) {
@@ -1108,6 +1109,8 @@ export async function createThreadFromRequest(
       isChildThread: parentThread !== null,
       messageSource: "thread_create",
       providerId: request.providerId,
+      // A scheduled first message is timed from when it is due, not from the click.
+      ...(request.sendAt !== undefined && request.sendAt !== null && request.sendAt > Date.now() ? { sentAt: request.sendAt } : {}),
       threadId: thread.id,
     });
   }

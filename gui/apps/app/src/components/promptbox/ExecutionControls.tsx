@@ -61,7 +61,7 @@ export interface ExecutionControlsProps {
   // An existing thread's picker reports every pick with its provider (ADR 0211).
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
   // Switches provider and model in one step; used by /opus and /astra.
-  selectModel?: (selection: { providerId: string; model: string }) => void;
+  selectModel?: (selection: { providerId: string; model: string }) => void | Promise<void>;
   disabled?: boolean;
   lockModelSelection?: boolean;
 }
