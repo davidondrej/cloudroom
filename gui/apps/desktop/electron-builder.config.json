@@ -36,8 +36,8 @@
     }
   ],
   "extraResources": [
-    { "from": "../../LICENSE", "to": "LICENSE.cloudroom.txt" },
-    { "from": "../../NOTICE", "to": "NOTICE.bb.txt" }
+    { "from": "../../../LICENSE", "to": "LICENSE.cloudroom.txt" },
+    { "from": "../../../NOTICE", "to": "NOTICE.bb.txt" }
   ],
   "publish": null,
   "protocols": [{ "name": "Cloudroom", "schemes": ["cloudroom"] }],
