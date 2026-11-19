@@ -36,6 +36,8 @@ async function makeTempHome(): Promise<string> {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-codex-auth-"));
   tempDirs.push(tempDir);
   vi.stubEnv("HOME", tempDir);
+  vi.spyOn(os, "homedir").mockReturnValue(tempDir);
+  vi.stubEnv("CODEX_HOME", "");
   return tempDir;
 }
 
