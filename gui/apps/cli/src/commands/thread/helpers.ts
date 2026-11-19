@@ -22,7 +22,7 @@ export const THREAD_WAIT_EXIT_CODE_UNREACHABLE = 4;
 export const DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS =
   DEFAULT_THREAD_WAIT_TIMEOUT_MS / 1000;
 
-const SERVICE_TIERS: ServiceTier[] = ["fast", "default"];
+const SERVICE_TIERS: ServiceTier[] = ["fast", "ultrafast", "default"];
 export const PERMISSION_MODE_HELP =
   "Permission mode: accept-edits, auto, or full";
 export const PLAN_HELP =

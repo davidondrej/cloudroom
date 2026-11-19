@@ -34,7 +34,8 @@
     "format": "oxfmt .",
     "format:check": "oxfmt . --check",
     "storybook": "turbo run storybook --filter=@cloudroom/app",
-    "lint": "turbo run lint",
+    "lint": "pnpm run lint:tests && turbo run lint",
+    "lint:tests": "oxlint --disable-nested-config -c .oxlintrc.tests.json .",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
     "test:integration": "turbo run test:integration",
@@ -49,10 +50,11 @@
     "drizzle-studio:prod": "node --import tsx scripts/set-env.mjs NODE_ENV=production pnpm --filter @cloudroom/db db:studio"
   },
   "devDependencies": {
+    "@interfere/landmines": "0.0.0",
     "dotenv-cli": "^11.0.0",
     "esbuild": "^0.28.0",
     "oxfmt": "^0.64.0",
-    "oxlint": "^1.79.0",
+    "oxlint": "^1.81.0",
     "rimraf": "^6.1.0",
     "tsx": "^4.23.1",
     "turbo": "^2.10.12",

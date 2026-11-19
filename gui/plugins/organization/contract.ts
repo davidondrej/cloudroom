@@ -9,6 +9,8 @@ export const stateSchema = z.object({
   org: z.object({
     name: z.string(), role: z.enum(["admin", "member"]), repos: z.array(z.string()), instructions: z.string(), repo_rules: z.record(z.string(), z.string()).default({}),
     member_view: z.enum(["none", "shared", "all"]).default("shared"), admins_see_locked: z.boolean().default(true),
+    // The team board (ADR 20261118-201443): this app sends cards and shows the Board tab.
+    board: z.boolean().default(false),
   }).nullable(),
   invites: z.array(z.object({ orgId: z.string(), name: z.string() })),
   mine: z.array(z.object({ thread: z.string(), shared: z.boolean(), locked: z.boolean().default(false) })),
@@ -24,6 +26,15 @@ export const sharedThreadSchema = z.object({
   harness: z.string().nullable(), model: z.string().nullable(), at: z.string(),
 });
 export type SharedThread = z.infer<typeof sharedThreadSchema>;
+// The team board (web/lib/org-board.ts): teammates' threads as cards, Local and Cloud. Never messages.
+export const boardCardSchema = z.object({
+  owner: z.string(), ownerName: z.string(), thread: z.string(), repo: z.string(), local: z.boolean(), title: z.string(), purpose: z.string().nullable(),
+  percent: z.number().nullable(), status: z.enum(["working", "waiting", "idle", "done"]), model: z.string().nullable(), at: z.string(),
+  pr: z.object({ number: z.number(), url: z.string(), state: z.enum(["draft", "open", "merged", "closed"]), checks: z.enum(["passing", "failing", "pending", "none"]) }).nullable(),
+});
+export type BoardCard = z.infer<typeof boardCardSchema>;
+export const boardSchema = z.object({ people: z.array(z.object({ owner: z.string(), name: z.string() })), cards: z.array(boardCardSchema) });
+export type Board = z.infer<typeof boardSchema>;
 export const handoffSchema = z.object({
   repo: z.string(), branch: z.string(), title: z.string(), harness: z.string().nullable(), model: z.string().nullable(), reasoning: z.string().nullable().optional(),
   ownerName: z.string(), messages: z.array(messageSchema),
@@ -35,7 +46,8 @@ export const settingsSchema = z.object({
   org: z.object({
     name: z.string(), role, repos: z.array(z.string()), instructions: z.string(), repo_rules: z.record(z.string(), z.string()),
     rules_editors: z.enum(["admins", "everyone"]), member_view: z.enum(["none", "shared", "all"]), admin_view: z.boolean(),
-    sharing: z.string(), canEditRules: z.boolean(), members: z.array(z.object({ email: z.string(), role, joined: z.boolean() })),
+    sharing: z.string(), canEditRules: z.boolean(), board: z.boolean().default(false),
+    members: z.array(z.object({ email: z.string(), role, joined: z.boolean(), sees: z.array(z.string()).nullable().default(null) })),
     // The invite link, for admins (ADR 20261118-120824). A website from before it sends neither.
     inviteLink: z.string().nullable().default(null), seats: z.number().nullable().default(null),
   }).nullable(),
@@ -51,6 +63,9 @@ export const orgRpcContract = defineRpcContract({
   list: { input: z.object({}).strict(), output: z.object({ threads: z.array(sharedThreadSchema) }) },
   view: { input: ref, output: z.object({ title: z.string(), messages: z.array(messageSchema) }) },
   takeover: { input: ref, output: z.object({ threadId: z.string() }) },
+  board: { input: z.object({}).strict(), output: boardSchema },
+  search: { input: z.object({ query: z.string().max(200) }).strict(), output: z.object({ cards: z.array(boardCardSchema) }) },
+  fork: { input: ref, output: z.object({ threadId: z.string() }) },
   thread: { input: z.object({ threadId: z.string() }).strict(), output: z.object({ eligible: z.boolean(), shared: z.boolean(), adminsSee: z.boolean() }) },
   share: { input: z.object({ threadId: z.string(), shared: z.boolean() }).strict(), output: z.object({ shared: z.boolean() }) },
   invite: { input: z.object({ orgId: z.string(), accept: z.boolean() }).strict(), output: view },

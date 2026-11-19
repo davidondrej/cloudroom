@@ -240,7 +240,8 @@ impl Terminal {
             .id()
             .ok_or_else(|| io::Error::other("the shell has no process ID"))?;
         let terminal = Self {
-            pty: AsyncFd::new(master)?,
+            // SAFETY: AsyncFd owns the master File and keeps its descriptor open until drop.
+            pty: unsafe { AsyncFd::register(master) }?,
             pid,
             shell,
             cwd,

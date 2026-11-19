@@ -35,6 +35,11 @@ static DRIVING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default)
 /// The spawns still waiting for their child's ID, by session and request ID: a refusal reaches the agent through one,
 /// and through a notice once none waits (thread.rs).
 pub(super) static WAITING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+/// The website's last failure of each start a task drives, by session and request ID, newest last, until it settles
+/// (#1957). Only in memory: a restart forgets it until the next try.
+static LAST_TRY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Outages can leave many starts waiting: the oldest reasons go first.
+const LAST_TRIES: usize = 200;
 const APP_NOTE: &str = "Passed to the user's Cloudroom app, which applies it while it is open.";
 /// Core can't tell whether the app counts this thread as the caller's child: the user may have moved it there.
 const MAYBE_NOTE: &str = "Not linked to this thread, so it went to the user's Cloudroom app. The app applies it only to a thread this one started (such as one the user moved here), while it is open; otherwise nothing happens.";
@@ -50,10 +55,17 @@ fn unconfirmed(why: &str) -> String {
 /// The website's answer for a thread that moved to the Mac (web/lib/mobile.ts, `threadCore`).
 const MOVED: &str = "This thread moved to the Mac.";
 const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
-const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
+const STARTING: &str = "This child is still starting in its own sandbox.";
 /// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
 /// older Core ignores it and steers, as before (#1517).
 const QUEUE: &str = "_queue";
+/// `thread archive` when the website only queued it (web/lib/mobile.ts `relayKept`), which tries for about two minutes
+/// and then tries to tell this thread if it failed. A parent that moved to the Mac meanwhile never hears.
+fn archive_queued(id: &str) -> String {
+    format!(
+        "Archive queued, not confirmed yet: the child's sandbox can't take it right now. Cloudroom keeps trying for a few minutes and tries to tell this thread if it doesn't go through. If you haven't heard back in about 10 minutes and still want it archived, run room-cli thread archive {id} again. Meanwhile thread list hides it, and thread show {id} and thread list --include-archived say archived; they may keep saying so even if it fails."
+    )
+}
 
 /// The website delivers here, with this Core's token.
 pub fn routes() -> Router<Arc<Manager>> {
@@ -104,6 +116,64 @@ fn note_unless(
         None,
     );
     true
+}
+
+/// Why a start's try failed, as a fixed sentence: the website's own text may name hosts or carry tokens.
+fn try_failure(error: &ApiError) -> String {
+    let ApiError::Status(status, _) = error else {
+        return "the website could not be reached".to_owned();
+    };
+    let why = match status {
+        500 => "the website hit an error",
+        502 => "a step of its setup failed",
+        503 => "the website is busy or unavailable",
+        504 => "the website took too long",
+        _ => "the website failed",
+    };
+    format!("HTTP {status}, {why}")
+}
+
+/// Keeps `why` as the last failure of a start still pending; a try that ends after the start settled is ignored. The
+/// check and the write share the session lock a settle is recorded under.
+fn note_try(m: &Manager, session: &str, request: &str, why: String) {
+    let local = m.local.lock().unwrap();
+    if !pending_in(&local, session, request) {
+        return;
+    }
+    let key = format!("{session}/{request}");
+    let mut last = LAST_TRY.lock().unwrap();
+    last.retain(|(k, _)| *k != key);
+    last.push((key, why));
+    if last.len() > LAST_TRIES {
+        last.remove(0);
+    }
+}
+
+/// How long this Core has repeated the start of `child` the website hasn't finished, and why it waits (#1957).
+pub(super) fn waiting_start(m: &Manager, parent: &str, child: &str) -> Option<String> {
+    let (key, at) = {
+        let local = m.local.lock().unwrap();
+        let starts = local.sessions.get(parent)?.child_starts.iter();
+        let mut waiting = starts.filter(|(_, s)| !s.done && s.error.is_none());
+        let (request, start) = waiting.find(|(_, s)| s.child.as_deref() == Some(child))?;
+        (format!("{parent}/{request}"), start.at_ms)
+    };
+    let minutes = crate::observability::now_ms().saturating_sub(at) / 60_000;
+    let long = if at > 0 {
+        format!(" for {minutes} min")
+    } else {
+        String::new()
+    };
+    let last = LAST_TRY
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|(k, _)| *k == key)
+        .map(|(_, why)| why.clone());
+    let last = last.unwrap_or_else(|| "its sandbox is being set up".to_owned());
+    Some(format!(
+        "Cloudroom has been starting it{long} and keeps trying (last: {last})."
+    ))
 }
 
 /// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own. `to_parent`: a
@@ -157,7 +227,12 @@ pub(super) async fn command(
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
         Err(ApiError::Status(404, _)) if starting(m, caller, true).iter().any(|c| c == id) => {
-            return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
+            let why = waiting_start(m, caller, id).map(|why| format!("{why} Retry later."));
+            let why = why.unwrap_or_else(|| "Retry in a few seconds.".to_owned());
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("{STARTING} {why}"),
+            ));
         }
         // Its start was refused, so no agent runs there to message or stop. A stop of one that never woke gets the
         // website's 409 "it may still start" instead, which a final refusal makes untrue (#1058).
@@ -223,6 +298,10 @@ pub(super) async fn command(
         // An archive its child's Core took names the reports it may still send (#1000); a queued one names none.
         let late = answer["late"].take();
         note_child(m, caller, id, state, &late);
+    }
+    // Noted as archived above, as before, though the website only queued it (#1947): the agent hears so.
+    if action == "archive" && answer["state"] == "queued" {
+        answer["note"] = json!(archive_queued(id));
     }
     answer["id"] = json!(id);
     Ok(Json(answer))
@@ -607,7 +686,13 @@ pub(super) async fn own_children(
         let mut item = json!({"id":id,"threadId":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
         // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
         let refused = start_error(m, caller, id).filter(|_| state == "error");
-        if let Some(issue) = refused.as_deref().or(child["issue"].as_str()) {
+        let why = waiting_start(m, caller, id).filter(|_| state == "starting");
+        let issue = [
+            refused.as_deref().or(child["issue"].as_str()),
+            why.as_deref(),
+        ];
+        let issue = issue.into_iter().flatten().collect::<Vec<_>>().join(" ");
+        if !issue.is_empty() {
             item["issue"] = json!(issue);
         }
         list.push(item);
@@ -616,9 +701,12 @@ pub(super) async fn own_children(
     for id in recent {
         let archived = known.get(&id).is_some_and(|s| s == "archived");
         if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
-            list.push(
-                json!({"id":id,"threadId":id,"title":null,"state":"starting","status":"active","sandbox":"own"}),
-            );
+            let mut item = json!({"id":id,"threadId":id,"title":null,"state":"starting","status":"active","sandbox":"own"});
+            // Not linked yet: the website hasn't made its sandbox (#1957).
+            if let Some(why) = waiting_start(m, caller, &id) {
+                item["issue"] = json!(why);
+            }
+            list.push(item);
         }
     }
 }
@@ -723,7 +811,9 @@ pub(super) fn start_pending(local: &Local) -> bool {
 
 /// Whether this start still waits: not settled, not cancelled, and its thread not archived.
 fn still_pending(m: &Manager, session: &str, request: &str) -> bool {
-    let local = m.local.lock().unwrap();
+    pending_in(&m.local.lock().unwrap(), session, request)
+}
+fn pending_in(local: &Local, session: &str, request: &str) -> bool {
     local.sessions.get(session).is_some_and(|s| {
         !s.archived
             && s.child_starts
@@ -796,7 +886,7 @@ async fn drive_start(
             }
             // Refused for good: out of credits, a missing login, an archived parent.
             Err(ApiError::Status(status, error)) if status < 500 => break Some(error),
-            Err(_) => {}
+            Err(error) => note_try(&m, &session, &request, try_failure(&error)),
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(Duration::from_secs(300));
@@ -835,6 +925,8 @@ async fn drive_start(
             let _ = deliver(&m, &session, &id, prompt, true, None, false).await;
         }
     }
+    let key = format!("{session}/{request}");
+    LAST_TRY.lock().unwrap().retain(|(k, _)| *k != key);
     DRIVING
         .lock()
         .unwrap()
@@ -1256,6 +1348,16 @@ mod tests {
         ];
         assert_eq!(sent, expected);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed try is shown as its status in fixed words, never the website's own text (#1957).
+    #[test]
+    fn a_start_failure_shows_only_fixed_words() {
+        let leaky = "upload failed: getaddrinfo ENOTFOUND internal-storage fd00::1:443 Bearer abcdefghijklmnopqrstuv";
+        let shown = try_failure(&ApiError::Status(502, leaky.into()));
+        assert_eq!(shown, "HTTP 502, a step of its setup failed");
+        let shown = try_failure(&ApiError::Network("dns error: storage.example".into()));
+        assert_eq!(shown, "the website could not be reached");
     }
 
     /// A child this thread archived stays archived while the website still lists it as asleep (#1430), but not once

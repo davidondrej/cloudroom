@@ -1501,6 +1501,7 @@ export function listUnarchivedAssignedChildThreads(
   );
 }
 
+/** A thread's open side chats. One with a parent of its own belongs to that parent instead, even after a move (#2136). */
 export function listUnarchivedHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1510,11 +1511,12 @@ export function listUnarchivedHiddenSourceThreads(
     liveThreads(
       eq(threads.sourceThreadId, args.sourceThreadId),
       eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
     ),
   );
 }
 
-/** A thread's side chats, archived or not. */
+/** A thread's side chats, archived or not, without a parent of their own. */
 export function listHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1524,6 +1526,7 @@ export function listHiddenSourceThreads(
     nonDeletedThreads(
       eq(threads.sourceThreadId, args.sourceThreadId),
       eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
     ),
   );
 }

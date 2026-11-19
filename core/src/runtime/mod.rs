@@ -72,12 +72,25 @@ impl Kind {
     pub fn fast(self) -> bool {
         matches!(self, Kind::Codex | Kind::Cursor)
     }
+    /// Whether a prompt may ask this harness for `tier`. Ultra Fast is Codex's own; a model
+    /// without it runs at standard speed.
+    pub fn tier(self, tier: &str) -> bool {
+        match tier {
+            "default" => true,
+            "fast" => self.fast(),
+            "ultrafast" => self == Kind::Codex,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Model {
     pub model: String,
     pub reasoning_levels: Vec<String>,
+    /// Speeds beside the standard one: `fast`, `ultrafast`. Codex only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<String>,
 }
 
 /// Effort levels the catalog allows for `model`, or `None` when the model is not offered.

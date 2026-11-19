@@ -31,7 +31,7 @@ export const reasoningLevelSchema = z.enum([
   "ultra",
 ]);
 export type ReasoningLevel = z.infer<typeof reasoningLevelSchema>;
-export const serviceTierSchema = z.enum(["default", "fast"]);
+export const serviceTierSchema = z.enum(["default", "fast", "ultrafast"]);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
 
 export const unmanagedBranchSpecSchema = z.discriminatedUnion("kind", [

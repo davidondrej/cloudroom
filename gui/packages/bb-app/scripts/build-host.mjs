@@ -25,7 +25,6 @@ const dependencyNames = [
   "fs-native-extensions",
   "node-pty",
   "pino",
-  "pino-pretty",
   "pino-roll",
 ];
 const hostDaemonFiles = [

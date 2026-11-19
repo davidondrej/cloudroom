@@ -1,7 +1,6 @@
 import { pickZone, zoneBox, type SplitZone, type ZoneDecision } from "./zones";
 
 export const SPLIT_PANE_DATA_ATTR = "data-split-pane-id";
-const SIDEBAR_PANEL_SELECTOR = '[data-sidebar="panel"]';
 
 export interface SplitDropTarget {
   paneId: string;
@@ -55,8 +54,7 @@ export function beginSplitDrag(config: SplitDragConfig): void {
         }),
       );
     }
-    ghostEl =
-      config.renderGhost === false ? null : createGhost(config.ghostLabel);
+    ghostEl = config.renderGhost === false ? null : createGhost(config.ghostLabel);
     overlayEl = createOverlay();
     if (ghostEl) {
       document.body.append(ghostEl);
@@ -73,10 +71,6 @@ export function beginSplitDrag(config: SplitDragConfig): void {
     clientX: number,
     clientY: number,
   ): ResolvedTarget | null => {
-    // The floating sidebar card can sit over a pane: dropping on it is no drop.
-    if (isOverSidebar(clientX, clientY)) {
-      return null;
-    }
     const paneEl = paneElementAt(clientX, clientY);
     const paneId = paneEl?.getAttribute(SPLIT_PANE_DATA_ATTR) ?? null;
     if (
@@ -192,14 +186,6 @@ function swallowNextClick(): void {
     () => window.removeEventListener("click", swallow, true),
     300,
   );
-}
-
-function isOverSidebar(clientX: number, clientY: number): boolean {
-  for (const element of document.elementsFromPoint(clientX, clientY)) {
-    if (element.closest(SIDEBAR_PANEL_SELECTOR)) return true;
-    if (element.closest(`[${SPLIT_PANE_DATA_ATTR}]`)) return false;
-  }
-  return false;
 }
 
 function paneElementAt(clientX: number, clientY: number): HTMLElement | null {

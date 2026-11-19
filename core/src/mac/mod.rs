@@ -917,6 +917,7 @@ fn agent_router() -> Router<Arc<Manager>> {
         .merge(crate::session::thread::agent_routes())
         .merge(crate::session::report::agent_routes())
         .merge(crate::session::snippets::agent_routes())
+        .merge(crate::session::team::agent_routes())
         .merge(crate::session::automation::agent_routes())
         .merge(crate::computer_use::agent_routes())
         .merge(crate::gpu::agent_routes())

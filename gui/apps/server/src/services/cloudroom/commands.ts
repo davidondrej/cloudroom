@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, gt, inArray, isNull, max, notInArray, sql } from "drizzle-orm";
 import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, cloudLoginName, cloudLoginProvider, type CloudLoginProvider, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, cloudLoginName, cloudLoginProvider, type CloudLoginProvider, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, serviceTierSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
@@ -17,7 +17,7 @@ import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-displ
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
 import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, teleportProgress, unstartedTurn, unsentDeletes, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, refreshProjectRemote, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyKey, copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, refreshProjectRemote, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -120,7 +120,7 @@ const capabilitiesSchema = z.object({
     provider: z.string().nullable().optional(),
     provider_selection: z.boolean().default(false),
     reasoning_levels: z.array(z.string()).default(["none", "minimal", "low", "medium", "high", "xhigh"]),
-    models: z.array(z.object({ model: z.string(), reasoning_levels: z.array(z.string()) })).nullable().optional(),
+    models: z.array(z.object({ model: z.string(), reasoning_levels: z.array(z.string()), service_tiers: z.array(z.string()).optional() })).nullable().optional(),
     steer: z.boolean().default(false),
     compact: z.boolean().default(false),
     goal: z.boolean().default(false),
@@ -227,8 +227,6 @@ const slowSandbox = (error: unknown) => error instanceof Error && error.message 
 const CUT_SHORT = "The project copy was cut short, so some files may be missing.";
 const COPY_DEADLINE = 9 * 60_000;
 const STALLED = `The project copy did not finish in ${COPY_DEADLINE / 60_000} minutes, so some files may be missing.`;
-/** A project copy's target: one folder per thread sandbox, or one shared folder on a VM. */
-const copyKey = (sandbox: string | null, workspace: string) => sandbox ? `${sandbox}:${workspace}` : workspace;
 
 /** The project folder a thread's first message copies into, if it has one. */
 function copyWorkspace(input: string | undefined): string | null {
@@ -360,7 +358,7 @@ function validateReasoning(harness: string, model: string, reasoning: string, ca
 function followUpPayload(harness: string, saved: Binding, payload: SendMessageRequest, reasoning: string | null, capabilities: Capabilities) {
   const profile = harnessProfile(capabilities, harness);
   if ((payload.mode === "steer" || payload.mode === "steer-if-active") && (!feature(capabilities, "steer") || profile?.steer === false)) throw new ApiError(409, "cloudroom_unsupported", "Cloud steering is not enabled. Use --mode queue.");
-  if (payload.serviceTier === "fast" && !profile?.service_tier) throw new ApiError(409, "cloudroom_launch_settings", "Model is fixed for this cloud session. Start a new thread to change it.");
+  if (!cloudOffersTier(profile, payload.serviceTier, saved.model)) throw new ApiError(409, "cloudroom_launch_settings", "Model is fixed for this cloud session. Start a new thread to change it.");
   if (reasoning !== null) validateFollowUpReasoning(harness, saved, reasoning, capabilities);
   return promptPayload(payload.input, harness, capabilities.attachments && (profile?.attachments ?? true), cloudPromptLimit(capabilities));
 }
@@ -427,6 +425,13 @@ function nativeRewindBefore(db: DbQueryConnection, threadId: string, expectedReq
 function harnessProfile(capabilities: Capabilities, harness: string) {
   const id = isCloudProvider(harness) ? CLOUD_HARNESSES[harness] : harness;
   return capabilities.harnesses.find((item) => item.id === id);
+}
+
+/** Whether Cloud runs `tier` for this model. Ultra Fast needs a Core that lists it on the model; older ones reject it. */
+function cloudOffersTier(profile: ReturnType<typeof harnessProfile>, tier: string | undefined, model: string | undefined): boolean {
+  if (!tier || tier === "default") return true;
+  if (!profile?.service_tier) return false;
+  return tier === "fast" || profile.models?.find((item) => item.model === model)?.service_tiers?.includes(tier) === true;
 }
 
 function commandReasoning(input: string): string | undefined {
@@ -502,7 +507,8 @@ type ConnectionIssue = { message: string; reconnecting: boolean };
 
 const AGENT_FORKS = "cloudroom-agent-forks.json";
 const CHILD_REPORTS = "cloudroom-child-reports.json";
-/** How a child the website started names its first request: `sub_` and a hash (web/lib/cloud-start.ts spawnChild). */
+/** How a child the website started names its first request: `sub_` and a hash (web/lib/cloud-start.ts spawnChild).
+ *  An agent switch or project move keeps the prefix on the new session's request (restartSession). */
 const WEBSITE_CHILD = "sub_";
 const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string() });
 const AGENT_FORK_WAIT = 90_000;
@@ -2129,7 +2135,7 @@ class CloudroomService {
     const reasoning = this.currentReasoning(threadId, saved);
     const transfer = commands(this.deps.db, threadId).find(item => item.command === "teleport");
     const input = latestPrompt ? effectivePrompt(this.deps.db, threadId, latestPrompt.id) : transfer ? JSON.parse(transfer.input).manifest ?? {} : {};
-    const serviceTier = input.service_tier === "fast" ? "fast" : "default";
+    const serviceTier = serviceTierSchema.catch("default").parse(input.service_tier);
     const initial = prompts.find(item => item.id === `first_${threadId}`);
     const issues = Object.values(this.connectionIssues.get(threadId) ?? {});
     return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), launchCap: !this.sandboxes.usageLimited() && this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? ""), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
@@ -2163,7 +2169,7 @@ class CloudroomService {
       }
     }
     const profile = capabilities ? harnessProfile(capabilities, request.providerId) : null;
-    if (capabilities && request.serviceTier === "fast" && !profile?.service_tier) throw new ApiError(400, "cloudroom_unsupported", "Cloud fast service tier is not enabled");
+    if (capabilities && !cloudOffersTier(profile ?? undefined, request.serviceTier, request.model)) throw new ApiError(400, "cloudroom_unsupported", "Cloud does not offer this speed for the model");
     const payload = promptPayload(request.input, request.providerId, capabilities?.attachments === false ? false : profile?.attachments ?? true, cloudPromptLimit(capabilities));
     const model = request.model;
     const piDefault = request.providerId === "pi" && !request.reasoningLevel;
@@ -2477,7 +2483,8 @@ class CloudroomService {
       if (target.providerId === "pi") await this.copyPiSetup(client, Boolean(sandboxThread(saved.coreUrl)));
       continues.value = feature(capabilities, "cloud_threads");
       const record = await prepare(!continues.value);
-      const startRequestId = randomUUID();
+      // A child the website started stays one, so its Core alone reports its turns, as before the switch (#1579).
+      const startRequestId = `${saved.startRequestId?.startsWith(WEBSITE_CHILD) ? WEBSITE_CHILD : ""}${randomUUID()}`;
       const saveSwitch = (session: string) => {
         this.detach(thread.id);
         this.deps.db.transaction((tx) => {
@@ -3064,7 +3071,7 @@ class CloudroomService {
       id: c.id, threadId: saved.threadId, initiator: "user", senderThreadId: null,
       content: Array.isArray(stored.content) ? stored.content : [{ type: "text", text: stored.text ?? "", mentions: [] }],
       model: saved.model, reasoningLevel: commandReasoning(c.input) ?? saved.reasoning, permissionMode: "full",
-      serviceTier: stored.service_tier === "fast" ? "fast" : "default",
+      serviceTier: serviceTierSchema.catch("default").parse(stored.service_tier),
       sendAt: null, waitingOn: null, failureReason: null, payload: { kind: "inline" }, editable: (c.state === "sending" || c.state === "accepted") && capabilities?.queue_edit === true,
       pausedByStop: this.stopHeld(saved), createdAt: c.createdAt, updatedAt: c.createdAt + revision - 1,
     });
@@ -3979,7 +3986,7 @@ class CloudroomService {
       }
       return;
     }
-    const input = z.object({ id: z.string().min(1).max(80), prompt: z.string().min(1), provider: z.string().optional(), model: z.string().optional(), reasoning: z.string().optional(), title: z.string().optional(), service_tier: z.enum(["fast", "default"]).optional() }).parse(record.data);
+    const input = z.object({ id: z.string().min(1).max(80), prompt: z.string().min(1), provider: z.string().optional(), model: z.string().optional(), reasoning: z.string().optional(), title: z.string().optional(), service_tier: serviceTierSchema.optional() }).parse(record.data);
     // One start per request, even when the parent's stream replays it.
     const requestId = `child_${createHash("sha256").update(`${parent.threadId}:${input.id}`).digest("hex").slice(0, 40)}`;
     let child = this.deps.db.select().from(cloudroomThreads).where(eq(cloudroomThreads.startRequestId, requestId)).get()?.threadId ?? null;

@@ -32,11 +32,11 @@ the explicitly requested provider or Codex, then resolves the model marked
 default by that provider on the target machine (falling back to the first
 catalog model when none is marked).
 
-`room-cli provider models acp-cursor --restart` (or `codex`/`pi --restart`) restarts
-that provider's model-discovery process and reloads its models. It preserves
-conversation threads, credentials, and project files. Use it when model loading
-fails, or when the model list looks stale after a CLI upgrade or a Pi
-`models.json` edit; it does not
+`room-cli provider models acp-cursor --restart` (or any `acp-*` provider, `codex`,
+`pi`) restarts that provider's model-discovery process and reloads its models. It
+preserves conversation threads, credentials, and project files. Use it when model
+loading fails, or when the model list looks stale after a CLI upgrade, a Pi
+`models.json` edit, or an `opencode.json` provider change; it does not
 repair login or installation problems. Other providers must explicitly support
 this action.
 

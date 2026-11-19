@@ -515,8 +515,8 @@ impl Repo {
         self.head().map_or_else(|| self.empty_tree(), Ok)
     }
 
-    /// The full ref of a base branch. Remote first: the app compares against what's pushed.
-    fn branch_ref(&self, branch: &str) -> Option<String> {
+    /// The tip of a base branch. Remote first: the app compares against what's pushed.
+    fn branch_tip(&self, branch: &str) -> Option<String> {
         if branch.is_empty() {
             return None;
         }
@@ -529,7 +529,7 @@ impl Repo {
         };
         candidates
             .into_iter()
-            .find(|candidate| self.verify(&format!("{candidate}^{{commit}}")).is_some())
+            .find_map(|candidate| self.verify(&format!("{candidate}^{{commit}}")))
     }
 
     /// origin's HEAD, else main or master, else the first local branch.
@@ -566,7 +566,7 @@ impl Repo {
                 merge_base: None,
             },
             Target::Branch(branch) | Target::All(branch) => {
-                let Some(base) = self.branch_ref(branch) else {
+                let Some(base) = self.branch_tip(branch) else {
                     return fail(MISSING, format!("Branch {branch} was not found."));
                 };
                 let head = self.head();
@@ -956,7 +956,7 @@ fn working_tree(
 
 /// How this branch compares with `branch`: commits only here (patches already there don't count) and their files.
 fn merge_base_status(repo: &Repo, branch: &str, head: Option<&str>) -> Result<Value> {
-    let Some(base) = repo.branch_ref(branch) else {
+    let Some(base) = repo.branch_tip(branch) else {
         return Ok(Value::Null);
     };
     let merge_base = head.and_then(|head| repo.line(&["merge-base", &base, head]));
@@ -979,7 +979,9 @@ fn merge_base_status(repo: &Repo, branch: &str, head: Option<&str>) -> Result<Va
     let format = "--format=%H%x1f%h%x1f%s%x1f%an%x1f%at%x00";
     // The three slow reads (patch IDs on both sides) run at once. Without --cherry-pick support, plain counts.
     let (counts, log, squashed) = thread::scope(|scope| {
-        let squashed = scope.spawn(|| squashed(repo, &merge_base, &base));
+        // Only diverged branches can have a squash on the other side.
+        let squashed = (merge_base != base && head != Some(merge_base.as_str()))
+            .then(|| scope.spawn(|| squashed(repo, &merge_base, &base)));
         let log = scope.spawn(|| {
             let picked = [
                 "log",
@@ -1003,7 +1005,7 @@ fn merge_base_status(repo: &Repo, branch: &str, head: Option<&str>) -> Result<Va
                 &both,
             ])
             .map(|counts| (true, counts));
-        (counts, join(log), join(squashed))
+        (counts, join(log), squashed.is_some_and(join))
     });
     let (pick, counts) = match counts {
         Some(counts) => counts,
@@ -1148,7 +1150,7 @@ fn untracked(repo: &Repo, limit: usize) -> Result<(Repo, HashSet<String>, Vec<St
 fn files(repo: &Repo, target: &Target, max_files: usize) -> Result<Value> {
     let range = repo.range(target)?;
     let (repo, small, large, more) = if target.working_tree() {
-        untracked(repo, max_files + 1)?
+        untracked(repo, max_files.saturating_add(1))?
     } else {
         (repo.clone(), HashSet::new(), Vec::new(), false)
     };
@@ -1293,6 +1295,9 @@ fn diff(
     let (added, removed) = totals(counts.values());
     let mut files = utf8(list.stdout, list.cut);
     for path in &large {
+        if list.cut || path.len() + 3 > max_list.saturating_sub(files.len()) {
+            break;
+        }
         files += &format!("A\t{path}\n");
     }
     Ok(json!({

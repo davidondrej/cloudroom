@@ -345,8 +345,12 @@ impl Manager {
         if let Err(error) = self.harness_ready(check.harness).await {
             return fail("login_required", error.message(), None);
         }
-        if check.service_tier.as_deref() == Some("fast") && !check.harness.fast() {
-            let error = format!("Cloud {harness} has no Fast mode; turn Fast off, then Teleport");
+        if let Some(tier @ ("fast" | "ultrafast")) = check.service_tier.as_deref()
+            && !check.harness.tier(tier)
+        {
+            let name = if tier == "fast" { "Fast" } else { "Ultra Fast" };
+            let error =
+                format!("Cloud {harness} has no {name} mode; turn {name} off, then Teleport");
             return fail("setting_unavailable", error, None);
         }
         let reasoning = check.reasoning.as_deref();
@@ -469,7 +473,7 @@ impl Manager {
                 }
             }
             if let Some(tier) = input["service_tier"].as_str()
-                && (tier != "default" && !(tier == "fast" && manifest.harness.fast()))
+                && !manifest.harness.tier(tier)
             {
                 return Err(Error::Conflict("invalid service tier"));
             }

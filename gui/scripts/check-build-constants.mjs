@@ -3,8 +3,8 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-const files = execFileSync("git", ["ls-files", "*.ts", "*.tsx", "*.mts", "*.mjs", "*.js", "*.cjs"], { encoding: "utf8" })
-  .split("\n").filter((f) => f && !/(^|\/)(dist|node_modules)\/|\.(test|spec)\.|\/__tests__\//.test(f));
+const files = execFileSync("git", ["ls-files", "-z", "*.ts", "*.tsx", "*.mts", "*.mjs", "*.js", "*.cjs"], { encoding: "utf8" })
+  .split("\0").filter((f) => f && !/(^|\/)(dist|node_modules)\/|\.(test|spec)\.|\/__tests__\//.test(f));
 const declared = new Map();
 const defined = new Map();
 for (const file of files) {

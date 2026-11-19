@@ -363,6 +363,7 @@ pub(super) fn model_catalog(value: &Value) -> io::Result<Vec<super::Model>> {
                 models.push(super::Model {
                     model: name.into(),
                     reasoning_levels: levels.clone(),
+                    service_tiers: Vec::new(),
                 });
             }
         }

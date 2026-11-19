@@ -24,7 +24,6 @@ const HOST_DEPENDENCIES = [
   "fs-native-extensions",
   "node-pty",
   "pino",
-  "pino-pretty",
   "pino-roll",
 ] as const;
 const HOST_DAEMON_FILES = [

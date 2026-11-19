@@ -35,7 +35,6 @@ const packageJson = {
     "fs-native-extensions": "1.5.0",
     "node-pty": "1.2.0-beta.15",
     pino: "9.6.0",
-    "pino-pretty": "13.0.0",
     "pino-roll": "4.0.0",
   },
   bin: {
@@ -347,7 +346,6 @@ describe.each(MODES)("bb-app artifact service (%s)", (mode) => {
         "fs-native-extensions",
         "node-pty",
         "pino",
-        "pino-pretty",
         "pino-roll",
       ]);
       expect(artifact.digest).toMatch(/^[a-f0-9]{64}$/u);

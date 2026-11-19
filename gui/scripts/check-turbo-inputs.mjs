@@ -6,7 +6,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { posix as path } from "node:path";
 
-const tracked = new Set(execFileSync("git", ["ls-files", "--", ".", "../core"], { encoding: "utf8", maxBuffer: 1 << 28 }).split("\n"));
+const tracked = new Set(execFileSync("git", ["ls-files", "-z", "--", ".", "../core"], { encoding: "utf8", maxBuffer: 1 << 28 }).split("\0").filter(Boolean));
 const packages = new Map(); // folder -> { name, deps }
 for (const file of tracked) {
   if (!file.endsWith("/package.json")) continue;

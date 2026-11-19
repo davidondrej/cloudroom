@@ -1,5 +1,4 @@
 import { useState, type ComponentProps, type ReactNode } from "react";
-import { useSidebarOverlayInset } from "@/components/ui/sidebar.js";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { COARSE_POINTER_HEADER_ICON_BUTTON_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
@@ -82,9 +81,6 @@ export function RootComposeSecondaryContent({
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const rendersWindowDragStrip =
     usesDesktopChrome && paneContext?.isTopRow !== false;
-  // Keep the drag strip off the floating sidebar card, so the card's buttons
-  // stay clickable (Electron picks drag regions by page order, not paint order).
-  const sidebarOverlayInset = useSidebarOverlayInset();
   const { renderBrowserDeck, ...threadSecondaryPanelProps } = secondaryPanel;
   const isCompactViewport = useIsCompactViewport();
   const usesCompactHomeLayout =
@@ -104,9 +100,6 @@ export function RootComposeSecondaryContent({
             CHROME_ROW_HEIGHT_CLASS,
             MACOS_WINDOW_DRAG_CLASS,
           )}
-          style={
-            sidebarOverlayInset ? { left: sidebarOverlayInset } : undefined
-          }
         >
           {!isSecondaryPanelOpen && secondaryPanelHost === null ? (
             <div

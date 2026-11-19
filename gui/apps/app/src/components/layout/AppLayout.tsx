@@ -1,12 +1,9 @@
-import { type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefObject,
 } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { atom, useAtom, useAtomValue, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
@@ -21,7 +18,6 @@ import {
   SidebarTrigger,
   useCloseMobileSidebar,
   useIsSidebarShowing,
-  useSidebarOverlayInset,
 } from "@/components/ui/sidebar.js";
 import { SidebarHistoryNavigationControls } from "@/components/sidebar/SidebarHistoryNavigationControls";
 import {
@@ -86,8 +82,7 @@ import {
   getRoomDesktopInfo,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
-  MACOS_WINDOW_CONTROLS_WIDTH,
-  readMacosDesktopZoom,
+  MACOS_SIDEBAR_MIN_WIDTH,
   MACOS_UNZOOMED_CHROME_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
   MACOS_WINDOW_NO_DRAG_CLASS,
@@ -123,7 +118,10 @@ import {
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
-import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
+import {
+  getMediaQuerySnapshot,
+  REDUCED_MOTION_QUERY,
+} from "@cloudroom/shared-ui/hooks/use-media-query";
 import {
   isFirefoxAndroid,
   shouldRestoreIOSViewportOnKeyboardDismissal,
@@ -142,17 +140,6 @@ const SIDEBAR_OPEN_KEY = "bb.sidebar.open";
 const SIDEBAR_MIN_WIDTH = 200;
 const SIDEBAR_MAX_WIDTH = 460;
 const SIDEBAR_DEFAULT_WIDTH = 320;
-// The sidebar floats over the chat's empty left gutter only while the centered
-// chat column still clears it with this much air.
-const CHAT_COLUMN_WIDTH = 760;
-const SIDEBAR_OVERLAY_GUTTER = 16;
-// The floating card is this much narrower than its slot (8px inset each side, less 2px).
-const SIDEBAR_CARD_INSET = 14;
-
-function subscribeWindowResize(notify: () => void) {
-  window.addEventListener("resize", notify);
-  return () => window.removeEventListener("resize", notify);
-}
 
 function clampSidebarWidth(value: number) {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, value));
@@ -188,71 +175,60 @@ const sidebarOpenAtom = atomWithStorage<boolean>(
 
 interface SidebarStateBridgeProps {
   children: ReactNode;
-  reserveMacosTrafficLights: boolean;
-  isChatRoute: boolean;
+  minWidth?: string;
+  mainRef: RefObject<HTMLElement | null>;
 }
 
 type SidebarResizeMouseEvent = ReactMouseEvent<HTMLDivElement>;
 type SidebarOpenChangeHandler = (open: boolean) => void;
 
+// Opening or closing the sidebar re-centers the page in the free space. The
+// layout snaps once (animating it re-wrapped every chat on every frame), then
+// the page slides from its old center to the new one, in step with the card.
+function slideWithSidebar(main: HTMLElement | null, change: () => void) {
+  const before = main?.getBoundingClientRect();
+  change();
+  if (!main || !before || getMediaQuerySnapshot(REDUCED_MOTION_QUERY)) return;
+  const after = main.getBoundingClientRect();
+  const dx = before.left + before.width / 2 - (after.left + after.width / 2);
+  if (Math.abs(dx) < 1) return;
+  main.animate([{ translate: `${dx}px 0` }, { translate: "0 0" }], {
+    duration: 220,
+    easing: "cubic-bezier(0.32,0.72,0,1)",
+  });
+}
+
 function SidebarStateBridge({
   children,
-  reserveMacosTrafficLights,
-  isChatRoute,
+  minWidth,
+  mainRef,
 }: SidebarStateBridgeProps) {
   const [open, setOpen] = useAtom(sidebarOpenAtom);
   const sidebarWidth = useAtomValue(sidebarWidthAtom);
   const sidebarLiveWidth = useAtomValue(sidebarLiveWidthAtom);
   const handleOpenChange = useCallback<SidebarOpenChangeHandler>(
     (nextOpen) => {
-      setOpen(nextOpen);
+      slideWithSidebar(mainRef.current, () =>
+        flushSync(() => setOpen(nextOpen)),
+      );
       window.requestAnimationFrame(dispatchBrowserViewBoundsSync);
     },
-    [setOpen],
+    [mainRef, setOpen],
   );
   useAppCommandHandler("sidebar.toggle", () => {
     handleOpenChange(!open);
     return true;
   });
-  const zoom = useSyncExternalStore(
-    subscribeWindowResize,
-    readMacosDesktopZoom,
-    () => 1,
-  );
-  // The real slot width: on macOS the window controls capsule must fit on the card.
-  const widthPx = Math.max(
-    sidebarLiveWidth ?? sidebarWidth,
-    reserveMacosTrafficLights
-      ? MACOS_WINDOW_CONTROLS_WIDTH / zoom + SIDEBAR_CARD_INSET
-      : 0,
-  );
-  const overlayFits = useMediaQuery(
-    `(min-width: ${CHAT_COLUMN_WIDTH + 2 * (widthPx + SIDEBAR_OVERLAY_GUTTER)}px)`,
-  );
+  const width = `${sidebarLiveWidth ?? sidebarWidth}px`;
   return (
     <SidebarProvider
-      width={`${widthPx}px`}
-      overlay={isChatRoute && overlayFits}
+      width={minWidth ? `max(${width}, ${minWidth})` : width}
       data-testid="app-layout-root"
       open={open}
       onOpenChange={handleOpenChange}
     >
       {children}
     </SidebarProvider>
-  );
-}
-
-// In overlay mode the chat area runs under the floating sidebar instead of
-// being pushed by it. Headers and banners stay pushed.
-function AppMain({ children }: { children: ReactNode }) {
-  const inset = useSidebarOverlayInset();
-  return (
-    <main
-      className="bb-zoom flex min-h-0 flex-1 flex-col p-4 md:p-5"
-      style={inset ? { marginLeft: `calc(${inset} * -1)` } : undefined}
-    >
-      {children}
-    </main>
   );
 }
 
@@ -620,6 +596,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const hasThreadDetailBootstrapSettled =
     threadDetailBootstrapQuery.isSuccess || threadDetailBootstrapQuery.isError;
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
   const liveWidthRef = useRef(0);
@@ -867,8 +844,13 @@ export function AppLayout({ children }: AppLayoutProps) {
         <ThreadTitleMentionResourcesProvider {...titleMentionResources}>
           <ThreadActionsProvider>
             <SidebarStateBridge
-              reserveMacosTrafficLights={reserveMacosTrafficLights}
-              isChatRoute={isThreadView || isRootView}
+              // The floating card is 14px narrower than its slot; keep the window capsule on it.
+              minWidth={
+                reserveMacosTrafficLights
+                  ? `calc(${MACOS_SIDEBAR_MIN_WIDTH} + 14px)`
+                  : undefined
+              }
+              mainRef={mainRef}
             >
               {backToAppRoutePath !== null && !isSidebarResizing ? (
                 <BackToAppCommandHandler routePath={backToAppRoutePath} />
@@ -910,7 +892,12 @@ export function AppLayout({ children }: AppLayoutProps) {
                     }
                   />
                   <ProviderLoginListener />
-                  <AppMain>{children}</AppMain>
+                  <main
+                    ref={mainRef}
+                    className="flex min-h-0 flex-1 flex-col p-4 md:p-5"
+                  >
+                    {children}
+                  </main>
                 </div>
               </SidebarInset>
               <SidebarTriggerOverlay

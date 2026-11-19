@@ -273,8 +273,8 @@ export default async function plugin(room: BbPluginApi) {
   const noteThreadAccount = (threadId: string | undefined, provider: Provider, id: string) => {
     if (threadId !== undefined) threadAccount.set(threadId, { id, key: limitKey(provider, id) });
   };
-  // A message that joins a running turn asks for the env again, but that turn keeps the Claude it began on until it
-  // ends. Only a new turn notes its thread, so a late limit stays the old account's (#1300).
+  // A message that joins a running turn asks for the env again, but that turn keeps the Claude, Codex or Cursor it
+  // began on until it ends. Only a new turn notes its thread, so a late limit stays the old account's (#1300).
   const newTurn = async (threadId: string | undefined) => {
     try {
       if (
@@ -1449,7 +1449,7 @@ export default async function plugin(room: BbPluginApi) {
     "acp-cursor",
     async (context: { threadId?: string }) => {
       const id = current("acp-cursor");
-      noteThreadAccount(context.threadId, "acp-cursor", id);
+      noteThreadAccount(await newTurn(context.threadId), "acp-cursor", id);
       const account = accounts.find((entry) => entry.id === id);
       const key = account ? await readCursorKey(account).catch(() => null) : null;
       if (!account || !key) return [];
@@ -1584,7 +1584,9 @@ export default async function plugin(room: BbPluginApi) {
   room.providers.experimental_contributeEnv(
     "codex",
     async (context: { threadId?: string }) => {
-      noteThreadAccount(context.threadId, "codex", codexInUse);
+      // Read the account before the await, so a switch during it can't note the new one for this turn.
+      const id = codexInUse;
+      noteThreadAccount(await newTurn(context.threadId), "codex", id);
       return [];
     },
   );

@@ -52,9 +52,21 @@ pub(super) async fn models(handle: &Handle) -> io::Result<Vec<super::Model>> {
                         .ok_or_else(|| io::Error::other("invalid reasoning level"))
                 })
                 .collect::<io::Result<Vec<_>>>()?;
+            // Codex calls Fast "priority".
+            let service_tiers = entry["serviceTiers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tier| match tier["id"].as_str()? {
+                    "priority" => Some("fast".to_owned()),
+                    "ultrafast" => Some("ultrafast".to_owned()),
+                    _ => None,
+                })
+                .collect();
             models.push(super::Model {
                 model: model.into(),
                 reasoning_levels,
+                service_tiers,
             });
         }
         let next = page["nextCursor"].clone();
@@ -179,6 +191,7 @@ fn prompt_items(input: &Value) -> Vec<Value> {
 fn service_tier_for_turn(input: &Value) -> &'static str {
     match input["service_tier"].as_str() {
         Some("fast") => "fast",
+        Some("ultrafast") => "ultrafast",
         _ => "default",
     }
 }

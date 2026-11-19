@@ -161,10 +161,10 @@ async function reportCrashes(dataDir: string): Promise<void> {
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; attempt?: number; version: string; at: number }[];
+  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; attempt?: number; cause?: string; version: string; at: number }[];
   for (const crash of crashes) {
     capture("app_crash", () => ({
-      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version, attempt: crash.attempt ?? null,
+      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version, attempt: crash.attempt ?? null, cause: crash.cause ?? null,
       minutes_ago: Math.round((Date.now() - crash.at) / 60_000),
       // The newest 8,000 characters: the events endpoint drops an event whose properties pass 16 KB as JSON.
       logs: crash.logs?.split("\n").map(line => scrub(line)).filter(Boolean).join("\n").slice(-8_000) || null,

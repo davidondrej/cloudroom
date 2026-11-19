@@ -30,11 +30,12 @@ export function SettingsTab() {
         <Repos org={org} busy={busy} change={change} />
       </div>
       <Permissions org={org} busy={busy} change={change} />
+      {org.board && <Access org={org} busy={busy} change={change} />}
       <Prompts org={org} busy={busy} change={change} />
       <div className="grid gap-4 md:grid-cols-2">
         <Editor title="Your sharing rule" wrap value={org.sharing} max={2000} busy={busy} save={(text) => change({ action: "sharing", text })}
           placeholder="Leave it empty to use the default rule." />
-        <SharingNote />
+        <SharingNote org={org} />
       </div>
       <Leave name={org.name} busy={busy} leave={() => void change({ action: "leave" })} />
       {shown}
@@ -205,6 +206,52 @@ function Permissions({ org, busy, change }: { org: Org; busy: boolean; change: C
   );
 }
 
+// Whose threads each person, and their agents, see (ADR 20261118-201443): everyone, or picked teammates. On top of
+// "What members see". Admins edit; the website enforces it. Matches /org on the website.
+function Access({ org, busy, change }: { org: Org; busy: boolean; change: Change }) {
+  const admin = org.role === "admin", people = org.members.filter((member) => member.joined);
+  const name = (email: string) => email.split("@")[0] ?? email;
+  const set = (email: string, sees: string[] | null) => void change({ action: "access", email, sees });
+  return (
+    <Section title="Who sees whom">
+      <ul className="divide-y divide-border">{people.map((person) => {
+        const others = people.filter((other) => other.email !== person.email), picked = person.sees;
+        return (
+          <li key={person.email} className="space-y-2 px-4 py-2.5">
+            <div className="flex items-center justify-between gap-4">
+              <span className="min-w-0 truncate text-sm">{person.email}{person.role === "admin" && <span className="text-xs text-primary"> admin</span>}</span>
+              <div role="radiogroup" aria-label={`Whose threads ${person.email} sees`} className="flex shrink-0 rounded-full border border-border p-0.5">
+                {([["everyone", "Everyone"], ["pick", "Pick people"]] as const).map(([id, text]) => {
+                  const on = id === (picked === null ? "everyone" : "pick");
+                  return (
+                    <button key={id} type="button" role="radio" aria-checked={on} disabled={!admin || busy} onClick={() => !on && set(person.email, id === "everyone" ? null : [])}
+                      className={`rounded-full px-3 py-1 text-xs ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground enabled:hover:text-foreground"}`}>{text}</button>
+                  );
+                })}
+              </div>
+            </div>
+            {picked !== null && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {others.map((other) => {
+                  const on = picked.includes(other.email);
+                  return (
+                    <button key={other.email} type="button" aria-pressed={on} disabled={!admin || busy} title={other.email}
+                      onClick={() => set(person.email, on ? picked.filter((email) => email !== other.email) : [...picked, other.email])}
+                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${on ? "border-primary/40 bg-primary/15 text-primary" : "border-dashed border-border text-muted-foreground enabled:hover:text-foreground"}`}>
+                      <Icon name={on ? "Check" : "Plus"} className="size-3" />{name(other.email)}
+                    </button>
+                  );
+                })}
+                {!picked.length && <span className="text-xs text-muted-foreground">Sees nobody's threads.</span>}
+              </div>
+            )}
+          </li>
+        );
+      })}</ul>
+    </Section>
+  );
+}
+
 function Prompts({ org, busy, change }: { org: Org; busy: boolean; change: Change }) {
   const global = <Editor title="Global system prompt" value={org.instructions} placeholder={"Use pnpm. Never push to main.\nRun the tests before opening a PR."} max={4000} busy={busy}
     readOnly={!org.canEditRules} save={(text) => change({ action: "instructions", text })} />;
@@ -225,7 +272,7 @@ function RepoName({ repo }: { repo: string }) {
   return <span className="flex items-center gap-1.5"><Icon name="Github" className="size-3.5" /><span><span className="text-muted-foreground">{owner}/</span>{name}</span></span>;
 }
 
-function SharingNote() {
+function SharingNote({ org }: { org: Org }) {
   const mark = "bg-[linear-gradient(transparent_45%,color-mix(in_srgb,var(--primary)_85%,transparent)_45%)] px-0.5 text-inherit";
   return (
     <div className="flex flex-col pt-9">
@@ -237,7 +284,7 @@ function SharingNote() {
           <li>Start a Cloud thread in a team repo. <mark className={mark}>Jev</mark> reads its first messages.</li>
           <li>Jev <mark className={mark}>shares it</mark> with your team, or keeps it private.</li>
         </ol>
-        <p className="mt-3.5 text-xs text-[#5a5a5a]">The lock button always wins. Local threads are never shared.</p>
+        <p className="mt-3.5 text-xs text-[#5a5a5a]">The lock button always wins. {org.board ? "Local threads share only their title, status, and purpose." : "Local threads are never shared."}</p>
       </aside>
     </div>
   );

@@ -386,7 +386,7 @@ async function runWhileFollowUpShortcutSending(
 }
 
 import { showCloudSignIn, useCloudLocked } from "@/hooks/useCloudLocked";
-import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudServiceTierSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
@@ -698,7 +698,7 @@ export function ThreadDetailPromptArea({
     selectedProviderComposerActions,
     selectedModel,
     setSelectedModel,
-    serviceTier,
+    serviceTier: selectedServiceTier,
     setServiceTier,
     reasoningLevel,
     permissionMode,
@@ -714,6 +714,7 @@ export function ThreadDetailPromptArea({
     permissionModeOptions,
     supportsPermissionModeSelection,
     supportsServiceTier,
+    supportsUltraFast,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     executionInputSources,
@@ -741,6 +742,9 @@ export function ThreadDetailPromptArea({
     }).sort((a, b) => reasoningLevelSchema.options.indexOf(a.value) - reasoningLevelSchema.options.indexOf(b.value));
   }, [cloudConnection.data, cloudReasoning, cloudState.data?.model, thread.providerId]);
   const cloudFastSupported = isCloud && cloudServiceTierSupported(cloudConnection.data, pendingSwitch?.providerId ?? thread.providerId);
+  // Cloud runs Ultra Fast only when its Core lists it for the model; otherwise the turn runs at standard speed.
+  const ultraFast = supportsUltraFast && (!isCloud || cloudUltraFastSupported(cloudConnection.data, pendingSwitch?.providerId ?? thread.providerId, cloudModel));
+  const serviceTier = selectedServiceTier === "ultrafast" && !ultraFast ? "default" : selectedServiceTier;
   const cloudProviderOptions = useMemo(() => providerOptions.filter((option) => cloudCanRunHarness(option.value)), [providerOptions]);
   const cloudSteerSupported = isCloud && cloudFeatureSupported(cloudConnection.data, thread.providerId, "steer");
   const fallbackIdentity = modelFallback
@@ -1668,6 +1672,7 @@ export function ThreadDetailPromptArea({
         supported: supportsServiceTier,
         supportByProvider: serviceTierSupportByProvider,
         fastLabel: serviceTierFastLabel,
+        ultraFast,
       },
       reasoning: {
         value: followUpReasoningLevel,
@@ -1698,6 +1703,7 @@ export function ThreadDetailPromptArea({
       selectedModel,
       selectedProviderId,
       serviceTier,
+      ultraFast,
       serviceTierSupportByProvider,
       setServiceTier,
       supportsServiceTier,

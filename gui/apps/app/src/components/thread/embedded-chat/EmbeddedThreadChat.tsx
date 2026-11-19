@@ -318,6 +318,7 @@ function EmbeddedThreadChatWithComposer({
     permissionModeOptions,
     supportsPermissionModeSelection,
     supportsServiceTier,
+    supportsUltraFast,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     isLoadingModels,
@@ -959,6 +960,7 @@ function EmbeddedThreadChatWithComposer({
         supported: supportsServiceTier,
         supportByProvider: serviceTierSupportByProvider,
         fastLabel: serviceTierFastLabel,
+        ultraFast: supportsUltraFast,
       },
       reasoning: {
         value: reasoningLevel,
@@ -989,6 +991,7 @@ function EmbeddedThreadChatWithComposer({
       pendingModel,
       setServiceTier,
       supportsServiceTier,
+      supportsUltraFast,
       serviceTierFastLabel,
     ],
   );
@@ -1008,6 +1011,7 @@ function EmbeddedThreadChatWithComposer({
               supported: supportsServiceTier,
               supportByProvider: serviceTierSupportByProvider,
               fastLabel: serviceTierFastLabel,
+              ultraFast: supportsUltraFast,
             },
             reasoning: {
               ...bottomExecutionConfig.reasoning,
@@ -1021,6 +1025,7 @@ function EmbeddedThreadChatWithComposer({
       serviceTierSupportByProvider,
       setServiceTier,
       supportsServiceTier,
+      supportsUltraFast,
       serviceTierFastLabel,
     ],
   );

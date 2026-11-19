@@ -12,7 +12,7 @@ import type {
   SystemExecutionOptionsModelLoadError,
   SystemProvidersQuery,
 } from "@cloudroom/server-contract";
-import type { ReasoningLevel } from "@cloudroom/domain";
+import type { ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
 import { useInRouterContext, useNavigate } from "react-router-dom";
@@ -41,7 +41,7 @@ import {
   PopoverTrigger,
 } from "@cloudroom/shared-ui/popover";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
-import { Switch } from "@cloudroom/shared-ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@cloudroom/shared-ui/toggle-group";
 import {
   Tooltip,
   TooltipContent,
@@ -217,9 +217,11 @@ interface ModelReasoningPickerProps {
   reasoningValue: ReasoningLevel;
   reasoningOptions: readonly PickerOption<ReasoningLevel>[];
   onReasoningChange: (value: ReasoningLevel) => void;
-  fastModeEnabled: boolean;
-  onFastModeChange: (enabled: boolean) => void;
-  showFastModeToggle: boolean;
+  serviceTier: ServiceTier | undefined;
+  onServiceTierChange: (tier: ServiceTier) => void;
+  showServiceTiers: boolean;
+  /** The selected model also offers Ultra Fast. */
+  showUltraFast?: boolean;
   commandShortcutsEnabled?: boolean;
   serviceTierSupportByProvider?: Record<string, boolean>;
   className?: string;
@@ -255,9 +257,10 @@ export function ModelReasoningPicker({
   reasoningValue,
   reasoningOptions: allReasoningOptions,
   onReasoningChange,
-  fastModeEnabled,
-  onFastModeChange,
-  showFastModeToggle,
+  serviceTier,
+  onServiceTierChange,
+  showServiceTiers,
+  showUltraFast = false,
   commandShortcutsEnabled = true,
   serviceTierSupportByProvider,
   className,
@@ -573,8 +576,8 @@ export function ModelReasoningPicker({
   const highlightedIndex =
     activeIndex >= 0 && activeIndex < navRows.length ? activeIndex : -1;
 
-  const effectiveShowFastModeToggle =
-    showFastModeToggle &&
+  const effectiveShowServiceTiers =
+    showServiceTiers &&
     !isPreviewing &&
     hasActiveModelOptions &&
     (!serviceTierSupportByProvider ||
@@ -582,9 +585,23 @@ export function ModelReasoningPicker({
   const effectiveFastModeLabel = isPreviewing
     ? fastServiceTierLabel(previewProvider)
     : (fastModeLabel ?? "Fast");
-  const fastModeText = `${effectiveFastModeLabel} mode`;
-  const showSelectedFastMode =
-    hasSelectedModel && fastModeEnabled && modelOptions.length > 0;
+  // An Ultra Fast choice the selected model lacks runs, and shows, as standard.
+  const activeTier: ServiceTier =
+    serviceTier === "fast" || (serviceTier === "ultrafast" && showUltraFast)
+      ? serviceTier
+      : "default";
+  // One bolt per step above standard, here and on the trigger.
+  const speedTiers: { id: ServiceTier; label: string; bolts: number }[] = [
+    { id: "default", label: "Standard", bolts: 0 },
+    { id: "fast", label: effectiveFastModeLabel, bolts: 1 },
+    ...(showUltraFast
+      ? [{ id: "ultrafast" as const, label: "Ultra Fast", bolts: 2 }]
+      : []),
+  ];
+  const selectedSpeedTier =
+    hasSelectedModel && modelOptions.length > 0 && activeTier !== "default"
+      ? speedTiers.find((tier) => tier.id === activeTier)
+      : undefined;
 
   const resetBrowseState = useCallback(() => {
     setPreviewProviderId(null);
@@ -872,7 +889,7 @@ export function ModelReasoningPicker({
       : triggerModelLabel;
   const triggerTitle = [
     `${selectedProviderLabel}: ${triggerTitleModelLabel}`,
-    showSelectedFastMode ? " (Fast mode)" : "",
+    selectedSpeedTier ? ` (${selectedSpeedTier.label} mode)` : "",
   ].join("");
   const halfClassName = cn(
     OPTION_BASE_CLASS_NAME,
@@ -939,10 +956,10 @@ export function ModelReasoningPicker({
               className="h-3 w-8 shrink-0 rounded-sm"
             />
           </>
-        ) : showSelectedFastMode ? (
-          <Icon
-            name="Zap"
-            className="size-3.5 shrink-0 fill-current text-subtle-foreground"
+        ) : selectedSpeedTier ? (
+          <SpeedBolts
+            count={selectedSpeedTier.bolts}
+            className="size-3.5 text-subtle-foreground"
           />
         ) : TriggerIcon ? (
           <TriggerIcon className="size-4 shrink-0" />
@@ -1262,46 +1279,36 @@ export function ModelReasoningPicker({
                   </div>
                 )}
 
-                {effectiveShowFastModeToggle ? (
-                  isCompactViewport ? (
-                    <>
-                      <div className="shrink-0 border-t border-foreground/10" />
-                      <div className="shrink-0 p-1">
-                        <label className="flex min-h-6 cursor-pointer items-center justify-between gap-3 rounded-sm px-2 text-xs text-muted-foreground">
-                          <span className="flex min-w-0 items-center gap-2">
-                            <Icon
-                              name="Zap"
-                              className="size-3.5 fill-current text-muted-foreground"
-                            />
-                            <span>{fastModeText}</span>
-                          </span>
-                          <Switch
-                            checked={fastModeEnabled}
-                            onCheckedChange={onFastModeChange}
-                            aria-label={fastModeText}
+                {effectiveShowServiceTiers ? (
+                  <>
+                    <div className="h-px shrink-0 bg-foreground/[0.07]" />
+                    <div className="shrink-0 p-1.5">
+                      <ToggleGroup
+                        type="single"
+                        aria-label="Speed"
+                        value={activeTier}
+                        onValueChange={(next) => {
+                          if (next !== "") onServiceTierChange(next as ServiceTier);
+                        }}
+                        className="w-full gap-0.5 rounded-md bg-foreground/5 p-0.5"
+                      >
+                        {speedTiers.map((tier) => (
+                          <ToggleGroupItem
+                            key={tier.id}
+                            value={tier.id}
                             className={cn(
                               LIST_HOVER_TRANSITION,
-                              "focus-visible:ring-foreground/50 data-[state=unchecked]:bg-foreground/15 data-[state=checked]:border-transparent data-[state=checked]:bg-foreground/60 [&>span]:size-3.5 [&>span]:bg-background",
+                              "min-w-0 grow gap-1 rounded-sm px-2 text-xs font-normal text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-background data-[state=on]:font-medium data-[state=on]:text-foreground data-[state=on]:shadow-message dark:data-[state=on]:bg-surface-recessed",
+                              isCompactViewport ? "h-9" : "h-7",
                             )}
-                          />
-                        </label>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="h-px shrink-0 bg-foreground/[0.07]" />
-                      <label className="flex h-9 shrink-0 cursor-pointer items-center gap-2 px-3 text-xs text-muted-foreground">
-                        <Icon name="Zap" className="size-3.5 fill-current" />
-                        <span className="mr-auto">{fastModeText}</span>
-                        <Switch
-                          checked={fastModeEnabled}
-                          onCheckedChange={onFastModeChange}
-                          aria-label={fastModeText}
-                          className={cn(LIST_HOVER_TRANSITION, "[&>span]:size-3.5")}
-                        />
-                      </label>
-                    </>
-                  )
+                          >
+                            <SpeedBolts count={tier.bolts} className="size-3" />
+                            <span className="truncate">{tier.label}</span>
+                          </ToggleGroupItem>
+                        ))}
+                      </ToggleGroup>
+                    </div>
+                  </>
                 ) : null}
               </div>
             </MenuHoverProvider>
@@ -1309,6 +1316,22 @@ export function ModelReasoningPicker({
         </div>
       </PopoverContent>
     </Popover>,
+  );
+}
+
+/** One bolt for Fast, two for Ultra Fast. */
+function SpeedBolts({ count, className }: { count: number; className: string }) {
+  if (count === 0) return null;
+  return (
+    <span className="flex shrink-0 items-center -space-x-1.5">
+      {Array.from({ length: count }, (_, index) => (
+        <Icon
+          key={index}
+          name="Zap"
+          className={cn("shrink-0 fill-current", className)}
+        />
+      ))}
+    </span>
   );
 }
 

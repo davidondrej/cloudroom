@@ -31,6 +31,8 @@ export const availableModelSchema = z.object({
   supportedReasoningEfforts: z.array(modelReasoningEffortSchema),
   defaultReasoningEffort: reasoningLevelSchema,
   isDefault: z.boolean(),
+  /** Speeds this model offers beside the standard one. Missing: not known. */
+  serviceTiers: z.array(serviceTierSchema).optional(),
 });
 export type AvailableModel = z.infer<typeof availableModelSchema>;
 

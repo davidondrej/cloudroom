@@ -19,12 +19,12 @@ import {
 } from "../../ws/hub.js";
 import { ensureHostSessionReadyForWork } from "./host-lifecycle.js";
 import { inactiveHostUnavailableDetails } from "../lib/lifecycle-api-errors.js";
-import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../constants.js";
+import { DAEMON_SETUP_DISCONNECT_GRACE_MS } from "../../constants.js";
 
 const HOST_DAEMON_REGISTRATION_WAIT_MS = 1_000;
-// A Local thread start rides out a daemon or relay blip as long as running
-// work does, instead of failing with "Host is not connected" (#879).
-const THREAD_START_HOST_WAIT_MS = DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS;
+// A Local thread start rides out a daemon or relay blip instead of failing
+// with "Host is not connected" (#879).
+const THREAD_START_HOST_WAIT_MS = DAEMON_SETUP_DISCONNECT_GRACE_MS;
 export const HOST_CONNECTION_INTERRUPTED = "host_connection_interrupted";
 
 interface CallHostOnlineRpcArgs<TCommand extends HostDaemonRpcCommand> {

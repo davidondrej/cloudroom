@@ -1616,6 +1616,14 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
     teleports(harness.deps).recover();
     expect(await phase()).toBe("cancelled");
 
+    // Saved state that is gone pauses the transfer for good instead of crashing the server (#2046).
+    const gone = { id: "missing", owner: thread.id, completed: 0, total: 0 };
+    saveTeleportProgress(harness.db, thread.id, { ...gone, phase: "stopping" });
+    teleports(harness.deps).recover();
+    await vi.waitFor(async () => expect(await phase()).toBe("error"));
+    teleports(harness.deps).abandon(thread.id);
+    expect(await phase()).toBe("cancelled");
+
     const stopped = api(`/cloudroom/threads/${thread.id}/teleport`, { action: "start" });
     await vi.waitFor(() => expect(heldChecks).toHaveLength(2));
     teleports(harness.deps).abandon(thread.id);

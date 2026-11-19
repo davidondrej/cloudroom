@@ -12,6 +12,7 @@ Commands:
   mac           Run commands and copy files on the user's computer
   secret        Ask the user for API keys
   snippets      Manage synced personal and Organization snippets
+  team          Read and fork your teammates' threads
   files         Wait for the project's files
   preview       Show a web app through the user's browser
   computer-use  Control this sandbox's screen
@@ -189,6 +190,15 @@ async fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     if args.first().map(String::as_str) == Some("computer-use") {
         match cloudroom::computer_use::cli(&args[1..]).await {
+            Ok(code) => std::process::exit(code),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.first().map(String::as_str) == Some("team") {
+        match cloudroom::session::team::cli(&args[1..]).await {
             Ok(code) => std::process::exit(code),
             Err(error) => {
                 eprintln!("{error}");

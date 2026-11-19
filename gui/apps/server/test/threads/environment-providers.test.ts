@@ -572,12 +572,14 @@ describe("machine and environment provider composition", () => {
       );
 
       release.resolve();
+      // The machine never connected, so its removal retires the environment.
       await expect
         .poll(() => getPreparingEnvironment(harness.db, thread.id))
         .toMatchObject({
-          status: "error",
+          status: "destroyed",
           statusMessage: "Cloud quota exceeded",
         });
+      expect(getThread(harness.db, thread.id)?.status).toBe("error");
     });
   });
 });

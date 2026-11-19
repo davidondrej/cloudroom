@@ -150,6 +150,8 @@ def codex():
                     continue
                 if text != "reply-first":
                     send(reply)
+                if text == "hold-turn":
+                    continue
                 if text == "hold":
                     job = f"from pathlib import Path; import time\nfor n in range(300):\n Path('{native}.ticks').write_text(str(n)); time.sleep(.1)\n"
                     child = subprocess.Popen([sys.executable, "-c", job], start_new_session=True,
@@ -1211,8 +1213,8 @@ class RecoveryTests(unittest.TestCase):
                 n = len(pids()); os.kill(pids()[-1], signal.SIGKILL)
                 self.wait(lambda: self.status()["state"] == "process_lost" or (len(pids()) > n and self.status()["state"] == "idle"), "lost or recovered")
         relay = lambda key, text="hello", expected=200: self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": "tell", "text": text}, expected)
-        # A tell steered into a running turn, then the agent is lost: its retry never restarts it.
-        self.prompt("running", "hold")
+        # Kill the agent during a running turn. This recovery case needs no detached tool process.
+        self.prompt("running", "hold-turn")
         self.wait(lambda: self.status()["state"] == "running", "running turn")
         relay("steered")
         self.wait(lambda: self.status()["receipts"]["steered_steer"]["state"] == "completed", "steered tell")

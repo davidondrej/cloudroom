@@ -2,13 +2,26 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 159
+
+A new Ultra Fast speed (2026-11-19)
+
+### Changes
+
+- Codex has a third speed: pick Standard, Fast, or Ultra Fast in the model picker, or type /ultrafast.
+- With the sidebar open, the chat is now centered in the free space.
+- A short connection drop to a remote computer no longer interrupts threads still running on it.
+- A Codex thread stuck on "already has an active writer" recovers on your next message.
+- On Windows, Claude skills load without admin rights, and Cursor sign-in works when its CLI is off PATH.
+- Security fixes.
+
 ## 158
 
 Floating sidebar and snippets (2026-11-18)
 
 ### Changes
 
-- The sidebar is now a floating card, so opening or closing it never moves the chat.
+- The sidebar is now a floating, rounded card with a soft shadow.
 - Snippets: save text you reuse, expand it in any message, and keep it synced across your computers.
 - Fork a Claude thread from any reply, even after edits or agent switches.
 - Switch models with a shortcut in an idle thread and keep the same session.

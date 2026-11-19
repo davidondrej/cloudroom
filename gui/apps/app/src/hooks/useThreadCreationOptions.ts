@@ -142,6 +142,8 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   supportsPermissionModeSelection: boolean;
   permissionModeIsVerified: boolean;
   supportsServiceTier: boolean;
+  /** The selected model offers Ultra Fast on this machine. */
+  supportsUltraFast: boolean;
   serviceTierSupportByProvider: Record<string, boolean>;
   serviceTierFastLabel: string;
   executionInputSources: TExecutionInputSources;
@@ -581,10 +583,16 @@ export function useThreadCreationOptions(
       selectedProviderInfo,
     ],
   );
-  const serviceTier = useMemo(
-    () => (supportsServiceTier ? rawServiceTier : undefined),
-    [rawServiceTier, supportsServiceTier],
-  );
+  const supportsUltraFast =
+    supportsServiceTier &&
+    activeModel?.serviceTiers?.includes("ultrafast") === true;
+  // Ultra Fast is per model: a model without it runs at standard speed.
+  const serviceTier = useMemo(() => {
+    if (!supportsServiceTier) return undefined;
+    return rawServiceTier === "ultrafast" && !supportsUltraFast
+      ? "default"
+      : rawServiceTier;
+  }, [rawServiceTier, supportsServiceTier, supportsUltraFast]);
 
   const permissionMode = resolvePermissionModeSelection({
     rawPermissionMode,
@@ -1001,6 +1009,7 @@ export function useThreadCreationOptions(
     supportsPermissionModeSelection,
     permissionModeIsVerified,
     supportsServiceTier,
+    supportsUltraFast,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     executionInputSources,

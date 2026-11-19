@@ -132,6 +132,8 @@ export interface PromptFastMode {
   enabled: boolean;
   label: string;
   onToggle: () => void;
+  /** `/ultrafast`, when the selected model offers Ultra Fast. */
+  ultra?: { enabled: boolean; onToggle: () => void };
 }
 
 export interface PromptModelShortcut {
@@ -191,7 +193,7 @@ export interface PromptBoxProps {
   focusEndKey?: string | number;
 }
 
-/** The `/fast` command, for providers that have a fast tier. */
+/** The `/fast` and `/ultrafast` commands, for providers that have those tiers. */
 export function promptFastModeCommand(
   serviceTier: ExecutionControlsProps["serviceTier"],
 ): PromptFastMode | undefined {
@@ -201,6 +203,17 @@ export function promptFastModeCommand(
     enabled,
     label: serviceTier.fastLabel?.trim() || "Fast",
     onToggle: () => serviceTier.onChange(enabled ? "default" : "fast"),
+    ...(serviceTier.ultraFast
+      ? {
+          ultra: {
+            enabled: serviceTier.value === "ultrafast",
+            onToggle: () =>
+              serviceTier.onChange(
+                serviceTier.value === "ultrafast" ? "default" : "ultrafast",
+              ),
+          },
+        }
+      : {}),
   };
 }
 

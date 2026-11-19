@@ -722,9 +722,15 @@ class Teleport {
       .catch((error) => {
         const progress = teleportProgress(this.deps.db, threadId);
         if (!progress || progress.phase === "cancelled") return;
-        const state = this.load(id);
+        // Missing saved state pauses this transfer for good, still blocked, instead of crashing the server (#2046).
+        let state: State | undefined;
+        try {
+          state = this.load(id);
+        } catch (missing) {
+          error = missing;
+        }
         if (
-          state.stopped &&
+          state?.stopped &&
           state.cancelRequested &&
           !state.activationRequested
         ) {
@@ -760,6 +766,12 @@ class Teleport {
         );
         this.notify(threadId);
       })
+      .catch((error: unknown) =>
+        this.deps.logger.error(
+          { threadId, transferId: id, error },
+          "Teleport failure handling failed",
+        ),
+      )
       .finally(() => this.active.delete(threadId));
     this.active.set(threadId, work);
   }

@@ -14,8 +14,9 @@ import type { AppDeps } from "../../types.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
 import { macAccessSupported } from "./previews.js";
+import { sandboxThread } from "./sandboxes.js";
 import { redactSecrets } from "./shares.js";
-import { command, saveProjectCopyProgress } from "./store.js";
+import { binding, command, saveProjectCopyProgress } from "./store.js";
 import { copyMacGithub } from "./sync.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
@@ -121,8 +122,17 @@ export const localFilesNote = (path: string) =>
     ? `The full project is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
     : "Cloud agents can't reach the user's Windows computer. Tell the user what failed: pass on any fix the message names, otherwise ask them to start a new thread.";
 
+/** A project copy's target: one folder per thread sandbox, or one shared folder on a VM. */
+export const copyKey = (sandbox: string | null, workspace: string) => sandbox ? `${sandbox}:${workspace}` : workspace;
+const BUSY = "Another copy is filling this project folder.";
+
+/** A plan that fails reads as nothing to copy, except a move's: Teleport then retries or shows the error instead of
+ *  arriving without its code (#2120). A copy already filling the same folder brings the code. */
 export function planProjectCopy(...args: Parameters<typeof planProjectCopyOrThrow>): Promise<ProjectCopyJob | null> {
-  return planProjectCopyOrThrow(...args).catch(() => null);
+  return planProjectCopyOrThrow(...args).catch((error: unknown) => {
+    if (args[4]?.teleport && !(error instanceof Error && error.message === BUSY)) throw error;
+    return null;
+  });
 }
 
 /** A new thread's copy (#337): a request its just-claimed sandbox drops is tried once more a second later, and an error
@@ -147,11 +157,12 @@ export function planNewProjectCopy(deps: Deps, client: CloudroomClient, threadId
 /** Like planProjectCopy, but a sandbox that can't be reached, or a folder another copy is filling, throws instead of
  *  reading as nothing left to copy. `resumed`: a move's copy an app restart cut off, which goes on in a folder that already
  *  has files too, but only while its status still reads `copying`: older apps wrote none for a move. Its clone isn't
- *  repeated once it landed (#1970). */
-export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = workspace, teleport = false, resumed = false, branch, signal }: { localPath?: string; key?: string; teleport?: boolean; resumed?: boolean; branch?: string; signal?: AbortSignal } = {}): Promise<ProjectCopyJob | null> {
+ *  repeated once it landed (#1970). The key defaults to the thread's own sandbox, so moves into separate sandboxes of
+ *  one project never skip each other (#2120). */
+export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient, threadId: string, workspace: string, { localPath, key = copyKey(sandboxThread(binding(deps.db, threadId)?.coreUrl ?? ""), workspace), teleport = false, resumed = false, branch, signal }: { localPath?: string; key?: string; teleport?: boolean; resumed?: boolean; branch?: string; signal?: AbortSignal } = {}): Promise<ProjectCopyJob | null> {
   const project = getProject(deps.db, getThread(deps.db, threadId)?.projectId ?? "");
   if (!project) return null;
-  if (copying.has(key)) throw new Error("Another copy is filling this project folder.");
+  if (copying.has(key)) throw new Error(BUSY);
   const path = localPath ?? localProjectPath(deps, project.id) ?? null;
   const repository = githubRepository(await projectRemote(deps, project, path));
   if (!path && !repository) return null;

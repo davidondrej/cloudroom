@@ -1,5 +1,4 @@
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { useBlockSidebarOverlay } from "@/components/ui/sidebar.js";
 import { PANE_FOCUS_APP_COMMAND_IDS } from "@cloudroom/domain";
 import { useAtom, useAtomValue, useStore } from "jotai";
 import {
@@ -310,8 +309,6 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
         : null);
   const panes = layout === null ? [] : listPanes(layout.root);
   const isSplitActive = splitWorkspaceActive && panes.length > 1;
-  // Side-by-side panes leave the leftmost chat no gutter for the floating sidebar.
-  useBlockSidebarOverlay(isSplitActive);
   const maximizedPane =
     layout !== null && maximizedPaneId !== null
       ? findPane(layout.root, maximizedPaneId)

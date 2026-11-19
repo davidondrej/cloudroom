@@ -954,14 +954,24 @@ function spawnChildConnection(callbacks: {
     responder: CodexAppServerRequestResponder,
   ) => void;
   onExit: (info: CodexAppServerExitInfo) => void;
+  /** The thread's env; its identity tags mark this Codex as the thread's own. */
+  threadEnv?: Readonly<Record<string, string>> | undefined;
 }): CodexAppServerConnection {
+  const { threadEnv, ...connectionCallbacks } = callbacks;
   const launch = resolveAppServerLaunch();
+  // Tagged like the thread's commands, so Stop and the daemon's stale-writer
+  // recovery can find a Codex Cloudroom lost track of (#607, #1717).
+  const tags: Record<string, string> = {};
+  for (const key of ["ROOM_THREAD_ID", "ROOM_SERVER_URL"]) {
+    const value = threadEnv?.[key];
+    if (value !== undefined) tags[key] = value;
+  }
   return createCodexAppServerConnection({
     command: launch.command,
     args: launch.args,
     cwd: process.cwd(),
-    env: buildAppServerEnv(),
-    ...callbacks,
+    env: { ...buildAppServerEnv(), ...tags },
+    ...connectionCallbacks,
   });
 }
 
@@ -1169,6 +1179,7 @@ async function constructThreadSession(
   try {
     const connection = spawnChildConnection({
       recordThreadId: args.threadId,
+      threadEnv: decoded.sessionOptions.envVars,
       onNotification: (method, params) =>
         handleChildNotification(args.threadId, serial, method, params),
       onRequest: (method, params, responder) =>

@@ -35,7 +35,7 @@ Every Cloudroom feature is available over this API. It is plain HTTP on `127.0.0
 
 Commands, all `POST /v1/sessions/{id}/...` with a `request_id`:
 
-- `prompts`: send a message. Body: `text`, plus optional `content`, `attachments`, `reasoning` and `service_tier`. Messages sent while busy queue in order.
+- `prompts`: send a message. Body: `text`, plus optional `content`, `attachments`, `reasoning` and `service_tier` (`default`, `fast`, or Codex's `ultrafast`). Messages sent while busy queue in order.
 - `edit`: replace a queued message. Adds `target_request_id` and `expected_revision`.
 - `cancel`: remove a queued message (`target_request_id`).
 - `reorder`: set the queue order (`order`: request IDs). Unlisted queued messages keep their place after the listed ones.

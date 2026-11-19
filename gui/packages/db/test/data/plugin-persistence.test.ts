@@ -5,12 +5,15 @@ import {
   deleteInstalledPlugin,
   getInstalledPluginRegistration,
   getInstalledPlugin,
+  getPluginMarketplace,
   listPluginArtifacts,
   listPluginArtifactsAtOrUnderPath,
   listPluginArtifactsUnderPath,
   listPluginKvKeys,
+  setInstalledPluginLastFailure,
   setPluginKvValue,
   upsertInstalledPlugin,
+  upsertPluginMarketplace,
   type DbConnection,
 } from "../../src/index.js";
 import type { UpsertInstalledPluginInput } from "../../src/data/plugins.js";
@@ -194,6 +197,11 @@ describe("normalized plugin persistence", () => {
       version: "1.0.0",
       enabled: true,
     });
+    setInstalledPluginLastFailure(db, "legacy", {
+      version: "1.1.0",
+      detail: "git clone 'https://x:ghp_FAKE123@github.com/acme/repo' failed",
+      at: 1,
+    });
     for (const row of [
       getInstalledPlugin(db, "legacy"),
       getInstalledPluginRegistration(db, "legacy"),
@@ -203,8 +211,26 @@ describe("normalized plugin persistence", () => {
         sourceGitUrl: "https://github.com/acme/repo",
         updateStatusDetail:
           "git ls-remote 'https://github.com/acme/repo' failed",
+        lastFailureDetail: "git clone 'https://github.com/acme/repo' failed",
       });
     }
+    upsertPluginMarketplace(db, {
+      name: "legacy",
+      sourceKind: "git",
+      manifestUrl: url,
+      sourceGitRef: "main",
+      sourceGitCommit: null,
+      manifestJson: "{}",
+      statsJson: null,
+      etag: null,
+      lastModified: null,
+      lastSuccessfulRefreshAt: null,
+      lastAttemptedRefreshAt: null,
+      lastError: null,
+    });
+    expect(getPluginMarketplace(db, "legacy")?.manifestUrl).toBe(
+      "https://github.com/acme/repo",
+    );
   });
 
   it("retains artifact records when a plugin registration is removed", () => {

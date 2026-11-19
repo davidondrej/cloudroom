@@ -8,6 +8,7 @@ import {
   cloudHarnessNames,
   cloudReasoningLevels,
   cloudServiceTierSupported,
+  cloudUltraFastSupported,
   cloudroomRequestId,
   clearCloudroomRequestId,
 } from "@/hooks/queries/cloudroom-queries";
@@ -883,6 +884,7 @@ export function NewThreadComposer({
     setServiceTier,
     supportsPermissionModeSelection,
     supportsServiceTier,
+    supportsUltraFast,
     clearReuseEnvironment,
   } = creationOptions;
   const executionTarget = cloudLocked
@@ -900,6 +902,9 @@ export function NewThreadComposer({
   const selectedThreadModel = activeModel?.model ?? selectedModel;
   const cloudLevels = cloudReasoningLevels(cloudConnection.data, selectedProviderId, selectedThreadModel);
   const cloudFastSupported = executionTarget === "cloud" && cloudServiceTierSupported(cloudConnection.data, selectedProviderId);
+  // Cloud runs Ultra Fast only when its Core lists it for the model; otherwise the thread starts at standard speed.
+  const ultraFast = supportsUltraFast && (executionTarget !== "cloud" || cloudUltraFastSupported(cloudConnection.data, selectedProviderId, selectedThreadModel));
+  const threadTier = serviceTier === "ultrafast" && !ultraFast ? "default" : serviceTier;
   const cloudKnown = executionTarget === "cloud" && cloudCatalogKnown(cloudConnection.data);
   // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
   const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
@@ -1705,7 +1710,7 @@ export function NewThreadComposer({
         reasoningLevel: starterHigh && submittedDraft.text === starterRef.current ? "high" : reasoningLevel,
         permissionMode: executionTarget === "cloud" ? "full" : permissionMode,
         ...(executionTarget === "cloud"
-          ? { executionTarget, serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
+          ? { executionTarget, serviceTier: cloudFastSupported && threadTier ? threadTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
           : supportsServiceTier && serviceTier
             ? { serviceTier }
             : {}),
@@ -1769,6 +1774,7 @@ export function NewThreadComposer({
       selectedProviderId,
       selectedThreadModel,
       serviceTier,
+      threadTier,
       supportsServiceTier,
       cloudFastSupported,
       cloudBaseBranch,
@@ -2095,11 +2101,12 @@ export function NewThreadComposer({
               onChange: handleModelChange,
             },
             serviceTier: {
-              value: executionTarget === "cloud" && !cloudFastSupported ? "default" : serviceTier,
+              value: executionTarget === "cloud" && !cloudFastSupported ? "default" : threadTier,
               onChange: handleServiceTierChange,
               supported: executionTarget === "cloud" ? cloudFastSupported : supportsServiceTier,
               supportByProvider: serviceTierSupportByProvider,
               fastLabel: serviceTierFastLabel,
+              ultraFast,
             },
             reasoning: {
               value: reasoningLevel,
@@ -2167,7 +2174,8 @@ export function NewThreadComposer({
       reuseThreadOptions,
       selectedModel,
       selectedProviderId,
-      serviceTier,
+      threadTier,
+      ultraFast,
       serviceTierSupportByProvider,
       sidebarNavigationSettled,
       supportsPermissionModeSelection,

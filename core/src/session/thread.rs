@@ -945,9 +945,12 @@ async fn output(
             Err(super::history::ApiError::Status(404, _))
                 if starting(&m, &parent, true).contains(&id) =>
             {
-                Ok(
-                    json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
-                )
+                let why = relay::waiting_start(&m, &parent, &id).map(|why| format!("{why} "));
+                let why = why.unwrap_or_default();
+                let note = format!(
+                    "Its sandbox is still starting. {why}Its replies arrive as messages when its turns end."
+                );
+                Ok(json!({"id":id,"state":"starting","note":note}))
             }
             // Its start was refused: no chat, or only what came before. The same story as `thread list` (#1058).
             Err(super::history::ApiError::Status(404, _)) if failed.is_some() => {

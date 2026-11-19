@@ -15,7 +15,10 @@ pub(super) const KIMI: cursor::Flavor = cursor::Flavor {
     // Resume uses `session/resume`, which replays nothing; Cloudroom already has the conversation.
     replay: false,
     explain_stops: true,
-    empty_turn: None,
+    // Kimi ends a turn whose model request failed without a word, as Local threads say (#1785).
+    empty_turn: Some(
+        "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in ~/.kimi-code/sessions in this Cloud sandbox.",
+    ),
     cumulative_text: false,
 };
 const SESSIONS: &str = "sessions";

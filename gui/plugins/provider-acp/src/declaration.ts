@@ -110,9 +110,9 @@ export function acpProviderDeclaration(
       acpLaunchSpec: { ...agent.launch },
     },
     models: { scope: "host" },
-    ...(agent.dialect === "cursor" || offersSignIn(agent)
-      ? { experimental_modelDiscoveryRestart: true }
-      : {}),
+    // Every ACP bridge caches its agent's models, so `--restart` is how a
+    // signed-in agent or an edited agent config (opencode.json) shows (#1236).
+    experimental_modelDiscoveryRestart: true,
     maintenance: {
       health: true,
       usage: agent.providerUsage === true,

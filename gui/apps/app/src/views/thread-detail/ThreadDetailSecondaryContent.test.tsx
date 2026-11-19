@@ -48,7 +48,6 @@ vi.mock("@/lib/room-desktop", () => ({
 
 vi.mock("@/components/ui/sidebar.js", () => ({
   useOptionalIsSidebarShowing: () => true,
-  useBlockSidebarOverlay: () => {},
 }));
 
 const { useThreadsMock } = vi.hoisted(() => ({

@@ -241,9 +241,9 @@ function renderPicker({
         reasoningValue={reasoningValue}
         reasoningOptions={pickerReasoningOptions}
         onReasoningChange={onReasoningChange}
-        fastModeEnabled={false}
-        onFastModeChange={vi.fn()}
-        showFastModeToggle={false}
+        serviceTier="default"
+        onServiceTierChange={vi.fn()}
+        showServiceTiers={false}
         muted={muted}
         modal={false}
         onSelectModel={onSelectModel}

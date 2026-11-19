@@ -44,7 +44,7 @@ export const cloudroomStatusSchema = z.object({
     id: z.string(),
     provider: z.string().nullable().optional(),
     reasoning_levels: z.array(z.string()),
-    models: z.array(z.object({ model: z.string(), reasoning_levels: z.array(z.string()) })).nullable().optional(),
+    models: z.array(z.object({ model: z.string(), reasoning_levels: z.array(z.string()), service_tiers: z.array(z.string()).optional() })).nullable().optional(),
     service_tier: z.boolean().default(false),
     steer: z.boolean().optional(),
     idle_set_model: z.boolean().optional(),
@@ -78,6 +78,12 @@ export function cloudHarnessNames(status: z.infer<typeof cloudroomStatusSchema> 
 
 export function cloudServiceTierSupported(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined): boolean {
   return cloudHarness(status, harness)?.service_tier === true;
+}
+
+/** Whether Cloud runs this model at Ultra Fast. Needs a Core that lists it on the model. */
+export function cloudUltraFastSupported(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined, model: string | undefined): boolean {
+  const profile = cloudHarness(status, harness);
+  return profile?.service_tier === true && profile.models?.find((item) => item.model === model)?.service_tiers?.includes("ultrafast") === true;
 }
 
 export function cloudReasoningLevels(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined, model: string | undefined): string[] {

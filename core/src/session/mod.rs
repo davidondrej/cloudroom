@@ -15,6 +15,7 @@ pub mod report;
 mod sleep;
 pub mod snippets;
 mod state;
+pub mod team;
 mod tokens;
 pub use state::SessionState;
 pub(crate) use tokens::Tokens;

@@ -5,7 +5,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
 import { CORE_PLAN_LIMIT, LIMIT_RESUME } from "../system/plan-limit-telemetry.js";
-import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, serviceTierSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
@@ -111,7 +111,7 @@ function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Co
     input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
     request: { method: initial ? "thread/start" : "turn/start", params: {} },
-    execution: { source: "client/turn/requested", model: saved.model, reasoningLevel: messageReasoning(JSON.stringify(stored), saved.reasoning), permissionMode: "full", serviceTier: stored.service_tier === "fast" ? "fast" : "default" },
+    execution: { source: "client/turn/requested", model: saved.model, reasoningLevel: messageReasoning(JSON.stringify(stored), saved.reasoning), permissionMode: "full", serviceTier: serviceTierSchema.catch("default").parse(stored.service_tier) },
   });
 }
 

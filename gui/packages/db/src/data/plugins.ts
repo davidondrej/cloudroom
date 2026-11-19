@@ -195,8 +195,12 @@ const GIT_URL_CREDENTIALS = /(https?:\/\/|^git:)[^/?#\\]*@/giu;
 // Free text: a URL also ends at whitespace.
 const TEXT_GIT_URL_CREDENTIALS = /(https?:\/\/)[^\s/?#\\]*@/giu;
 
-function stripGitUrlCredentials(value: string): string {
+export function stripGitUrlCredentials(value: string): string {
   return value.replace(GIT_URL_CREDENTIALS, "$1");
+}
+
+export function stripTextGitUrlCredentials(value: string): string {
+  return value.replace(TEXT_GIT_URL_CREDENTIALS, "$1");
 }
 
 function withoutGitUrlCredentials(row: InstalledPluginRow): InstalledPluginRow {
@@ -206,7 +210,10 @@ function withoutGitUrlCredentials(row: InstalledPluginRow): InstalledPluginRow {
     sourceGitUrl: row.sourceGitUrl && stripGitUrlCredentials(row.sourceGitUrl),
     updateStatusDetail:
       row.updateStatusDetail &&
-      row.updateStatusDetail.replace(TEXT_GIT_URL_CREDENTIALS, "$1"),
+      stripTextGitUrlCredentials(row.updateStatusDetail),
+    lastFailureDetail:
+      row.lastFailureDetail &&
+      stripTextGitUrlCredentials(row.lastFailureDetail),
   };
 }
 

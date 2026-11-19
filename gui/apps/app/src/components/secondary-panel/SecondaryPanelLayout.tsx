@@ -20,7 +20,6 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { useResponsiveDrawerRealization } from "@cloudroom/shared-ui/responsive-overlay";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CompactSecondaryPanelShelf } from "./CompactSecondaryPanelShelf";
-import { useBlockSidebarOverlay } from "@/components/ui/sidebar.js";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import { dispatchBrowserViewBoundsSync } from "@/lib/browser-view-bounds-sync";
 import {
@@ -30,7 +29,6 @@ import {
 } from "@/views/thread-detail/PaneContext";
 import {
   getPanelCollapseTransitionStyle,
-  PANEL_COLLAPSE_DURATION_MS,
   PANEL_COLLAPSE_TRANSITION_CLASS,
   usePanelCollapseTransitionsReady,
 } from "./panelTransitionTokens";
@@ -127,12 +125,6 @@ export function SecondaryPanelLayout({
   const transitionsReady = usePanelCollapseTransitionsReady(
     resetKey,
     !renderAsDrawer,
-  );
-  // An open right panel leaves the chat no gutter for the floating sidebar.
-  // It keeps its space until its close animation ends, so keep the veto too.
-  useBlockSidebarOverlay(
-    open && !renderAsDrawer,
-    transitionsReady ? PANEL_COLLAPSE_DURATION_MS : 0,
   );
   const persistedSecondaryWidthPercent = useAtomValue(
     secondaryPanelWidthPercentAtom,

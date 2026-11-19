@@ -230,10 +230,16 @@ function loginCommandFor(target: AcpMaintenanceTarget): string | null {
   const onPath = (process.env.PATH ?? "")
     .split(path.delimiter)
     .includes(path.dirname(command));
-  const name = path.basename(command);
-  return !onPath && login.startsWith(`${name} `)
-    ? `${formatCommand(command, [])}${login.slice(name.length)}`
-    : login;
+  // Windows resolves `cursor-agent.cmd`; its login runs in PowerShell (#1709).
+  const windows = process.platform === "win32";
+  const name = windows ? path.parse(command).name : path.basename(command);
+  if (onPath || !login.startsWith(`${name} `)) return login;
+  const shown = !windows
+    ? formatCommand(command, [])
+    : /^[\w.:\\~-]+$/u.test(command)
+      ? command
+      : `& '${command.replaceAll("'", "''")}'`;
+  return `${shown}${login.slice(name.length)}`;
 }
 
 function healthResult(args: {

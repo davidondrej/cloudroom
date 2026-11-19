@@ -129,6 +129,9 @@ function serializeServerMessage(message: ServerChangedMessage): string | null {
 }
 
 type SessionTimers = Map<string, ReturnType<typeof setTimeout>>;
+const HOST_DISCONNECT_DEADLINE_KINDS = ["setup", "work"] as const;
+type HostDisconnectDeadlineKind =
+  (typeof HOST_DISCONNECT_DEADLINE_KINDS)[number];
 
 function cancelTimer(timers: SessionTimers, sessionId: string): void {
   const timeout = timers.get(sessionId);
@@ -245,10 +248,15 @@ export class NotificationHub implements DbNotifier {
     string,
     ReturnType<typeof setTimeout>
   >();
-  private readonly pendingDaemonActiveWorkDisconnects = new Map<
+  // Keyed by host, not session: a session open whose socket never arrives
+  // must not cancel the deadline. Only a registered socket does (#1956).
+  private readonly pendingHostDisconnectDeadlines = new Map<
     string,
     ReturnType<typeof setTimeout>
   >();
+  // Setup deadlines that already fired in this outage; not started again in
+  // it. A running-turn deadline re-arms, since a reopen can revive a turn.
+  private readonly firedHostDisconnectDeadlines = new Set<string>();
   private readonly terminalClientSocketsById = new Map<
     string,
     Set<HubSocket>
@@ -552,6 +560,10 @@ export class NotificationHub implements DbNotifier {
       this.cancelPendingDaemonDisconnect(existingSessionId);
       this.unregisterDaemon(existingSessionId);
     }
+    for (const kind of HOST_DISCONNECT_DEADLINE_KINDS) {
+      cancelTimer(this.pendingHostDisconnectDeadlines, `${kind}:${hostId}`);
+      this.firedHostDisconnectDeadlines.delete(`${kind}:${hostId}`);
+    }
     this.daemonSessions.set(sessionId, {
       hostId,
       localApiPort:
@@ -720,22 +732,27 @@ export class NotificationHub implements DbNotifier {
     scheduleTimer(this.pendingDaemonDisconnects, sessionId, delayMs, callback);
   }
 
-  scheduleDaemonActiveWorkDisconnect(
-    sessionId: string,
+  /** Keeps a running deadline; only a registered socket cancels it. */
+  scheduleHostDisconnectDeadline(
+    hostId: string,
+    kind: HostDisconnectDeadlineKind,
     delayMs: number,
     callback: () => void,
   ): void {
-    scheduleTimer(
-      this.pendingDaemonActiveWorkDisconnects,
-      sessionId,
-      delayMs,
-      callback,
-    );
+    const key = `${kind}:${hostId}`;
+    if (
+      this.pendingHostDisconnectDeadlines.has(key) ||
+      this.firedHostDisconnectDeadlines.has(key)
+    )
+      return;
+    scheduleTimer(this.pendingHostDisconnectDeadlines, key, delayMs, () => {
+      if (kind === "setup") this.firedHostDisconnectDeadlines.add(key);
+      callback();
+    });
   }
 
   cancelPendingDaemonDisconnect(sessionId: string): void {
     cancelTimer(this.pendingDaemonDisconnects, sessionId);
-    cancelTimer(this.pendingDaemonActiveWorkDisconnects, sessionId);
   }
 
   requestHostOnlineRpc(args: {

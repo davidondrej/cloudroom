@@ -4,7 +4,7 @@ import { createRoomDesktopApi } from "@/test/room-desktop-test-utils";
 import {
   CHROME_ROW_HEIGHT_CLASS,
   MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS,
-  MACOS_WINDOW_CONTROLS_WIDTH,
+  MACOS_SIDEBAR_MIN_WIDTH,
   shouldReserveMacosTrafficLights,
 } from "./room-desktop";
 
@@ -60,7 +60,7 @@ describe("desktop chrome geometry", () => {
     };
 
     expect(controlsWidth(MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS)).toBe(
-      MACOS_WINDOW_CONTROLS_WIDTH,
+      controlsWidth(MACOS_SIDEBAR_MIN_WIDTH),
     );
     expect(MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS).toContain("-1rem)");
   });

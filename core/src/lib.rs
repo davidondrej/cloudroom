@@ -100,6 +100,7 @@ pub const FEATURES: &[&str] = &[
 #[cfg(unix)]
 pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error::Error>> {
     use std::{future::IntoFuture, time::Duration};
+    use tokio::signal::unix::{SignalKind, signal};
     config.account_home = config.account_home.canonicalize()?;
     config.repository = config.repository.canonicalize()?;
     for profile in config.harnesses.values_mut() {
@@ -108,6 +109,9 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     }
     // A bind failure must not mutate saved sessions or claim their recovery.
     let listener = tokio::net::TcpListener::bind(config.listen).await?;
+    // A stop during recovery must be delivered to graceful shutdown, even before the server is polled.
+    let mut terminate = signal(SignalKind::terminate())?;
+    let mut interrupt = signal(SignalKind::interrupt())?;
     let manager = session::Manager::open(config.clone())?;
     manager.check_storage().await;
     runtime::warm_codex(&config).await;
@@ -129,10 +133,7 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
     let mut changed = manager.subscribe();
     let server = axum::serve(listener, api::router(manager.clone(), config.token))
         .with_graceful_shutdown(async move {
-            let mut terminate =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("signal handler");
-            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+            tokio::select! { _=interrupt.recv()=>{}, _=terminate.recv()=>{} }
             shutdown.shutdown().await;
         })
         .into_future();

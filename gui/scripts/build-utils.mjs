@@ -18,7 +18,6 @@ const NATIVE_EXTERNAL_PACKAGES = [
   "fsevents",
   "node-pty",
   "pino",
-  "pino-pretty",
   "pino-roll",
   "thread-stream",
   "utf-8-validate",

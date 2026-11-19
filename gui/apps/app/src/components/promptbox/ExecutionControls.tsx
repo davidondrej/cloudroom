@@ -37,6 +37,8 @@ interface ExecutionServiceTierConfig {
   supported: boolean;
   supportByProvider?: Record<string, boolean>;
   fastLabel?: string;
+  /** The selected model also offers Ultra Fast where this thread runs. */
+  ultraFast?: boolean;
 }
 
 interface ExecutionReasoningConfig {
@@ -113,11 +115,10 @@ export const ExecutionControls = memo(function ExecutionControls({
           reasoningValue={reasoning.value}
           reasoningOptions={reasoning.options}
           onReasoningChange={reasoning.onChange}
-          fastModeEnabled={serviceTier?.value === "fast"}
-          onFastModeChange={(enabled) =>
-            handleServiceTierChange(enabled ? "fast" : "default")
-          }
-          showFastModeToggle={serviceTier?.supported ?? false}
+          serviceTier={serviceTier?.value}
+          onServiceTierChange={handleServiceTierChange}
+          showServiceTiers={serviceTier?.supported ?? false}
+          showUltraFast={serviceTier?.ultraFast}
           serviceTierSupportByProvider={serviceTier?.supportByProvider}
           fastModeLabel={serviceTier?.fastLabel}
           muted

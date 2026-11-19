@@ -244,9 +244,10 @@ describe("PluginProviderModelPicker", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
-    const fastMode = screen.getByRole("switch", { name: "Fast mode" });
+    const fastMode = screen.getByRole("radio", { name: "Fast" });
     expect(fastMode.getAttribute("aria-checked")).toBe("true");
-    fireEvent.click(fastMode);
+    expect(screen.queryByRole("radio", { name: "Ultra Fast" })).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "Standard" }));
     await waitFor(() =>
       expect(onChange).toHaveBeenLastCalledWith({
         providerId: "codex",
@@ -255,7 +256,7 @@ describe("PluginProviderModelPicker", () => {
         serviceTier: "default",
       }),
     );
-    fireEvent.click(screen.getByText("Fast mode"));
+    fireEvent.click(screen.getByRole("radio", { name: "Fast" }));
     await waitFor(() =>
       expect(onChange).toHaveBeenLastCalledWith({
         providerId: "codex",

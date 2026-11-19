@@ -82,6 +82,10 @@ describe("@cloudroom/templates", () => {
     // #1281: Cloud agents explain that a GH_TOKEN API key overrides the GitHub login.
     expect(cloud).toContain("a Cloud API key may be overriding the GitHub login.");
     expect(local).not.toContain("GH_TOKEN");
+    // #1182: a used-up API quota makes `gh auth status` say "invalid".
+    expect(cloud).toContain(
+      "Check `gh api rate_limit` before you report a bad login.",
+    );
     // #936: blobless Cloud clones get one batch fetch before history-wide reads.
     expect(cloud).toContain(String.raw`[ -z "$ids" ] || printf '%s\n' "$ids" | GIT_TERMINAL_PROMPT=0 timeout 900 git -c fetch.negotiationAlgorithm=noop fetch -q --no-tags --recurse-submodules=no --no-write-fetch-head origin --stdin`);
     expect(local).not.toContain("negotiationAlgorithm");

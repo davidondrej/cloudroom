@@ -27,6 +27,7 @@ import {
   providerInstallationGateKey,
   untilAborted,
 } from "../provider-installation-gate.js";
+import { stopStaleThreadAgents } from "../thread-processes.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 
 type TurnSubmitCommand = CommandOf<"turn.submit">;
@@ -240,20 +241,63 @@ async function resumeThreadRuntimeIfMissing(
     command.resumeContext.bridgeLaunch ?? command.bridgeLaunch,
     options,
   );
-  await entry.runtime.resumeThread({
-    bridgeLaunch,
-    environmentId: command.environmentId,
-    threadId: command.threadId,
-    projectId: resumeContext.projectId,
-    providerThreadId: resumeContext.providerThreadId,
-    providerId: resumeContext.providerId,
-    contributedEnv: resumeContext.contributedEnv,
-    options: command.options,
-    instructions: resumeContext.instructions,
-    dynamicTools: resumeContext.dynamicTools,
-    disallowedTools: resumeContext.disallowedTools,
-    instructionMode: resumeContext.instructionMode,
-  });
+  const resume = () =>
+    entry.runtime.resumeThread({
+      bridgeLaunch,
+      environmentId: command.environmentId,
+      threadId: command.threadId,
+      projectId: resumeContext.projectId,
+      providerThreadId: resumeContext.providerThreadId,
+      providerId: resumeContext.providerId,
+      contributedEnv: resumeContext.contributedEnv,
+      options: command.options,
+      instructions: resumeContext.instructions,
+      dynamicTools: resumeContext.dynamicTools,
+      disallowedTools: resumeContext.disallowedTools,
+      instructionMode: resumeContext.instructionMode,
+    });
+  try {
+    await resume();
+  } catch (error) {
+    if (!(await endStaleCodexWriter(error, command.threadId, options))) {
+      throw error;
+    }
+    await resume();
+  }
+}
+
+// Codex lets one app-server write a thread (see the Codex bridge).
+const CODEX_ACTIVE_WRITER_PATTERN = /\balready has an active writer\b/i;
+
+/**
+ * Codex refused the thread for another writer while no runtime holds it, so
+ * its holder may be a Codex Cloudroom lost track of, e.g. on a replaced
+ * bridge. Ends that one, found by its thread tags under a provider bridge, so
+ * a retry recovers. Another app's Codex is neither (#1717).
+ */
+async function endStaleCodexWriter(
+  error: unknown,
+  threadId: string,
+  options: CommandDispatchOptions,
+): Promise<boolean> {
+  if (
+    !(error instanceof Error) ||
+    !CODEX_ACTIVE_WRITER_PATTERN.test(error.message) ||
+    options.runtimeManager.holdsThreadAgent(threadId)
+  ) {
+    return false;
+  }
+  const serverUrl = options.runtimeManager.getShellEnv().ROOM_SERVER_URL;
+  const stopped = await stopStaleThreadAgents(threadId, serverUrl).catch(
+    () => 0,
+  );
+  if (stopped > 0) {
+    options.logger.warn(
+      { threadId, stopped },
+      "Ended a stale Codex that held the thread's writer lock; retrying",
+    );
+  }
+  return stopped > 0;
 }
 
 export async function startThread(

@@ -1,5 +1,5 @@
-import { toString as cronstrueToString } from "cronstrue";
 import type { AutomationTrigger } from "../src/rpc-types";
+import { describeCron } from "./describe-cron.js";
 
 export const PERSONAL_PROJECT_ID = "proj_personal";
 
@@ -56,7 +56,7 @@ const DAY_ABBREVIATION: Record<string, string> = {
 function formatCronCadence(cron: string): string {
   let text: string;
   try {
-    text = cronstrueToString(cron, { verbose: false });
+    text = describeCron(cron);
   } catch {
     return "Custom schedule";
   }

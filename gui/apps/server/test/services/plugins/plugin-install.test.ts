@@ -283,6 +283,7 @@ describe("plugin install sources", () => {
       "git:https://user:token@github.com/acme/repo@main",
       "HTTPS://token@github.com/acme/repo@main",
       "git:user:token@github.com/acme/repo@main",
+      "https://token@github.com/acme/repo",
     ]) {
       expect(() => parsePluginSource(source)).toThrowError(/credential helper/);
     }

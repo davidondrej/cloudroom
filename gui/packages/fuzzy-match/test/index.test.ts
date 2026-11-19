@@ -108,6 +108,17 @@ describe("fuzzyMatchPaths", () => {
     ]);
   });
 
+  it("keeps an earlier directory match when the best filename match would skip the next segment", () => {
+    const matches = fuzzyMatchPaths({
+      items: ["application/spec/app.ts", "app/spec.ts"],
+      query: "app/spec",
+      getPath: (path) => path,
+      limit: 2,
+    });
+
+    expect(matches.map((match) => match.item)).toEqual(["app/spec.ts", "application/spec/app.ts"]);
+  });
+
   it("treats exact directory prefixes as scoped path searches", () => {
     const matches = fuzzyMatchPaths({
       items: [

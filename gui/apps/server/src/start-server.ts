@@ -23,6 +23,7 @@ import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppVersionService } from "./services/system/app-version.js";
 import { createRoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
+import { startRunningTurnDeadlinesAfterRestart } from "./internal/session-owner-side-effects.js";
 import {
   runPeriodicSweeps,
   runStartupRecoverySweep,
@@ -292,6 +293,10 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     serverConfig,
   });
   injectWebSocket(server);
+  // Daemons can only reconnect once the server listens, so their grace starts then (#1956).
+  const rearmDeadlines = () => startRunningTurnDeadlinesAfterRestart(sweepDeps);
+  if (server.listening) rearmDeadlines();
+  else server.once("listening", rearmDeadlines);
 
   logger.info(
     {

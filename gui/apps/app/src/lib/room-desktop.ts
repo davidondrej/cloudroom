@@ -8,9 +8,8 @@ import type {
 // only on them, so a zoom step restyles a few chrome rows, not the whole page.
 export const MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS =
   "bb-zoom pl-[calc(206px/var(--bb-desktop-zoom,1)-1rem)]";
-// Width of the window controls capsule (traffic lights, toggle, history) at
-// zoom 1. The title reserve above must use the same number.
-export const MACOS_WINDOW_CONTROLS_WIDTH = 206;
+export const MACOS_SIDEBAR_MIN_WIDTH =
+  "calc(206px / var(--bb-desktop-zoom, 1))";
 export const MACOS_UNZOOMED_CHROME_CLASS =
   "bb-zoom [zoom:calc(1/var(--bb-desktop-zoom,1))]";
 
@@ -59,14 +58,6 @@ export function shouldReserveMacosTrafficLights({
   return shouldUseMacosDesktopChrome(desktopInfo) && !windowState.isFullScreen;
 }
 
-// Zoom steps resize the CSS viewport, so a window resize is the change signal.
-export function readMacosDesktopZoom(): number {
-  const desktopApi = getRoomDesktopInfo();
-  return shouldUseMacosDesktopChrome(desktopApi)
-    ? (desktopApi?.getZoomFactor?.() ?? 1)
-    : 1;
-}
-
 export function watchMacosDesktopZoom(): () => void {
   const desktopApi = getRoomDesktopInfo();
   if (!shouldUseMacosDesktopChrome(desktopApi) || !desktopApi?.getZoomFactor) {
@@ -75,7 +66,7 @@ export function watchMacosDesktopZoom(): () => void {
   const style = document.createElement("style");
   document.head.append(style);
   const sync = () => {
-    const zoom = readMacosDesktopZoom();
+    const zoom = desktopApi.getZoomFactor?.() ?? 1;
     const rule = `.bb-zoom{--bb-desktop-zoom:${zoom}}`;
     if (style.textContent !== rule) style.textContent = rule;
   };

@@ -100,6 +100,10 @@ function listCommands(
     const description = `Turn ${fastMode.enabled ? "off" : "on"} ${fastMode.label} mode`;
     own.push({ kind: "fast-mode", name: "fast", description });
   }
+  if (fastMode?.ultra && matches("ultrafast", "Ultra Fast")) {
+    const description = `Turn ${fastMode.ultra.enabled ? "off" : "on"} Ultra Fast mode`;
+    own.push({ kind: "fast-mode", name: "ultrafast", description });
+  }
   for (const { value, label } of reasoning?.options ?? []) {
     if (matches(value, label)) {
       own.push({
@@ -440,7 +444,11 @@ export function usePromptTypeahead({
           locationCommands?.find(({ name }) => name === item.name)?.onSelect,
         );
       case "fast-mode":
-        return runOwnCommand(fastMode?.onToggle);
+        return runOwnCommand(
+          item.name === "ultrafast"
+            ? fastMode?.ultra?.onToggle
+            : fastMode?.onToggle,
+        );
       case "model-shortcut": {
         const editor = api.ref.current;
         const shortcut = modelShortcuts?.find(({ name }) => name === item.name);

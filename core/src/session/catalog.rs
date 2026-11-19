@@ -396,9 +396,6 @@ impl Manager {
         let Some(tier) = tier else {
             return Ok(());
         };
-        if tier != "default" && tier != "fast" {
-            return Err(Error::Conflict("invalid service tier"));
-        }
         let kind = self
             .local
             .lock()
@@ -407,7 +404,7 @@ impl Manager {
             .get(id)
             .ok_or(Error::NotFound)?
             .harness;
-        if !kind.fast() && tier == "fast" {
+        if !kind.tier(tier) {
             return Err(Error::Conflict("invalid service tier"));
         }
         Ok(())

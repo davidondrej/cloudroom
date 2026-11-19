@@ -657,6 +657,7 @@ pub(super) fn claude_effort_refusal(
     let row = [runtime::Model {
         model: model.clone(),
         reasoning_levels: levels.clone(),
+        service_tiers: Vec::new(),
     }];
     let refusal = runtime::supports(runtime::Kind::Claude, &row, model, reasoning).err();
     refusal.map(Error::Effort)

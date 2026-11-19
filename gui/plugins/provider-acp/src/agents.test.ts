@@ -303,6 +303,12 @@ describe("acpProviderDeclaration", () => {
     expect(cursor.experimental_modelDiscoveryRestart).toBe(true);
     expect(cursor.maintenance?.usage).toBe(true);
     expect(cursor.maintenance?.installation).toBe(true);
+
+    // An opencode.json edit shows only after `--restart` (#1236).
+    const opencode = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-opencode")!,
+    );
+    expect(opencode.experimental_modelDiscoveryRestart).toBe(true);
   });
 
   it("gives a configured agent honest copy when it names no sign-in command", () => {

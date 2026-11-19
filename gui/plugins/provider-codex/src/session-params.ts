@@ -678,7 +678,7 @@ export function toCodexPermissionSettings(
 
 export function toCodexServiceTier(
   tier: ServiceTier | undefined,
-): "fast" | null | undefined {
+): "fast" | "ultrafast" | null | undefined {
   return tier === "default" ? null : tier;
 }
 
