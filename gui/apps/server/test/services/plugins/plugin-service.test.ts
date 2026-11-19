@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import semver from "semver";
 import {
@@ -444,7 +445,7 @@ describe("plugin service", () => {
       join(importerDir, "server.js"),
       `export default function plugin() {
          globalThis.importerReadShared = async () =>
-           (await import(${JSON.stringify(join(importedDir, "shared.js"))})).SHARED;
+           (await import(${JSON.stringify(pathToFileURL(join(importedDir, "shared.js")).href)})).SHARED;
        }\n`,
     );
     await writeFile(
@@ -478,10 +479,10 @@ describe("plugin service", () => {
       `export default function plugin() {
          globalThis.failImporterRead = async () => {
            const shared = await import(
-             ${JSON.stringify(join(importedDir, "shared.js"))}
+             ${JSON.stringify(pathToFileURL(join(importedDir, "shared.js")).href)}
            );
            const helper = (await import(
-             ${JSON.stringify(join(importedDir, "helper.cjs"))}
+             ${JSON.stringify(pathToFileURL(join(importedDir, "helper.cjs")).href)}
            )).default;
            return shared.SHARED + ":" + helper.H;
          };
