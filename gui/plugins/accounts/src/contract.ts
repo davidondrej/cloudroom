@@ -13,8 +13,13 @@ export const usageWindowSchema = z.object({
   resetsAt: z.number().nullable(),
   // The model family ("fable") a row is for. Missing: the limit covers every model.
   model: z.string().nullish(),
+  // When a read last confirmed this bar. 0: saved before this was kept. Missing: not tracked (Codex).
+  checkedAt: z.number().nullish(),
 });
 export type UsageWindow = z.infer<typeof usageWindowSchema>;
+// Accounts not in use are read hourly, so a bar older than this wasn't confirmed by its last read. Usage only rises
+// until a reset, so an old bar is a floor: the page greys it out instead of hiding it.
+export const USAGE_STALE_MS = 90 * 60_000;
 
 export const accountViewSchema = z.object({
   id: z.string(),

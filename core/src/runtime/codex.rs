@@ -665,6 +665,19 @@ impl Adapter for Protocol {
                     .map(str::to_owned);
                 // The next turn, prompted or Codex's own, hears about credits again.
                 self.credits = None;
+                // OpenAI's filter refused the work itself: another agent may still do it (ADR 20261119-091500).
+                if matches!(
+                    params
+                        .pointer("/turn/error/codexErrorInfo")
+                        .and_then(Value::as_str),
+                    Some("cyberPolicy" | "misalignmentPolicyViolation")
+                ) {
+                    events.push(Event::Record {
+                        kind: "refused",
+                        data: json!({"harness":"codex"}),
+                        native: None,
+                    });
+                }
                 if std::mem::take(&mut self.limited) {
                     let resets = self.resets();
                     events.push(super::plan_limited("codex", resets));
@@ -840,5 +853,44 @@ pub(super) fn recover(
         if before == tail.read_offset {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_turn_says_so_so_its_loop_can_move() {
+        let profile = HarnessConfig {
+            binary: "codex".into(),
+            home: "/nonexistent".into(),
+            model: "gpt-6.2-astra".into(),
+            provider: None,
+        };
+        let mut codex = Protocol::new(&profile, None, None);
+        let mut ended = |info: &str| {
+            let mut state = Progress {
+                native_turn: Some("t".into()),
+                request: Some("r".into()),
+                ..Default::default()
+            };
+            let frame = json!({"method":"turn/completed","params":{"turn":{"id":"t","status":"failed","error":{"message":"flagged","codexErrorInfo":info}}}});
+            let events = codex
+                .receive(&frame, frame.to_string(), &mut state)
+                .unwrap();
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Record {
+                        kind: "refused",
+                        ..
+                    }
+                )
+            })
+        };
+        assert!(ended("cyberPolicy"));
+        assert!(ended("misalignmentPolicyViolation"));
+        assert!(!ended("serverOverloaded"));
     }
 }

@@ -334,6 +334,9 @@ export function registerPluginRoutes(
   );
   const upgradePluginWebSocket = upgradeWebSocket?.(async (context) => {
     const id = context.req.param("id");
+    if (id === undefined) {
+      throw new ApiError(404, "unknown_plugin", "missing plugin id");
+    }
     const subPath = pluginHttpSubPath(context, id);
     const lookup = plugins.getWebSocketRoute(id, subPath);
     if (lookup.outcome === "unknown-plugin") {

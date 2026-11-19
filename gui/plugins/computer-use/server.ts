@@ -6,6 +6,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
+  ACTIVE_CHANGED_CHANNEL,
   APPROVAL_RENDERER_ID,
   approvalResponseSchema,
   appSchema,
@@ -186,8 +187,33 @@ export default async function computerUsePlugin(room: BbPluginApi) {
   const track = (name: string, properties: Record<string, string | number | boolean | null>) =>
     room.experimental_telemetry.capture(name, { execution: "local", ...properties });
   const busy = new Map<string, { threadId: string; at: number }>();
-  const active = new Map<string, string>();
+  const active = new Map<string, { hostId: string; appName: string | null }>();
   const threadKey = (threadId: string) => `thread/${encodeURIComponent(threadId)}`;
+
+  const activeSnapshot = () => ({
+    active: [...active.entries()].map(([threadId, entry]) => ({
+      threadId,
+      appName: entry.appName,
+    })),
+  });
+  const publishActive = () =>
+    room.realtime.publish(ACTIVE_CHANGED_CHANNEL, activeSnapshot());
+  const markActive = (threadId: string, hostId: string, appName: string | null) => {
+    const prev = active.get(threadId);
+    const nextApp = appName ?? prev?.appName ?? null;
+    if (prev && prev.hostId === hostId && prev.appName === nextApp) return;
+    active.set(threadId, { hostId, appName: nextApp });
+    publishActive();
+  };
+  const clearActive = (hostId?: string) => {
+    let changed = false;
+    for (const [threadId, entry] of active) {
+      if (hostId && entry.hostId !== hostId) continue;
+      active.delete(threadId);
+      changed = true;
+    }
+    if (changed) publishActive();
+  };
 
   const readList = async (key: string) =>
     z.array(appSchema).catch([]).parse((await room.storage.kv.get(key)) ?? []);
@@ -364,7 +390,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
         "permissions_missing",
         "Cloudroom needs macOS Accessibility permission. Ask the user to grant it in Settings > Plugins > Computer Use (or run `room-cli computer-use setup` while they watch), then retry.",
       );
-    active.set(threadId, hostId);
+    if (tool !== "end_session") markActive(threadId, hostId, app?.name ?? null);
     const session = sessionFor(threadId);
     const shotsKey = threadId.replace(/[^A-Za-z0-9_-]/g, "_");
     const result = await host.call(
@@ -372,6 +398,10 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       { tool, args: input, session, shotsKey },
       { hostId, timeoutMs: 150_000, ...(ctx.signal ? { signal: ctx.signal } : {}) },
     );
+    if (tool === "end_session") {
+      for (const [key, holder] of busy) if (holder.threadId === threadId) busy.delete(key);
+      if (active.delete(threadId)) publishActive();
+    }
     if (result.driverExits > 0) track("computer_use_crash", { component: "driver", count: result.driverExits });
     const listWindows = (pid: number) =>
       host.call("call", { tool: "list_windows", args: { pid }, session, shotsKey }, { hostId, timeoutMs: 30_000 });
@@ -451,6 +481,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
   });
 
   room.rpc.register(rpcContract, {
+    getActive: () => activeSnapshot(),
     getSettings: () => settings(),
     async removeAlwaysAllowed({ key }) {
       const list = await readList(ALWAYS_KEY);
@@ -464,21 +495,28 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     },
     async restart() {
       const hostId = await localHostId();
-      if (hostId) await host.call("restart", {}, { hostId });
+      if (hostId) {
+        clearActive(hostId);
+        await host.call("restart", {}, { hostId });
+      }
       return settings(hostId);
     },
   });
 
-  host.experimental_onWorkerExit(() => track("computer_use_crash", { component: "host_worker" }));
+  host.experimental_onWorkerExit(() => {
+    clearActive();
+    track("computer_use_crash", { component: "host_worker" });
+  });
 
   // Computer use lasts one turn: when it ends, the thread's driver session ends too,
   // and the driver (with its screen capture) stops once no other thread uses it.
   async function release(threadId: string) {
     for (const [key, holder] of busy) if (holder.threadId === threadId) busy.delete(key);
-    const hostId = active.get(threadId);
-    if (!hostId) return;
+    const entry = active.get(threadId);
+    if (!entry) return;
     active.delete(threadId);
-    await host.call("release", { session: sessionFor(threadId) }, { hostId }).catch(() => {});
+    publishActive();
+    await host.call("release", { session: sessionFor(threadId) }, { hostId: entry.hostId }).catch(() => {});
   }
 
   for (const event of ["thread.idle", "thread.failed"] as const)

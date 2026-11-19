@@ -44,11 +44,10 @@ import {
   type CachedThreadListSnapshot,
 } from "./thread-list-cache-data";
 import {
-  getCachedLiveThreadDescendants,
+  getCachedArchiveTree,
   getCachedLiveThreadIdsMatching,
   getCachedThreadSnapshots,
-  optimisticallyArchiveThreads,
-  removeLiveThreadsFromCachedLists,
+  applyArchivedThreadIds,
   type CachedThreadSnapshot,
 } from "./thread-archive-cache";
 
@@ -744,13 +743,9 @@ async function beginArchiveMatchingThreadsTransaction({
     threadIds: archivedThreadIds,
   });
 
-  optimisticallyArchiveThreads({
+  applyArchivedThreadIds({
     queryClient,
     threadIds: archivedThreadIds,
-  });
-  removeLiveThreadsFromCachedLists({
-    matchesThread,
-    queryClient,
   });
 
   return {
@@ -771,7 +766,7 @@ export async function beginArchiveThreadAndChildrenTransaction({
   const threadIds = new Set([
     threadId,
     ...(includeLive
-      ? getCachedLiveThreadDescendants(queryClient, threadId).map(
+      ? getCachedArchiveTree(queryClient, threadId).descendants.map(
           (thread) => thread.id,
         )
       : []),

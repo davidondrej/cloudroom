@@ -854,6 +854,17 @@ export class SandboxDirectory {
     return this.awake;
   }
 
+  /** One authoritative, read-only snapshot for an archive. Old addresses in views may already be asleep. */
+  async awakeForArchive(signal: AbortSignal) {
+    const only = await this.bind(AbortSignal.any([signal, this.session.signal]));
+    const listed = awakeSchema.parse(await this.call({ action: "awake" }, "sandboxes", only));
+    return {
+      accountId: only.account.userId,
+      signal: only.signal,
+      connections: new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { url: origin, token }])),
+    };
+  }
+
   /** Finds threads the website started (Loop runs, top-level launches) even when no known thread sleeps, so none
    *  stays hidden (ADR 0267). At most one website call per `recheck_ms`; none while signed out. */
   async discover(): Promise<void> {

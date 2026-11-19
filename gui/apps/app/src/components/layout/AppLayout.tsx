@@ -185,17 +185,23 @@ type SidebarOpenChangeHandler = (open: boolean) => void;
 // Opening or closing the sidebar re-centers the page in the free space. The
 // layout snaps once (animating it re-wrapped every chat on every frame), then
 // the page slides from its old center to the new one, in step with the card.
+let sidebarSlide: Animation | undefined;
+
 function slideWithSidebar(main: HTMLElement | null, change: () => void) {
+  // Mid-slide this is where the page looks right now, so a quick second toggle starts from there.
   const before = main?.getBoundingClientRect();
+  sidebarSlide?.cancel();
   change();
   if (!main || !before || getMediaQuerySnapshot(REDUCED_MOTION_QUERY)) return;
   const after = main.getBoundingClientRect();
   const dx = before.left + before.width / 2 - (after.left + after.width / 2);
   if (Math.abs(dx) < 1) return;
-  main.animate([{ translate: `${dx}px 0` }, { translate: "0 0" }], {
-    duration: 220,
-    easing: "cubic-bezier(0.32,0.72,0,1)",
-  });
+  sidebarSlide = main.animate(
+    [{ translate: `${dx}px 0` }, { translate: "0 0" }],
+    { duration: 220, easing: "cubic-bezier(0.32,0.72,0,1)" },
+  );
+  // The in-app browser is a native view placed from the page's on-screen spot: place it again where the page stops.
+  sidebarSlide.onfinish = dispatchBrowserViewBoundsSync;
 }
 
 function SidebarStateBridge({

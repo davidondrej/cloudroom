@@ -51,12 +51,16 @@ const CARD_VIEW_MS = 24 * 60 * 60_000;
 /** A switch whose new agent never got going (say its message is still queued) stops showing as in progress. */
 const SWITCH_STALE_MS = 3 * 60_000;
 
-/** A plan limit stopped the last turn: switch to another account of the same agent, or continue on another agent (ADR 0211 switch, then resend). */
+/** A plan limit stopped the last turn: switch to another account of the same agent, or continue on another agent (ADR 0211 switch, then resend).
+ *  A refusal (say OpenAI's cybersecurity filter) gets the same card without the account switch: every account has the
+ *  same filter (ADR 20261119-091500). */
 export function PlanLimitRow({
   rowId,
   rowAt,
   threadId,
   switched,
+  refusal = false,
+  detail = null,
   className,
 }: {
   /** The limit's timeline row: its card counts as viewed once per app run. */
@@ -66,6 +70,10 @@ export function PlanLimitRow({
   threadId: string;
   /** The thread already moved to another agent with resend: the card shows it picking up. */
   switched?: PlanLimitSwitch | undefined;
+  /** The provider refused the work instead of hitting a limit. */
+  refusal?: boolean | undefined;
+  /** The provider's own words, folded away on a refusal. */
+  detail?: string | null;
   className?: string;
 }) {
   const { thread, model, self, selfResetsAt, agents, agentsLoaded, primary } =
@@ -73,6 +81,7 @@ export function PlanLimitRow({
   const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
   // Kept from the click: the thread moves to `to` midway, and `from` is the agent that hit the limit.
   const [switching, setSwitching] = useState<{
     from: Agent | null;
@@ -104,7 +113,7 @@ export function PlanLimitRow({
   const execution =
     thread?.executionTarget === "cloud" ? "cloud_sandbox" : "local";
   useEffect(() => {
-    if (!shown || !accounts.loaded || !agentsLoaded) return;
+    if (!shown || refusal || !accounts.loaded || !agentsLoaded) return;
     if (Date.now() - rowAt > CARD_VIEW_MS) return;
     reportLimitCardViewed({
       key: rowId,
@@ -113,11 +122,17 @@ export function PlanLimitRow({
       can_switch_account: accounts.others.length > 0,
       other_agents: agents.length,
     });
-  }, [shown, accounts.loaded, agentsLoaded, rowId, rowAt, provider, execution, accounts.others.length, agents.length]);
+  }, [shown, refusal, accounts.loaded, agentsLoaded, rowId, rowAt, provider, execution, accounts.others.length, agents.length]);
   if (!thread) return null;
   if (switching || switched) {
     if (switched && stopped && now - switched.at > SWITCH_STALE_MS) {
-      return <PlanLimitSwitchedRow switched={switched} className={className} />;
+      return (
+        <PlanLimitSwitchedRow
+          switched={switched}
+          refusal={refusal}
+          className={className}
+        />
+      );
     }
     const to = switching?.to ?? agentOf(switched!.to);
     const landed =
@@ -126,6 +141,7 @@ export function PlanLimitRow({
       <SwitchChecklist
         from={switching?.from ?? (switched ? agentOf(switched.from) : null)}
         to={to}
+        refusal={refusal}
         step={!landed ? 0 : status === "active" ? 2 : 1}
         seconds={Math.max(
           0,
@@ -167,7 +183,8 @@ export function PlanLimitRow({
   };
   const name = self?.name ?? thread.providerId;
   const reset = formatUsageReset(selfResetsAt);
-  const canSwitch = accounts.others.length > 0;
+  const canSwitch = !refusal && accounts.others.length > 0;
+  const vendor = thread.providerId === "codex" ? "OpenAI" : name;
   const SelfIcon = self?.icon;
 
   return (
@@ -182,7 +199,12 @@ export function PlanLimitRow({
             aria-hidden
           />
         )}
-        {name} hit its plan limit
+        {refusal ? `${name} refused this task` : `${name} hit its plan limit`}
+        {refusal ? (
+          <span className="text-sm font-normal text-muted-foreground">
+            {vendor}'s safety filter
+          </span>
+        ) : null}
       </p>
       {busy ? (
         <div className="pl-7">
@@ -253,7 +275,7 @@ export function PlanLimitRow({
                   <MenuRow
                     logo={self}
                     label={name}
-                    detail={reset ?? "At its limit"}
+                    detail={refusal ? "Refused" : (reset ?? "At its limit")}
                     disabled
                   />
                 </>
@@ -261,8 +283,27 @@ export function PlanLimitRow({
             </SplitButton>
           ) : null}
         </div>
-      ) : reset ? (
+      ) : reset && !refusal ? (
         <p className="-mt-1.5 pl-7 text-sm text-muted-foreground">{reset}.</p>
+      ) : null}
+      {refusal && detail ? (
+        <div className="pl-7 text-sm text-muted-foreground">
+          <button
+            type="button"
+            className="flex items-center gap-1 hover:text-foreground"
+            onClick={() => setShowDetail(!showDetail)}
+          >
+            {vendor}'s message
+            <Icon
+              name={showDetail ? "ChevronDown" : "ChevronRight"}
+              className="size-3.5"
+              aria-hidden
+            />
+          </button>
+          {showDetail ? (
+            <p className="mt-2 max-w-[620px] whitespace-pre-wrap">{detail}</p>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -275,8 +316,10 @@ function SwitchChecklist({
   to,
   step,
   seconds,
+  refusal,
   className,
 }: {
+  refusal: boolean;
   from: Agent | null;
   to: Agent;
   step: number;
@@ -299,7 +342,8 @@ function SwitchChecklist({
       </p>
       <ul className="flex flex-col gap-2 pl-7 text-sm">
         <SwitchStep state="done">
-          {from?.name ?? "The last agent"} hit its plan limit
+          {from?.name ?? "The last agent"}{" "}
+          {refusal ? "refused the task" : "hit its plan limit"}
         </SwitchStep>
         {steps.map((label, index) => (
           <SwitchStep
@@ -343,9 +387,11 @@ function SwitchStep({
 /** After a switch, the plan-limit row is one line: who hit the limit and who took over. */
 export function PlanLimitSwitchedRow({
   switched,
+  refusal = false,
   className,
 }: {
   switched: PlanLimitSwitch;
+  refusal?: boolean | undefined;
   className?: string;
 }) {
   const agentOf = useAgentOf();
@@ -359,7 +405,7 @@ export function PlanLimitSwitchedRow({
       )}
     >
       <LogoIcon logo={from} className="size-3.5" />
-      {from.name} hit its plan limit
+      {from.name} {refusal ? "refused the task" : "hit its plan limit"}
       <Icon name="ArrowRight" className="size-3.5" aria-hidden />
       <LogoIcon logo={to} className="size-3.5" />
       {to.name} took over

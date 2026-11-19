@@ -1079,30 +1079,35 @@ function EmbeddedThreadChatWithComposer({
       queuedMessageIndex: inlineEditingQueuedMessage.queuedMessageIndex,
       onDismiss: dismissInlineQueuedMessageEditor,
       content: (
-        <FollowUpPromptBox
-          attachments={inlineAttachmentsConfig}
-          stack={null}
-          composer={inlineComposerConfig}
-          pluginComposerHost={queuedPluginComposerHost}
-          pluginComposerScope={queuedPluginComposerHost?.scope ?? null}
-          textEffects={queuedComposerTextEffects}
-          environmentSummary={null}
-          contextWindowUsage={null}
-          execution={inlineExecutionConfig}
-          executionReadOnly
-          permission={inlinePermissionConfig}
-          permissionReadOnly
-          permissionInToolbar
-          typeahead={typeaheadConfig}
-          promptActions={promptActions}
-          collapseResetKey={`${surfaceKey}:queued-message:${inlineEditingQueuedMessage.queuedMessageId}`}
-          focusEndKey={`${inlineEditingQueuedMessage.editSessionId}:${inlineComposerFocusNonce}`}
-          isPrimaryComposer={false}
-          showScrollToBottomButton={false}
-        />
+        <PromptDraftContextsContext.Provider
+          value={activeComposerDraft.contexts}
+        >
+          <FollowUpPromptBox
+            attachments={inlineAttachmentsConfig}
+            stack={null}
+            composer={inlineComposerConfig}
+            pluginComposerHost={queuedPluginComposerHost}
+            pluginComposerScope={queuedPluginComposerHost?.scope ?? null}
+            textEffects={queuedComposerTextEffects}
+            environmentSummary={null}
+            contextWindowUsage={null}
+            execution={inlineExecutionConfig}
+            executionReadOnly
+            permission={inlinePermissionConfig}
+            permissionReadOnly
+            permissionInToolbar
+            typeahead={typeaheadConfig}
+            promptActions={promptActions}
+            collapseResetKey={`${surfaceKey}:queued-message:${inlineEditingQueuedMessage.queuedMessageId}`}
+            focusEndKey={`${inlineEditingQueuedMessage.editSessionId}:${inlineComposerFocusNonce}`}
+            isPrimaryComposer={false}
+            showScrollToBottomButton={false}
+          />
+        </PromptDraftContextsContext.Provider>
       ),
     };
   }, [
+    activeComposerDraft.contexts,
     dismissInlineQueuedMessageEditor,
     inlineAttachmentsConfig,
     inlineComposerConfig,

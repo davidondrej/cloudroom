@@ -6,9 +6,10 @@ import type {
   PromptDraftState,
   ProviderCommandSuggestion,
 } from "@cloudroom/client-core";
-import type {
-  PromptMentionCommandTrigger,
-  PromptTextMention,
+import {
+  newestModel,
+  type PromptMentionCommandTrigger,
+  type PromptTextMention,
 } from "@cloudroom/domain";
 import type { IconName } from "@cloudroom/shared-ui/icon";
 import type { ComposerView } from "@get-bb/plugin-sdk";
@@ -217,28 +218,37 @@ export function promptFastModeCommand(
   };
 }
 
+// Each shortcut names a model family, never a version: it takes the newest one in the harness's own list.
 const MODEL_SHORTCUTS = [
-  ["fable", "claude-code", "claude-fable-5-2", "Fable 5.2 in Claude Code"],
-  ["opus", "claude-code", "claude-opus-5-5[1m]", "Opus 5.5 in Claude Code"],
-  ["astra", "codex", "gpt-6-astra", "GPT-6 Astra in Codex"],
+  ["fable", "claude-code", "Claude Code"],
+  ["opus", "claude-code", "Claude Code"],
+  ["astra", "codex", "Codex"],
 ] as const;
 
-/** New drafts use the available harnesses. An existing thread already owns its harness. */
+/** New drafts load the harness's models on pick. An existing thread already owns its harness and models. */
 export function promptModelShortcuts(
   { provider, selectModel }: Pick<ExecutionControlsProps, "provider" | "selectModel">,
-  thread?: { providerId: string; models: readonly string[] },
+  source:
+    | { providerId: string; models: readonly string[] }
+    | { loadModels: (providerId: string) => Promise<readonly string[]> },
 ): PromptModelShortcut[] | undefined {
   if (!selectModel) return undefined;
   const shortcuts: PromptModelShortcut[] = [];
-  for (const [name, providerId, model, label] of MODEL_SHORTCUTS) {
+  for (const [name, providerId, harnessName] of MODEL_SHORTCUTS) {
     const harness = provider.options?.find(({ value }) => value === providerId);
-    const available = thread ? providerId === thread.providerId && thread.models.includes(model) : Boolean(harness);
-    if (!available) continue;
+    // A thread switches only within its own harness, to a model its list already has.
+    const known = "models" in source && source.providerId === providerId ? newestModel(source.models, name) : null;
+    if ("models" in source ? !known : !harness) continue;
     shortcuts.push({
       name,
-      description: `Switch to ${label}`,
+      description: `Switch to ${known ?? `the newest ${name.charAt(0).toUpperCase()}${name.slice(1)}`} in ${harnessName}`,
       icon: harness?.icon,
-      onSelect: () => selectModel({ providerId, model }),
+      onSelect: async () => {
+        const model = "models" in source ? known : newestModel(await source.loadModels(providerId), name);
+        // Rejecting keeps the typed shortcut in the draft.
+        if (!model) throw new Error(`${harnessName} lists no ${name} model`);
+        await selectModel({ providerId, model });
+      },
     });
   }
   return shortcuts.length > 0 ? shortcuts : undefined;

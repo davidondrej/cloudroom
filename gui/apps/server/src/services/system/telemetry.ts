@@ -160,7 +160,6 @@ export type TelemetryEvent =
   | { name: "limit_card"; properties: { provider: string; execution: TelemetryExecution; can_switch_account: boolean; other_agents: number } }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
-  | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
   /** A card at the top right (docs/scopes/corner-cards.md). `viewed`: a new showing started. `key` names the showing; `variant` is its design. */
   | { name: "corner"; properties: { card: CornerCard; key: string; action: "viewed" | CornerAnswer; variant?: string } }
@@ -180,11 +179,9 @@ export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" 
 export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local", "switched_agent"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "claude_not_connected", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded", "one_click_scan"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
-export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
-export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
 export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;

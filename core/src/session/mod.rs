@@ -3489,6 +3489,20 @@ impl Manager {
                     return Ok(());
                 }
                 let current = local.sessions[id].current_request.clone();
+                // A loop run its provider refused moves to the other provider on the website (ADR 20261119-091500).
+                // It is not history.
+                if kind == "refused" {
+                    if let Some(request) = current.filter(|request| tokens::loop_run(request)) {
+                        let report = json!({"action":"refused","request":request,"session":id,"harness":data["harness"]});
+                        let this = self.clone();
+                        tokio::spawn(async move {
+                            if let Some(api) = &this.history.api {
+                                let _ = api.post("automation", &report).await;
+                            }
+                        });
+                    }
+                    return Ok(());
+                }
                 // The running turn's guard; the harness's own continuation turns keep the guard of the turn they follow.
                 let plan_only = current.is_some() && local.sessions[id].guarded_turn;
                 if kind == "usage_limited" && plan_only {

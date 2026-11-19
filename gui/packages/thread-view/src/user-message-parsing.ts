@@ -236,6 +236,7 @@ function buildTurnRequest(
   acceptedClientRequest: AcceptedClientRequest | undefined,
 ): EventProjectionTurnRequest {
   return {
+    ...(typeof decoded.request.params.cloudMessageId === "string" ? { cloudMessageId: decoded.request.params.cloudMessageId } : {}),
     isGrouped: decoded.inputGroups !== undefined,
     kind: resolveTurnRequestKind({
       acceptedClientRequest,

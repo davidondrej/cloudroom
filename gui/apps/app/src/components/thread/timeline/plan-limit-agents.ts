@@ -60,7 +60,7 @@ export function findLatestPlanLimitRowId(
     if (last.planLimitAccountSwitch) return null;
     if (last.planLimitSwitch)
       return last.planLimitSwitch.resend ? last.id : null;
-    return last.planLimit && !running ? last.id : null;
+    return (last.planLimit || last.refusal) && !running ? last.id : null;
   }
 }
 

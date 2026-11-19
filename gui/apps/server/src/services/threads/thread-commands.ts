@@ -290,7 +290,7 @@ export async function buildThreadStartCommand(
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
       deps.db,
-      { threadId: args.thread.id, projectId: args.projectId },
+      { threadId: args.thread.id, projectId: args.projectId, experimental_execution: { providerId: args.providerId, model: args.execution.model } },
       args,
       true,
     ),
@@ -327,7 +327,7 @@ function buildPreparedTurnSubmitCommandPayload(
     bridgeLaunch,
     ...prepareCustomInstructionInput(
       args.deps.db,
-      { threadId: args.threadId, projectId: args.runtimeContext.projectId },
+      { threadId: args.threadId, projectId: args.runtimeContext.projectId, experimental_execution: { providerId: args.runtimeContext.providerId, model: args.execution.model } },
       args,
     ),
     options: toRuntimeExecutionOptions({

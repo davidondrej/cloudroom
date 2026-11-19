@@ -84,6 +84,7 @@ type EventProjectionTurnRequestStatus =
   (typeof eventProjectionTurnRequestStatusValues)[number];
 
 export interface EventProjectionTurnRequest {
+  cloudMessageId?: string;
   isGrouped: boolean;
   kind: EventProjectionTurnRequestKind;
   status: EventProjectionTurnRequestStatus;

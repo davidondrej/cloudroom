@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import type { PromptInput, RuntimePermissionPolicy } from "@cloudroom/domain";
 import {
   buildCodexConfig,
+  buildPrivateDataDenyConfig,
   codexManagedPolicyError,
   combineWorkspaceWriteRoots,
   gitWritableRootsForWorkspace,
@@ -24,6 +25,7 @@ import {
   toCodexServiceTier,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
+  usesPrivateDataDenyProfile,
 } from "./session-params.js";
 import type { CodexSessionOptions } from "./session-params.js";
 
@@ -957,5 +959,37 @@ describe("toCodexUserInput", () => {
         text_elements: [],
       },
     ]);
+  });
+});
+
+describe("private data deny profile", () => {
+  const envVars = { ROOM_DATA_DIR: "/data" };
+
+  it("denies the data folder's secrets to sandboxed commands", () => {
+    const config = buildCodexConfig({
+      threadId: "bb-thread-1",
+      additionalWorkspaceWriteRoots: [],
+      gitWritableRoots: [],
+      options: { ...WORKSPACE_ASK_OPTIONS, envVars },
+    });
+    expect(usesPrivateDataDenyProfile(config)).toBe(process.platform !== "win32");
+    if (process.platform === "win32") return;
+    expect(config?.["permissions.cloudroom.filesystem"]).toMatchObject({
+      ":root": "read",
+      ":workspace_roots": { ".": "write" },
+      "/data/auth.json": "deny",
+      "/data/cloudroom.json": "deny",
+    });
+  });
+
+  it("adds nothing on Windows or without a data folder", () => {
+    expect(buildPrivateDataDenyConfig(envVars, "win32")).toEqual({});
+    expect(buildPrivateDataDenyConfig({}, "darwin")).toEqual({});
+    expect(usesPrivateDataDenyProfile(buildCodexConfig({
+      threadId: "bb-thread-1",
+      additionalWorkspaceWriteRoots: [],
+      gitWritableRoots: [],
+      options: WORKSPACE_ASK_OPTIONS,
+    }))).toBe(false);
   });
 });

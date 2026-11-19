@@ -12,7 +12,8 @@ import {
   reloadWhenMacGoesOffline,
 } from "./cloud/cloud-mode";
 import { installCloudServer } from "./cloud/cloud-server";
-import { keepOtherMacOnScreen, viewingOtherMac } from "./cloud/other-mac";
+import { viewingOtherMac } from "./cloud/mac-connection";
+import { keepOtherMacOnScreen } from "./cloud/other-mac";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppToaster } from "./components/AppToaster";
 import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";

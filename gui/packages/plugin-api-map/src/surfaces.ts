@@ -456,6 +456,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "ExperimentalPluginProviderEnvHealthContext",
           "ExperimentalPluginProviderEnvHealth",
           "experimental_isClaudeNpmPlaceholder",
+          "experimental_privateDataPaths",
         ],
         firstParty: [
           "ACP providers",
@@ -664,6 +665,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Register tools an agent calls the same way it calls Cloudroom's built-in tools",
           "Decide per thread which of its tools and skills are available",
           "Append instructions to a session's system prompt as that session starts",
+          "Match user instructions to the message’s harness and model with experimental_execution",
         ],
         apiSymbols: ["PluginAgents"],
         firstParty: [

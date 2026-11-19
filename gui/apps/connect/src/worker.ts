@@ -750,7 +750,7 @@ async function switchMac(request: Request, url: URL, env: Env, token: string, us
   if (request.headers.get("origin") !== url.origin) return json({ error: "Wrong origin." }, 403);
   const handle = (await readJson(request)).handle;
   const mac = typeof handle === "string" && HANDLE.test(handle) ? await serverByHandle(env.DB, handle, true) : null;
-  if (!mac || mac.userId !== userId || mac.ownerServerId !== null || !(await pickServer(env.DB, token, mac))) {
+  if (!mac || mac.userId !== userId || mac.ownerServerId !== null || mac.vps || !(await pickServer(env.DB, token, mac))) {
     return json({ error: "That Mac is not on your account." }, 404);
   }
   const switched = json({ ok: true });
@@ -809,7 +809,7 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
   if (url.pathname === "/__share") {
     const handle = url.searchParams.get("mac") ?? "";
     const mac = HANDLE.test(handle) ? await serverByHandle(env.DB, handle, true) : null;
-    if (!mac || mac.userId !== session.userId || mac.ownerServerId !== null) return text("Not found\n", 404);
+    if (!mac || mac.userId !== session.userId || mac.ownerServerId !== null || mac.vps) return text("Not found\n", 404);
     return shareRedirect(env, mac, url, token);
   }
   const cloudPath = CLOUD_PATH.exec(url.pathname)?.[1];

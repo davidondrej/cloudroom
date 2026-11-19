@@ -20,6 +20,10 @@ import { useAppCommandShortcut } from "@/components/commands/AppCommandProvider"
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { MarkdownPreview } from "@/components/ui/markdown-preview.js";
+import { AgentEditCursor } from "./agent-file-edit";
+import OfficeDocumentFrame, {
+  type OfficeDocumentFormat,
+} from "./OfficeDocumentFrame";
 import { ImageLightbox } from "@/components/ui/image-lightbox.js";
 import {
   Tooltip,
@@ -78,6 +82,12 @@ export type FilePreviewState =
       file: FilePreviewFile;
       lineRange: FilePreviewLineRange | null;
       textPreviewKind: TextFilePreviewKind | null;
+      /** Word or PowerPoint bytes: Preview draws pages, Raw shows the text. */
+      document?: {
+        format: OfficeDocumentFormat;
+        bytes: Uint8Array;
+        slideOrder: string[];
+      };
     };
 
 interface FilePreviewProps {
@@ -615,12 +625,17 @@ function FilePreviewBody({
     );
   }
   if (state.textPreviewKind === "markdown" && viewMode === "preview") {
-    return (
+    const markdown = (
       <MarkdownFilePreview
         file={state.file}
         markdownLinkRouting={markdownLinkRouting}
         onSelectionAddToChat={onSelectionAddToChat}
       />
+    );
+    return state.document ? (
+      <OfficeDocumentFrame {...state.document} fallback={markdown} />
+    ) : (
+      markdown
     );
   }
   return (
@@ -973,19 +988,29 @@ function HtmlFilePreviewBody({
   );
 }
 
+// Files read like documents: a centered column, bigger headings, more air.
+// Chat keeps the compact look.
+const MARKDOWN_DOCUMENT_CLASS =
+  "mx-auto max-w-[46rem] text-[15px] leading-[1.7] [&_h1]:mb-3 [&_h1]:text-[1.65rem] [&_h1]:leading-tight [&_h1]:tracking-tight [&_h2:not(:first-child)]:mt-8 [&_h2]:mb-2.5 [&_h2]:text-[1.2rem] [&_h2]:tracking-tight [&_h3:not(:first-child)]:mt-6 [&_h3]:text-base [&_li]:mb-1.5 [&_p]:mb-3";
+
 function MarkdownFilePreview({
   file,
   onSelectionAddToChat,
   markdownLinkRouting,
 }: MarkdownFilePreviewProps) {
+  const contentRef = useRef<HTMLDivElement>(null);
   return (
     <SecondaryPanelSelectionActions onSelectionAddToChat={onSelectionAddToChat}>
-      <div className="flex-auto bg-background px-4 py-4">
-        <MarkdownPreview
-          allowHtml
-          content={file.contents}
-          linkRouting={markdownLinkRouting}
-        />
+      <div className="relative flex-auto bg-background px-6 pb-12 pt-5">
+        <div ref={contentRef}>
+          <MarkdownPreview
+            allowHtml
+            className={MARKDOWN_DOCUMENT_CLASS}
+            content={file.contents}
+            linkRouting={markdownLinkRouting}
+          />
+        </div>
+        <AgentEditCursor contentRef={contentRef} contents={file.contents} />
       </div>
     </SecondaryPanelSelectionActions>
   );

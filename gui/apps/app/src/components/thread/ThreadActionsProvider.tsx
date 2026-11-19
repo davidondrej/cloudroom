@@ -3,21 +3,20 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   type ReactNode,
 } from "react";
-import { useSetAtom } from "jotai";
-import { useQueryClient } from "@tanstack/react-query";
-import { getCachedLiveThreadDescendants } from "@/hooks/cache-owners/thread-archive-cache";
-import { appToast } from "@/components/ui/app-toast";
+import { useSetAtom, useStore } from "jotai";
+import { useLocation } from "react-router-dom";
 import {
   closePanesForThreadsAtom,
+  splitLayoutAtom, maximizedPaneIdAtom,
   type ClosePanesForThreadsResult,
 } from "@/lib/split-layout/atoms";
 import type { Thread } from "@cloudroom/domain";
 import {
-  useArchiveThreadAndChildren,
   useDeleteThread,
   useMarkThreadRead,
   useMarkThreadUnread,
@@ -27,7 +26,6 @@ import {
   useUpdateThread,
 } from "@/hooks/mutations/thread-state-mutations";
 import { sdk } from "@/lib/sdk";
-import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useRouteState } from "@/hooks/useRouteState";
 import { useDialogState } from "@/hooks/useDialogState";
 import { showMutationErrorToast } from "@/lib/mutation-errors";
@@ -45,12 +43,9 @@ import {
   ConfirmDeleteDialog,
   ConfirmDeleteDialogContent,
 } from "@/components/dialogs/ConfirmDeleteDialog";
-import { ArchivedThreadToastDescription } from "@/components/thread/ArchivedThreadToastDescription";
+import { useThreadArchive } from "./useThreadArchive";
 import { destroyPersistedBrowserViewsForThread } from "@/components/secondary-panel/browserViewVisibilityCoordinator";
-import {
-  getThreadReadToggleAction,
-  isThreadRunning,
-} from "@cloudroom/client-core";
+import { getThreadReadToggleAction } from "@cloudroom/client-core";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
@@ -67,16 +62,6 @@ function getSidebarSectionTargets(
       .querySelector(`a[data-sidebar-thread-id="${threadId}"]`)
       ?.closest<HTMLElement>("[data-sidebar-sticky-section]") ?? null,
   );
-}
-
-/** The Cloud threads in this family that Core says are working; none if it can't say. */
-async function cloudRunning(threadId: string): Promise<string[]> {
-  try {
-    const response = await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/running`, { signal: AbortSignal.timeout(7_000) });
-    return response.ok ? ((await response.json()) as { running?: string[] }).running ?? [] : [];
-  } catch {
-    return [];
-  }
 }
 
 // The next top-level thread below the archived one, else the nearest above. Never a subagent.
@@ -133,18 +118,10 @@ interface ThreadActionContext {
   childThreadCount: number;
 }
 
-interface ThreadArchiveConfirmTarget {
-  thread: Thread;
-  runningThreadCount: number;
-}
-
-const ARCHIVE_UNDO_TOAST_DURATION_MS = 8_000;
-
 export function ThreadActionsProvider({
   children,
 }: ThreadActionsProviderProps) {
   const navigate = useRouteNavigate();
-  const queryClient = useQueryClient();
   const { threadId: viewedThreadId } = useRouteState();
   const viewedThreadIdRef = useRef(viewedThreadId);
   const openedSectionTargetsRef = useRef<{
@@ -161,7 +138,6 @@ export function ThreadActionsProvider({
       : null;
   }, [viewedThreadId]);
   const closePanesForThreads = useSetAtom(closePanesForThreadsAtom);
-  const archiveThreadAndChildrenMutation = useArchiveThreadAndChildren();
   const unarchiveThreadMutation = useUnarchiveThread();
   const markThreadRead = useMarkThreadRead();
   const markThreadUnread = useMarkThreadUnread();
@@ -170,8 +146,6 @@ export function ThreadActionsProvider({
   const deleteThread = useDeleteThread();
   const updateThread = useUpdateThread();
   const threadActionContextAbortRef = useRef<AbortController | null>(null);
-  const { mutateAsync: archiveThreadAndChildrenMutateAsync } =
-    archiveThreadAndChildrenMutation;
   const { mutate: unarchiveMutate } = unarchiveThreadMutation;
   const { mutate: markReadMutate } = markThreadRead;
   const { mutate: markUnreadMutate } = markThreadUnread;
@@ -182,12 +156,9 @@ export function ThreadActionsProvider({
 
   const renameDialog = useDialogState<ThreadRenameDialogTarget>();
   const deleteDialog = useDialogState<ThreadDeleteDialogTarget>();
-  const archiveConfirmDialog = useDialogState<ThreadArchiveConfirmTarget>();
 
   const { onClose: closeRenameDialog, onOpen: openRenameDialog } = renameDialog;
   const { onClose: closeDeleteDialog, onOpen: openDeleteDialog } = deleteDialog;
-  const { onClose: closeArchiveConfirm, onOpen: openArchiveConfirm } =
-    archiveConfirmDialog;
 
   useEffect(() => {
     return () => {
@@ -196,24 +167,17 @@ export function ThreadActionsProvider({
     };
   }, []);
 
-  const navigateAwayIfViewing = useCallback(
-    (thread: Thread) => {
-      if (viewedThreadIdRef.current === thread.id) {
-        navigate(getRootComposeRoutePath());
-      }
-    },
-    [navigate],
-  );
-
   const syncNavigationAfterClose = useCallback(
-    (result: ClosePanesForThreadsResult, navigateAway: () => void) => {
-      if (result.removedAny && result.focusedRoute !== null) {
-        if (result.focusedRoute.threadId !== viewedThreadIdRef.current) {
-          navigate(getThreadRoutePath(result.focusedRoute), { replace: true });
-        }
-        return;
+    (result: ClosePanesForThreadsResult, fallback: () => string | undefined) => {
+      if (result.removedAny && result.focusedRoute) {
+        if (result.focusedRoute.threadId === viewedThreadIdRef.current) return;
+        const path = getThreadRoutePath(result.focusedRoute);
+        navigate(path, { replace: true });
+        return path;
       }
-      navigateAway();
+      const path = fallback();
+      if (path) navigate(path);
+      return path;
     },
     [navigate],
   );
@@ -312,7 +276,7 @@ export function ThreadActionsProvider({
             });
             closeDialog();
             syncNavigationAfterClose(closePanesForThreads([thread.id]), () =>
-              navigateAwayIfViewing(thread),
+              viewedThreadIdRef.current === thread.id ? getRootComposeRoutePath() : undefined,
             );
           },
         },
@@ -321,7 +285,6 @@ export function ThreadActionsProvider({
     [
       closePanesForThreads,
       deleteMutate,
-      navigateAwayIfViewing,
       syncNavigationAfterClose,
     ],
   );
@@ -361,18 +324,21 @@ export function ThreadActionsProvider({
     [unarchiveMutate],
   );
 
-  const performArchive = useCallback(
-    (thread: Thread) => {
-      const archivedThreadIds = new Set([
-        thread.id,
-        ...getCachedLiveThreadDescendants(queryClient, thread.id).map(
-          (descendant) => descendant.id,
-        ),
-      ]);
+  const store = useStore();
+  const location = useLocation();
+  const route = useRef({ location, revision: 0 });
+  useLayoutEffect(() => {
+    if (route.current.location.key !== location.key) route.current = { location, revision: route.current.revision + 1 };
+  }, [location]);
+  const closeArchivedPanes = useCallback(
+    (thread: Thread, archivedThreadIds: ReadonlySet<string>) => {
+      const original = route.current;
+      const layout = store.get(splitLayoutAtom);
+      const maximized = store.get(maximizedPaneIdAtom);
       const opened = openedSectionTargetsRef.current;
       const openedTargets =
         opened?.threadId === thread.id ? opened.targets : [];
-      const navigateAwayIfArchived = () => {
+      const fallbackAfterArchive = () => {
         const viewed = viewedThreadIdRef.current;
         if (!viewed || !archivedThreadIds.has(viewed)) return;
         const listedThreadIds = new Set(
@@ -390,100 +356,46 @@ export function ThreadActionsProvider({
             thread.id,
             isAvailable,
           );
-        navigate(
-          fallback
-            ? getThreadRoutePath({
-                projectId: fallback.projectId ?? thread.projectId,
-                threadId: fallback.threadId,
-              })
-            : getRootComposeRoutePath(),
-        );
+        return fallback
+          ? getThreadRoutePath({ projectId: fallback.projectId ?? thread.projectId, threadId: fallback.threadId })
+          : getRootComposeRoutePath();
       };
-      syncNavigationAfterClose(
-        closePanesForThreads([...archivedThreadIds]),
-        navigateAwayIfArchived,
-      );
-      archiveThreadAndChildrenMutateAsync({ id: thread.id }).then(
-        (response) => {
-          const toastId = `thread-archived-${thread.id}`;
-          appToast.success("Archived", {
-            compact: true,
-            description: (
-              <ArchivedThreadToastDescription
-                archivedThreadCount={response.archivedThreadIds.length}
-                threadTitle={getThreadDisplayTitle(thread)}
-                onOpenThread={() => {
-                  navigate(
-                    getThreadRoutePath({
-                      projectId: thread.projectId,
-                      threadId: thread.id,
-                    }),
-                  );
-                  appToast.dismiss(toastId);
-                }}
-              />
-            ),
-            cancel: {
-              label: "Undo",
-              onClick: () => {
-                for (const threadId of response.archivedThreadIds) {
-                  unarchiveMutate({ id: threadId, keepParent: true });
-                }
-              },
-            },
-            duration: ARCHIVE_UNDO_TOAST_DURATION_MS,
-            id: toastId,
-          });
-        },
-        (error: unknown) => {
-          showMutationErrorToast({
-            error,
-            fallbackMessage: "Failed to archive thread and children",
-            lifecycleOperation: "archive_thread",
-          });
-        },
-      );
-    },
-    [
-      archiveThreadAndChildrenMutateAsync,
-      closePanesForThreads,
-      navigate,
-      queryClient,
-      syncNavigationAfterClose,
-      unarchiveMutate,
-    ],
-  );
-
-  const archiveThreadAndChildrenAction = useCallback(
-    (thread: Thread) => {
-      const family = [
-        thread,
-        ...getCachedLiveThreadDescendants(queryClient, thread.id),
-      ];
-      const decide = (elsewhere: string[]) => {
-        const running = new Set([
-          ...family.filter(isThreadRunning).map((item) => item.id),
-          ...elsewhere,
-        ]);
-        if (running.size > 0) {
-          openArchiveConfirm({ thread, runningThreadCount: running.size });
-          return;
+      const closed = closePanesForThreads([...archivedThreadIds]);
+      const destination = syncNavigationAfterClose(closed, fallbackAfterArchive);
+      const remaining = store.get(splitLayoutAtom);
+      const remainingMaximized = store.get(maximizedPaneIdAtom);
+      return () => {
+        // Leave later navigation, resizing, and other archive actions in the user's hands.
+        const current = route.current;
+        if (current !== original && (current.revision !== original.revision + 1 || current.location.pathname !== destination)) return;
+        if (store.get(splitLayoutAtom) !== remaining || store.get(maximizedPaneIdAtom) !== remainingMaximized) return;
+        if (closed.removedAny) {
+          store.set(splitLayoutAtom, layout);
+          store.set(maximizedPaneIdAtom, maximized);
         }
-        performArchive(thread);
+        if (destination) {
+          const { pathname, search, hash, state } = original.location;
+          navigate(pathname + search + hash, { replace: true, state });
+        }
       };
-      // A Cloud child shown idle here may be working on another computer (#237): Core says, without a wake.
-      if (family.some((item) => item.executionTarget === "cloud"))
-        void cloudRunning(thread.id).then(decide);
-      else decide([]);
     },
-    [openArchiveConfirm, performArchive, queryClient],
+    [closePanesForThreads, navigate, store, syncNavigationAfterClose],
   );
-
-  const confirmArchive = useCallback(() => {
-    const target = archiveConfirmDialog.target;
-    closeArchiveConfirm();
-    if (target) performArchive(target.thread);
-  }, [archiveConfirmDialog.target, closeArchiveConfirm, performArchive]);
+  const openThread = useCallback(
+    (thread: Thread) =>
+      navigate(getThreadRoutePath({ projectId: thread.projectId, threadId: thread.id })),
+    [navigate],
+  );
+  const {
+    archive: archiveThreadAndChildrenAction,
+    confirmation,
+    closeConfirmation,
+    confirmArchive, retry,
+  } = useThreadArchive({
+    closePanes: closeArchivedPanes,
+    openThread,
+    unarchive: unarchiveMutate,
+  });
 
   const toggleRead = useCallback(
     (thread: Thread) => {
@@ -558,20 +470,25 @@ export function ThreadActionsProvider({
         onDelete={confirmDelete}
       />
       <ConfirmDeleteDialog
-        open={archiveConfirmDialog.isOpen}
-        onOpenChange={archiveConfirmDialog.onOpenChange}
+        open={Boolean(confirmation)}
+        onOpenChange={(open) => {
+          if (!open) closeConfirmation();
+        }}
       >
         <ConfirmDeleteDialogContent
-          title="Archive a running thread?"
+          title={confirmation?.runningCount === null ? "Archive without checking?" : "Archive a running thread?"}
+          secondaryAction={confirmation?.runningCount === null ? { label: "Retry", onClick: retry } : undefined}
           description={
-            archiveConfirmDialog.target?.runningThreadCount === 1
-              ? "It is still running. Archiving stops it."
-              : `${archiveConfirmDialog.target?.runningThreadCount ?? 0} threads in it are still running, including sub-agents. Archiving stops all of them.`
+            confirmation && <>
+              {confirmation.runningCount === null && "Cloud couldn’t check whether this thread is running. "}
+              {confirmation.runningCount !== null && confirmation.runningCount > 1 && `At least ${confirmation.runningCount} threads are running. `}
+              Archiving “{getThreadDisplayTitle(confirmation.thread)}” stops all running work in this thread and its children.
+            </>
           }
           confirmLabel="Archive anyway"
           pending={false}
           onConfirm={confirmArchive}
-          onCancel={closeArchiveConfirm}
+          onCancel={closeConfirmation}
         />
       </ConfirmDeleteDialog>
     </ThreadActionsContext.Provider>

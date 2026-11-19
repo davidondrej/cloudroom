@@ -42,6 +42,9 @@ export type Db = Database.Database;
 const AUTOMATION_MAX_CONSECUTIVE_FAILURES = 3;
 /** Before a pause, a scheduled loop tries again 1 minute, then 15 minutes, after a failure. */
 export const AUTOMATION_RETRY_DELAYS_MS = [60_000, 15 * 60_000] as const;
+/** A run's error starts with this when its provider refused the work, say OpenAI's cybersecurity filter (run.ts). It
+ *  fails the run, but never counts toward a pause: its retry runs on the other provider (ADR 20261119-091500). */
+export const REFUSED = "Refused: ";
 // A paused loop tries again on its own (ADR 20261103-235500), like Cloud loops: 1 hour, 6 hours, then daily, until 10
 // failures in a row. Each try that fails adds one, so the count says how far along it is.
 const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
@@ -837,7 +840,8 @@ function recordAutomationFailure(
   if (!automation) {
     return { consecutiveFailures: 0, paused: false, retryAt: null };
   }
-  const consecutiveFailures = automation.consecutiveFailures + 1;
+  const consecutiveFailures =
+    automation.consecutiveFailures + (args.error.startsWith(REFUSED) ? 0 : 1);
   // Turned off by hand while this run went on, it stays off: no pause mark, so it never tries again on its own.
   const paused =
     automation.enabled &&

@@ -20,7 +20,11 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
 import { Link } from "react-router-dom";
-import { SettingsWithControl } from "@/components/ui/settings-section.js";
+import { ScopedInstructionRules } from "@/components/settings/ScopedInstructionRules";
+import {
+  SettingsSection,
+  SettingsWithControl,
+} from "@/components/ui/settings-section.js";
 import { getPluginDetailRoutePath } from "@/lib/route-paths";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { Switch } from "@cloudroom/shared-ui/switch";
@@ -313,6 +317,8 @@ function AutosavingPluginSetting({
   settingKey,
   storedValue,
 }: AutosavingPluginSettingProps) {
+  const globalInstructions =
+    pluginId === "custom-instructions" && settingKey === "instructions";
   const queryClient = useQueryClient();
   const messageId = useId();
   const initialDraft = initialSettingDraft(descriptor, storedValue);
@@ -366,6 +372,7 @@ function AutosavingPluginSetting({
   function saveDraft(
     event: FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
   ): void {
+    if (globalInstructions) return;
     if (descriptor.type !== "string" && descriptor.type !== "number") return;
     if (descriptor.type === "number" && event.currentTarget.validity.badInput) {
       setDraftState({ value: initialDraft, hasNewerDraft: false });
@@ -408,6 +415,50 @@ function AutosavingPluginSetting({
       })
     : null;
   const isDirty = draft !== storedValue || save.isError;
+  const control = (
+    <div className="space-y-1">
+      <PluginSettingField
+        ariaDescribedBy={saveError !== null ? messageId : undefined}
+        ariaInvalid={saveError !== null}
+        descriptor={
+          globalInstructions
+            ? { ...descriptor, label: "Global default" }
+            : descriptor
+        }
+        storedValue={storedValue}
+        draft={draft}
+        onBlur={saveDraft}
+        onChange={changeDraft}
+      />
+      {saveError !== null ? (
+        <p id={messageId} className="text-xs text-destructive" role="alert">
+          {saveError}
+        </p>
+      ) : null}
+      {isMultilineSetting(descriptor) ? (
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!isDirty || save.isPending}
+            onClick={saveMultiline}
+          >
+            {save.isPending ? "Saving…" : isDirty ? "Save" : "Saved"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+  if (globalInstructions) {
+    return (
+      <SettingsSection
+        title="Global default"
+        description="Applies to every harness and model on this host."
+      >
+        {control}
+      </SettingsSection>
+    );
+  }
   return (
     <SettingsWithControl
       label={descriptor.label}
@@ -421,34 +472,7 @@ function AutosavingPluginSetting({
         ? { description: descriptor.description }
         : {})}
     >
-      <div className="space-y-1">
-        <PluginSettingField
-          ariaDescribedBy={saveError !== null ? messageId : undefined}
-          ariaInvalid={saveError !== null}
-          descriptor={descriptor}
-          storedValue={storedValue}
-          draft={draft}
-          onBlur={saveDraft}
-          onChange={changeDraft}
-        />
-        {saveError !== null ? (
-          <p id={messageId} className="text-xs text-destructive" role="alert">
-            {saveError}
-          </p>
-        ) : null}
-        {isMultilineSetting(descriptor) ? (
-          <div className="flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!isDirty || save.isPending}
-              onClick={saveMultiline}
-            >
-              {save.isPending ? "Saving…" : isDirty ? "Save" : "Saved"}
-            </Button>
-          </div>
-        ) : null}
-      </div>
+      {control}
     </SettingsWithControl>
   );
 }
@@ -551,7 +575,10 @@ function PluginSettingsPageSkeleton() {
           <ResourceDetailConfigurationSection
             label={<Skeleton className="h-3.5 w-24" />}
           >
-            <ResourceDetailPanel surface="recessed" className="border-0 bg-surface-recessed px-3 py-3">
+            <ResourceDetailPanel
+              surface="recessed"
+              className="border-0 bg-surface-recessed px-3 py-3"
+            >
               <div className="space-y-4">
                 <PluginSettingsFieldSkeleton />
                 <PluginSettingsFieldSkeleton />
@@ -585,7 +612,9 @@ export function PluginSettingsPage({
     ) ?? null;
   if (listQuery.data === undefined && !listQuery.isError) {
     // Accounts has no header, so its skeleton would flash one.
-    return pluginId === ACCOUNTS_PLUGIN_ID ? null : <PluginSettingsPageSkeleton />;
+    return pluginId === ACCOUNTS_PLUGIN_ID ? null : (
+      <PluginSettingsPageSkeleton />
+    );
   }
   if (listQuery.data === undefined && listQuery.isError) {
     return (
@@ -687,6 +716,13 @@ function PluginSettingsContent({
         plugin.id === CONNECT_PLUGIN_ID &&
         PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status) ? (
           <PluginSettingsSections pluginId={plugin.id} />
+        ) : plugin.id === "custom-instructions" && enabled && plugin.enabled ? (
+          <PluginSettingsDetail plugin={plugin} />
+        ) : plugin.id === "custom-instructions" && !enabled ? (
+          <p className="text-sm text-subtle-foreground">
+            Custom instructions are off. Turn them on to use your saved
+            instructions.
+          </p>
         ) : enabled && plugin.enabled && hasAvailableSettings ? (
           <ResourceDetailConfigurationSection label="Configuration">
             <PluginSettingsDetail plugin={plugin} />
@@ -725,11 +761,22 @@ export function PluginSettingsDetail({ plugin }: { plugin: PluginListItem }) {
   const settingsAvailable =
     plugin.enabled && PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status);
   if (!plugin.hasSettings && !hasSettingsSections) return null;
+  if (plugin.id === "custom-instructions" && settingsAvailable) {
+    return (
+      <div className="space-y-6">
+        <PluginSettingsForm pluginId={plugin.id} />
+        <ScopedInstructionRules />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" data-testid={`plugin-detail-${plugin.id}`}>
       {plugin.hasSettings || !settingsAvailable ? (
-        <ResourceDetailPanel surface="recessed" className="border-0 bg-surface-recessed px-3 py-3">
+        <ResourceDetailPanel
+          surface="recessed"
+          className="border-0 bg-surface-recessed px-3 py-3"
+        >
           {settingsAvailable ? (
             <PluginSettingsForm key={plugin.id} pluginId={plugin.id} />
           ) : (

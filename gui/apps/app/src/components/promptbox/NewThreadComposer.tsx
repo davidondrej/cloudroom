@@ -18,7 +18,7 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
 import { CloudClaudeStrip, useCloudClaudeMissing } from "./banner/CloudClaudeStrip";
 import { CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
-import { StarterPrompts } from "@/components/ActivationChecklist";
+import { OneClickScans } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -180,6 +180,13 @@ interface NewThreadComposerPromptOptions {
 
 type PromptDraftController = ReturnType<typeof usePromptDraftStorage>;
 type ParsedEnvironment = ReturnType<typeof parseEnvironmentValue>;
+type PickedDraftEnvironment =
+  | { target: "cloud" }
+  | {
+      target: "local";
+      selectionValue?: string;
+      machine?: EnvironmentMachineSelection | null;
+    };
 
 export interface NewThreadComposerState {
   connectionFooter?: ReactNode;
@@ -468,6 +475,17 @@ export function NewThreadComposer({
   const [cloudPicked, setCloudPicked] = useState(
     seed?.executionTarget === "cloud",
   );
+  // Tracks an intentional environment pick in this draft so switching projects keeps it.
+  const [pickedEnvironment, setPickedEnvironment] =
+    useState<PickedDraftEnvironment | null>(null);
+  const pickRevisionRef = useRef(0);
+  const setUserPickedEnvironment = useCallback(
+    (next: PickedDraftEnvironment | null) => {
+      pickRevisionRef.current += 1;
+      setPickedEnvironment(next);
+    },
+    [],
+  );
   const vps = useCloudVps();
   const vpsConnected = vps.data?.connected === true;
   const [cloudTarget, setCloudTarget] = useState<"vps" | "cloud" | null>(() => {
@@ -486,10 +504,13 @@ export function NewThreadComposer({
     branch: string | null;
   }>({ projectId: null, branch: null });
   useEffect(() => {
-    const selectCloud = () => setExecutionTarget("cloud");
+    const selectCloud = () => {
+      setExecutionTarget("cloud");
+      setUserPickedEnvironment(null);
+    };
     window.addEventListener(SELECT_CLOUD_EVENT, selectCloud);
     return () => window.removeEventListener(SELECT_CLOUD_EVENT, selectCloud);
-  }, []);
+  }, [setUserPickedEnvironment]);
   const [localPromptBoxFocusRequest, setLocalPromptBoxFocusRequest] = useState<
     number | null
   >(null);
@@ -517,14 +538,6 @@ export function NewThreadComposer({
     if (!projects || !replayKnowsCandidate) return requestedCandidate;
     return candidateKnown ? requestedCandidate : PERSONAL_PROJECT_ID;
   }, [candidateKnown, projects, replayKnowsCandidate, requestedCandidate]);
-  const [machineProjectId, setMachineProjectId] = useState(projectId);
-  if (machineProjectId !== projectId) {
-    setMachineProjectId(projectId);
-    if (selectionScope === "new-thread" && seed?.executionTarget === undefined && seed?.environment === undefined) {
-      setExecutionTarget(startingExecutionTarget(true, projectId));
-      setCloudPicked(false);
-    }
-  }
   const isProjectless = isProjectlessProjectId(projectId);
   const currentProject = useMemo(() => {
     if (isProjectless) {
@@ -652,8 +665,8 @@ export function NewThreadComposer({
   const { providers: machineProviders } = useSystemMachineProviders();
   const pluginList = usePluginList({ enabled: true });
 
-  const seedSignature = JSON.stringify([
-    projectId,
+  const composerSeedSignature = JSON.stringify([
+    draftStorage,
     resetKey ?? null,
     seed?.providerId ?? null,
     seed?.model ?? null,
@@ -672,19 +685,46 @@ export function NewThreadComposer({
   );
   const { value: storedMachineId, setValue: setStoredMachineId } =
     usePromptBoxMachinePreference(projectId);
-  const [activeSeedSignature, setActiveSeedSignature] = useState(seedSignature);
+  const [activeComposerSeedSignature, setActiveComposerSeedSignature] =
+    useState(composerSeedSignature);
+  const [activeProjectId, setActiveProjectId] = useState(projectId);
   const [seedOverridden, setBranchSeedOverridden] = useState(false);
   const [pickedProviderMachine, setPickedProviderMachine] = useState<{
     selectionValue: string;
     machine: EnvironmentMachineSelection;
   } | null>(null);
-  if (activeSeedSignature !== seedSignature) {
-    setActiveSeedSignature(seedSignature);
+  if (activeComposerSeedSignature !== composerSeedSignature) {
+    const projectChanged = activeProjectId !== projectId;
+    setActiveComposerSeedSignature(composerSeedSignature);
+    setActiveProjectId(projectId);
     setBranchSeedOverridden(false);
     setPickedProviderMachine(null);
-    if (seed?.environment !== undefined) setExecutionTarget("local");
+    setPickedEnvironment(null);
     if (seed?.executionTarget) setExecutionTarget(seed.executionTarget);
+    else if (seed?.environment !== undefined) setExecutionTarget("local");
+    else if (projectChanged && selectionScope === "new-thread") {
+      setExecutionTarget(startingExecutionTarget(true, projectId));
+    }
     setCloudPicked(seed?.executionTarget === "cloud");
+  } else if (activeProjectId !== projectId) {
+    setActiveProjectId(projectId);
+    // Keep the previous project's seeded checkout path/branch from leaking onto the newly picked project.
+    setBranchSeedOverridden(true);
+    setPickedProviderMachine(null);
+    if (pickedEnvironment === null) {
+      if (
+        selectionScope === "new-thread" &&
+        seed?.executionTarget === undefined &&
+        seed?.environment === undefined
+      ) {
+        setExecutionTarget(startingExecutionTarget(true, projectId));
+        setCloudPicked(false);
+      } else {
+        if (seed?.executionTarget) setExecutionTarget(seed.executionTarget);
+        else if (seed?.environment !== undefined) setExecutionTarget("local");
+        setCloudPicked(seed?.executionTarget === "cloud");
+      }
+    }
   }
 
   const resolveProviderSelection = useCallback(
@@ -717,6 +757,17 @@ export function NewThreadComposer({
           ? pickedProviderMachine.machine
           : null;
       if (picked !== null) return { provider, machine: picked };
+      const carried =
+        pickedEnvironment?.target === "local" &&
+        pickedEnvironment.selectionValue === effectiveValue
+          ? (pickedEnvironment.machine ?? null)
+          : null;
+      if (
+        carried !== null &&
+        (carried.type === "new" || knownHostIds.has(carried.hostId))
+      ) {
+        return { provider, machine: carried };
+      }
       const seeded =
         !seedOverridden &&
         environmentSeed !== null &&
@@ -763,6 +814,7 @@ export function NewThreadComposer({
       environmentProviders,
       environmentProvidersByHostId,
       knownHostIds,
+      pickedEnvironment,
       pickedProviderMachine,
       selectionScope,
       storedMachineId,
@@ -773,7 +825,11 @@ export function NewThreadComposer({
   const resolveProviderRouting = useCallback(
     (environmentSelectionValue: string) => {
       const effectiveValue = resolveRootComposeEffectiveEnvironmentValue({
-        environmentSelectionValue,
+        environmentSelectionValue:
+          pickedEnvironment?.target === "local" &&
+          pickedEnvironment.selectionValue !== undefined
+            ? pickedEnvironment.selectionValue
+            : environmentSelectionValue,
         environmentProviders,
         isProjectless,
         knownHostIds,
@@ -800,6 +856,7 @@ export function NewThreadComposer({
       environmentProviders,
       isProjectless,
       knownHostIds,
+      pickedEnvironment,
       primaryHostId,
       projectGitRemoteUrl,
       projectSources,
@@ -838,7 +895,7 @@ export function NewThreadComposer({
   const creationOptions = useThreadCreationOptions({
     scope: selectionScope,
     preferenceProjectId: projectId,
-    resetKey: `${projectId}\0${seedSignature}`,
+    resetKey: `${projectId}\0${composerSeedSignature}`,
     resolveProviderRouting,
     initialProviderId: seed?.providerId ?? projectDefaults?.providerId,
     preferReadyProviderWhenUnset:
@@ -957,6 +1014,11 @@ export function NewThreadComposer({
     if (restoredDraft !== null) promptDraft.setDraft(restoredDraft);
   });
 
+  const activeEnvironmentSelectionValue =
+    pickedEnvironment?.target === "local" &&
+    pickedEnvironment.selectionValue !== undefined
+      ? pickedEnvironment.selectionValue
+      : environmentSelectionValue;
   const changeEnvironment = useCallback(
     (
       value: string,
@@ -966,12 +1028,23 @@ export function NewThreadComposer({
         typeof providerTarget === "string"
           ? { type: "existing" as const, hostId: providerTarget }
           : providerTarget;
+      const isProviderSelection =
+        parseEnvironmentValue(value)?.type === "provider";
+      if (isProviderSelection) {
+        setExecutionTarget("local");
+        setCloudPicked(false);
+        setUserPickedEnvironment({
+          target: "local",
+          selectionValue: value,
+          machine: providerMachine,
+        });
+      }
       const currentProviderMachine =
         pickedProviderMachine?.selectionValue === value
           ? pickedProviderMachine.machine
           : null;
       if (
-        Object.is(environmentSelectionValue, value) &&
+        Object.is(activeEnvironmentSelectionValue, value) &&
         JSON.stringify(providerMachine) ===
           JSON.stringify(currentProviderMachine)
       ) {
@@ -984,10 +1057,7 @@ export function NewThreadComposer({
           ? null
           : { selectionValue: value, machine: providerMachine },
       );
-      if (
-        selectionScope === "new-thread" &&
-        parseEnvironmentValue(value)?.type === "provider"
-      ) {
+      if (selectionScope === "new-thread" && isProviderSelection) {
         setStoredMachineId(
           providerMachine?.type === "existing" ? providerMachine.hostId : "",
         );
@@ -995,18 +1065,26 @@ export function NewThreadComposer({
       setCreationEnvironmentSelectionValue(value);
     },
     [
-      environmentSelectionValue,
+      activeEnvironmentSelectionValue,
       pickedProviderMachine,
       setCreationEnvironmentSelectionValue,
       selectionScope,
       setStoredMachineId,
+      setUserPickedEnvironment,
       snapshotDraftBeforeOptionChange,
     ],
+  );
+  const seedEnvironmentSelectionValue = useCallback(
+    (value: string) => {
+      setUserPickedEnvironment(null);
+      setCreationEnvironmentSelectionValue(value);
+    },
+    [setCreationEnvironmentSelectionValue, setUserPickedEnvironment],
   );
   const effectiveEnvironmentValue = useMemo(
     () =>
       resolveRootComposeEffectiveEnvironmentValue({
-        environmentSelectionValue,
+        environmentSelectionValue: activeEnvironmentSelectionValue,
         environmentProviders,
         isProjectless,
         knownHostIds,
@@ -1018,8 +1096,8 @@ export function NewThreadComposer({
         reuseThreadOptionsLoading,
       }),
     [
+      activeEnvironmentSelectionValue,
       connectedHostIds,
-      environmentSelectionValue,
       environmentProviders,
       isProjectless,
       knownHostIds,
@@ -1065,14 +1143,14 @@ export function NewThreadComposer({
     snapshotDraftBeforeOptionChange();
     setExecutionTarget("cloud");
     setCloudPicked(true);
-  }, [cloudLocked, snapshotDraftBeforeOptionChange]);
+    setUserPickedEnvironment({ target: "cloud" });
+  }, [cloudLocked, setUserPickedEnvironment, snapshotDraftBeforeOptionChange]);
   const handleSelectProvider = useCallback(
     (provider: SystemEnvironmentProvider, hostId: string | null) => {
       if (selectionScope === "new-thread" && executionTarget === "cloud") reportCloudChoice("picked_local", cloudChoiceReason);
-      setExecutionTarget("local");
       changeEnvironment(
         encodeProviderValue(provider.id),
-        hostId === null ? null : { type: "existing", hostId },
+        hostId === null ? null : { type: "existing" as const, hostId },
       );
     },
     [changeEnvironment, selectionScope, executionTarget, cloudChoiceReason],
@@ -1085,7 +1163,7 @@ export function NewThreadComposer({
       });
       if (provider === null) return;
       changeEnvironment(encodeProviderValue(provider.id), {
-        type: "existing",
+        type: "existing" as const,
         hostId,
       });
     },
@@ -1669,8 +1747,6 @@ export function NewThreadComposer({
                 ? "Type a message first"
                 : null))
       : localSubmitDisabledReason;
-  const starterRef = useRef<string | null>(null);
-  const starterHigh = availableReasoningOptions.some((option) => option.value === "high");
   const seededMachine =
     seed?.executionTarget !== undefined || seed?.environment !== undefined;
   const submitDraft = useCallback(
@@ -1707,7 +1783,7 @@ export function NewThreadComposer({
         projectId,
         providerId: selectedProviderId,
         model: selectedThreadModel,
-        reasoningLevel: starterHigh && submittedDraft.text === starterRef.current ? "high" : reasoningLevel,
+        reasoningLevel,
         permissionMode: executionTarget === "cloud" ? "full" : permissionMode,
         ...(executionTarget === "cloud"
           ? { executionTarget, serviceTier: cloudFastSupported && threadTier ? threadTier : "default", ...(cloudBaseBranch ? { baseBranch: cloudBaseBranch } : {}), ...(vpsConnected ? { cloudTarget: wantedCloudTarget } : {}) }
@@ -1730,6 +1806,7 @@ export function NewThreadComposer({
           promptDraft.storageKey,
           request,
         );
+      const submittedPickRevision = pickRevisionRef.current;
       isSubmittingRef.current = true;
       setIsSubmitting(true);
       setComposerError(null);
@@ -1741,8 +1818,20 @@ export function NewThreadComposer({
         clearReuseEnvironment();
         if (selectionScope === "new-thread") {
           saveNewThreadMachine(projectId, seededMachine, storedExecutionTarget, executionTarget);
-          setExecutionTarget(startingExecutionTarget(true, projectId));
-          setCloudPicked(false);
+        }
+        if (pickRevisionRef.current === submittedPickRevision) {
+          setUserPickedEnvironment(null);
+          if (selectionScope === "new-thread") {
+            if (
+              pickedEnvironment?.target === "local" &&
+              parseEnvironmentValue(effectiveEnvironmentValue)?.type === "provider"
+            ) {
+              setCreationEnvironmentSelectionValue(effectiveEnvironmentValue);
+              setStoredMachineId(providerHostId ?? "");
+            }
+            setExecutionTarget(startingExecutionTarget(true, projectId));
+            setCloudPicked(false);
+          }
         }
       } catch (submitError) {
         setComposerError(
@@ -1780,9 +1869,14 @@ export function NewThreadComposer({
       cloudBaseBranch,
       vpsConnected,
       wantedCloudTarget,
-      starterHigh,
       seededMachine,
       storedExecutionTarget,
+      pickedEnvironment,
+      effectiveEnvironmentValue,
+      providerHostId,
+      setCreationEnvironmentSelectionValue,
+      setStoredMachineId,
+      setUserPickedEnvironment,
     ],
   );
 
@@ -1794,18 +1888,6 @@ export function NewThreadComposer({
     },
     [submitDraft],
   );
-  const [starter, setStarter] = useState<string | null>(null);
-  const pickStarter = useCallback((text: string) => {
-    promptDraft.setDraft({ text, mentions: [], attachments: [] });
-    selectCloudTarget();
-    starterRef.current = text;
-    setStarter(text);
-  }, [promptDraft, selectCloudTarget]);
-  useEffect(() => {
-    if (starter === null || executionTarget !== "cloud" || submitDisabledReason !== null) return;
-    setStarter(null);
-    if (promptDraft.getCurrent().text === starter) void handleSubmit(null);
-  }, [starter, executionTarget, submitDisabledReason, promptDraft, handleSubmit]);
   useEffect(() => {
     submitProgrammaticallyRef.current = async (
       submitOptions,
@@ -1856,14 +1938,16 @@ export function NewThreadComposer({
   );
   const handleWorktreeChange = useCallback(
     (environmentId: string) => {
+      setUserPickedEnvironment(null);
       changeEnvironment(encodeReuseValue(environmentId));
     },
-    [changeEnvironment],
+    [changeEnvironment, setUserPickedEnvironment],
   );
 
   const renderPromptBox = useCallback(
     (options: NewThreadComposerPromptOptions) => {
       const locks = options.locks ?? {};
+      const environmentLocked = Boolean(locks.environment || isSubmitting);
       const disabledReason = options.blockedReason ?? submitDisabledReason;
       return (
         <PromptDraftContextsContext.Provider value={currentDraft.contexts}>
@@ -1932,7 +2016,10 @@ export function NewThreadComposer({
                 ...(cloudLocked ? { note: CLOUD_LOCKED_REASON } : {}),
                 onSelect: () => {
                   selectCloudTarget();
-                  if (vpsConnected && !cloudLocked) pickCloudTarget("cloud");
+                  if (!cloudLocked) {
+                    if (vpsConnected) pickCloudTarget("cloud");
+                    else setCloudTarget("cloud");
+                  }
                 },
                 ...(vpsConnected && vps.data
                   ? {
@@ -1951,12 +2038,12 @@ export function NewThreadComposer({
                   : {}),
                 onAddMachine: () => navigate(getSettingsRoutePath("machines")),
               },
-              ...(executionTarget === "local" && !cloudLocked && !locks.environment && cloudCanRunHarness(selectedProviderId)
+              ...(executionTarget === "local" && !cloudLocked && !environmentLocked && cloudCanRunHarness(selectedProviderId)
                 ? { hint: <TryCloudHint draftLength={promptDraft.text.trim().length} github={cloudBranchPickerShown} onUseCloud={selectCloudTarget} /> }
                 : {}),
               value: effectiveEnvironmentValue,
               sources: projectSources,
-              disabled: locks.environment,
+              disabled: environmentLocked,
               isLoading: environmentProviders === undefined,
               providers: environmentProviders ?? [],
               providersByHostId: environmentProvidersByHostId,
@@ -1972,7 +2059,7 @@ export function NewThreadComposer({
               options: reuseThreadOptions,
               value: reuseEnvironmentId,
               onChange: handleWorktreeChange,
-              disabled: locks.environment,
+              disabled: environmentLocked,
             },
             permission: {
               value: executionTarget === "cloud" ? "full" : permissionMode,
@@ -1997,7 +2084,7 @@ export function NewThreadComposer({
                   }
                   value={cloudBaseBranch}
                   onChange={(branch) => setCloudBranch({ projectId, branch })}
-                  disabled={locks.environment}
+                  disabled={environmentLocked}
                 />
               ) : null,
             footer: cloudQueue ? (
@@ -2006,6 +2093,7 @@ export function NewThreadComposer({
                 onUseLocal={() => {
                   setExecutionTarget("local");
                   setCloudPicked(false);
+                  setUserPickedEnvironment({ target: "local" });
                 }}
               />
             ) : <>{executionTarget === "cloud" && wantedCloudTarget === "vps" && !landsOnVps && vps.data ? (
@@ -2013,7 +2101,7 @@ export function NewThreadComposer({
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}<StarterPrompts onPick={pickStarter} fallback={<FreePlanTip />} /></>,
+            ) : null}<OneClickScans fallback={<FreePlanTip />} /></>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason === null ? null : (
@@ -2121,7 +2209,6 @@ export function NewThreadComposer({
     },
     [
       executionTarget,
-      pickStarter,
       selectCloudTarget,
       cloudLocked,
       activeModel,
@@ -2203,6 +2290,7 @@ export function NewThreadComposer({
       primaryHostId,
       inputsControlProviderIds,
       providerHostId,
+      setUserPickedEnvironment,
       textEffects,
       serviceTierFastLabel,
     ],
@@ -2241,7 +2329,7 @@ export function NewThreadComposer({
         pluginComposerHost,
         textEffects,
         isSubmitting,
-        seedEnvironmentSelectionValue: setCreationEnvironmentSelectionValue,
+        seedEnvironmentSelectionValue,
         setEnvironmentSelectionValue: changeEnvironment,
         setProviderModelReasoning,
         setPermissionMode,

@@ -1574,10 +1574,9 @@ function TimelineRowView({
   const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
   const latestCloudLoginRowId = useContext(LatestCloudLoginRowIdContext);
 
-  const planLimitSwitch =
-    row.kind === "system" && row.systemKind === "error"
-      ? row.planLimitSwitch
-      : undefined;
+  const errorRow =
+    row.kind === "system" && row.systemKind === "error" ? row : null;
+  const planLimitSwitch = errorRow?.planLimitSwitch;
   if (
     row.kind === "system" &&
     row.systemKind === "error" &&
@@ -1609,6 +1608,8 @@ function TimelineRowView({
         rowAt={row.createdAt}
         threadId={row.threadId}
         switched={planLimitSwitch}
+        refusal={errorRow?.refusal}
+        detail={errorRow?.detail}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -1617,6 +1618,7 @@ function TimelineRowView({
     return (
       <PlanLimitSwitchedRow
         switched={planLimitSwitch}
+        refusal={errorRow?.refusal}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );

@@ -17,6 +17,7 @@ interface ConfirmDeleteDialogContentProps {
   pending: boolean;
   onConfirm: () => void;
   onCancel?: () => void;
+  secondaryAction?: { label: string; onClick: () => void };
 }
 
 export function ConfirmDeleteDialogContent({
@@ -27,6 +28,7 @@ export function ConfirmDeleteDialogContent({
   pending,
   onConfirm,
   onCancel,
+  secondaryAction,
 }: ConfirmDeleteDialogContentProps) {
   return (
     <>
@@ -35,6 +37,16 @@ export function ConfirmDeleteDialogContent({
         <DialogDescription>{description}</DialogDescription>
       </DialogHeader>
       <DialogFooter>
+        {secondaryAction && (
+          <Button
+            type="button"
+            variant="outline"
+            disabled={pending}
+            onClick={secondaryAction.onClick}
+          >
+            {secondaryAction.label}
+          </Button>
+        )}
         {onCancel ? (
           <Button
             type="button"

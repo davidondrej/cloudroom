@@ -1,5 +1,11 @@
 import { execFile } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
 import { mkdir, mkdtemp, realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -153,4 +159,60 @@ export function ensureDataPrivateDir(dataDir: string, name: string): string {
   mkdirSync(dataDir, { recursive: true });
   // The native call, like fs/promises realpath above: the same path everywhere.
   return ownPrivateDir(realpathSync.native(dataDir), name);
+}
+
+// Files in the data folder that hold credentials or every thread's data: the
+// host key, the cloud account token, the auth secret, the browser broker token,
+// Codex account tokens, share tokens, plugin state backups, and the app
+// database. Not the whole folder: managed worktrees, attachments, and thread
+// storage live there too, and agents need them.
+const PRIVATE_DATA_FILES = [
+  "auth.json",
+  "auth-secret",
+  "machine-environment-key",
+  "cloudroom.json",
+  "desktop-browser-broker.json",
+  "cloudroom-codex-accounts.json",
+  "thread-shares.json",
+  "bb.db",
+  "bb.db-wal",
+  "bb.db-shm",
+  "bb.db-journal",
+  join("plugins", "accounts", "secrets"),
+  join("plugins", "snapshots"),
+];
+
+// Real paths, not wildcards: Claude's sandbox matches wildcards differently on
+// Linux. A secret created later is covered from the next session.
+function childPaths(dir: string, pick: (name: string) => string | null): string[] {
+  try {
+    return readdirSync(dir).flatMap((name) => {
+      const child = pick(name);
+      return child === null ? [] : [join(dir, child)];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Paths a sandboxed agent must never read (#2191); empty without a data folder. */
+export function privateDataPaths(dataDir: string | undefined): string[] {
+  const root = dataDir?.trim();
+  if (!root) return [];
+  const plugins = join(root, "plugins");
+  return [
+    ...new Set([
+      ...PRIVATE_DATA_FILES.map((name) => join(root, name)),
+      // Every plugin's secret settings and HTTP token.
+      ...childPaths(plugins, (name) => join(name, "secrets")),
+      // Claude logins of added accounts (Linux and Windows keep them in a file).
+      ...childPaths(join(plugins, "accounts", "profiles"), (name) =>
+        join(name, ".credentials.json"),
+      ),
+      // The preview helper's SSH key, including parked account folders.
+      ...childPaths(root, (name) =>
+        name.startsWith("cloudroom-preview") ? join(name, "id_ed25519") : null,
+      ),
+    ]),
+  ];
 }

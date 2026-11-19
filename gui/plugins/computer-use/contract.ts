@@ -2,6 +2,7 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const APPROVAL_RENDERER_ID = "computer-use-approval";
+export const ACTIVE_CHANGED_CHANNEL = "active-changed";
 
 export const permissionsSchema = z
   .object({
@@ -98,7 +99,20 @@ export const settingsSchema = z
     alwaysAllowed: z.array(appSchema),
   })
   .strict();
+export const activeThreadSchema = z
+  .object({
+    threadId: z.string().min(1),
+    appName: z.string().min(1).nullable(),
+  })
+  .strict();
+export const activeStateSchema = z
+  .object({
+    active: z.array(activeThreadSchema),
+  })
+  .strict();
+
 export const rpcContract = defineRpcContract({
+  getActive: { input: z.null(), output: activeStateSchema },
   getSettings: { input: z.null(), output: settingsSchema },
   removeAlwaysAllowed: {
     input: z.object({ key: z.string().min(1) }).strict(),

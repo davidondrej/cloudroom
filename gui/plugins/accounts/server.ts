@@ -101,15 +101,6 @@ type Usage = {
   at: number;
 };
 
-// What the usage bars show: each one's name, whole percent, and reset time to the minute.
-const bars = (windows: UsageWindow[] = []) =>
-  windows
-    .map(
-      (window) =>
-        `${window.label}:${Math.round(window.usedPercent)}:${Math.round((window.resetsAt ?? 0) / 60_000)}`,
-    )
-    .join();
-
 export default async function plugin(room: BbPluginApi) {
   const kv = room.storage.kv;
   const telemetry = accountTelemetry(room);
@@ -243,7 +234,13 @@ export default async function plugin(room: BbPluginApi) {
         .parse(await kv.get("usage:v1")),
     ).map(([id, windows]) => [
       id,
-      { windows, credits: null, error: null, signInAgain: false, at: 0 },
+      {
+        windows: windows.map((window) => ({ ...window, checkedAt: window.checkedAt ?? 0 })),
+        credits: null,
+        error: null,
+        signInAgain: false,
+        at: 0,
+      },
     ]),
   );
   // Background work never throws: outside a request, an unhandled error stops the whole server. Once this run is
@@ -604,13 +601,18 @@ export default async function plugin(room: BbPluginApi) {
           (!read.reportedModels || read.reportedModels.includes(window.model)) &&
           !read.windows.some((next) => next.label === window.label),
       );
-      const windows = [...read.windows, ...kept];
+      // A bar this read returned is checked now, unless it's the last read's, kept through a short error.
+      const now = Date.now();
+      const windows = [
+        ...read.windows.map((window) => ({ ...window, checkedAt: window.checkedAt ?? now })),
+        ...kept,
+      ];
       usage.set(id, {
         windows,
         credits: read.credits,
         error: null,
         signInAgain: false,
-        at: Date.now(),
+        at: now,
       });
       const next = mark === undefined ? undefined : afterUsage(mark, read, mode === "failure");
       if (next !== mark) {
@@ -620,14 +622,10 @@ export default async function plugin(room: BbPluginApi) {
         } else if (next !== undefined) limits[key] = next;
         await kv.set("limits:v1", limits);
       }
-      if (!local && JSON.stringify(windows) !== JSON.stringify(previous?.windows))
-        await saveUsage();
-      if (
-        next !== mark ||
-        previous?.error ||
-        !read.credits !== !previous?.credits ||
-        bars(windows) !== bars(previous?.windows)
-      )
+      // Exact, check time included: every read is saved, and open pages never grey a bar the server just read.
+      const moved = JSON.stringify(windows) !== JSON.stringify(previous?.windows);
+      if (!local && moved) await saveUsage();
+      if (next !== mark || previous?.error || !read.credits !== !previous?.credits || moved)
         room.realtime.publish(ACCOUNTS_CHANGED, {});
     };
     const done: Promise<void> = load().finally(() => {

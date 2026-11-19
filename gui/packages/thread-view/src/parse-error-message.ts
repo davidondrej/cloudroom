@@ -4,6 +4,11 @@ import type { EventMeta } from "./event-decode.js";
 import { messageId } from "./format-helpers.js";
 import type { EventProjectionErrorMessage } from "./event-projection-types.js";
 
+const CODEX_POLICY_CODES = new Set([
+  "cyberPolicy",
+  "misalignmentPolicyViolation",
+]);
+
 export function parseErrorMessage(
   decoded: ThreadEvent,
   meta: EventMeta,
@@ -29,6 +34,17 @@ export function parseErrorMessage(
     detail: detail && detail !== message ? detail : null,
     ...(decoded.type === "provider/error" && decoded.errorInfo
       ? { providerErrorInfo: decoded.errorInfo }
+      : {}),
+    // Cloud threads keep Codex's own code: label its refusals like Local ones (provider-codex delta-translation.ts).
+    ...(decoded.type === "system/error" &&
+    CODEX_POLICY_CODES.has(decoded.code ?? "")
+      ? {
+          providerErrorInfo: {
+            category: "policy" as const,
+            providerCode: decoded.code ?? null,
+            httpStatusCode: null,
+          },
+        }
       : {}),
     ...(decoded.type === "provider/error" && decoded.willRetry !== undefined
       ? { willRetry: decoded.willRetry }

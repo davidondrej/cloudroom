@@ -54,6 +54,7 @@ import {
   DraftEditor,
   useDraftMessage,
 } from "@/components/thread/timeline/DraftEditor";
+import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { usePortalScopeProps } from "@cloudroom/shared-ui/lib/portal-scope";
 import { usePersistentOverlayFocus } from "@cloudroom/shared-ui/responsive-overlay";
@@ -284,6 +285,7 @@ type MarkdownImageRenderAttributes = Omit<
   "alt" | "children" | "className" | "node" | "src"
 >;
 type MarkdownListItemProps = ComponentPropsWithoutRef<"li"> & ExtraProps;
+type MarkdownInputProps = ComponentPropsWithoutRef<"input"> & ExtraProps;
 type MarkdownOrderedListProps = ComponentPropsWithoutRef<"ol"> & ExtraProps;
 type MarkdownParagraphProps = ComponentPropsWithoutRef<"p"> & ExtraProps;
 type MarkdownPreProps = ComponentPropsWithoutRef<"pre"> & ExtraProps;
@@ -988,6 +990,17 @@ function MarkdownParagraph({
   );
 }
 
+// GFM task lists ("- [ ] item"): a checkbox replaces the bullet.
+function isTaskListItem(node: MarkdownHastNode | undefined): boolean {
+  const first = node?.children?.find((child) => child.type === "element");
+  if (first?.tagName === "input") return true;
+  return (
+    first?.tagName === "p" &&
+    first.children?.find((child) => child.type === "element")?.tagName ===
+      "input"
+  );
+}
+
 function MarkdownUnorderedList({ children }: MarkdownUnorderedListProps) {
   return <ul className="mb-2 list-disc pl-5 text-foreground">{children}</ul>;
 }
@@ -1018,8 +1031,31 @@ function MarkdownOrderedList({
   );
 }
 
-function MarkdownListItem({ children }: MarkdownListItemProps) {
-  return <li className="mb-1 text-foreground">{children}</li>;
+function MarkdownListItem({ children, node }: MarkdownListItemProps) {
+  return (
+    <li
+      className={cn(
+        "mb-1 text-foreground",
+        // Only a checkbox item drops its bullet; the box sits in the
+        // bullet's column and wrapped lines hang under the text.
+        isTaskListItem(node) && "-ml-5 list-none pl-6 -indent-6",
+      )}
+    >
+      {children}
+    </li>
+  );
+}
+
+function MarkdownInput({ node: _node, ...inputProps }: MarkdownInputProps) {
+  if (inputProps.type !== "checkbox") return <input {...inputProps} />;
+  return (
+    <Checkbox
+      checked={Boolean(inputProps.checked)}
+      disabled
+      aria-label={inputProps.checked ? "Done" : "Not done"}
+      className="mr-2 inline-flex align-[-3px] indent-0 disabled:cursor-default disabled:opacity-100"
+    />
+  );
 }
 
 function MarkdownBlockquote({ children }: MarkdownBlockquoteProps) {
@@ -1649,6 +1685,7 @@ function buildMarkdownComponents({
     h6: MarkdownH6,
     hr: MarkdownHr,
     img: MarkdownImage,
+    input: MarkdownInput,
     li: MarkdownListItem,
     ol: MarkdownOrderedList,
     p: MarkdownParagraph,

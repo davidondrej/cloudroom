@@ -9,6 +9,7 @@ import type {
 } from "@cloudroom/server-contract";
 import type { AppCreateThreadRequest } from "@cloudroom/client-core";
 import { BbHttpError, sdk } from "@/lib/sdk";
+import { REMOTE_SEND_MUTATION_KEY, recoverRemoteCloudSend } from "@/cloud/remote-cloud-send";
 import { retryTransient } from "@/lib/retry-transient";
 import { wsManager } from "@/lib/ws";
 import type { QueuedMessageReorderRequest } from "@/lib/queued-message-reorder";
@@ -163,6 +164,7 @@ export function useSendThreadMessage() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    mutationKey: REMOTE_SEND_MUTATION_KEY,
     meta: {
       errorMessage: "Failed to send message.",
       lifecycleOperation: "send_message",
@@ -171,6 +173,7 @@ export function useSendThreadMessage() {
     mutationFn: async ({
       id,
       requestId,
+      recoverCloudDelivery,
       input,
       model,
       serviceTier,
@@ -183,7 +186,7 @@ export function useSendThreadMessage() {
       executionInputSources,
     }: SendThreadMessageMutationRequest) => {
       await waitForThreadExecutionSave(queryClient, id);
-      return await sdk.threads.send({
+      const send = () => sdk.threads.send({
         threadId: id,
         ...(requestId ? { requestId } : {}),
         input,
@@ -197,6 +200,7 @@ export function useSendThreadMessage() {
         mode,
         ...(senderThreadId !== undefined ? { senderThreadId } : {}),
       });
+      return recoverCloudDelivery && requestId ? recoverRemoteCloudSend(id, requestId, send) : send();
     },
     onMutate: async (variables): Promise<SendThreadMessageTransaction> =>
       beginSendThreadMessageTransaction({

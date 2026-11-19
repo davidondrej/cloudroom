@@ -37,6 +37,8 @@ interface SettingsSearchState {
   activeSection: SettingsSectionId | null;
   pluginEntries: readonly PluginSettingsEntry[];
   sections: readonly SettingsNavSection[];
+  /** False when the DeepAPI section hides itself (see DeepapiSettingsSection). */
+  deepapiShown?: boolean;
 }
 
 const entries = (
@@ -49,6 +51,11 @@ const entries = (
       ? { page, heading, label: item }
       : { page, heading, label: item[0], keywords: item[1] },
   );
+
+const DEEPAPI_SEARCH_ENTRIES = entries("general", "DeepAPI", [
+  ["DeepAPI", "web search research scrape agents"],
+  ["Pay with Cloud Credits", "deepapi cloud credits charge cost"],
+]);
 
 const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Threads & editing", [
@@ -81,10 +88,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Confidence", "wrong project hint nudge sensitivity percent"],
   ]),
   ...entries("general", "Smart search", [["Smart search", "cmd k jev find thread search"]]),
-  ...entries("general", "DeepAPI", [
-    ["DeepAPI", "web search research scrape agents"],
-    ["Pay with Cloud Credits", "deepapi cloud credits charge cost"],
-  ]),
+  ...DEEPAPI_SEARCH_ENTRIES,
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -126,7 +130,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Sidebar footer", "buttons reorder"],
     ["Question cards", "agent questions ask"],
     ["Wallpaper", "background image photo picture gif"],
-    ["Always show one-click prompts", "starter prompts new thread security pills"],
+    ["Always show one-click scans", "workflow cyber scan new thread loops"],
   ]),
   ...entries("keyboard", undefined, [
     ["Keyboard shortcuts", "hotkeys keybindings keys"],
@@ -347,6 +351,7 @@ function buildDocuments(
   for (const entry of [...SETTINGS_SEARCH_ENTRIES, ...pluginEntries]) {
     const page = pages.get(entry.page);
     if (!page) continue;
+    if (state.deepapiShown === false && DEEPAPI_SEARCH_ENTRIES.includes(entry)) continue;
     const path = [page.group, page.label, entry.heading]
       .filter((part, index, all): part is string =>
         part !== undefined && part !== entry.label && all.indexOf(part) === index,

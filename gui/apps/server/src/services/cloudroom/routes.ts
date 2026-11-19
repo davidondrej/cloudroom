@@ -56,7 +56,7 @@ import { skillSuggestion, skillSuggestionEvent } from "../threads/skill-suggesti
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { readWrapped } from "../system/wrapped.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, CORNER_ANSWERS, CORNER_CARDS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, CORNER_ANSWERS, CORNER_CARDS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
@@ -130,9 +130,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const thread = getThread(deps.db, context.req.param("id"));
     if (!thread) return context.json({ message: "Thread not found" }, 404);
     const cloud = listThreadWithDescendants(deps, thread).filter((item) => item.executionTarget === "cloud" && !item.archivedAt && !item.deletedAt);
-    // A few seconds at most: past that the dialog uses what it has, as when the read fails.
-    const limit = new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 5_000).unref());
-    return context.json({ running: await Promise.race([cloudroom(deps).runningInCloud(cloud.map((item) => item.id)), limit]) });
+    const signal = AbortSignal.any([context.req.raw.signal, AbortSignal.timeout(5_000)]);
+    return context.json({ running: await cloudroom(deps).runningInCloud(cloud.map(item => item.id), signal) });
   });
   app.get("/api/v1/cloudroom/connect", async context => context.json(await connectAccount(deps)));
   app.post("/api/v1/cloudroom/connect", async context => {
@@ -197,11 +196,6 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.get("/api/v1/cloudroom/activation", async (context) => context.json(await activation(deps, plugins)));
   app.post("/api/v1/cloudroom/activation", async (context) => {
     const body = await context.req.json().catch(() => null);
-    const starter = z.object({ starter: z.enum(STARTER_PROMPTS) }).strict().safeParse(body);
-    if (starter.success) {
-      deps.telemetry.capture({ name: "starter_prompt", properties: starter.data });
-      return context.json({ ok: true });
-    }
     const parsed = z.object({ step: z.enum(ACTIVATION_STEPS), action: z.enum(["clicked", "hidden"]).default("clicked") }).strict().safeParse(body);
     if (!parsed.success) throw new ApiError(400, "invalid_activation_step", "Invalid checklist step.");
     deps.telemetry.capture({ name: "activation_step", properties: parsed.data });
@@ -739,6 +733,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const thread = getThread(deps.db, id);
     if (!status || !thread) return context.json(null);
     return context.json(status);
+  });
+  app.get("/api/v1/cloudroom/threads/:id/delivery/:requestId", async (context) => {
+    const { id, requestId } = context.req.param();
+    context.header("Cache-Control", "no-store");
+    return context.json(await cloudroom(deps).messageDelivery(id, requestId));
   });
   app.get("/api/v1/cloudroom/threads/:id/workspace", async (context) => context.json(await cloudroom(deps).threadWorkspace(context.req.param("id"), context.req.raw.signal)));
   app.post("/api/v1/cloudroom/threads/:id/retry-start", async (context) => {

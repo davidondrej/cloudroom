@@ -260,6 +260,79 @@
     );
   }
 
+  /* Ambient sky-blue glow for a thread actively using computer use (David, 2026-11-19, design 1C). */
+  .bb-sidebar-computer-use-row {
+    --bb-computer-use-accent: #0284c7;
+    --bb-computer-use-stop-1: 15%;
+    --bb-computer-use-stop-2: 6%;
+    background-image: linear-gradient(
+      90deg,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--sidebar)
+        )
+        0%,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--sidebar)
+        )
+        52%,
+      var(--sidebar) 100%
+    );
+  }
+
+  .dark .bb-sidebar-computer-use-row {
+    --bb-computer-use-accent: #38bdf8;
+    --bb-computer-use-stop-1: 18%;
+    --bb-computer-use-stop-2: 7%;
+  }
+
+  .bb-sidebar-computer-use-row:is(:hover, :has([data-state="open"])) {
+    background-image: linear-gradient(
+      90deg,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--sidebar-accent)
+        )
+        0%,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--sidebar-accent)
+        )
+        52%,
+      var(--sidebar-accent) 100%
+    );
+  }
+
+  .bb-sidebar-computer-use-laptop {
+    color: #0284c7;
+    opacity: 1;
+    filter: drop-shadow(0 0 4px color-mix(in oklab, #0284c7 45%, transparent));
+  }
+
+  .dark .bb-sidebar-computer-use-laptop {
+    color: #38bdf8;
+    filter: drop-shadow(0 0 5px color-mix(in oklab, #38bdf8 55%, transparent));
+  }
+
+  .bb-sidebar-computer-use-laptop path:first-child {
+    fill: color-mix(in oklab, currentColor 28%, transparent);
+  }
+
+  .bb-sidebar-computer-use-spinner {
+    color: color-mix(in oklab, #0284c7 55%, var(--muted-foreground));
+    opacity: 0.75;
+  }
+
+  .dark .bb-sidebar-computer-use-spinner {
+    color: color-mix(in oklab, #38bdf8 55%, var(--muted-foreground));
+    opacity: 0.7;
+  }
+
   .bb-sidebar-hover-actions {
     pointer-events: none;
     opacity: 0;

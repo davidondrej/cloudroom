@@ -30,6 +30,7 @@ import {
   setAutomationEnabled,
   setAutomationRunThread,
   AUTOMATION_RETRY_DELAYS_MS,
+  REFUSED,
   type Db,
 } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
@@ -724,6 +725,27 @@ describe("automation data access", () => {
         );
       }
     }
+  });
+
+  it("never pauses for a refused run: it fails, retries, and keeps the failure count (ADR 20261119-091500)", () => {
+    const db = createTestDb();
+    const automation = createScheduledAutomation(db, 1000);
+    let expectedNextRunAt = 1000;
+    for (const error of ["dispatch failed 1", "dispatch failed 2", `${REFUSED}flagged`]) {
+      const claim = claimAutomationScheduledRun(db, {
+        automationId: automation.id,
+        expectedNextRunAt,
+        newNextRunAt: expectedNextRunAt + 60_000,
+        now: expectedNextRunAt,
+      });
+      if (!claim.advanced) throw new Error(`claim for ${error} failed`);
+      closeAutomationRun(db, { runId: claim.run.id, status: "failed", error, now: expectedNextRunAt + 1 });
+      expectedNextRunAt = getAutomation(db, automation.id)!.nextRunAt!;
+    }
+    const current = getAutomation(db, automation.id);
+    expect(current?.consecutiveFailures).toBe(2);
+    expect(current?.enabled).toBe(true);
+    expect(current?.nextRunAt).not.toBeNull();
   });
 
   it("applies the same backoff and pause policy to settled script failures", () => {

@@ -16,6 +16,7 @@ import {
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
 import { InviteSidebarRow } from "@/components/InviteOffer";
+import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
 import { useSettingsNavState } from "./settings-nav";
@@ -47,7 +48,7 @@ interface SettingsSidebarProps {
 type SettingsSidebarNavigation = Pick<
   SettingsNavState,
   "activePluginId" | "activeSection" | "pluginEntries" | "sections"
->;
+> & { deepapiShown?: boolean };
 
 interface SettingsSidebarContentProps extends SettingsSidebarProps {
   account?: ReactNode;
@@ -247,6 +248,8 @@ export function SettingsSidebar({
   mobileHosted,
 }: SettingsSidebarProps) {
   const navigation = useSettingsNavState();
+  // Same rule as DeepapiSettingsSection, so search never lists a section the page hides.
+  const deepapiShown = useCloudroomAccount().data?.deepapi?.enabled !== undefined;
 
   return (
     <SettingsSidebarContent
@@ -255,7 +258,7 @@ export function SettingsSidebar({
       appRoutePath={appRoutePath}
       isResizing={isResizing}
       mobileHosted={mobileHosted}
-      navigation={navigation}
+      navigation={{ ...navigation, deepapiShown }}
       onResizeMouseDown={onResizeMouseDown}
     />
   );

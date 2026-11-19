@@ -133,8 +133,8 @@ export function saveBinding(db: DbQueryConnection, threadId: string, values: Par
   db.update(cloudroomThreads).set(values).where(eq(cloudroomThreads.threadId, threadId)).run();
 }
 
-export function commands(db: DbQueryConnection, threadId: string): Command[] {
-  return db.select().from(cloudroomCommands).where(eq(cloudroomCommands.threadId, threadId)).orderBy(cloudroomCommands.createdAt, cloudroomCommands.id).all();
+export function commands(db: DbQueryConnection, threadId: string, state?: Command["state"]): Command[] {
+  return db.select().from(cloudroomCommands).where(and(eq(cloudroomCommands.threadId, threadId), state === undefined ? undefined : eq(cloudroomCommands.state, state))).orderBy(cloudroomCommands.createdAt, cloudroomCommands.id).all();
 }
 
 export function queuedPrompts(db: DbQueryConnection, threadId: string): Command[] {

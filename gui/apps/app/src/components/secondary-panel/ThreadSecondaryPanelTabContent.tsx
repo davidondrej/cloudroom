@@ -36,6 +36,7 @@ import { clearDiffFileCardStates } from "./git-diff/diffFilesStore";
 import { buildGitDiffIdentity } from "./git-diff/gitDiffPanelHelpers";
 import { useDiffFileContentsRequester } from "./git-diff/useDiffFileContentsRequester";
 import { SecondaryPanelFilePreview } from "./ThreadStorageFilePreview";
+import { AgentFileEditContext, useAgentFileEdit } from "./agent-file-edit";
 import {
   buildMarkdownFileImageRouting,
   buildMarkdownLeaseImageRouting,
@@ -338,6 +339,7 @@ export function WorkspaceFilePreviewTabContent({
       markdownLinkRouting?.localImage === undefined,
     staleTime: 5_000,
   });
+  const agentFileEdit = useAgentFileEdit(threadId, activePath);
   const workspaceFilePreviewQuery = useEnvironmentFilePreview(
     environmentId,
     activePath,
@@ -382,22 +384,24 @@ export function WorkspaceFilePreviewTabContent({
   ]);
 
   return (
-    <SecondaryPanelFilePreview
-      {...filePreviewQueryProps(workspaceFilePreviewQuery)}
-      activePath={activePath}
-      copyPath={copyPath}
-      htmlPreviewUrl={
-        threadId && source?.kind === "working-tree"
-          ? buildThreadWorktreeRawContentUrl(threadId, activePath)
-          : null
-      }
-      lineRange={lineRange}
-      markdownLinkRouting={resolvedMarkdownLinkRouting}
-      onSelectionAddToChat={onSelectionAddToChat}
-      onOpenInEditor={onOpenInEditor}
-      onRevealInFinder={onRevealInFinder}
-      statusLabel={statusLabel}
-    />
+    <AgentFileEditContext.Provider value={agentFileEdit}>
+      <SecondaryPanelFilePreview
+        {...filePreviewQueryProps(workspaceFilePreviewQuery)}
+        activePath={activePath}
+        copyPath={copyPath}
+        htmlPreviewUrl={
+          threadId && source?.kind === "working-tree"
+            ? buildThreadWorktreeRawContentUrl(threadId, activePath)
+            : null
+        }
+        lineRange={lineRange}
+        markdownLinkRouting={resolvedMarkdownLinkRouting}
+        onSelectionAddToChat={onSelectionAddToChat}
+        onOpenInEditor={onOpenInEditor}
+        onRevealInFinder={onRevealInFinder}
+        statusLabel={statusLabel}
+      />
+    </AgentFileEditContext.Provider>
   );
 }
 

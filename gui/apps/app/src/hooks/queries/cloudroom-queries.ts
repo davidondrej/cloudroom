@@ -5,6 +5,7 @@ import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult
 import type { ProjectSelectorSuggestions } from "@/components/pickers/ProjectSelector";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
+import { relayConnectionError, OtherMacUnavailableError, viewingOtherMac } from "@/cloud/mac-connection";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { sdk } from "@/lib/sdk";
 import { sidebarNavigationQueryKey, threadReasoningSaveKey } from "@/hooks/queries/query-keys";
@@ -72,6 +73,11 @@ export function cloudCatalogKnown(status: z.infer<typeof cloudroomStatusSchema> 
 }
 
 const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", kimi: "Kimi Code", openclaw: "OpenClaw", "agent-zero": "Agent Zero" };
+export function cloudHarnessOption(coreId: string) {
+  const label = HARNESS_NAMES[coreId];
+  if (!label) return null;
+  return { id: Object.keys(CORE_HARNESS_IDS).find(id => CORE_HARNESS_IDS[id] === coreId) ?? coreId, label };
+}
 export function cloudHarnessNames(status: z.infer<typeof cloudroomStatusSchema> | undefined): string {
   return (status?.harnesses ?? []).map((item) => HARNESS_NAMES[item.id] ?? item.id).join(", ") || "none";
 }
@@ -132,7 +138,7 @@ export function useCloudroomSignIn() {
   });
 }
 
-const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], queryFn: async ({ signal }: { signal: AbortSignal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()) };
+export const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], queryFn: async ({ signal }: { signal: AbortSignal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()) };
 export function useCloudroomConnection() {
   return useQuery({ ...cloudroomConnectionQuery, refetchInterval: 10000 });
 }
@@ -190,7 +196,15 @@ export function useHostDesktopUpdate(enabled: boolean) {
 export type HostDesktopUpdate = NonNullable<ReturnType<typeof useHostDesktopUpdate>>;
 
 export function useCloudroomThread(threadId: string, enabled: boolean) {
-  return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => threadStatusSchema.parse(await (await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })).json()), refetchInterval: 1500 });
+  return useQuery({ queryKey: ["cloudroom-thread", threadId], enabled, queryFn: async ({ signal }) => {
+    const response = await fetchWithAppSurface(`/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal });
+    if (!response.ok) {
+      if (viewingOtherMac() && relayConnectionError(response)) throw new OtherMacUnavailableError();
+      const body = await response.json().catch(() => null);
+      throw new Error(typeof body?.message === "string" ? body.message : `Could not load the Cloud thread (HTTP ${response.status}).`);
+    }
+    return threadStatusSchema.parse(await response.json());
+  }, refetchInterval: 1500 });
 }
 
 const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor"]), threads: z.number(), loops: z.number() })) });
@@ -449,6 +463,7 @@ export async function cloudroomRequestId(key: string, input: unknown): Promise<s
   return id;
 }
 
-export function clearCloudroomRequestId(key: string): void {
-  localStorage.removeItem(`cloudroom-request:${key}`);
+export function clearCloudroomRequestId(key: string, expectedId?: string): void {
+  const storageKey = `cloudroom-request:${key}`;
+  if (!expectedId || localStorage.getItem(storageKey)?.split(":")[1] === expectedId) localStorage.removeItem(storageKey);
 }

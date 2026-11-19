@@ -58,6 +58,12 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
   ) => previewQuery(path),
   useThreadStorageFilePreview: (_threadId: string, path: string) =>
     previewQuery(path),
+  useThread: () => ({ data: undefined }),
+  useThreadTimeline: () => ({ data: undefined }),
+}));
+
+vi.mock("@/hooks/queries/system-queries", () => ({
+  useSystemProviders: () => ({ data: undefined }),
 }));
 
 vi.mock("@/hooks/queries/host-file-preview-query", () => ({

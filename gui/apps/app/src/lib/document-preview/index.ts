@@ -5,6 +5,7 @@ import {
   convertPresentation,
   convertWordDocument,
   convertWorkbook,
+  fitsPageView,
   type DocumentPart,
 } from "./office";
 
@@ -13,6 +14,8 @@ export interface DocumentPreview {
   detail: string | null;
   textKind: "csv" | "markdown" | null;
   parts: DocumentPart[];
+  /** Word and PowerPoint that may be drawn as pages; slides in saved order. */
+  pageView?: { slideOrder: string[] };
 }
 
 interface ArchiveFolder {
@@ -183,15 +186,17 @@ export async function convertDocument(
         detail: plural(words, "word"),
         textKind: "markdown",
         parts: [{ name: "Document", text: markdown }],
+        ...(fitsPageView(bytes) ? { pageView: { slideOrder: [] } } : {}),
       };
     }
     case "pptx": {
-      const { markdown, slides } = await convertPresentation(bytes);
+      const { markdown, slides, slidePaths } = await convertPresentation(bytes);
       return {
         label: "Shown as text · from PowerPoint",
         detail: plural(slides, "slide"),
         textKind: "markdown",
         parts: [{ name: "Slides", text: markdown }],
+        ...(fitsPageView(bytes) ? { pageView: { slideOrder: slidePaths } } : {}),
       };
     }
     case "zip":

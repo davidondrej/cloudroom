@@ -81,6 +81,7 @@ import {
   SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
   SIDEBAR_ROW_SELECTED_STATE_CLASS,
   SIDEBAR_CONTROL_BUTTON_CLASS,
+  SIDEBAR_ROW_COMPUTER_USE_STATE_CLASS,
   SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
   SIDEBAR_SUCCESS_STATUS_COLOR_CLASS,
   SIDEBAR_SUCCESS_STATUS_DOT_CLASS,
@@ -107,6 +108,7 @@ import {
   useThreadTitleDisplayText,
 } from "@/components/thread/ThreadTitleMentions";
 import { pluginIconName } from "@/components/plugin/PluginIcon";
+import { useComputerUseActivity } from "@/lib/computer-use-active";
 import { usePluginThreadRowStatus } from "@/lib/plugin-thread-row-status";
 import { harnessIconModeAtom } from "@/components/settings/HarnessIconsSetting";
 import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
@@ -369,6 +371,7 @@ function renderThreadRowContainer({
 
 interface ThreadStatusGlyphProps extends ThreadListIndicatorState {
   hideIdleDraftLabel?: boolean;
+  isComputerUseActive?: boolean;
 }
 
 export function ThreadStatusGlyph({
@@ -379,6 +382,7 @@ export function ThreadStatusGlyph({
   hideIdleDraftLabel = false,
   isBackgroundAgentActive,
   isBackgroundCommandActive,
+  isComputerUseActive = false,
   isGoalActive,
   isPlanModeActive,
   isRuntimeActive,
@@ -445,7 +449,9 @@ export function ThreadStatusGlyph({
           name="Loading"
           className={cn(
             "animate-spin",
-            SIDEBAR_WORKING_STATUS_COLOR_CLASS,
+            isComputerUseActive
+              ? "bb-sidebar-computer-use-spinner"
+              : SIDEBAR_WORKING_STATUS_COLOR_CLASS,
             COARSE_POINTER_ICON_SIZE_CLASS,
           )}
           aria-label={getThreadListIndicatorLabel(kind) ?? undefined}
@@ -687,13 +693,22 @@ function ThreadRowComponent({
   const splitIndicatorLabel = trailingIndicatorResolution.accessibleLabel
     ? `${labelTitle} — open in split; ${trailingIndicatorResolution.accessibleLabel}`
     : `${labelTitle} — open in split`;
+  const computerUse = useComputerUseActivity(thread.id);
+  const computerUseActive = computerUse !== null;
+  const computerUseLabel = computerUse
+    ? computerUse.appName
+      ? `Using ${computerUse.appName}`
+      : "Using your computer"
+    : null;
   const linkLabel = waiting
     ? `Open ${labelTitle} (${waiting.label})`
     : needsYou
       ? `Open ${labelTitle} (needs you)`
-      : hasComposerDraft
-      ? `Open ${labelTitle} (unsubmitted draft)`
-        : `Open ${labelTitle}`;
+      : computerUseLabel
+        ? `Open ${labelTitle} (${computerUseLabel})`
+        : hasComposerDraft
+          ? `Open ${labelTitle} (unsubmitted draft)`
+          : `Open ${labelTitle}`;
   const rowDragBindings = options.dragBindings;
   const nestTargetState = options.nestDrop?.state ?? null;
   const reorderPlacement = options.nestDrop?.reorderPlacement ?? null;
@@ -713,9 +728,14 @@ function ThreadRowComponent({
     showActive
       ? SIDEBAR_ROW_SELECTED_STATE_CLASS
       : SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
-    // A waiting row's red or yellow wins over the quiet split tint, which would paint over it when pinned.
+    // A waiting row's red or yellow wins over computer-use and split tints.
     !showActive &&
       !flagged &&
+      computerUseActive &&
+      SIDEBAR_ROW_COMPUTER_USE_STATE_CLASS,
+    !showActive &&
+      !flagged &&
+      !computerUseActive &&
       splitIndicator.isOpenInSplit &&
       SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
     !showActive && "has-[[data-state=open]]:bg-sidebar-accent",
@@ -759,6 +779,29 @@ function ThreadRowComponent({
         )}
       />
     </span>
+  ) : computerUseLabel !== null ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-sidebar-thread-computer-use-icon=""
+          role="img"
+          aria-label={computerUseLabel}
+          className="relative z-10 flex shrink-0 items-center"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            rowLinkRef.current?.click();
+          }}
+        >
+          <Icon
+            name="Laptop"
+            aria-hidden
+            className="size-3.5 shrink-0 bb-sidebar-computer-use-laptop"
+          />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{computerUseLabel}</TooltipContent>
+    </Tooltip>
   ) : (
     <Icon
       name={showCloudIcon ? "Cloud" : "Laptop"}
@@ -778,6 +821,8 @@ function ThreadRowComponent({
         {locationIcon}
         {harnessIcon}
       </>
+    ) : computerUseActive ? (
+      locationIcon
     ) : harnessIconMode === "instead" ? (
       harnessIcon
     ) : (
@@ -963,6 +1008,7 @@ function ThreadRowComponent({
                     hideIdleDraftLabel={
                       !hasHiddenChildren && trailingIndicatorKind === "draft"
                     }
+                    isComputerUseActive={computerUseActive}
                     pluginStatus={pluginThreadRowStatus}
                   />
                 )}

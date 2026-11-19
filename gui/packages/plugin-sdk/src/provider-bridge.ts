@@ -276,6 +276,13 @@ export {
 } from "@cloudroom/process-utils";
 
 /**
+ * Absolute paths of the Cloudroom data folder's credential files and app
+ * database. Bridges deny them to sandboxed agents, given the session's
+ * `ROOM_DATA_DIR`; empty when it is unset.
+ */
+export { privateDataPaths as experimental_privateDataPaths } from "@cloudroom/process-utils";
+
+/**
  * Spawns a provider CLI by name the way the daemon does: on Windows it resolves
  * PATH and PATHEXT and opens no console window. An npm or pnpm `.cmd` shim runs
  * its target directly (`node <script>`, or the bin's `.exe`), because Node

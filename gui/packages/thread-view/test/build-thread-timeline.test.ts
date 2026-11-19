@@ -2178,6 +2178,46 @@ describe("buildThreadTimelineFromEvents", () => {
     ]);
   });
 
+  it("marks a Cloud Codex refusal so it gets the continue card, then who took over", () => {
+    // The real event from a Cloud loop run (thr_fmewhjg2b5, seq 186).
+    const refusal = systemErrorEvent({
+      code: "cyberPolicy",
+      message: "Codex error (cyberPolicy)",
+      detail:
+        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
+      seq: 2,
+    });
+    const switched = systemOperationEvent({
+      message: "Switched",
+      operation: "harness_switch",
+      metadata: { from: "codex", to: "claude-code", resend: true },
+      seq: 4,
+    });
+    const before = collectSystemRows(
+      buildTimelineRows([turnStartedEvent({ seq: 1 }), refusal]),
+    );
+    const after = collectSystemRows(
+      buildTimelineRows([
+        turnStartedEvent({ seq: 1 }),
+        refusal,
+        turnCompletedEvent({ seq: 3, status: "failed" }),
+        switched,
+      ]),
+    ).find((row) => row.systemKind === "error");
+
+    expect(before).toEqual([
+      expect.objectContaining({
+        title: "Codex error (cyberPolicy)",
+        refusal: true,
+      }),
+    ]);
+    expect(before[0]).not.toHaveProperty("planLimit");
+    expect(after).toMatchObject({
+      refusal: true,
+      planLimitSwitch: { from: "codex", to: "claude-code", resend: true },
+    });
+  });
+
   it.each([
     ["collapse", true],
     ["collapse", false],

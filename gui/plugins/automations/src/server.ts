@@ -70,6 +70,7 @@ export default async function plugin(room: BbPluginApi) {
       status: "failed",
       error,
       rateLimited: errorInfo?.category === "rate-limit",
+      refused: errorInfo?.category === "policy",
     });
     reviewChanged(thread.id);
   });

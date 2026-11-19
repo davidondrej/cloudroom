@@ -1,5 +1,9 @@
 // @vitest-environment jsdom
 
+import { Provider, createStore } from "jotai";
+import { makeThread } from "@cloudroom/test-helpers/domain-fixtures";
+import { createDeferredPromise } from "@cloudroom/test-helpers";
+import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { memo, type ReactNode } from "react";
 import {
   act,
@@ -50,6 +54,7 @@ vi.mock("@/lib/sdk", () => ({
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
 });
 
 const consumerRenders: ThreadActionsContextValue[] = [];
@@ -136,3 +141,59 @@ describe("useRouteNavigate", () => {
     );
   });
 });
+
+it.each([true, false])(
+  "rolls back the split only while the user is still at the archive destination (moved=%s)",
+  async (moved) => {
+    const store = createStore();
+    const layout = {
+      root: {
+        type: "split" as const,
+        dir: "row" as const,
+        sizes: [0.5, 0.5],
+        children: ["t1", "t2"].map((id) => ({
+          type: "pane" as const,
+          paneId: id,
+          content: { kind: "thread" as const, projectId: "p1", threadId: id },
+        })),
+      },
+      focusedPaneId: "t1",
+    };
+    store.set(splitLayoutAtom, layout);
+    const check = createDeferredPromise<Response>();
+    vi.stubGlobal("fetch", () => check.promise);
+    const thread = makeThread({
+      id: "t1",
+      projectId: "p1",
+      executionTarget: "cloud",
+    });
+    function Controls() {
+      const actions = useThreadActions();
+      const navigate = useNavigate();
+      return (
+        <>
+          <button onClick={() => actions.archiveThreadAndChildren(thread)}>
+            Archive
+          </button>
+          <button onClick={() => navigate("/settings")}>Settings</button>
+        </>
+      );
+    }
+    renderTree(
+      <Provider store={store}>
+        <ThreadActionsProvider>
+          <Controls />
+        </ThreadActionsProvider>
+      </Provider>,
+    );
+    fireEvent.click(screen.getByText("Archive"));
+    expect(await screen.findByText("/projects/p1/threads/t2")).toBeTruthy();
+    if (moved) fireEvent.click(screen.getByText("Settings"));
+    await act(async () => check.resolve(Response.json({ running: ["t1"] })));
+    fireEvent.click(await screen.findByText("Cancel"));
+    expect(screen.getByTestId("pathname").textContent).toBe(
+      moved ? "/settings" : "/projects/p1/threads/t1",
+    );
+    expect(store.get(splitLayoutAtom)?.focusedPaneId).toBe(moved ? "t2" : "t1");
+  },
+);

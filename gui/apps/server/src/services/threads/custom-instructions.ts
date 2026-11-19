@@ -18,7 +18,7 @@ export const PLUGIN_INSTRUCTION_MAX_CHARS = 4096;
 const ORG_INSTRUCTION_MAX_CHARS = 8_600;
 export const pluginInstructionMaxChars = (pluginId: string) => (pluginId === "organization" ? ORG_INSTRUCTION_MAX_CHARS : PLUGIN_INSTRUCTION_MAX_CHARS);
 
-type Context = { threadId: string; projectId: string };
+type Context = import("@get-bb/plugin-sdk").PluginInstructionContext;
 
 /**
  * The system prompt for a Local or a Cloud thread: the shared lines plus that kind's own.

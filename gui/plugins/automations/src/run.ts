@@ -17,6 +17,7 @@ import {
   setAutomationEnabled,
   setAutomationRunSentId,
   setAutomationRunThread,
+  REFUSED,
   THREAD_ARCHIVED_ERROR,
   type AutomationRow,
   type AutomationRunRow,
@@ -511,12 +512,14 @@ export async function closeAutomationRunForSettledThread(
     status: "idle" | "failed";
     error?: string | null;
     rateLimited?: boolean;
+    /** The provider refused the work: the run fails, and its retry goes to the other provider (fallback.ts). */
+    refused?: boolean;
   },
 ): Promise<void> {
   const runs = listRunningAutomationRunsByThread(db, args.threadId);
   const now = Date.now();
   const changedProjects = new Set<string>();
-  const error = args.error ?? "Turn failed";
+  const error = `${args.refused ? REFUSED : ""}${args.error ?? "Turn failed"}`;
   for (const run of runs) {
     const stopped =
       args.status === "idle" &&

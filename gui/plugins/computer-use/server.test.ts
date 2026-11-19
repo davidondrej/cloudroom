@@ -1,4 +1,7 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
+import {
+  createFakePluginHost,
+  makeThreadResponse,
+} from "@get-bb/plugin-sdk/testing";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -211,4 +214,134 @@ it.runIf(assetFor(process.platform, process.arch))("install retries GitHub's tra
     vi.unstubAllGlobals();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+describe("active computer-use indicator state", () => {
+  const readyStatus = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: true, screenRecording: true },
+  };
+
+  it("publishes active-changed signals and returns active threads via getActive", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      appForName: { key: "com.brave.Browser", name: "Brave" },
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+      release: null,
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await fake.bb.storage.kv.set("always-allowed", [
+      { key: "com.brave.browser", name: "Brave" },
+    ]);
+    await computerUsePlugin(fake.bb);
+
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+
+    // Free tool starts an active session with appName: null.
+    expect(
+      (await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: null }],
+    });
+
+    // Targeting an app fills in appName.
+    expect(
+      (
+        await fake.harness.runCli(
+          ["call", "launch_app", '{"name":"Brave"}'],
+          { threadId: "thr_1" },
+        )
+      ).exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: "Brave" }],
+    });
+
+    // Subsequent free tool call keeps the known appName.
+    expect(
+      (await fake.harness.runCli(["call", "list_windows", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: "Brave" }],
+    });
+
+    // end_session clears the active indicator immediately.
+    expect(
+      (await fake.harness.runCli(["call", "end_session", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+
+    const activeSignals = fake.harness.realtimeSignals
+      .filter((s) => s.channel === "active-changed")
+      .map((s) => s.payload);
+    expect(activeSignals).toEqual([
+      { active: [{ threadId: "thr_1", appName: null }] },
+      { active: [{ threadId: "thr_1", appName: "Brave" }] },
+      { active: [] },
+    ]);
+  });
+
+  it("clears active state when a thread becomes idle or its host restarts", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+      release: null,
+      restart: readyStatus,
+    };
+    const hosts: Record<string, string> = { thr_1: "mac-1", thr_2: "mac-2" };
+    const fake = createFakePluginHost({
+      sdk: {
+        threads: {
+          get: async ({ threadId }: { threadId: string }) => ({
+            host: { id: hosts[threadId] ?? "mac-1" },
+          }),
+        },
+        hosts: {
+          list: async () => [{ id: "mac-2", status: "connected" }],
+        },
+      },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await computerUsePlugin(fake.bb);
+
+    await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_1" });
+    await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_2" });
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [
+        { threadId: "thr_1", appName: null },
+        { threadId: "thr_2", appName: null },
+      ],
+    });
+
+    await fake.harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_1", projectId: "proj_1" }),
+      lastAssistantText: "Done",
+    });
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_2", appName: null }],
+    });
+
+    await fake.harness.callRpc("restart", null);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+  });
 });

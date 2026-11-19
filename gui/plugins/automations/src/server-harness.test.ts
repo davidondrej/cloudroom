@@ -47,6 +47,7 @@ const rpcMethods = [
   "scans_agent_sessions",
   "scans_card",
   "scans_start",
+  "scans_state",
   "scans_upgrade_clicked",
 ].sort();
 

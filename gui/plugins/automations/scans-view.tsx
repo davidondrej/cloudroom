@@ -41,11 +41,18 @@ export function ScansView() {
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [plan, setPlan] = useState<string | null | undefined>(undefined);
   const [starting, setStarting] = useState<"workflow" | "cyber" | null>(null);
+  // Which kinds already ran on this computer: a Free plan's first scan of each kind is free (David, 2026-11-19).
+  const [used, setUsed] = useState<Record<"workflow" | "cyber", boolean> | null>(null);
   useEffect(() => {
     let cancelled = false;
     rpc.call("scans_agent_sessions", null).then(
       (result) => !cancelled && setAgents(result.agents),
       () => !cancelled && setAgents([]),
+    );
+    rpc.call("scans_state", null).then(
+      (result) => !cancelled && setUsed({ workflow: result.workflow.used, cyber: result.cyber.used }),
+      // Unknown counts as unused: the server still refuses a second free scan.
+      () => !cancelled && setUsed({ workflow: false, cyber: false }),
     );
     rpc.call("account_plan", null).then(
       (result) => !cancelled && setPlan(result.plan),
@@ -55,9 +62,9 @@ export function ScansView() {
       cancelled = true;
     };
   }, [rpc]);
-  const free = plan === "free";
+  const upgrade = (kind: "workflow" | "cyber") => plan === "free" && used !== null && used[kind];
   const start = (kind: "workflow" | "cyber") => {
-    if (free) {
+    if (upgrade(kind)) {
       rpc.call("scans_upgrade_clicked", null).catch(() => {});
       return navigate.openUrl("https://www.cloudroom.dev/billing");
     }
@@ -87,21 +94,25 @@ export function ScansView() {
             size="lg"
             variant="outline"
             className="h-10 gap-2 px-4 font-semibold"
-            disabled={starting !== null || plan === undefined}
+            disabled={starting !== null || plan === undefined || used === null}
             onClick={() => start("cyber")}
           >
             <Icon name="SecurityCheck" className="size-4" aria-hidden />
-            {starting === "cyber" ? "Starting…" : "Cyber scan"}
+            {upgrade("cyber")
+              ? "Upgrade to scan"
+              : starting === "cyber"
+                ? "Starting…"
+                : "Cyber scan"}
           </Button>
           <Button
             type="button"
             size="lg"
             className="h-10 gap-2 px-5 font-semibold"
-            disabled={starting !== null || plan === undefined || !agents?.length}
+            disabled={starting !== null || plan === undefined || used === null || !agents?.length}
             onClick={() => start("workflow")}
           >
             <Icon name="Play" className="size-4" aria-hidden />
-            {free
+            {upgrade("workflow")
               ? "Upgrade to scan"
               : starting === "workflow"
                 ? "Starting…"

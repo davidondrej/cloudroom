@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 160
+
+One-click scans on new threads (2026-11-19)
+
+### Changes
+
+- The new-thread screen offers one-click Workflow and Cyber scans of your work.
+- Custom instructions can now apply to just one agent or one model.
+- Included context shows as a collapsible chip in sent messages, and survives edits.
+- The sidebar shows which thread is using an app on your computer.
+- Security fixes.
+
 ## 159
 
 A new Ultra Fast speed (2026-11-19)

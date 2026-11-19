@@ -103,21 +103,27 @@ export function useDocumentFilePreview(
   }
   const index = Math.min(partIndex, preview.parts.length - 1);
   const text = preview.parts[index]?.text ?? "";
+  const { format } = filePreview;
+  const pageView =
+    (format === "docx" || format === "pptx") && preview.pageView
+      ? { format, bytes: filePreview.contentBytes, ...preview.pageView }
+      : null;
   return {
     state:
-      text.trim() === ""
+      text.trim() === "" && !pageView
         ? { kind: "empty" }
         : {
             kind: "ready",
             lineRange: null,
             textPreviewKind: preview.textKind,
+            ...(pageView ? { document: pageView } : {}),
             file: {
               cacheKey: `document-preview:${filePreview.path}:${index}:${hashSourceContents(text)}`,
               name: filePreview.name ?? filePreview.path,
               contents: text,
             },
           },
-    notice: (
+    notice: pageView ? null : (
       <DocumentNotice
         preview={preview}
         partIndex={index}

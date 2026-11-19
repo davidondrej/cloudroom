@@ -1,5 +1,10 @@
 # APIs To Audit
 
+## Target for custom instructions
+
+`bb.agents.contributeInstructions` can receive `ctx.experimental_execution` with the resolved `providerId` and `model` for a user message. It is absent for callers without a resolved target.
+
+
 ## `app.commands.register`
 
 `app.commands.register` requires SDK 0.4.91; `defaultShortcut` and keyboard
@@ -1162,6 +1167,18 @@ dist-tag and `doctor` parsing) beside them.
    waits in `${TMPDIR:-/tmp}`, which the daemon points at a private folder
    (macOS, Linux). A plugin's own plan that hard-codes `/tmp` gets no such
    protection.
+
+## Private data paths (`experimental_privateDataPaths`) (`@get-bb/plugin-sdk/provider-bridge`)
+
+**What it does.** Returns the absolute paths of the data folder's credential
+files and app database for a session's `ROOM_DATA_DIR` (empty when unset).
+The Claude and Codex bridges deny them to sandboxed agents (#2191).
+
+**Audit before stabilizing.** The list lives in `@cloudroom/process-utils`:
+fixed names plus a scan of each plugin's `secrets/`, account profiles, and
+preview folders when it is called. A new kind of credential file must be added
+there. It names files, not the whole folder, because worktrees and attachments
+live in it too.
 
 ## Presentation builders (`experimental_presentationTitle`, `experimental_presentationDetail`, `experimental_withTitle`, `experimental_presentationFileName`, `experimental_COMPACTION_PRESENTATION`, `experimental_REASONING_PRESENTATION`, `experimental_fileReadPresentation`, `experimental_searchPresentation`, `experimental_webSearchPresentation`, `experimental_webFetchPresentation`, `experimental_planStepsPresentation`, `experimental_toolPresentation`) (`@get-bb/plugin-sdk/provider-bridge`)
 

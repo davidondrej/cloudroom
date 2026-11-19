@@ -6,6 +6,7 @@ import {
   type RuntimePermissionPolicy,
   type ServiceTier,
   buildShellEnvOverrides,
+  experimental_privateDataPaths as privateDataPaths,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import fs from "node:fs";
 import path from "node:path";
@@ -829,6 +830,7 @@ export function buildCodexConfig(
     config["features.multi_agent"] = false;
     config["features.multi_agent_v2.max_concurrent_threads_per_session"] = 1;
   }
+  Object.assign(config, buildPrivateDataDenyConfig(args.options?.envVars));
   config["memories.use_memories"] = args.options?.memoryEnabled ?? true;
   config["memories.generate_memories"] = args.options?.memoryEnabled ?? true;
   if (args.options?.permissionScope === "workspace") {
@@ -841,6 +843,38 @@ export function buildCodexConfig(
     }
   }
   return Object.keys(config).length > 0 ? config : undefined;
+}
+
+const CLOUDROOM_PERMISSION_PROFILE = "cloudroom";
+
+/**
+ * A Codex permission profile that denies sandboxed commands Cloudroom's
+ * credential files (#2191). Each turn's `sandboxPolicy` still sets writes and
+ * network, and Codex keeps this profile's deny entries on top. A thread-level
+ * `sandbox` mode would replace the profile, so the bridge leaves it out while
+ * this profile is set. Not on Windows, whose sandbox was not tested.
+ */
+export function buildPrivateDataDenyConfig(
+  envVars: Record<string, string> | undefined,
+  platform: NodeJS.Platform = process.platform,
+): { [key in string]?: JsonValue } {
+  const paths = platform === "win32" ? [] : privateDataPaths(envVars?.ROOM_DATA_DIR);
+  if (paths.length === 0) return {};
+  return {
+    default_permissions: CLOUDROOM_PERMISSION_PROFILE,
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.filesystem`]: {
+      ":root": "read",
+      ":workspace_roots": { ".": "write" },
+      ...Object.fromEntries(paths.map((entry) => [entry, "deny"])),
+    },
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.network.enabled`]: true,
+  };
+}
+
+export function usesPrivateDataDenyProfile(
+  config: { [key in string]?: JsonValue } | undefined,
+): boolean {
+  return config?.default_permissions === CLOUDROOM_PERMISSION_PROFILE;
 }
 
 interface CodexDynamicToolInput {

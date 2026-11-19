@@ -44,6 +44,11 @@ export function isPlanLimitError(
   );
 }
 
+/** The provider refused the work itself (say OpenAI's cybersecurity filter): another agent may still do it. */
+export function isRefusalError(message: EventProjectionErrorMessage): boolean {
+  return message.providerErrorInfo?.category === "policy";
+}
+
 const reconnectProgressPattern = /^Reconnecting\.\.\.\s+\d+\/\d+$/u;
 
 interface ReconnectDisplay {

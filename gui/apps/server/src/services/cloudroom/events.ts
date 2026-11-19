@@ -110,7 +110,7 @@ function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Co
     direction: "outbound", requestId: roomRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
     input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
-    request: { method: initial ? "thread/start" : "turn/start", params: {} },
+    request: { method: initial ? "thread/start" : "turn/start", params: initial ? {} : { cloudMessageId: request.id } },
     execution: { source: "client/turn/requested", model: saved.model, reasoningLevel: messageReasoning(JSON.stringify(stored), saved.reasoning), permissionMode: "full", serviceTier: serviceTierSchema.catch("default").parse(stored.service_tier) },
   });
 }

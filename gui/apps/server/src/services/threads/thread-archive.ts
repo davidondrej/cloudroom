@@ -69,6 +69,7 @@ interface ArchiveThreadAndChildrenArgs {
   liveThreadIds?: readonly string[];
   /** The website already has the parent archived (an agent's own archive, #237): only its children go out. */
   websiteHasRoot?: boolean;
+  checkOwner?: (owner: string | null | undefined) => void;
 }
 
 interface ArchiveThreadAndChildrenResult {
@@ -283,15 +284,21 @@ export function archiveFromWebsite(deps: AppDeps, thread: Thread): void {
 export function archiveThreadAndChildren(
   deps: AppDeps,
   args: ArchiveThreadAndChildrenArgs,
+  family = listThreadWithDescendants(deps, args.parentThread),
 ): ArchiveThreadAndChildrenResult {
   const kept = args.includeLive
     ? new Set<string>()
     : listKeptLiveThreads(deps, args.parentThread, new Set(args.liveThreadIds));
   const archivedThreadIds: string[] = [];
 
-  for (const thread of listThreadWithDescendants(deps, args.parentThread)) {
-    // A kept thread keeps its side chats too.
-    if (thread.archivedAt !== null || kept.has(thread.id) || kept.has(thread.sourceThreadId ?? "")) continue;
+  // A kept thread keeps its side chats too. Check every target before the first write.
+  const targets = family.filter(thread => thread.archivedAt === null && !kept.has(thread.id) && !kept.has(thread.sourceThreadId ?? ""));
+  if (args.checkOwner) {
+    for (const thread of targets) {
+      if (isCloudThread(thread)) args.checkOwner(binding(deps.db, thread.id)?.accountId);
+    }
+  }
+  for (const thread of targets) {
     const environment = resolveArchiveThreadEnvironment(deps, { thread });
     const result = archiveThreadWithLifecycleEffects(deps, {
       environment,
@@ -349,6 +356,6 @@ function isLiveThread(
       listQueuedThreadMessages(deps.db, thread.id).some((message) => message.failureReason === null)) ||
     (!binding(deps.db, thread.id)?.queuePaused &&
       queuedPrompts(deps.db, thread.id).length > 0) ||
-    commands(deps.db, thread.id).some((command) => command.state === "sending")
+    commands(deps.db, thread.id, "sending").some((command) => command.command !== "unarchive_session")
   );
 }

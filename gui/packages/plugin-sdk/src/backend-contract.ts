@@ -1669,6 +1669,13 @@ export interface PluginProviderDeclaration {
   ) => Readonly<Record<string, JsonValue>>;
 }
 
+export type PluginInstructionContext = {
+  threadId: string;
+  projectId: string;
+  /** Resolved target for user instructions on this message. */
+  experimental_execution?: { providerId: string; model: string | null };
+};
+
 export interface PluginAgents {
   /**
    * Select this plugin's statically registered tools and manifest skills for
@@ -1738,7 +1745,7 @@ export interface PluginAgents {
    * A repeated registration within one factory execution is rejected.
    */
   contributeInstructions(
-    provider: (ctx: { threadId: string; projectId: string }) => string | null,
+    provider: (ctx: PluginInstructionContext) => string | null,
   ): void;
 }
 

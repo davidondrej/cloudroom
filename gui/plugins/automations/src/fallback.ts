@@ -1,6 +1,11 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { MODEL_LEVELS } from "@cloudroom/domain";
-import { listAutomationRuns, type AutomationRow, type Db } from "./data.js";
+import {
+  listAutomationRuns,
+  REFUSED,
+  type AutomationRow,
+  type Db,
+} from "./data.js";
 import type {
   AutomationExecution,
   ReasoningLevel,
@@ -42,6 +47,9 @@ const usageCache = new Map<
       | null;
   }
 >();
+// After a refusal, the loop runs on the other provider for a week (ADR 20261119-091500). Kept until the app restarts.
+const REFUSAL_HOLD_MS = 7 * 86_400_000;
+const refusedUntil = new Map<string, number>();
 // A provider seen at its limit stays suspect until the full window resets, or 10 minutes when the reset is unknown (#1807).
 const limitedUntil = new Map<string, number>();
 // Loops whose last run switched: the next one checks usage again, so an unknown reset can't send it back early.
@@ -155,13 +163,16 @@ function fallbackOn(sdk: FallbackSdk): Promise<boolean> {
   return read.on;
 }
 
-// run.ts skips a run its plan limit stopped (ADR 0344). The newest run is this one, still running.
-function limitSkipped(db: Db, automationId: string): boolean {
-  return (
-    listAutomationRuns(db, { automationId, limit: 2 })
-      .find((run) => run.status !== "running")
-      ?.skipReason?.startsWith("plan limit:") === true
+// The last run that ended. The newest run is this one, still running.
+function lastEnded(db: Db, automationId: string) {
+  return listAutomationRuns(db, { automationId, limit: 2 }).find(
+    (run) => run.status !== "running",
   );
+}
+
+// run.ts skips a run its plan limit stopped (ADR 0344).
+function limitSkipped(db: Db, automationId: string): boolean {
+  return lastEnded(db, automationId)?.skipReason?.startsWith("plan limit:") === true;
 }
 
 /** A loop with several agents gives each run the next one (docs/scopes/loops.md), past any at its plan limit or not
@@ -215,14 +226,26 @@ export async function loopAgent(
       ? {}
       : { serviceTier: execution.serviceTier }),
   };
+  // A refused last run holds this loop's own agent for a week, only when it ran there: one already on the other agent
+  // (at a limit) refused there, so the hold would send the loop to the agent that refused. The retry already switches.
+  const held = `${automation.id}:${execution.providerId}`;
+  if (
+    failed &&
+    lastEnded(db, automation.id)?.error?.startsWith(REFUSED) &&
+    (await ranOn(sdk, automation.lastRunThreadId)) === execution.providerId
+  )
+    refusedUntil.set(held, Date.now() + REFUSAL_HOLD_MS);
+  const refused = (refusedUntil.get(held) ?? 0) > Date.now();
   const suspect =
     switched.delete(automation.id) ||
     failed ||
     (limitedUntil.get(execution.providerId) ?? 0) > Date.now();
   if (
     !OTHER_PROVIDER[execution.providerId] ||
-    !suspect ||
-    (await atLimit(sdk, execution.providerId, execution.model, failed)) !== true
+    (!refused &&
+      (!suspect ||
+        (await atLimit(sdk, execution.providerId, execution.model, failed)) !==
+          true))
   )
     return own;
   const other = sameLevelAgent(execution);
@@ -243,6 +266,18 @@ export async function loopAgent(
     return own;
   switched.add(automation.id);
   return other;
+}
+
+/** The agent a run's thread ran on, or null when unknown. */
+async function ranOn(
+  sdk: FallbackSdk,
+  threadId: string | null,
+): Promise<string | null> {
+  if (!threadId) return null;
+  const thread = (await safely(() => sdk.threads.get?.({ threadId }))) as {
+    providerId?: unknown;
+  } | null;
+  return typeof thread?.providerId === "string" ? thread.providerId : null;
 }
 
 // The last run's retries would redo its work on the limited provider. As after a failed run, Stop cancels them all,

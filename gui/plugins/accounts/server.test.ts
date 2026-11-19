@@ -292,6 +292,16 @@ it("accounts not in use keep their usage bars and reset times across a restart",
         }[]
       ).map((row) => [row.id, row.error ?? row.windows]),
     );
+  // When each of D's bars was last confirmed by a read.
+  const checked = async (host: typeof harness) =>
+    (
+      (await host.callRpc("accounts.list", { provider: "claude-code" })) as {
+        id: string;
+        windows: { checkedAt?: number | null }[];
+      }[]
+    )
+      .find((row) => row.id === "d")!
+      .windows.map((window) => window.checkedAt);
   try {
     await plugin(bb);
     // B had nothing saved, so one reply fills its row. C's saved bar and D's full login need none.
@@ -317,6 +327,8 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     await vi.waitFor(async () =>
       expect(await rows(next.harness)).toMatchObject({ d: fullWeekly(55) }),
     );
+    const lastRead = await checked(next.harness);
+    expect(lastRead.every((at) => at! > Date.now() - 60_000)).toBe(true);
 
     // Offline after a restart: every saved bar stays, and D shows no error.
     asked.length = 0;
@@ -345,6 +357,8 @@ it("accounts not in use keep their usage bars and reset times across a restart",
     await vi.waitFor(async () =>
       expect((await rows(next.harness)).d).toMatch(/Sign in again/),
     );
+    // Its bars can't be read now: they keep the last read's time, so the page greys them once it's old.
+    expect(await checked(next.harness)).toEqual(lastRead);
     // Removing an account drops its saved bars.
     await next.harness.callRpc("accounts.remove", {
       provider: "claude-code",

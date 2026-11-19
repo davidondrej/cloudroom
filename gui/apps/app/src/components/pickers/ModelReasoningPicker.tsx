@@ -206,7 +206,13 @@ interface ModelReasoningPickerProps {
   onProviderPreviewResolved?: (value: ResolvedProviderPreview) => void;
   requireVerifiedProviderPreview?: boolean;
   hasMultipleProviders: boolean;
-  modelValue: string;
+  modelValue: string | null;
+  /** Additional choices for a harness, including targets available without a local model catalog. */
+  extendModelOptions?: (
+    providerId: string,
+    models: readonly ModelPickerOption[],
+    moreModels: readonly ModelPickerOption[],
+  ) => readonly ModelPickerOption[];
   modelOptions: readonly ModelPickerOption[];
   moreModelOptions?: readonly ModelPickerOption[];
   modelIsLoading?: boolean;
@@ -247,6 +253,7 @@ export function ModelReasoningPicker({
   requireVerifiedProviderPreview = false,
   hasMultipleProviders,
   modelValue,
+  extendModelOptions,
   modelOptions,
   moreModelOptions = [],
   modelIsLoading = false,
@@ -330,8 +337,10 @@ export function ModelReasoningPicker({
     (p) => p.value === selectedProviderId,
   );
   const ProviderIcon = selectedProvider?.icon;
-  const selectedModelOption = modelOptions.find((m) => m.value === modelValue);
-  const selectedModelLabel = selectedModelOption?.label ?? modelValue;
+  const selectedOptions =
+    extendModelOptions?.(selectedProviderId, modelOptions, moreModelOptions) ?? modelOptions;
+  const selectedModelOption = selectedOptions.find((m) => m.value === modelValue);
+  const selectedModelLabel = selectedModelOption?.label ?? modelValue ?? "";
   const hasSelectedModel = selectedModelLabel.trim().length > 0;
   const selectedProviderLabel = selectedProvider?.label ?? selectedProviderId;
   const selectedModelLoadErrorMatches =
@@ -383,7 +392,7 @@ export function ModelReasoningPicker({
     siblingIdsKey,
   ]);
   const hasAlternateSelectionPath =
-    modelOptions.length > 0 ||
+    selectedOptions.length > 0 ||
     (selectedModelLoadErrorMatches && canSwitchProviders);
   const selectedModelLoadErrorText =
     selectedModelLoadErrorMatches && modelLoadError
@@ -400,7 +409,7 @@ export function ModelReasoningPicker({
         ? hasAlternateSelectionPath
           ? "Select model"
           : FAILED_TO_LOAD_MODELS_LABEL
-        : modelOptions.length === 0
+        : selectedOptions.length === 0
           ? canSwitchProviders
             ? "Select model"
             : selectedProvider?.signInCommand
@@ -470,7 +479,6 @@ export function ModelReasoningPicker({
       reasoningValue,
     ],
   );
-  const previewModelOptions = previewSelection?.modelOptions ?? modelOptions;
   const previewMoreModelOptions =
     previewSelection?.moreModelOptions ?? moreModelOptions;
   useEffect(() => {
@@ -500,9 +508,6 @@ export function ModelReasoningPicker({
   const activeModelLoadError = isPreviewing
     ? (previewQuery.data?.modelLoadError ?? null)
     : (modelLoadError ?? null);
-  const activeModelIsLoading = isPreviewing
-    ? previewQuery.isLoading
-    : modelIsLoading;
   const activeProvider = providerOptions.find(
     (p) => p.value === activeProviderId,
   );
@@ -514,9 +519,15 @@ export function ModelReasoningPicker({
     : modelLoadFailed || activeModelLoadErrorMatches;
   const canRestartModelDiscovery =
     activeModelLoadErrorMatches && activeModelLoadError?.canRestart === true;
-  const activeModelOptions = canRestartModelDiscovery
+  const baseOptions = canRestartModelDiscovery
     ? EMPTY_MODEL_OPTIONS
-    : previewModelOptions;
+    : previewSelection?.modelOptions ?? modelOptions;
+  const activeModelOptions = isPreviewing || canRestartModelDiscovery
+    ? extendModelOptions?.(activeProviderId, baseOptions, previewMoreModelOptions) ?? baseOptions
+    : selectedOptions;
+  const activeModelIsLoading =
+    (isPreviewing ? previewQuery.isLoading : modelIsLoading) &&
+    !(extendModelOptions && activeModelOptions.length > 0);
   const activeMoreModelOptions =
     previewSelectionBlocked || canRestartModelDiscovery
       ? EMPTY_MODEL_OPTIONS
@@ -744,8 +755,8 @@ export function ModelReasoningPicker({
       if (lockModelSelection || !ownsCycleChord(target)) return false;
       const next =
         index === 0
-          ? nextCycleValue(modelOptions, modelValue)
-          : previousCycleValue(modelOptions, modelValue);
+          ? nextCycleValue(modelOptions, modelValue ?? "")
+          : previousCycleValue(modelOptions, modelValue ?? "");
       if (next !== null) {
         onModelChange(next);
         setPreviewProviderId(null);

@@ -50,7 +50,6 @@
     "drizzle-studio:prod": "node --import tsx scripts/set-env.mjs NODE_ENV=production pnpm --filter @cloudroom/db db:studio"
   },
   "devDependencies": {
-    "@interfere/landmines": "0.0.0",
     "dotenv-cli": "^11.0.0",
     "esbuild": "^0.28.0",
     "oxfmt": "^0.64.0",

@@ -15,6 +15,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import {
   createPluginProcessTempDir,
   ensureDataTempDir,
+  privateDataPaths,
 } from "../src/plugin-process-paths.js";
 
 const roots: string[] = [];
@@ -141,4 +142,34 @@ it("gives what Cloudroom runs outside any sandbox the same folder", async () => 
   }
   expect(dirname(await create(dataDir))).toBe(base);
   expect(await readdir(temp)).toEqual([]);
+});
+
+it("lists the data folder's secret files, including ones found by scanning", async () => {
+  const dataDir = await makeRoot(tmpdir());
+  await mkdir(join(dataDir, "plugins", "github", "secrets"), { recursive: true });
+  await mkdir(join(dataDir, "plugins", "accounts", "profiles", "p1"), {
+    recursive: true,
+  });
+  await mkdir(join(dataDir, "cloudroom-preview-old"), { recursive: true });
+  await mkdir(join(dataDir, "thread-storage"), { recursive: true });
+
+  const paths = privateDataPaths(dataDir);
+
+  expect(paths).toEqual(
+    expect.arrayContaining(
+      [
+        "auth.json",
+        "cloudroom.json",
+        "bb.db",
+        join("plugins", "snapshots"),
+        join("plugins", "github", "secrets"),
+        join("plugins", "accounts", "profiles", "p1", ".credentials.json"),
+        join("cloudroom-preview-old", "id_ed25519"),
+      ].map((name) => join(dataDir, name)),
+    ),
+  );
+  expect(paths.some((p) => p.includes("thread-storage"))).toBe(false);
+  expect(new Set(paths).size).toBe(paths.length);
+  expect(privateDataPaths(undefined)).toEqual([]);
+  expect(privateDataPaths("  ")).toEqual([]);
 });

@@ -212,6 +212,7 @@ import {
   SIDE_CHAT_PLUGIN_PANEL_ACTION_ID,
 } from "@/lib/side-chat-plugin";
 import { RightPanelFileTabIcon } from "@/components/secondary-panel/RightPanelFileTabIcon";
+import { WorkspaceFileTabIcon } from "@/components/secondary-panel/agent-file-edit";
 import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { PluginIcon } from "@/components/plugin/PluginIcon";
 import {
@@ -3153,7 +3154,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
           return {
             ...shared,
             label: filenameOfPanelTab(tab.path),
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
+            leadingVisual: (
+              <WorkspaceFileTabIcon path={tab.path} threadId={threadId} />
+            ),
             statusLabel: tab.statusLabel,
             onSelect: () => handleActivateFileTab(tab.id),
           };

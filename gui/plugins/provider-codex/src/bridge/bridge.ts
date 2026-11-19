@@ -80,6 +80,7 @@ import {
   toCodexDynamicTools,
   toCodexPermissionSettings,
   toCodexServiceTier,
+  usesPrivateDataDenyProfile,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
   type RoomThreadForkParams,
@@ -1269,7 +1270,10 @@ async function constructThreadSession(
     const sharedConstructionParams = {
       approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       approvalsReviewer: preparedGitRoots.permissionSettings.approvalsReviewer,
-      sandbox: preparedGitRoots.permissionSettings.sandbox,
+      // Each turn sets the sandbox; a thread-level mode would drop the deny profile.
+      ...(usesPrivateDataDenyProfile(preparedGitRoots.config)
+        ? {}
+        : { sandbox: preparedGitRoots.permissionSettings.sandbox }),
       cwd: args.cwd,
       ...instructionOverrides,
       model: decoded.sessionOptions.model ?? undefined,

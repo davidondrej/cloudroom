@@ -4880,11 +4880,14 @@ describe("PromptBoxInternal fast mode command", () => {
       provider: { options: [{ value: "claude-code", label: "Claude Code" }] },
       selectModel,
     };
-    expect(promptModelShortcuts(execution)?.map(({ name }) => name)).toEqual(["fable", "opus"]);
-    expect(promptModelShortcuts(execution, { providerId: "codex", models: ["gpt-6-astra", "claude-fable-5-2"] })?.map(({ name }) => name)).toEqual(["astra"]);
+    expect(promptModelShortcuts(execution, { loadModels: async () => [] })?.map(({ name }) => name)).toEqual(["fable", "opus"]);
+    const astra = promptModelShortcuts(execution, { providerId: "codex", models: ["gpt-6-astra", "gpt-6.2-astra", "gpt-6.1-sol", "claude-fable-5-2"] });
+    expect(astra?.map(({ name }) => name)).toEqual(["astra"]);
+    await astra?.[0]?.onSelect();
+    expect(selectModel).toHaveBeenLastCalledWith({ providerId: "codex", model: "gpt-6.2-astra" });
     execution.provider.options.push({ value: "codex", label: "Codex" });
-    const modelShortcuts = promptModelShortcuts(execution, { providerId: "claude-code", models: ["claude-opus-5-5[1m]"] });
-    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["opus"]);
+    const modelShortcuts = promptModelShortcuts(execution, { providerId: "claude-code", models: ["claude-opus-5[1m]", "claude-opus-5-5[1m]", "claude-fable-5-2"] });
+    expect(modelShortcuts?.map(({ name }) => name)).toEqual(["fable", "opus"]);
     const { changes, onSubmit, promptBoxRef } = renderPromptBox(
       "Review this /opus",
       { modelShortcuts },

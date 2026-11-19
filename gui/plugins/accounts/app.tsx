@@ -30,6 +30,7 @@ import {
   ACCOUNTS_CHANGED,
   LOCAL,
   MAX_ACCOUNTS,
+  USAGE_STALE_MS,
   type AccountView,
   type Provider,
   type accountsRpcContract,
@@ -41,14 +42,16 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function until(timestamp: number): string {
-  const minutes = Math.max(1, Math.round((timestamp - Date.now()) / 60_000));
+// A time span: "5m", "2h 10m", "1d 6h".
+function span(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   return hours < 24
     ? `${hours}h ${minutes % 60}m`
     : `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
+const until = (timestamp: number) => span(timestamp - Date.now());
 
 function windowLabel(label: string): string {
   return label
@@ -61,14 +64,23 @@ function windowLabel(label: string): string {
 }
 
 // One line of an account's limits. `usedPercent` is null for a limit that was not read: it is unknown, not 0%.
-type Limit = { label: string; usedPercent: number | null; resetsAt: number | null };
+type Limit = {
+  label: string;
+  usedPercent: number | null;
+  resetsAt: number | null;
+  checkedAt?: number | null;
+};
 
-// The line: the limit's name, bar, percent used, and the time until it resets.
-function Meter({ label, usedPercent, resetsAt }: Limit) {
+// The line: the limit's name, bar, percent used, and the time until it resets. Greyed when no read confirmed it lately.
+function Meter({ label, usedPercent, resetsAt, checkedAt }: Limit) {
   const used = usedPercent ?? 0;
   const hot = used >= 90;
+  const old = checkedAt != null && Date.now() - checkedAt > USAGE_STALE_MS;
   return (
-    <div className="contents">
+    <div
+      className={cn("contents", old && "*:opacity-40")}
+      title={old ? (checkedAt ? `Last checked ${span(Date.now() - checkedAt)} ago` : "Last known usage") : undefined}
+    >
       <span>{windowLabel(label)}</span>
       <span className="h-[3px] overflow-hidden rounded-full bg-border">
         <span
@@ -149,12 +161,15 @@ function AccountRow({
   // Every limit gets its own line, with the time until it resets. A limit this account doesn't report shows empty,
   // so every row has the same lines. An account with no usage read shows none.
   // "Resets in" alone shows only for a limit that lasts longer than every full bar.
+  // A 0% Claude left out was confirmed by the row's latest read, so it greys with the rest.
+  const newest = Math.max(...account.windows.map((window) => window.checkedAt ?? -1));
   const shown: Limit[] =
     account.windows.length === 0
       ? []
       : limits.map(
           (empty) =>
-            account.windows.find((window) => window.label === empty.label) ?? empty,
+            account.windows.find((window) => window.label === empty.label) ??
+            (empty.usedPercent === 0 && newest >= 0 ? { ...empty, checkedAt: newest } : empty),
         );
   const full = shown.some(
     (window) =>
@@ -299,6 +314,7 @@ function AccountRow({
                 label={window.label}
                 usedPercent={window.usedPercent}
                 resetsAt={window.resetsAt}
+                checkedAt={window.checkedAt}
               />
             ))}
           </div>

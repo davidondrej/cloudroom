@@ -34,7 +34,10 @@ import {
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { workflowRow } from "@/test/fixtures/thread-timeline-rows";
-import type { PromptDraftAttachment } from "@cloudroom/client-core";
+import type {
+  PromptDraftAttachment,
+  PromptDraftContext,
+} from "@cloudroom/client-core";
 import { BbHttpError } from "@/lib/sdk";
 import type { TypeaheadConfig } from "@/components/promptbox/PromptBoxInternal";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
@@ -66,6 +69,7 @@ const mocks = vi.hoisted(() => ({
     addAttachment: vi.fn(),
     attachments: [] as PromptDraftAttachment[],
     clearIfCurrentMatches: vi.fn(),
+    contexts: undefined as PromptDraftContext[] | undefined,
     getCurrent: vi.fn(),
     mentions: [] as PromptTextMention[],
     removeAttachment: vi.fn(),
@@ -102,9 +106,13 @@ vi.mock("react-router-dom", async (importOriginal) => {
 });
 
 vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
+  const { useContext } = await import("react");
   const { ComposerBannersSlot } = await vi.importActual<
     typeof import("@/components/plugin/PluginComposerBanners")
   >("@/components/plugin/PluginComposerBanners");
+  const { PromptDraftContextsContext } = await vi.importActual<
+    typeof import("@/components/promptbox/editor/prompt-context-chip")
+  >("@/components/promptbox/editor/prompt-context-chip");
   return {
     FollowUpPromptBox: ({
       activePromptMode,
@@ -178,7 +186,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       textEffects?: readonly {
         effect: { className: string };
       }[];
-    }) => (
+    }) => {
+      const promptDraftContexts = useContext(PromptDraftContextsContext);
+      return (
       <div data-testid="follow-up-prompt-box">
         {environmentSummary}
         <div data-testid="prompt-stack">
@@ -257,6 +267,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         </div>
         <div data-testid="composer-location">
           {showScrollToBottomButton === false ? "inline" : "bottom"}
+        </div>
+        <div data-testid="prompt-draft-contexts">
+          {JSON.stringify(promptDraftContexts ?? [])}
         </div>
         <div data-testid="plugin-composer-scope">
           {pluginComposerHost
@@ -376,7 +389,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           </button>
         ) : null}
       </div>
-    ),
+      );
+    },
   };
 });
 
@@ -917,8 +931,10 @@ beforeEach(() => {
   mocks.promptDraft.text = "";
   mocks.promptDraft.mentions = [];
   mocks.promptDraft.attachments = [];
+  mocks.promptDraft.contexts = undefined;
   mocks.promptDraft.getCurrent.mockImplementation(() => ({
     attachments: mocks.promptDraft.attachments,
+    ...(mocks.promptDraft.contexts ? { contexts: mocks.promptDraft.contexts } : {}),
     mentions: mocks.promptDraft.mentions,
     text: mocks.promptDraft.text,
   }));
@@ -2142,5 +2158,36 @@ describe("ThreadDetailPromptArea", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it("provides the queued message's own context previews to the inline queued editor", () => {
+    mocks.promptDraft.contexts = [
+      { label: "[message #1 - 2 words]", text: "bottom quote" },
+    ];
+    mocks.queuedMessages = [
+      makeQueuedMessage({
+        content: [
+          {
+            type: "text",
+            text: '<context message="#1">\nqueued quote\n</context>\nEdit me',
+            mentions: [],
+          },
+        ],
+      }),
+    ];
+
+    renderPromptArea();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit queued message 1" }),
+    );
+
+    const inlineEditor = within(
+      screen.getByTestId("inline-queued-message-editor"),
+    );
+    expect(
+      JSON.parse(
+        inlineEditor.getByTestId("prompt-draft-contexts").textContent ?? "[]",
+      ),
+    ).toEqual([{ label: "[message #1 - 2 words]", text: "queued quote" }]);
   });
 });

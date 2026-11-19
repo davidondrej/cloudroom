@@ -4,17 +4,12 @@
   "categories": {
     "correctness": "off"
   },
-  "jsPlugins": [
-    {
-      "name": "landmines-testing",
-      "specifier": "@interfere/landmines/testing"
-    }
-  ],
+  "jsPlugins": ["./scripts/oxlint-plugin.mjs"],
   "overrides": [
     {
       "files": ["**/*.{test,spec}.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
       "rules": {
-        "landmines-testing/no-fixed-sleep": [
+        "bb/no-fixed-sleep": [
           "error",
           {
             "allow": {
@@ -70,7 +65,7 @@
             }
           }
         ],
-        "landmines-testing/no-unsignaled-poll": [
+        "bb/no-unsignaled-poll": [
           "warn",
           {
             "allow": {

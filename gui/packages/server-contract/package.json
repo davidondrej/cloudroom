@@ -21,7 +21,7 @@
     "@cloudroom/host-daemon-contract": "workspace:*",
     "@cloudroom/hono-typed-routes": "workspace:*",
     "@cloudroom/provider-bridge-protocol": "workspace:*",
-    "hono": "^4.7.0",
+    "hono": "^4.13.16",
     "zod": "^4.3.6"
   },
   "devDependencies": {

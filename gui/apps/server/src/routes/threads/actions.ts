@@ -85,10 +85,11 @@ import {
   toThreadListEntryResponses,
   toThreadResponseFromThread,
 } from "../../services/threads/thread-runtime-display.js";
-import { archiveThreadAndChildren, listThreadsArchivedWith } from "../../services/threads/thread-archive.js";
+import { archiveThreadAndChildren, listThreadsArchivedWith, listThreadWithDescendants } from "../../services/threads/thread-archive.js";
 import { unarchiveThreadKeepingOpenParent } from "../../services/threads/thread-ownership.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { teleports } from "../../services/cloudroom/teleport.js";
+import { binding } from "../../services/cloudroom/store.js";
 import { teleportToLocal } from "../../services/cloudroom/teleport-local.js";
 import {
   requireThreadCommandEnvironment,
@@ -621,12 +622,16 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json(buildActivePinnedThreadRootListResponse(deps));
   });
 
-  post(routes.archiveAll, (context, query) => {
+  post(routes.archiveAll, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const result = archiveThreadAndChildren(deps, {
-      parentThread: thread,
-      includeLive: query.includeLive === "true",
-    });
+    const family = listThreadWithDescendants(deps, thread);
+    const includeLive = query.includeLive === "true";
+    if (!family.some(item => isCloudThread(item) && item.archivedAt === null)) {
+      return context.json({ ok: true, ...archiveThreadAndChildren(deps, { parentThread: thread, includeLive }, family) });
+    }
+    const checkOwner = await cloudroom(deps).threadOwnerCheck();
+    // A child may have joined or been archived during the account read.
+    const result = archiveThreadAndChildren(deps, { parentThread: requirePublicThread(deps.db, thread.id), includeLive, checkOwner });
     return context.json({ ok: true, ...result });
   });
 
@@ -662,6 +667,10 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     // Read again: it may have been deleted during the wait.
     const thread = requirePublicThread(deps.db, archived.id);
     const providerThreadId = getLastProviderThreadId(deps, thread.id);
+    if (isCloudThread(thread)) {
+      const saved = binding(deps.db, thread.id);
+      if (saved) await cloudroom(deps).requireOwnThread(saved);
+    }
     const unarchivedThread = unarchiveThreadKeepingOpenParent(
       deps,
       thread.id,

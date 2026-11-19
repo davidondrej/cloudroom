@@ -75,6 +75,7 @@ import { extractThreadTimelinePendingTodos } from "./todo-snapshot-extraction.js
 import {
   buildTimelineErrorDisplay,
   isPlanLimitError,
+  isRefusalError,
 } from "./error-display.js";
 import { isTimelineRetryMessage } from "./timeline-message-helpers.js";
 
@@ -850,6 +851,7 @@ function convertMessage(
           ...(!isReconnect && isPlanLimitError(message)
             ? { planLimit: true }
             : {}),
+          ...(!isReconnect && isRefusalError(message) ? { refusal: true } : {}),
         },
       ];
     }
@@ -1402,7 +1404,7 @@ type PlanLimitAccountSwitch = NonNullable<
 const isPlanLimitRow = (row: TimelineRow | undefined) =>
   row?.kind === "system" &&
   row.systemKind === "error" &&
-  row.planLimit === true;
+  (row.planLimit === true || row.refusal === true);
 
 /**
  * A plan-limit row right before a harness switch says who took over: the first switch's `from`, the last one's `to`.

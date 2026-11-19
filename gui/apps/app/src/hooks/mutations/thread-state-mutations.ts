@@ -45,6 +45,7 @@ import {
   type PinThreadPosition,
   type ThreadListMutationTransaction,
 } from "../cache-owners/thread-state-cache-owner";
+import { applyArchivedThreadIds } from "../cache-owners/thread-archive-cache";
 import { threadReasoningSaveKey } from "../queries/query-keys";
 
 interface ThreadMutationRequest {
@@ -410,7 +411,9 @@ export function useReorderPinnedThread() {
   });
 }
 
-export function useArchiveThreadAndChildren() {
+export function useArchiveThreadAndChildren({
+  sidebarAlreadyHidden = false,
+} = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -424,14 +427,21 @@ export function useArchiveThreadAndChildren() {
       includeLive = true,
     }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> =>
       sdk.threads.archiveAll({ threadId: id, includeLive }),
-    onMutate: async ({ id, includeLive }): Promise<ArchiveThreadsTransaction> =>
-      beginArchiveThreadAndChildrenTransaction({
+    onMutate: async ({ id, includeLive }): Promise<ArchiveThreadsTransaction | undefined> => {
+      // The sidebar hides each pending family separately. Its rollback only removes that family's filter.
+      if (sidebarAlreadyHidden) return;
+      return beginArchiveThreadAndChildrenTransaction({
         queryClient,
         threadId: id,
         includeLive,
-      }),
+      });
+    },
     onError: (_error, _variables, context) => {
       rollbackArchiveThreadsTransaction({ queryClient, transaction: context });
+    },
+    onSuccess: ({ archivedThreadIds }) => {
+      if (!sidebarAlreadyHidden) return;
+      applyArchivedThreadIds({ queryClient, threadIds: archivedThreadIds });
     },
     onSettled: (data, _error, _variables, context) => {
       settleArchiveThreadsTransaction({

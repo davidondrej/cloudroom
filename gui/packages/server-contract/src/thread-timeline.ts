@@ -98,6 +98,7 @@ export const timelineConversationTurnRequestStatusValues = [
   "rejected",
 ] as const;
 export const timelineConversationTurnRequestSchema = z.object({
+  cloudMessageId: z.string().optional(),
   isGrouped: z.boolean(),
   kind: z.enum(timelineConversationTurnRequestKindValues),
   status: z.enum(timelineConversationTurnRequestStatusValues),
@@ -191,6 +192,8 @@ export const timelineNonOperationSystemRowSchema =
     systemKind: z.enum(["debug", "error", "reconnect"]),
     /** The provider's plan or usage limit stopped the turn. */
     planLimit: z.boolean().optional(),
+    /** The provider refused the work (say OpenAI's cybersecurity filter); it gets the same card to continue elsewhere. */
+    refusal: z.boolean().optional(),
     /** The thread then moved to another agent: `from` hit the limit, `to` took over at `at` (ms), right away with `resend`. */
     planLimitSwitch: z
       .object({

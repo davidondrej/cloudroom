@@ -67,7 +67,7 @@ import { SidebarThreadListSetting } from "@/components/settings/SidebarThreadLis
 import { SidebarFooterSettings } from "@/components/settings/SidebarFooterSettings";
 import { SidebarNavigationSetting } from "@/components/settings/SidebarNavigationSetting";
 import { SplitDimmingSetting } from "@/components/settings/SplitDimmingSetting";
-import { StarterPromptsSetting } from "@/components/ActivationChecklist";
+import { OneClickScansSetting } from "@/components/ActivationChecklist";
 import { HarnessIconsSetting } from "@/components/settings/HarnessIconsSetting";
 import { useSettingsNavState } from "@/components/settings/settings-nav";
 import { useRevealSettingsTarget } from "@/components/settings/settings-search";
@@ -931,7 +931,7 @@ export function AppearanceSettingsSection({
             aria-label="Question cards"
           />
         </SettingsWithControl>
-        <StarterPromptsSetting />
+        <OneClickScansSetting />
         <PluginSettingsSections pluginId="wallpaper" />
       </div>
     </SettingsSection>

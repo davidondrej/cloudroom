@@ -1,6 +1,7 @@
 import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
+  experimental_privateDataPaths as privateDataPaths,
   type InstructionMode,
   type ReasoningLevel,
   type RuntimePermissionScope,
@@ -59,13 +60,29 @@ export function toSdkEffort(
   return reasoningLevel;
 }
 
-function buildFlagSettings(params: BuildSessionOptionsArgs): Settings {
+function buildFlagSettings(
+  params: BuildSessionOptionsArgs,
+  env: NodeJS.ProcessEnv,
+): Settings {
+  const deny = privateDataReadDenyRules(env);
   return {
     autoMemoryEnabled: params.memoryEnabled ?? true,
     disableClaudeAiConnectors: params.claudeAiConnectorsEnabled !== true,
     enableWorkflows: params.workflowsEnabled,
     ultracode: params.reasoningLevel === "ultracode",
+    ...(deny.length > 0 ? { permissions: { deny } } : {}),
   };
+}
+
+/**
+ * `Read(//path)` deny rules for Cloudroom's credential files (#2191). Claude
+ * applies them to its Read, Grep, and Glob tools in every mode, and adds them
+ * to the sandbox's denyRead, so sandboxed shell commands can't read them.
+ */
+export function privateDataReadDenyRules(env: NodeJS.ProcessEnv): string[] {
+  return privateDataPaths(env.ROOM_DATA_DIR)
+    .filter((path) => path.startsWith("/"))
+    .map((path) => `Read(/${path})`);
 }
 
 export function buildChromeExtraArgs(
@@ -292,7 +309,7 @@ export function buildSessionOptions(
         };
   const model = params.model;
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutable({ env });
-  const flagSettings = buildFlagSettings(params);
+  const flagSettings = buildFlagSettings(params, env);
   const extraArgs = buildChromeExtraArgs(params.chromeEnabled);
 
   return {

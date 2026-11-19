@@ -112,7 +112,7 @@ describe("useForkThreadFromMessage", () => {
     });
 
     expect(getPromptDraftAccessor({ kind: "new-thread" }).getCurrent()).toMatchObject({
-      text: "<context> [message #4 - 3 words] </context> ",
+      text: "<context> [message #4 - 3 words] </context>\n",
       contexts: [{ label: "[message #4 - 3 words]", text: "fork from here" }],
     });
     expect(mocks.setRootComposeProjectId).toHaveBeenCalledWith("proj_source");

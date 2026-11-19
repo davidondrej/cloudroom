@@ -1,3 +1,4 @@
+import { createKeyedLock } from "../lib/async-deduper.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
@@ -197,6 +198,10 @@ const sandboxAccountOf = (saved: SavedConnection): SandboxAccount | null =>
 const ownerOf = (saved: SavedConnection): string | null => !saved?.account && !saved?.token ? null
   : createHash("sha256").update(JSON.stringify(saved.account ? [saved.account.id, saved.websiteUrl ?? HOSTED_WEBSITE, saved.url] : [saved.url, saved.token])).digest("hex");
 const cloudStep = (sandbox: boolean, status: StartStep["status"] = "started"): StartStep => ({ key: "cloud", text: sandbox ? "Starting cloud sandbox" : "Connecting to cloud VM", status });
+
+function assertThreadOwner(owner: string | null | undefined, accountId: string | undefined) {
+  if (owner && owner !== accountId) throw new ApiError(409, "cloudroom_other_account", "Sign in to the account that owns this thread.");
+}
 
 export function cloudroom(deps: Deps): CloudroomService {
   let service = services.get(deps.db);
@@ -538,9 +543,9 @@ const startsWork = (item: Command) => ["prompt", "steer", "resume", "compact", "
 /** Unsent commands that need Core now. A stop left for a sleeping sandbox (#553) waits for its next wake, and until then
  *  only work that runs the agent wakes it: queue edits, reorders and the like wait with the stop. */
 const unsentWork = (db: DbQueryConnection, threadId: string) => {
-  const unsent = commands(db, threadId).filter(c => c.state === "sending");
+  const unsent = commands(db, threadId, "sending");
   const stopped = unsent.some(c => c.command === "stop");
-  return unsent.some(c => c.command !== "stop" && c.command !== "model" && (!stopped || startsWork(c)));
+  return unsent.some(c => c.command !== "stop" && c.command !== "model" && c.command !== "unarchive_session" && (!stopped || startsWork(c)));
 };
 
 /** Threads made by importing old chats. They are not agents the user started (ADR 20261102-073449). */
@@ -714,7 +719,7 @@ class CloudroomService {
     this.detach(threadId);
     const thread = getThread(this.deps.db, threadId), status = thread?.status;
     // A stop held for the next wake (#553, #1699) isn't work: an asleep sandbox runs nothing.
-    if (thread && status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending" && c.command !== "stop")) {
+    if (thread && status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending" && c.command !== "stop" && c.command !== "unarchive_session")) {
       // Last heard from over 6 days ago: the website may have archived the sandbox as an old run, not as a finished one.
       if (Date.now() - thread.updatedAt < 6 * 86_400_000) this.cutOff.set(threadId, 0);
       saveStatus(this.deps.db, threadId, "idle");
@@ -1220,7 +1225,7 @@ class CloudroomService {
   }
 
   async requireOwnThread(saved: Binding): Promise<void> {
-    if (await this.otherAccountThread(saved)) throw new ApiError(409, "cloudroom_other_account", "This cloud thread belongs to another Cloudroom account. Sign in with that account to use it.");
+    if (saved.accountId) (await this.threadOwnerCheck())(saved.accountId);
   }
 
   private async storage(client: CloudroomClient): Promise<Storage | null> {
@@ -2588,6 +2593,25 @@ class CloudroomService {
     }
   }
 
+  /** Check the Mac's saved command before replaying a send whose reply was lost. */
+  async messageDelivery(threadId: string, rawId: string): Promise<SendMessageResponse | null> {
+    const saved = binding(this.deps.db, threadId);
+    const thread = getThread(this.deps.db, threadId);
+    if (!saved || !thread || !isCloudThread(thread)) throw new ApiError(404, "cloudroom_missing_binding", "Cloud thread unavailable.");
+    await this.requireOwnThread(saved);
+    const id = await this.requestId(threadId, rawId);
+    const stored = command(this.deps.db, id);
+    if (!stored) return null;
+    if (stored.threadId !== threadId || (stored.command !== "prompt" && stored.command !== "steer")) {
+      throw new ApiError(409, "request_conflict", "This request ID belongs to a different command.");
+    }
+    if (!["sending", "accepted", "running", "delivered", "completed", "interrupted"].includes(stored.state)) {
+      throw new ApiError(409, "cloudroom_command_failed", "Check the conversation before sending this message again.");
+    }
+    const queued = this.queue(threadId).find(item => item.id === id);
+    return queued ? { ok: true, delivery: "queued", queuedMessage: queued } : { ok: true, delivery: "sent" };
+  }
+
   async send(thread: Thread, payload: SendMessageRequest): Promise<SendMessageResponse> {
     if (this.switching.has(thread.id)) throw new ApiError(409, "thread_busy", "This thread is switching agents. Send again in a moment.");
     this.sends.set(thread.id, (this.sends.get(thread.id) ?? 0) + 1);
@@ -2754,6 +2778,9 @@ class CloudroomService {
   private readonly archiveLanes = [Promise.resolve(), Promise.resolve(), Promise.resolve()];
   private archiveLane = 0;
 
+  // Renderers get a local acknowledgement first. A fast Undo must reach Cloud after its archive.
+  private readonly inArchiveOrder = createKeyedLock<string>();
+
   archive(threadId: string): void {
     this.refusedSince.delete(threadId);
     const saved = binding(this.deps.db, threadId);
@@ -2762,18 +2789,36 @@ class CloudroomService {
     if (sandbox) {
       // Archive always wins (ADR 0112): the website stops the sandbox even mid-task, once no other thread runs in it.
       this.archived(threadId);
-      // Only an archive the website took can later be undone through it (cloud-sync.ts).
-      if (!coreInUse(this.deps.db, saved.coreUrl)) void this.sandboxes.archive(sandbox).then(() => this.sync.archivedOnWebsite(sandbox, true), error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId }));
-      // Its other threads keep the sandbox open, so stop this thread's own agent: a stop, then a sleep, as on a VM.
-      else if (saved.sessionId) {
-        if (sandbox !== threadId) void this.archiveShared(saved, true);
-        const stop = randomUUID(), sleep = randomUUID();
-        this.enqueue(threadId, stop, "stop", {});
-        this.enqueue(threadId, sleep, "sleep", {});
-        void this.stopArchived(threadId, saved.sessionId, stop, sleep).catch(error => this.warn("The archived thread's agent could not be stopped", error, { threadId }));
+      const archivedAt = getThread(this.deps.db, threadId)?.archivedAt;
+      if (archivedAt == null) return;
+      const stillArchived = () => getThread(this.deps.db, threadId)?.archivedAt === archivedAt;
+      for (const pending of commands(this.deps.db, threadId, "sending")) {
+        if (pending.command === "unarchive_session") saveCommandState(this.deps.db, threadId, pending.id, "cancelled");
       }
-      // Cloud automations (ADR 0212) stop prompting it. A child shares its parent's sandbox, which stays open.
-      if (saved.sessionId) void this.sandboxes.automations({ action: "archived", thread: sandbox, session: saved.sessionId }).catch(error => this.warn("The thread's cloud automations could not be paused", error, { threadId }));
+      const last = !coreInUse(this.deps.db, saved.coreUrl);
+      const session = saved.sessionId;
+      if (!last && session) {
+        const stop = randomUUID(), sleep = randomUUID();
+        this.enqueue(threadId, stop, "stop", { archivedAt });
+        this.enqueue(threadId, sleep, "sleep", { archivedAt });
+        // Let the synchronous family archive finish first. Individual stop retries never hold up the whole sandbox.
+        void Promise.resolve().then(() => this.stopArchived(threadId, session, stop, sleep, archivedAt))
+          .catch(error => this.warn("The archived thread's agent could not be stopped", error, { threadId }));
+      }
+      void this.inArchiveOrder(sandbox, async () => {
+        await this.requireOwnThread(saved);
+        if (!stillArchived()) return;
+        const effects: Promise<unknown>[] = [];
+        if (last && !coreInUse(this.deps.db, saved.coreUrl)) {
+          effects.push(this.sandboxes.archive(sandbox).then(() => this.sync.archivedOnWebsite(sandbox, true))
+            .catch(error => this.warn("The thread's sandbox could not be archived; it sleeps on its own", error, { threadId })));
+        } else if (sandbox !== threadId && session) {
+          effects.push(this.archiveShared(saved, true));
+        }
+        if (session) effects.push(this.sandboxes.automations({ action: "archived", thread: sandbox, session })
+          .catch(error => this.warn("The thread's cloud automations could not be paused", error, { threadId })));
+        await Promise.all(effects);
+      }).catch(error => this.warn("Cloud archive failed", error, { threadId }));
       return;
     }
     this.enqueue(threadId, randomUUID(), "stop", {});
@@ -2784,28 +2829,54 @@ class CloudroomService {
   /** Which of these Cloud threads Core says are working now (#237, App 8): one cached idle here may run on another
    *  computer. One session list per awake sandbox, which holds its own session and the ones sharing it; an asleep
    *  sandbox runs nothing and is never woken for this. */
-  async runningInCloud(threadIds: string[]): Promise<string[]> {
+  async runningInCloud(threadIds: string[], signal: AbortSignal): Promise<string[] | null> {
     const bySandbox = new Map<string, Binding[]>();
     for (const id of threadIds) {
       const saved = binding(this.deps.db, id);
-      if (saved?.sessionId && sandboxThread(saved.coreUrl)) bySandbox.set(saved.coreUrl, [...bySandbox.get(saved.coreUrl) ?? [], saved]);
+      const sandbox = saved && sandboxThread(saved.coreUrl);
+      if (!sandbox || !saved?.sessionId) continue;
+      const group = bySandbox.get(sandbox);
+      if (group) group.push(saved);
+      else bySandbox.set(sandbox, [saved]);
     }
-    const running: string[] = [];
-    let fresh = true;
-    for (const saved of bySandbox.values()) {
-      try {
-        const client = await this.client(saved[0], false, undefined, fresh);
-        fresh = false;
-        const sessions = new Map((await client.listSessions()).sessions.map((session) => [session.session_id, session]));
-        for (const item of saved) {
-          const session = sessions.get(item.sessionId!);
-          // A wake restarts an idle agent (`resuming`) with nothing to run: that is not work, as in its sidebar row.
-          const waking = session?.state === "resuming" && !session.current_request && !session.queued;
-          if (session && !waking && (session.current_request || WORKING.includes(session.state))) running.push(item.threadId);
-        }
-      } catch (error) { fresh = false; if (!(error instanceof SandboxAsleep)) this.warn("A Cloud thread's state could not be read", error, { threadId: saved[0]!.threadId }); }
+    if (!bySandbox.size) return [];
+    try {
+      const awake = await this.sandboxes.awakeForArchive(signal);
+      for (const group of bySandbox.values()) for (const saved of group) assertThreadOwner(saved.accountId, awake.accountId);
+      const running: string[] = [];
+      let complete = true;
+      await Promise.all([...bySandbox].map(async ([sandbox, group]) => {
+        const connection = awake.connections.get(sandbox);
+        if (!connection) return;
+        try {
+          const listed = await new CloudroomClient(connection).listSessions(awake.signal);
+          const sessions = new Map(listed.sessions.map(session => [session.session_id, session]));
+          for (const saved of group) {
+            const session = sessions.get(saved.sessionId!);
+            if (!session) {
+              if (listed.total > listed.sessions.length) complete = false;
+              continue;
+            }
+            const waking = session.state === "resuming" && !session.current_request && !session.queued;
+            if (!waking && (session.current_request || WORKING.includes(session.state))) running.push(saved.threadId);
+          }
+        } catch { complete = false; }
+      }));
+      if (awake.signal.aborted && !signal.aborted) throw new ApiError(409, "cloudroom_other_account", "The Cloudroom account changed. Try again.");
+      return complete || running.length > 0 ? running : null;
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      if (error instanceof CloudroomError && (error.status === 401 || error.status === 403)) {
+        throw new ApiError(error.status, "cloudroom_archive_forbidden", "Sign in to the account that owns this thread.");
+      }
+      return null;
     }
-    return running;
+  }
+
+  /** Capture the signed-in account once; check the entire family before changing any thread. */
+  async threadOwnerCheck() {
+    const accountId = (await this.savedConnection())?.account?.id;
+    return (owner: string | null | undefined) => assertThreadOwner(owner, accountId);
   }
 
   /** Teleport to Local holds Core's freeze (#237), renewed every 2 minutes: other computers' sends get 409 `moving`
@@ -2867,22 +2938,28 @@ class CloudroomService {
 
   /** Sends an archived thread's saved stop and sleep straight to its Core, without following its stream. An asleep
    *  sandbox runs nothing, so it is never woken for this. Unsent ones are dropped, so an unarchived thread never gets them. */
-  private async stopArchived(threadId: string, sessionId: string, stop: string, sleep: string): Promise<void> {
+  private async stopArchived(threadId: string, sessionId: string, stop: string, sleep: string, archivedAt: number): Promise<void> {
     try {
+      const saved = binding(this.deps.db, threadId);
+      if (!saved) return;
+      const sandbox = sandboxThread(saved.coreUrl)!;
+      const needed = () => getThread(this.deps.db, threadId)?.archivedAt === archivedAt && coreInUse(this.deps.db, saved.coreUrl);
       for (let tries = 1; ; tries++) {
-        const saved = binding(this.deps.db, threadId);
-        if (!saved || !getThread(this.deps.db, threadId)?.archivedAt) return;
         try {
-          const client = await this.client(saved, false);
-          for (const [id, action] of [[stop, "stop"], [sleep, "sleep"]] as const) {
-            if (command(this.deps.db, id)?.state !== "sending") continue;
-            saveCommandState(this.deps.db, threadId, id, (await client[action](sessionId, id)).receipt.state);
-            // So a message sent after an unarchive resumes the queue first, as after the user's own Stop.
-            if (action === "stop") saveBinding(this.deps.db, threadId, { queuePaused: true });
-          }
+          await this.inArchiveOrder(sandbox, async () => {
+            if (!needed()) return;
+            const client = await this.client(saved, false);
+            for (const [id, action] of [[stop, "stop"], [sleep, "sleep"]] as const) {
+              if (!needed()) return;
+              if (command(this.deps.db, id)?.state !== "sending") continue;
+              const receipt = (await client[action](sessionId, id)).receipt;
+              saveCommandState(this.deps.db, threadId, id, receipt.state);
+              if (action === "stop") saveBinding(this.deps.db, threadId, { queuePaused: true });
+            }
+          });
           return;
         } catch (error) {
-          if (error instanceof SandboxAsleep) return;
+          if (error instanceof SandboxAsleep || !needed()) return;
           if (!(error instanceof CloudroomConnectionError) || tries >= 3) throw error;
         }
         await new Promise(resolve => setTimeout(resolve, 2_000));
@@ -2958,21 +3035,38 @@ class CloudroomService {
   async restore(threadId: string): Promise<void> {
     const saved = binding(this.deps.db, threadId), sandbox = sandboxThread(saved?.coreUrl ?? "");
     if (!saved || !sandbox) return;
+    const shared = sandbox !== threadId && saved.sessionId;
+    const sending = commands(this.deps.db, threadId, "sending");
+    if (shared && !sending.some(c => c.command === "unarchive_session" && JSON.parse(c.input).session === shared)) {
+      this.enqueue(threadId, randomUUID(), "unarchive_session", { session: shared });
+    }
+    for (const pending of sending) {
+      if ((pending.command === "stop" || pending.command === "sleep") && JSON.parse(pending.input).archivedAt != null) {
+        saveCommandState(this.deps.db, threadId, pending.id, "cancelled");
+      }
+    }
     // The website lists the thread archived until it takes this, up to ~90 s after a fresh archive.
-    this.restores.set(sandbox, Infinity);
+    const restore = { at: Infinity };
+    this.restores.set(sandbox, restore);
     try {
-      // Naming the session resumes only the loops its archive paused (#237); older websites take no session.
-      const session = sandbox === threadId && saved.sessionId && await this.sandboxes.followsThreads().catch(() => false) ? saved.sessionId : undefined;
-      await this.sandboxes.restore(sandbox, session);
-      this.restores.set(sandbox, Date.now());
-    } catch (error) { this.restores.delete(sandbox); throw error; }
-    await this.sync.archivedOnWebsite(sandbox, false);
-    if (sandbox !== threadId) void this.archiveShared(saved, false);
+      await this.inArchiveOrder(sandbox, async () => {
+        // Naming the session resumes only the loops its archive paused (#237).
+        await this.requireOwnThread(saved);
+        if (getThread(this.deps.db, threadId)?.archivedAt !== null) return;
+        await this.sandboxes.restore(sandbox, saved.sessionId ?? undefined);
+        await this.sync.archivedOnWebsite(sandbox, false);
+      });
+      restore.at = Date.now();
+      if (shared) void this.deliver(threadId).catch(error => this.warn("Shared thread restore will retry", error, { threadId }));
+    } catch (error) {
+      if (this.restores.get(sandbox) === restore) this.restores.delete(sandbox);
+      throw error;
+    }
   }
   /** Restores sent from here, by sandbox: when the website took each, `Infinity` until it does. */
-  private readonly restores = new Map<string, number>();
+  private readonly restores = new Map<string, { at: number }>();
   /** A list asked `at` is older than this computer's restore of the thread: its archived row is the past. */
-  restoredSince(threadId: string, at: number): boolean { return (this.restores.get(threadId) ?? 0) > at; }
+  restoredSince(threadId: string, at: number): boolean { return (this.restores.get(threadId)?.at ?? 0) > at; }
 
   /** A shared child's archive lives in Core, so every computer sees it (#237). An asleep sandbox isn't woken for it. */
   private async archiveShared(saved: Binding, archived: boolean): Promise<void> {
@@ -2983,12 +3077,12 @@ class CloudroomService {
     } catch (error) { if (!(error instanceof SandboxAsleep)) this.warn("A shared child's archive could not be saved in Cloud", error, { threadId: saved.threadId }); }
   }
 
-  private snapshotInstructions(db: DbQueryConnection, thread: Pick<Thread, "id" | "projectId">, action: Command["command"], input: object): object {
+  private snapshotInstructions(db: DbQueryConnection, thread: Pick<Thread, "id" | "projectId" | "providerId">, action: Command["command"], input: object): object {
     if (!["prompt", "edit", "steer", "rewind"].includes(action)) return input;
     const prompt = z.object({ text: z.string(), content: z.unknown().optional() }).parse(
       action === "rewind" && "replacement" in input ? input.replacement : input,
     );
-    const context = { threadId: thread.id, projectId: thread.projectId };
+    const context = { threadId: thread.id, projectId: thread.projectId, experimental_execution: { providerId: thread.providerId, model: binding(db, thread.id)?.model ?? null } };
     // Checked with the instructions even when this message won't carry them. The core's real limit is checked again on send.
     prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null));
     // An edit replaces a queued message and a rewind drops later ones, either of which may have carried them.
@@ -3632,6 +3726,18 @@ class CloudroomService {
             }
             if (command(this.deps.db, pending.id)?.state === "sending") saveCommandState(this.deps.db, threadId, pending.id, "completed");
             void this.ensureBranch(threadId, false);
+            continue;
+          }
+          if (pending.command === "unarchive_session") {
+            await this.inArchiveOrder(sandbox ?? threadId, async () => {
+              if (command(this.deps.db, pending.id)?.state !== "sending") return;
+              if (getThread(this.deps.db, threadId)?.archivedAt !== null || JSON.parse(pending.input).session !== sessionId) {
+                saveCommandState(this.deps.db, threadId, pending.id, "cancelled");
+                return;
+              }
+              if (feature(capabilities, "cloud_threads")) await client.archiveSession(sessionId, pending.id, false);
+              if (command(this.deps.db, pending.id)?.state === "sending") saveCommandState(this.deps.db, threadId, pending.id, "completed");
+            });
             continue;
           }
           if (pending.command === "side_chat") {

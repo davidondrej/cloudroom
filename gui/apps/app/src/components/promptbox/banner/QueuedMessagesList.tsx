@@ -1,3 +1,4 @@
+import { RemoteSendReceipt } from "@/components/thread/RemoteSendReceipt";
 import {
   memo,
   useCallback,
@@ -844,6 +845,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
               </span>
             ) : null}
           </div>
+          {!queuedMessage.failureReason && <RemoteSendReceipt threadId={queuedMessage.threadId} messageId={queuedMessage.id} />}
           {senderLabel !== null || isProcessing || hasWaitLine ? (
             <div
               data-queued-message-metadata=""

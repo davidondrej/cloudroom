@@ -117,6 +117,28 @@ const rows: TimelineRow[] = [
   },
 ];
 
+// A Cloud Codex refusal (OpenAI's cybersecurity filter), as a loop run hit it on 2026-11-19.
+const refusalRows: TimelineRow[] = [
+  rows[0]!,
+  {
+    ...systemRow({
+      id: "refusal_error",
+      threadId: THREAD_ID,
+      turnId: null,
+      sourceSeqStart: 2,
+      sourceSeqEnd: 2,
+      startedAt: 2,
+      createdAt: 2,
+      systemKind: "error",
+      title: "Codex error (cyberPolicy)",
+      detail:
+        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
+      status: "error",
+    }),
+    refusal: true,
+  },
+];
+
 function usage(usedPercent: number, resetInMinutes: number) {
   return {
     status: "ok" as const,
@@ -147,6 +169,7 @@ const accounts = [
 function seededClient(
   othersUsedPercent: number,
   withAccounts: boolean,
+  refusal = false,
 ): QueryClient {
   const client = new QueryClient({
     defaultOptions: {
@@ -155,7 +178,7 @@ function seededClient(
   });
   client.setQueryData(hostsQueryKey(), []);
   client.setQueryData(
-    ["plan-limit-accounts", "claude-code"],
+    ["plan-limit-accounts", refusal ? "codex" : "claude-code"],
     withAccounts ? accounts : [],
   );
   client.setQueryData(systemConfigQueryKey(), makeSystemConfig());
@@ -164,23 +187,23 @@ function seededClient(
     makeThreadResponse({
       id: THREAD_ID,
       status: "error",
-      providerId: "claude-code",
+      providerId: refusal ? "codex" : "claude-code",
       environmentId: null,
     }),
   );
   client.setQueryData<ResolvedThreadExecutionOptions>(
     threadDefaultExecutionOptionsQueryKey(THREAD_ID),
     {
-      model: "claude-opus-5-5[1m]",
-      reasoningLevel: "max",
+      model: refusal ? "gpt-6.1-sol" : "claude-opus-5-5[1m]",
+      reasoningLevel: refusal ? "xhigh" : "max",
       serviceTier: "default",
       permissionMode: "full",
       source: "client/turn/requested",
     },
   );
   const used: Record<string, number> = {
-    "claude-code": 100,
-    codex: othersUsedPercent,
+    "claude-code": refusal ? othersUsedPercent : 100,
+    codex: refusal ? 20 : othersUsedPercent,
     "acp-cursor": othersUsedPercent,
   };
   for (const provider of providers) {
@@ -211,12 +234,14 @@ function seededClient(
 function Preview({
   othersUsedPercent,
   withAccounts = false,
+  refusal = false,
 }: {
   othersUsedPercent: number;
   withAccounts?: boolean;
+  refusal?: boolean;
 }) {
   const [client] = useState(() =>
-    seededClient(othersUsedPercent, withAccounts),
+    seededClient(othersUsedPercent, withAccounts, refusal),
   );
   return (
     <QueryClientProvider client={client}>
@@ -224,7 +249,7 @@ function Preview({
         <ThreadTimelineRows
           threadRuntimeDisplayStatus="idle"
           workspaceRootPath={undefined}
-          timelineRows={rows}
+          timelineRows={refusal ? refusalRows : rows}
         />
       </div>
     </QueryClientProvider>
@@ -257,6 +282,12 @@ export function States() {
         hint="no button; the row only says when the limit resets"
       >
         <Preview othersUsedPercent={100} />
+      </StoryRow>
+      <StoryRow
+        label="refusal"
+        hint="Codex refused (OpenAI's filter): continue on another agent; no account switch, every account has the filter"
+      >
+        <Preview othersUsedPercent={36} refusal withAccounts />
       </StoryRow>
     </StoryCard>
   );

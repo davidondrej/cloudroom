@@ -1283,6 +1283,11 @@ export function pluginSafeModeQueryKey() {
   return [PLUGIN_SAFE_MODE_QUERY_KEY] as const;
 }
 
+/** The one-click scan cards' last scan thread per kind; a deleted thread must refresh it. */
+export function oneClickScanStateQueryKey() {
+  return ["one-click-scans", "state"] as const;
+}
+
 export function pluginSettingsViewQueryKey(pluginId: string) {
   return [PLUGIN_SETTINGS_VIEW_QUERY_KEY, pluginId] as const;
 }
