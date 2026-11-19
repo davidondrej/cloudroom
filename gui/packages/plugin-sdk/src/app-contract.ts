@@ -3709,8 +3709,11 @@ export interface BbNavigate {
    * Open one of this plugin's registered panel actions in the current
    * surface's side panel: a `threadPanelAction` in a thread, or an
    * `experimental_newThreadPanelAction` on the New thread screen. Plugin
-   * commands and thread actions use the focused thread view's opener. Returns false when the surface has no side
-   * panel actions (plugin pages) or the action is unavailable.
+   * commands, thread actions, and sidebar thread-list replacements use the
+   * thread view focused at invocation. Returns false when no thread view is
+   * focused for those callers, the surface has no side panel actions (plugin
+   * pages), the action is unavailable, or params are not JSON values. An
+   * accepted open reuses an identical panel tab; it does not signal item focus.
    */
   openThreadPanel(options: PluginTargetedPanelActionOpenOptions): boolean;
   /**

@@ -31,6 +31,24 @@ export function PluginThreadPanelNavigationProvider({
   );
 }
 
+// Resolve on invocation: the sidebar can stay mounted while pane focus changes.
+const openFocusedThreadPanel: PluginThreadPanelOpenHandler = (options) =>
+  getActiveThreadPanelOpener()?.(options) ?? false;
+
+export function SidebarThreadPanelNavigationProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  return (
+    <PluginThreadPanelNavigationProvider
+      openThreadPanel={openFocusedThreadPanel}
+    >
+      {children}
+    </PluginThreadPanelNavigationProvider>
+  );
+}
+
 export function usePluginThreadPanelOpenHandler(): PluginThreadPanelOpenHandler | null {
   return useContext(PluginThreadPanelNavigationContext);
 }
