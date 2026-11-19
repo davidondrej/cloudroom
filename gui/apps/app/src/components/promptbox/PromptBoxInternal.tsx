@@ -443,7 +443,7 @@ export function PromptBoxInternal({
     },
     onTouchSubmit: () => {
       blurAfterSubmit.current = blurOnPointerSubmit;
-      submit();
+      submitAfterRender();
     },
   };
 
@@ -494,7 +494,7 @@ export function PromptBoxInternal({
         data-promptbox-voice-active={isVoiceActive ? "" : undefined}
         onSubmit={(event) => {
           event.preventDefault();
-          submit();
+          submitAfterRender();
         }}
         onMouseDown={focusEditorFromChrome}
         {...fileDrop.handlers}
