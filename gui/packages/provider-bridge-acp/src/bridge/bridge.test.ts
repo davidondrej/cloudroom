@@ -1222,6 +1222,32 @@ describe("acp bridge", () => {
     });
   });
 
+  // Antigravity answers session/new with ACP's auth-required error until `agy acp --login` has run.
+  it("fails ACP-native model discovery as auth required for a signed-out Antigravity", async () => {
+    const signedOut = { FAKE_ACP_AUTH_METHODS: "oauth-personal" };
+    const authId = sendModelList({
+      dialectId: "antigravity",
+      envVars: signedOut,
+    });
+
+    const response = await waitForResponse(authId);
+    expect(response.error?.message).toBe("Authentication required");
+    expect(response.error?.data).toMatchObject({
+      recovery: {
+        kind: "authRequired",
+        message: "Authentication required",
+        retryable: false,
+      },
+    });
+
+    // Agents that never said how to sign in keep the placeholder model.
+    const genericId = sendModelList({ envVars: signedOut });
+    expect((await waitForResponse(genericId)).result).toMatchObject({
+      models: [{ id: "acp-default" }],
+      selectedOnlyModels: [],
+    });
+  });
+
   it("falls back to the synthetic model when the list command prints no models", async () => {
     const emptyId = sendModelList({ modelLines: "no model lines here" });
     expect((await waitForResponse(emptyId)).result).toMatchObject({

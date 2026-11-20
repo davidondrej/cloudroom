@@ -23,7 +23,7 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["acp-devin", "devin", async () => setsSecret(await read(join(dir("XDG_DATA_HOME", ".local/share"), "devin", "credentials.toml")))],
   ["acp-kimi", "kimi", async () => (await macKimiLogin()) !== null],
   // agy keeps its sign-in in the Keychain, so ask agy: signed out, `agy models` fails with "Please sign in".
-  ["acp-antigravity", "agy", async () => {
+  ["antigravity", "agy", async () => {
     const agy = findCliExecutable("agy");
     return agy !== null && await execPortableFile(agy, ["models"], { timeoutMs: 15_000, env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" } }).then(() => true, () => false);
   }],

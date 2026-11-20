@@ -1,4 +1,8 @@
 import {
+  AntigravityConnectionButton,
+  antigravityConnectionQueryKey,
+} from "@/components/AntigravityConnection";
+import {
   ClaudeConnectionButton,
   useClaudeConnection,
 } from "@/components/ClaudeConnection";
@@ -58,6 +62,8 @@ import {
 import { RowStateControl, RowVersions } from "./UpdatesSettingsSection";
 import {
   cloudCanRunHarness,
+  cloudHarness,
+  useCloudroomConnection,
   useCloudroomAccount,
 } from "@/hooks/queries/cloudroom-queries";
 import {
@@ -256,6 +262,15 @@ function MacLogin({
         onConnected={onChange}
       />
     );
+  if (provider.id === "antigravity")
+    return (
+      <AntigravityConnectionButton
+        hostId={hostId}
+        className={TABLE_BUTTON}
+        text="Log in"
+        onConnected={onChange}
+      />
+    );
   return state.loginCommand ? (
     <ProviderLoginButton
       className={TABLE_BUTTON}
@@ -306,9 +321,20 @@ function CodexCloudLogin() {
   );
 }
 
+/** Antigravity runs in Cloud only where the Cloud machine has its CLI, signed in there with Google. */
+function AntigravityCloud() {
+  const offered = cloudHarness(useCloudroomConnection().data, "antigravity") !== undefined;
+  return offered ? (
+    <Check label="Antigravity is set up on your Cloud machine" />
+  ) : (
+    MAC_ONLY
+  );
+}
+
 function CloudLogin({ provider }: { provider: ProviderInfo }) {
   if (provider.id === "claude-code") return <ClaudeCloudLogin />;
   if (provider.id === "codex") return <CodexCloudLogin />;
+  if (provider.id === "antigravity") return <AntigravityCloud />;
   // Pi, opencode, Hermes, fx, and Devin have no Cloud sign-in: the Cloud reuses this Mac's login (ADR 0130).
   // Cursor (ADR 0161) and the rest can't run in Cloud.
   return cloudCanRunHarness(provider.id) ? (
@@ -426,7 +452,9 @@ function FailedNote({
   );
 }
 
-const SIGNS_OUT = new Set(["claude-code", "codex"]);
+const SIGNS_OUT = new Set(["claude-code", "codex", "antigravity"]);
+/** Agents with no Cloud login or added accounts, so Disconnect only signs out on this computer. */
+const SIGNS_OUT_HERE_ONLY = new Set(["antigravity"]);
 /** Agents with several accounts, on Settings → Agents → Accounts (the Accounts plugin). */
 const HAS_ACCOUNTS = new Set(["claude-code", "codex", "acp-cursor"]);
 
@@ -451,6 +479,7 @@ function useAgentAction(onDone: () => void) {
         queryClient.invalidateQueries({ queryKey: systemConfigQueryKey() }),
         queryClient.invalidateQueries({ queryKey: ["claude-connection"] }),
         queryClient.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] }),
+        queryClient.invalidateQueries({ queryKey: antigravityConnectionQueryKey }),
       ]);
     },
   });
@@ -474,6 +503,7 @@ function ProviderMenu({
   const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
   const signsOut = SIGNS_OUT.has(provider.id);
   const hasAccounts = HAS_ACCOUNTS.has(provider.id);
+  const hereOnly = SIGNS_OUT_HERE_ONLY.has(provider.id);
   const name = provider.displayName;
   const run = (kind: "disconnect" | "remove") =>
     action.mutate(
@@ -521,7 +551,7 @@ function ProviderMenu({
               <span className="flex min-w-0 flex-col">
                 <span>Disconnect</span>
                 <span className="truncate text-xs text-muted-foreground">
-                  Signs out on this {COMPUTER} and in Cloud
+                  {hereOnly ? `Signs out on this ${COMPUTER}` : `Signs out on this ${COMPUTER} and in Cloud`}
                 </span>
               </span>
             </DropdownMenuItem>
@@ -553,7 +583,7 @@ function ProviderMenu({
               ? `Remove ${name} from Cloudroom?`
               : `Disconnect ${name}?`
           }
-          description={`Signs ${name} out on this ${COMPUTER}, including in Terminal, removes its Cloud login, and removes any accounts you added.${
+          description={`Signs ${name} out on this ${COMPUTER}, including in Terminal${hereOnly ? "." : ", removes its Cloud login, and removes any accounts you added."}${
             confirm === "remove"
               ? " It also disappears from new threads. Add it back from this list anytime."
               : " Connect again anytime."

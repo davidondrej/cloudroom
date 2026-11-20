@@ -394,42 +394,6 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     },
   },
   {
-    id: "acp-antigravity",
-    displayName: "Antigravity",
-    icon: declaredIcon("antigravity"),
-    // Signs in by pasting a code from Google's page, so it also works in a terminal with no browser.
-    signInCommand: "agy acp --login",
-    installUrl: "https://antigravity.google/docs/getting-started",
-    installer: {
-      scriptUrl: "https://antigravity.google/cli/install.sh",
-      powershellUrl: "https://antigravity.google/cli/install.ps1",
-    },
-    // `agy acp` was added in 1.5.0.
-    minimumVersion: "1.5.0",
-    visibility: "installed",
-    dialect: "antigravity",
-    fork: "tip",
-    launch: {
-      displayName: "Antigravity",
-      command: "agy",
-      args: ["acp"],
-      env: {},
-      permissionCli: {
-        full: ["--dangerously-skip-permissions"],
-        insertAfterArgs: 1,
-      },
-      // The CLI reads ~/.gemini/config/skills plus its own two; projects use .agents/skills up to the repository root.
-      nativeSkillRoots: {
-        user: plainRoots([
-          ".gemini/config/skills",
-          ".gemini/antigravity-cli/skills",
-          ".gemini/skills",
-        ]),
-        project: ancestorRoots([".agents/skills"]),
-      },
-    },
-  },
-  {
     // Agent Zero itself runs on its own server, usually Docker; `a0 acp` bridges to it and runs its file edits and
     // commands in the thread's folder (ADR 20261116-153548). Its model is the server's own setting.
     id: "acp-agent-zero",

@@ -1,7 +1,7 @@
 # ACP providers
 
 First-party plugin for ACP (Agent Client Protocol) agent providers: Cursor,
-opencode, omp, Grok Build, Hermes Agent, Devin, Droid, Kilo Code, Cline, Kimi Code, Antigravity and Agent Zero.
+opencode, omp, Grok Build, Hermes Agent, Devin, Droid, Kilo Code, Cline, Kimi Code and Agent Zero.
 
 The plugin has no bridge of its own. Every agent it registers runs on the
 published ACP kit, `@get-bb/plugin-sdk/provider-bridge/acp`, which its

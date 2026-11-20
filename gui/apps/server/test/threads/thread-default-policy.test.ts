@@ -98,6 +98,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       executionDefaults: null,
       providerFallbackCandidates: [
         "claude-code",
+        "antigravity",
         "pi",
         "acp-cursor",
         "acp-opencode",
@@ -111,7 +112,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
-        "acp-antigravity",
         "acp-agent-zero",
       ],
     });
@@ -134,6 +134,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "pi",
       "claude-code",
       "codex",
+      "antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -146,7 +147,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
-      "acp-antigravity",
       "acp-agent-zero",
     ]);
     expect(
@@ -189,6 +189,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual([
       "pi",
       "claude-code",
+      "antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -201,7 +202,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
-      "acp-antigravity",
       "acp-agent-zero",
     ]);
   });
@@ -270,6 +270,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       providerId: "claude-code",
       executionDefaults: null,
       providerFallbackCandidates: [
+        "antigravity",
         "pi",
         "acp-cursor",
         "acp-opencode",
@@ -283,7 +284,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
-        "acp-antigravity",
         "acp-agent-zero",
       ],
     });

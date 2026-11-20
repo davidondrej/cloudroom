@@ -348,6 +348,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "antigravity",
+        logoUrl: "/api/v1/system/providers/antigravity/logo",
+        icon: undefined,
+      },
+      {
         id: "pi",
         logoUrl: "/api/v1/system/providers/pi/logo",
         icon: undefined,
@@ -413,11 +418,6 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
-        id: "acp-antigravity",
-        logoUrl: "/api/v1/system/providers/acp-antigravity/logo",
-        icon: undefined,
-      },
-      {
         id: "acp-agent-zero",
         logoUrl: "/api/v1/system/providers/acp-agent-zero/logo",
         icon: undefined,
@@ -442,6 +442,7 @@ describe("buildPluginProviderRegistration", () => {
     expect(Object.fromEntries(projected)).toStrictEqual({
       codex: "collapse",
       "claude-code": "flat",
+      antigravity: "collapse",
       pi: "collapse",
       "acp-cursor": "collapse",
       "acp-opencode": "collapse",
@@ -455,7 +456,6 @@ describe("buildPluginProviderRegistration", () => {
       "acp-kilo": "collapse",
       "acp-cline": "collapse",
       "acp-kimi": "collapse",
-      "acp-antigravity": "collapse",
       "acp-agent-zero": "collapse",
     });
   });
