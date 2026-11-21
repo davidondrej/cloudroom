@@ -25,6 +25,7 @@ import {
   resolveExecutablePath,
   versionFrom,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
+import { readAntigravityStatus } from "@cloudroom/process-utils/antigravity-status";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -435,7 +436,11 @@ const cursorUsageResponseSchema = z
   .object({
     billingCycleEnd: cursorNonNegativeIntegerSchema.nullish(),
     planUsage: z
-      .object({ totalPercentUsed: z.number().nonnegative().default(0) })
+      .object({
+        totalPercentUsed: z.number().nonnegative().default(0),
+        autoPercentUsed: z.number().nonnegative().nullish(),
+        apiPercentUsed: z.number().nonnegative().nullish(),
+      })
       .nullish(),
     spendLimitUsage: z
       .object({
@@ -476,11 +481,28 @@ function normalizeUsage(
       ? null
       : new Date(usage.data.billingCycleEnd).toISOString();
   const windows: ProviderUsageWindow[] = [];
-  if (usage.data.planUsage?.totalPercentUsed != null) {
+  const planUsage = usage.data.planUsage;
+  // Cursor's own models (Grok, Composer, Auto) and every other model (3P) use separate pools; the total blends them
+  // (F#5982). Older responses have only the total.
+  const auto = planUsage?.autoPercentUsed;
+  const api = planUsage?.apiPercentUsed;
+  if (planUsage) {
     windows.push({
       label: "Plan usage",
-      usedPercent: clampPercent(usage.data.planUsage.totalPercentUsed),
+      usedPercent: clampPercent(
+        auto != null && api != null ? auto : planUsage.totalPercentUsed,
+      ),
       resetsAt,
+    });
+  }
+  if (auto != null && api != null) {
+    windows.push({
+      label: "Plan · 3P",
+      usedPercent: clampPercent(api),
+      resetsAt,
+      // Display only: no model id contains "3p", so a full bar never marks Cursor at its limit. Grok still works, and
+      // on-demand spend may pay for 3P models.
+      model: "3p",
     });
   }
   const spend = usage.data.spendLimitUsage;
@@ -645,7 +667,6 @@ async function readCursorUsage(): Promise<ProviderUsageResult> {
 
 const ANTIGRAVITY_ACCOUNT_TTL_MS = 60_000;
 const ANTIGRAVITY_TIER_TTL_MS = 60 * 60_000;
-const ANTIGRAVITY_STATUSLINE_TIMEOUT_MS = 10_000;
 const ANTIGRAVITY_ACP_TIER_TIMEOUT_MS = 8_000;
 
 let antigravityAccount: {
@@ -767,76 +788,7 @@ function normalizeAntigravityUsage(
   };
 }
 
-const ANTIGRAVITY_STATUSLINE_PTY_SCRIPT = `
-import json, os, pty, select, subprocess, sys, time
-cmd, out_file, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
-settings = json.dumps({"statusLine": {"type": "command", "command": f"cat > {json.dumps(out_file)}"}})
-master, slave = pty.openpty()
-env = dict(os.environ)
-env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "1"
-p = subprocess.Popen([cmd, "--settings", settings], stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env, close_fds=True)
-os.close(slave)
-data = None
-email_seen_at = None
-deadline = time.time() + 10.0
-try:
-    while time.time() < deadline:
-        r, _, _ = select.select([master], [], [], 0.2)
-        if r:
-            try:
-                os.read(master, 4096)
-            except OSError:
-                break
-        if os.path.exists(out_file) and os.path.getsize(out_file) > 10:
-            try:
-                parsed = json.loads(open(out_file, "r", encoding="utf-8").read())
-                if isinstance(parsed, dict) and (parsed.get("quota") or parsed.get("email")):
-                    data = parsed
-                    if parsed.get("quota"):
-                        break
-                    if email_seen_at is None:
-                        email_seen_at = time.time()
-                    elif time.time() - email_seen_at >= 2.0:
-                        break
-            except Exception:
-                pass
-        if p.poll() is not None:
-            break
-finally:
-    p.terminate()
-    try:
-        p.wait(timeout=2)
-    except Exception:
-        p.kill()
-    try:
-        os.close(master)
-    except OSError:
-        pass
-if data is not None:
-    print(json.dumps(data))
-`.trim();
-
-/** Runs `agy` briefly in a PTY with a session-only `statusLine` hook to read email and live quota buckets without spending tokens. */
-async function probeAntigravityStatusLine(command: string): Promise<unknown> {
-  if (process.platform === "win32") return null;
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cloudroom-agy-usage-"));
-  const outFile = path.join(dir, "status.json");
-  try {
-    const { stdout } = await execFileAsync(
-      "python3",
-      ["-c", ANTIGRAVITY_STATUSLINE_PTY_SCRIPT, command, outFile, dir],
-      {
-        timeout: ANTIGRAVITY_STATUSLINE_TIMEOUT_MS + 4_000,
-        env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
-        windowsHide: true,
-      },
-    );
-    const trimmed = stdout.trim();
-    return trimmed ? (JSON.parse(trimmed) as unknown) : null;
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
-}
+const probeAntigravityStatusLine = (command: string) => readAntigravityStatus(command);
 
 const antigravityAcpTierSchema = z.object({
   id: z.number().optional(),

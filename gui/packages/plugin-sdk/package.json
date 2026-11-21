@@ -143,7 +143,7 @@
     "clean": "rimraf bundled-types dist tsconfig.tsbuildinfo",
     "prepack": "node scripts/build-bundled-dts.mjs && node scripts/build-runtime.mjs",
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",

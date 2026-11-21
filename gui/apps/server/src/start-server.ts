@@ -129,8 +129,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const providerRegistry = createProviderRegistryService({
     deferRegistrationsSettled: true,
     readUserProviderPreferences: () => {
-      const { defaultProviderId, hiddenProviderIds } = getAppSettings(db);
-      return { defaultProviderId, hiddenProviderIds, usage: readProviderUsage() };
+      const { defaultProviderId, hiddenProviderIds, customProviderOrder } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, customOrder: customProviderOrder, usage: readProviderUsage() };
     },
   });
 

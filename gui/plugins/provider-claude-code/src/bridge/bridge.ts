@@ -395,7 +395,7 @@ const threadAttachments = new Map<string, ThreadAttachment>();
 const closingSessions = new Map<string, Promise<void>>();
 /** Threads with a Stop on its way: the one new turn that gets here first ends at once. */
 const stopRequestedThreadIds = new Set<string>();
-const unconfirmedSessionStops = new Map<string, Set<SdkSession>>();
+const unconfirmedSessionStops = new Map<string, Set<ThreadSession>>();
 const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
 const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 
@@ -566,11 +566,12 @@ async function closeThreadSession(args: {
           args.gracefulTimeoutMs,
         ).catch((error: unknown) => {
           if (process.platform === "win32") {
-            holdUnconfirmedSessionStop(args.threadId, threadSession.session);
+            holdUnconfirmedSessionStop(args.threadId, threadSession);
             warnSessionStopFailed(args.threadId, error);
           }
           throw error;
         });
+        sendEndedTasks(args.threadId, threadSession);
       }
       await retryUnconfirmedSessionStops(args.threadId);
     })
@@ -597,11 +598,22 @@ async function closeThreadSession(args: {
 
 function holdUnconfirmedSessionStop(
   threadId: string,
-  session: SdkSession,
+  threadSession: ThreadSession,
 ): void {
   const sessions = unconfirmedSessionStops.get(threadId) ?? new Set();
-  sessions.add(session);
+  sessions.add(threadSession);
   unconfirmedSessionStops.set(threadId, sessions);
+}
+
+/**
+ * A stopped Claude's background commands, agents, and workflows ended with
+ * it. The next Claude can't see them, so nothing else would end them (#2228).
+ */
+function sendEndedTasks(threadId: string, threadSession: ThreadSession): void {
+  sendThreadDeltas(
+    threadId,
+    threadSession.translator.buildEndedTaskDeltas(threadId),
+  );
 }
 
 /** Stops this thread's earlier Claudes again until each stop is confirmed. */
@@ -609,9 +621,10 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
   const sessions = unconfirmedSessionStops.get(threadId);
   if (!sessions) return;
   const results = await Promise.allSettled(
-    Array.from(sessions, async (session) => {
-      await session.stop();
-      sessions.delete(session);
+    Array.from(sessions, async (held) => {
+      await held.session.stop();
+      sessions.delete(held);
+      sendEndedTasks(threadId, held);
     }),
   );
   if (sessions.size === 0) unconfirmedSessionStops.delete(threadId);
@@ -619,7 +632,7 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
   if (!failure) return;
-  if ([...sessions].some((session) => session.isRunning())) {
+  if ([...sessions].some((held) => held.session.isRunning())) {
     throw new Error(
       "An earlier Claude process for this thread is still running, and Cloudroom is stopping it. Try again in a moment.",
     );
@@ -1421,7 +1434,7 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
     threadSession: args.threadSession,
   });
   if (process.platform === "win32") {
-    holdUnconfirmedSessionStop(args.threadId, args.threadSession.session);
+    holdUnconfirmedSessionStop(args.threadId, args.threadSession);
     void args.threadSession.session.stop().catch((error: unknown) => {
       warnSessionStopFailed(args.threadId, error);
     });

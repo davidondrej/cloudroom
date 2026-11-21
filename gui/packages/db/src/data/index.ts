@@ -234,6 +234,8 @@ export {
   listProviderLifecycleEnvironments,
   environmentHasLiveThreads,
   environmentHasRestorableThreads,
+  environmentIsQuiet,
+  listQuietOpenEnvironments,
   releaseFinishedEnvironmentPreparationOwners,
   claimEnvironmentPath,
   findEnvironmentPathClaim,

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { renderTemplate } from "@cloudroom/templates";
 import {
   THREAD_PURPOSE_CLAUDE_MODEL,
@@ -224,10 +225,14 @@ function previousNote(previous: ThreadPurpose): string {
 export async function readGitFacts(path: string): Promise<string> {
   // --no-optional-locks: never take the index lock the agent's own Git may need.
   const git = (...args: string[]) =>
-    exec("git", ["--no-optional-locks", "-C", path, ...args], {
-      timeout: GIT_FACTS_TIMEOUT_MS,
-      windowsHide: true,
-    }).then(({ stdout }) => stdout.trim());
+    exec(
+      "git",
+      [...gitSafetyArgs(), "--no-optional-locks", "-C", path, ...args],
+      {
+        timeout: GIT_FACTS_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    ).then(({ stdout }) => stdout.trim());
   const [status, remotes] = await Promise.all([
     git("status", "--porcelain"),
     git("remote"),

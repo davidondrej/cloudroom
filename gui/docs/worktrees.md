@@ -30,9 +30,10 @@ branch. Under the hood it's `git worktree add` plus some bookkeeping:
   `jsconfig.json`, or with `--no-tsconfig`, `--incremental`, or `--tsgo`.
   Upgrade to `svelte-check` 4.7.0 or later
   ([upstream fix](https://github.com/sveltejs/language-tools/issues/3034)).
-- Once every thread using it is archived, Cloudroom saves its work to its
-  branch and removes the folder. Unarchiving a thread or sending it a message
-  brings the folder back at the same path. See Cleanup.
+- Once every thread using it is archived, or nobody has used it for a while,
+  Cloudroom saves its work to its branch and removes the folder. Unarchiving
+  a thread or sending it a message brings the folder back at the same path.
+  See Cleanup.
 
 Worktrees are created by bb's built-in **Worktree** plugin, which is enabled by
 default. Disabling it in Settings → Plugins leaves existing worktrees alone
@@ -61,7 +62,9 @@ Omit `--base-branch` for bb's smart default. Explicit values are exact:
 `room-cli thread worktree` moves a Local thread out of the project checkout
 into a new managed worktree, starting from its current commit. It keeps its ID
 and chat; the move happens when its current turn ends, and messages wait until
-it finishes. Uncommitted files stay behind unless the agent names them with
+it finishes. When a running agent moves itself, Cloudroom resumes it in the new
+worktree automatically once the move completes (unless you stopped the thread or
+queued a message). Uncommitted files stay behind unless the agent names them with
 `--carry`, since other agents may share the checkout. Carried files land before
 `.bb-env-setup.sh` runs, so it can read them. The hooks themselves come from
 where the thread branched off its base branch, not from its commits or carried
@@ -174,15 +177,31 @@ worktree it made and removes the ones nothing is using:
   checked again every hour.
 - Unarchiving the thread or sending it a message rebuilds the worktree at the
   same path from that branch. Saved changes come back uncommitted, `private/`
-  comes back, and `.worktreeinclude` files are copied again. Dependencies and
-  build output are not kept, so reinstall them.
+  comes back, and `.worktreeinclude` files are copied again. Other ignored
+  files of the worktree's own, like a `.env` you made there, come back too, up
+  to 200 MB. Dependencies and build output are not kept (`node_modules`,
+  `.venv`, `.next`, `.turbo`, and folders a tool tagged as a cache, like Rust's
+  `target`), so reinstall them. The setup script does not run again; the agent
+  is told its folder was rebuilt.
   Unarchiving while the folder is still being removed waits for that
   (up to 20 s), then rebuilds it. If the removal failed, unarchive waits
   for its retry a minute later.
+- A worktree nobody uses is parked the same way while its threads stay open
+  ([ADR](../../docs/adr/20261121-215228-park-unused-worktrees-under-open-threads.md)).
+  Below 30 GB free, that is one unused for a day, longest unused first, until
+  50 GB is free. Unused means no thread in it ran or was changed, nothing
+  sent it a message, opened a terminal in it, forked it or Teleported it, no
+  terminal is open in it, and no process runs in it. Only looking at a thread
+  doesn't count. A pinned thread keeps its worktree, and so does a worktree
+  with a teardown script or with more than 200 MB of its own ignored files.
+  Not on Windows, which can't see what runs in a folder. The thread shows
+  "Parked"; its next message, a terminal, a fork or a Teleport brings the
+  folder back.
 - Deleting the last thread removes the worktree for good. The branch stays.
 - Worktrees on other machines ("Run threads here") are removed 3 days after
   their last thread is archived, without saving first.
 - Settings shows how much disk worktrees use. Below 10 GB free, the app warns.
+  Below 30 GB free, no spare worktrees are prebuilt.
 - Teleporting the last thread to Cloud removes the local worktree after 2 days.
 
 Removal runs `.bb-env-teardown.sh` inside the worktree first, then stops

@@ -1,5 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalDependencies": [".bun-version"],
   "globalEnv": ["BB_BUILD_TOOLCHAIN"],
   "tasks": {
     "@cloudroom/db#db:generate": { "cache": false },

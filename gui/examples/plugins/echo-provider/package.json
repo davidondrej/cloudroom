@@ -23,7 +23,7 @@
     "bb-plugin"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@get-bb/plugin-sdk": "workspace:*",

@@ -14,6 +14,7 @@ import {
   fireEvent,
   render,
   screen,
+  within,
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Thread } from "@cloudroom/domain";
@@ -89,6 +90,18 @@ vi.mock("@/hooks/mutations/thread-state-mutations", async (importOriginal) => {
   };
 });
 
+const appCommandHandlers = vi.hoisted(
+  () => new Map<string, { handler: () => boolean; enabled: boolean }>(),
+);
+vi.mock("@/components/commands/AppCommandProvider", () => ({
+  useAppCommandHandler: (
+    command: string,
+    handler: () => boolean,
+    _priority: number,
+    enabled = true,
+  ) => appCommandHandlers.set(command, { handler, enabled }),
+  useAppCommandShortcut: () => null,
+}));
 vi.mock("@/lib/sdk", () => ({
   sdk: {
     threads: {
@@ -316,17 +329,41 @@ describe("Cloud archive", () => {
     renderProvider(<ArchiveButton thread={cloud} />);
     clickArchive();
     fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
-    await screen.findByText("Archive a running thread?");
+    await screen.findByText("Archive running thread?");
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
     expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
     clickArchive();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Archive anyway" }),
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Archive",
+      }),
     );
     await vi.waitFor(() =>
       expect(sdk.threads.archiveAll).toHaveBeenCalledTimes(1),
     );
     expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("confirms on a second archive shortcut, but not in the first 400ms", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(Response.json({ running: ["child"] })),
+    );
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    renderProvider(<ArchiveButton thread={cloud} />);
+    clickArchive();
+    await screen.findByRole("dialog");
+    const shortcut = appCommandHandlers.get("thread.archive")!;
+    expect(shortcut.enabled).toBe(true);
+    await act(async () => void expect(shortcut.handler()).toBe(true));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+    now.mockReturnValue(1_400);
+    act(() => void shortcut.handler());
+    await vi.waitFor(() =>
+      expect(sdk.threads.archiveAll).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    now.mockRestore();
   });
 
   it("checks the latest sidebar status of an unopened Local parent with a Cloud child", async () => {
@@ -351,7 +388,9 @@ describe("Cloud archive", () => {
       sidebar({ ...parent, status: "active", updatedAt: 2 }),
     );
     await act(async () => check.resolve(Response.json({ running: [] })));
-    await screen.findByRole("button", { name: "Archive anyway" });
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Archive",
+    });
     expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
   });
 

@@ -37,15 +37,21 @@ function useChannelEnabled(): boolean {
 function NotificationDelivery() {
   const navigate = useBbNavigate();
   const enabled = useChannelEnabled();
-  const delivery = useRef<ReturnType<typeof createClientDelivery> | null>(null);
+  const navigateRef = useRef(navigate);
   useEffect(() => {
-    const next = createClientDelivery((id) => navigate.toThread(id));
+    navigateRef.current = navigate;
+  });
+  const delivery = useRef<ReturnType<typeof createClientDelivery> | null>(null);
+  // One delivery per mount: navigate changes on every route change, and disposing
+  // then would kill the clicks of notifications already on screen (#2386).
+  useEffect(() => {
+    const next = createClientDelivery((id) => navigateRef.current.toThread(id));
     delivery.current = next;
     return () => {
       delivery.current = null;
       next.dispose();
     };
-  }, [navigate]);
+  }, []);
   useRealtime(CLIENT_NOTIFICATION_CHANNEL, (payload) => {
     void delivery.current?.deliver(payload, enabled).catch(() => undefined);
   });

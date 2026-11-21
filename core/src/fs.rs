@@ -480,6 +480,11 @@ fn read_relative(request: &Value) -> Result<Value> {
         .fold(PathBuf::from(root), |path, segment| path.join(segment));
     let path = readable(&path, relative, Some(root))?;
     let info = stat_file(&path, relative)?;
+    #[cfg(unix)]
+    if std::os::unix::fs::FileTypeExt::is_fifo(&info.file_type()) {
+        // Reading a FIFO blocks until a writer appears.
+        return refuse("invalid_path", "Path is a FIFO, not a file");
+    }
     let contents = fs::read(&path).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => missing(relative),
         _ => denied_or(error),

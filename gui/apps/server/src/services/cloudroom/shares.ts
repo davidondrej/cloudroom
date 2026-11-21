@@ -62,6 +62,7 @@ const SECRET_PATTERNS = [
   /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
   /\bsk-[A-Za-z0-9_-]{20,}/g,
   // Whole, with dots and dashes: GitHub App installation tokens are `ghs_<app id>_<JWT>` (#1847).
+  /\b(?:glpat|gloas)-[\w.-]{12,}/g,
   /\b(?:gh[pousr]|github_pat)_[\w.-]{29,}\w/g,
   /\bglpat-[A-Za-z0-9_-]{20,}/g,
   /\bxox[abeprs]-[A-Za-z0-9-]{10,}/g,

@@ -223,6 +223,7 @@ const MODEL_SHORTCUTS = [
   ["fable", "claude-code", "Claude Code"],
   ["opus", "claude-code", "Claude Code"],
   ["astra", "codex", "Codex"],
+  ["neon", "acp-antigravity", "Antigravity"],
 ] as const;
 
 /** New drafts load the harness's models on pick. An existing thread already owns its harness and models. */

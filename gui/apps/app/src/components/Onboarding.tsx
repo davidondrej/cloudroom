@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
 import { useNavigate } from "react-router";
 import { deriveProjectNameFromPath } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -17,7 +18,6 @@ import { useCreateProject } from "@/hooks/mutations/project-mutations";
 import { useUpdateGeneralSettings } from "@/hooks/mutations/settings-mutations";
 import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportRoom, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
-import { useStartFirstAgent } from "@/hooks/useFirstAgent";
 import { useHostDaemon, useThisComputer } from "@/hooks/useHostDaemon";
 import { GitForWindowsBanner } from "@/components/layout/DesktopUpdateBanner";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
@@ -42,7 +42,7 @@ const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>(
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual";
+type SetupDetail = "gitlab" | "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -84,9 +84,13 @@ export function useSetupProgress() {
   const signedIn = useMacAgents(extra !== null).data?.includes(extra ?? "") === true;
   const other = provider && signedIn ? provider.id : null;
   const agents = { claude: claude.data?.state === "connected", codex: codex.data?.state === "connected", other, otherName: other && provider?.displayName };
-  const done = [Boolean(accountId) || ownCore, agents.claude || agents.codex || other !== null, github.data?.state === "connected" || ownCore];
-  return { account, ownCore, ready, offline, agents, codex, github, done, complete: done.every(Boolean), checking: account.isPending };
+  const gitlab = useGitlabConnection(Boolean(accountId) && ready);
+  const done = [Boolean(accountId) || ownCore, agents.claude || agents.codex || other !== null, github.data?.state === "connected" || Boolean(gitlab.state?.login && !gitlab.state.expired) || ownCore];
+  return { account, ownCore, ready, offline, agents, codex, github, gitlab, done, complete: done.every(Boolean), checking: account.isPending };
 }
+
+/** True while setup is open, so a pop-up waits for it to close. */
+export const useOnboardingOpen = () => useAtomValue(openAtom);
 
 export function Onboarding() {
   const [dismissed, setDismissed] = useAtom(dismissedAtom);
@@ -100,22 +104,15 @@ export function Onboarding() {
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
   const visible = open || firstRun;
-  // Started here, not in Setup: this component stays mounted after setup closes, so the new thread can still open.
-  const startFirstAgent = useStartFirstAgent();
   if (!visible) return null;
-  // The first time setup closes on the desktop app, by any path, it starts the first agent (ADR 20261111-220912).
-  const close = (agents: { claude: boolean; codex: boolean }) => {
-    if (!dismissed && getRoomDesktopInfo() !== null) startFirstAgent(agents);
-    setDismissed(true);
-    setOpen(false);
-  };
-  return <Setup signedOut={signedOut} fresh={projects?.length === 0} close={close} />;
+  return <Setup signedOut={signedOut} fresh={projects?.length === 0} close={() => { setDismissed(true); setOpen(false); }} />;
 }
 
-function Setup({ signedOut, fresh, close: closeSetup }: { signedOut: boolean; fresh: boolean; close: (agents: { claude: boolean; codex: boolean }) => void }) {
+function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean; close: () => void }) {
   const progress = useSetupProgress();
-  const close = () => closeSetup(progress.agents);
   const { done, account } = progress;
+  const lab = progress.gitlab.state;
+  const gitlabChosen = lab?.waiting || (lab?.login && !lab.expired && progress.github.data?.state !== "connected");
   const [ownCoreForm, setOwnCoreForm] = useState(false);
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
   // Step 4's progress lives here, so going back a step keeps the Added ticks and Continue.
@@ -223,7 +220,7 @@ function Setup({ signedOut, fresh, close: closeSetup }: { signedOut: boolean; fr
                       {state === "done" ? <Icon name="Check" className="size-3.5" aria-label="Done" /> : `0${index + 1}`}
                     </span>
                     <span className="min-w-0">
-                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (signedOut && ownCoreForm)) ? "Your own Core" : title}</strong>
+                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (signedOut && ownCoreForm)) ? "Your own Core" : index === 2 && gitlabChosen ? "Connect GitLab" : title}</strong>
                       <small className="mt-0.5 block truncate text-[12.5px] text-(--ob-muted)">{meta}</small>
                     </span>
                   </button>
@@ -250,7 +247,7 @@ function Setup({ signedOut, fresh, close: closeSetup }: { signedOut: boolean; fr
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
             {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : signedOut && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} skip={signedOut ? skip : null} />)}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
-            {step === 2 && <GithubStep progress={progress} next={next} />}
+            {step === 2 && <GithubStep progress={progress} next={next} stay={()=>setPicked(2)} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
           </div>
         </main>
@@ -290,6 +287,7 @@ function nextStep(done: boolean[], from: number) {
 function doneMeta(index: number, progress: ReturnType<typeof useSetupProgress>) {
   if (index === 0) return progress.account.data?.account?.email ?? (progress.ownCore ? "Connected" : "Signed in");
   if (index === 1) return [progress.agents.claude && "Claude Code", progress.agents.codex && "Codex", progress.agents.otherName].filter(Boolean).join(" + ");
+  if (progress.gitlab.state?.login && progress.github.data?.state !== "connected") return "@"+progress.gitlab.state.login;
   return progress.github.data?.email ?? (progress.ownCore ? "On your server" : "Connected");
 }
 
@@ -689,8 +687,8 @@ const CountdownBar = ({ seconds }: { seconds: number }) => (
 const GITHUB_COUNTDOWN = 4;
 const openGithub = (url: string) => { if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); };
 
-function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupProgress>; next: () => void }) {
-  const { github, account, ready, offline } = progress;
+function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useSetupProgress>; next: () => void; stay:()=>void }) {
+  const { github, gitlab, account, ready, offline } = progress;
   const here = useThisComputer();
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
@@ -734,6 +732,19 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
     ? "Cloud agents can use your repos."
     : onServer ? "Your Core uses the GitHub login set up on its server."
     : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on ${here}. You'll copy a code, then paste it on github.com.`;
+  if (gitlab.state?.waiting || (!connected && gitlab.state?.login && !gitlab.state.expired)) {
+    const waiting = gitlab.state.waiting;
+    return <>
+      <Heading lead={waiting ? "Connect" : "Connected to"} mark="GitLab"/>
+      <div className="mt-8"><Card on={!waiting} logo={<img className="size-8" src="/gitlab.svg" alt=""/>} name={waiting ? "GitLab.com" : "@"+gitlab.state.login}
+        detail={waiting ? "Finish authorizing Cloudroom in your browser." : "Cloud agents can use your GitLab projects."}>{!waiting && <Connected/>}</Card></div>
+      <div className="mt-8 flex items-center gap-5">
+        {waiting ? <><Cta onClick={gitlab.open}>Open GitLab <Icon name="ExternalLink"/></Cta><Note><button className={LINK} disabled={gitlab.busy} onClick={()=>gitlab.change("cancel")}>Back to GitHub</button></Note></> :
+          <Cta onClick={()=>{track("github","done","gitlab");next();}}>Continue <Icon name="ArrowRight"/></Cta>}
+      </div>
+      {gitlab.error && <p role="alert">{gitlab.error}</p>}
+    </>;
+  }
   if (code) {
     return (
       <>
@@ -783,6 +794,10 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
           <Note><button type="button" className={LINK} onClick={() => { track("github", "skipped"); next(); }}>Skip this step</button> if you only use public repos.</Note>
         )}
       </div>
+      {!connected && !onServer && gitlab.state?.available && <div className="mt-3.5">
+        <button type="button" className={QUIET_LINK+" text-[12.5px] text-(--ob-muted)"} disabled={gitlab.busy || !ready} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button>
+        {gitlab.error && <p role="alert" className="text-xs text-(--ob-error)">{gitlab.error}</p>}
+      </div>}
     </>
   );
 }

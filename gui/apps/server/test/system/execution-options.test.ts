@@ -1613,9 +1613,20 @@ describe("resolveSystemExecutionOptions provider model catalog", () => {
         path: "/tmp/memo-pi-b",
       });
 
-      for (const environmentId of [environmentA, environmentA, environmentB]) {
+      // A new thread has no environment yet: it lists in its project's checkout (#1236).
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/memo-pi-project",
+      });
+
+      for (const route of [
+        { environmentId: environmentA },
+        { environmentId: environmentA },
+        { environmentId: environmentB },
+        { hostId: host.id, projectId: project.id },
+      ]) {
         await resolveSystemExecutionOptions(harness.deps, {
-          environmentId,
+          ...route,
           providerId: "pi",
         });
       }
@@ -1625,7 +1636,7 @@ describe("resolveSystemExecutionOptions provider model catalog", () => {
           .map((request) => request.command)
           .filter((command) => command.type === "provider.list_models")
           .map((command) => command.cwd),
-      ).toEqual(["/tmp/memo-pi-a", "/tmp/memo-pi-b"]);
+      ).toEqual(["/tmp/memo-pi-a", "/tmp/memo-pi-b", "/tmp/memo-pi-project"]);
     });
   });
 

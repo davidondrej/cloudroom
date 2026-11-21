@@ -280,6 +280,11 @@ async function applyTemplate(
   const scheduled = ["cron", "at", "in", "webhook"].some((name) =>
     args.flags.has(name),
   );
+  const sameThread =
+    boolFlag(args, "same-thread") ||
+    (args.flags.has("thread") &&
+      !boolFlag(args, "new-thread") &&
+      (args.flags.has("at") || args.flags.has("in")));
   const filled: Record<string, string> = {
     name: template.name,
     prompt: template.prompt,
@@ -287,6 +292,9 @@ async function applyTemplate(
     model: agent.model,
     reasoning: agent.reasoningLevel,
     priority: String(template.priority),
+    ...(!local && template.secrets !== undefined && !sameThread
+      ? { secrets: template.secrets.length ? template.secrets.join(",") : "none" }
+      : {}),
     // Above a thread's own mode, the mode is left out, so creation picks the agent's highest one within it.
     ...(local &&
     (ceiling === undefined ||
@@ -1225,6 +1233,13 @@ A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create p
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
 and they wait while it is off. A Local webhook loop made here starts paused: a person turns it on in Loops.
 room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--agent <provider,model[,level]>...] [--priority 1-4] [--secrets <KEY,.env|none|all>]
+room-cli loop create --cloud --project <id> --name <name> --cron <expr> --timezone <tz> --script-file <path> --jev <questions.json> (--act-file <path> | --act <inline>) [--secrets ...]
+A Jev loop runs no agent (paid plans; a few Cloud Credits per thousand items). Its script prints items, one per line,
+JSON objects best. Jev, a fast decision model, answers the --jev questions for each item: {"id": {"type": "noul" |
+"choice" | "score", "instructions": "...", "criteria": ...}}. The --act script then gets a JSON file path as $1:
+[{"item": ..., "answers": {"id": {"noul": 0.94} | {"choice": "x", "probabilities": {...}} | {"score": 1.2, ...}}}],
+and acts in code; each line it prints is saved as an action of the run. Up to 50 items a run, 60 s per script. Make
+both scripts safe to run twice: print only items not yet handled. loop update takes --jev, --act and --act-file too.
 --secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
 .env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
 Any picked list, even .env or none, blocks room-cli mac in its runs: a job that needs the Mac keeps all
@@ -1245,8 +1260,12 @@ type Cloud = Pick<BbPluginApi, "sdk">["sdk"]["cloudroom"];
 type CloudAutomation = NonNullable<Awaited<ReturnType<Cloud["automations"]>>["automation"]>;
 
 function isCloudCommand(args: ParsedArgs): boolean {
-  return boolFlag(args, "cloud") || CLOUD_ID.test(args.positionals[0] ?? "");
+  const cloud = boolFlag(args, "cloud") || CLOUD_ID.test(args.positionals[0] ?? "");
+  // Never a Local loop that quietly drops them.
+  if (!cloud && JEV_FLAGS.some((name) => args.flags.has(name))) throw new Error("Jev loops are Cloud loops. Add --cloud, or give a Cloud loop's ID.");
+  return cloud;
 }
+const JEV_FLAGS = ["jev", "act", "act-file"];
 
 function cloudSchedule(args: ParsedArgs): { cron: string | null; timezone?: string; run_at: string | null } | null {
   if (!["cron", "at", "in"].some((name) => args.flags.has(name))) return null;
@@ -1269,7 +1288,7 @@ function printCloudRuns(runs: CloudLoopRun[]): string {
           ? "running or unreported"
           : "-"
         : `${run.outcome}${run.confidence ? ` (${run.confidence})` : ""}`,
-      run.thread_id,
+      run.thread_id ?? "-",
       `${run.reason ?? "-"}${run.actions?.length ? ` [${run.actions.join("; ")}]` : ""}`,
     ]),
   );
@@ -1279,9 +1298,9 @@ function printCloudAutomation(a: CloudAutomation): string {
   const webhook = !a.cron && !a.run_at;
   const schedule = a.cron ? `${a.cron} (${a.timezone})` : webhook ? "on webhook" : `once at ${a.run_at}`;
   const state = !a.enabled ? "paused" : webhook ? (a.next_run_at ? "running its webhooks" : "waiting for a webhook") : `next run ${a.next_run_at ?? "within a minute"}`;
-  const mode = `${a.new_thread ? "new thread per run" : "re-prompts"}${a.script ? " · script" : ""}`;
+  const mode = a.jev_action ? "Jev decides, no agent · script + action script" : `${a.new_thread ? "new thread per run" : "re-prompts"}${a.script ? " · script" : ""}`;
   const one = (agent: NonNullable<CloudAutomation["agent"]>) => `${agent.provider} · ${agent.model ?? "default model"}${agent.reasoning ? ` · ${agent.reasoning}` : ""}`;
-  const agent = a.agents?.length ? `\n  Agents (take turns, next: run ${a.runs % a.agents.length + 1}): ${a.agents.map(one).join("  ⇄  ")}` : a.agent ? `\n  Agent: ${one(a.agent)}` : "";
+  const agent = a.agents?.length ? `\n  Agents (take turns, next: run ${a.runs % a.agents.length + 1}): ${a.agents.map(one).join("  ⇄  ")}` : a.jev_action ? "" : a.agent ? `\n  Agent: ${one(a.agent)}` : "";
   const secrets = a.new_thread && a.secrets !== undefined ? `\n  Secrets: ${a.secrets === null ? "all API keys and .env files" : a.secrets.join(", ") || "none"}` : "";
   return `${a.id}  ${a.name}  P${a.priority ?? DEFAULT_LOOP_PRIORITY}\n  ${a.thread_id.startsWith("proj_") ? "Project" : "Cloud thread"} ${a.thread_id} · ${mode} · ${schedule} · ${state} · ${a.runs} runs${agent}${secrets}${a.last_error ? `\n  Last error: ${a.last_error}` : ""}\n${a.url ? webhookNote(a.url) : ""}`;
 }
@@ -1315,6 +1334,21 @@ function cloudSecrets(args: ParsedArgs): { secrets?: string[] | null } {
 /** A webhook loop's URL, printed only when it is created or replaced. */
 function webhookNote(url: string): string {
   return `\n  Webhook URL: ${url}\n  POST anything to it to run the loop; the request reaches the agent as data. This URL is shown only now:\n  \`room-cli loop hook ID\` replaces it. Keep it secret: anyone with it can start this loop.\n`;
+}
+
+/** A Jev loop's questions and action script (docs/scopes/loops.md, Jev loops): --jev is a JSON file of Jev's questions,
+ *  saved as the loop's prompt, and --act or --act-file the script that gets Jev's answers. Both files are read on this Mac. */
+async function cloudJev(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs, ctx: PluginCliContext, created: boolean): Promise<{ prompt?: string; jev_action?: string }> {
+  const questions = optionalFlag(args, "jev"), inline = optionalFlag(args, "act"), file = optionalFlag(args, "act-file");
+  if (inline !== undefined && file !== undefined) throw new Error("Use --act or --act-file, not both.");
+  if (questions !== undefined && flag(args, "prompt") !== undefined) throw new Error("A Jev loop's questions are its prompt. Use --jev or --prompt, not both.");
+  const acts = inline !== undefined || file !== undefined;
+  if (created && (questions !== undefined) !== acts) throw new Error("A Jev loop needs both --jev <questions.json> and --act-file <path> (or --act <inline>).");
+  if (created && acts && !args.flags.has("script") && !args.flags.has("script-file")) throw new Error("A Jev loop needs a --script or --script-file that prints its items, one per line.");
+  return {
+    ...(questions === undefined ? {} : { prompt: (await readCliTextFile(room, ctx, "--jev", questions, undefined)).content.replace(/^\uFEFF/u, "") }),
+    ...(inline !== undefined ? { jev_action: inline } : file !== undefined ? { jev_action: (await readCliTextFile(room, ctx, "--act-file", file, undefined)).content } : {}),
+  };
 }
 
 /** The script a cloud automation runs first, from --script or a --script-file read on this Mac; null for --no-script. */
@@ -1359,11 +1393,12 @@ async function runCloudCommand(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs,
     if (!thread && !project) throw new Error("Missing required option --project <id>.");
     const schedule = boolFlag(args, "webhook") && buildTrigger(args).triggerType === "webhook" ? { webhook: true as const } : cloudSchedule(args);
     if (!schedule) throw new Error("Provide exactly one trigger flag: --cron, --at, --in, or --webhook.");
-    return one({ action: "create", ...(thread ? { thread } : { project }), name: requireFlag(args, "name"), prompt: requireFlag(args, "prompt"), ...schedule, enabled: !boolFlag(args, "disabled"),
+    const jev = await cloudJev(room, args, ctx, true);
+    return one({ action: "create", ...(thread ? { thread } : { project }), name: requireFlag(args, "name"), prompt: jev.prompt ?? requireFlag(args, "prompt"), ...(jev.jev_action === undefined ? {} : { jev_action: jev.jev_action }), ...schedule, enabled: !boolFlag(args, "disabled"),
       ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
   }
   if (args.command === "update") {
-    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...cloudSchedule(args), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
+    const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...await cloudJev(room, args, ctx, false), ...cloudSchedule(args), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
     return one({ action: "update", id: requireId(), ...fields }, "updated");
   }
   if (args.command === "pause" || args.command === "resume") return one({ action: "update", id: requireId(), enabled: args.command === "resume" }, args.command === "pause" ? "paused" : "resumed");

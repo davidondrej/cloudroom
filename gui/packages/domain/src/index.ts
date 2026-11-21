@@ -22,6 +22,7 @@ export * from "./experiments.js";
 export * from "./feature-flags.js";
 export * from "./git-checkout.js";
 export * from "./git-url-credentials.js";
+export * from "./gitlab-repository.js";
 export * from "./host-list-limits.js";
 export * from "./host.js";
 export * from "./html-escape.js";

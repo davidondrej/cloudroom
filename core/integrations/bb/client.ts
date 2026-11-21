@@ -69,6 +69,7 @@ export type Session = {
   last_app_prompt?: { request_id: string; sequence: number } | null;
   continued?: { from?: string; history?: string | null } | null;
   title?: string | null;
+  pinned?: boolean;
 };
 export type SessionSummary = {
   session_id: string;

@@ -114,9 +114,10 @@ export interface CloudEnvironment {
 }
 
 /** A repo that is not a Cloudroom project yet: a Git folder on this Mac, or a GitHub repo. */
+export type GitlabConnection = { available: boolean; login: string | null; expired: boolean; waiting: boolean; url?: string };
 export type RepoSuggestion =
   | { source: "mac"; name: string; path: string; updatedAt: number }
-  | { source: "github"; name: string; repo: string; updatedAt: number | null };
+  | { source: "github" | "gitlab"; name: string; repo: string; updatedAt: number | null };
 export type CloudRepoSync = { repo: string; branch: string; every: number; on: boolean };
 export type CloudEnvironmentChange =
   | { action: "repoSync"; repo: string; on?: boolean; branch?: string; every?: number; remove?: boolean }
@@ -161,6 +162,8 @@ export interface CloudAutomation {
   runs: number;
   origin: "app" | "agent";
   created_at: string;
+  /** The loop's project: its home for a project loop, else its thread's project. Null when the thread is gone. */
+  project_id?: string | null;
   /** Each run starts a fresh Cloud thread in its own sandbox (ADR 0239). Missing until the website's 0069 update. */
   new_thread?: boolean;
   /** Runs first in the thread's sandbox: no output skips the run, output goes to the agent (ADR 0246). */
@@ -178,12 +181,16 @@ export interface CloudAutomation {
   /** The API keys a fresh-thread loop's runs get, and `.env` for the project's .env files (ADR 0342); null for all of
    *  them. Missing until the website's 0103 update. */
   secrets?: string[] | null;
+  /** A Jev loop's action script (docs/scopes/loops.md, Jev loops): it runs no agent, its `prompt` holds Jev's questions
+   *  as JSON, and its `agent` is the provider `jev`. Missing from ordinary loops and older websites. */
+  jev_action?: string | null;
 }
 /** A Cloud loop's agent: the app's provider ID; a null model is the agent's default. */
 export type CloudLoopAgent = { provider: string; model: string | null; reasoning: string | null };
 /** One Cloud loop run's record (ADR 0298): what its agent reported, or null fields while it runs or never reported. */
 export interface CloudLoopRun {
-  thread_id: string;
+  /** Null for a Jev loop's run: no agent, so no thread. */
+  thread_id: string | null;
   started_at: string;
   ended_at: string | null;
   outcome: string | null;
@@ -192,7 +199,7 @@ export interface CloudLoopRun {
   actions: string[] | null;
 }
 /** `harness` is Core's harness name or the app's provider ID; only fresh-thread loops pick an agent. */
-export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; agents?: { harness: string; model: string; reasoning?: string }[]; priority?: number; secrets?: string[] | null };
+export type CloudAutomationFields = { name?: string; prompt?: string; cron?: string | null; timezone?: string; run_at?: string | null; enabled?: boolean; script?: string | null; new_thread?: boolean; webhook?: true; harness?: string; model?: string; reasoning?: string; agents?: { harness: string; model: string; reasoning?: string }[]; priority?: number; secrets?: string[] | null; jev_action?: string };
 /** Webhook events the website holds for one Local webhook loop on this Mac (ADR 0262). Ack the batch once its run starts. */
 export interface CloudHookBatch {
   local: string;
@@ -305,6 +312,9 @@ export interface CloudroomArea {
   /** Only this Mac's repos. Fast: no GitHub calls, so the picker shows them while `repoSuggestions` loads. */
   macRepoSuggestions(signal?: AbortSignal): Promise<{ repos: RepoSuggestion[] }>;
   /** Makes an `owner/name` GitHub repo a project right away. Machines and sandboxes clone it when first needed. */
+  gitlabConnection(action: "status" | "start" | "cancel" | "disconnect", signal?: AbortSignal): Promise<GitlabConnection>;
+  gitlabCheck(repo: string, signal?: AbortSignal): Promise<{accessible:boolean}>;
+  addGitlabRepo(input: {repo:string}): Promise<{projectId:string}>;
   addGithubRepo(input: { repo: string }): Promise<{ projectId: string }>;
   /** Another project a new thread's prompt looks like it belongs in, or null. */
   projectSuggestion(input: { prompt: string; projectId: string }, signal?: AbortSignal): Promise<{ projectId: string | null }>;
@@ -317,6 +327,7 @@ export interface CloudroomArea {
   /** Cmd+K "Search deeper": a Claude Code agent reads threads and returns its best 5, best first. */
   deepSearch(input: { query: string }, signal?: AbortSignal): Promise<{ threads: ThreadListEntry[] }>;
   /** A project's branches on GitHub, for a project with no folder on this Mac. */
+  projectBranches(projectId: string, signal?: AbortSignal): Promise<{ defaultBranch: string | null; branches: string[] }>;
   githubBranches(projectId: string, signal?: AbortSignal): Promise<{ defaultBranch: string | null; branches: string[] }>;
   status(signal?: AbortSignal): Promise<CloudroomStatus>;
   /** `provider` opens that provider's sign-in directly instead of the website's sign-in page. */
@@ -472,6 +483,9 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     githubAuth: (signal) => transport.readJson(request("/github", undefined, signal)) as Promise<CloudroomCodexAuth>,
     repoSuggestions: (signal) => transport.readJson(request("/repo-suggestions", undefined, signal)) as Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>,
     macRepoSuggestions: (signal) => transport.readJson(request("/repo-suggestions/mac", undefined, signal)) as Promise<{ repos: RepoSuggestion[] }>,
+    gitlabConnection: (action,signal) => transport.readJson(request("/gitlab",{action},signal)) as Promise<GitlabConnection>,
+    gitlabCheck: (repo,signal) => transport.readJson(request("/gitlab/check",{repo},signal)) as Promise<{accessible:boolean}>,
+    addGitlabRepo: (input) => transport.readJson(request("/repo-suggestions/gitlab",input)) as Promise<{projectId:string}>,
     addGithubRepo: (input) => transport.readJson(request("/repo-suggestions/github", input)) as Promise<{ projectId: string }>,
     projectSuggestion: (input, signal) => transport.readJson(request("/project-suggestion", input, signal)) as Promise<{ projectId: string | null }>,
     promptSuggestion: (input, signal) => transport.readJson(request("/prompt-suggestion", input, signal)) as Promise<{ suggestion: string | null }>,
@@ -480,6 +494,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     skillSuggestionEvent: (input) => transport.readJson(request("/skill-suggestion/event", input)) as Promise<{ ok: boolean }>,
     searchRank: (input, signal) => transport.readJson(request("/search-rank", input, signal)) as Promise<{ probabilities: Record<string, number> | null; ranked: string[] }>,
     deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
+    projectBranches: (projectId, signal) => transport.readJson(request(`/project-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{defaultBranch:string|null;branches:string[]}>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
     githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,

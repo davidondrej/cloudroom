@@ -41,6 +41,11 @@ const restrictDragToVerticalAxis: Modifier = ({ transform }) => ({
 });
 
 const REORDER_MODIFIERS: Modifier[] = [restrictDragToVerticalAxis];
+// dnd-kit's pointer sensors take a release on the document or the row before
+// it reaches the window, then call onDragEnd or onDragCancel. They call neither
+// when the release lands before React commits the drag start (a quick flick or
+// a busy main thread), so a release that leaves the drag on was lost (#2329).
+const POINTER_RELEASE_EVENTS = ["mouseup", "touchend", "touchcancel"] as const;
 
 export interface UseReorderDndArgs {
   onDragEnd: (event: DragEndEvent) => void;
@@ -90,6 +95,7 @@ export function useReorderDnd({
     consumeDragClickSuppression,
   } = useDragClickSuppression();
   const isDraggingRef = useRef(false);
+  const dragActivatorRef = useRef<Event | null>(null);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 4 } }),
     useSensor(touchSensor, {
@@ -102,6 +108,7 @@ export function useReorderDnd({
   const handleDragStart = useCallback(
     (event: DragStartEvent) => {
       isDraggingRef.current = true;
+      dragActivatorRef.current = event.activatorEvent;
       beginDragClickSuppression();
       onDragStart?.(event);
     },
@@ -112,12 +119,14 @@ export function useReorderDnd({
       return;
     }
     isDraggingRef.current = false;
+    dragActivatorRef.current = null;
     clearDragClickSuppressionSoon();
     onDragCancel?.();
   }, [clearDragClickSuppressionSoon, onDragCancel]);
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       isDraggingRef.current = false;
+      dragActivatorRef.current = null;
       clearDragClickSuppressionSoon();
       onDragEnd(event);
     },
@@ -130,10 +139,35 @@ export function useReorderDnd({
         handleDragCancel();
       }
     };
+    const handlePointerRelease = (event: Event): void => {
+      const activator = dragActivatorRef.current;
+      if (event.type === "mouseup") {
+        if (activator?.type !== "mousedown") return;
+      } else {
+        if (activator?.type !== "touchstart") return;
+        const activeTouch = (activator as TouchEvent).touches[0];
+        // Another finger's release must not cancel the live sensor's drag.
+        if (
+          !activeTouch ||
+          Array.from((event as TouchEvent).touches).some(
+            (touch) => touch.identifier === activeTouch.identifier,
+          )
+        )
+          return;
+      }
+      handleDragCancel();
+    };
     document.addEventListener("keydown", handleKeyDown);
+    for (const type of POINTER_RELEASE_EVENTS) {
+      window.addEventListener(type, handlePointerRelease);
+    }
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      for (const type of POINTER_RELEASE_EVENTS) {
+        window.removeEventListener(type, handlePointerRelease);
+      }
       isDraggingRef.current = false;
+      dragActivatorRef.current = null;
     };
   }, [handleDragCancel]);
   const onClickCapture = useCallback<MouseEventHandler<HTMLElement>>(

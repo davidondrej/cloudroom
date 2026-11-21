@@ -906,6 +906,16 @@ describe("startup queue waits", () => {
       expect(
         listEvents(harness.db, { threadId: thread.id }).map((e) => e.type),
       ).not.toContain("system/error");
+      // Its notice waits for that turn too, in its place, instead of being lost.
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) => [
+          row.payloadKind,
+          JSON.parse(row.content)[0].text,
+        ]),
+      ).toEqual([
+        ["retry", "child A assigned"],
+        ["inline", "child B assigned"],
+      ]);
     });
   });
 

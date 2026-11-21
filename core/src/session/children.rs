@@ -390,6 +390,8 @@ pub struct Spawn {
     pub prompt: String,
     /// `fast` runs the child's turns in the harness's fast tier, where it has one.
     pub service_tier: Option<String>,
+    /// Pin the new shared child once when created (`room-cli thread spawn --shared-sandbox --pin`).
+    pub pin: bool,
 }
 
 /// A side chat's source (ADR 0189): `session`'s conversation, cut before user message `before`
@@ -587,13 +589,14 @@ pub(super) fn status(state: &str, busy: bool) -> &'static str {
     }
 }
 
+/// The latest rename's title, else the start's (#2060).
 fn title(session: &Session) -> Option<String> {
-    session
-        .receipts
-        .values()
-        .find(|r| r.command == "start")
-        .and_then(|r| r.input["title"].as_str())
-        .map(str::to_owned)
+    session.title.clone().or_else(|| {
+        (session.receipts.values())
+            .find(|r| r.command == "start")
+            .and_then(|r| r.input["title"].as_str())
+            .map(str::to_owned)
+    })
 }
 
 pub(super) fn notice(
@@ -774,6 +777,9 @@ impl Manager {
             if let Some(project) = p.project_id() {
                 input["project_id"] = json!(project);
             }
+            if spawn.pin {
+                input["pin"] = json!(true);
+            }
             if let Some(existing) = local.sessions.get(&id) {
                 return Self::retry(existing, &start_id, "start", &input)?
                     .map(|r| (id.clone(), r))
@@ -843,6 +849,9 @@ impl Manager {
                 serde_json::to_value(&receipt).map_err(io::Error::other)?,
                 None,
             )?;
+            if spawn.pin {
+                local.append(&id, "pin", json!({"pinned": true}), None)?;
+            }
             // Its own record kind: apps that predate child threads ignore it instead of failing on it.
             local.append(
                 parent,
@@ -1303,6 +1312,39 @@ mod tests {
             item(&local, &local.sessions["cr_sub_kid"])["id"],
             "cr_sub_kid"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #2060: inspection and child notices name a thread by its latest title, also after a restart, not its start's.
+    #[test]
+    fn a_renamed_thread_shows_its_new_title() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-renamed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start =
+            json!({"request_id":"s","command":"start","state":"completed","input":{"title":"A"}});
+        local.append("cr_kid", "receipt", start, None).unwrap();
+        assert_eq!(title(&local.sessions["cr_kid"]).as_deref(), Some("A"));
+        local
+            .append("cr_kid", "title", json!({"title":"B"}), None)
+            .unwrap();
+        assert_eq!(this_thread(&local, "cr_kid").unwrap()["title"], "B");
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        assert_eq!(title(&local.sessions["cr_kid"]).as_deref(), Some("B"));
+        // A snapshot from before `Session.title` falls back to the start's title, as on main; the snapshot is kept.
+        local.save_snapshot();
+        drop(local);
+        let path = dir.join("snapshot.json");
+        let mut snapshot: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        snapshot["sessions"][0]["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("title");
+        std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        let local = Local::open(&dir).unwrap();
+        assert_eq!(local.snapshot_at, snapshot["sequence"].as_u64().unwrap());
+        assert_eq!(title(&local.sessions["cr_kid"]).as_deref(), Some("A"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

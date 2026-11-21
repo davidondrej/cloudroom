@@ -29,8 +29,8 @@ conversation history stays unchanged. Cloud messages capture the setting when
 submitted, so queued messages and retries keep that copy. Control commands such
 as `/compact` stay unchanged. A thread whose copy may be lost (a cancelled or failed message, a new agent session) gets it again.
 
-The builtin Accounts plugin is always on. It lets one user connect up to 10
-Claude Code and up to 10 Codex subscriptions. Add them at the top of Settings →
+The builtin Accounts plugin is always on. It lets one user connect up to 30
+Claude Code and up to 30 Codex subscriptions. Add them at the top of Settings →
 Agents → Claude Code or Codex; the machine's own CLI login is the first entry
 and is never copied. Every Local and Cloud thread uses the account in use, and
 **Use** picks another; nothing switches automatically. Adding an account never

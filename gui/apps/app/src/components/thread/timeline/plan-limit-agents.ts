@@ -125,6 +125,25 @@ export function usePlanLimitAgents(threadId: string) {
         .at(-1) || ""
     );
   };
+  /** The full window that resets last names the limit: "5-hour limit", "weekly limit", else "plan limit". */
+  const selfLimit = (() => {
+    const limits = usage[providerId];
+    if (limits?.status !== "ok") return "plan limit";
+    const label =
+      limits.windows
+        .filter(
+          (window) =>
+            window.usedPercent >= 100 &&
+            (typeof window.model !== "string" ||
+              currentModel.toLowerCase().includes(window.model)),
+        )
+        .sort((a, b) => (a.resetsAt ?? "").localeCompare(b.resetsAt ?? ""))
+        .at(-1)?.label ?? "";
+    if (/^(five-hour|5 hours)/iu.test(label)) return "5-hour limit";
+    if (/^weekly/iu.test(label)) return "weekly limit";
+    if (/^daily/iu.test(label)) return "daily limit";
+    return "plan limit";
+  })();
   const paired = (id: string) => sameLevelModel("", providerId, id) !== null;
   const agents = others
     .flatMap((provider, index): PlanLimitAgent[] => {
@@ -180,6 +199,9 @@ export function usePlanLimitAgents(threadId: string) {
         }
       : null,
     selfResetsAt: resetOf(providerId, currentModel),
+    selfLimit,
+    reasoningLevel: currentReasoning ?? null,
+    permissionMode: isCloud ? null : (local.data?.permissionMode ?? null),
     agents,
     // The agent list, the thread's model, every agent's models, and usage: before then, `agents` can be short.
     agentsLoaded:

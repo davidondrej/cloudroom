@@ -26,6 +26,7 @@ export function PluginProviderModelPicker({
   routing,
   cloud,
   allowProviderChange = true,
+  extraChoice,
   align = "start",
   disabled,
   className,
@@ -166,6 +167,7 @@ export function PluginProviderModelPicker({
       showUltraFast={controller.supportsUltraFast}
       serviceTierSupportByProvider={controller.serviceTierSupportByProvider}
       commandShortcutsEnabled={false}
+      extraChoice={allowProviderChange ? extraChoice : undefined}
       align={align}
       disabled={disabled}
       className={className}

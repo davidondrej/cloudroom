@@ -187,8 +187,8 @@ export async function createTestAppHarness(
   const readProviderUsage = createProviderUsageReader(db, 0);
   const providerRegistry = createProviderRegistryService({
     readUserProviderPreferences: () => {
-      const { defaultProviderId, hiddenProviderIds } = getAppSettings(db);
-      return { defaultProviderId, hiddenProviderIds, usage: readProviderUsage() };
+      const { defaultProviderId, hiddenProviderIds, customProviderOrder } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, customOrder: customProviderOrder, usage: readProviderUsage() };
     },
   });
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
@@ -330,7 +330,7 @@ export async function createTestAppHarness(
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
-      await rm(dataDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     },
   };
 }

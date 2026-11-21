@@ -100,8 +100,22 @@ describe("thread command dispatch", () => {
       instructionMode: "append",
     };
 
+    // A busy runtime keeps running: shutting it down would end its turns with no notice (#912).
+    harness.threadControls.setActiveTurn("thread-busy", "turn-busy");
     await expect(
       dispatchCommand(command, harness.dispatchOptions()),
+    ).rejects.toMatchObject({
+      code: "workspace_type_mismatch",
+      message: expect.stringContaining("Threads are still running"),
+    });
+    expect(harness.runtimeState.shutdownCount).toBe(0);
+    harness.threadControls.endActiveTurn("thread-busy");
+
+    await expect(
+      dispatchCommand(
+        { ...command, requestId: nextClientRequestId() },
+        harness.dispatchOptions(),
+      ),
     ).rejects.toMatchObject({
       code: "workspace_type_mismatch",
     });

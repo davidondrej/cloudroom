@@ -11,8 +11,8 @@ import { SPARE_DIR_PREFIX, sparePathIn, spareReadyPath } from "./paths.js";
 import { removeWorktree } from "./worktree.js";
 
 const SPARE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-// The app warns about low disk space at the same level.
-const LOW_DISK_BYTES = 10e9;
+// Where Cloudroom starts parking unused worktrees: spares go before anyone's work does.
+const LOW_DISK_BYTES = 30e9;
 // Git re-reads every file written in the same second as its index, so the
 // index is refreshed once the clock has moved on. Without it a claim is slow.
 const INDEX_SETTLE_MS = 1500;

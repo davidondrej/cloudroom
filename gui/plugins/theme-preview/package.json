@@ -29,7 +29,7 @@
   ],
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {

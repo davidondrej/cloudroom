@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "standalone:start": "tsx src/standalone/start.ts",
     "standalone:stop": "tsx src/standalone/stop.ts",

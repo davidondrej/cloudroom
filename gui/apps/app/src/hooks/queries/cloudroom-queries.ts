@@ -1,4 +1,4 @@
-import { useIsMutating, useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE, deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
 import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
@@ -191,9 +191,6 @@ export const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], qu
 export function useCloudroomConnection(enabled = true) {
   return useQuery({ ...cloudroomConnectionQuery, enabled, refetchInterval: 10000 });
 }
-/** The Cloud status right now, for code that asks at one moment instead of watching. Always fresh: a copy up to 10
- *  seconds old could miss a region block or the cloud queue. */
-export const fetchCloudroomConnection = (queryClient: QueryClient) => queryClient.fetchQuery({ ...cloudroomConnectionQuery, staleTime: 0 });
 
 export function useMacAgents(enabled = true) {
   return useQuery({
@@ -418,6 +415,7 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
   const add = useMutation({
     mutationFn: async ({ hostId, repo }: { hostId: string; repo: RepoSuggestion }) => repo.source === "mac"
       ? (await sdk.projects.create({ name: deriveProjectNameFromPath(repo.path), source: { type: "local_path", hostId, path: repo.path } })).id
+      : repo.source === "gitlab" ? (await sdk.cloudroom.addGitlabRepo({ repo: repo.repo })).projectId
       : (await sdk.cloudroom.addGithubRepo({ repo: repo.repo })).projectId,
     onSuccess: async (projectId, { repo }) => {
       // The new project replaces its suggestion as soon as the picker lists it, not after every query refreshes (#2126).
@@ -443,8 +441,9 @@ export function useProjectSuggestions(): ProjectSelectorSuggestions | undefined 
 }
 
 /** A project's branches on GitHub, for a project with no folder on this Mac. */
-export function useGithubBranches(projectId: string, enabled: boolean) {
-  return useQuery({ queryKey: ["cloudroom-github-branches", projectId], queryFn: ({ signal }) => sdk.cloudroom.githubBranches(projectId, signal), enabled, retry: false, staleTime: 5 * 60_000 });
+export function useCloudProjectBranches(projectId: string, enabled: boolean) {
+  const accountId = useCloudroomAccount(enabled).data?.account?.id;
+  return useQuery({ queryKey: ["cloudroom-project-branches", accountId, projectId], queryFn: ({ signal }) => sdk.cloudroom.projectBranches(projectId, signal), enabled, retry: false, staleTime: 5 * 60_000 });
 }
 
 /** Imports in batches so a big import shows progress and keeps going after its screen closes. */

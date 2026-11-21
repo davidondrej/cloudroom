@@ -7,6 +7,8 @@ import { promisify } from "node:util";
 import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
 import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection, type EnvironmentRow } from "@cloudroom/db";
 import type { Thread, ThreadCreateOrigin } from "@cloudroom/domain";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
 import { z } from "zod";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
@@ -290,7 +292,11 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
   const target = { threadId: sourceId, environmentId: environment.id, workspaceContext: workspaceContextFromPath({ path }) };
   return {
     nativeId,
-    code: async (id) => hostId === resolvePrimaryHostId(deps as AppDeps) ? localCode(path, id) : null,
+    code: async (id) => {
+      if (hostId !== resolvePrimaryHostId(deps as AppDeps)) return null;
+      await restoreParkedWorktree(deps, sourceId, environment.id);
+      return localCode(path, id);
+    },
     files: async (transferId) => {
       const run = (command: { action: "capture" | "read"; sessions?: { threadId: string; nativeId: string; harness: "codex" | "claude-code" }[]; keepImages?: boolean; index?: number; offset?: number }) => runLiveHostCommand(deps as AppDeps, { hostId, timeoutMs: 120_000, command: { type: "thread.teleport", transferId, ...target, ...command } });
       const capture = await run({ action: "capture", keepImages: true, sessions: [{ threadId: sourceId, nativeId, harness: harness === "codex" ? "codex" : "claude-code" }] });
@@ -427,7 +433,9 @@ async function parentCode(deps: Parameters<typeof cloudroom>[0], threadId: strin
     if (!source?.sessionId) {
       const environmentId = getThread(deps.db, threadId)?.environmentId;
       const environment = environmentId ? getEnvironment(deps.db, environmentId) : null;
-      return environment?.path && environment.hostId === resolvePrimaryHostId(deps as AppDeps) ? await localCode(environment.path, id) : null;
+      if (!environment?.path || environment.hostId !== resolvePrimaryHostId(deps as AppDeps)) return null;
+      await restoreParkedWorktree(deps, threadId, environment.id);
+      return await localCode(environment.path, id);
     }
     const from = await cloudroom(deps).threadClient(threadId);
     return await sourceCode(from, (await from.sessionWorkspace(source.sessionId)).path, id);
@@ -458,15 +466,21 @@ export async function sourceCode(from: CloudroomClient, workspace: string, id: s
   }, workspace, id);
 }
 
-/** Runs a script on this computer. Windows uses Git for Windows' shell, which prints MSYS paths such as `/c/Users/…`. */
+/** Runs a script on this computer, every `git` in it with `gitSafetyArgs` (#2189). Windows uses Git for Windows' shell,
+ *  which prints MSYS paths such as `/c/Users/…`. */
 async function localShell(script: string): Promise<string> {
-  if (process.platform !== "win32") return (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout;
+  const settings = gitSafetyArgs().filter((arg) => arg !== "-c");
+  const git = Object.fromEntries([["GIT_CONFIG_COUNT", String(settings.length)], ...settings.flatMap((setting, index) => {
+    const at = setting.indexOf("=");
+    return [[`GIT_CONFIG_KEY_${index}`, setting.slice(0, at)], [`GIT_CONFIG_VALUE_${index}`, setting.slice(at + 1)]];
+  })]);
+  if (process.platform !== "win32") return (await exec("sh", ["-c", script], { env: { ...process.env, ...git }, maxBuffer: 1024 * 1024 })).stdout;
   const shell = await gitShell();
-  return (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024, windowsHide: true })).stdout;
+  return (await exec(shell.command, ["-c", script], { env: { ...shell.env, ...git }, maxBuffer: 1024 * 1024, windowsHide: true })).stdout;
 }
 
 async function localCode(workspace: string, id: string): Promise<Code | null> {
-  if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"], { windowsHide: true }).then(() => false, () => true)) return null;
+  if (await exec("git", [...gitSafetyArgs(), "-C", workspace, "rev-parse", "-q", "--verify", "HEAD"], { windowsHide: true }).then(() => false, () => true)) return null;
   const windows = process.platform === "win32";
   return packCode({
     run: localShell,
@@ -484,6 +498,8 @@ export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, pr
   const base: GitBranchSelection | null = requested.type === "provider" && requested.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
     ? (requested.inputs as { branch?: GitBranchSelection } | null)?.branch ?? { kind: "default" }
     : requested.type === "host" && requested.workspace.type === "managed-worktree" ? requested.workspace.baseBranch : null;
+  // A fork starts from the source folder's code, so a parked one comes back first.
+  if (base && source.archivedAt === null && source.environmentId) await restoreParkedWorktree(deps, source.id, source.environmentId);
   const folder = source.environmentId ? getEnvironment(deps.db, source.environmentId) : null;
   if (!base || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
   const checkout = projectId === PERSONAL_PROJECT_ID ? undefined
@@ -544,6 +560,7 @@ async function forkWorktreeSource(
   if (inherited || path === checkout) return inherited;
   const repo = (dir: string) =>
     exec("git", [
+      ...gitSafetyArgs(),
       "-C",
       dir,
       "rev-parse",

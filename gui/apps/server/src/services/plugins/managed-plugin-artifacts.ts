@@ -151,9 +151,15 @@ async function cloneGitCommit(
   commit: string,
   notFoundHint?: string,
 ): Promise<void> {
-  await runInstallCommand("git", ["clone", "--quiet", url, stagingDir], {
-    notFoundHint,
-  });
+  // Enable long paths before Git creates the repo, then persist the setting
+  // for the checkout below. The clone option alone applies after repo setup.
+  const longPaths =
+    process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
+  await runInstallCommand(
+    "git",
+    [...longPaths, "clone", "--quiet", ...longPaths, url, stagingDir],
+    { notFoundHint },
+  );
   await runInstallCommand("git", [
     "-C",
     stagingDir,

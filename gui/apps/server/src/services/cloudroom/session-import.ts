@@ -9,6 +9,7 @@ import { pipeline } from "node:stream";
 import { createZstdDecompress } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { isNotNull } from "drizzle-orm";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { events, findOrCreateProjectByLocalPathSource, getThread, listProjectSourcesByProjectIds, listPublicProjects, type StoredEventRow } from "@cloudroom/db";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
@@ -348,7 +349,7 @@ async function createImportedThread(deps: AppDeps, hostId: string, session: Foun
 // project. An existing project for a subfolder of that repo still wins for chats inside it.
 async function projectFolder(deps: AppDeps, hostId: string, session: Found): Promise<string> {
   const start = session.project ?? session.cwd;
-  const lines = await execFileAsync("git", ["-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], { timeout: 10_000, windowsHide: true })
+  const lines = await execFileAsync("git", [...gitSafetyArgs(), "-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], { timeout: 10_000, windowsHide: true })
     .then(({ stdout }) => stdout.trim().split("\n").map((line) => normalize(line.trim())), () => []);
   const [common, top] = lines;
   const repo = lines.length === 2 && isAbsolute(common!) && isAbsolute(top!) ? (basename(common!) === ".git" ? dirname(common!) : top!) : start;

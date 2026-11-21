@@ -1732,7 +1732,9 @@ async function handleFsWriteTextFile(
       ...(oldText === undefined ? {} : { oldText }),
       content: parsed.data.content,
     });
-    responder.result(null);
+    // An object, not null: Rust ACP agents such as Devin read null as a Parse
+    // error after the write succeeded, and retry it (#2061).
+    responder.result({});
   } catch (error) {
     responder.error(
       -32603,

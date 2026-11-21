@@ -1110,6 +1110,24 @@ export class RuntimeManager {
     await this.cleanupUnusedInjectedSkillStagingDirs([]);
   }
 
+  /** For a changed folder: keeps a runtime with running turns, tasks or another thread's command, since shutdown ends them with no notice (#912). */
+  async forgetIdleEnvironment(
+    environmentId: string,
+    excludingThreadId?: string,
+  ): Promise<boolean> {
+    const entry = await this.getOrAwait(environmentId);
+    if (
+      entry &&
+      (entry.runtime.getLiveThreadIds().length > 0 ||
+        entry.runtime.hasOpenBackgroundWork() ||
+        this.hasInFlightThreadCommand(entry, excludingThreadId))
+    ) {
+      return false;
+    }
+    await this.forgetEnvironment(environmentId);
+    return true;
+  }
+
   async shutdownAll(): Promise<void> {
     const entries = [...this.entries.values()];
     for (const pending of this.pendingEntries.values()) {

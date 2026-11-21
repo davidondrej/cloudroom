@@ -1117,6 +1117,7 @@ async fn start(
             title,
             prompt,
             service_tier: None,
+            pin: false,
         };
         let (id, receipt) = manager
             .spawn_child(&parent, &body.request_id, spawn)

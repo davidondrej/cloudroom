@@ -65,6 +65,7 @@ interface ThreadSpawnCommandOptions {
   model?: string;
   reasoningLevel?: string;
   title?: string;
+  pin?: boolean;
   serviceTier?: string;
   permissionMode?: string;
   plan?: boolean;
@@ -381,6 +382,7 @@ export function registerSpawnCommand(
       "Reasoning level: low, medium, high, xhigh, max (provider-dependent)",
     )
     .option("--title <title>", "Thread title")
+    .option("--pin", "Pin the new thread in the sidebar")
     .option("--service-tier <tier>", "Service tier: fast or default")
     .option("--permission-mode <mode>", PERMISSION_MODE_HELP)
     .option("--plan", PLAN_HELP)
@@ -594,9 +596,9 @@ export function registerSpawnCommand(
         const launcherThreadId = resolveContextThreadId();
         // Sent on every spawn, so an unanswered one can be retried without a duplicate.
         const requestId = opts.requestId ?? randomUUID();
+        const sdk = createCliRoomSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
         let thread: Thread;
         try {
-          const sdk = createCliRoomSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
           const model = opts.model && (await preferCallerModel(sdk, opts.model));
           const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
@@ -677,6 +679,17 @@ export function registerSpawnCommand(
           }
         } catch (err: unknown) {
           throw prependErrorContext("Failed to create thread", err);
+        }
+
+        if (opts.pin) {
+          try {
+            thread = await sdk.threads.pin({ threadId: thread.id });
+          } catch (err: unknown) {
+            console.error(
+              `Warning: thread ${thread.id} was created, but pinning failed: ${getErrorMessage(err)}`,
+            );
+            process.exitCode = 1;
+          }
         }
 
         if (outputJson(opts, thread)) return;

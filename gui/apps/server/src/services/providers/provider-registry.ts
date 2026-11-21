@@ -103,10 +103,10 @@ function leadingIndex(id: string): number {
 }
 
 const REGISTRATIONS_SETTLED_TIMEOUT_MS = 30_000;
-const PROVIDER_USAGE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+const PROVIDER_USAGE_WINDOW_MS = 72 * 60 * 60 * 1000;
 const PROVIDER_USAGE_CACHE_MS = 60_000;
 
-/** Threads started per harness in the last 30 days, re-read at most once a minute. */
+/** Threads started per harness in the last 72 hours, re-read at most once a minute. */
 export function createProviderUsageReader(
   db: DbQueryConnection,
   cacheMs = PROVIDER_USAGE_CACHE_MS,
@@ -135,6 +135,8 @@ interface ProviderRegistryDeps {
     usage: ReadonlyMap<string, number>;
     /** Harnesses the user removed; they go last, so they never become the default. */
     hiddenProviderIds?: readonly string[];
+    /** The order the user dragged in Settings; it replaces the usage order. */
+    customOrder?: readonly string[];
   };
   deferRegistrationsSettled?: boolean;
 }
@@ -242,14 +244,16 @@ export function createProviderRegistryService(
       if (preferences === undefined) {
         return entries;
       }
-      // The default harness first, then the most used, removed ones last; ties keep install order.
-      const { defaultProviderId, usage, hiddenProviderIds = [] } = preferences;
-      const rank = ({ info: { id } }: ProviderRegistration): number =>
-        hiddenProviderIds.includes(id)
-          ? -1
-          : id === defaultProviderId
-            ? Number.MAX_SAFE_INTEGER
-            : (usage.get(id) ?? 0);
+      // The user's own order if set, else the default harness first; then the most used,
+      // removed ones last; ties keep install order.
+      const { defaultProviderId, usage, hiddenProviderIds = [], customOrder = [] } = preferences;
+      const rank = ({ info: { id } }: ProviderRegistration): number => {
+        if (hiddenProviderIds.includes(id)) return -1;
+        const pinned = customOrder.indexOf(id);
+        if (pinned !== -1) return Number.MAX_SAFE_INTEGER - pinned;
+        if (id === defaultProviderId) return Number.MAX_SAFE_INTEGER - customOrder.length;
+        return usage.get(id) ?? 0;
+      };
       return entries.sort((a, b) => rank(b) - rank(a));
     },
 

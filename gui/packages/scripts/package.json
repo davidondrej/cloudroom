@@ -24,7 +24,7 @@
   "scripts": {
     "build": "node ../../scripts/build-package.mjs",
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "cli": "node dist/commands/run-cli.js",
     "dev:host-daemon": "node dist/commands/run-host-daemon.js --auto-join",

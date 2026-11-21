@@ -37,7 +37,7 @@
     "clean": "rimraf dist app host-daemon server tsconfig.tsbuildinfo",
     "prepack": "node dist/prune-cli-chunks.mjs",
     "smoke:boot": "node scripts/smoke-boot.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {

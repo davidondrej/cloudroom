@@ -8,6 +8,7 @@ import {
   setThreadExecutionOverride,
 } from "@cloudroom/db";
 import {
+  groupHostDaemonEvents,
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonServerWsMessageSchema,
 } from "@cloudroom/host-daemon-contract";
@@ -23,7 +24,10 @@ import {
   DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
   DAEMON_DISCONNECT_GRACE_MS,
 } from "../../src/constants.js";
-import { internalAuthHeaders } from "../helpers/commands.js";
+import {
+  createTestDaemonEventEnvelope,
+  internalAuthHeaders,
+} from "../helpers/commands.js";
 import {
   seedEnvironment,
   seedHost,
@@ -755,6 +759,78 @@ describe("active thread disconnect reconciliation triggers", () => {
       });
     },
   );
+
+  it.each([
+    ["a started turn", true],
+    ["a turn the daemon had not started yet", false],
+  ])("tells a running child's parent once for %s, through a restart, a revive, a second deadline and a late report", async (_label, started) => {
+    await withTestHarness(async (harness) => {
+      const { host, session, environment, project, thread: parent } =
+        seedThreadFixture(harness, {});
+      setThreadExecutionOverride(harness.deps.db, { threadId: parent.id, modelOverride: "gpt-5" });
+      const child = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        parentThreadId: parent.id,
+        status: "active",
+      });
+      if (started) {
+        seedTurnStarted(harness.deps, { environmentId: environment.id, threadId: child.id, turnId: "turn-1" });
+      }
+      const open = async (activeThreads: { threadId: string }[]) => {
+        const response = await harness.app.request("/internal/session/open", {
+          method: "POST",
+          headers: internalAuthHeaders(harness, { hostId: host.id }),
+          body: JSON.stringify({
+            hostId: host.id, instanceId: "instance-restarted", hostName: host.name, hasMachineCredential: false,
+            platform: "darwin", dataDir: "/tmp/host-daemon-child-failure", localApiPort: null,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION, activeThreads,
+          }),
+        });
+        return ((await response.json()) as { sessionId: string }).sessionId;
+      };
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await open([]); // A new daemon: the turn fails.
+      await vi.advanceTimersByTimeAsync(3_000);
+      const sessionId = await open([{ threadId: child.id }]); // HTTP-only revive.
+      expect(getThread(harness.deps.db, child.id)?.status).toBe("active");
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS + 3_000);
+      expect(getThread(harness.deps.db, child.id)?.status).toBe("error");
+      await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId,
+          eventGroups: groupHostDaemonEvents([
+            ...(started
+              ? []
+              : [
+                  createTestDaemonEventEnvelope({
+                    event: {
+                      type: "turn/started", threadId: child.id, providerThreadId: "claude-session-1",
+                      scope: turnScope("turn-1"),
+                    },
+                  }),
+                ]),
+            createTestDaemonEventEnvelope({
+              event: {
+                type: "turn/completed", threadId: child.id, providerThreadId: "claude-session-1",
+                scope: turnScope("turn-1"), status: "interrupted",
+              },
+            }),
+          ]),
+        }),
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(
+        listQueuedThreadMessages(harness.deps.db, parent.id).filter((row) =>
+          row.content.includes(child.id),
+        ),
+      ).toHaveLength(1);
+    });
+  });
 
   it("records a lost host connection after the live event window elapses without a reconnect", async () => {
     await withTestHarness(async (harness) => {

@@ -29,6 +29,7 @@ Cheap readers review GitHub repos in the cloud.
    ```
    It takes 1-3 minutes. Then read all of `$d/summary.md`.
    It may start with "Not fully checked". Say so in the report. Never call those parts clean.
+   Off macOS, it lists the computer checks there. Say the computer wasn't checked, in the reply and in `scope`.
 2. **Readers:** if `$d/slices` has slice files, start one reader per GitHub repo. Use your own agent's small model:
    ```
    SCAN_READER_PROMPT="$s/reader.md" SCAN_TITLE="Cyber scan" SCAN_READER_REASONING=medium \
@@ -52,6 +53,9 @@ Cheap readers review GitHub repos in the cloud.
    Under it, write 2-3 short plain-English sentences: the biggest risk and the first fix.
 6. **Loops:** find the 2 biggest gaps. Pick the 2 loops that would prevent that class of problem from coming back.
    - Base each on the closest security template (`room-cli loop templates`). Tune its prompt to what you found.
+   - If it says templates need a paid plan, the scan still worked.
+     Write both loops from your findings instead. Don't look for the templates elsewhere.
+     Say templates need a paid plan, with its upgrade link.
    - Each runs on one repo's Cloudroom project. Give its schedule and what it checks.
    - End with: "Turn these on?"
 7. **On yes:** create each as a Cloud loop with `room-cli loop create` (see the automations skill). Then `rm -rf "$d"`.

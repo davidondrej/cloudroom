@@ -1347,7 +1347,10 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       return transport.readJson(
         transport.api.v1.threads[":id"].worktree.$post({
           param: { id: input.threadId },
-          json: { carry: input.carry ?? [] },
+          json: {
+            carry: input.carry ?? [],
+            ...(input.self === undefined ? {} : { self: input.self }),
+          },
         }),
       );
     },

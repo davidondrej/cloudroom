@@ -20,10 +20,11 @@
     "bb-plugin"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {
+    "@cloudroom/shared-ui": "workspace:*",
     "zod": "^4.3.6"
   },
   "devDependencies": {
@@ -31,7 +32,9 @@
     "@get-bb/plugin-sdk": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

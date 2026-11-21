@@ -1347,10 +1347,15 @@ export function createClaudeDeltaTranslator(
     // A Stop: what a sub-agent still streams must not open a turn of its own.
     // The next input lifts this.
     if (includeUnopenedTurn) state.suppressUnacceptedTurnStart = true;
-    deltas.push(
-      ...buildInterruptedClaudeTaskDeltas({ tasks: state.tasksById }),
-    );
+    deltas.push(...buildEndedTaskDeltas(threadId));
     return deltas;
+  }
+
+  /** Claude ended: its commands, agents, and workflows ended with it (#2228). */
+  function buildEndedTaskDeltas(threadId: string): ThreadDelta[] {
+    return buildInterruptedClaudeTaskDeltas({
+      tasks: stateFor({ threadId }).tasksById,
+    });
   }
 
   function hasOpenTurn(threadId: string): boolean {
@@ -1367,6 +1372,7 @@ export function createClaudeDeltaTranslator(
 
   return {
     acceptInput,
+    buildEndedTaskDeltas,
     buildSessionSettlementDeltas,
     cancelInput,
     configureInjectedTools,

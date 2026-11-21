@@ -4472,6 +4472,9 @@ describe("bridge", () => {
     const close = vi
       .spyOn(SdkSession.prototype, "closeGracefully")
       .mockRejectedValueOnce(new Error(stopError));
+    // Only Windows holds a failed stop and retries it (#2228).
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
 
     try {
       const threadId = "thread-failed-stop";
@@ -4482,14 +4485,32 @@ describe("bridge", () => {
         threadId,
       });
       await bridge.waitForResponse(1);
+      queries[0]?.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: "provider-failed-stop",
+        task_id: "task-1",
+        task_type: "local_bash",
+        description: "npm run dev",
+      } as unknown as SDKMessage);
+      await bridge.flushWork();
+      const endedTasks = () =>
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+          (event) =>
+            event.type === "item/backgroundTask/completed"
+              ? [event.item.taskStatus]
+              : [],
+        );
+      // Stop on an idle thread releases Claude and its background commands.
       const stop = {
         threadId,
         providerThreadId: threadId,
-        intent: "interrupt",
+        intent: "release",
         activeTurnId: null,
       };
       bridge.sendRequest(2, "thread/stop", stop);
       expect((await bridge.waitForResponse(2)).error?.message).toBe(stopError);
+      expect(endedTasks()).toEqual([]);
 
       bridge.sendRequest(3, "turn/start", {
         threadId,
@@ -4514,12 +4535,15 @@ describe("bridge", () => {
         "After unarchive",
       );
       expect((await bridge.waitForResponse(3)).error).toBeUndefined();
+      // The retried stop confirmed the old Claude ended, and its command with it.
+      expect(endedTasks()).toEqual(["stopped"]);
 
       bridge.sendRequest(4, "thread/stop", stop);
       await bridge.flushWork();
       queries[1]?.finish();
       await bridge.waitForResponse(4);
     } finally {
+      Object.defineProperty(process, "platform", platform);
       close.mockRestore();
       bridge.restore();
     }

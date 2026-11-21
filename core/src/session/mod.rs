@@ -155,6 +155,9 @@ pub struct Session {
     // Archived by `room-cli thread archive`; `thread list` hides it unless asked.
     #[serde(default)]
     pub archived: bool,
+    // Pinned by `room-cli thread pin` or `thread spawn --pin`; lets late-joining apps pin a shared child once.
+    #[serde(default)]
+    pub pinned: bool,
     // The turn this thread archived itself in: archived, it still reports that one (relay.rs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_turn: Option<String>,

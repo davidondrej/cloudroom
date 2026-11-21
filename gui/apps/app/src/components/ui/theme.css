@@ -1107,6 +1107,49 @@
   }
 
   /*
+   * A subagent's smaller cousin of the grid above: 2x2 pixels, lit one after
+   * another clockwise. `--n` is a cell's place in the orbit; `--o` shifts the
+   * whole cube so pills side by side don't blink in step.
+   */
+  .subagent-grid {
+    display: inline-grid;
+    flex: none;
+    grid-template-columns: repeat(2, 4px);
+    gap: 2px;
+    place-content: center;
+    width: 13px;
+    height: 13px;
+  }
+
+  .subagent-grid i {
+    position: relative;
+    width: 4px;
+    height: 4px;
+  }
+
+  .subagent-grid i::before,
+  .subagent-grid i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 0.5px;
+    transform: scale(0.82);
+  }
+
+  .subagent-grid i::before {
+    background: var(--muted-foreground);
+    opacity: 0.34;
+  }
+
+  .subagent-grid i::after {
+    background: var(--primary);
+    opacity: 0;
+    animation: subagent-grid-orbit 1.6s linear infinite;
+    /* Negative, so a cube mounts mid-orbit instead of dark. */
+    animation-delay: calc(var(--n) * 400ms - 1600ms - var(--o, 0ms));
+  }
+
+  /*
    * Hidden hosts keep shimmering rows mounted: the closed sidebar drawer's
    * inert panel, a collapsed `aria-hidden` banner body, a retained overlay.
    * Pause the sweep and release the layer there so nothing off-screen repaints
@@ -1116,9 +1159,11 @@
   [inert] .animate-shine,
   [inert] .animate-shine-icon,
   [inert] .working-grid i::after,
+  [inert] .subagent-grid i::after,
   [aria-hidden="true"] .animate-shine,
   [aria-hidden="true"] .animate-shine-icon,
-  [aria-hidden="true"] .working-grid i::after {
+  [aria-hidden="true"] .working-grid i::after,
+  [aria-hidden="true"] .subagent-grid i::after {
     animation-play-state: paused;
     will-change: auto;
   }
@@ -1199,9 +1244,24 @@
     }
 
     /* The still gray grid plus the label still reads as "busy". */
-    .working-grid i::after {
+    .working-grid i::after,
+    .subagent-grid i::after {
       animation: none;
     }
+  }
+}
+
+/* One orbit: a cell lights for a quarter, then fades over the next. */
+@keyframes subagent-grid-orbit {
+  0%,
+  22% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  50%,
+  100% {
+    opacity: 0;
+    transform: scale(0.82);
   }
 }
 

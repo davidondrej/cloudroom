@@ -4,7 +4,7 @@ Creates an isolated Git worktree from the project checkout on an enrolled machin
 
 A create skips fetching the base branch when it was fetched in the last 5 minutes (the composer fetches when it opens). Otherwise it waits at most 2 seconds, then starts from the last fetched copy and lets the fetch finish in the background. When the remote can't be reached, it starts from that copy too. With no copy yet, it waits for the fetch, as before.
 
-After each new worktree, the plugin prebuilds one spare per checkout in the background (`worktrees/.spare-<hash>/`). The next create moves it into place and switches branch instead of writing every file, then runs `post-checkout` once, as `git worktree add` does. It falls back to a normal `git worktree add` when there is no usable spare. No spare is built after a fork, for a checkout with submodules, on Git older than 2.36, or with under 10 GB free. Spares unused for 7 days are deleted, as are all spares when the disk is that full.
+After each new worktree, the plugin prebuilds one spare per checkout in the background (`worktrees/.spare-<hash>/`). The next create moves it into place and switches branch instead of writing every file, then runs `post-checkout` once, as `git worktree add` does. It falls back to a normal `git worktree add` when there is no usable spare. No spare is built after a fork, for a checkout with submodules, on Git older than 2.36, or with under 30 GB free. Spares unused for 7 days are deleted, as are all spares when the disk is that full.
 
 Bundled and installed automatically. Select it through the environment picker or `bb thread spawn --environment-provider git-worktree`. Use `bb environment providers --json` for its inputs and availability.
 

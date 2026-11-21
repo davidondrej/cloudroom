@@ -80,6 +80,7 @@ import {
 } from "@/hooks/queries/host-queries";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  providerModelsRoute,
   systemExecutionOptionsQueryOptions,
   useSystemConfig,
 } from "@/hooks/queries/system-queries";
@@ -354,20 +355,24 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
     [promptBoxRef],
   );
   const queryClient = useQueryClient();
+  const { environmentId, hostId, projectId } = execution.providerRouting ?? {};
   // Shortcuts read the same cached list the model picker shows for that harness.
   const loadModels = useCallback(
     async (providerId: string) =>
       (
         await queryClient.fetchQuery(
           systemExecutionOptionsQueryOptions({
-            environmentId: execution.providerRouting?.environmentId ?? null,
-            hostId: execution.providerRouting?.hostId ?? null,
+            ...providerModelsRoute(
+              queryClient,
+              { environmentId, hostId, projectId },
+              providerId,
+            ),
             providerId,
             writeLastKnown: false,
           }),
         )
       ).models.map(({ model }) => model),
-    [execution.providerRouting?.environmentId, execution.providerRouting?.hostId, queryClient],
+    [environmentId, hostId, projectId, queryClient],
   );
   const placeholder = placeholderOverride ?? NEW_THREAD_PROMPT_PLACEHOLDER;
   const placeholderHint =

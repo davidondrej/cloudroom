@@ -83,6 +83,7 @@ let storeSnapshot: UsageStoreSnapshot = {
 let activeRefreshCount = 0;
 let lastMachineId: string | null = null;
 let lastPlan: PlanSummary | null = null;
+let lastPlanAt = 0;
 
 function updateStore(next: UsageStoreSnapshot): void {
   storeSnapshot = next;
@@ -226,6 +227,8 @@ function rowLabel(label: string): { prefix: string | null; label: string } {
   if (fiveHourModel) return { prefix: "5h", label: fiveHourModel };
   const model = /^Weekly · (.+)$/u.exec(label)?.[1];
   if (model) return { prefix: "7d", label: model };
+  const planModel = /^Plan · (.+)$/u.exec(label)?.[1];
+  if (planModel) return { prefix: "plan", label: planModel };
   return {
     prefix: null,
     label: label
@@ -526,7 +529,10 @@ function TerminalSignIn({ label, providerId, signIn }: { label: string; provider
 /** Sign-in runs on the computer running Cloudroom, so other machines and stored accounts keep their hint. */
 type UsageSignIn = { hostId: string; onSignedIn: () => void };
 
-function isAntigravityExtraWindow(label: string): boolean {
+/** Antigravity's and Cursor's third-party model limits fold under a chevron (Cursor: F#5982). */
+const COLLAPSIBLE_EXTRA = new Set(["acp-antigravity", "acp-cursor"]);
+
+function isExtraWindow(label: string): boolean {
   return /\b3p\b/iu.test(label);
 }
 
@@ -537,10 +543,10 @@ function ProviderUsageBody({ provider, signIn }: { provider: UsageProvider; sign
   switch (usage.status) {
     case "ok": {
       const hasCollapsibleExtra =
-        provider.providerId === "acp-antigravity" &&
-        usage.windows.some((window) => isAntigravityExtraWindow(window.label));
+        COLLAPSIBLE_EXTRA.has(provider.providerId) &&
+        usage.windows.some((window) => isExtraWindow(window.label));
       const primaryWindows = hasCollapsibleExtra
-        ? usage.windows.filter((window) => !isAntigravityExtraWindow(window.label))
+        ? usage.windows.filter((window) => !isExtraWindow(window.label))
         : usage.windows;
       const shownWindows =
         hasCollapsibleExtra && !showExtra ? primaryWindows : usage.windows;
@@ -846,6 +852,8 @@ function TimeInCloudroom() {
 }
 
 const PLAN_RETRY_MS = 10_000;
+// Hovering the footer button mounts the card early, so a plan read this recently is reused instead of asking the website again.
+const PLAN_REUSE_MS = 60_000;
 const MONO_CLASS = "font-mono text-[10.5px] leading-[1.75]";
 const CARD_HEADER_CLASS =
   "mx-1.5 flex h-9 min-w-0 shrink-0 items-center gap-1 border-b border-sidebar-border pr-1 font-mono text-[10.5px] text-subtle-foreground";
@@ -866,13 +874,17 @@ function usePlanSummary(): [PlanSummary | null, () => void] {
       loadPlanSummary(controller.signal).then(
         (summary) => {
           lastPlan = summary;
+          lastPlanAt = Date.now();
           setPlan(summary);
           next(summary);
         },
         () => next(null),
       );
     };
-    load();
+    const age = Date.now() - lastPlanAt;
+    if (reloads === 0 && lastPlan !== null && age < PLAN_REUSE_MS)
+      timer = window.setTimeout(load, CARD_MAX_AGE_MS - age);
+    else load();
     return () => {
       controller.abort();
       if (timer !== null) window.clearTimeout(timer);
@@ -920,9 +932,10 @@ export function ProviderUsageStatusContent({
     >();
     for (const account of activeMachine?.providers ?? []) {
       if (account.usage?.status === "not_installed") continue;
-      // Antigravity appears in the usage box only while connected (David, 2026-11-21).
+      // This computer's Antigravity login appears only while connected (David, 2026-11-21). Added accounts always do.
       if (
         account.providerId === "acp-antigravity" &&
+        (!account.accountId || account.accountId === "local") &&
         account.usage?.status !== "ok"
       )
         continue;
@@ -984,7 +997,8 @@ export function ProviderUsageStatusContent({
   }, []);
 
   return (
-    <div className="flex max-h-80 flex-col">
+    // Grows to fit every subscription; only a very short window scrolls the list (David, 2026-11-21).
+    <div className="flex max-h-[calc(100dvh-8rem)] flex-col">
       <div data-provider-usage-header="" className={CARD_HEADER_CLASS}>
         <div className="flex min-w-0 flex-1">
           <MachineSelector

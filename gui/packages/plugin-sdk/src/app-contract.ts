@@ -3294,6 +3294,19 @@ export interface ExperimentalProviderModelPickerValue {
   serviceTier?: ServiceTier;
 }
 
+/**
+ * One more choice shown after the picker's provider tabs, for a caller whose
+ * selection can be something that is not an agent (Loops offers Jev, a
+ * decision model that runs no agent). Picking it closes the picker and calls
+ * `onSelect`. The picker's own `value` stays as it is: the caller decides
+ * what the choice means and what to render for it.
+ */
+export interface ExperimentalProviderModelPickerExtraChoice {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  onSelect(): void;
+}
+
 /** Where the picker resolves the live provider and model catalog. */
 export type ExperimentalProviderModelPickerRouting =
   | { kind: "host"; hostId: string }
@@ -3316,6 +3329,8 @@ export interface ExperimentalProviderModelPickerProps {
   routing?: ExperimentalProviderModelPickerRouting;
   /** Allow switching providers. Defaults to true; false hides provider tabs. */
   allowProviderChange?: boolean;
+  /** One more choice after the provider tabs; needs `allowProviderChange`. */
+  extraChoice?: ExperimentalProviderModelPickerExtraChoice;
   /** Horizontal popover alignment. Defaults to `"start"`. */
   align?: "start" | "center" | "end";
   /** Render the shared selection summary without allowing changes. */

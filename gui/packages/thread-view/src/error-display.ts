@@ -44,6 +44,11 @@ export function isPlanLimitError(
   );
 }
 
+/** Antigravity's CLI reports its quota as a plain reply ("⚠ Individual quota reached. … Resets in 24m24s."), not an error. */
+export function isPlanLimitReply(text: string): boolean {
+  return /^\s*⚠?\s*Individual quota reached\b/u.test(text);
+}
+
 /** The provider refused the work itself (say OpenAI's cybersecurity filter): another agent may still do it. */
 export function isRefusalError(message: EventProjectionErrorMessage): boolean {
   return message.providerErrorInfo?.category === "policy";

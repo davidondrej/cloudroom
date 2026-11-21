@@ -41,25 +41,9 @@ const DAEMON_DISCONNECTED_ENVIRONMENT_PROVISIONING_REASON =
   "The connection to the host was lost while preparing the workspace. Retry provisioning to continue.";
 
 type HostSessionOpenedDeps = LoggedPendingInteractionWorkSessionDeps;
-type DaemonSocketClosedDeps = Pick<
-  AppDeps,
-  | "db"
-  | "hub"
-  | "logger"
-  | "pendingInteractions"
-  | "providerRegistry"
-  | "sharedPorts"
-  | "terminalSessions"
->;
-type DaemonDisconnectGraceDeps = Pick<
-  AppDeps,
-  | "db"
-  | "hub"
-  | "logger"
-  | "pendingInteractions"
-  | "providerRegistry"
-  | "terminalSessions"
->;
+type DaemonSocketClosedDeps = LoggedPendingInteractionWorkSessionDeps &
+  Pick<AppDeps, "sharedPorts">;
+type DaemonDisconnectGraceDeps = LoggedPendingInteractionWorkSessionDeps;
 
 /**
  * Background tasks settled while a host's daemon was away. A temporary
@@ -228,10 +212,7 @@ export function handleDaemonSocketClosed(
   startHostDisconnectDeadlines(deps, session.hostId);
 }
 
-type HostDisconnectDeadlineDeps = Pick<
-  AppDeps,
-  "db" | "hub" | "logger" | "pendingInteractions" | "providerRegistry"
->;
+type HostDisconnectDeadlineDeps = LoggedPendingInteractionWorkSessionDeps;
 
 // Starts (or keeps) the host's setup and running-turn deadlines. Only a
 // registered daemon socket cancels them, so they run from whichever comes
@@ -347,10 +328,7 @@ function completeDaemonDisconnectGrace(
 }
 
 function completeDaemonActiveWorkDisconnectGrace(
-  deps: Pick<
-    AppDeps,
-    "db" | "hub" | "logger" | "pendingInteractions" | "providerRegistry"
-  >,
+  deps: LoggedPendingInteractionWorkSessionDeps,
   args: CompleteDaemonActiveWorkDisconnectGraceArgs,
 ): void {
   if (deps.hub.hasDaemonForHost(args.hostId)) {

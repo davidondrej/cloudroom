@@ -4,12 +4,16 @@ import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { and, asc, desc, eq, gt, sql, type SQL } from "drizzle-orm";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import {
+  countClaimedQueuedThreadMessages,
   createEventId,
   events,
   findStoredEventRow,
   getEnvironment,
   getThread,
+  isThreadQueueAutoSendPaused,
+  listQueuedThreadMessages,
   updateThread,
   type DbQueryConnection,
   type EnvironmentRow,
@@ -37,7 +41,9 @@ import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { getEnvironmentProvider } from "../plugins/plugin-environment-provider-registry.js";
 import type { DeferredFirstTurnContext } from "./deferred-first-turn-context.js";
+import { attemptDispatch } from "./dispatch-attempt.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
+import { createAutomaticQueuedMessageEligibility } from "./queued-messages.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import {
@@ -67,9 +73,15 @@ const TURN_STARTED = "turn_started_during_move";
 
 /** Threads waiting for their turn to end: the paths they carry, relative to their folder, and the move's timeline entry. */
 interface Request {
+  autoContinue: boolean;
   carry: string[];
   from: string;
   operationId: string;
+}
+interface MoveResult {
+  from: string;
+  to: string;
+  resumesNative: boolean;
 }
 const pending = new Map<string, Request>();
 const moving = new Set<string>();
@@ -114,7 +126,8 @@ export function requestThreadWorktreeMove(
   deps: AppDeps,
   threadId: string,
   carry: readonly string[],
-): { previousPath: string } {
+  options: { self?: boolean } = {},
+): { previousPath: string; deferred: boolean } {
   const { thread, folder } = movable(deps, threadId, carry);
   for (const path of carry) carriedPath(folder.path, path);
   if (pending.has(thread.id) || moving.has(thread.id))
@@ -123,13 +136,15 @@ export function requestThreadWorktreeMove(
       "thread_busy",
       "This thread is already moving to a new worktree.",
     );
-  const request = {
+  const now = settled(deps, thread);
+  const self = options.self ?? true;
+  const request: Request = {
+    autoContinue: !now && self,
     carry: [...carry],
     from: folder.path,
     operationId: createEventId(),
   };
   pending.set(thread.id, request);
-  const now = settled(deps, thread);
   // Saved now, so a restart that clears `pending` still tells the agent its move never ran.
   note(
     deps,
@@ -142,7 +157,12 @@ export function requestThreadWorktreeMove(
     `Cloudroom restarted before this thread's move to a new worktree finished, so it still runs in ${folder.path}. Run \`room-cli thread worktree\` again.`,
   );
   if (now) void applyPendingThreadWorktreeMove(deps, thread.id);
-  return { previousPath: folder.path };
+  return { previousPath: folder.path, deferred: !now };
+}
+
+/** True while a running thread has a self-move queued that will auto-resume right after this turn ends. */
+export function hasPendingWorktreeAutoContinue(threadId: string): boolean {
+  return pending.get(threadId)?.autoContinue === true;
 }
 
 /** The note the agent's next turn must carry when its last move failed or never ran. */
@@ -214,19 +234,24 @@ export async function applyPendingThreadWorktreeMove(
   if (request === undefined || !thread || !settled(deps, thread)) return;
   pending.delete(threadId);
   moving.add(threadId);
+  let moved: MoveResult | null = null;
   try {
     // Sends wait until the move ends, so no turn starts in the old folder; queued messages stay queued.
-    const { from, to } = await withThreadContextClearGuard(
+    moved = await withThreadContextClearGuard(
       threadId,
       () => moveToNewWorktree(deps, threadId, request.carry),
       BUSY,
     );
+    // Always save the path note for native-resuming providers so whichever turn runs first (auto-resume, queued, or user) carries it.
     note(
       deps,
       threadId,
       request,
       "completed",
-      `Moved from ${from} to a new worktree at ${to}.`,
+      `Moved from ${moved.from} to a new worktree at ${moved.to}.`,
+      moved.resumesNative
+        ? `[Cloudroom] This thread moved to a new worktree at ${moved.to}. Work only there; never edit ${moved.from}.`
+        : undefined,
     );
   } catch (error) {
     // Removes the new worktree if the thread never switched to it.
@@ -253,7 +278,74 @@ export async function applyPendingThreadWorktreeMove(
     }
   } finally {
     moving.delete(threadId);
+  }
+  const continued =
+    request.autoContinue && moved !== null
+      ? await continueAfterWorktreeMove(deps, threadId)
+      : false;
+  if (!continued) {
     requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
+  }
+}
+
+function canAutoContinueAfterMove(deps: AppDeps, threadId: string): Thread | null {
+  const thread = getThread(deps.db, threadId);
+  if (
+    !thread ||
+    thread.deletedAt !== null ||
+    thread.archivedAt !== null ||
+    thread.status !== "idle" ||
+    deps.pendingInteractions.hasPendingThreadInteraction(threadId) ||
+    isThreadQueueAutoSendPaused(deps.db, threadId) ||
+    countClaimedQueuedThreadMessages(deps.db, threadId) > 0
+  ) {
+    return null;
+  }
+  const isEligible = createAutomaticQueuedMessageEligibility(deps, {
+    now: Date.now(),
+    thread,
+  });
+  return listQueuedThreadMessages(deps.db, threadId).some(isEligible)
+    ? null
+    : thread;
+}
+
+/** Wakes a thread that moved itself mid-turn so it finishes the user's request without waiting for "go". */
+async function continueAfterWorktreeMove(
+  deps: AppDeps,
+  threadId: string,
+): Promise<boolean> {
+  const thread = canAutoContinueAfterMove(deps, threadId);
+  if (!thread) return false;
+  try {
+    const outcome = await attemptDispatch(deps, {
+      thread,
+      payload: {
+        input: [
+          {
+            type: "text",
+            text: "[Cloudroom] Continue the user's request in the new worktree. If moving was the entire request, confirm the new folder briefly and stop.",
+            mentions: [],
+            visibility: "agent-only",
+          },
+        ],
+        mode: "start",
+      },
+      source: { kind: "inline" },
+      queuePayload: { kind: "inline" },
+      pluginSubmission: null,
+      origin: null,
+      originPluginId: null,
+      startedOnBehalfOf: null,
+      trigger: "auto-dispatch",
+    });
+    return outcome.kind === "dispatched";
+  } catch (error) {
+    deps.logger.warn(
+      { threadId, error },
+      "Could not resume thread after worktree move",
+    );
+    return false;
   }
 }
 
@@ -265,7 +357,7 @@ export function watchFailedTurnsForWorktreeMoves(deps: AppDeps): void {
   });
 }
 
-async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonly string[]): Promise<{ from: string; to: string }> {
+async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonly string[]): Promise<MoveResult> {
   const { thread, folder, local } = movable(deps, threadId, carry);
   const record = getEnvironmentProvider(DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree);
   if (!record) throw new ApiError(409, "worktree_plugin_off", "Turn on the Worktree plugin in Settings → Plugins.");
@@ -341,7 +433,7 @@ async function moveToNewWorktree(deps: AppDeps, threadId: string, carry: readonl
         },
       });
   });
-  return { from: folder.path, to: ready.path };
+  return { from: folder.path, to: ready.path, resumesNative: seed === null };
 }
 
 /** Drives the worktree provider until the folder exists, the same way a new thread's first start does. */
@@ -361,7 +453,7 @@ async function createWorktree(
 }
 
 const localHead = (path: string) =>
-  exec("git", ["-C", path, "rev-parse", "HEAD"], { windowsHide: true }).then(({ stdout }) => stdout.trim(), () => null);
+  exec("git", [...gitSafetyArgs(), "-C", path, "rev-parse", "HEAD"], { windowsHide: true }).then(({ stdout }) => stdout.trim(), () => null);
 
 /** Another computer's HEAD comes from its own host daemon; this process can't read its folders. */
 async function remoteHead(deps: AppDeps, folder: EnvironmentRow): Promise<string | null> {
@@ -420,7 +512,7 @@ async function carriedFiles(folder: string, carry: readonly string[]): Promise<s
   if (carry.length === 0) return [];
   const paths = ["--", ...carry.map((path) => carriedPath(folder, path))];
   const git = async (args: string[]) =>
-    (await exec("git", ["--literal-pathspecs", "-C", folder, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })).stdout;
+    (await exec("git", [...gitSafetyArgs(), "--literal-pathspecs", "-C", folder, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })).stdout;
   const [tracked, untracked] = await Promise.all([
     git(["diff", "--name-only", "--no-renames", "--relative", "-z", "HEAD", ...paths]),
     git(["ls-files", "--others", "--exclude-standard", "-z", ...paths]),
@@ -432,7 +524,7 @@ async function carriedFiles(folder: string, carry: readonly string[]): Promise<s
  *  inside the repo keeps its place, so `gui/package.json` never lands on the root one. The old folder is untouched. */
 async function carryFiles(from: string, worktree: string, files: readonly string[]): Promise<void> {
   if (files.length === 0) return;
-  const prefix = (await exec("git", ["-C", from, "rev-parse", "--show-prefix"], { windowsHide: true })).stdout.trim();
+  const prefix = (await exec("git", [...gitSafetyArgs(), "-C", from, "rev-parse", "--show-prefix"], { windowsHide: true })).stdout.trim();
   const root = await realpath(worktree);
   for (const file of files) {
     const source = resolve(from, file);

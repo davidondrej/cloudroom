@@ -13,7 +13,7 @@ import {
   type AvailableModel,
   type ProviderInfo,
 } from "@cloudroom/domain";
-import { getAppSettings } from "@cloudroom/db";
+import { getAppSettings, getProjectSourceByHost } from "@cloudroom/db";
 import type { LoggedWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { callHostRetryableOnlineRpc } from "../hosts/online-rpc.js";
@@ -475,12 +475,18 @@ async function resolveExecutionOptions(
   } else {
     await deps.providerRegistry.whenProviderRegistered(query.providerId);
   }
-  const cwd =
+  const environmentCwd =
     query.environmentId === undefined
       ? undefined
       : (requireEnvironment(deps.db, query.environmentId).path ?? undefined);
   const { hostId, hostLookupError, providersPromise } =
     resolveSystemProviderInfosPlan(deps, query);
+  // A project's new thread lists where thread create checks its model (#1236).
+  const cwd =
+    environmentCwd ??
+    (query.projectId === undefined || hostId === null
+      ? undefined
+      : projectCheckoutPathOnHost(deps, query.projectId, hostId));
   // Validation tells an offline host apart from a failed discovery (#1291).
   if (access.kind === "validation" && hostLookupError !== null) {
     throw hostLookupError;
@@ -606,6 +612,16 @@ async function resolveExecutionOptions(
     selectedOnlyModels,
     modelLoadError: modelResult.modelLoadError,
   };
+}
+
+/** The project's checkout on the host: a new thread there starts in it, or in a worktree of it. */
+export function projectCheckoutPathOnHost(
+  deps: Pick<LoggedWorkSessionDeps, "db">,
+  projectId: string,
+  hostId: string,
+): string | undefined {
+  const source = getProjectSourceByHost(deps.db, projectId, hostId);
+  return source?.type === "local_path" ? source.path : undefined;
 }
 
 async function loadSystemProviderModels(

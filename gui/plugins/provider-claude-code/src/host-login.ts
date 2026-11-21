@@ -167,7 +167,7 @@ export class ClaudeLogin {
   }
 
   private async action(input: ClaudeLoginInput): Promise<ClaudeLoginStatus> {
-    if (input.action === "status") return this.check();
+    if (input.action === "status") return this.check(input.force === true);
     if (input.action === "cancel") {
       if (input.requestId === this.value.login_id) {
         this.stop();
@@ -200,7 +200,7 @@ export class ClaudeLogin {
     await this.check(true);
     if (
       this.child ||
-      this.value.state === "connected" ||
+      (!input.force && this.value.state === "connected") ||
       this.value.state === "unavailable" ||
       !input.requestId
     )

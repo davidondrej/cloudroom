@@ -68,6 +68,7 @@ function useSignsInElsewhere() {
 }
 type Action = {
   action?: "login" | "cancel" | "complete" | "setup-token";
+  force?: boolean;
   requestId?: string;
   code?: string;
   state?: string;
@@ -97,11 +98,12 @@ async function request(
 const openWhenReady = new Set<string>();
 
 /** `quiet`: for screens open all day, like the composer. One check, then again only after a sign-in or 5 minutes
- *  (db-load-budget: no polling every app makes all the time). */
+ *  (db-load-budget: no polling every app makes all the time). `fresh`: bust the host's 15 s status cache after an auth failure. */
 export function useClaudeConnection(
   target: ClaudeConnectionTarget,
   enabled = true,
   quiet = false,
+  fresh = false,
 ) {
   const account = useCloudroomAccount();
   const query = useQuery({
@@ -112,11 +114,16 @@ export function useClaudeConnection(
       target.target === "cloud" ? "primary" : target.environmentId ?? target.hostId ?? "primary",
       target.target === "cloud" ? account.data?.account?.id : null,
     ],
-    queryFn: ({ signal }) => request(target, undefined, signal),
+    queryFn: ({ signal }) =>
+      request(
+        target,
+        fresh && target.target === "local" ? { force: true } : undefined,
+        signal,
+      ),
     enabled:
       enabled && (target.target === "local" || account.data?.ready === true),
     retry: false,
-    staleTime: quiet ? 5 * 60_000 : 30_000,
+    staleTime: fresh ? 0 : quiet ? 5 * 60_000 : 30_000,
     refetchOnWindowFocus: !quiet,
     refetchInterval: (query) =>
       query.state.data?.state === "waiting" ? 1500 : quiet ? false : 60_000,
@@ -187,71 +194,23 @@ export function useRefreshOnClaudeConnect(connected: boolean, onConnected?: () =
   return connected;
 }
 
-export function ClaudeSignIn({
-  target,
-  onContinue,
-  continuing,
-}: {
-  target: ClaudeConnectionTarget;
-  onContinue?: () => void;
-  continuing: boolean;
-}) {
-  const auth = useClaudeConnection(target);
-  const connected = auth.data?.state === "connected";
-  const sawSignedOut = useRef(false);
-  useEffect(() => {
-    if (auth.data && !connected) sawSignedOut.current = true;
-    else if (connected && sawSignedOut.current) {
-      sawSignedOut.current = false;
-      onContinue?.();
-    }
-  }, [auth.data, connected, onContinue]);
-  if (connected && !onContinue) return null;
-  if (connected)
-    return (
-      <div className="flex items-center justify-between gap-2 text-sm">
-        <span>Claude is connected.</span>
-        <Button
-          type="button"
-          size="sm"
-          className="h-7 text-xs"
-          disabled={continuing}
-          onClick={onContinue}
-        >
-          {continuing ? "Starting…" : "Continue"}
-        </Button>
-      </div>
-    );
-  return (
-    <ClaudeConnectionPanel
-      target={target}
-      heading={
-        <div>
-          <p className="text-sm font-medium">Sign in to Claude to continue</p>
-          <p className="text-muted-foreground">Your message is saved.</p>
-        </div>
-      }
-    />
-  );
-}
+type SignInActionInput =
+  | "login"
+  | "cancel"
+  | "complete"
+  | { kind: "login" | "cancel" | "complete"; force?: boolean };
 
-export function ClaudeConnectionPanel({
-  target,
-  onClose,
-  heading,
-}: {
-  target: ClaudeConnectionTarget;
-  onClose?: () => void;
-  heading?: ReactNode;
-}) {
+function useClaudeSignInFlow(target: ClaudeConnectionTarget, fresh = false) {
   const [code, setCode] = useState("");
   const [manual, setManual] = useState(false);
   const client = useQueryClient();
-  const auth = useClaudeConnection(target);
+  const auth = useClaudeConnection(target, true, false, fresh);
   const elsewhere = useSignsInElsewhere();
   const codeFlow = manual || elsewhere(auth.data);
   const action = useMutation({
-    mutationFn: async (kind: "login" | "cancel" | "complete") => {
+    mutationFn: async (raw: SignInActionInput) => {
+      const kind = typeof raw === "string" ? raw : raw.kind;
+      const force = typeof raw === "string" ? false : raw.force === true;
       const codeInput = code.trim();
       setCode("");
       const requestId =
@@ -277,7 +236,13 @@ export function ClaudeConnectionPanel({
         if (result && result.state !== "error") return openSignIn(result);
         if (result) tokenError = new Error(result.message ?? "Claude sign-in failed.");
       }
-      let input: Action = { action: kind, requestId };
+      let input: Action = {
+        action: kind,
+        requestId,
+        ...(kind === "login" && force && target.target === "local"
+          ? { force: true }
+          : {}),
+      };
       if (kind === "complete") {
         const [authorizationCode, state] = codeInput.split("#");
         const expected = new URL(
@@ -325,6 +290,246 @@ export function ClaudeConnectionPanel({
     target.target === "cloud"
       ? Boolean(signInUrl) && !returnsToMac(signInUrl!)
       : codeFlow;
+  return {
+    auth,
+    action,
+    code,
+    setCode,
+    codeFlow,
+    setManual,
+    state,
+    error,
+    signInUrl,
+    pasteCode,
+  };
+}
+
+/** Inline Claude sign-in/continue controls for timeline rows (AuthFailureRow and CloudLoginRow). */
+export function ClaudeInlineSignIn({
+  target,
+  onContinue,
+  continuing = false,
+  fresh = false,
+}: {
+  target: ClaudeConnectionTarget;
+  onContinue?: () => void;
+  continuing?: boolean;
+  fresh?: boolean;
+}) {
+  const {
+    auth,
+    action,
+    code,
+    setCode,
+    codeFlow,
+    setManual,
+    state,
+    error,
+    signInUrl,
+    pasteCode,
+  } = useClaudeSignInFlow(target, fresh);
+  const connected = state === "connected";
+  const sawSignedOut = useRef(false);
+  useEffect(() => {
+    if (auth.data && !connected) sawSignedOut.current = true;
+    else if (connected && sawSignedOut.current) {
+      sawSignedOut.current = false;
+      onContinue?.();
+    }
+  }, [auth.data, connected, onContinue]);
+
+  return (
+    <div className="flex flex-col gap-2">
+      {connected ? (
+        <div className="flex flex-wrap items-center gap-2">
+          {onContinue ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={continuing}
+              onClick={onContinue}
+            >
+              <Icon name="RotateCcw" className="size-3.5" aria-hidden />
+              {continuing ? "Starting…" : "Continue"}
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            className="text-muted-foreground"
+            disabled={action.isPending}
+            onClick={() => action.mutate({ kind: "login", force: true })}
+          >
+            {action.isPending ? "Opening sign-in…" : "Sign in again"}
+          </Button>
+        </div>
+      ) : state === "waiting" && auth.data?.installing_since ? (
+        <div className="flex flex-col gap-2">
+          <div className="max-w-xs text-xs">
+            <InstallProgress since={auth.data.installing_since} />
+          </div>
+          <div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              disabled={action.isPending}
+              onClick={() => action.mutate("cancel")}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : state === "waiting" ? (
+        <div className="flex flex-col gap-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!signInUrl}
+              onClick={() => {
+                if (signInUrl) openUrlInExternalBrowser(signInUrl);
+              }}
+            >
+              <Icon name="ExternalLink" className="size-3.5" aria-hidden />
+              {signInUrl ? "Open sign-in page" : "Getting sign-in link…"}
+            </Button>
+            {target.target === "local" && !codeFlow && auth.data?.manual_url ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="text-muted-foreground"
+                onClick={() => {
+                  setManual(true);
+                  openUrlInExternalBrowser(auth.data!.manual_url!);
+                }}
+              >
+                Use a code
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-muted-foreground"
+              disabled={action.isPending}
+              onClick={() => action.mutate("cancel")}
+            >
+              Cancel
+            </Button>
+          </div>
+          <p className="text-muted-foreground">
+            {!signInUrl
+              ? "Getting the sign-in link…"
+              : pasteCode
+                ? "Approve in your browser, then paste the one-time code."
+                : "Approve in your browser. This updates automatically."}
+          </p>
+          {signInUrl ? (
+            <div className="max-w-sm rounded-md border border-input px-2 py-1">
+              <CopyableInlineLabel
+                text={signInUrl}
+                label="Copy sign-in link"
+                successMessage="Sign-in link copied."
+              />
+            </div>
+          ) : null}
+          {pasteCode ? (
+            <form
+              className="flex max-w-sm gap-1.5"
+              onSubmit={(event) => {
+                event.preventDefault();
+                action.mutate("complete");
+              }}
+            >
+              <input
+                type="password"
+                maxLength={2048}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="One-time code"
+                aria-label="One-time sign-in code"
+                value={code}
+                onChange={(event) => setCode(event.target.value)}
+                className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1"
+              />
+              <Button
+                type="submit"
+                size="sm"
+                variant="outline"
+                disabled={!code.trim() || action.isPending}
+              >
+                {action.isPending ? "…" : "Connect"}
+              </Button>
+            </form>
+          ) : null}
+        </div>
+      ) : auth.isError || state === "unavailable" ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={auth.isFetching}
+            onClick={() => void auth.refetch()}
+          >
+            Check again
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={action.isPending}
+            onClick={() => action.mutate("login")}
+          >
+            {action.isPending ? "Opening sign-in…" : "Sign in with Claude"}
+          </Button>
+          {target.target === "cloud" ? <ClaudeApiKeyForm inline /> : null}
+        </div>
+      )}
+      {auth.data?.message ? (
+        <p role="status" className="text-xs text-muted-foreground">
+          {auth.data.message}
+        </p>
+      ) : null}
+      {error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+export function ClaudeConnectionPanel({
+  target,
+  onClose,
+  heading,
+}: {
+  target: ClaudeConnectionTarget;
+  onClose?: () => void;
+  heading?: ReactNode;
+}) {
+  const {
+    auth,
+    action,
+    code,
+    setCode,
+    codeFlow,
+    setManual,
+    state,
+    error,
+    signInUrl,
+    pasteCode,
+  } = useClaudeSignInFlow(target);
   return (
     <div className="space-y-2 text-xs">
       <div className="flex items-center justify-between gap-2">

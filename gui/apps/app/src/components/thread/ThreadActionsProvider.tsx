@@ -49,7 +49,11 @@ import { getThreadReadToggleAction } from "@cloudroom/client-core";
 import type { PaneContent } from "@/lib/split-layout";
 import { paneContentRoute, reconcileLayoutForContent, threadPaneContent } from "@/views/thread-detail/splitThreadNavigation";
 import { getThreadRoutePath } from "@/lib/route-paths";
-import { getDesktopBrowserApi } from "@/lib/room-desktop";
+import { getDesktopBrowserApi, getRoomDesktopInfo } from "@/lib/room-desktop";
+import {
+  useAppCommandHandler,
+  useAppCommandShortcut,
+} from "@/components/commands/AppCommandProvider";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import {
   getSidebarThreadNavigationTargets,
@@ -119,6 +123,8 @@ interface DeleteThreadActionRequest {
 interface ThreadActionContext {
   childThreadCount: number;
 }
+
+const SHORTCUT_CONFIRM_DELAY_MS = 400;
 
 export function ThreadActionsProvider({
   children,
@@ -403,6 +409,33 @@ export function ThreadActionsProvider({
     openThread,
     unarchive: unarchiveMutate,
   });
+  // On desktop the archive shortcut is a menu accelerator, so it still fires
+  // while this confirmation is open: pressing it again confirms. Presses in
+  // the first moments after a popup appears are swallowed, so a late Cloud
+  // check, a queued popup, or a held key can't confirm unread.
+  const confirmArmedAtRef = useRef(0);
+  useEffect(() => {
+    confirmArmedAtRef.current = Date.now() + SHORTCUT_CONFIRM_DELAY_MS;
+  }, [confirmation]);
+  useAppCommandHandler(
+    "thread.archive",
+    () => {
+      if (Date.now() >= confirmArmedAtRef.current) confirmArchive();
+      return true;
+    },
+    200,
+    Boolean(confirmation),
+  );
+  const archiveShortcut = useAppCommandShortcut("thread.archive");
+  const archiveHint =
+    getRoomDesktopInfo()?.onAppCommand && archiveShortcut ? (
+      <>
+        <kbd className="shrink-0 rounded border border-foreground/15 px-1.5 py-0.5 font-sans text-foreground/85">
+          {archiveShortcut.label}
+        </kbd>{" "}
+        again to archive
+      </>
+    ) : null;
 
   const toggleRead = useCallback(
     (thread: Thread) => {
@@ -477,22 +510,27 @@ export function ThreadActionsProvider({
         onDelete={confirmDelete}
       />
       <ConfirmDeleteDialog
+        compact
         open={Boolean(confirmation)}
         onOpenChange={(open) => {
           if (!open) closeConfirmation();
         }}
       >
         <ConfirmDeleteDialogContent
-          title={confirmation?.runningCount === null ? "Archive without checking?" : "Archive a running thread?"}
+          compact
+          hint={archiveHint}
+          title={confirmation?.runningCount === null ? "Archive without checking?" : "Archive running thread?"}
           secondaryAction={confirmation?.runningCount === null ? { label: "Retry", onClick: retry } : undefined}
           description={
             confirmation && <>
               {confirmation.runningCount === null && "Cloud couldn’t check whether this thread is running. "}
               {confirmation.runningCount !== null && confirmation.runningCount > 1 && `At least ${confirmation.runningCount} threads are running. `}
-              Archiving “{getThreadDisplayTitle(confirmation.thread)}” stops all running work in this thread and its children.
+              Stops active work in{" "}
+              <span className="font-medium text-foreground/90">{getThreadDisplayTitle(confirmation.thread)}</span>{" "}
+              and its children.
             </>
           }
-          confirmLabel="Archive anyway"
+          confirmLabel="Archive"
           pending={false}
           onConfirm={confirmArchive}
           onCancel={closeConfirmation}

@@ -287,6 +287,9 @@ describe("plugin install sources", () => {
     ]) {
       expect(() => parsePluginSource(source)).toThrowError(/credential helper/);
     }
+    expect(() =>
+      parsePluginSource("git:git@github.com:acme/repo@main"),
+    ).toThrowError(/https URL/);
   });
 
   it("reads git semver ranges, explicit selectors, and tag prefixes", () => {

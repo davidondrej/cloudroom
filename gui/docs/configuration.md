@@ -233,8 +233,9 @@ is no setting. See [Worktrees](worktrees.md#cleanup).
 
 Settings → Agents → Harness lists every registered agent provider in picker order:
 the default first, then the providers you started the most threads with in the
-last 30 days, then the rest in plugin install order. The order is not set by
-hand. `defaultProviderId` is the provider new threads use when neither the
+last 72 hours, then the rest in plugin install order. Drag a row to set your own
+order instead (`customProviderOrder`; Picker order → Most used, or `[]`, goes
+back). `defaultProviderId` is the provider new threads use when neither the
 caller nor the project chose one (`null` means the first available provider in
 picker order). Set it with `bb settings general defaultProviderId claude-code`
 (or `null`).
@@ -802,8 +803,8 @@ persistently restores undimmed splits.
 
 ## Accounts
 
-The builtin Accounts plugin is always on (ADR 0194). Connect up to 10 Claude
-Code and 10 Codex subscriptions at the top of Settings → Agents → Claude Code
+The builtin Accounts plugin is always on (ADR 0194). Connect up to 30 Claude
+Code and 30 Codex subscriptions at the top of Settings → Agents → Claude Code
 or Codex. The machine's own CLI login is the first entry and is never copied, so
 the CLI and Cloudroom never refresh the same token.
 
@@ -1116,7 +1117,8 @@ spec tracks the newest compatible stable release, ranges track within the
 range, dist-tags track the tag, and exact versions are pinned. A bare HTTP(S)
 Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`. Git
 URLs must not embed a username, password, or token; private repositories sign
-in through Git's credential helper. An
+in through Git's credential helper. A marketplace listing's Git URL login is
+dropped. An
 omitted ref tracks the repository's default branch, explicit branches track
 their head, and tags and commits are pinned. A semver range
 (`git:<url>@^1.2.0`, or `@semver:<range>` to state the intent explicitly)

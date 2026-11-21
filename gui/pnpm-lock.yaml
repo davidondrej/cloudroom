@@ -563,8 +563,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/tunnel-contract
       '@hono/node-server':
-        specifier: ^1.19.18
-        version: 1.19.19(hono@4.13.16)
+        specifier: ^2.1.3
+        version: 2.1.9(hono@4.13.16)
       '@parcel/watcher':
         specifier: 2.5.6
         version: 2.5.6
@@ -690,8 +690,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
       '@hono/node-server':
-        specifier: ^1.19.18
-        version: 1.19.19(hono@4.13.16)
+        specifier: ^2.1.3
+        version: 2.1.9(hono@4.13.16)
       '@opentelemetry/api':
         specifier: 1.9.1
         version: 1.9.1
@@ -1711,9 +1711,6 @@ importers:
       '@radix-ui/react-tabs':
         specifier: ^1.1.17
         version: 1.1.17(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@radix-ui/react-toggle':
-        specifier: ^1.1.14
-        version: 1.1.14(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-toggle-group':
         specifier: ^1.1.15
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1878,6 +1875,9 @@ importers:
       '@cloudroom/domain':
         specifier: workspace:*
         version: link:../domain
+      '@cloudroom/process-utils':
+        specifier: workspace:*
+        version: link:../process-utils
       '@cloudroom/provider-bridge-protocol':
         specifier: workspace:*
         version: link:../provider-bridge-protocol
@@ -2164,9 +2164,6 @@ importers:
       '@radix-ui/react-tabs':
         specifier: ^1.1.17
         version: 1.1.17(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
-      '@radix-ui/react-toggle':
-        specifier: ^1.1.14
-        version: 1.1.14(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-toggle-group':
         specifier: ^1.1.15
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.13))(@types/react@19.2.13)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -3599,6 +3596,9 @@ importers:
 
   plugins/shared-projects:
     dependencies:
+      '@cloudroom/shared-ui':
+        specifier: workspace:*
+        version: link:../../packages/shared-ui
       zod:
         specifier: 4.6.7
         version: 4.6.7
@@ -3615,9 +3615,15 @@ importers:
       '@types/react':
         specifier: ^19.0.0
         version: 19.2.13
+      '@types/react-dom':
+        specifier: ^19.0.0
+        version: 19.2.3(@types/react@19.2.13)
       react:
         specifier: ^19.0.0
         version: 19.2.4
+      react-dom:
+        specifier: ^19.0.0
+        version: 19.2.4(react@19.2.4)
       typescript:
         specifier: npm:@typescript/typescript6@^6.0.2
         version: '@typescript/typescript6@6.0.2'
@@ -4000,8 +4006,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/test-helpers
       '@hono/node-server':
-        specifier: ^1.19.18
-        version: 1.19.19(hono@4.13.16)
+        specifier: ^2.1.3
+        version: 2.1.9(hono@4.13.16)
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.4(@cloudflare/workers-types@4.20260702.1)(@opentelemetry/api@1.9.1)(@types/better-sqlite3@7.6.13)(better-sqlite3@12.10.0)(kysely@0.29.3)
@@ -5132,11 +5138,11 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@hono/node-server@1.19.19':
-    resolution: {integrity: sha512-Fy9R7PACOzHU9LDpfnuzVyuVYevKQRcEG2mZhmfc+DRdmayEd3RVfa2XOt2IgGcPNgA77Yk63KBszepcMFK5Ng==}
-    engines: {node: '>=18.14.1'}
+  '@hono/node-server@2.1.9':
+    resolution: {integrity: sha512-Sk4NQd3GFY0WZWCzndwFMPwJhtD0y9qjsQ+pjID0/03nK9pxyBCUoUHCho8QYBLBVhi0ssL8UkNPHqbgSOFPIQ==}
+    engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4
+      hono: ^4 || ^5.0.0-0
 
   '@hugeicons/core-free-icons@4.1.3':
     resolution: {integrity: sha512-FWPrKnlYKpSaitUtlZhFlDQXDgHiayTPFJYWvyIKkW2RI6Vj5KBvjxI+lAnnFPu07SwgIMiDDj+Gttl0t+o/oQ==}
@@ -12064,7 +12070,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@hono/node-server@1.19.19(hono@4.13.16)':
+  '@hono/node-server@2.1.9(hono@4.13.16)':
     dependencies:
       hono: 4.13.16
 
@@ -12292,7 +12298,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.1(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 1.19.19(hono@4.13.16)
+      '@hono/node-server': 2.1.9(hono@4.13.16)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5

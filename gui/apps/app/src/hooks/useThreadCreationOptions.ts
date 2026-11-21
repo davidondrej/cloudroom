@@ -22,7 +22,7 @@ import type {
   ExecutionInputFieldSource,
   ExistingThreadExecutionInputSources,
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import {
   PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
@@ -112,7 +112,7 @@ type ProviderModelReasoningSelectionSetter = (
 ) => void;
 
 interface UseThreadCreationOptionsResult<TExecutionInputSources> {
-  executionOptionsRouting: SystemProvidersQuery;
+  executionOptionsRouting: SystemExecutionOptionsQuery;
   selectedProviderId: string;
   setSelectedProviderId: StringSelectionSetter;
   setProviderModelReasoning: ProviderModelReasoningSelectionSetter;
@@ -165,7 +165,7 @@ function resolveThreadCreationProviderRouting({
   environmentSelectionValue,
   modelCatalogScope,
   scope,
-}: ResolveThreadCreationProviderRoutingArgs): SystemProvidersQuery {
+}: ResolveThreadCreationProviderRoutingArgs): SystemExecutionOptionsQuery {
   if (scope === "component-local") {
     if (environmentId === undefined) {
       return {};
@@ -338,7 +338,10 @@ export function useThreadCreationOptions(
   );
   const executionOptionsQueryEnabled = enabled;
   const executionOptionsRouting = resolveProviderRouting
-    ? resolveProviderRouting(rawEnvironmentSelectionValue)
+    ? resolveProviderRouting(
+        rawEnvironmentSelectionValue,
+        selectedProviderIdBeforeReadyFallback,
+      )
     : resolveThreadCreationProviderRouting({
         environmentId,
         environmentHostId,

@@ -115,6 +115,15 @@ export function openBindings(db: DbQueryConnection) {
     .where(and(isNull(threads.archivedAt), isNull(threads.deletedAt))).all();
 }
 
+export function openBinding(db: DbQueryConnection, threadId: string): OpenBinding | null {
+  return db.select({
+    threadId: cloudroomThreads.threadId, sessionId: cloudroomThreads.sessionId, coreUrl: cloudroomThreads.coreUrl,
+    status: threads.status, parentThreadId: threads.parentThreadId,
+    sending: sql<number>`exists (select 1 from ${cloudroomCommands} where ${cloudroomCommands.threadId} = ${cloudroomThreads.threadId} and ${cloudroomCommands.state} = 'sending')`,
+  }).from(cloudroomThreads).innerJoin(threads, eq(threads.id, cloudroomThreads.threadId))
+    .where(and(eq(cloudroomThreads.threadId, threadId), isNull(threads.archivedAt), isNull(threads.deletedAt))).get() ?? null;
+}
+
 export function lastGitStatus(db: DbQueryConnection, threadId: string): string | null {
   return db.select({ value: cloudroomThreads.lastGitStatus }).from(cloudroomThreads).where(eq(cloudroomThreads.threadId, threadId)).get()?.value ?? null;
 }
@@ -182,11 +191,12 @@ export function saveCommandState(db: DbQueryConnection, threadId: string, id: st
   if (unstarted && !["sending", "accepted", "running", "delivered"].includes(state)) saveStatus(db, threadId, ["failed", "unknown", "unknown_after_restart"].includes(state) ? "error" : "idle", { category: `prompt-${state.replaceAll("_", "-")}`, ...refusal });
 }
 
-export function effectivePrompt(db: DbQueryConnection, threadId: string, id: string, pending = false): Record<string, unknown> {
-  const original = command(db, id);
+export function effectivePrompt(db: DbQueryConnection, threadId: string, id: string, pending = false, preloaded?: Command[]): Record<string, unknown> {
+  const all = preloaded ?? commands(db, threadId);
+  const original = preloaded ? (all.find((item) => item.id === id) ?? null) : command(db, id);
   let input: Record<string, unknown> = original ? JSON.parse(original.input) : {};
   let revision = 1;
-  const edits = commands(db, threadId)
+  const edits = all
     .filter((item) => item.command === "edit" && (["accepted", "completed"].includes(item.state) || (pending && item.state === "sending")))
     .map((item) => JSON.parse(item.input))
     .filter((item) => item.target_request_id === id)

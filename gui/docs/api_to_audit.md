@@ -1956,6 +1956,9 @@ Verified data may come from the machine's stored catalog while a background
 refresh runs, or while that provider's refresh keeps failing or timing out, so
 a model newer than the stored list can be normalized away before a refresh
 lands.
+`extraChoice={{ label, icon, onSelect }}` adds one tab after the providers for
+a caller's choice that is not an agent (Loops: Jev); picking it closes the
+picker and calls `onSelect` without changing `value`.
 `allowProviderChange={false}` hides provider tabs while retaining model,
 reasoning, and service-tier selection for the controlled provider. Routing
 never implies provider locking: an environment supplies host/workspace context
@@ -2264,9 +2267,10 @@ renders in the same footer row.
 3. **Programmatic opening.** Confirm `open()` should remain available. The
    intended policy is direct user-driven flows; background changes should not
    surprise-open sidebar content.
-4. **Disclosure lifecycle.** Components currently mount only while open and
-   remount after dismissal. Confirm plugins do not require retained hidden state,
-   or add an explicit retention policy before stabilizing.
+4. **Disclosure lifecycle.** Components mount while open, and also hidden while
+   their button is hovered, so data loads before the click. A hidden
+   mount ends 30 s after the pointer leaves. Confirm plugins tolerate mounting
+   without being seen, or add an explicit opt-out before stabilizing.
 5. **Footer capacity.** Establish overflow behavior when several plugins
    register items, including compact viewports and icon-collapsed sidebars.
 6. **Compatibility.** Migrate representative users of

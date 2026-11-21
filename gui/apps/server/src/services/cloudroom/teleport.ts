@@ -31,7 +31,10 @@ import type { PromptInput, Thread } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
-import { shortenWorktreeRetirement } from "../environments/environment-engine.js";
+import {
+  restoreParkedWorktree,
+  shortenWorktreeRetirement,
+} from "../environments/environment-engine.js";
 import {
   getLastExecutionOptions,
   getLastProviderThreadId,
@@ -493,6 +496,14 @@ class Teleport {
     this.notify(threadId);
     this.checking.add(id);
     try {
+      // A parked worktree holds the files Teleport carries: bring it back first.
+      for (const source of all)
+        if (source.archivedAt === null && source.environmentId !== null)
+          await restoreParkedWorktree(
+            this.deps,
+            source.id,
+            source.environmentId,
+          );
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
       this.dropChecking(threadId, id);

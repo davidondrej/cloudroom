@@ -112,10 +112,12 @@ export type SystemInstallableProvidersQuery = z.infer<
   typeof systemInstallableProvidersQuerySchema
 >;
 
+// `projectId` lists in that project's checkout on the host, where a new thread there starts (#1236).
 export const systemExecutionOptionsQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     providerId: z.string().min(1),
+    projectId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -128,6 +130,7 @@ export const systemRestartModelDiscoveryRequestSchema = z
     hostId: z.string().min(1).optional(),
     environmentId: z.string().min(1).optional(),
     providerId: z.string().min(1),
+    projectId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine(rejectMultipleWorkspaceSelectors);

@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 162
+
+GitLab projects in the cloud (2026-11-21)
+
+### Changes
+
+- Cloud threads now work with GitLab.com projects, not just GitHub.
+- Unused worktrees park themselves to free disk, and threads keep running after a worktree move.
+- The app starts faster, and sleeping threads open their history at once.
+- A subagent bar under the thread title shows every child thread at a glance.
+- Signed-out accounts show a one-click Sign in again button right in the chat.
+- Security fixes.
+
 ## 161
 
 The Antigravity Update (2026-11-21)

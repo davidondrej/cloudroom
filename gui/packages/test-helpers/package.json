@@ -17,7 +17,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@cloudroom/domain": "workspace:*",

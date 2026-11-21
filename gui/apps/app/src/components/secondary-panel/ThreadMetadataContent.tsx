@@ -709,6 +709,7 @@ export function GitStatusRow({
     error: workspaceStatusError,
     workspaceUnavailable,
     workspaceDeleted: isWorkspaceDeleted,
+    workspaceParked: environment?.lifecycle.phase === "parked",
   });
   const labelClass =
     display.label === "Dirty" ? "text-destructive" : "text-foreground";

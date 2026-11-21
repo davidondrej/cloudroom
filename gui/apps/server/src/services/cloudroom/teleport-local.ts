@@ -22,6 +22,7 @@ import {
   threads,
 } from "@cloudroom/db";
 import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
@@ -293,7 +294,7 @@ async function localForkFolder(deps: AppDeps, source: Thread): Promise<string> {
   if (hostId && project) await ensureProjectCheckoutForThread(deps, { project, hostId });
   return (await localEnvironment(deps, source).catch((error: unknown) => {
     throw error instanceof ApiError && error.body.code === "teleport_unavailable"
-      ? new ApiError(409, "fork_unavailable", `This project has no folder on this ${computer} and no GitHub repo to clone. Add its folder here, or fork to Cloud.`)
+      ? new ApiError(409, "fork_unavailable", `This project has no folder on this ${computer} and no repository to clone. Add its folder here, or fork to Cloud.`)
       : error;
   })).path;
 }
@@ -327,8 +328,9 @@ async function landLocalForkCode(deps: AppDeps, client: CloudroomClient, source:
   try {
     const file = join(temporary, "code.bundle");
     await writeFile(file, bundle);
-    const fetch = () => exec("git", ["-C", folder, "fetch", "-q", file, `refs/cloudroom/${id}:refs/heads/${branch}`], { windowsHide: true });
-    await fetch().catch(async () => { await exec("git", ["-C", folder, "fetch", "-q", "origin"], { windowsHide: true }).catch(() => {}); await fetch(); });
+    // GIT_ALLOW_PROTOCOL=file: a checkout's `url.*.insteadOf` can't turn the local bundle into a proxy or SSH fetch.
+    const fetch = () => exec("git", [...gitSafetyArgs(), "-C", folder, "fetch", "-q", file, `refs/cloudroom/${id}:refs/heads/${branch}`], { env: BUNDLE_ONLY, windowsHide: true });
+    await fetch().catch(async () => { await exec("git", [...gitSafetyArgs(), "-C", folder, "fetch", "-q", "origin"], { windowsHide: true }).catch(() => {}); await fetch(); });
   } catch (error) {
     const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
     throw new ApiError(409, "fork_code_unavailable", `The Cloud thread's code could not be copied to this ${computer}: ${reason || "git fetch failed"}`);
@@ -373,7 +375,7 @@ export async function copyToMac(deps: AppDeps, threadId: string): Promise<{ bran
       try { await writeFile(file, await download(client, path)); }
       finally { await vm(client, `rm -f ${quote(path)}`).catch(() => {}); }
       if (!full && await git(environment.path, ["bundle", "verify", "-q", file]) === null) continue;
-      try { await exec("git", ["-C", environment.path, "fetch", "-q", file, `refs/heads/${branch}:refs/heads/${branch}`], { windowsHide: true }); }
+      try { await exec("git", [...gitSafetyArgs(), "-C", environment.path, "fetch", "-q", file, `refs/heads/${branch}:refs/heads/${branch}`], { env: BUNDLE_ONLY, windowsHide: true }); }
       catch (error) {
         const reason = error instanceof Error && "stderr" in error ? String(error.stderr).trim() : "";
         throw new ApiError(409, "copy_unavailable", /checked out|rejected|non-fast-forward/.test(reason)
@@ -725,8 +727,11 @@ async function same(a: string, b: string): Promise<boolean> {
   return Promise.all([readFile(a), readFile(b)]).then(([left, right]) => left.equals(right), () => false);
 }
 
+/** Env for fetching a local bundle file: no other transport, so repo config can't redirect it. */
+const BUNDLE_ONLY = { ...process.env, GIT_ALLOW_PROTOCOL: "file" };
+
 async function git(cwd: string, args: string[]): Promise<string | null> {
-  return exec("git", ["-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true }).then((result) => result.stdout, () => null);
+  return exec("git", [...gitSafetyArgs(), "-C", cwd, ...args], { maxBuffer: 64 * 1024 * 1024, windowsHide: true }).then((result) => result.stdout, () => null);
 }
 
 /** `lineage`: a Codex fork's parent file (see `codexLineage`), kept byte-for-byte. A Mac copy that already holds

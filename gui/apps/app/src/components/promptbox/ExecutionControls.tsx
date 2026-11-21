@@ -2,7 +2,7 @@ import { memo } from "react";
 import type { PermissionMode, ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import type {
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import { formatModelLabel } from "@/hooks/useThreadCreationOptions";
 import {
@@ -55,7 +55,7 @@ export interface ExecutionPermissionConfig {
 }
 
 export interface ExecutionControlsProps {
-  providerRouting?: SystemProvidersQuery;
+  providerRouting?: SystemExecutionOptionsQuery;
   provider: ExecutionProviderConfig;
   model: ExecutionModelConfig;
   serviceTier?: ExecutionServiceTierConfig;

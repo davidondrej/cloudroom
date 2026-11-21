@@ -7,7 +7,7 @@ import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { wsManager } from "@/lib/ws";
 
 const PLUGIN = "accounts";
-const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor"]);
+const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor", "acp-antigravity"]);
 const QUERY_KEY = "plan-limit-accounts";
 
 const accountsSchema = z.array(

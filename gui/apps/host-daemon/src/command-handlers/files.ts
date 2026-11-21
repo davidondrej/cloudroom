@@ -48,6 +48,7 @@ function coreFs<T>(binary: string, command: string, request: object, options?: O
       env: sanitizeInheritedChildProcessEnv({ env: process.env, ...(shellPath !== undefined ? { shellPath } : {}) }),
       maxBuffer: MAX_OUTPUT_BYTES,
       timeout: TIMEOUT_MS,
+      windowsHide: true,
     }, (error, stdout, stderr) => {
       let reply: { error?: { code: string; message: string; expected: boolean } } | undefined;
       try { reply = JSON.parse(stdout) as typeof reply; } catch { reply = undefined; }

@@ -33,7 +33,8 @@ export interface EnvironmentDisplayInfo {
   modeLabel: string;
   compactModeLabel: string;
   providerLabel: string | null;
-  lifecycle: "provisioning" | "destroyed" | null;
+  // "parked": the worktree's folder was removed to free disk space and comes back on the next message.
+  lifecycle: "provisioning" | "destroyed" | "parked" | null;
   id: string;
 }
 
@@ -92,13 +93,17 @@ export function formatEnvironmentDisplay({
       ? "destroyed"
       : environment.status === "provisioning"
         ? "provisioning"
-        : null;
+        : environment.lifecycle.phase === "parked"
+          ? "parked"
+          : null;
   const lifecycleLabel =
     lifecycle === "destroyed"
       ? "Destroyed"
       : lifecycle === "provisioning"
         ? "Provisioning"
-        : null;
+        : lifecycle === "parked"
+          ? "Parked"
+          : null;
   const providerLabel = resolveEnvironmentProviderLabel(
     environment.environmentProviderId,
     providerLookup,

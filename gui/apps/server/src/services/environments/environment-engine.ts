@@ -1,6 +1,8 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { listProcessesWithCwdUnder } from "@cloudroom/process-utils";
 import { withHostCleanup } from "../hosts/cleanup-context.js";
 import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { findHostDataDir } from "../lib/entity-lookup.js";
@@ -8,9 +10,11 @@ import { updateThread } from "@cloudroom/db";
 import { assertEnvironmentPathAvailable } from "./path-admission.js";
 import {
   markRemovalStarted,
+  ownIgnoredDir,
   restoreWorktreeWork,
   saveWorktreeWork,
   savedBeforeRemoval,
+  undoWorktreeSave,
 } from "./worktree-work.js";
 import { saveThreadProvisionContext } from "../threads/thread-startup-store.js";
 import {
@@ -35,6 +39,7 @@ import {
   releaseFinishedEnvironmentPreparationOwners,
   environmentHasLiveThreads,
   environmentHasRestorableThreads,
+  environmentIsQuiet,
   environments,
   findEnvironmentSharingPath,
   getEnvironment,
@@ -62,6 +67,7 @@ import {
   type Host,
   type JsonValue,
   type Project,
+  type PromptInput,
   type ProvisioningTranscriptEntry,
   type SystemThreadProvisioningStatus,
   type ThreadStatus,
@@ -76,6 +82,8 @@ import {
   type ThreadProvisioningDeps,
   ensureWorkspaceReadyEventInTransaction,
 } from "../threads/thread-provisioning-environment.js";
+import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
+import { isParentNotifiableChildThread } from "../threads/thread-parent.js";
 import { toEnvironmentResponse } from "./environment-response.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "./environment-provider-ids.js";
 import {
@@ -361,6 +369,45 @@ function worktreeNotesDir(
   environmentId: string,
 ): string {
   return path.join(deps.config.dataDir, "worktree-notes", environmentId);
+}
+
+/**
+ * A teardown script releases things outside the folder, like a database or a
+ * container, and a rebuild can't bring those back. The daemon saves the
+ * scripts in its data folder at the environment's first setup. Unreadable
+ * counts as having one.
+ */
+function hasTeardownScript(deps: Pick<Deps, "db" | "hub">, row: EnvironmentRow) {
+  const dataDir = findHostDataDir(deps, row.hostId);
+  if (dataDir === null) return true;
+  try {
+    const saved: unknown = JSON.parse(
+      readFileSync(
+        path.join(dataDir, "environment-hooks", `${row.id}.json`),
+        "utf8",
+      ),
+    );
+    return (saved as { teardown?: unknown }).teardown != null;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+/**
+ * Whether open threads still need this worktree's folder. They don't once
+ * nobody used it since `quietSince`: then it can be parked, and the next
+ * message rebuilds it. A process running in the folder counts as use, since
+ * removal would stop it.
+ */
+async function worktreeInUse(
+  deps: Pick<Deps, "db" | "hub">,
+  row: EnvironmentRow,
+  quietSince: number,
+): Promise<boolean> {
+  if (!environmentIsQuiet(deps.db, row.id, quietSince)) return true;
+  if (hasTeardownScript(deps, row)) return true;
+  if (row.path === null || !existsSync(row.path)) return false;
+  return (await listProcessesWithCwdUnder({ directory: row.path })).length > 0;
 }
 
 async function invokeCreate(
@@ -705,12 +752,17 @@ export function requestEnvironmentRemoval(
   return true;
 }
 
+/**
+ * `quiet` parks a worktree whose threads are open: a time means only if nobody
+ * used it since then, "finish" means its removal already began.
+ */
 async function runRemove(
   deps: Deps,
   environmentId: string,
   attempt: number,
   resumeOnly: boolean,
   signal: AbortSignal,
+  quiet?: number | "finish",
 ): Promise<void> {
   const row = getEnvironment(deps.db, environmentId);
   if (
@@ -732,14 +784,18 @@ async function runRemove(
   // thread can still come back, the environment is parked instead of
   // destroyed: the row stays and the folder is rebuilt on demand. Unarchive
   // waits for teardown to end and stays refused if it failed; the live-thread
-  // check is a last guard.
+  // check is a last guard. A quiet worktree is parked under its open threads.
   const local = isLocalWorktree(deps, row);
-  const automatic = !explicitRemovals.has(environmentId) && local;
+  const automatic =
+    (quiet !== undefined || !explicitRemovals.has(environmentId)) && local;
   const park =
-    automatic && environmentHasRestorableThreads(deps.db, environmentId);
+    automatic &&
+    (quiet !== undefined ||
+      environmentHasRestorableThreads(deps.db, environmentId));
+  const notesDir = worktreeNotesDir(deps, environmentId);
   // Holds the saved HEAD while the folder is being removed, so a retry after
   // a cut-off removal doesn't commit the files it already deleted (#1068).
-  const removing = `${worktreeNotesDir(deps, environmentId)}.removing`;
+  const removing = `${notesDir}.removing`;
   const clearRemoving = () => rm(removing, { force: true }).catch(() => {});
   const keep = (retireAt: number | null) => {
     void clearRemoving();
@@ -752,27 +808,40 @@ async function runRemove(
   };
   // Last guards, before the hook and again before the folder goes (#1284):
   // never remove a folder a live thread or another environment still uses.
-  const refused = () => {
-    const live = environmentHasLiveThreads(deps.db, environmentId);
+  const refused = async (beforeKeep?: () => Promise<void>) => {
+    const live =
+      quiet === undefined
+        ? environmentHasLiveThreads(deps.db, environmentId)
+        : quiet !== "finish" && (await worktreeInUse(deps, row, quiet));
     const other =
       live || !row.providerOwnsPath || row.path === null
         ? null
         : findEnvironmentSharingPath(deps.db, { ...row, path: row.path });
     const reason = live
-      ? "A live thread uses it"
+      ? quiet === undefined
+        ? "A live thread uses it"
+        : "It is in use"
       : other && `Environment ${other.id} uses the same folder`;
     if (reason === null) return false;
     deps.logger.warn({ environmentId, reason }, "Environment removal refused");
     explicitRemovals.delete(environmentId);
     const recheckAt = live ? null : Date.now() + WORK_RECHECK_MS;
     if (recheckAt !== null) deferredRemovals.set(environmentId, recheckAt);
+    // Before `keep` hands the folder back, so nothing runs in it meanwhile.
+    await beforeKeep?.().catch(() => undefined);
     keep(recheckAt);
     return true;
   };
   await withHostCleanup(deps, row.hostId, async () => {
     try {
-      if (refused()) return;
-      if (runsLifecycleHooks(row) && row.hostId !== null && row.path !== null) {
+      if (await refused()) return;
+      // A quiet park has no teardown script to run: `worktreeInUse` keeps those.
+      if (
+        quiet === undefined &&
+        runsLifecycleHooks(row) &&
+        row.hostId !== null &&
+        row.path !== null
+      ) {
         await runEnvironmentHook(deps, {
           id: `environment:${environmentId}:${row.environmentProviderInstanceKey}:teardown`,
           environmentId,
@@ -793,32 +862,38 @@ async function runRemove(
       }
       const resumed =
         automatic &&
-        (await savedBeforeRemoval(
-          row.path!,
-          removing,
-          worktreeNotesDir(deps, environmentId),
-        ));
+        (await savedBeforeRemoval(row.path!, removing, notesDir));
+      let saved = false;
       if (resumed) writeEnvironment(deps, environmentId, { branchName: resumed });
       else if (automatic && existsSync(row.path!)) {
         const branchName = await saveWorktreeWork(
           row.path!,
-          worktreeNotesDir(deps, environmentId),
+          notesDir,
           `cloudroom/saved-${environmentId}`,
           (deletedFiles) =>
             deps.logger.warn(
               { environmentId, deletedFiles },
               "Worktree kept: its changes delete too many tracked files to save automatically",
             ),
+          quiet !== undefined,
         );
         if (branchName === null) {
-          keep(Date.now() + WORK_RECHECK_MS);
+          // Open threads clear a recheck time, so a quiet park sets none.
+          keep(quiet === undefined ? Date.now() + WORK_RECHECK_MS : null);
           return;
         }
+        saved = true;
         // Recorded before the folder goes. A retry after a cut-off removal
         // reuses it above; the mass-deletion check keeps other half-deleted folders.
         writeEnvironment(deps, environmentId, { branchName });
       }
-      if (refused()) return;
+      // The folder stays, so its work is uncommitted again, as it was.
+      if (
+        await refused(
+          saved ? () => undoWorktreeSave(row.path!, notesDir) : undefined,
+        )
+      )
+        return;
       if (automatic && existsSync(row.path!))
         await markRemovalStarted(row.path!, removing).catch(() => {});
       const invocation = await invokeEnvironmentProvider(
@@ -878,10 +953,10 @@ async function runRemove(
         event: { type: "destroy.recorded" },
       });
       if (local)
-        await rm(worktreeNotesDir(deps, environmentId), {
-          recursive: true,
-          force: true,
-        }).catch(() => undefined);
+        for (const dir of [notesDir, ownIgnoredDir(notesDir)])
+          await rm(dir, { recursive: true, force: true }).catch(
+            () => undefined,
+          );
     } catch (error) {
       writeEnvironment(deps, environmentId, {
         teardownStatus: "failed",
@@ -963,8 +1038,43 @@ async function sweepProviderEnvironmentInSlot(
   if (record === undefined) return;
   const now = Date.now();
   if (shared) {
-    if (row.retireAt !== null && row.teardownStatus === null)
-      writeEnvironment(deps, environmentId, { retireAt: null });
+    if (row.teardownStatus === null) {
+      if (row.retireAt !== null)
+        writeEnvironment(deps, environmentId, { retireAt: null });
+      return;
+    }
+    // A quiet park that failed, or that a restart cut off. Its threads are
+    // open, so nothing else retries it: finish it if the folder is already
+    // partly gone (its work is saved), and leave an untouched folder alone.
+    if (
+      !isLocalWorktree(deps, row) ||
+      row.path === null ||
+      (row.retireAt !== null && row.retireAt > now)
+    )
+      return;
+    const begun =
+      existsSync(`${worktreeNotesDir(deps, environmentId)}.removing`) ||
+      !existsSync(row.path);
+    if (!begun) {
+      await undoWorktreeSave(
+        row.path,
+        worktreeNotesDir(deps, environmentId),
+      ).catch(() => undefined);
+      writeEnvironment(deps, environmentId, {
+        status: "ready",
+        teardownStatus: null,
+        teardownMessage: null,
+        retireAt: null,
+      });
+      return;
+    }
+    const attempt = row.teardownAttempt + 1;
+    writeEnvironment(deps, environmentId, {
+      teardownStatus: "running",
+      teardownAttempt: attempt,
+      teardownMessage: null,
+    });
+    await runRemove(deps, environmentId, attempt, false, signal, "finish");
     return;
   }
   if (
@@ -1034,6 +1144,47 @@ async function sweepProviderEnvironmentInSlot(
     row.teardownAttempt > 0,
     signal,
   );
+}
+
+/**
+ * Parks a Local worktree that open threads hold but nobody used since
+ * `quietSince`: its work is saved and its folder removed, and the next message
+ * to a thread rebuilds it. True when it parked; false when it is in use, can't
+ * be saved, or its removal failed (the lifecycle sweep retries that).
+ */
+export async function parkQuietWorktree(
+  deps: Deps,
+  environmentId: string,
+  quietSince: number,
+): Promise<boolean> {
+  const map = perDbRegistry(environmentOperations, deps.db);
+  const hostId = getEnvironment(deps.db, environmentId)?.hostId;
+  if (hostId === undefined || map.has(environmentId)) return false;
+  await runTrackedOperation({
+    kind: "remove",
+    map,
+    key: environmentId,
+    run: (signal) =>
+      withEnvironmentCleanupSlot(deps.db, hostId, async () => {
+        const row = getEnvironment(deps.db, environmentId);
+        if (
+          row === null ||
+          row.teardownStatus !== null ||
+          row.parkedAt !== null ||
+          row.updatedAt > quietSince ||
+          !isLocalWorktree(deps, row)
+        )
+          return;
+        const attempt = row.teardownAttempt + 1;
+        writeEnvironment(deps, environmentId, {
+          teardownStatus: "running",
+          teardownAttempt: attempt,
+          teardownMessage: null,
+        });
+        await runRemove(deps, environmentId, attempt, false, signal, quietSince);
+      }),
+  }).done;
+  return getEnvironment(deps.db, environmentId)?.parkedAt != null;
 }
 
 export async function sweepProviderLifecycles(deps: Deps): Promise<void> {
@@ -1128,17 +1279,90 @@ export function shortenWorktreeRetirement(
 }
 
 const restores = new Map<string, Promise<void>>();
+// Worktrees rebuilt since their thread's last message. Lost on a restart, which only costs the note.
+const rebuilt = new Set<string>();
+const USE_STAMP_MS = 60 * 60_000;
+const SETTLE_WAIT_MS = 30_000;
+
+/** The note telling the agent its folder was rebuilt without what a tool installs or builds, or null. `worktreeRebuiltNoteSent` clears it. */
+export function worktreeRebuiltNote(environmentId: string): PromptInput | null {
+  if (!rebuilt.has(environmentId)) return null;
+  return {
+    type: "text",
+    text: "[Worktree rebuilt]\nCloudroom removed this thread's worktree folder while it was unused, to free disk space, and has just rebuilt it at the same path. Committed and uncommitted work is back. Installed dependencies and build output (such as node_modules or a Rust target folder) are gone: reinstall or rebuild them before you rely on them.",
+    mentions: [],
+    visibility: "agent-only",
+  };
+}
+
+export function worktreeRebuiltNoteSent(environmentId: string): void {
+  rebuilt.delete(environmentId);
+}
+
+/**
+ * Records a use of a Local worktree in its row's `updatedAt`, at most once an
+ * hour: a worktree used since the cutoff is never quietly parked.
+ */
+function markWorktreeUsed(
+  deps: Pick<Deps, "config" | "db" | "hub">,
+  row: EnvironmentRow,
+): void {
+  if (row.updatedAt > Date.now() - USE_STAMP_MS || !isLocalWorktree(deps, row))
+    return;
+  writeEnvironment(deps, row.id, {});
+}
+
+/**
+ * A quiet park of an open thread's worktree that failed or was cut off. The
+ * lifecycle sweep (every 10 s) settles it: this makes it due now and waits.
+ * True when it is still unsettled after `SETTLE_WAIT_MS`.
+ */
+async function quietParkUnsettled(
+  deps: Pick<Deps, "config" | "db" | "hub">,
+  environmentId: string,
+): Promise<boolean> {
+  const unsettled = () => {
+    const row = getEnvironment(deps.db, environmentId);
+    return (
+      row !== null &&
+      row.parkedAt === null &&
+      row.teardownStatus !== null &&
+      row.teardownStatus !== "removed" &&
+      isLocalWorktree(deps, row) &&
+      environmentHasLiveThreads(deps.db, environmentId)
+    );
+  };
+  if (!unsettled()) return false;
+  writeEnvironment(deps, environmentId, { retireAt: Date.now() });
+  const deadline = Date.now() + SETTLE_WAIT_MS;
+  while (unsettled() && Date.now() < deadline) await delay(250);
+  return unsettled();
+}
 
 /** Rebuilds a parked worktree for this thread at its old path, on the branch that holds its saved work. Does nothing if it isn't parked. */
-export function restoreParkedWorktree(
+export async function restoreParkedWorktree(
   deps: Pick<Deps, "config" | "db" | "hub">,
   threadId: string,
   environmentId: string,
 ): Promise<void> {
+  const used = getEnvironment(deps.db, environmentId);
+  if (used !== null) markWorktreeUsed(deps, used);
+  // A park under way would delete the folder under the caller's turn: let it
+  // end, then rebuild what it parked.
+  const active = perDbRegistry(environmentOperations, deps.db).get(
+    environmentId,
+  );
+  if (active?.kind === "remove") await active.done.catch(() => undefined);
+  if (await quietParkUnsettled(deps, environmentId))
+    throw new ApiError(
+      409,
+      "environment_removing",
+      "This thread's worktree is being parked to free disk space. Try again in a minute.",
+    );
   const row = getEnvironment(deps.db, environmentId);
-  if (row === null || row.parkedAt === null) return Promise.resolve();
+  if (row === null || row.parkedAt === null) return;
   const thread = getThread(deps.db, threadId);
-  if (thread === null) return Promise.resolve();
+  if (thread === null) return;
   const running = restores.get(row.id);
   if (running !== undefined) return running;
   const restore = rebuildParkedWorktree(deps, thread, row)
@@ -1197,6 +1421,7 @@ async function rebuildParkedWorktree(
     );
   await restoreWorktreeWork(row.path, worktreeNotesDir(deps, row.id));
   writeEnvironment(deps, row.id, { parkedAt: null });
+  rebuilt.add(row.id);
 }
 
 type EnvironmentProvisionCommand =
@@ -1253,6 +1478,8 @@ interface FailEnvironmentProvisioningDurablyArgs {
   failureEntry: ProvisioningTranscriptEntry;
   failureReason: string;
   provisioningId: string;
+  /** Collects each failed child's parent notice, sent after commit (#2217). */
+  postCommitActions?: CommandResultPostCommitAction[];
 }
 
 interface StartTrackedEnvironmentProvisionCommandArgs {
@@ -1467,6 +1694,19 @@ function recordEnvironmentProvisioningFailureInTransaction(
     if (outcome.applied) {
       deps.hub.notifyThread(thread.id, ["status-changed"]);
     }
+    // A child whose workspace setup failed never ends a turn, so tell its
+    // parent here, as failThreadProvisioning does (#565, #2217).
+    const child = outcome.applied ? getThread(deps.db, thread.id) : null;
+    if (child && isParentNotifiableChildThread(child))
+      args.postCommitActions?.push({
+        run: (runDeps) =>
+          queueChildThreadTurnNotificationBestEffort(runDeps, {
+            childThread: child,
+            failureReason: `Workspace setup failed: ${args.failureReason}`,
+            parentThreadId: child.parentThreadId,
+            turnStatus: "failed",
+          }),
+      });
   }
 
   return true;
@@ -1625,6 +1865,7 @@ function settleEnvironmentProvisionOutcome(
     environmentId: args.command.environmentId,
     failureReason: args.report.errorMessage,
     provisioningId: environmentProvisioningId,
+    postCommitActions,
     failureEntry: {
       type: "step",
       key: "workspace-failed",

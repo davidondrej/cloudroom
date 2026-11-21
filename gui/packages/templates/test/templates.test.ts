@@ -91,6 +91,10 @@ describe("@cloudroom/templates", () => {
     // #936: blobless Cloud clones get one batch fetch before history-wide reads.
     expect(cloud).toContain(String.raw`[ -z "$ids" ] || printf '%s\n' "$ids" | GIT_TERMINAL_PROMPT=0 timeout 900 git -c fetch.negotiationAlgorithm=noop fetch -q --no-tags --recurse-submodules=no --no-write-fetch-head origin --stdin`);
     expect(local).not.toContain("negotiationAlgorithm");
+    // #2107: a Git command whose lazy fetch fails aborts only its own rebase, gets its autostash back, then batch fetches and reruns.
+    expect(cloud).toContain(
+      "`git rebase --abort` if that command was a rebase, `for r in MERGE_AUTOSTASH CHECKOUT_AUTOSTASH_HEAD; do git rev-parse -q --verify $r >/dev/null && git stash apply $r && git update-ref -d $r; done; true`, that batch fetch, then that command again.",
+    );
     // #1739: Codex can SIGTERM a plain retained server; Cloud agents start servers with a TTY or detached.
     expect(cloud).toContain("setsid nohup <cmd> > /tmp/<name>.log 2>&1 < /dev/null &");
     expect(local).not.toContain("setsid nohup");

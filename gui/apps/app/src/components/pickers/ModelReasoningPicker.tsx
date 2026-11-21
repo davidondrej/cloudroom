@@ -5,12 +5,13 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type KeyboardEventHandler,
   type ReactNode,
 } from "react";
 import type {
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import type { ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
@@ -200,7 +201,7 @@ export function buildModelNavRows({
 }
 
 interface ModelReasoningPickerProps {
-  providerRouting?: SystemProvidersQuery;
+  providerRouting?: SystemExecutionOptionsQuery;
   providerOptions: readonly ProviderPickerOption[];
   selectedProviderId: string;
   onSelectedProviderChange?: (value: string) => void;
@@ -243,6 +244,14 @@ interface ModelReasoningPickerProps {
    * Picking another provider switches the thread's harness in place (ADR 0211).
    */
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
+  /** A caller's own choice after the harnesses (Loops: Jev, which runs no agent). Picking it closes the picker. */
+  extraChoice?: ExtraChoice;
+}
+
+interface ExtraChoice {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  onSelect: () => void;
 }
 
 export function ModelReasoningPicker({
@@ -279,6 +288,7 @@ export function ModelReasoningPicker({
   disabled,
   lockModelSelection = false,
   onSelectModel,
+  extraChoice,
 }: ModelReasoningPickerProps) {
   const showUltraEfforts = useAtomValue(showUltraEffortsAtom);
   const reasoningOptions = useMemo(
@@ -369,6 +379,7 @@ export function ModelReasoningPicker({
   );
   const prefetchRoutingEnvironmentId = providerRouting?.environmentId;
   const prefetchRoutingHostId = providerRouting?.hostId;
+  const prefetchRoutingProjectId = providerRouting?.projectId;
   const siblingIdsKey = providerOptions
     .map((option) => option.value)
     .filter((id) => id !== selectedProviderId)
@@ -381,6 +392,7 @@ export function ModelReasoningPicker({
       routing: {
         environmentId: prefetchRoutingEnvironmentId,
         hostId: prefetchRoutingHostId,
+        projectId: prefetchRoutingProjectId,
       },
       providerIds: siblingIdsKey.split("\0"),
     });
@@ -389,6 +401,7 @@ export function ModelReasoningPicker({
     open,
     prefetchRoutingEnvironmentId,
     prefetchRoutingHostId,
+    prefetchRoutingProjectId,
     queryClient,
     siblingIdsKey,
   ]);
@@ -539,8 +552,8 @@ export function ModelReasoningPicker({
   const isShowingModelError =
     !activeModelIsLoading && !hasActiveModelOptions && activeModelLoadFailed;
   const showProviderTabs =
-    canSwitchProviders &&
-    providerOptions.length > 1 &&
+    // A caller's extra choice lives in the strip, so it shows even with one harness.
+    (canSwitchProviders || extraChoice !== undefined) &&
     (!isShowingModelError || activeModelErrorIsProviderSpecific);
 
   const activeBrandPrefix = activeProvider?.brandPrefix;
@@ -1125,6 +1138,9 @@ export function ModelReasoningPicker({
               activeButtonRef={activeHarnessRef}
               onSelect={handleProviderSelect}
             >
+              {extraChoice ? (
+                <ExtraChoiceButton choice={extraChoice} onClose={() => setOpen(false)} />
+              ) : null}
               {inRouter && <ConnectHarnessButton onClose={() => setOpen(false)} />}
             </ModelPickerHarnessStrip>
           ) : null}
@@ -1624,6 +1640,36 @@ function ReasoningStepButtons({
         ))}
       </span>
     </TooltipProvider>
+  );
+}
+
+/** Looks like a harness tab that is not open: its logo, and its name on hover. */
+function ExtraChoiceButton({
+  choice,
+  onClose,
+}: {
+  choice: ExtraChoice;
+  onClose: () => void;
+}) {
+  const Logo = choice.icon;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={choice.label}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onClose();
+            choice.onSelect();
+          }}
+          className="flex h-7 shrink-0 items-center rounded-lg px-1.5 text-subtle-foreground outline-none hover:bg-state-hover hover:text-foreground focus-visible:bg-state-hover focus-visible:text-foreground pointer-coarse:h-10 pointer-coarse:px-2.5"
+        >
+          <Logo className="size-4 shrink-0 pointer-coarse:size-5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{choice.label}</TooltipContent>
+    </Tooltip>
   );
 }
 

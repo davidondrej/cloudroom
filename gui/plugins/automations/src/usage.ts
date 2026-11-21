@@ -16,7 +16,7 @@ export type LoopUsage = { limit: string; percents: Record<string, number> } | nu
 export type TemplateUsage = Record<string, { limit: string; percent: number }>;
 
 /** How many times a cron fires from `from` to `to`; 0 for a cron that can't be read. */
-function runsBetween(cron: string, timezone: string, from: number, to: number): number {
+export function runsBetween(cron: string, timezone: string, from: number, to: number): number {
   try {
     const expression = CronExpressionParser.parse(cron, { currentDate: new Date(from), endDate: new Date(to), tz: timezone });
     let count = 0;

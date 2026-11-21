@@ -4998,6 +4998,10 @@ describe("PromptBoxInternal fast mode command", () => {
     expect(astra?.map(({ name }) => name)).toEqual(["astra"]);
     await astra?.[0]?.onSelect();
     expect(selectModel).toHaveBeenLastCalledWith({ providerId: "codex", model: "gpt-6.2-astra" });
+    const neon = promptModelShortcuts(execution, { providerId: "acp-antigravity", models: ["gemini-4-neon", "gemini-4-hydrogen-xhigh", "gemini-3.8-flash"] });
+    expect(neon?.map(({ name }) => name)).toEqual(["neon"]);
+    await neon?.[0]?.onSelect();
+    expect(selectModel).toHaveBeenLastCalledWith({ providerId: "acp-antigravity", model: "gemini-4-neon" });
     execution.provider.options.push({ value: "codex", label: "Codex" });
     const modelShortcuts = promptModelShortcuts(execution, { providerId: "claude-code", models: ["claude-opus-5[1m]", "claude-opus-5-5[1m]", "claude-fable-5-2"] });
     expect(modelShortcuts?.map(({ name }) => name)).toEqual(["fable", "opus"]);

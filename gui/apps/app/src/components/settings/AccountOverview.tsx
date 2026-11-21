@@ -1,4 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import type { CloudroomStatus } from "@cloudroom/sdk/browser";
@@ -41,6 +42,7 @@ export function AccountOverview({ email, onSignOut }: { email: string; onSignOut
   const githubUser = useQuery({ queryKey: ["cloudroom-github-account"], enabled: github === "connected", retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal) }).data;
   const claude = useClaudeConnection({ target: "cloud" }, Boolean(accountId)).data?.state;
   const codex = useCloudLogin("codex").data?.state;
+  const lab = useGitlabConnection().state;
   const paid = Boolean(status?.plan && status.plan !== "free");
   return <>
     <div className="grid gap-4 sm:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
@@ -57,6 +59,7 @@ export function AccountOverview({ email, onSignOut }: { email: string; onSignOut
     <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.45fr)]">
       <ConnectedCard rows={[
         ["GitHub", <span className={cn(TILE_CLASS, "text-foreground")}><Icon name="Github" className="size-4" aria-hidden /></span>, github],
+        ...(lab?.login ? [["GitLab", <span className={TILE_CLASS}><img src="/gitlab.svg" alt="" className="size-4"/></span>, lab.expired ? "expired" : "connected"] as [string, ReactNode, string]] : []),
         ["Claude Code", <AgentLogo id="claude-code" />, claude],
         ["Codex", <AgentLogo id="codex" />, codex],
       ]} />
@@ -147,7 +150,7 @@ function ConnectedCard({ rows }: { rows: [string, ReactNode, string | undefined]
         <span className="min-w-0 flex-1 truncate text-foreground">{name}</span>
         {state === "connected"
           ? <StatusPill ok>Connected</StatusPill>
-          : state && <Button variant="outline" size="sm" onClick={() => navigate(getSettingsSectionRoutePath("cloud-environment"))}>Connect</Button>}
+          : state && <Button variant="outline" size="sm" onClick={() => navigate(getSettingsSectionRoutePath("cloud-environment"))}>{state === "expired" ? "Reconnect" : "Connect"}</Button>}
       </div>)}
     </div>
   </div>;

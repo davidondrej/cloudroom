@@ -743,6 +743,7 @@ export interface MoveThreadResponse {
 /** `room-cli thread worktree`: the uncommitted files to bring along, relative to the thread's folder. */
 export const moveThreadToWorktreeRequestSchema = z.object({
   carry: z.array(z.string().min(1)).max(10_000).optional(),
+  self: z.boolean().optional(),
 });
 export type MoveThreadToWorktreeRequest = z.infer<
   typeof moveThreadToWorktreeRequestSchema
@@ -750,6 +751,7 @@ export type MoveThreadToWorktreeRequest = z.infer<
 
 export interface MoveThreadToWorktreeResponse {
   previousPath: string;
+  deferred: boolean;
 }
 
 export const panelFileSourceSchema = z.enum(["workspace", "thread-storage"]);

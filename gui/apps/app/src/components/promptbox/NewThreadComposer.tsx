@@ -1,3 +1,4 @@
+import { gitlabRepository } from "@cloudroom/domain";
 import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
 import { useAntigravityCloud } from "@/lib/antigravity-cloud";
 import { CONNECT_AGENT_IDS, ConnectAgentsButton } from "@/components/ConnectAgentsButton";
@@ -622,9 +623,10 @@ export function NewThreadComposer({
   const { providers: projectEnvironmentProviders } =
     useSystemEnvironmentProviders({ projectId });
   const projectGitRemoteUrl = currentProject?.gitRemoteUrl;
-  // Cloud clones only GitHub repositories; other projects upload their files, so there is no branch to pick.
+  // Uploaded folders have no remote branches in Cloud.
+  const gitlabProject = Boolean(gitlabRepository(projectGitRemoteUrl));
   const cloudBranchPickerShown =
-    !isProjectless && /github\.com[/:]/.test(projectGitRemoteUrl ?? "");
+    !isProjectless && (gitlabProject || /github\.com[/:]/.test(projectGitRemoteUrl ?? ""));
   const cloudBaseBranch =
     cloudBranchPickerShown && cloudBranch.projectId === projectId
       ? cloudBranch.branch
@@ -826,7 +828,7 @@ export function NewThreadComposer({
   );
 
   const resolveProviderRouting = useCallback(
-    (environmentSelectionValue: string) => {
+    (environmentSelectionValue: string, providerId: string) => {
       const effectiveValue = resolveRootComposeEffectiveEnvironmentValue({
         environmentSelectionValue:
           pickedEnvironment?.target === "local" &&
@@ -845,9 +847,18 @@ export function NewThreadComposer({
       });
       const providerSelection = resolveProviderSelection(effectiveValue);
       if (providerSelection !== null) {
-        return providerSelection.machine?.type !== "existing"
-          ? {}
-          : { hostId: providerSelection.machine.hostId };
+        if (providerSelection.machine?.type !== "existing") return {};
+        const { hostId } = providerSelection.machine;
+        // A Local thread lists where thread create checks its model, so a project's opencode.json applies (#1236).
+        // A Cloud thread keeps this machine's list: the local project's config doesn't run there.
+        const local =
+          cloudLocked ||
+          agentExecutionTarget(
+            storedExecutionTarget,
+            cloudPicked,
+            providerId,
+          ) === "local";
+        return local ? { hostId, projectId } : { hostId };
       }
       const parsed = parseEnvironmentValue(effectiveValue);
       return parsed?.type === "reuse" && parsed.environmentId !== null
@@ -855,6 +866,8 @@ export function NewThreadComposer({
         : {};
     },
     [
+      cloudLocked,
+      cloudPicked,
       connectedHostIds,
       environmentProviders,
       isProjectless,
@@ -862,10 +875,12 @@ export function NewThreadComposer({
       pickedEnvironment,
       primaryHostId,
       projectGitRemoteUrl,
+      projectId,
       projectSources,
       resolveProviderSelection,
       reuseThreadOptions,
       reuseThreadOptionsLoading,
+      storedExecutionTarget,
     ],
   );
   const projectDefaultsQuery = useProjectDefaultExecutionOptions(
@@ -2095,10 +2110,11 @@ export function NewThreadComposer({
             cloudInputsSlot:
               cloudBranchPickerShown && !locks.baseBranch && projectId !== null ? (
                 <CloudBranchPicker
+                  gitlab={gitlabProject}
                   projectId={projectId}
                   hostId={primaryHostId}
-                  fromGithub={
-                    !primaryHostId ||
+                  fromRemote={
+                    gitlabProject || !primaryHostId ||
                     !findLocalPathProjectSourceForHost(
                       projectSources,
                       primaryHostId,
@@ -2123,12 +2139,12 @@ export function NewThreadComposer({
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}<OneClickScans fallback={<FreePlanTip />} /></>,
+            ) : null}{agyNeedsLogin && cloudBlockedReason === null ? <AntigravityCloudLogin composer /> : <OneClickScans fallback={<FreePlanTip />} />}</>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason !== null ? (
                   <ProviderRequirementBanner title="Not available in Cloud" description={cloudBlockedReason} action={null} />
-                ) : agyNeedsLogin ? <AntigravityCloudLogin /> : cloudOpenCodeIssue !== null ? (
+                ) : agyNeedsLogin ? null : cloudOpenCodeIssue !== null ? (
                   <ProviderRequirementBanner
                     title="Model not available in Cloud"
                     description={cloudOpenCodeIssue.message}
@@ -2321,6 +2337,7 @@ export function NewThreadComposer({
       environmentProviderInputsSlot,
       machineProviderInputs.control,
       cloudBranchPickerShown,
+      gitlabProject,
       cloudBaseBranch,
       vps.data,
       vpsBusy,

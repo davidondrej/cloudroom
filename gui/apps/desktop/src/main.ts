@@ -6,7 +6,7 @@ import {
 import { createLocalCallerAuth } from "./local-caller-auth.js";
 import { randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, constants as fsConstants, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { arch, homedir, release, type as osType } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
@@ -396,6 +396,37 @@ let desktopAutoUpdateService: DesktopAutoUpdateService | null = null;
 let idleInstall: ReturnType<typeof startIdleInstall> | null = null;
 let macVitals: RoomDesktopVitals | undefined;
 let currentRuntime: DesktopRuntime | null = null;
+let shellPathReady: Promise<void> = Promise.resolve();
+
+const RENDERER_CACHE_VERSION_FILE = "renderer-cache-version";
+
+function prependPackagedMacGitBin(): void {
+  if (!app.isPackaged || process.platform !== "darwin") {
+    return;
+  }
+  const gitBin = join(process.resourcesPath, "git", "bin");
+  const current = process.env.PATH ?? "/usr/bin:/bin";
+  if (current === gitBin || current.startsWith(`${gitBin}:`)) {
+    return;
+  }
+  process.env.PATH = `${gitBin}:${current}`;
+}
+
+async function clearRendererCacheOnVersionChange(
+  userDataPath: string,
+  desktopVersion: string,
+): Promise<void> {
+  const markerPath = join(userDataPath, RENDERER_CACHE_VERSION_FILE);
+  const previous = await readFile(markerPath, "utf8").then(
+    (text) => text.trim(),
+    () => null,
+  );
+  if (previous === desktopVersion) {
+    return;
+  }
+  await session.defaultSession.clearCache();
+  await writeFile(markerPath, desktopVersion, "utf8").catch(() => undefined);
+}
 let currentWindowUrl: string | null = null;
 let logViewerLineBuffer: LogLineBuffer | null = null;
 let logViewerPreloadPath: string | null = null;
@@ -2369,9 +2400,10 @@ function registerDesktopBrowserWindowLifecycle({
 }
 
 async function startOwnedRuntime(
-  args: StartOwnedRuntimeArgs,
+  args: StartOwnedRuntimeArgs & { windowsReady?: Promise<unknown> },
 ): Promise<DesktopRuntime | null> {
   if (process.argv.includes("--attach-only")) {
+    await args.windowsReady;
     await loadStartupError({
       details: `Start the shared backend at ${args.serverUrl}, then reopen Cloudroom Dev. No backend was started and no history was changed.`,
       logs: "",
@@ -2380,6 +2412,7 @@ async function startOwnedRuntime(
     });
     return null;
   }
+  await shellPathReady;
   const roomProcess = startRoomAppProcess({
     bridgePath: args.bridgePath,
     cwd: homedir(),
@@ -2422,14 +2455,19 @@ async function startOwnedRuntime(
     saveCrash({ what: "backend", reason: formatExitResult(exit), exit_code: exit.code, logs: roomProcess.logs.text().split("\n").slice(-50).join("\n"), attempt });
     // Before it was ready, the start below shows the error or tries again.
     if (!ready) return;
-    void loadStartupError({
-      details: `The Cloudroom backend stopped with ${formatExitResult(
-        exit,
-      )}.`,
-      logs: roomProcess.logs.text(),
-      retryable: false,
-      title: "Cloudroom stopped",
-    });
+    // A crash while windows still restore shows once they exist.
+    void Promise.resolve(args.windowsReady)
+      .catch(() => undefined)
+      .then(() =>
+        loadStartupError({
+          details: `The Cloudroom backend stopped with ${formatExitResult(
+            exit,
+          )}.`,
+          logs: roomProcess.logs.text(),
+          retryable: false,
+          title: "Cloudroom stopped",
+        }),
+      );
   });
 
   const raceResult = await Promise.race<StartupRaceResult>([
@@ -2454,6 +2492,7 @@ async function startOwnedRuntime(
       await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       return quitting ? null : startOwnedRuntime({ ...args, attempt: attempt + 1 });
     }
+    await args.windowsReady;
     await loadStartupError({
       details: `The Cloudroom backend exited before it was ready with ${formatExitResult(
         raceResult.exit,
@@ -2478,6 +2517,7 @@ async function startOwnedRuntime(
     return runtime;
   }
 
+  await args.windowsReady;
   await loadStartupError({
     details:
       raceResult.result.kind === "incompatible"
@@ -2495,6 +2535,7 @@ interface InitializeRuntimeArgs {
   bridgePath: string;
   serverUrl: string;
   userDataPath: string;
+  windowsReady?: Promise<unknown>;
 }
 
 function shouldAskBeforeAttaching(): boolean {
@@ -2615,6 +2656,7 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
   });
 
   if (existingProbe.kind === "compatible") {
+    await args.windowsReady;
     const decision = await decideOnExistingServer(existingProbe);
     if (decision === "quit") {
       app.quit();
@@ -2653,6 +2695,7 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
   }
 
   if (existingProbe.kind === "incompatible") {
+    await args.windowsReady;
     await loadStartupError({
       details: `Port ${args.serverUrl} is already in use, but it is not a compatible Cloudroom server: ${existingProbe.reason}.`,
       logs: "",
@@ -2666,8 +2709,16 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
     bridgePath: args.bridgePath,
     serverUrl: args.serverUrl,
     userDataPath: args.userDataPath,
+    windowsReady: args.windowsReady,
   });
-  if (runtime !== null) {
+  await args.windowsReady;
+  // A server picked while windows restored wins, on every restored window.
+  if (serverTargetStore !== null && serverTargetStore.getTarget().kind !== "builtin") {
+    await applyServerTarget();
+    return;
+  }
+  // A backend that crashed while windows restored is no longer current, and its crash screen stays up.
+  if (runtime !== null && currentRuntime === runtime) {
     await loadRoomApp(runtime.serverUrl);
     startSystemConfigSync(runtime.serverUrl);
     refreshApplicationMenu();
@@ -2689,19 +2740,26 @@ async function runDesktopApp(): Promise<void> {
   if (app.isPackaged) {
     applyPackagedDesktopRuntimeEnv({ env: process.env, homeDir: homedir() });
   }
-  ensurePackagedUserShellPath({
+  if (process.platform === "darwin") {
+    process.env.CURL_SSL_BACKEND ??= "secure-transport";
+  }
+  // The probe spawns its shell synchronously, before bundled Git joins this process's PATH below, so the user's
+  // PATH it reads (saved as CLOUDROOM_SHELL_PATH for Mac jobs) never contains it.
+  shellPathReady = ensurePackagedUserShellPath({
     env: process.env,
     isPackaged: app.isPackaged,
     logger: desktopLogger,
     platform: process.platform,
-  });
-
-  if (process.platform === "darwin") {
-    process.env.CURL_SSL_BACKEND ??= "secure-transport";
-  }
-  if (app.isPackaged && process.platform === "darwin") {
-    process.env.PATH = `${join(process.resourcesPath, "git", "bin")}:${process.env.PATH ?? "/usr/bin:/bin"}`;
-  }
+  })
+    .then(() => {
+      prependPackagedMacGitBin();
+    })
+    .catch((error: unknown) => {
+      desktopLogger.warn(
+        `Could not load the user shell PATH for the packaged desktop app: ${error instanceof Error ? error.message : String(error)}. Continuing with the inherited PATH.`,
+      );
+    });
+  prependPackagedMacGitBin();
 
   const applicationName = app.isPackaged
     ? DESKTOP_RELEASE_INFO.applicationName
@@ -2838,9 +2896,6 @@ async function runDesktopApp(): Promise<void> {
   await app.whenReady();
   powerMonitor.on("shutdown", allowQuitWithoutAsking);
   installDefaultSessionPermissionHandlers();
-  if (app.isPackaged) {
-    await session.defaultSession.clearCache();
-  }
 
   const paths = createDesktopPathContext();
   const appImagePath = process.env.APPIMAGE?.trim() ?? "";
@@ -2898,6 +2953,9 @@ async function runDesktopApp(): Promise<void> {
   });
   const userDataPath = app.getPath("userData");
   desktopUserDataPath = userDataPath;
+  if (app.isPackaged) {
+    await clearRendererCacheOnVersionChange(userDataPath, desktopVersion);
+  }
 
   assertPathExists({ label: "bb-app bridge", path: bridgePath });
   assertPathExists({
@@ -2973,7 +3031,11 @@ async function runDesktopApp(): Promise<void> {
     userDataPath,
   });
   relayCredential = await relayCredentialCache.read();
-  thisComputerName = await computerName();
+  const computerNameReady = computerName()
+    .then((name) => {
+      thisComputerName = name;
+    })
+    .catch(() => undefined);
   relaySessionKeeper = createRelaySessionKeeper({
     async renew(handle) {
       const credential = await getRelayCredential(false);
@@ -3009,6 +3071,7 @@ async function runDesktopApp(): Promise<void> {
     async fetchList() {
       const credential = await getRelayCredential(false);
       if (credential === null) return { ok: false, reason: "no-credential" };
+      await computerNameReady;
       const result = await listComputers(credential, thisComputerName);
       if (!result.ok && result.reason === "unauthorized") await clearRelayCredential();
       return result;
@@ -3319,12 +3382,19 @@ async function runDesktopApp(): Promise<void> {
 
   refreshApplicationMenu();
   await loadLoadingView();
-  await desktopWindowFactory.restoreSavedWindows({
+  const windowsReady = desktopWindowFactory.restoreSavedWindows({
     initialUrl: currentWindowUrl,
   });
+  // Marks a failed restore handled while the server starts; the awaits below still throw it.
+  void windowsReady.catch(() => undefined);
   if (serverTargetStore.getTarget().kind === "builtin") {
-    await initializeRuntime({ bridgePath, serverUrl, userDataPath });
+    try {
+      await initializeRuntime({ bridgePath, serverUrl, userDataPath, windowsReady });
+    } finally {
+      await windowsReady.catch(() => undefined);
+    }
   } else {
+    await windowsReady;
     await applyServerTarget();
     computersSync.syncNow().catch(() => {});
   }

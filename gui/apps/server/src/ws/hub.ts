@@ -244,6 +244,7 @@ export class NotificationHub implements DbNotifier {
   >();
   private readonly hostProtocolUpdateRetryRequests = new Set<string>();
   private readonly changedMessageListeners = new Set<ChangedMessageListener>();
+  private readonly threadWatchedListeners = new Set<(threadId: string) => void>();
   private readonly pendingDaemonDisconnects = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -513,14 +514,28 @@ export class NotificationHub implements DbNotifier {
     this.terminalSocketSendQueues.delete(socket);
   }
 
+  onThreadWatched(listener: (threadId: string) => void): () => void {
+    this.threadWatchedListeners.add(listener);
+    return () => {
+      this.threadWatchedListeners.delete(listener);
+    };
+  }
+
   subscribe(socket: HubSocket, target: RealtimeSubscriptionTarget): void {
     this.registerClient(socket);
     const key = subscriptionKey(target);
     this.clientKeysBySocket.get(socket)?.add(key);
 
-    const sockets = this.clientSocketsByKey.get(key) ?? new Set<HubSocket>();
+    const existing = this.clientSocketsByKey.get(key);
+    const firstWatcher = existing === undefined;
+    const sockets = existing ?? new Set<HubSocket>();
     sockets.add(socket);
     this.clientSocketsByKey.set(key, sockets);
+    if (firstWatcher && target.kind === "thread-detail") {
+      for (const listener of this.threadWatchedListeners) {
+        listener(target.threadId);
+      }
+    }
   }
 
   /** Whether a thread is open on a screen here, so its Cloud stream runs (#237). */

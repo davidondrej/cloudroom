@@ -49,7 +49,7 @@ import { starPrompt, starRepo } from "./star-prompt.js";
 import { callTicket, cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
-import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
+import { addGitlabRepo, addGithubRepo, projectBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
 import { skillSuggestion, skillSuggestionEvent } from "../threads/skill-suggestion.js";
@@ -61,6 +61,12 @@ import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, CORNER_AN
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
 const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
+
+function gitlabRouteError(error: unknown): never {
+  if (!(error instanceof CloudroomError)) throw error;
+  const status = error.status ?? 503;
+  throw new ApiError(status as ConstructorParameters<typeof ApiError>[0], error.code ?? "gitlab_request", error.message);
+}
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
@@ -719,9 +725,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const { query } = z.object({ query: z.string().trim().min(1).max(500) }).strict().parse(await context.req.json());
     return context.json({ threads: await deepSearch(deps, query, context.req.raw.signal) });
   });
-  app.get("/api/v1/cloudroom/account/github-branches", async context => {
+  // Existing desktop SDKs call github-branches.
+  for (const path of ["github-branches", "project-branches"]) app.get("/api/v1/cloudroom/account/"+path, async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));
-    return context.json(await githubBranches(projectId, deps));
+    return context.json(await projectBranches(projectId, deps).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/gitlab", async context => {
+    const input = z.object({action:z.enum(["status","start","cancel","disconnect"])}).strict().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.gitlabConnection(input.action).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/gitlab/check", async context => {
+    const {repo}=z.object({repo:z.string().max(1024)}).strict().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.gitlabCheck(repo).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/repo-suggestions/gitlab", async context => {
+    const {repo}=z.object({repo:z.string().max(1024)}).strict().parse(await context.req.json());
+    return context.json(await addGitlabRepo(deps, repo).catch(gitlabRouteError));
   });
   app.post("/api/v1/cloudroom/account/repo-suggestions/github", async context => {
     const input = z.object({ repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/) }).strict().parse(await context.req.json());

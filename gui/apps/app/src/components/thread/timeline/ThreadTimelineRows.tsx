@@ -94,6 +94,12 @@ import {
   LatestCloudLoginRowIdContext,
 } from "./CloudLoginRow.js";
 import {
+  AuthFailureRow,
+  findLatestAuthFailureRowId,
+  isAuthFailureRow,
+  LatestAuthFailureRowIdContext,
+} from "./AuthFailureRow.js";
+import {
   LatestPlanLimitRowIdContext,
   findLatestPlanLimitRowId,
 } from "./plan-limit-agents.js";
@@ -1573,6 +1579,7 @@ function TimelineRowView({
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
   const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
   const latestCloudLoginRowId = useContext(LatestCloudLoginRowIdContext);
+  const latestAuthFailureRowId = useContext(LatestAuthFailureRowIdContext);
 
   const errorRow =
     row.kind === "system" && row.systemKind === "error" ? row : null;
@@ -1619,6 +1626,15 @@ function TimelineRowView({
       <PlanLimitSwitchedRow
         switched={planLimitSwitch}
         refusal={errorRow?.refusal}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (isAuthFailureRow(row)) {
+    return (
+      <AuthFailureRow
+        row={row}
+        latest={row.id === latestAuthFailureRowId}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -2264,6 +2280,10 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     () => findLatestCloudLoginRowId(rows) ?? null,
     [rows],
   );
+  const latestAuthFailureRowId = useMemo(
+    () => findLatestAuthFailureRowId(rows, scopeActive),
+    [rows, scopeActive],
+  );
   const computedAutoExpansionRowIds = useMemo(
     () => collectTimelineAutoExpansionRowIds({ rows, scopeActive }),
     [rows, scopeActive],
@@ -2528,6 +2548,9 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                         <LatestCloudLoginRowIdContext.Provider
                           value={latestCloudLoginRowId}
                         >
+                        <LatestAuthFailureRowIdContext.Provider
+                          value={latestAuthFailureRowId}
+                        >
                         <LatestPlanLimitRowIdContext.Provider
                           value={latestPlanLimitRowId}
                         >
@@ -2553,6 +2576,7 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                             }
                           />
                         </LatestPlanLimitRowIdContext.Provider>
+                        </LatestAuthFailureRowIdContext.Provider>
                         </LatestCloudLoginRowIdContext.Provider>
                       </AutoHeightContainer>
                     </TimelineWindowingEnabledContext.Provider>

@@ -582,7 +582,9 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.worktree, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
-      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? []),
+      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? [], {
+        self: payload.self ?? true,
+      }),
     );
   });
 

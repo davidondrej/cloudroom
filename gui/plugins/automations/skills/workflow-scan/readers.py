@@ -96,7 +96,12 @@ def spawn(d, provider, model):
     for path in sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt"))):
         n = os.path.basename(path)[6:-4]
         if n not in state["readers"]:
-            start(d, state, n)
+            try:
+                start(d, state, n)
+            except subprocess.CalledProcessError as e:  # never print e: it holds the spawn command and its chat-containing prompt (#2376)
+                why = ((e.stderr or "").strip().splitlines() or [f"room-cli exited with status {e.returncode}"])[-1]
+                fix = "Cloud readers need Cloudroom sign-in: ask the user to sign in, then run" if "sign in" in why.lower() and "cloudroom" in why.lower() else "Run"
+                sys.exit(f"Reader {n} could not start: {why}\n{len(state['readers'])} readers started. {fix} the same command again: it starts only the missing readers.")
             save(d, state)
     report(d, state, "reading")
     print(f"{len(state['readers'])} readers started")

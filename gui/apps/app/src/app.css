@@ -932,7 +932,8 @@
 [data-window-blurred] .animate-shine-icon {
   animation-timing-function: steps(10) !important;
 }
-[data-window-blurred] .working-grid i::after {
+[data-window-blurred] .working-grid i::after,
+[data-window-blurred] .subagent-grid i::after {
   animation-timing-function: steps(2) !important;
 }
 

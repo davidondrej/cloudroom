@@ -17,11 +17,12 @@
   "types": "./src/index.ts",
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@cloudroom/domain": "workspace:*",
+    "@cloudroom/process-utils": "workspace:*",
     "@cloudroom/provider-bridge-protocol": "workspace:*",
     "zod": "^4.3.6"
   },

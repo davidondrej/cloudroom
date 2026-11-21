@@ -32,6 +32,8 @@ export const appSettingsSchema = z
     stripAiCoAuthorsEnabled: z.boolean().default(true),
     providerAutoUpdate: z.array(z.string().min(1)).default([]),
     hiddenProviderIds: z.array(z.string().min(1)).default([]),
+    /** Harness order dragged in Settings → Harness. Empty: the default first, then the most used. */
+    customProviderOrder: z.array(z.string().min(1)).default([]),
     managedBranchPrefix: managedBranchPrefixSchema,
     machineServerUrl: z
       .string()
@@ -66,6 +68,7 @@ export const defaultAppSettings: AppSettings = {
   stripAiCoAuthorsEnabled: true,
   providerAutoUpdate: [],
   hiddenProviderIds: [],
+  customProviderOrder: [],
   managedBranchPrefix: DEFAULT_MANAGED_BRANCH_PREFIX,
   machineServerUrl: null,
   defaultMachineAccess: null,
@@ -81,6 +84,7 @@ export const appSettingsUpdateSchema = z.union([
     stripAiCoAuthorsEnabled: z.boolean().optional(),
     providerAutoUpdate: z.array(z.string().min(1)).optional(),
     hiddenProviderIds: z.array(z.string().min(1)).optional(),
+    customProviderOrder: z.array(z.string().min(1)).optional(),
     telemetryEnabled: z.boolean().optional(),
     showUnhandledProviderEvents: z.boolean().optional(),
     // Retired: harness order now follows usage. Older apps still send it.
@@ -94,6 +98,7 @@ export const appSettingsUpdateSchema = z.union([
     stripAiCoAuthorsEnabled: z.boolean().optional(),
     providerAutoUpdate: z.array(z.string().min(1)).optional(),
     hiddenProviderIds: z.array(z.string().min(1)).optional(),
+    customProviderOrder: z.array(z.string().min(1)).optional(),
     telemetryEnabled: z.boolean().optional(),
     showUnhandledProviderEvents: z.boolean(),
     providerOrder: z.array(z.string()).optional(),

@@ -13,7 +13,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "parity": "node --conditions=source --import tsx src/cli.ts",
     "rerecord": "node --conditions=source --import tsx src/rerecord.ts"

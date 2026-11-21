@@ -44,7 +44,7 @@
   ],
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "bun check -p tsconfig.json",
     "build:monaco": "node scripts/stage-assets.mjs",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },

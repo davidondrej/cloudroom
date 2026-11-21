@@ -25,6 +25,7 @@ import type { AutomationService } from "./service.js";
 import type { Db } from "./data.js";
 import type { TrackScan } from "./rpc-types.js";
 import { cloudLoopUsage, localLoopUsage, templateUsage } from "./usage.js";
+import { enablePlanLoops, planLoops, planLoopsEnableInputSchema, planLoopsEnableOutputSchema, planLoopsEventInputSchema, planLoopsEvent, planLoopsSchema, type PlanLoopsDeps } from "./plan-loops.js";
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 import {
   forgetCloud,
@@ -36,7 +37,8 @@ import {
 
 const cloudAutomationInputSchema = z
   .object({
-    action: z.enum(["list", "create", "update", "run", "delete", "hook", "settings"]),
+    // "history": a Jev loop's runs for its dialog; they start no thread, so Review has none of them.
+    action: z.enum(["list", "create", "update", "run", "delete", "hook", "settings", "history"]),
   })
   .passthrough();
 
@@ -59,6 +61,7 @@ const cloudTemplateInputSchema = z
     model: z.string().min(1),
     reasoningLevel: reasoningLevelSchema,
     priority: loopPrioritySchema,
+    secrets: z.array(z.string().min(1)).optional(),
   })
   .strict();
 
@@ -183,6 +186,10 @@ export const automationRpcContract = defineRpcContract({
     input: z.null(),
     output: z.object({ show: z.boolean() }).strict(),
   },
+  // The pop-up after buying a plan (plan-loops.ts): what it shows or null, turning its loops on, and its stats.
+  plan_loops: { input: z.null(), output: planLoopsSchema.nullable() },
+  plan_loops_enable: { input: planLoopsEnableInputSchema, output: planLoopsEnableOutputSchema },
+  plan_loops_event: { input: planLoopsEventInputSchema, output: z.null() },
 });
 
 type Sdk = Pick<BbPluginApi["sdk"], "cloudroom" | "system" | "threads">;
@@ -295,8 +302,19 @@ export function createRpcHandlers(
   db?: Db,
   trackScan: TrackScan = () => {},
   scans?: { kv: Kv; pluginId: string },
+  plan?: PlanLoopsDeps,
 ) {
   return {
+    async plan_loops() {
+      return plan ? planLoops(plan) : null;
+    },
+    async plan_loops_enable(input: z.output<typeof planLoopsEnableInputSchema>) {
+      if (!plan) throw new Error("Cloud loops are unavailable.");
+      return enablePlanLoops(plan, input);
+    },
+    async plan_loops_event(input: z.output<typeof planLoopsEventInputSchema>) {
+      return plan ? planLoopsEvent(plan, input.event) : null;
+    },
     async automations_usage(input: z.output<typeof loopUsageInputSchema>) {
       if (!sdk) return null;
       if (input.cloudId) return cloudLoopUsage(sdk, input.cloudId, input.crons);
@@ -350,6 +368,7 @@ export function createRpcHandlers(
         model: input.model,
         reasoning: input.reasoningLevel,
         priority: input.priority,
+        ...(input.secrets !== undefined ? { secrets: input.secrets } : {}),
       });
     },
     // The Scans tab asks for these once each time it opens.

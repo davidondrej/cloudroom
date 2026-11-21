@@ -47,6 +47,9 @@ export function gitSafetyArgs(hooks = false): string[] {
     "core.fsmonitor=false",
     "-c",
     "protocol.ext.allow=never",
+    // A checkout's `log.showSignature` would run its `gpg.program` on every `git log`.
+    "-c",
+    "log.showSignature=false",
     ...(hooks
       ? []
       : [
@@ -54,8 +57,10 @@ export function gitSafetyArgs(hooks = false): string[] {
           "core.hooksPath=/dev/null",
           ...[
             "post-checkout",
+            "post-commit",
             "post-index-change",
             "pre-auto-gc",
+            "prepare-commit-msg",
             "reference-transaction",
           ].flatMap((event) => ["-c", `hook.${event}.enabled=false`]),
         ]),

@@ -13,7 +13,7 @@ import {
   sidebarFooterHiddenAtom,
 } from "@/components/sidebar/sidebarFooterPreferences";
 import { SidebarFooterSettings } from "@/components/settings/SidebarFooterSettings";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import type {
   ExperimentalSidebarFooterActionContext,
   ExperimentalSidebarFooterDisclosureController,
@@ -88,12 +88,14 @@ function FooterHarness() {
     <>
       <PluginSidebarFooterDisclosure
         item={disclosure.activeItem}
+        warmItem={disclosure.warmItem}
         onDismiss={disclosure.dismiss}
       />
       <SidebarMenu>
         <PluginSidebarFooterItems
           activeDisclosureKey={disclosure.activeKey}
           onDisclosureCommand={disclosure.handleCommand}
+          onDisclosureWarm={disclosure.handleWarm}
         />
       </SidebarMenu>
     </>
@@ -287,6 +289,45 @@ describe("PluginSidebarFooterItems", () => {
     expect(screen.getByText("Claude Code on usage credits")).toBeDefined();
     act(() => footer?.setAlert(null));
     expect(document.querySelector("[data-footer-alert]")).toBeNull();
+  });
+
+  it("mounts a hovered disclosure hidden and reuses that mount when opened", () => {
+    let mounts = 0;
+    function WarmDisclosure() {
+      useEffect(() => {
+        mounts += 1;
+      }, []);
+      return <p>Warm usage content</p>;
+    }
+    setPluginSlotRegistrations(
+      "usage-plugin",
+      collectPluginAppRegistrations(
+        definePluginApp((app) => {
+          app.experimental_sidebarFooter.register({
+            kind: "disclosure",
+            id: "usage",
+            label: "Provider usage",
+            icon: "ChartColumn",
+            component: WarmDisclosure,
+          });
+        }),
+      ),
+    );
+    renderWithProviders(<FooterHarness />);
+    const trigger = screen.getByRole("button", { name: "Provider usage" });
+    const card = () =>
+      document.querySelector(
+        '[data-testid="plugin-sidebar-footer-disclosure-usage-plugin-usage"]',
+      );
+
+    fireEvent.pointerEnter(trigger);
+    expect(mounts).toBe(1);
+    expect(card()?.classList.contains("invisible")).toBe(true);
+
+    fireEvent.click(trigger);
+    expect(card()?.classList.contains("invisible")).toBe(false);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(mounts).toBe(1);
   });
 
   it("keeps the tooltip closed when the More drawer returns focus after a touch dismissal", () => {

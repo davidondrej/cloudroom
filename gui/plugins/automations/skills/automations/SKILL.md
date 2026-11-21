@@ -40,6 +40,17 @@ Webhooks (ADR 0262): `--webhook` instead of `--cron`/`--at`/`--in` makes a loop 
 
 `show`, `update`, `pause`, `resume`, `run`, `hook`, and `delete` take a cloud automation's ID (a UUID) without `--project`. A re-prompt run is a message in its thread; a fresh-thread run is its own thread, which the app shows when it next checks in. A missed run fires once; a run waits until the previous one ends; three failed runs in a row pause it. Inside a Cloud thread, `room-cli loop create` takes no `--cloud` or `--thread`: it reads that thread's project settings, and the loop then belongs to the project.
 
+Jev loops (Cloud, paid plans): a loop that runs no agent. Use one when each item needs only a yes/no, a pick, or a level: sorting an inbox, labeling issues, filtering alerts. Jev is a fast decision model: it answers in under a second for a fraction of a cent, but it cannot write or use tools.
+
+```bash
+room-cli loop create --cloud --project <id> --name "..." --cron "<expr>" --timezone <tz> --script-file collect.sh --jev questions.json --act-file act.sh [--secrets KEY,...]
+```
+
+- `collect.sh` prints the items, one per line, each a small JSON object (`{"id": "1", "title": "..."}`). Print only items not handled yet, and nothing to skip the run. Up to 50 items a run.
+- `questions.json` is what Jev answers for each item: `{"is_video_idea": {"type": "noul", "instructions": "Is \`title\` an idea for a video, not a task?"}}`. Types: `noul` (is it true; optional `criteria` `{"true": ..., "false": ...}`), `choice` (`criteria` `{"option": "what it means"}`, 2 to 255, with an `other`), `score` (`criteria` an array of 2 to 10 levels, low to high). One narrow judgment per question; name the item's fields in backticks; write the instructions literally.
+- `act.sh` gets a JSON file path as `$1`: `[{"item": {...}, "answers": {"is_video_idea": {"type": "noul", "noul": 0.94}}}]`. A choice answers `choice` and `probabilities`; a score answers `score` (a level number, low is 0) and `probabilities`. Pick thresholds in code and act only when Jev is sure. Each line it prints is saved as an action of the run. Any exit code but 0 fails the run.
+- Each script has 60 seconds and the Cloud environment's keys (`--secrets` picks which). A failed run runs both again, so both must be safe to run twice. Test both scripts by hand before creating the loop.
+
 Choosing a mode:
 
 Use `script` when the output is fully determined by code: watchdogs, threshold alerts, health checks, heartbeats, and API pollers with a fixed output shape. Scripts run on the Cloudroom server, with cwd inside the plugin data directory's `scripts/` area. Script automations do not have an environment field and do not accept environment flags.

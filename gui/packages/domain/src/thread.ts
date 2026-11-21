@@ -413,6 +413,7 @@ export type TeleportLocalStep = (typeof teleportLocalSteps)[number];
 export const projectCopyProgressSchema = z.object({
   // `waiting`: the sandbox slept or dropped mid-copy; the copy restarts when it is back.
   phase: z.enum(["cloning", "uploading", "waiting", "complete", "error"]),
+  gitHost: z.enum(["github", "gitlab"]).optional(),
   completed: z.number(), total: z.number(), secondsLeft: z.number().optional(), error: z.string().optional(),
 });
 export type ProjectCopyProgress = z.infer<typeof projectCopyProgressSchema>;

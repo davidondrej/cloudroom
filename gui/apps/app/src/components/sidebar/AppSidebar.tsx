@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
 import { useNavigate } from "react-router";
 import { OverflowFade } from "@/components/ui/overflow-fade.js";
@@ -77,6 +78,11 @@ export function AppSidebar({
     label: "New thread",
   });
   const closeOnMobile = useCloseMobileSidebar();
+  const cardsRef = useCallback(
+    (element: HTMLDivElement | null) =>
+      setSidebarCards(element && { element, close: closeOnMobile }),
+    [closeOnMobile],
+  );
   const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
@@ -303,13 +309,16 @@ export function AppSidebar({
         <OverflowFade placement="above" tone="sidebar" size="sm" />
         <PluginSidebarFooterDisclosure
           item={pluginSidebarFooter.activeItem}
+          warmItem={pluginSidebarFooter.warmItem}
           onDismiss={pluginSidebarFooter.dismiss}
         />
+        <div ref={cardsRef} className="empty:hidden" />
         <PlanCard />
         <SidebarMenu className="flex-row flex-wrap-reverse items-center gap-1">
           <PluginSidebarFooterItems
             activeDisclosureKey={pluginSidebarFooter.activeKey}
             onDisclosureCommand={pluginSidebarFooter.handleCommand}
+            onDisclosureWarm={pluginSidebarFooter.handleWarm}
             onNavigate={closeOnMobile}
             builtInActions={[
               {

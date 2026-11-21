@@ -806,6 +806,10 @@ impl Local {
                 session.title = record.data["title"].as_str().map(str::to_owned);
                 session.owe("title", &record.data, record.sequence);
             }
+            "pin" => {
+                session.pinned = true;
+                session.owe("pinned", &record.data, record.sequence);
+            }
             "thread_report" => session
                 .thread_reports
                 .retain(|report| report["seq"] != record.data["seq"]),
@@ -835,15 +839,17 @@ impl Local {
                         Some(at) => session.child_archived_at.insert(child.to_owned(), at),
                         None => session.child_archived_at.remove(child),
                     };
-                    let late = record.data["late"].as_array().into_iter().flatten();
-                    let late: std::collections::BTreeSet<String> = late
-                        .filter_map(|id| Some(id.as_str()?.to_owned()))
-                        .collect();
-                    if late.is_empty() {
-                        session.late_reports.remove(child);
-                    } else {
-                        session.late_reports.insert(child.to_owned(), late);
-                    }
+                    // An archive its child's Core took names the reports it may still send, maybe none; a queued
+                    // one can't, so it keeps no list (relay.rs `holds_archive`).
+                    match record.data["late"].as_array() {
+                        Some(late) => {
+                            let late = late.iter().filter_map(|id| Some(id.as_str()?.to_owned()));
+                            session
+                                .late_reports
+                                .insert(child.to_owned(), late.collect())
+                        }
+                        None => session.late_reports.remove(child),
+                    };
                 }
             }
             "child_start" => {

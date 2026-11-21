@@ -291,6 +291,7 @@ export function registerSystemRoutes(
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
       hiddenProviderIds: settings.hiddenProviderIds ?? current.hiddenProviderIds,
+      customProviderOrder: settings.customProviderOrder ?? current.customProviderOrder,
       showDiagnosticEvents:
         diagnosticValue === undefined ||
         (showUnhandledProviderEvents !== undefined &&

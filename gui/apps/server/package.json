@@ -10,7 +10,7 @@
     "dev": "node --conditions=source --import tsx scripts/dev-supervisor.mjs",
     "clean": "rimraf dist",
     "generate:official-marketplace": "node --conditions=source --import tsx scripts/generate-official-marketplace.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "test:provider-corpus": "vitest run --config vitest.config.ts test/provider-corpus"
   },
@@ -33,7 +33,7 @@
     "@better-auth/drizzle-adapter": "^1.7.25",
     "@earendil-works/pi-ai": "0.84.0",
     "@get-bb/plugin-sdk": "workspace:*",
-    "@hono/node-server": "^1.19.18",
+    "@hono/node-server": "^2.1.3",
     "@opentelemetry/api": "1.9.1",
     "better-auth": "^1.7.25",
     "better-sqlite3": "12.10.0",

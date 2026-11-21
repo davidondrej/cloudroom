@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
+import * as gitlabHooks from "@/hooks/useGitlabConnection";
+import { sdk } from "@/lib/sdk";
 import { ProjectSelector } from "./ProjectSelector";
 
 // The picker reads folders through React Query, so every render needs a client.
@@ -19,9 +21,44 @@ const PROJECTS = [
   { id: "proj_foxtrot", name: "Foxtrot Design" },
 ] as const;
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("ProjectSelector", () => {
+  function pasteGitlab(ready: boolean, onAdd = vi.fn().mockResolvedValue("proj_existing")) {
+    vi.spyOn(gitlabHooks, "useGitlabConnection").mockReturnValue({
+      accountId: ready ? "account" : undefined, ready, state: undefined, busy: false,
+      change: vi.fn(), open: vi.fn(), error: undefined,
+    });
+    render(<ProjectSelector projects={PROJECTS} value={null} onChange={() => {}}
+      defaultOpen modal={false} createProject={{ onCreate: vi.fn(), suggestions: {
+        hostId: "host_dev", repos: [], githubConnected: true, isLoading: false, addingKey: null, onAdd
+      } }} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search projects" }), {
+      target: { value: "https://gitlab.com/group/sub/project" },
+    });
+    return onAdd;
+  }
+
+  it("offers Cloudroom sign-in without probing the pasted private URL", async () => {
+    const check = vi.spyOn(sdk.cloudroom, "gitlabCheck");
+    pasteGitlab(false);
+    expect(screen.getByRole("option", { name: /Sign in to Cloudroom/ })).toBeTruthy();
+    await act(() => new Promise<void>(resolve => setTimeout(resolve, 450)));
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("adds a pasted project once when clicked twice during its access check", async () => {
+    let resolve!: (value: { accessible: boolean }) => void;
+    const checking = new Promise<{ accessible: boolean }>(done => { resolve = done; });
+    vi.spyOn(sdk.cloudroom, "gitlabCheck").mockReturnValue(checking);
+    const add = pasteGitlab(true);
+    const row = screen.getByRole("option", { name: /gitlab.com\/group\/sub/ });
+    fireEvent.click(row);
+    fireEvent.click(row);
+    resolve({ accessible: true });
+    await waitFor(() => expect(add).toHaveBeenCalledTimes(1));
+  });
+
   it("exposes the current project separately from keyboard highlight", () => {
     render(
       <ProjectSelector

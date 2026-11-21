@@ -57,6 +57,8 @@ const BUILTIN_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 const GIT_URL_LOGIN_PATTERN = /^(?:https?:[/\\]*)?[^/?#\\]+@/iu;
 const GIT_URL_CREDENTIALS_ERROR =
   "git url must not contain a username, password, or token — remove it and sign in through Git's credential helper (https://git-scm.com/docs/gitcredentials)";
+// scp-style `git@host:org/repo` is SSH, which git: sources never took.
+const GIT_SCP_URL_PATTERN = /^[^/?#\\:@]+@[^/?#\\:@]+:/u;
 const GIT_AUTH_FAILURE_PATTERN =
   /could not read Username|Authentication failed|terminal prompts disabled/iu;
 
@@ -163,7 +165,11 @@ function parseGitSelector(spec: string): ParsedGitSelector {
 
 function parseGitSource(spec: string): ParsedPluginSource {
   if (GIT_URL_LOGIN_PATTERN.test(spec)) {
-    throw new Error(GIT_URL_CREDENTIALS_ERROR);
+    throw new Error(
+      GIT_SCP_URL_PATTERN.test(spec)
+        ? "ssh git urls are not supported — use the repository's https URL"
+        : GIT_URL_CREDENTIALS_ERROR,
+    );
   }
   const at = spec.lastIndexOf("@");
   if (at === spec.length - 1) {

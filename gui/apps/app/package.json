@@ -14,7 +14,7 @@
     "storybook": "vite --config .ladle/vite.config.ts",
     "storybook:build": "vite build --config .ladle/vite.config.ts",
     "lint": "oxlint src vite.config.ts vite.dev.config.ts vite-app-files.ts vite-bundle-stats.ts vite-font-preload.ts vite-shared-ui-seam.ts vite-react-compiler.ts",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
+    "typecheck": "bun check && bun check -p tsconfig.node.json",
     "test": "node scripts/generate-pwa-icons.mjs --check && vitest run --config vitest.config.ts"
   },
   "dependencies": {

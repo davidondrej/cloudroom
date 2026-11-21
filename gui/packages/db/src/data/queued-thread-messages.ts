@@ -69,6 +69,8 @@ export interface CreateQueuedThreadMessageInput {
   hardQueue?: boolean;
   /** A put-back row's old place in the queue; new rows go last. */
   sortKey?: string;
+  /** A put-back request's time: it goes before every row queued since. */
+  queuedAt?: number;
   /** Holds the row from automatic sends, in the same insert as the wait. */
   failureReason?: string;
 }
@@ -294,6 +296,22 @@ function resolveQueuedThreadMessageNeighbor(
   return neighbor;
 }
 
+function orderKeyQueuedAt(
+  tx: DbTransaction,
+  input: CreateQueuedThreadMessageInput,
+): string | null {
+  const { queuedAt } = input;
+  if (queuedAt === undefined) return null;
+  const rows = listQueuedThreadMessages(tx, input.threadId);
+  const next = rows.findIndex((row) => row.createdAt >= queuedAt);
+  const previousKey = rows[next - 1]?.sortKey ?? null;
+  const nextKey = rows[next]?.sortKey;
+  return nextKey === undefined ||
+    (previousKey !== null && previousKey >= nextKey)
+    ? null
+    : createOrderKeyBetween({ previousKey, nextKey });
+}
+
 export function createQueuedThreadMessageInTransaction(
   tx: DbTransaction,
   input: CreateQueuedThreadMessageInput,
@@ -303,6 +321,7 @@ export function createQueuedThreadMessageInTransaction(
   const lastQueuedMessage = getLastQueuedThreadMessage(tx, input.threadId);
   const sortKey =
     input.sortKey ??
+    orderKeyQueuedAt(tx, input) ??
     (lastQueuedMessage
       ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
       : createOrderKeyBetween({ previousKey: null, nextKey: null }));

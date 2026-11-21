@@ -118,6 +118,22 @@ fn note_unless(
     true
 }
 
+/// How long `thread list` hides a child archived here that the website still lists: it tries a queued archive for 2
+/// minutes, then says if it failed.
+const ARCHIVING_MS: u64 = 10 * 60_000;
+
+/// Whether a report from `child` leaves it archived. One the archived child had in flight never shows it again
+/// (#1000). A queued archive can't name those, so while it may still land, no report shows it again. Any other
+/// report updates it, say from a session that replaced it after a restore.
+fn holds_archive(s: &super::Session, child: &str, request: &str, now: u64) -> bool {
+    s.child_states.get(child).is_some_and(|s| s == "archived")
+        && match s.late_reports.get(child) {
+            Some(late) => late.contains(request),
+            None => (s.child_archived_at.get(child))
+                .is_some_and(|at| *at > now.saturating_sub(ARCHIVING_MS)),
+        }
+}
+
 /// Why a start's try failed, as a fixed sentence: the website's own text may name hosts or carry tokens.
 fn try_failure(error: &ApiError) -> String {
     let ApiError::Status(status, _) = error else {
@@ -343,6 +359,31 @@ pub(super) async fn compact(
     Ok(Json(answer))
 }
 
+/// `thread pin` on a child in a sandbox of its own, through the website only: older apps refuse it as a
+/// `child_command`, and the website pins it without waking its sandbox.
+pub(super) async fn pin(m: &Manager, caller: &str, id: &str) -> Result<Json<Value>, Failure> {
+    let foreign = (m.local.lock().unwrap().sessions.get(caller))
+        .is_some_and(|s| s.parent_session.is_some() && !s.child_states.contains_key(id));
+    if foreign {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Only the thread that started this child can pin it.",
+        ));
+    }
+    let Some(api) = m.history.api.as_ref() else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Cloudroom's website is unavailable, so this child can't be pinned.",
+        ));
+    };
+    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let body = json!({"action":"pin","thread":id,"request_id":format!("relay_{key}")});
+    let mut answer = (api.post("relay", &body).await)
+        .map_err(|error| website_failure(error, "reach the child"))?;
+    answer["id"] = json!(id);
+    Ok(Json(answer))
+}
+
 /// The app applies it to a child the caller started, whenever it next reads the caller's thread.
 fn via_app(
     m: &Manager,
@@ -431,13 +472,9 @@ async fn receive(
                 "interrupted" => "stopped",
                 _ => "error",
             };
-            // A report the archived child had in flight never shows it again (#1000). Any other report updates it,
-            // say from a session that replaced it after a restore.
+            let now = crate::observability::now_ms();
             note_unless(&m, &id, &child, known, |s| {
-                s.child_states.get(&child).is_some_and(|s| s == "archived")
-                    && s.late_reports
-                        .get(&child)
-                        .is_some_and(|l| l.contains(&request))
+                holds_archive(s, &child, &request, now)
             });
             notice(&child, input.title, state, input.error, input.reply)
         }
@@ -615,8 +652,7 @@ pub(super) async fn own_children(
     let (shared, known, mine, others, archiving) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
-        // Archived here in the last 10 minutes: the website tries a queued archive for 2, then says if it failed.
-        let since = crate::observability::now_ms().saturating_sub(10 * 60_000);
+        let since = crate::observability::now_ms().saturating_sub(ARCHIVING_MS);
         let archiving: HashSet<String> = (session.into_iter())
             .flat_map(|s| s.child_archived_at.iter().filter(|(_, at)| **at > since))
             .map(|(child, _)| child.clone())
@@ -952,8 +988,11 @@ impl super::Session {
         {
             return;
         }
-        self.thread_reports
-            .push(json!({"kind":kind,"value":value,"seq":sequence,"wake":data["wake"]}));
+        let mut report = json!({"kind":kind,"value":value,"seq":sequence,"wake":data["wake"]});
+        if let Some(at) = data["at"].as_u64() {
+            report["at"] = json!(at);
+        }
+        self.thread_reports.push(report);
     }
 }
 
@@ -1016,6 +1055,9 @@ impl Manager {
                 // and restored meanwhile) is dropped by the website.
                 let mut body = json!({"request_id":format!("report_{seq}"),"session":session,"wake":report["wake"]});
                 body[kind.as_str()] = report["value"].clone();
+                if let Some(at) = report["at"].as_u64() {
+                    body["at"] = json!(at);
+                }
                 // Taken, or refused for good (409: not the thread's session now): never sent again.
                 let done = match api.post("thread", &body).await {
                     Ok(_) | Err(ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => manager
@@ -1350,6 +1392,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A self-pin sets `session.pinned` and queues one website report carrying its stable `at` timestamp for main
+    /// threads, while shared-sandbox children stay local to their session snapshot.
+    #[test]
+    fn a_pin_sets_session_pinned_and_reports_a_stable_timestamp_for_main_only() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-pin-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = |parent: Option<&str>| json!({"request_id":"s","command":"start","state":"completed","input":{"parent_session":parent}});
+        local.append("main", "receipt", start(None), None).unwrap();
+        local
+            .append("kid", "receipt", start(Some("main")), None)
+            .unwrap();
+        let pin = json!({"pinned": true, "at": 1795290000123_u64, "wake": "0123456789abcdef"});
+        local.append("main", "pin", pin.clone(), None).unwrap();
+        local.append("kid", "pin", pin, None).unwrap();
+        assert!(local.sessions["main"].pinned);
+        assert!(local.sessions["kid"].pinned);
+        let (session, report) = next_thread_report(&local).expect("main pin report");
+        assert_eq!(session, "main");
+        assert_eq!(report["kind"], "pinned");
+        assert_eq!(report["value"], true);
+        assert_eq!(report["at"], 1795290000123_u64);
+        assert!(local.sessions["kid"].thread_reports.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A failed try is shown as its status in fixed words, never the website's own text (#1957).
     #[test]
     fn a_start_failure_shows_only_fixed_words() {
@@ -1358,6 +1426,38 @@ mod tests {
         assert_eq!(shown, "HTTP 502, a step of its setup failed");
         let shown = try_failure(&ApiError::Network("dns error: storage.example".into()));
         assert_eq!(shown, "the website could not be reached");
+    }
+
+    /// An in-flight report never shows a child its parent archived again: a taken archive holds against the reports
+    /// it named, a queued one against any while it may still land. Also after a restart.
+    #[test]
+    fn a_report_in_flight_never_shows_an_archived_child_again() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let archive = |late: Value| json!({"child":"thr_kid","state":"archived","late":late});
+        local
+            .append("taken", "child_state", archive(json!(["r1"])), None)
+            .unwrap();
+        local
+            .append("nothing_late", "child_state", archive(json!([])), None)
+            .unwrap();
+        local
+            .append("queued", "child_state", archive(Value::Null), None)
+            .unwrap();
+        for _ in 0..2 {
+            let now = crate::observability::now_ms();
+            let holds = |id: &str, request: &str, now: u64| {
+                holds_archive(&local.sessions[id], "thr_kid", request, now)
+            };
+            assert!(holds("taken", "r1", now) && !holds("taken", "r2", now));
+            assert!(!holds("nothing_late", "r1", now));
+            assert!(holds("queued", "r1", now) && holds("queued", "r2", now));
+            assert!(!holds("queued", "r1", now + ARCHIVING_MS));
+            drop(local);
+            local = Local::open(&dir).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A child this thread archived stays archived while the website still lists it as asleep (#1430), but not once

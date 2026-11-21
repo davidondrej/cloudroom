@@ -20,7 +20,7 @@
   "scripts": {
     "clean": "rimraf tsconfig.tsbuildinfo",
     "scaffold:surface-entry": "node scripts/scaffold-surface-entry.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {

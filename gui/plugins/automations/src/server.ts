@@ -40,7 +40,10 @@ export default async function plugin(room: BbPluginApi) {
     room.experimental_telemetry.capture("workflow_scan", { action, ...properties });
   room.rpc.register(
     automationRpcContract,
-    createRpcHandlers(service, room.sdk, db, trackScan, { kv: room.storage.kv, pluginId: room.pluginId }),
+    createRpcHandlers(service, room.sdk, db, trackScan, { kv: room.storage.kv, pluginId: room.pluginId }, {
+      sdk: room.sdk, kv: room.storage.kv, service,
+      track: (action, properties = {}) => room.experimental_telemetry.capture("plan_loops", { action, ...properties }),
+    }),
   );
   registerAutomationCli({ bb: room, service, trackScan });
 

@@ -8,7 +8,7 @@ export const providerSchema = z.enum([
   "acp-antigravity",
 ]);
 export type Provider = z.infer<typeof providerSchema>;
-export const MAX_ACCOUNTS = 10;
+export const MAX_ACCOUNTS = 30;
 export const LOCAL = "local";
 export const ACCOUNTS_CHANGED = "accounts-changed";
 
@@ -40,6 +40,8 @@ export const accountViewSchema = z.object({
   needsSignIn: z.boolean(),
   // A Claude account added before full logins: it runs on its one-year token, without claude.ai connectors.
   limitedLogin: z.boolean(),
+  // Its login failed or was rejected: only a new sign-in fixes it. A passing error is not this.
+  signedOut: z.boolean(),
 });
 export type AccountView = z.infer<typeof accountViewSchema>;
 
@@ -100,6 +102,16 @@ export const accountsRpcContract = defineRpcContract({
   },
   // Cursor accounts are added with a user API key from cursor.com/dashboard.
   "cursor.add": { input: z.object({ apiKey: z.string().max(4096) }), output: ok },
+  // Antigravity accounts sign in with Google: open the link, then paste the code Google shows.
+  "antigravity.start": {
+    input: z.null(),
+    output: z.object({ sessionId: z.string(), authorizeUrl: z.string() }),
+  },
+  "antigravity.complete": {
+    input: poll.extend({ code: z.string().max(4096) }),
+    output: ok,
+  },
+  "antigravity.cancel": { input: poll, output: ok },
   "claude.poll": { input: poll, output: polled },
   "codex.poll": { input: poll, output: polled },
 });

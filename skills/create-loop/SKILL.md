@@ -29,7 +29,7 @@ For flags, Cloud loops, and scripts:
 - **Secrets:** a Cloud loop gets only the API keys its job needs: `--secrets KEY,.env` or `--secrets none`. Any picked list, even `.env` or `none`, blocks `room-cli mac` in its runs, so a job that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop.
 - **Safety:** include the safety sentence below verbatim in every Local or Cloud loop prompt, including prompts embedded in scripts.
 - **Finish:** all fine → 1-2 lines, then the thread archives itself. Something matters → a short verdict, thread left open for the user's Review tab.
-- **No repeats:** skip issues already reported in open threads with the same title.
+- **No repeats:** skip anything the past runs' Loop notes already cover.
 
 ## Steps
 
@@ -69,7 +69,7 @@ Never test destructive edge cases on live services; mock the API and reject miss
 1. Rename this thread: `room-cli thread update --self --title "<Name> · $(date '+%b-%d %H:%M')"`.
 2. Read: <concrete files and docs>.
 3. Check: <what to look for, in plain words>.
-4. Skip issues already reported in open threads titled "<Name>".
+4. Skip anything the past runs' Loop notes already cover.
 
 Finish:
 - Nothing major: write 1-2 lines on what you checked, then run `room-cli thread archive --self --json`.

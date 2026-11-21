@@ -75,7 +75,9 @@ import { extractThreadTimelinePendingTodos } from "./todo-snapshot-extraction.js
 import {
   buildTimelineErrorDisplay,
   isPlanLimitError,
+  isPlanLimitReply,
   isRefusalError,
+  PROVIDER_AUTH_FAILED_TITLE,
 } from "./error-display.js";
 import { isTimelineRetryMessage } from "./timeline-message-helpers.js";
 
@@ -552,6 +554,20 @@ function convertMessage(
         },
       ];
     case "assistant-text":
+      // The plan-limit card needs an error row, so Antigravity's quota reply becomes one.
+      if (isPlanLimitReply(message.text)) {
+        return [
+          {
+            ...buildTimelineRowBase(message, options.rowIdPrefix),
+            kind: "system",
+            systemKind: "error",
+            title: "Plan limit reached",
+            detail: message.text.replace(/^\s*⚠?\s*/u, "").trim(),
+            status: "error",
+            planLimit: true,
+          },
+        ];
+      }
       return [
         {
           ...buildTimelineRowBase(message, options.rowIdPrefix),
@@ -1406,6 +1422,23 @@ const isPlanLimitRow = (row: TimelineRow | undefined) =>
   row.systemKind === "error" &&
   (row.planLimit === true || row.refusal === true);
 
+const isAuthFailureRow = (row: TimelineRow | undefined) =>
+  row?.kind === "system" &&
+  row.systemKind === "error" &&
+  row.title === PROVIDER_AUTH_FAILED_TITLE;
+
+function collectAuthFailureRowIds(rows: readonly TimelineRow[]): string[] {
+  const ids: string[] = [];
+  const walk = (list: readonly TimelineRow[]) => {
+    for (const row of list) {
+      if (isAuthFailureRow(row)) ids.push(row.id);
+      if (row.kind === "turn" && row.children) walk(row.children);
+    }
+  };
+  walk(rows);
+  return ids;
+}
+
 /**
  * A plan-limit row right before a harness switch says who took over: the first switch's `from`, the last one's `to`.
  * One before an account switch says which account continued (ADR 20261107-082837). Its retry may already sit
@@ -1421,7 +1454,10 @@ function markPlanLimitSwitches(
       (event.operation === THREAD_HARNESS_SWITCH_OPERATION ||
         event.operation === THREAD_ACCOUNT_SWITCH_OPERATION),
   );
-  if (switches.length === 0) return rows;
+  if (switches.length === 0) {
+    const authIds = collectAuthFailureRowIds(rows);
+    return authIds.length === 0 ? rows : dropErrorEchoes(rows, new Set(authIds));
+  }
   const flat: TimelineRow[] = [];
   const walk = (list: readonly TimelineRow[]) => {
     for (const row of list) {
@@ -1488,7 +1524,10 @@ function markPlanLimitSwitches(
       at: meta.createdAt,
     });
   }
-  if (marks.size === 0 && accountMarks.size === 0) return rows;
+  if (marks.size === 0 && accountMarks.size === 0) {
+    const authIds = collectAuthFailureRowIds(rows);
+    return authIds.length === 0 ? rows : dropErrorEchoes(rows, new Set(authIds));
+  }
   const mark = (list: TimelineRow[]): TimelineRow[] =>
     list.map((row) => {
       if (row.kind === "turn") {
@@ -1503,34 +1542,39 @@ function markPlanLimitSwitches(
         ...(account ? { planLimitAccountSwitch: account } : {}),
       };
     });
-  return dropLimitEchoes(
-    mark(rows),
-    new Set([...marks.keys(), ...accountMarks.keys()]),
+  const marked = mark(rows);
+  return dropErrorEchoes(
+    marked,
+    new Set([
+      ...marks.keys(),
+      ...accountMarks.keys(),
+      ...collectAuthFailureRowIds(marked),
+    ]),
   );
 }
 
 /**
- * Once a thread moved on from its limit, the agent's own copy of the limit message goes (Claude prints it as a
- * reply), and so does a turn that did nothing else: the limit row's one line says it all.
+ * Drops an agent's duplicate assistant copy of a limit/auth error (Claude prints it as a reply before the
+ * error row), plus a turn row that did nothing else so the dedicated inline row stands alone.
  */
-function dropLimitEchoes(
+function dropErrorEchoes(
   rows: TimelineRow[],
-  switched: ReadonlySet<string>,
+  targetIds: ReadonlySet<string>,
 ): TimelineRow[] {
   const gone = new Set<string>();
-  const isEcho = (row: TimelineRow | undefined, limit: TimelineRow) =>
+  const isEcho = (row: TimelineRow | undefined, error: TimelineRow) =>
     row?.kind === "conversation" &&
     row.role === "assistant" &&
     row.text.trim() !== "" &&
-    limit.kind === "system" &&
-    (limit.detail ?? "").includes(row.text.trim());
+    error.kind === "system" &&
+    (error.detail ?? "").includes(row.text.trim());
   const scan = (list: readonly TimelineRow[]) => {
     list.forEach((row, index) => {
       if (row.kind === "turn" && row.children) scan(row.children);
-      if (!switched.has(row.id)) return;
+      if (!targetIds.has(row.id)) return;
       const before = list[index - 1];
       if (before && isEcho(before, row)) gone.add(before.id);
-      // Grouped turns keep the reply inside the turn right before the limit row.
+      // Grouped turns keep the reply inside the turn right before the error row.
       const nested =
         before?.kind === "turn" ? before.children?.at(-1) : undefined;
       if (nested && isEcho(nested, row)) gone.add(nested.id);
@@ -1565,7 +1609,7 @@ function dropLimitEchoes(
       if (row.kind !== "turn" || !row.children) return [row];
       const children = drop(row.children);
       const only = children.length === 1 ? children[0] : undefined;
-      return only && switched.has(only.id) ? [only] : [{ ...row, children }];
+      return only && targetIds.has(only.id) ? [only] : [{ ...row, children }];
     });
   return drop(rows);
 }

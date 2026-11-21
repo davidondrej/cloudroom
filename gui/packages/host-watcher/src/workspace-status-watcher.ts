@@ -66,6 +66,9 @@ function runGitIgnoredMatchingStatus(
     execFile(
       "git",
       [
+        // A checkout's `core.fsmonitor` would run its program on every automatic status (#2189).
+        "-c",
+        "core.fsmonitor=false",
         "--no-optional-locks",
         "status",
         "--porcelain=v1",

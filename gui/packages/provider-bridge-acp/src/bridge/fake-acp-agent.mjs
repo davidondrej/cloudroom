@@ -595,12 +595,13 @@ async function handlePrompt(message) {
     notifyUpdate(messageChunk(`permission:${outcome}`));
   } else if (text.includes("write-file")) {
     try {
-      await requestClient("fs/write_text_file", {
+      const ack = await requestClient("fs/write_text_file", {
         sessionId: activeSessionId,
         path: process.env.FAKE_ACP_WRITE_PATH,
         content: "hello from agent\n",
       });
-      notifyUpdate(messageChunk("write:ok"));
+      // Rust ACP SDKs (Devin) reject a null ack as a Parse error (#2061).
+      notifyUpdate(messageChunk(ack === null ? "write:bad-ack" : "write:ok"));
     } catch {
       notifyUpdate(messageChunk("write:denied"));
     }

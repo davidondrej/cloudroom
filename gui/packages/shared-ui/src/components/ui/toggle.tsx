@@ -1,5 +1,5 @@
 import * as React from "react";
-import * as TogglePrimitive from "@radix-ui/react-toggle";
+import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "../../lib/utils";
@@ -26,18 +26,81 @@ const toggleVariants = cva(
   },
 );
 
-const Toggle = React.forwardRef<
-  React.ElementRef<typeof TogglePrimitive.Root>,
-  React.ComponentPropsWithoutRef<typeof TogglePrimitive.Root> &
-    VariantProps<typeof toggleVariants>
->(({ className, variant, size, ...props }, ref) => (
-  <TogglePrimitive.Root
-    ref={ref}
-    className={cn(toggleVariants({ variant, size, className }))}
-    {...props}
-  />
-));
+// Same behavior as Radix Toggle 1.1: a button with aria-pressed and
+// data-state "on" or "off" that flips on click unless disabled.
+type ToggleProps = React.ComponentPropsWithoutRef<"button"> & {
+  asChild?: boolean;
+  pressed?: boolean;
+  defaultPressed?: boolean;
+  onPressedChange?(pressed: boolean): void;
+};
 
-Toggle.displayName = TogglePrimitive.Root.displayName;
+// Like Radix: a controlled change reports at once, an uncontrolled one after render.
+function usePressedState(
+  prop: boolean | undefined,
+  defaultProp: boolean | undefined,
+  onChange: ((pressed: boolean) => void) | undefined,
+) {
+  const [uncontrolled, setUncontrolled] = React.useState(defaultProp ?? false);
+  const onChangeRef = React.useRef(onChange);
+  React.useInsertionEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
+  const reportedRef = React.useRef(uncontrolled);
+  React.useEffect(() => {
+    if (reportedRef.current === uncontrolled) return;
+    onChangeRef.current?.(uncontrolled);
+    reportedRef.current = uncontrolled;
+  }, [uncontrolled]);
+  const setPressed = (next: boolean) => {
+    if (prop === undefined) setUncontrolled(next);
+    else if (next !== prop) onChangeRef.current?.(next);
+  };
+  return [prop !== undefined ? prop : uncontrolled, setPressed] as const;
+}
+
+const Toggle = React.forwardRef<
+  HTMLButtonElement,
+  ToggleProps & VariantProps<typeof toggleVariants>
+>(
+  (
+    {
+      className,
+      variant,
+      size,
+      asChild,
+      pressed: pressedProp,
+      defaultPressed,
+      onPressedChange,
+      ...props
+    },
+    ref,
+  ) => {
+    const [pressed, setPressed] = usePressedState(
+      pressedProp,
+      defaultPressed,
+      onPressedChange,
+    );
+    const Comp = asChild ? Slot : "button";
+    return (
+      <Comp
+        type="button"
+        aria-pressed={pressed}
+        data-state={pressed ? "on" : "off"}
+        data-disabled={props.disabled ? "" : undefined}
+        className={cn(toggleVariants({ variant, size, className }))}
+        {...props}
+        ref={ref}
+        onClick={(event: React.MouseEvent<HTMLButtonElement>) => {
+          props.onClick?.(event);
+          // As in Radix, a child that calls onClick() with no event still toggles.
+          if (!event?.defaultPrevented && !props.disabled) setPressed(!pressed);
+        }}
+      />
+    );
+  },
+);
+
+Toggle.displayName = "Toggle";
 
 export { Toggle, toggleVariants };

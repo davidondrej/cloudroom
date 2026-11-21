@@ -23,7 +23,6 @@ const SHARED = [
   "keybindings.json",
 ];
 const SESSION_DIRS = ["projects", "file-history", "todos", "plans"];
-const SHARED_CONFIG = ["mcpServers", "projects"];
 
 const claudeHome = () =>
   process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), ".claude");
@@ -100,14 +99,29 @@ export async function prepareProfile(profile: string): Promise<void> {
     await fs.readFile(file, "utf8").catch(() => "{}"),
   ) as Record<string, unknown>;
   const next = { ...own };
-  for (const key of SHARED_CONFIG)
-    if (main[key] === undefined) delete next[key];
-    else next[key] = main[key];
-  if (JSON.stringify(next) !== JSON.stringify(own)) {
-    const temp = `${file}.${randomUUID()}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
-    await fs.rename(temp, file);
-  }
+  if (main.projects === undefined) delete next.projects;
+  else next.projects = main.projects;
+  // Main's MCP servers sync in; ones added in this account (`claude mcp add -s user` in a thread) stay (#2318).
+  const fromMain = path.join(profile, "cloudroom-main-mcp-servers.json");
+  const before: unknown = await fs
+    .readFile(fromMain, "utf8")
+    .then(JSON.parse)
+    .catch(() => []);
+  const shared = isRecord(main.mcpServers) ? main.mcpServers : {};
+  const servers: Store = isRecord(own.mcpServers) ? { ...own.mcpServers } : {};
+  for (const name of Array.isArray(before) ? before : [])
+    if (!Object.hasOwn(shared, name)) delete servers[name];
+  if (main.mcpServers !== undefined || own.mcpServers !== undefined)
+    next.mcpServers = Object.assign(servers, shared);
+  const save = async (target: string, text: string) => {
+    const temp = `${target}.${randomUUID()}.tmp`;
+    await fs.writeFile(temp, text, { mode: 0o600 });
+    await fs.rename(temp, target);
+  };
+  if (JSON.stringify(next) !== JSON.stringify(own))
+    await save(file, JSON.stringify(next, null, 2));
+  const names = JSON.stringify(Object.keys(shared));
+  if (names !== JSON.stringify(before)) await save(fromMain, names);
   synced.set(profile, changed);
 }
 

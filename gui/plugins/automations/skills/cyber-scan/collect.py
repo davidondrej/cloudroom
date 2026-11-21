@@ -575,6 +575,9 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     unchecked = [f"{n} {text}" for n, text in counts if n]
     unchecked += [f"{name}: failed to load" for name, ok in (("CISA's exploited list", recent["kev"]),
                                                               ("GitHub's critical advisories", recent["github_critical"])) if not ok]
+    if sys.platform != "darwin":  # mac() reads macOS only: missing computer facts must not look clean
+        unchecked.append(f"this computer ({platform.system()}): disk encryption, firewall, pending updates, ports open to the network, "
+                         "startup items, key and token files, and installed app versions: these checks run on macOS only")
     for r in repos:
         vulns = []
         for pkg in r["packages"]:

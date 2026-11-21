@@ -98,7 +98,7 @@ describe("ProvidersSettingsSection", () => {
 
     expect(
       screen.queryAllByRole("button", { name: /Reorder (Alpha|Beta|Gamma)/ }),
-    ).toHaveLength(0);
+    ).toHaveLength(3);
 
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "Gamma actions" }),

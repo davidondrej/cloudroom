@@ -5,6 +5,7 @@ import {
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
+import { arrayMove } from "@dnd-kit/sortable";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";
@@ -38,6 +39,7 @@ import {
   SettingsRow,
   SettingsRowList,
   SettingsSection,
+  SettingsWithControl,
 } from "@/components/ui/settings-section";
 import {
   autoUpdateProgress,
@@ -73,6 +75,14 @@ import { getProviderIconInfo } from "@/lib/provider-icon";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ProviderIconMark } from "./ProviderIconMark";
 import { ProviderLoginButton } from "./ProviderLoginButton";
+import {
+  SETTINGS_DROPDOWN_CONTENT_CLASS,
+  SETTINGS_DROPDOWN_TRIGGER_CLASS,
+} from "./settings-dropdown";
+import {
+  SortableSettingsRowList,
+  useSortableSettingsRow,
+} from "./sortable-settings-rows";
 
 interface ProvidersSettingsSectionProps {
   disabled: boolean;
@@ -89,6 +99,19 @@ const CELL = {
 } as const;
 
 const TABLE_BUTTON = "h-7 px-2.5 text-xs";
+
+/** Shows a just-dragged order at once, before the server's list catches up. */
+function inOrder(
+  providers: readonly ProviderInfo[],
+  ids: readonly string[] | null,
+): readonly ProviderInfo[] {
+  if (ids === null) return providers;
+  const at = (id: string) => {
+    const index = ids.indexOf(id);
+    return index === -1 ? ids.length : index;
+  };
+  return [...providers].sort((a, b) => at(a.id) - at(b.id));
+}
 
 function withProviderCompletedTurnDisplay(
   settings: AppSettings,
@@ -606,10 +629,23 @@ function ProviderRow({
   const status = hostStatus && withAutoUpdateSetting(
     hostStatus, generalSettings.providerAutoUpdate?.includes(provider.id) ?? false,
   );
+  const { setNodeRef, style, isDragging, handle } = useSortableSettingsRow({
+    id: provider.id,
+    disabled,
+    label: provider.displayName,
+  });
   const notInstalled = state?.status === "not_installed";
 
   return (
-    <SettingsRow className="group/provider-row flex-wrap sm:flex-nowrap">
+    <SettingsRow
+      ref={setNodeRef}
+      style={style}
+      className={cn(
+        "group/provider-row flex-wrap sm:flex-nowrap",
+        isDragging && "relative z-10 rounded-md bg-card opacity-90 shadow-lift",
+      )}
+    >
+      {handle}
       <ProviderRowIcon provider={provider} />
       <span className="flex min-w-0 flex-1 items-center gap-2">
         <span className="max-w-[60%] shrink-0 truncate font-medium">
@@ -741,6 +777,7 @@ function NotInstalledRow({
   const { busy, startInstall } = useCliJob(hostId, provider.id);
   return (
     <SettingsRow className="flex-wrap sm:flex-nowrap">
+      <span className="-ml-2 w-7 shrink-0" />
       <span className="opacity-50">
         <ProviderRowIcon provider={provider} />
       </span>
@@ -778,10 +815,85 @@ function NotInstalledRow({
   );
 }
 
+const PICKER_ORDER_OPTIONS = [
+  { label: "Most used", custom: false },
+  { label: "Custom", custom: true },
+] as const;
+
+/** Most used (the default first, then usage) or the order the user dragged. */
+function PickerOrderSetting({
+  custom,
+  disabled,
+  onChange,
+}: {
+  custom: boolean;
+  disabled: boolean;
+  onChange: (custom: boolean) => void;
+}) {
+  return (
+    <SettingsWithControl
+      label="Picker order"
+      description={
+        custom
+          ? "Your own order in the model picker."
+          : "Default first, then the harnesses you started the most threads with in the last 72 hours. Drag to set your own."
+      }
+    >
+      <div className="flex items-center gap-1.5">
+        {custom ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-muted-foreground"
+            disabled={disabled}
+            onClick={() => onChange(false)}
+          >
+            Reset
+          </Button>
+        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
+              aria-label="Picker order"
+              disabled={disabled}
+            >
+              {custom ? "Custom" : "Most used"}
+              <Icon name="ChevronDown" className="size-3.5 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className={SETTINGS_DROPDOWN_CONTENT_CLASS}>
+            {PICKER_ORDER_OPTIONS.map((option) => (
+              <DropdownMenuItem
+                key={option.label}
+                onSelect={() => {
+                  if (option.custom !== custom) onChange(option.custom);
+                }}
+              >
+                {option.label}
+                <Icon
+                  name="Check"
+                  className={cn(
+                    "ml-auto",
+                    custom !== option.custom && "opacity-0",
+                    COARSE_POINTER_ICON_SIZE_CLASS,
+                  )}
+                />
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </SettingsWithControl>
+  );
+}
+
 function TableHeader({ showCloud }: { showCloud: boolean }) {
   return (
     <div className="mb-2.5 hidden items-center gap-3 border-b border-border pb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground sm:flex">
-      <span className="flex-1 pl-8">Agent</span>
+      <span className="flex-1 pl-16">Agent</span>
       <span className={cn("text-center", CELL.mac)}>{COMPUTER_TITLE}</span>
       {showCloud ? (
         <span className={cn("text-center", CELL.cloud)}>Cloud</span>
@@ -864,8 +976,9 @@ export function ProvidersSettingsSection({
   const hiddenInstallable = useInstallableProviders({ hostId }).data ?? [];
   const showCloud = useCloudroomAccount().data?.ready === true;
   const serverProviders: ProviderInfo[] = providersQuery.data ?? [];
-  // The server lists the default harness first, then the most used.
-  const allProviders = serverProviders;
+  // The server lists the user's own order, or the default first, then the most used.
+  const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
+  const allProviders = inOrder(serverProviders, optimisticOrder);
   const hidden = new Set(generalSettings.hiddenProviderIds);
   const providers = allProviders.filter(
     (provider) => isInstalled(provider) && !hidden.has(provider.id),
@@ -915,16 +1028,47 @@ export function ProvidersSettingsSection({
       hidden.has(provider.id) &&
       list.findIndex((entry) => entry.id === provider.id) === index,
   );
+  // An older server may not send the field yet.
+  const customOrder = (generalSettings.customProviderOrder ?? []).length > 0;
+  const saveOrder = (order: string[]): void => {
+    setOptimisticOrder(order.length > 0 ? order : null);
+    Promise.resolve(
+      onGeneralSettingsChange({ ...generalSettings, customProviderOrder: order }),
+    ).catch(() => setOptimisticOrder(null));
+  };
+  const handleReorder = (activeId: string, overId: string): void => {
+    const ids = providers.map((provider) => provider.id);
+    const from = ids.indexOf(activeId);
+    const to = ids.indexOf(overId);
+    if (from === -1 || to === -1 || from === to) return;
+    const moved = arrayMove(ids, from, to);
+    // Keep not-installed and removed harnesses in the saved order too.
+    saveOrder([
+      ...moved,
+      ...allProviders.map((p) => p.id).filter((id) => !moved.includes(id)),
+    ]);
+  };
 
   return (
     <SettingsSection
       title="Harness"
-      description="Your agents: logins, versions, updates, and the default. The default comes first everywhere, then the agents you use most. Provider-specific settings are in the tabs above."
+      description="Your agents: logins, versions, updates, the default, and their order in the model picker. Provider-specific settings are in the tabs above."
     >
       {providersQuery.isPending ? (
         <p className="text-sm text-muted-foreground">Loading providers…</p>
       ) : (
         <>
+          {providers.length > 1 || customOrder ? (
+            <div className="mb-5">
+              <PickerOrderSetting
+                custom={customOrder}
+                disabled={disabled}
+                onChange={(custom) =>
+                  saveOrder(custom ? allProviders.map((p) => p.id) : [])
+                }
+              />
+            </div>
+          ) : null}
           <TableHeader showCloud={showCloud} />
           {cliStatusQuery.isError ? (
             <p className="flex items-center gap-2 pb-2.5 text-xs text-destructive">
@@ -945,7 +1089,11 @@ export function ProvidersSettingsSection({
               No agent is installed yet. Install one below.
             </p>
           ) : (
-            <SettingsRowList>
+            <SortableSettingsRowList
+              ids={providers.map((provider) => provider.id)}
+              disabled={disabled}
+              onReorder={handleReorder}
+            >
               {providers.map((provider) => (
                 <ProviderRow
                   key={provider.id}
@@ -962,7 +1110,7 @@ export function ProvidersSettingsSection({
                   status={cliStatus?.[provider.id]}
                 />
               ))}
-            </SettingsRowList>
+            </SortableSettingsRowList>
           )}
           {hostId === null || installable.length === 0 ? null : (
             <>
@@ -1014,6 +1162,7 @@ function RemovedRow({
   const action = useAgentAction(onDone);
   return (
     <SettingsRow>
+      <span className="-ml-2 w-7 shrink-0" />
       <span className="opacity-50">
         <ProviderRowIcon provider={provider} />
       </span>

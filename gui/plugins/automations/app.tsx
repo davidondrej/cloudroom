@@ -44,7 +44,7 @@ import {
   type LoopReviewState,
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
-import { loopsChanged, PausedLoopsLabel } from "./paused-notice";
+import { loopsChanged, PausedLoopsLabel, usePlanLoopsChanged } from "./paused-notice";
 import { ScanCard } from "./scan-card";
 import { failurePause } from "./lib/paused.js";
 import type { LoopTemplate } from "./templates";
@@ -466,6 +466,9 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
   const [plan, setPlan] = useState(lastLoaded.plan);
   const [usage, setUsage] = useState(lastLoaded.usage);
   const paid = plan !== undefined && plan !== "free";
+  // A plan bought while this page is open: the pop-up after the purchase says so, and the paywall goes away.
+  const [planAsked, setPlanAsked] = useState(0);
+  usePlanLoopsChanged(() => setPlanAsked((count) => count + 1));
   // Free never sees the templates, so it never pays for the estimate.
   useEffect(() => {
     if (!paid) return;
@@ -493,7 +496,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     return () => {
       cancelled = true;
     };
-  }, [rpc]);
+  }, [rpc, planAsked]);
   useEffect(() => {
     let cancelled = false;
     sdk.projects.list().then(
@@ -548,6 +551,9 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
               model: agent.model,
               reasoningLevel: agent.reasoningLevel,
               priority: template.priority,
+              ...(template.secrets !== undefined
+                ? { secrets: [...template.secrets] }
+                : {}),
             });
             return;
           }

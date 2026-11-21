@@ -195,10 +195,20 @@ export function buildTurnFailedEvent(
     rateLimits: latestRateLimits(db, thread, failed.requestSequence, providerError?.turnId),
     attemptNumber: retryChain(failed.request).attemptNumber,
     interruptionReason: interruptionReason(db, { threadId, failed }),
-    turnStartedBeforeBoot:
-      thread.executionTarget !== "cloud" &&
-      failed.requestedAt < Date.now() - os.uptime() * 1_000,
+    turnStartedBeforeBoot: turnStartedBeforeBoot(thread, failed),
   };
+}
+
+/** A Local turn requested before this computer last booted (ADR 20261103-233411). */
+export function turnStartedBeforeBoot(
+  thread: Pick<Thread, "executionTarget">,
+  failed: FailedTurnRecord | null,
+): boolean {
+  return (
+    failed !== null &&
+    thread.executionTarget !== "cloud" &&
+    failed.requestedAt < Date.now() - os.uptime() * 1_000
+  );
 }
 
 /**

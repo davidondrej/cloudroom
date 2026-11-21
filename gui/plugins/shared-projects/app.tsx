@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { createPortal } from "react-dom";
 import { definePluginApp, experimental_Icon as Icon, Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { usePortalScopeProps } from "@cloudroom/shared-ui/lib/portal-scope";
+import { useSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { STATE_CHANNEL, type Invite, type Person, type SharedMessage, type SharedThread, type SharePage, type sharesRpcContract, type Teammate } from "./contract.js";
 
 // Shared projects (docs/scopes/shared-projects.md): "Share project" in every project's menu, the page it opens, the
-// lock button on threads in shared projects, and the invite popup.
+// lock button on threads in shared projects, and the invite card in the sidebar.
 const PAGE = "share", BILLING_URL = "https://www.cloudroom.dev/billing";
 const button = "inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs disabled:opacity-50 enabled:hover:bg-muted";
 const primary = "inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50";
@@ -212,7 +215,7 @@ function LockButton({ threadId }: { threadId: string }) {
   );
 }
 
-function InvitePopup() {
+function InviteCard() {
   const rpc = useRpc<typeof sharesRpcContract>();
   const navigate = useBbNavigate();
   const [invites, setInvites] = useState<Invite[]>([]);
@@ -227,30 +230,37 @@ function InvitePopup() {
     window.addEventListener("focus", check);
     return () => window.removeEventListener("focus", check);
   }, [rpc]);
+  const spot = useSidebarCards();
+  // The card renders outside the plugin's slot, so it carries the plugin's style scope itself.
+  const scopeProps = usePortalScopeProps();
   const invite = invites[0];
-  if (!invite) return null;
+  if (!invite || !spot) return null;
   const answer = async (accept: boolean) => {
     setBusy(true); setProblem(null);
     try {
       const { projectId } = await rpc.call("answer", { id: invite.id, accept });
       load();
-      if (projectId) navigate.toPluginPanel(PAGE, { subPath: projectId });
+      if (projectId) { spot.close(); navigate.toPluginPanel(PAGE, { subPath: projectId }); }
     } catch (failure) { setProblem(errorText(failure)); } finally { setBusy(false); }
   };
-  return (
-    <div className="fixed right-4 top-14 z-50 w-80 space-y-3 rounded-xl border border-border bg-surface-raised-solid p-4 shadow-lg">
-      <p className="text-sm"><b>{invite.from}</b> shared the project <b>github.com/{invite.repo}</b> with you. You'll both see each other's Cloud threads in it, and can take them over.</p>
-      {problem && <p role="alert" className="text-xs text-destructive">{problem}</p>}
-      <div className="flex justify-end gap-2">
+  // In the sidebar, above the plan card. While the sidebar is hidden, the invite waits.
+  return createPortal(
+    <section {...scopeProps} aria-label="Project invite" className="rounded-lg border border-border bg-surface-raised-solid p-3">
+      <p className="truncate text-xs text-muted-foreground">{invite.from} shared a project</p>
+      <p title={`github.com/${invite.repo}`} className="mt-1 truncate text-sm font-medium text-foreground">{invite.repo}</p>
+      <p className="mt-2 text-xs text-muted-foreground">You'll both see each other's Cloud threads in it, and can take them over.</p>
+      {problem && <p role="alert" className="mt-2 text-xs text-destructive">{problem}</p>}
+      <div className="mt-3 flex justify-end gap-2">
         <button type="button" className={button} disabled={busy} onClick={() => void answer(false)}>Decline</button>
         <button type="button" className={primary} disabled={busy} onClick={() => void answer(true)}>Accept</button>
       </div>
-    </div>
+    </section>,
+    spot.element,
   );
 }
 
 export default definePluginApp((app) => {
   app.slots.experimental_projectAction({ id: PAGE, title: "Share project", icon: "UserRoundPlus", badge: "NEW", component: ShareProjectPage });
   app.slots.experimental_threadHeaderAction({ id: "lock", title: "Share with project", component: LockButton });
-  app.slots.experimental_appOverlay({ id: "invites", component: InvitePopup });
+  app.slots.experimental_appOverlay({ id: "invites", component: InviteCard });
 });

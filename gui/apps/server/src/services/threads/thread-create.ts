@@ -5,9 +5,6 @@ import {
   reasoningLevelSchema,
 } from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
-import { rememberFirstAgent } from "../system/first-agent.js";
-import { noteMessageSent } from "../system/first-response-telemetry.js";
-import type { TelemetryExecution } from "../system/telemetry.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
 import { forkModel, textForkSequence, prepareLocalForkWorktree } from "../cloudroom/fork.js";
 import { messagesSeed } from "./thread-harness-switch.js";
@@ -20,7 +17,6 @@ import {
   getProjectExecutionDefaults,
   getEnvironment,
   getLatestCompletedThreadContextClearSequence,
-  getProjectSourceByHost,
   getThread,
 } from "@cloudroom/db";
 import type {
@@ -100,6 +96,7 @@ import {
 import { deriveTitleFallback } from "./title-generation.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
 import {
+  projectCheckoutPathOnHost,
   providerSetupError,
   resolveSystemProviderModels,
 } from "../system/execution-options.js";
@@ -472,15 +469,6 @@ function childHostIdForResolvedEnvironment(
   }
 }
 
-function projectCheckoutPathOnHost(
-  deps: Pick<AppDeps, "db">,
-  projectId: string,
-  hostId: string,
-): string | undefined {
-  const source = getProjectSourceByHost(deps.db, projectId, hostId);
-  return source?.type === "local_path" ? source.path : undefined;
-}
-
 function modelCatalogCwdForResolvedEnvironment(
   resolvedEnvironment: ResolvedStableThreadRequestEnvironment,
 ): string | undefined {
@@ -736,14 +724,6 @@ const createsInFlight = new Map<
 
 /** A retry sent while the first request with its request ID still runs waits
  *  for that request instead of racing it (#860). */
-/** The first agent is no thread or prompt of the user's, but its reply still gets timed (`first_response`), and its
- *  ID is remembered so that reply, a failure, and the user's follow-ups carry `first_agent`. */
-function trackFirstAgent(deps: ThreadCreateDeps, thread: Thread, execution: TelemetryExecution): Thread {
-  rememberFirstAgent(deps.db, thread.id);
-  noteMessageSent(thread.id, { execution, isChildThread: false, messageSource: "thread_create", provider: thread.providerId });
-  return thread;
-}
-
 export async function createThreadOnce(
   deps: ThreadCreateDeps,
   request: ThreadCreateServiceRequestInput,
@@ -889,7 +869,6 @@ export async function createThreadFromRequest(
   }
   if (rawRequestInput.executionTarget === "cloud" || cloudChild || cloudFork) {
     const thread = await cloudroom(deps).create({ ...(await withCloudDefaultReasoningLevel(deps, rawRequestInput)), origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
-    if (rawRequestInput.origin === "setup") return trackFirstAgent(deps, thread, cloudExecution(deps, thread.id)); // Not counted, like the Local one below.
     // Cloud threads count in the same anonymous usage events as local ones, tagged with where they run.
     const execution = cloudExecution(deps, thread.id);
     const isChildThread = thread.parentThreadId !== null;
@@ -1199,9 +1178,6 @@ export async function createThreadFromRequest(
   });
   // Imported chats are old work, not new agents: they would inflate the site's agent counter.
   if (createArgs.deferFork) return thread;
-  // The first agent (ADR 20261111-220912) is started by Cloudroom, not the user: no thread, prompt, or active day is
-  // counted, so "sent a first prompt" keeps meaning a prompt the user typed. Setup reports it as a `setup_step`.
-  if (request.origin === "setup") return trackFirstAgent(deps, thread, "local");
   deps.telemetry.capture({
     name: "thread_created",
     properties: {

@@ -26,11 +26,12 @@ use tokio::sync::oneshot;
 
 const USAGE: &str = "room-cli thread show [CHILD_ID]
 room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
+room-cli thread pin --self|CHILD_ID
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
 room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
-room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--pin] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
 room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
@@ -40,9 +41,9 @@ room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one.";
 /// `room-cli thread` commands only the app on the user's computer has.
-const LOCAL_ONLY: [&str; 27] = [
+const LOCAL_ONLY: [&str; 26] = [
     "count",
     "context",
     "open",
@@ -56,7 +57,6 @@ const LOCAL_ONLY: [&str; 27] = [
     "queue",
     "tabs",
     "unarchive",
-    "pin",
     "unpin",
     "delete",
     "edit-message",
@@ -96,7 +96,7 @@ const OTHER_NOTES: [&str; 3] = [
 ];
 const PAUSED_NOTE: &str = "Queued, paused by a Stop. It sends when that thread is resumed.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
-const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
+const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's Git repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
 /// How long `spawn --top-level` keeps retrying a start the website could not finish (say, a slow wake).
 const LAUNCH_RETRY: Duration = Duration::from_secs(240);
 /// How long a spawn waits for the website to name a child it starts in a sandbox of its own. It stays under Claude
@@ -183,6 +183,9 @@ pub struct SpawnBody {
     /// Start a top-level thread instead of a child (ADR 0267).
     #[serde(default)]
     top_level: bool,
+    /// Pin the new thread in each Mac's sidebar once created (`room-cli thread spawn --pin`).
+    #[serde(default)]
+    pin: bool,
     service_tier: Option<String>,
 }
 
@@ -248,6 +251,7 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
     Router::new()
         .route("/title", post(rename))
         .route("/reasoning", post(set_reasoning))
+        .route("/pin", post(pin_self))
         .route("/archive", post(archive))
         .route("/move", post(move_project))
         .route("/children", get(list).post(spawn))
@@ -256,6 +260,7 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
         .route("/children/{id}", get(output))
         .route("/children/{id}/messages", post(tell))
         .route("/children/{id}/stop", post(stop_child))
+        .route("/children/{id}/pin", post(pin_child))
         .route("/children/{id}/archive", post(archive_child))
         .route("/compact", post(compact_self))
         .route("/children/{id}/compact", post(compact_child))
@@ -341,6 +346,45 @@ async fn set_reasoning(
         "reasoning",
         json!({"reasoning":input.reasoning,"wake":m.wake_id()}),
     )
+}
+
+/// Stable payload for a self-pin: `at` is stamped once so website retries never write a second timestamp.
+fn pin_data(m: &Manager) -> Value {
+    json!({"pinned": true, "at": crate::observability::now_ms(), "wake": m.wake_id()})
+}
+
+/// Pins this thread on the website so every Mac pins it once on sync, even if it was closed while this ran.
+async fn pin_self(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Result<Json<Value>, Failure> {
+    let session = caller(&m, peer, "thread")?;
+    record(&m, &session, "pin", pin_data(&m))
+}
+
+/// Pins a child thread (in its own sandbox through the website, or in this sandbox as a record), or this thread when
+/// given its own `thr_...` or Core session ID.
+async fn pin_child(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    let parent = caller(&m, peer, "thread pin")?;
+    let own = id == parent
+        || m.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&parent)
+            .is_some_and(|s| s.thread_id() == Some(id.as_str()));
+    if own {
+        return record(&m, &parent, "pin", pin_data(&m));
+    }
+    if relay::thread_id(&id) {
+        return relay::pin(&m, &parent, &id).await;
+    }
+    m.own_child(&parent, &id).map_err(session_failure)?;
+    record(&m, &id, "pin", json!({"pinned": true}))
 }
 
 /// The app archives the thread and its children, which also stops this session.
@@ -473,6 +517,7 @@ async fn spawn(
         title: input.title.map(|t| t.trim().to_owned()),
         prompt: input.prompt,
         service_tier: input.service_tier,
+        pin: input.pin,
     };
     let (id, receipt) = m
         .spawn_child(&parent, &key, spawn)
@@ -498,7 +543,10 @@ async fn launch(
             "Run room-cli thread spawn --top-level from a Cloudroom cloud thread",
         ));
     };
-    let body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    let mut body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    if input.pin {
+        body["pin"] = json!(true);
+    }
     let started = Instant::now();
     let task = tokio::spawn(async move {
         let mut wait = Duration::from_secs(10);
@@ -577,7 +625,10 @@ async fn own_child(
         if let Some(error) = refusal {
             return Err(fail(StatusCode::CONFLICT, &error.message()));
         }
-        let body = json!({"request_id":key,"session":parent,"prompt":input.prompt,"title":title,"harness":input.provider,"model":input.model,"reasoning":reasoning,"service_tier":input.service_tier});
+        let mut body = json!({"request_id":key,"session":parent,"prompt":input.prompt,"title":title,"harness":input.provider,"model":input.model,"reasoning":reasoning,"service_tier":input.service_tier});
+        if input.pin {
+            body["pin"] = json!(true);
+        }
         let _ = record(
             m,
             parent,
@@ -1360,7 +1411,7 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
     if let Some(word) = unknown_word(
         words,
         &SPAWN_VALUES,
-        &["--shared-sandbox", "--parent-self", "--top-level"],
+        &["--shared-sandbox", "--parent-self", "--top-level", "--pin"],
     ) {
         eprintln!(
             "Unknown option {word}. Cloud threads take only the options in `room-cli thread --help`."
@@ -1396,8 +1447,12 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
         eprintln!("A top-level thread has no parent. Omit --parent-self.");
         return Ok(2);
     }
-    let mut body =
-        json!({"prompt":prompt,"shared":words.contains(&"--shared-sandbox"),"top_level":top});
+    let mut body = json!({
+        "prompt": prompt,
+        "shared": words.contains(&"--shared-sandbox"),
+        "top_level": top,
+        "pin": words.contains(&"--pin"),
+    });
     // A top-level start or a child in a sandbox of its own can outlast the agent's command timeout, so its request ID
     // comes first: rerunning the command with it continues that start instead of making a second thread (#1668).
     if let Some(key) = first_key(words)? {
@@ -1782,6 +1837,14 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             answer
         }
+        "pin" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
+            (_, Err(code)) => return Ok(code),
+            (true, Ok(ids)) if ids.is_empty() => call("POST", "/pin", None).await?,
+            (false, Ok(ids)) if ids.len() == 1 => {
+                call("POST", &format!("/children/{}/pin", ids[0]), None).await?
+            }
+            _ => return usage(),
+        },
         "archive" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
             (_, Err(code)) => return Ok(code),
             (true, Ok(ids)) if ids.is_empty() => call("POST", "/archive", None).await?,

@@ -3,6 +3,21 @@ import { describeCron } from "./describe-cron.js";
 
 export const PERSONAL_PROJECT_ID = "proj_personal";
 
+/** A model ID as people read it: "claude-opus-5-5" is "Opus 5.5", "gpt-6.1-sol" is "GPT-6.1 Sol". */
+export function formatModelName(model: string): string {
+  const [, base = model, context] = /^(.+?)(?:\[(\w+)\])?$/u.exec(model) ?? [];
+  const name = (base.split("/").at(-1) ?? base)
+    .replace(/^claude-/u, "")
+    .split("-")
+    .map((part) =>
+      part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join(" ")
+    .replace(/(\d) (?=\d)/gu, "$1.")
+    .replace(/^GPT /u, "GPT-");
+  return context === undefined ? name : `${name} (${context.toUpperCase()})`;
+}
+
 const SCHEDULE_RUN_FORMATTER = new Intl.DateTimeFormat(undefined, {
   month: "short",
   day: "numeric",

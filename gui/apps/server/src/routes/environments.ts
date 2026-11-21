@@ -58,6 +58,7 @@ import {
 } from "./path-list-policy.js";
 import {
   requireWorkspaceCommandTarget,
+  WORKTREE_PARKED_MESSAGE,
   type WorkspaceCommandTarget,
 } from "../services/environments/workspace-command-target.js";
 import {
@@ -374,6 +375,15 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
         message: "Workspace status is not available for non-git environments",
       });
     }
+    if (environment.parkedAt !== null)
+      return context.json({
+        outcome: "unavailable",
+        failure: {
+          code: "unknown",
+          workspacePath: environment.path ?? "",
+          message: WORKTREE_PARKED_MESSAGE,
+        },
+      });
     const target = requireWorkspaceCommandTarget(environment);
     const result = await deps.workspaceReadCaches.status.read({
       environmentId: environment.id,
@@ -408,6 +418,11 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
     if (!environment.isGitRepo) {
       return context.json({ outcome: "absent" });
     }
+    if (environment.parkedAt !== null)
+      return context.json({
+        outcome: "unavailable",
+        message: WORKTREE_PARKED_MESSAGE,
+      });
     const target = requireWorkspaceCommandTarget(environment);
     const result = await deps.workspaceReadCaches.pullRequest.read({
       environmentId: environment.id,

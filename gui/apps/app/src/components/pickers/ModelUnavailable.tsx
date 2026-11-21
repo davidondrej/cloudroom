@@ -2,7 +2,7 @@ import { useEffect, useState, type ComponentType, type ReactNode } from "react";
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import type {
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -15,6 +15,7 @@ import {
 import { providerCliJobKey } from "@/components/provider-cli/provider-cli-install-store";
 import { useEnvironment } from "@/hooks/queries/environment-queries";
 import {
+  providerModelsRoute,
   useHostProviderCliStatus,
   useSystemConfig,
   useSystemProviderUsageLimits,
@@ -44,7 +45,7 @@ const QUIET_FILL = "border-transparent bg-surface-recessed";
 
 /** The machine a provider's models are checked on: the route's host, its environment's, or the primary. */
 export function useRoutedHostId(
-  routing: SystemProvidersQuery | undefined,
+  routing: SystemExecutionOptionsQuery | undefined,
   enabled: boolean,
 ): string | null {
   const environment = useEnvironment(routing?.environmentId, { enabled });
@@ -60,7 +61,7 @@ export function useRoutedHostId(
 /** The install Cloudroom can run on the routed machine for a provider whose CLI is missing or broken, or `outdated`. */
 function useProviderCliFix(
   providerId: string,
-  routing: SystemProvidersQuery | undefined,
+  routing: SystemExecutionOptionsQuery | undefined,
   enabled: boolean,
   outdated = false,
 ) {
@@ -89,22 +90,22 @@ function useProviderCliFix(
 export async function restartProviderModels(
   queryClient: QueryClient,
   providerId: string,
-  routing?: SystemProvidersQuery,
+  routing?: SystemExecutionOptionsQuery,
 ) {
   const identity = {
     providerId,
-    environmentId: routing?.environmentId ?? null,
-    hostId: routing?.hostId ?? null,
+    ...providerModelsRoute(queryClient, routing ?? {}, providerId),
   };
   const queryKey = systemExecutionOptionsQueryKey(identity);
   await queryClient.cancelQueries({ queryKey, exact: true });
   const result = await sdk.providers.restartModelDiscovery({
     providerId,
-    ...(routing?.environmentId
-      ? { environmentId: routing.environmentId }
-      : routing?.hostId
-        ? { hostId: routing.hostId }
+    ...(identity.environmentId
+      ? { environmentId: identity.environmentId }
+      : identity.hostId
+        ? { hostId: identity.hostId }
         : {}),
+    ...(identity.projectId ? { projectId: identity.projectId } : {}),
   });
   queryClient.setQueryData(queryKey, result);
   if (!result.modelLoadError && result.models.length > 0)
@@ -130,7 +131,7 @@ export function ModelUnavailable({
   providerId: string;
   providerLabel: string;
   providerIcon?: ComponentType<{ className?: string }>;
-  routing?: SystemProvidersQuery;
+  routing?: SystemExecutionOptionsQuery;
   error: SystemExecutionOptionsModelLoadError | null;
   failed: boolean;
   installUrl?: string;
@@ -142,8 +143,7 @@ export function ModelUnavailable({
   const queryClient = useQueryClient();
   const identity = {
     providerId,
-    environmentId: routing?.environmentId ?? null,
-    hostId: routing?.hostId ?? null,
+    ...providerModelsRoute(queryClient, routing ?? {}, providerId),
   };
   const signInKey = `${providerId}:${identity.environmentId ?? identity.hostId ?? ""}`;
   const [signInOpened, setSignInOpened] = useState(() =>
@@ -323,7 +323,7 @@ export function MissingModelsNote({
 }: {
   providerId: string;
   providerLabel: string;
-  routing?: SystemProvidersQuery;
+  routing?: SystemExecutionOptionsQuery;
   modelIds: readonly string[];
 }) {
   const newest = NEWEST_MODELS[providerId];

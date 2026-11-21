@@ -45,7 +45,7 @@ const threadChangeSchema = z.object({
   thread: rawThreadIdSchema, session: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/), project: z.string(), project_name: z.string().nullable(),
   repository: z.string().nullable(), title: z.string().nullable(), state: z.enum(["open", "archived", "deleted", "local"]), sandbox: z.string().nullable(),
   harness: z.string().nullable(), model: z.string().nullable(), reasoning: z.string().nullable(), parent: z.string().nullable(),
-  parent_state: z.enum(["open", "closed"]).nullable(), loop: z.boolean(), created_at: z.string(), woke_at: z.string().nullable(), updated_at: z.string(),
+  parent_state: z.enum(["open", "closed"]).nullable(), loop: z.boolean(), pinned_at: z.string().nullable().optional().default(null), created_at: z.string(), woke_at: z.string().nullable(), updated_at: z.string(),
 });
 export type ThreadChange = z.infer<typeof threadChangeSchema>;
 const threadPageSchema = z.object({ threads: z.array(threadChangeSchema), next: z.string(), more: z.boolean(), recheck_ms: z.number().int().positive().default(3_600_000), recheck_offline_ms: z.number().int().positive().default(600_000) });
@@ -754,7 +754,7 @@ export class SandboxDirectory {
     // A reset cancels it, unless the caller bound it to an account itself. Either way, a late reply changes no state.
     const session = this.session.signal, cancel = only?.signal ?? session;
     const account = await this.account();
-    if (!account) throw new CloudroomError("Sign in to Cloudroom to use cloud sandboxes.");
+    if (!account) throw new CloudroomError("Sign in to Cloudroom to use cloud sandboxes.", 401);
     // Checked and sent with the same read, so an A → B → A switch can't send A's request as B.
     if (only) check(only, account);
     let response: Response;
@@ -774,9 +774,9 @@ export class SandboxDirectory {
     const stale = session.aborted;
     if (!response.ok) {
       const message = typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`;
-      if (response.status === 409 && /busy/i.test(message)) throw new CloudroomConnectionError(message);
+      if (path !== "gitlab" && response.status === 409 && /busy/i.test(message)) throw new CloudroomConnectionError(message);
       const code = typeof value.code === "string" ? value.code : null;
-      if (stale) throw new CloudroomError(message, response.status >= 500 ? null : response.status, code);
+      if (stale) throw new CloudroomError(message, path !== "gitlab" && response.status >= 500 ? null : response.status, code);
       if (code === USAGE_LIMIT) this.limit = { on: true, at: Date.now() };
       // Refused for the cloud queue or the region: ask again soon, so the composer shows the right card.
       if (code === CLOUD_QUEUE || code === CLOUD_REGION) this.mode = null;
@@ -784,7 +784,7 @@ export class SandboxDirectory {
       // A 4xx (say, "This account is not enabled") means the database answered: Cloud is back, whatever the answer.
       if (code === CLOUD_PAUSED) this.pausedAnswers += 1;
       else if (response.status < 500) this.cloudAnswered(path);
-      throw new CloudroomError(message, response.status >= 500 ? null : response.status, code);
+      throw new CloudroomError(message, path !== "gitlab" && response.status >= 500 ? null : response.status, code);
     }
     if (!stale) this.cloudAnswered(path);
     return value;
@@ -1307,8 +1307,8 @@ export class SandboxDirectory {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "label", thread, ...label })).saved;
   }
   /** The account's Cloud threads changed since `since` (#237), `null` for all of them, 500 a page. */
-  async threads(since: string | null): Promise<ThreadPage> {
-    const page = threadPageSchema.parse(await this.call({ action: "threads", ...(since ? { since } : {}) }));
+  async threads(since: string | null, options?: { pinnedOnly?: boolean }): Promise<ThreadPage> {
+    const page = threadPageSchema.parse(await this.call({ action: "threads", ...(since ? { since } : {}), ...(options?.pinnedOnly ? { pinned_only: true } : {}) }));
     this.threadsSupport = { ok: true, at: Date.now() };
     this.threadsFailed = 0;
     return page;
@@ -1526,6 +1526,20 @@ export class SandboxDirectory {
   }
 
   /** Who the account's GitHub login belongs to, or null when GitHub or an older website can't tell. */
+  async gitlabConnection(action: "status" | "start" | "cancel" | "disconnect") {
+    const state = z.object({ available:z.boolean(), login:z.string().nullable(), expired:z.boolean(), waiting:z.boolean(), url:z.string().optional() }).parse(await this.call({action},"gitlab"));
+    if (state.url) {
+      const account = await this.account(), url = new URL(state.url);
+      if (!account || url.origin !== new URL(account.website).origin || url.pathname !== "/api/gitlab/authorize") throw new Error("Unexpected GitLab connection URL.");
+    }
+    return state;
+  }
+  async gitlabBranches(repo: string) {
+    return z.object({ defaultBranch:z.string().nullable(), branches:z.array(z.string()) }).parse(await this.call({action:"branches", repo},"gitlab"));
+  }
+  async gitlabCheck(repo: string) {
+    return z.object({ accessible:z.boolean() }).parse(await this.call({action:"check",repo},"gitlab"));
+  }
   async githubAccount(): Promise<GithubAccount | null> {
     return z.object({ account: githubAccountSchema.nullable() }).parse(await this.call({ action: "github" }, "logins")).account;
   }

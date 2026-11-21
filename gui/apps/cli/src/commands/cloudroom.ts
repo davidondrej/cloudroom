@@ -306,6 +306,17 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     const result = await createCliRoomSdk(getUrl()).cloudroom.cancelCodexLogin(id);
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
+  const gitlab = group.command("gitlab").description("Connect GitLab.com for Cloud projects");
+  gitlab.command("add <url>").description("Add a GitLab.com project").option("--json", "Print JSON").action(action(async (url:string,options:JsonOutputOptions)=>{
+    const project=await createCliRoomSdk(getUrl()).cloudroom.addGitlabRepo({repo:url});
+    if(!outputJson(options,project)) console.log(project.projectId);
+  }));
+  for (const command of ["status","login","cancel","disconnect"] as const) {
+    gitlab.command(command).option("--json","Print JSON").action(action(async (options:JsonOutputOptions)=>{
+      const state=await createCliRoomSdk(getUrl()).cloudroom.gitlabConnection(command==="login"?"start":command);
+      if (!outputJson(options,state)) console.log(state.waiting ? "Open "+state.url : state.expired ? "Reconnect GitLab" : state.login ? "Connected as @"+state.login : "GitLab disconnected");
+    }));
+  }
   const github = group.command("github").description("Connect GitHub for cloud sandboxes");
   github.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     const result = await createCliRoomSdk(getUrl()).cloudroom.githubAuth();

@@ -20,6 +20,7 @@ import {
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { formatUsageReset } from "@cloudroom/shared-ui/lib/usage-format";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
+import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
 import {
   getProviderIconInfo,
@@ -76,8 +77,18 @@ export function PlanLimitRow({
   detail?: string | null;
   className?: string;
 }) {
-  const { thread, model, self, selfResetsAt, agents, agentsLoaded, primary } =
-    usePlanLimitAgents(threadId);
+  const {
+    thread,
+    model,
+    self,
+    selfResetsAt,
+    selfLimit,
+    reasoningLevel,
+    permissionMode,
+    agents,
+    agentsLoaded,
+    primary,
+  } = usePlanLimitAgents(threadId);
   const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
@@ -99,6 +110,10 @@ export function PlanLimitRow({
     meta: { errorMessage: "Couldn't switch accounts." },
     mutationFn: switchAccount,
     onError: () => setBusy(null),
+  });
+  const retry = useMutation({
+    meta: { errorMessage: "Couldn't schedule the retry." },
+    mutationFn: scheduleRetry,
   });
   const pending = accountSwitch.isPending;
   useEffect(() => {
@@ -183,9 +198,14 @@ export function PlanLimitRow({
   };
   const name = self?.name ?? thread.providerId;
   const reset = formatUsageReset(selfResetsAt);
-  const canSwitch = !refusal && accounts.others.length > 0;
+  // Cloud keeps its own Antigravity login, so picking an account here can't move a Cloud Antigravity thread.
+  const canSwitch =
+    !refusal &&
+    accounts.others.length > 0 &&
+    !(isCloud && thread.providerId === "acp-antigravity");
   const vendor = thread.providerId === "codex" ? "OpenAI" : name;
   const SelfIcon = self?.icon;
+  const retryAt = refusal || !selfResetsAt ? null : Date.parse(selfResetsAt);
 
   return (
     <div className={cn("flex flex-col gap-3 py-1", className)}>
@@ -199,10 +219,10 @@ export function PlanLimitRow({
             aria-hidden
           />
         )}
-        {refusal ? `${name} refused this task` : `${name} hit its plan limit`}
-        {refusal ? (
+        {refusal ? `${name} refused this task` : `${name} hit its ${selfLimit}`}
+        {refusal || reset ? (
           <span className="text-sm font-normal text-muted-foreground">
-            {vendor}'s safety filter
+            {refusal ? `${vendor}'s safety filter` : reset}
           </span>
         ) : null}
       </p>
@@ -217,8 +237,34 @@ export function PlanLimitRow({
             {busy}
           </Button>
         </div>
-      ) : canSwitch || primary ? (
+      ) : canSwitch || primary || retryAt ? (
         <div className="flex flex-wrap items-center gap-2 pl-7">
+          {retryAt ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={retry.isPending || retry.isSuccess}
+              onClick={() =>
+                retry.mutate({
+                  projectId: thread.projectId,
+                  threadId,
+                  providerId: thread.providerId,
+                  model,
+                  reasoningLevel,
+                  permissionMode,
+                  runAt: retryAt,
+                })
+              }
+            >
+              <Icon
+                name={retry.isSuccess ? "Check" : "Clock"}
+                className="size-3.5"
+                aria-hidden
+              />
+              {retry.isSuccess ? "Retries" : "Retry"} at {clockTime(retryAt)}
+            </Button>
+          ) : null}
           {canSwitch ? (
             <SplitButton
               logo={self}
@@ -283,8 +329,6 @@ export function PlanLimitRow({
             </SplitButton>
           ) : null}
         </div>
-      ) : reset && !refusal ? (
-        <p className="-mt-1.5 pl-7 text-sm text-muted-foreground">{reset}.</p>
       ) : null}
       {refusal && detail ? (
         <div className="pl-7 text-sm text-muted-foreground">
@@ -307,6 +351,42 @@ export function PlanLimitRow({
       ) : null}
     </div>
   );
+}
+
+/** "Retry at 21:32": a one-time wake of this thread just after the reset, the same loop `room-cli wake` creates. */
+async function scheduleRetry(args: {
+  projectId: string;
+  threadId: string;
+  providerId: string;
+  model: string;
+  reasoningLevel: string | null;
+  permissionMode: string | null;
+  runAt: number;
+}): Promise<void> {
+  await callPluginRpc(fetch, "automations", "automations_create", {
+    projectId: args.projectId,
+    name: "Wake: retry after the plan limit",
+    trigger: { triggerType: "once", runAt: Math.max(args.runAt, Date.now()) + 60_000 },
+    execution: {
+      mode: "agent",
+      prompt: "The plan limit has reset. Continue where you left off.",
+      providerId: args.providerId,
+      model: args.model,
+      ...(args.reasoningLevel ? { reasoningLevel: args.reasoningLevel } : {}),
+      permissionMode: args.permissionMode ?? "full",
+      environment: { type: "project-default" },
+      targetThreadId: args.threadId,
+    },
+    origin: "app",
+    createdByThreadId: args.threadId,
+  });
+}
+
+function clockTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** Each step is a real signal: the switch request (new agent starting), the thread on the new agent (hidden "continue"

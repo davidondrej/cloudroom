@@ -520,6 +520,8 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if ("visibility" in payload) {
       metadataUpdate.visibility = payload.visibility;
     }
+    // The parent as committed now: `thread` predates the awaits above (#2281).
+    const previous = getThread(deps.db, thread.id) ?? thread;
     const updated =
       Object.keys(metadataUpdate).length > 0
         ? updateThread(deps.db, deps.hub, thread.id, metadataUpdate)
@@ -552,12 +554,9 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       }
     }
 
-    if (
-      "parentThreadId" in payload &&
-      payload.parentThreadId !== thread.parentThreadId
-    ) {
+    if ("parentThreadId" in payload) {
       await handleThreadOwnershipChange(deps, {
-        previousThread: thread,
+        previousThread: previous,
         updatedThread: updated,
       });
     }

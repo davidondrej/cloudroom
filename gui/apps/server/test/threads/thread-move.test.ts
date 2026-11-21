@@ -23,7 +23,10 @@ import { validatePromptAttachmentReferences } from "../../src/services/projects/
 import { resolveDeferredFirstTurnContext } from "../../src/services/threads/deferred-first-turn-context.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { moveThreadToProject } from "../../src/services/threads/thread-move.js";
-import { requestThreadWorktreeMove } from "../../src/services/threads/thread-worktree-move.js";
+import {
+  hasPendingWorktreeAutoContinue,
+  requestThreadWorktreeMove,
+} from "../../src/services/threads/thread-worktree-move.js";
 import {
   registerTestHostRpcCapture,
   reportQueuedCommandSuccess,
@@ -32,9 +35,11 @@ import {
 import { installFakeGitWorktreeProvider } from "../helpers/environment-provider.js";
 import {
   seedEnvironment,
+  seedEvent,
   seedHostSession,
   seedPrimaryHost,
   seedProjectWithSource,
+  seedQueuedMessage,
   seedStoredEvent,
   seedThread,
   seedTurnStarted,
@@ -566,6 +571,424 @@ describe("thread worktree", () => {
           expect.objectContaining({ operation: "thread_worktree_move", status: "failed" }),
         ), { timeout: 5000 });
       expect(getThread(harness.db, thread.id)?.environmentId).toBe(folder.id);
+    });
+  });
+
+  async function answerRemoteWorktreeMove(
+    harness: TestAppHarness,
+    hostId: string,
+    threadId: string,
+    folderId: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const status = await waitForQueuedCommand(
+      harness,
+      ({ row, command }) =>
+        row.hostId === hostId &&
+        command.type === "workspace.status" &&
+        command.environmentId === folderId,
+    );
+    await reportQueuedCommandSuccess(harness, status, {
+      outcome: "available",
+      workspaceStatus: {
+        workingTree: {
+          insertions: 0,
+          deletions: 0,
+          lineStatsComplete: true,
+          files: [],
+          hasUncommittedChanges: false,
+          state: "clean",
+        },
+        branch: { currentBranch: "main", defaultBranch: "main" },
+        checkout: { kind: "branch", branchName: "main", headSha: "abc123" },
+        mergeBase: null,
+      },
+    });
+    const attach = await waitForQueuedCommand(
+      harness,
+      ({ row, command }) =>
+        row.hostId === hostId &&
+        command.type === "environment.attach" &&
+        command.path === worktreePath,
+      5_000,
+    );
+    await reportQueuedCommandSuccess(harness, attach, {
+      path: worktreePath,
+      isGitRepo: true,
+      isWorktree: true,
+      branchName: "room/t",
+      defaultBranch: "main",
+    });
+    await releaseOldRuntime(harness, threadId);
+  }
+
+  function turnRequests(harness: TestAppHarness, threadId: string) {
+    return listEvents(harness.db, { threadId })
+      .filter((event) => event.type === "client/turn/requested")
+      .map((event) => JSON.parse(event.data) as { input: PromptInput[] });
+  }
+
+  it("resumes an active thread automatically once its worktree move completes", async () => {
+    await withTestHarness(async (harness) => {
+      seedPrimaryHost(
+        harness.deps,
+        seedHostSession(harness.deps, { id: "host-primary-resume" }).host.id,
+      );
+      const { host } = seedHostSession(harness.deps, { id: "host-resume" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/move-resume-checkout",
+      });
+      const folder = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/move-resume-checkout",
+        mergeBaseBranch: "origin/main",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      seedStoredEvent(harness.deps, {
+        threadId: thread.id,
+        sequence: 1,
+        type: "client/turn/requested",
+        scope: threadScope(),
+        data: {
+          direction: "outbound",
+          requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
+          input: [{ type: "text", text: "Move to a worktree and redesign the chart", mentions: [] }],
+          target: { kind: "thread-start" },
+          execution: {
+            model: "claude-opus-4-6",
+            serviceTier: "default",
+            reasoningLevel: "high",
+            permissionMode: "full",
+            source: "client/turn/requested",
+          },
+          initiator: "user",
+          senderThreadId: null,
+          request: { method: "turn/start", params: {} },
+          source: "tell",
+        },
+      });
+      installFakeGitWorktreeProvider(() => ({
+        action: "ready",
+        environment: {
+          type: "host",
+          hostId: host.id,
+          path: "/tmp/move-resume-worktree",
+          ownsPath: true,
+          mergeBaseBranch: "abc123",
+        },
+      }));
+
+      const moveResult = requestThreadWorktreeMove(harness.deps, thread.id, []);
+      expect(moveResult.deferred).toBe(true);
+      expect(hasPendingWorktreeAutoContinue(thread.id)).toBe(true);
+      harness.db
+        .update(threads)
+        .set({ status: "idle" })
+        .where(eq(threads.id, thread.id))
+        .run();
+
+      const dispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+      await answerRemoteWorktreeMove(
+        harness,
+        host.id,
+        thread.id,
+        folder.id,
+        "/tmp/move-resume-worktree",
+      );
+      await dispatch;
+      expect(hasPendingWorktreeAutoContinue(thread.id)).toBe(false);
+
+      const updated = getThread(harness.db, thread.id)!;
+      expect(getEnvironment(harness.db, updated.environmentId!)?.path).toBe(
+        "/tmp/move-resume-worktree",
+      );
+      const requests = turnRequests(harness, thread.id);
+      expect(requests).toHaveLength(2);
+      expect(requests[1]!.input).toEqual([
+        expect.objectContaining({
+          type: "text",
+          visibility: "agent-only",
+          text: expect.stringContaining("/tmp/move-resume-worktree"),
+        }),
+        expect.objectContaining({
+          type: "text",
+          visibility: "agent-only",
+          text: expect.stringContaining("Continue the user's request in the new worktree"),
+        }),
+      ]);
+    });
+  });
+
+  it("resumes fresh-session providers with history seed and preserves path note if continuation fails", async () => {
+    await withTestHarness(async (harness) => {
+      seedPrimaryHost(
+        harness.deps,
+        seedHostSession(harness.deps, { id: "host-primary-extra" }).host.id,
+      );
+      const { host } = seedHostSession(harness.deps, { id: "host-extra" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/move-extra-checkout",
+      });
+      const folder = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/move-extra-checkout",
+        mergeBaseBranch: "origin/main",
+      });
+      let worktreePath = "/tmp/move-extra-pi";
+      installFakeGitWorktreeProvider(() => ({
+        action: "ready",
+        environment: {
+          type: "host",
+          hostId: host.id,
+          path: worktreePath,
+          ownsPath: true,
+          mergeBaseBranch: "abc123",
+        },
+      }));
+
+      // 1. Fresh-session provider (resumesInNewFolder: false) auto-resumes with historySeed + nudge.
+      const piThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "pi",
+        status: "active",
+      });
+      seedStoredEvent(harness.deps, {
+        threadId: piThread.id,
+        sequence: 1,
+        type: "client/turn/requested",
+        scope: threadScope(),
+        data: {
+          direction: "outbound",
+          requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
+          input: [{ type: "text", text: "Move to a worktree and fix the bug", mentions: [] }],
+          target: { kind: "thread-start" },
+          execution: {
+            model: "anthropic/claude-sonnet-4-5",
+            serviceTier: "default",
+            reasoningLevel: "high",
+            permissionMode: "full",
+            source: "client/turn/requested",
+          },
+          initiator: "user",
+          senderThreadId: null,
+          request: { method: "turn/start", params: {} },
+          source: "tell",
+        },
+      });
+      requestThreadWorktreeMove(harness.deps, piThread.id, []);
+      harness.db.update(threads).set({ status: "idle" }).where(eq(threads.id, piThread.id)).run();
+      const piDispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: piThread.id,
+      });
+      await answerRemoteWorktreeMove(harness, host.id, piThread.id, folder.id, worktreePath);
+      await piDispatch;
+      const piRequests = turnRequests(harness, piThread.id);
+      expect(piRequests).toHaveLength(2);
+      expect(piRequests[1]!.input.some((block) => block.type === "text" && block.text.includes(worktreePath))).toBe(true);
+      expect(piRequests[1]!.input.at(-1)).toMatchObject({
+        type: "text",
+        visibility: "agent-only",
+        text: expect.stringContaining("Continue the user's request in the new worktree"),
+      });
+
+      // 2. If auto-resume dispatch fails (e.g. missing model), the path note still waits for the next turn.
+      worktreePath = "/tmp/move-extra-failed-resume";
+      const failedResumeThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      requestThreadWorktreeMove(harness.deps, failedResumeThread.id, []);
+      harness.db.update(threads).set({ status: "idle" }).where(eq(threads.id, failedResumeThread.id)).run();
+      const failedDispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: failedResumeThread.id,
+      });
+      await answerRemoteWorktreeMove(harness, host.id, failedResumeThread.id, folder.id, worktreePath);
+      await failedDispatch;
+      expect(turnRequests(harness, failedResumeThread.id)).toHaveLength(0);
+      expect(resolveDeferredFirstTurnContext(harness.db, failedResumeThread)?.input[0]).toMatchObject({
+        visibility: "agent-only",
+        text: expect.stringContaining(worktreePath),
+      });
+    });
+  });
+
+  it("skips auto-resume for idle moves, external moves, manual stops, and when a user message is queued", async () => {
+    await withTestHarness(async (harness) => {
+      seedPrimaryHost(
+        harness.deps,
+        seedHostSession(harness.deps, { id: "host-primary-skip" }).host.id,
+      );
+      const { host } = seedHostSession(harness.deps, { id: "host-skip" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/move-skip-checkout",
+      });
+      const folder = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/move-skip-checkout",
+        mergeBaseBranch: "origin/main",
+      });
+      let worktreePath = "/tmp/move-skip-idle";
+      installFakeGitWorktreeProvider(() => ({
+        action: "ready",
+        environment: {
+          type: "host",
+          hostId: host.id,
+          path: worktreePath,
+          ownsPath: true,
+          mergeBaseBranch: "abc123",
+        },
+      }));
+
+      // 1. Idle thread moved externally: never wakes up, returns deferred: false, next turn gets the path note.
+      const idleThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "idle",
+      });
+      expect(requestThreadWorktreeMove(harness.deps, idleThread.id, [], { self: false }).deferred).toBe(false);
+      await answerRemoteWorktreeMove(
+        harness,
+        host.id,
+        idleThread.id,
+        folder.id,
+        worktreePath,
+      );
+      await vi.waitFor(() =>
+        expect(
+          getEnvironment(
+            harness.db,
+            getThread(harness.db, idleThread.id)!.environmentId!,
+          )?.path,
+        ).toBe(worktreePath),
+      );
+      expect(turnRequests(harness, idleThread.id)).toHaveLength(0);
+      expect(
+        resolveDeferredFirstTurnContext(harness.db, idleThread)?.input[0],
+      ).toMatchObject({
+        visibility: "agent-only",
+        text: expect.stringContaining(worktreePath),
+      });
+
+      // 2. Active thread moved by another caller (self: false): never auto-resumes or suppresses parent notifications.
+      worktreePath = "/tmp/move-skip-external";
+      const externalThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      expect(
+        requestThreadWorktreeMove(harness.deps, externalThread.id, [], { self: false }).deferred,
+      ).toBe(true);
+      expect(hasPendingWorktreeAutoContinue(externalThread.id)).toBe(false);
+      harness.db.update(threads).set({ status: "idle" }).where(eq(threads.id, externalThread.id)).run();
+      const externalDispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: externalThread.id,
+      });
+      await answerRemoteWorktreeMove(harness, host.id, externalThread.id, folder.id, worktreePath);
+      await externalDispatch;
+      expect(turnRequests(harness, externalThread.id)).toHaveLength(0);
+      expect(resolveDeferredFirstTurnContext(harness.db, externalThread)?.input[0]).toMatchObject({
+        visibility: "agent-only",
+        text: expect.stringContaining(worktreePath),
+      });
+
+      // 2. Active thread manually stopped before move completes: never wakes up.
+      worktreePath = "/tmp/move-skip-stopped";
+      const stoppedThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      requestThreadWorktreeMove(harness.deps, stoppedThread.id, []);
+      seedEvent(harness.deps, {
+        threadId: stoppedThread.id,
+        sequence: 99,
+        type: "system/thread/interrupted",
+        scope: threadScope(),
+        data: { reason: "manual-stop" },
+      });
+      harness.db
+        .update(threads)
+        .set({ status: "idle" })
+        .where(eq(threads.id, stoppedThread.id))
+        .run();
+      const stoppedDispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: stoppedThread.id,
+      });
+      await answerRemoteWorktreeMove(
+        harness,
+        host.id,
+        stoppedThread.id,
+        folder.id,
+        worktreePath,
+      );
+      await stoppedDispatch;
+      expect(turnRequests(harness, stoppedThread.id)).toHaveLength(0);
+
+      // 3. Queued user message wins over synthetic auto-resume and receives the new path note.
+      worktreePath = "/tmp/move-skip-queued";
+      const queuedThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: folder.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      requestThreadWorktreeMove(harness.deps, queuedThread.id, []);
+      seedQueuedMessage(harness.deps, {
+        threadId: queuedThread.id,
+        content: [{ type: "text", text: "Now build it", mentions: [] }],
+      });
+      harness.db
+        .update(threads)
+        .set({ status: "idle" })
+        .where(eq(threads.id, queuedThread.id))
+        .run();
+      const queuedDispatch = runQueuedMessageDispatch(harness.deps, {
+        kind: "thread-ready",
+        threadId: queuedThread.id,
+      });
+      await answerRemoteWorktreeMove(
+        harness,
+        host.id,
+        queuedThread.id,
+        folder.id,
+        worktreePath,
+      );
+      await queuedDispatch;
+      const requests = turnRequests(harness, queuedThread.id);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.input).toEqual([
+        expect.objectContaining({
+          type: "text",
+          visibility: "agent-only",
+          text: expect.stringContaining(worktreePath),
+        }),
+        expect.objectContaining({ type: "text", text: "Now build it" }),
+      ]);
     });
   });
 });

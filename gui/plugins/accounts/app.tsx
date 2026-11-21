@@ -61,6 +61,7 @@ function windowLabel(label: string): string {
     .replace("Weekly · ", "7d ")
     .replace("Weekly", "7d")
     .replace("Plan usage", "Plan")
+    .replace("Plan · ", "Plan ")
     .replace("On-demand spend", "Spend");
 }
 
@@ -73,10 +74,12 @@ type Limit = {
 };
 
 // The line: the limit's name, bar, percent used, and the time until it resets. Greyed when no read confirmed it lately.
+// An old bar is a floor until its reset. Past it, or at 0%, nothing is known: it shows "–", not a guessed 0%.
 function Meter({ label, usedPercent, resetsAt, checkedAt }: Limit) {
   const used = usedPercent ?? 0;
   const hot = used >= 90;
   const old = checkedAt != null && Date.now() - checkedAt > USAGE_STALE_MS;
+  const unknown = usedPercent === null || (old && used === 0 && resetsAt === null);
   return (
     <div
       className={cn("contents", old && "*:opacity-40")}
@@ -91,9 +94,9 @@ function Meter({ label, usedPercent, resetsAt, checkedAt }: Limit) {
       </span>
       <span
         className={cn("text-right", hot && "text-warning-text")}
-        title={usedPercent === null ? "Not read yet" : undefined}
+        title={usedPercent === null ? "Not read yet" : unknown ? "Not checked lately" : undefined}
       >
-        {usedPercent === null ? "–" : `${Math.round(used)}%`}
+        {unknown ? "–" : `${Math.round(used)}%`}
       </span>
       <span
         className="whitespace-nowrap pl-1 text-subtle-foreground/75"
@@ -131,6 +134,7 @@ function AccountRow({
   onRename,
   onRemove,
   onSignInAgain,
+  signingIn,
 }: {
   account: AccountView;
   // The limits every row of this agent shows, in order, each as it looks when the account doesn't report it.
@@ -144,6 +148,8 @@ function AccountRow({
   onRename: (name: string) => void;
   onRemove: () => void;
   onSignInAgain?: () => void;
+  // A sign-in is already running in this list: Sign in again waits for it.
+  signingIn: boolean;
 }) {
   // The page can stay open past a reset, so a limit or a bar whose reset has passed clears here.
   const now = Date.now();
@@ -172,6 +178,8 @@ function AccountRow({
             account.windows.find((window) => window.label === empty.label) ??
             (empty.usedPercent === 0 && newest >= 0 ? { ...empty, checkedAt: newest } : empty),
         );
+  // How long ago this row's bars were last read, once that's too long; 0 for bars saved before reads were timed.
+  const checkedAgo = newest >= 0 && now - newest > USAGE_STALE_MS ? (newest ? now - newest : 0) : null;
   const full = shown.some(
     (window) =>
       Math.round(window.usedPercent ?? 0) >= 100 &&
@@ -278,6 +286,15 @@ function AccountRow({
                 In use
               </span>
             ) : null}
+            {checkedAgo !== null ? (
+              <span
+                className="flex shrink-0 items-center gap-1 rounded bg-foreground/10 px-1.5 text-xs font-medium leading-4 text-subtle-foreground"
+                title={checkedAgo ? `Usage last checked ${span(checkedAgo)} ago` : "Last known usage"}
+              >
+                <Icon name="Clock" className="size-3" />
+                {checkedAgo ? `${span(checkedAgo).split(" ")[0]} ago` : "Not recent"}
+              </span>
+            ) : null}
           </div>
         )}
         {detail ? (
@@ -285,7 +302,28 @@ function AccountRow({
             {detail}
           </div>
         ) : null}
-        {account.error && !account.limitedUntil ? (
+        {/* A dead login shows even at a limit: the limit only hides usage-read errors. One click opens the sign-in page. */}
+        {account.signedOut && onSignInAgain ? (
+          // Clicks here never pick the row: a greyed-out button lets clicks through to it.
+          <div
+            className="mt-1.5 flex w-fit items-center gap-2"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span className="text-xs text-warning-text" title={account.error ?? undefined}>
+              Signed out
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 gap-1 px-2 text-xs [&_[data-icon-root]]:size-3"
+              disabled={signingIn}
+              onClick={onSignInAgain}
+            >
+              <Icon name="RotateCcw" />
+              Sign in again
+            </Button>
+          </div>
+        ) : account.error && !account.limitedUntil ? (
           <div className="truncate text-xs text-warning-text" title={account.error}>
             {account.error}
           </div>
@@ -293,6 +331,7 @@ function AccountRow({
         {account.limitedLogin && onSignInAgain ? (
           <button
             type="button"
+            disabled={signingIn}
             onClick={onSignInAgain}
             className="block max-w-full truncate text-left text-xs text-primary-text hover:underline"
           >
@@ -347,7 +386,7 @@ function AccountRow({
             <Icon name="Edit" /> Rename
           </DropdownMenuItem>
           {onSignInAgain ? (
-            <DropdownMenuItem onSelect={onSignInAgain}>
+            <DropdownMenuItem disabled={signingIn} onSelect={onSignInAgain}>
               <Icon name="RotateCcw" /> Sign in again
             </DropdownMenuItem>
           ) : null}
@@ -578,17 +617,120 @@ function KeyRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
   );
 }
 
+/** Antigravity accounts sign in with Google like Cloud does: the link opens, and Google shows a code to paste back. */
+function CodeRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
+  const navigate = useBbNavigate();
+  const [session, setSession] = useState<{ id: string; url: string } | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Each try is a new sign-in; leaving the row cancels the open one.
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    let started: string | null = null;
+    rpc.call("antigravity.start", null).then(
+      (next) => {
+        started = next.sessionId;
+        if (cancelled) {
+          void rpc.call("antigravity.cancel", { sessionId: next.sessionId });
+          return;
+        }
+        setSession({ id: next.sessionId, url: next.authorizeUrl });
+        navigate.openUrl(next.authorizeUrl);
+      },
+      (cause: unknown) => !cancelled && setError(errorText(cause)),
+    );
+    return () => {
+      cancelled = true;
+      if (started) void rpc.call("antigravity.cancel", { sessionId: started });
+    };
+  }, [rpc, attempt]);
+  const retry = () => {
+    setSession(null);
+    setCode("");
+    setError(null);
+    setAttempt((count) => count + 1);
+  };
+  const add = () => {
+    if (!session) return;
+    setBusy(true);
+    setError(null);
+    rpc.call("antigravity.complete", { sessionId: session.id, code }).then(close, (cause: unknown) => {
+      const message = errorText(cause);
+      // A mistyped code keeps the sign-in open; any other error ends it.
+      if (!message.startsWith("Paste the code")) setSession(null);
+      setError(message);
+      setBusy(false);
+    });
+  };
+  return (
+    <div className="space-y-2 py-2.5 text-sm">
+      <div className="flex items-center gap-2">
+        <input
+          autoFocus
+          aria-label="Google sign-in code"
+          placeholder={session ? "Paste the code Google shows" : error ? "Sign-in ended" : "Starting sign-in…"}
+          value={code}
+          disabled={busy || !session}
+          onChange={(event) => setCode(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && code.trim()) add();
+            if (event.key === "Escape" && !busy) close();
+          }}
+          className="min-w-0 flex-1 rounded border border-border bg-transparent px-2 py-1 text-sm text-foreground outline-none focus:border-foreground/50"
+        />
+        {session || busy ? (
+          <Button size="sm" disabled={busy || !code.trim()} onClick={add}>
+            {busy ? "Signing in…" : "Add"}
+          </Button>
+        ) : error ? (
+          <Button size="sm" onClick={retry}>
+            Try again
+          </Button>
+        ) : null}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 text-muted-foreground"
+          aria-label="Cancel"
+          disabled={busy}
+          onClick={close}
+        >
+          <Icon name="X" />
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {error ? (
+          <span className="text-destructive-text">{error}</span>
+        ) : session ? (
+          <>
+            Sign in with the other Google account, then paste the code here.{" "}
+            <button
+              type="button"
+              onClick={() => navigate.openUrl(session.url)}
+              className="text-primary-text hover:underline"
+            >
+              Open sign-in again
+            </button>
+          </>
+        ) : (
+          "Opening Google sign-in…"
+        )}
+      </p>
+    </div>
+  );
+}
+
 function AccountsSection({
   provider,
   name,
-  canAdd = true,
   hideWhenEmpty = false,
   note,
   onPresence,
 }: {
   provider: Provider;
   name: string;
-  canAdd?: boolean;
   hideWhenEmpty?: boolean;
   note?: string | undefined;
   onPresence?: ((present: boolean) => void) | undefined;
@@ -734,17 +876,15 @@ function AccountsSection({
             </>
           ) : null}
         </p>
-        {canAdd ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            aria-label={`Add ${name} account`}
-            disabled={adding !== null || count >= MAX_ACCOUNTS}
-            onClick={() => setAdding({ mac: false, id: null })}
-          >
-            <Icon name="Plus" /> Add
-          </Button>
-        ) : null}
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={`Add ${name} account`}
+          disabled={adding !== null || count >= MAX_ACCOUNTS}
+          onClick={() => setAdding({ mac: false, id: null })}
+        >
+          <Icon name="Plus" /> Add
+        </Button>
       </div>
       {accounts === null ? (
         <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
@@ -797,10 +937,11 @@ function AccountsSection({
                   )
                 }
                 onSignInAgain={
-                  provider === "claude-code" && account.id !== LOCAL && adding === null
+                  provider === "claude-code" && account.id !== LOCAL
                     ? () => setAdding({ mac: false, id: account.id })
                     : undefined
                 }
+                signingIn={adding !== null}
               />
             ))}
           </div>
@@ -810,6 +951,14 @@ function AccountsSection({
         <div className="rounded-lg border border-dashed border-border px-3.5">
           {provider === "acp-cursor" ? (
             <KeyRow
+              rpc={rpc}
+              close={() => {
+                setAdding(null);
+                load();
+              }}
+            />
+          ) : provider === "acp-antigravity" ? (
+            <CodeRow
               rpc={rpc}
               close={() => {
                 setAdding(null);
@@ -841,18 +990,12 @@ function AccountsSection({
 const AGENTS: readonly {
   provider: Provider;
   name: string;
-  canAdd?: boolean;
   hideWhenEmpty?: boolean;
 }[] = [
   { provider: "claude-code", name: "Claude Code" },
   { provider: "codex", name: "Codex" },
   { provider: "acp-cursor", name: "Cursor" },
-  {
-    provider: "acp-antigravity",
-    name: "Antigravity",
-    canAdd: false,
-    hideWhenEmpty: true,
-  },
+  { provider: "acp-antigravity", name: "Antigravity", hideWhenEmpty: true },
 ];
 
 /** Settings → Agents → Accounts: every agent's accounts on one page. All threads use the one picked. */
@@ -884,7 +1027,7 @@ function AccountsPage() {
             }
             note={
               agent.provider === "acp-antigravity"
-                ? "Antigravity uses this Mac's Google login, and Grok uses your X subscription. One login covers each, so there's nothing to add here."
+                ? "Added Antigravity accounts run Local threads; Cloud keeps its own Antigravity login. Grok signs in with your X subscription, so there's nothing to add for it."
                 : agent.provider === "acp-cursor" && !hasAntigravity
                   ? "Grok signs in with your X subscription. One login covers it, so there's nothing to add here."
                   : undefined

@@ -42,7 +42,7 @@
   },
   "scripts": {
     "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@get-bb/plugin-sdk": "workspace:*",

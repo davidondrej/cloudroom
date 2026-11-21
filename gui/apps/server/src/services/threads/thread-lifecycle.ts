@@ -29,6 +29,7 @@ import {
   markThreadDeleted,
   markThreadStorageDeleted,
   threads,
+  type DbConnection,
   type DbNotifier,
   type DbQueryConnection,
   type DbTransaction,
@@ -116,12 +117,17 @@ import {
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { queueChildThreadTurnNotificationBestEffort } from "./child-thread-notifications.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
+import { loadFailedTurn, turnStartedBeforeBoot } from "./turn-failed.js";
 import {
   clearThreadProvisionSchedule,
   getThreadProvisionContext,
 } from "./thread-startup-store.js";
 import { cancelAbandonedProviderCreations } from "./thread-environment-providers.js";
-import { emitPluginThreadDeleted } from "../plugins/plugin-thread-events.js";
+import {
+  emitPluginMessageQueued,
+  emitPluginThreadDeleted,
+} from "../plugins/plugin-thread-events.js";
+import { requeueRefusedTurnRequest } from "./queue-waits.js";
 import { scheduleThreadProvisioningAdvance } from "./thread-provisioning.js";
 import { pendingImportFork } from "./thread-fork-history.js";
 import { isPreStartThreadStatus } from "./thread-status.js";
@@ -946,9 +952,30 @@ export function settleThreadStartCommandResult(
     }
     // The host refused this start before touching the live turn it competed
     // with, so that turn's own end settles the thread: its result stands and
-    // the parent hears no false failure (#1584).
+    // the parent hears no false failure. Its message waits on the queue for
+    // that turn instead of being lost; an edit's is not resent (#1584).
     if (args.report.errorCode === "turn_busy") {
-      return emptyCommandResultSideEffects();
+      const queued =
+        args.command.replacesProviderThreadId === undefined
+          ? requeueRefusedTurnRequest(args.deps, {
+              requestId: args.command.requestId,
+              threadId: thread.id,
+            })
+          : null;
+      if (queued === null) return emptyCommandResultSideEffects();
+      if (carriesCustomInstructions(args.command.input)) {
+        markCustomInstructionsLost(args.deps.db, thread.id);
+      }
+      postCommitActions.push({
+        run: (deps) => {
+          emitPluginMessageQueued(queued);
+          requestQueuedMessageDispatch(deps, {
+            kind: "thread-ready",
+            threadId: thread.id,
+          });
+        },
+      });
+      return { postCommitActions };
     }
     clearThreadProvisionSchedule(thread.id);
     // The host came back reporting this thread live, so the start arrived.
@@ -1982,10 +2009,7 @@ function interruptActiveTurnForThreadInTransaction(
 }
 
 function interruptActiveThreads(
-  deps: Pick<
-    AppDeps,
-    "db" | "hub" | "logger" | "pendingInteractions" | "providerRegistry"
-  >,
+  deps: LoggedPendingInteractionWorkSessionDeps,
   args: InterruptActiveThreadsArgs,
 ): InterruptActiveThreadsResult {
   if (args.threads.length === 0) {
@@ -2093,16 +2117,59 @@ function interruptActiveThreads(
         ...(thread ? buildThreadStatusChangeMetadata(deps, thread) : {}),
       },
     );
+    // No daemon reports this turn's end, so the parent hears it here, once
+    // per request: a revived turn the next deadline ends again stays quiet
+    // (#2142). Work from before a reboot wakes nothing (ADR 20261103-233411).
+    if (
+      result.failureEventAppended &&
+      thread?.status === "error" &&
+      isParentNotifiableChildThread(thread)
+    ) {
+      if (
+        turnStartedBeforeBoot(thread, loadFailedTurn(deps.db, thread.id)) ||
+        countHostInterruptionsSinceLastRequest(deps.db, thread.id) > 1 ||
+        !isFirstFailureReportSinceStatusChange(thread.id)
+      ) {
+        continue;
+      }
+      void queueChildThreadTurnNotificationBestEffort(deps, {
+        childThread: thread,
+        parentThreadId: thread.parentThreadId,
+        ...(result.interruptedTurnId === null
+          ? {}
+          : { turnId: result.interruptedTurnId }),
+        turnStatus: "failed",
+      });
+    }
   }
 
   return { threads: results };
 }
 
+/** Daemon losses that ended the thread's latest request, in either scope (#2142). */
+export function countHostInterruptionsSinceLastRequest(
+  db: DbConnection,
+  threadId: string,
+): number {
+  const afterSequence = loadFailedTurn(db, threadId)?.requestSequence ?? 0;
+  return (
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          eq(events.type, "system/thread/interrupted"),
+          sql`json_extract(${events.data}, '$.reason') = 'host-daemon-restarted'`,
+          sql`${events.sequence} > ${afterSequence}`,
+        ),
+      )
+      .get()?.count ?? 0
+  );
+}
+
 export function interruptActiveThreadsForHost(
-  deps: Pick<
-    AppDeps,
-    "db" | "hub" | "logger" | "pendingInteractions" | "providerRegistry"
-  >,
+  deps: LoggedPendingInteractionWorkSessionDeps,
   args: InterruptActiveThreadsForHostArgs,
 ): InterruptActiveThreadsResult {
   const activeThreads = deps.db

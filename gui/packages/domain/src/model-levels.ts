@@ -63,9 +63,9 @@ export function sameLevelModel(
   return newestModel(availableModels.map(({ model }) => model), level.codex);
 }
 
-/** The newest model of a family ("astra", "opus") in a harness's own list: gpt-6.2-astra beats gpt-6-astra, and a 1M twin wins a tie. */
+/** The newest model of a family ("astra", "opus", "neon") in a harness's own list: gpt-6.2-astra beats gpt-6-astra, and a 1M twin wins a tie. */
 export function newestModel(models: readonly string[], family: string): string | null {
-  const pattern = new RegExp(`^(?:gpt-(\\d+(?:\\.\\d+)*)-${family}|claude-${family}-(\\d+(?:-\\d{1,2})?)(?:-\\d{8})?)(\\[1m\\])?$`);
+  const pattern = new RegExp(`^(?:(?:gpt|gemini)-(\\d+(?:\\.\\d+)*)-${family}|claude-${family}-(\\d+(?:-\\d{1,2})?)(?:-\\d{8})?)(\\[1m\\])?$`);
   let best: { id: string; score: number } | null = null;
   for (const id of models) {
     const match = pattern.exec(id);

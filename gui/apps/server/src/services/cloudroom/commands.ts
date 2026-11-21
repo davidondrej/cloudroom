@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir, stat, rename, rm } from "node:fs/promises";
 import { join, win32 } from "node:path";
 import { and, desc, eq, gt, inArray, isNull, max, notInArray, sql } from "drizzle-orm";
-import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
+import { createThread, findLastCompletedRootStoredTurn, getAppSettings, getProject, getThread, getThreadExecutionOverride, pinThread, setThreadExecutionOverride, updateThread, cloudroomThreads, cloudroomCommands, events, threads, type DbConnection, type DbQueryConnection, type DbTransaction } from "@cloudroom/db";
 import { PERSONAL_PROJECT_ID, cloudLoginName, cloudLoginProvider, type CloudLoginProvider, rawThreadIdSchema, encodeClientTurnRequestIdNumber, isStandaloneBuiltinCompactCommand, promptInputSchema, reasoningLevelSchema, serviceTierSchema, reconcileReasoningLevel, defaultReasoningLevel, threadQueuedMessageSchema, type Thread, type PromptInput, type ThreadEventType, type ThreadEventTurnStatus, type ThreadChangeKind, type ReasoningLevel, COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest, SendMessageRequest, SendMessageResponse } from "@cloudroom/server-contract";
 import { z } from "zod";
@@ -16,9 +16,10 @@ import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { cloudPluginInstructions, cloudroomSystemPrompt, dueCustomInstructions, markCustomInstructionsLost, prepareCloudInstructionInput, resolveCustomInstructions } from "../threads/custom-instructions.js";
-import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, teleportProgress, unstartedTurn, unsentDeletes, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
+import { TIMED_OUT, baseBranch, binding, bindings, command, commands, coreInUse, localTeleports, openBinding, openBindings, queuedPrompts, saveBinding, saveCommandState, saveStatus, effectivePrompt, projectCopyProgress, stampBindings, teleportBlocked, teleportProgress, unstartedTurn, unsentDeletes, type Binding, type Command, type OpenBinding, isDead, statusOf } from "./store.js";
+import { macHarnessVersions } from "./harness-versions.js";
 import { syncLoopEnv } from "./project-loops.js";
-import { copyKey, copyProject, copyRunning, keyCopying, githubRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, refreshProjectRemote, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
+import { copyKey, copyProject, copyRunning, keyCopying, cloudRepository, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, workspaceId, workspaceName, planProjectCopy, planProjectCopyOrThrow, refreshProjectRemote, reportProjectCopy, retry, writeFilesState, type ProjectCopyJob } from "./project-copy.js";
 import { CHILD_HINT, cloudForkOf, cloudForkPoint, codeFromOf, FORK_HARNESSES, FORK_HINT, landForkCode, localForkPoint, startCloudFork, threadCode, uploadInParts } from "./fork.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { CloudGitError, savedWorkspacePath } from "./git.js";
@@ -730,6 +731,9 @@ class CloudroomService {
   private asleep(threadId: string): void {
     this.slept.set(threadId, this.sandboxes.awakeChecks);
     this.detach(threadId);
+    // An open thread shows its history now, not on the next tick (needsDelivery reads it there too, once).
+    const saved = this.deps.hub.watching(threadId) ? binding(this.deps.db, threadId) : null;
+    if (saved && sandboxThread(saved.coreUrl) === threadId) void this.readHistory(threadId);
     const thread = getThread(this.deps.db, threadId), status = thread?.status;
     // A stop held for the next wake (#553, #1699) isn't work: an asleep sandbox runs nothing.
     if (thread && status && status !== "idle" && status !== "error" && !commands(this.deps.db, threadId).some(c => c.state === "sending" && c.command !== "stop" && c.command !== "unarchive_session")) {
@@ -768,6 +772,7 @@ class CloudroomService {
   private readonly disk = new Map<string, { paused: boolean; reason: "disk_capacity" | "measurement_unavailable"; usedBytes: number | null; totalBytes: number | null }>();
   private readonly deliveries = new Map<string, Promise<void>>();
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stopWatching: (() => void) | null = null;
   private stopped = false;
   private epoch = 0;
   private configurationWrite: Promise<void> = Promise.resolve();
@@ -1352,7 +1357,7 @@ class CloudroomService {
 
   private sandboxProject(projectId = PERSONAL_PROJECT_ID): SandboxProject {
     const project = getProject(this.deps.db, projectId);
-    return { id: project?.id ?? PERSONAL_PROJECT_ID, repository: project && project.id !== PERSONAL_PROJECT_ID ? githubRepository(project.gitRemoteUrl) : null, folder: workspaceName(project?.name ?? "project") };
+    return { id: project?.id ?? PERSONAL_PROJECT_ID, repository: project && project.id !== PERSONAL_PROJECT_ID ? cloudRepository(project.gitRemoteUrl) : null, folder: workspaceName(project?.name ?? "project") };
   }
 
   /** The project of the newest cloud thread from the last 7 days, if any. */
@@ -2116,12 +2121,12 @@ class CloudroomService {
     }
   }
 
-  private prompts(threadId: string) {
-    return commands(this.deps.db, threadId).filter((item) => item.command === "prompt" && !JSON.parse(item.input).teleport_handoff);
+  private prompts(threadId: string, preloaded?: Command[]) {
+    return (preloaded ?? commands(this.deps.db, threadId)).filter((item) => item.command === "prompt" && !JSON.parse(item.input).teleport_handoff);
   }
 
-  private currentReasoning(threadId: string, saved: Binding): string {
-    return getThreadExecutionOverride(this.deps.db, threadId)?.reasoningLevelOverride ?? commandReasoning(this.prompts(threadId).at(-1)?.input ?? "") ?? saved.reasoning;
+  private currentReasoning(threadId: string, saved: Binding, preloadedPrompts?: Command[]): string {
+    return getThreadExecutionOverride(this.deps.db, threadId)?.reasoningLevelOverride ?? commandReasoning((preloadedPrompts ?? this.prompts(threadId)).at(-1)?.input ?? "") ?? saved.reasoning;
   }
 
   /** Records only say paused or not, so each one also reads the disk size for the card's meter. */
@@ -2161,15 +2166,22 @@ class CloudroomService {
   threadStatus(threadId: string) {
     const saved = binding(this.deps.db, threadId);
     if (!saved) return null;
-    const prompts = this.prompts(threadId);
+    const allCommands = commands(this.deps.db, threadId);
+    const prompts: Command[] = [];
+    let transfer: Command | undefined;
+    let pendingDelivery = 0;
+    for (const item of allCommands) {
+      if (item.state === "sending") pendingDelivery++;
+      if (item.command === "prompt" && !JSON.parse(item.input).teleport_handoff) prompts.push(item);
+      else if (transfer === undefined && item.command === "teleport") transfer = item;
+    }
     const latestPrompt = prompts.at(-1);
-    const reasoning = this.currentReasoning(threadId, saved);
-    const transfer = commands(this.deps.db, threadId).find(item => item.command === "teleport");
-    const input = latestPrompt ? effectivePrompt(this.deps.db, threadId, latestPrompt.id) : transfer ? JSON.parse(transfer.input).manifest ?? {} : {};
+    const reasoning = this.currentReasoning(threadId, saved, prompts);
+    const input = latestPrompt ? effectivePrompt(this.deps.db, threadId, latestPrompt.id, false, allCommands) : transfer ? JSON.parse(transfer.input).manifest ?? {} : {};
     const serviceTier = serviceTierSchema.catch("default").parse(input.service_tier);
     const initial = prompts.find(item => item.id === `first_${threadId}`);
     const issues = Object.values(this.connectionIssues.get(threadId) ?? {});
-    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), launchCap: !this.sandboxes.usageLimited() && this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? ""), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery: commands(this.deps.db, threadId).filter((c) => c.state === "sending").length };
+    return { authRequired: !saved.sessionId && authRequiredMessages.has(saved.error ?? ""), starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)), sessionId: saved.sessionId, paused: saved.queuePaused, failedStart: !saved.sessionId && initial?.state === "failed", model: saved.model, reasoning, serviceTier, error: saved.error ?? issues.find(issue => !issue.reconnecting)?.message ?? null, reconnecting: issues.some(issue => issue.reconnecting), usageLimit: Boolean(sandboxThread(saved.coreUrl)) && (this.sandboxes.usageLimited() || this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? "")), launchCap: !this.sandboxes.usageLimited() && this.sandboxes.agentLimited(sandboxThread(saved.coreUrl) ?? ""), disk: this.disk.get(threadId) ?? null, awake: !sandboxThread(saved.coreUrl) || this.sandboxes.isAwake(sandboxThread(saved.coreUrl) ?? ""), vps: this.sandboxes.onVps(sandboxThread(saved.coreUrl) ?? ""), move: this.sandboxes.moveState(sandboxThread(saved.coreUrl) ?? ""), waiting: this.sandboxes.waitNotice(sandboxThread(saved.coreUrl) ?? ""), fromCopy: this.sandboxes.copyChoice(sandboxThread(saved.coreUrl) ?? ""), outOfMemory: this.outOfMemory.has(threadId), pendingDelivery };
   }
 
   async create(request: CreateThreadRequest, awaitingCore = false, fork?: { sourceThreadId: string; endSequence: number }): Promise<Thread> {
@@ -3500,9 +3512,17 @@ class CloudroomService {
     return !thread || Boolean(thread.archivedAt || thread.deletedAt) || (initial !== null && JSON.parse(initial.input).awaiting_core === true);
   }
 
+  private onThreadWatched(threadId: string): void {
+    if (this.stopped) return;
+    const row = openBinding(this.deps.db, threadId);
+    if (row && this.needsDelivery(row)) void this.deliver(row.threadId).catch(() => {});
+  }
+
   start(): void {
     if (this.timer) return;
     this.stopped = false;
+    void macHarnessVersions(); // Warm, so the first Cloud wake does not wait on 5 CLIs.
+    this.stopWatching = this.deps.hub.onThreadWatched((threadId) => this.onThreadWatched(threadId));
     void this.me().catch(() => {});
     this.sync.start();
     void this.deliverChildReports();
@@ -3548,6 +3568,8 @@ class CloudroomService {
     this.claudeConnected = null;
     this.stopped = true;
     this.sync.stop();
+    this.stopWatching?.();
+    this.stopWatching = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     for (const controller of this.streams.values()) controller.abort();
@@ -3720,7 +3742,7 @@ class CloudroomService {
         const replan = planned instanceof Error && !started.code && slowSandbox(planned);
         if (unplanned) this.warn("Cloud project copy could not be planned", planned, { threadId });
         if (unplanned && !replan && !macPath) reportProjectCopy(this.deps, threadId, { phase: "error", completed: 0, total: 0, error: unplanned });
-        const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace("https://github.com/", "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
+        const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace(/^https:\/\/(?:github\.com\/)?/, "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
         const files: StartStep[] = copying ? [{ key: "files", text: copying, status: "started" }] : [];
         const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
         this.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
@@ -4024,6 +4046,7 @@ class CloudroomService {
       return binding(tx, thread.id)!;
     });
     if (!child) return;
+    if (session.pinned) pinThread(this.deps.db, this.deps.hub, { threadId: child.threadId });
     if (!this.threadStates.get(child.threadId)) this.threadStates.set(child.threadId, { session: childId, actFrom: live ? 0 : null, home: null, from: parent.threadId });
     this.follow(child, client);
     this.notify(child.threadId);
@@ -4457,6 +4480,7 @@ class CloudroomService {
           const labels = !shared && !owed(record) && acts(record) && this.isHome(saved.threadId);
           const show = (apply: () => void) => labels ? apply() : this.quietly(saved.threadId, apply);
           if (record.kind === "title" && !owed(record)) show(() => updateThread(this.deps.db, this.deps.hub, saved.threadId, { title: z.object({ title: z.string().min(1) }).parse(record.data).title }));
+          if (record.kind === "pin" && fresh && acts(record) && !owed(record)) show(() => pinThread(this.deps.db, this.deps.hub, { threadId: saved.threadId }));
           const effort = (record.kind === "launch_reasoning" || (record.kind === "reasoning" && !owed(record))) && z.object({ reasoning: reasoningLevelSchema }).safeParse(record.data);
           if (effort && effort.success) show(() => {
             saveBinding(this.deps.db, saved.threadId, { reasoning: effort.data.reasoning });

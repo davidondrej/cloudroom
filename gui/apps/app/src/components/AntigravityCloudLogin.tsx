@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
+import { Icon } from "@cloudroom/shared-ui/icon";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import {
   agyLoginQueryKey,
@@ -10,12 +11,13 @@ import {
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { CLOUD_LOGIN_FIXED_EVENT } from "@/lib/cloud-reconnect";
 
-export function AntigravityCloudLogin() {
+/** `composer` is the one line under the new-thread composer; without it, the buttons in Settings. */
+export function AntigravityCloudLogin({ composer = false }: { composer?: boolean }) {
   const account = useCloudroomAccount().data?.account?.id;
-  return account ? <Login key={account} account={account} /> : null;
+  return account ? <Login key={account} account={account} composer={composer} /> : null;
 }
 
-function Login({ account }: { account: string }) {
+function Login({ account, composer }: { account: string; composer: boolean }) {
   const query = useQueryClient(),
     status = useAntigravityCloud(true);
   const [mode, setMode] = useState<"code" | "key" | null>(null);
@@ -93,61 +95,61 @@ function Login({ account }: { account: string }) {
       setBusy(false);
     }
   }
+  const quiet = (label: string, onClick: () => void, disabled = busy) =>
+    composer ? (
+      <button type="button" className="font-medium text-foreground/80 hover:underline disabled:opacity-50" disabled={disabled} onClick={onClick}>
+        {label}
+      </button>
+    ) : (
+      <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={onClick}>
+        {label}
+      </Button>
+    );
+  const dot = composer ? <span className="text-muted-foreground/50" aria-hidden>·</span> : null;
   return (
-    <div className="flex flex-wrap items-center gap-2 p-2 text-sm">
+    <div
+      className={
+        composer
+          ? "flex flex-wrap items-center gap-1.5 px-[18px] pt-2 text-xs text-muted-foreground"
+          : "flex flex-wrap items-center gap-2 p-2 text-sm"
+      }
+    >
       {!mode ? (
         <>
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={() => void submit("begin")}
-          >
-            {busy
-              ? "Connecting…"
-              : status.data?.connected
-                ? "Switch Google account"
-                : "Sign in with Google"}
-          </Button>
-          {status.data?.connected && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              disabled={busy}
-              onClick={() => void submit("disconnect")}
-            >
-              Disconnect
+          {composer ? (
+            <>
+              <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
+              Antigravity isn't connected.
+              <button
+                type="button"
+                className="font-medium text-primary-text hover:underline disabled:opacity-50"
+                disabled={busy}
+                onClick={() => void submit("begin")}
+              >
+                {busy ? "Connecting…" : "Sign in with Google"}
+              </button>
+            </>
+          ) : (
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void submit("begin")}>
+              {busy
+                ? "Connecting…"
+                : status.data?.connected
+                  ? "Switch Google account"
+                  : "Sign in with Google"}
             </Button>
           )}
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => {
-              setError("");
-              setMode("key");
-            }}
-          >
-            Use Gemini API key
-          </Button>
+          {status.data?.connected && quiet("Disconnect", () => void submit("disconnect"))}
+          {dot}
+          {quiet(composer ? "Use API key" : "Use Gemini API key", () => {
+            setError("");
+            setMode("key");
+          })}
         </>
       ) : (
         <>
-          {attempt && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={() => openUrlInExternalBrowser(attempt.url)}
-            >
-              Open Google
-            </Button>
-          )}
           <input
             ref={input}
+            autoFocus={composer}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
               event.preventDefault();
@@ -156,34 +158,29 @@ function Login({ account }: { account: string }) {
             }}
             type="password"
             autoComplete="off"
-            aria-label={
-              mode === "code" ? "Google sign-in code" : "Gemini API key"
+            aria-label={mode === "code" ? "Google sign-in code" : "Gemini API key"}
+            placeholder={mode === "code" ? "Paste the Google code" : "Gemini API key"}
+            className={
+              composer
+                ? "h-7 w-56 rounded-md border border-input bg-transparent px-2 text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                : "rounded border border-border bg-background px-2 py-1"
             }
-            placeholder={
-              mode === "code" ? "Paste the Google code" : "Gemini API key"
-            }
-            className="rounded border border-border bg-background px-2 py-1"
           />
           <Button
             type="button"
             size="sm"
+            className={composer ? "h-7 px-2.5 text-xs" : undefined}
             disabled={busy}
             onClick={() => void submit(mode === "code" ? "complete" : "key")}
           >
             {busy ? "Connecting…" : submittedCode.current ? "Retry sign-in" : "Connect"}
           </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={busy}
-            onClick={() => {
-              if (attempt) void submit("cancel");
-              else setMode(null);
-            }}
-          >
-            Cancel
-          </Button>
+          {attempt && quiet("Open Google", () => openUrlInExternalBrowser(attempt.url), false)}
+          {attempt && dot}
+          {quiet("Cancel", () => {
+            if (attempt) void submit("cancel");
+            else setMode(null);
+          })}
         </>
       )}
       {error && (

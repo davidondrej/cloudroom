@@ -118,7 +118,7 @@ it.skipIf(process.platform === "win32")("A child's blobless clone lands its pare
   }
 });
 
-it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable file and skip only dangling links on Windows", async () => {
+it.skipIf(process.platform !== "linux")("Teleport packs fail on an unreadable file and skip only dangling links on Windows", async () => {
   const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));
   try {
     await writeFile(join(root, "a.md"), "agents\n");

@@ -10,7 +10,7 @@ import type {
 import { evaluateEnvironmentLifecycleEvent } from "@cloudroom/domain";
 import type { DbConnection, DbTransaction } from "../connection.js";
 import type { DbNotifier } from "../notifier.js";
-import { environments, threads } from "../schema.js";
+import { environments, terminalSessions, threads } from "../schema.js";
 import { createEnvironmentId } from "../ids.js";
 import { listActiveBackgroundTaskCountsByThreadIds } from "./events.js";
 import { hostPathContains, hostPathEquals, sameHostPath } from "./host-path-sql.js";
@@ -543,6 +543,20 @@ export function environmentHasRestorableThreads(db: EnvironmentWriteConnection, 
 
 export function environmentHasLiveThreads(db: EnvironmentWriteConnection, environmentId: string): boolean {
   return db.select({ id: threads.id }).from(threads).where(and(eq(threads.environmentId, environmentId), or(and(isNull(threads.archivedAt), isNull(threads.deletedAt)), eq(threads.status, "stopping"), eq(threads.status, "active")))).limit(1).get() !== undefined;
+}
+
+/** Nobody used the folder since `since`: no thread there ran, changed or is pinned, and no terminal is open in it. */
+const quietSince = (since: number) => sql`not exists (select 1 from ${threads} where ${threads.environmentId} = ${environments.id} and ${threads.deletedAt} is null and (${threads.status} not in ('idle', 'error') or (${threads.archivedAt} is null and (${threads.pinnedAt} is not null or ${threads.updatedAt} > ${since})))) and not exists (select 1 from ${terminalSessions} where ${terminalSessions.environmentId} = ${environments.id} and ${terminalSessions.status} <> 'exited')`;
+
+export function environmentIsQuiet(db: EnvironmentReadConnection, environmentId: string, since: number): boolean {
+  return db.select({ id: environments.id }).from(environments).where(and(eq(environments.id, environmentId), quietSince(since))).get() !== undefined;
+}
+
+/** A provider's folders on a host that open threads hold but nobody used since `since`, longest unused first. A row
+ *  written since then (a use stamp, or a park that was refused) counts as used. */
+export function listQuietOpenEnvironments(db: EnvironmentReadConnection, args: { hostId: string; providerId: string; since: number; limit: number }): string[] {
+  const lastUsed = sql`(select max(${threads.updatedAt}) from ${threads} where ${threads.environmentId} = ${environments.id})`;
+  return db.select({ id: environments.id }).from(environments).where(and(eq(environments.hostId, args.hostId), eq(environments.environmentProviderId, args.providerId), eq(environments.status, "ready"), isNull(environments.ownerThreadId), isNull(environments.teardownStatus), isNull(environments.parkedAt), sql`${environments.path} is not null`, sql`exists (select 1 from ${threads} where ${threads.environmentId} = ${environments.id} and ${threads.archivedAt} is null and ${threads.deletedAt} is null)`, sql`${environments.updatedAt} <= ${args.since}`, quietSince(args.since))).orderBy(lastUsed).limit(args.limit).all().map((row) => row.id);
 }
 
 export function releaseFinishedEnvironmentPreparationOwners(db: EnvironmentWriteConnection): void {

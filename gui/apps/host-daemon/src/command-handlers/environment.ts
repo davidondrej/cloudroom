@@ -9,8 +9,10 @@ import type {
 } from "@cloudroom/host-daemon-contract";
 import type { ProvisionWorkspaceArgs } from "@cloudroom/host-workspace";
 import {
+  busyWorkspaceMessage,
   type CommandDispatchOptions,
   type CommandOf,
+  ExpectedCommandDispatchError,
 } from "../command-dispatch-support.js";
 
 type ProvisionProgressCallback = (entry: ProvisioningTranscriptEntry) => void;
@@ -30,10 +32,17 @@ export async function provisionEnvironment(
   options: CommandDispatchOptions,
 ): Promise<HostDaemonCommandResult<"environment.attach">> {
   // A failed worktree move frees its folder, and its retry reuses the environment ID with a new folder. Drop the old
-  // folder's runtime, like requireWorkspaceEnvironment, so setup runs in the new one (#2216).
+  // folder's runtime, like requireWorkspaceEnvironment, so setup runs in the new one (#2216). A busy one stays (#912).
   const cached = await options.runtimeManager.getOrAwait(command.environmentId);
-  if (cached !== undefined && cached.path !== command.path)
-    await options.runtimeManager.forgetEnvironment(command.environmentId);
+  if (
+    cached !== undefined &&
+    cached.path !== command.path &&
+    !(await options.runtimeManager.forgetIdleEnvironment(command.environmentId))
+  )
+    throw new ExpectedCommandDispatchError(
+      "workspace_type_mismatch",
+      busyWorkspaceMessage(cached.path),
+    );
   const alreadyExists =
     options.runtimeManager.get(command.environmentId) != null;
 

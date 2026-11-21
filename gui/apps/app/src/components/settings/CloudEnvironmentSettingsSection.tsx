@@ -1,3 +1,4 @@
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
 import { COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -67,6 +68,7 @@ export function CloudEnvironmentSettingsSection() {
         <>
           <CopyLoginsCard />
           <GithubCard synced={data.repoSync.filter((row) => row.on).length} />
+          <GitlabCard />
           <SkillsCard />
           <McpCard inCloud={data.mcp} onSaved={saved} />
           <VariablesCard environment={data} busy={update.isPending} onChange={(change) => update.mutateAsync(change)} onImported={saved} />
@@ -83,13 +85,68 @@ export function CloudEnvironmentSettingsSection() {
   );
 }
 
-export function Card({ icon, title, description, action, children }: { icon: string; title: string; description?: string; action?: ReactNode; children?: ReactNode }) {
+function GitlabCard() {
+  const { state, change, busy, error, open } = useGitlabConnection();
+  if (!state?.available && !state?.login) return null;
+  return (
+    <Card
+      icon={<img src="/gitlab.svg" className="size-4" alt="" />}
+      title="GitLab"
+      description="Cloud threads use this account for GitLab.com. Local threads use your computer’s Git credentials."
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3 text-xs">
+        <span>
+          {state.waiting
+            ? "Finish connecting on GitLab.com."
+            : state.login
+              ? "@" +
+                state.login +
+                (state.expired ? " · Connection expired" : " · Connected")
+              : "Not connected"}
+        </span>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={state.login || state.waiting ? "outline" : "default"}
+            disabled={busy}
+            onClick={() => (state.waiting ? open() : change("start"))}
+          >
+            {state.waiting
+              ? "Open GitLab"
+              : state.expired
+                ? "Reconnect GitLab"
+                : state.login
+                  ? "Switch account"
+                  : "Connect GitLab"}
+          </Button>
+          {(state.login || state.waiting) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => change(state.waiting ? "cancel" : "disconnect")}
+            >
+              {state.waiting ? "Cancel" : "Disconnect"}
+            </Button>
+          )}
+        </div>
+        {error && (
+          <p role="alert" className="w-full text-destructive-text">
+            {error}
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+export function Card({ icon, title, description, action, children }: { icon: ReactNode; title: string; description?: string; action?: ReactNode; children?: ReactNode }) {
   return (
     <section className="overflow-hidden rounded-lg bg-surface-recessed">
       <div className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface-recessed text-subtle-foreground">
-            <Icon name={icon} className="size-4" />
+            {typeof icon === "string" ? <Icon name={icon} className="size-4" /> : icon}
           </span>
           <div className="min-w-0">
             <h3 className="text-sm font-medium text-foreground">{title}</h3>
