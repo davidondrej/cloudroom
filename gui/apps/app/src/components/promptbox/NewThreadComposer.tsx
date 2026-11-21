@@ -1,3 +1,5 @@
+import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
+import { useAntigravityCloud } from "@/lib/antigravity-cloud";
 import { CONNECT_AGENT_IDS, ConnectAgentsButton } from "@/components/ConnectAgentsButton";
 import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 import {
@@ -7,6 +9,9 @@ import {
   cloudCatalogKnown,
   cloudHarnessNames,
   cloudReasoningLevels,
+  cloudOpenCodeCatalog,
+  cloudOpenCodeModelIssue,
+  partitionCloudOpenCodeModelOptions,
   cloudServiceTierSupported,
   cloudUltraFastSupported,
   cloudroomRequestId,
@@ -35,9 +40,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import {
-  usesTextFork,
   findLocalPathProjectSourceForHost,
   PERSONAL_PROJECT_ID,
   type EnvironmentMachineSelection,
@@ -142,7 +146,6 @@ import {
 type NewThreadComposerSelectionScope = "new-thread" | "component-local";
 
 export interface NewThreadComposerSeed {
-  textOnly?: boolean;
   providerId?: string;
   model?: string;
   reasoningLevel?: ReasoningLevel;
@@ -893,6 +896,7 @@ export function NewThreadComposer({
       seed?.reasoningLevel === undefined ||
       seed?.permissionMode === undefined);
   const creationOptions = useThreadCreationOptions({
+    cloud: !cloudLocked && storedExecutionTarget === "cloud",
     scope: selectionScope,
     preferenceProjectId: projectId,
     resetKey: `${projectId}\0${composerSeedSignature}`,
@@ -965,6 +969,9 @@ export function NewThreadComposer({
   const cloudKnown = executionTarget === "cloud" && cloudCatalogKnown(cloudConnection.data);
   // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
   const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
+  const agyCloud = executionTarget === "cloud" && selectedProviderId === "acp-antigravity";
+  const agyLogin = useAntigravityCloud(agyCloud && !cloudConnection.data?.selfHosted);
+  const agyNeedsLogin = agyCloud && !cloudConnection.data?.selfHosted && !agyLogin.data?.connected;
   const cloudAgentMissing = cloudKnown && !cloudHarness(cloudConnection.data, selectedProviderId);
   // Most first Cloud prompts that failed were Claude Code with no Claude login anywhere: the strip in the composer says so first.
   const claudeMissing = useCloudClaudeMissing(executionTarget === "cloud" && !vps.isLoading && !vps.isError && !landsOnVps && !cloudQueue && !cloudAgentMissing && selectedProviderId === "claude-code");
@@ -993,6 +1000,24 @@ export function NewThreadComposer({
   // catalog lacks, such as one released today, keeps the Mac's levels; Core still rejects an unsupported one.
   const cloudFiltered = cloudKnown && cloudLevels.length > 0;
   const availableReasoningOptions = cloudFiltered ? reasoningOptions.filter((option) => cloudLevels.includes(option.value)) : reasoningOptions;
+  const cloudOpenCodeModelsRef =
+    executionTarget === "cloud" && selectedProviderId === "acp-opencode"
+      ? cloudOpenCodeCatalog(cloudConnection.data)
+      : null;
+  const partitionedCloudModels = useMemo(
+    () =>
+      partitionCloudOpenCodeModelOptions(
+        [...modelOptions, ...moreModelOptions],
+        cloudOpenCodeModelsRef,
+      ),
+    [modelOptions, moreModelOptions, cloudOpenCodeModelsRef],
+  );
+  const effectiveModelOptions = partitionedCloudModels?.primary ?? modelOptions;
+  const effectiveMoreModelOptions = partitionedCloudModels?.more ?? moreModelOptions;
+  const cloudOpenCodeIssue = useMemo(
+    () => cloudOpenCodeModelIssue(cloudOpenCodeModelsRef, selectedThreadModel),
+    [cloudOpenCodeModelsRef, selectedThreadModel],
+  );
 
   const promptDraft = usePromptDraftStorage(draftStorage);
   const textEffects = useComposerTextEffects(promptDraft.storageKey);
@@ -1725,28 +1750,25 @@ export function NewThreadComposer({
     : selectedProviderId === "claude-code"
       ? "Claude Code is not configured in Cloud yet."
       : `${selectedProviderDisplayName ?? "This agent"} isn't available in Cloud. Available: ${cloudHarnessNames(cloudConnection.data)}.`;
-  const needsTextFork = seed?.textOnly && seed.providerId &&
-    !usesTextFork(seed.providerId, seed.model, selectedProviderId, selectedThreadModel, executionTarget === "cloud");
-  const submitDisabledReason = needsTextFork
-    ? "Choose another agent to fork from this reply."
-    : executionTarget === "cloud"
-      ? (cloudBlockedReason
-          ?? (claudeMissing ? "Connect Claude Code to send in Cloud"
-          : cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
-          // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
-          // still shows: it would fail as "Project not found", then quietly turn into no project (#1347).
-          : !isProjectless && (!sidebarNavigationSettled || sidebarNavigationQuery.isPlaceholderData)
-            ? "Loading projects…"
-          : !selectedThreadModel || isLoadingModels
-            ? "Select a model"
-            : cloudFiltered && !cloudLevels.includes(reasoningLevel)
-              ? "Select a reasoning level supported by the cloud model"
-            : isSubmitting || isUploading || isCopyingAttachments
-              ? "Preparing your message"
-              : promptInput.length === 0
-                ? "Type a message first"
-                : null))
-      : localSubmitDisabledReason;
+  const submitDisabledReason = executionTarget === "cloud"
+    ? (cloudBlockedReason
+        ?? (agyNeedsLogin ? "Connect Antigravity to send in Cloud"
+        : claudeMissing ? "Connect Claude Code to send in Cloud"
+        : cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
+        // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
+        // still shows: it would fail as "Project not found", then quietly turn into no project (#1347).
+        : !isProjectless && (!sidebarNavigationSettled || sidebarNavigationQuery.isPlaceholderData)
+          ? "Loading projects…"
+        : !selectedThreadModel || isLoadingModels
+          ? "Select a model"
+          : cloudFiltered && !cloudLevels.includes(reasoningLevel)
+            ? "Select a reasoning level supported by the cloud model"
+          : isSubmitting || isUploading || isCopyingAttachments
+            ? "Preparing your message"
+            : promptInput.length === 0
+              ? "Type a message first"
+              : null))
+    : localSubmitDisabledReason;
   const seededMachine =
     seed?.executionTarget !== undefined || seed?.environment !== undefined;
   const submitDraft = useCallback(
@@ -2104,9 +2126,26 @@ export function NewThreadComposer({
             ) : null}<OneClickScans fallback={<FreePlanTip />} /></>,
             banner:
               executionTarget === "cloud" ? (
-                cloudBlockedReason === null ? null : (
+                cloudBlockedReason !== null ? (
                   <ProviderRequirementBanner title="Not available in Cloud" description={cloudBlockedReason} action={null} />
-                )
+                ) : agyNeedsLogin ? <AntigravityCloudLogin /> : cloudOpenCodeIssue !== null ? (
+                  <ProviderRequirementBanner
+                    title="Model not available in Cloud"
+                    description={cloudOpenCodeIssue.message}
+                    action={
+                      cloudOpenCodeIssue.alternatives[0] ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="h-8 shrink-0 px-3"
+                          onClick={() => handleModelChange(cloudOpenCodeIssue.alternatives[0])}
+                        >
+                          Use {cloudOpenCodeIssue.alternatives[0]}
+                        </Button>
+                      ) : null
+                    }
+                  />
+                ) : null
               ) : (
                 (options.banner ??
                 (machineServerAccessReason !== null ? (
@@ -2181,8 +2220,8 @@ export function NewThreadComposer({
             model: {
               active: activeModel,
               selected: selectedModel,
-              options: modelOptions,
-              moreOptions: moreModelOptions,
+              options: effectiveModelOptions,
+              moreOptions: effectiveMoreModelOptions,
               isLoading: isLoadingModels,
               loadFailed: modelLoadFailed,
               loadError: modelLoadError,
@@ -2241,8 +2280,9 @@ export function NewThreadComposer({
       isUploading,
       modelLoadError,
       modelLoadFailed,
-      modelOptions,
-      moreModelOptions,
+      effectiveModelOptions,
+      effectiveMoreModelOptions,
+      cloudOpenCodeIssue,
       permissionMode,
       permissionModeOptions,
       projectId,
@@ -2269,7 +2309,7 @@ export function NewThreadComposer({
       supportsServiceTier,
       cloudFastSupported,
       submitDisabledReason,
-      cloudBlockedReason,
+      cloudBlockedReason, agyNeedsLogin,
       claudeMissing,
       codexOffered,
       switchToCodex,

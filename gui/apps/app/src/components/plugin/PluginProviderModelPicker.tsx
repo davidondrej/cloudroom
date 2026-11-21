@@ -24,6 +24,7 @@ export function PluginProviderModelPicker({
   value,
   onChange,
   routing,
+  cloud,
   allowProviderChange = true,
   align = "start",
   disabled,
@@ -35,6 +36,7 @@ export function PluginProviderModelPicker({
   );
   const controlledKey = `${resolvedRouting.key}\0${selectionKey(value)}`;
   const controller = useThreadCreationOptions({
+    cloud,
     scope: "component-local",
     initialProviderId: value.providerId,
     initialModel: value.model,

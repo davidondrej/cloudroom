@@ -87,19 +87,20 @@ function makeParentThread(
 
 describe("resolveCreateThreadExecutionDefaults", () => {
   it("uses the picker's first provider without pinning a model", () => {
-    expect(registry.list()[0]?.info.id).toBe("codex");
+    expect(registry.list()[0]?.info.id).toBe("claude-code");
 
     expect(
       resolveCreateThreadExecutionDefaults(registry, {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: "codex",
+      providerId: "claude-code",
       executionDefaults: null,
       providerFallbackCandidates: [
-        "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
         "acp-omp",
         "acp-grok",
@@ -111,7 +112,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
-        "acp-antigravity",
         "acp-agent-zero",
       ],
     });
@@ -134,6 +134,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "pi",
       "claude-code",
       "codex",
+      "acp-antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -146,7 +147,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
-      "acp-antigravity",
       "acp-agent-zero",
     ]);
     expect(
@@ -189,6 +189,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual([
       "pi",
       "claude-code",
+      "acp-antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -201,7 +202,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
-      "acp-antigravity",
       "acp-agent-zero",
     ]);
   });
@@ -259,7 +259,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
   it("skips unavailable providers when choosing the product default", async () => {
     const degradedRegistry = createProviderRegistryService();
     await registerFirstPartyProviders(degradedRegistry, {
-      unavailablePluginIds: ["provider-codex"],
+      unavailablePluginIds: ["provider-claude-code"],
     });
 
     expect(
@@ -267,11 +267,12 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: "claude-code",
+      providerId: "codex",
       executionDefaults: null,
       providerFallbackCandidates: [
-        "pi",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
         "acp-omp",
         "acp-grok",
@@ -283,7 +284,6 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
-        "acp-antigravity",
         "acp-agent-zero",
       ],
     });

@@ -15,6 +15,7 @@ import { getMutationErrorMessage, showMutationErrorToast } from "@/lib/mutation-
 
 export const cloudroomStatusSchema = z.object({
   ready: z.boolean(),
+  selfHosted: z.boolean().optional(),
   storage: z.object({
     enabled: z.boolean(), level: z.enum(["normal", "low_space", "blocked"]),
     reason: z.enum(["disk_capacity", "measurement_unavailable", "unprotected_test_mode"]),
@@ -55,14 +56,14 @@ export const cloudroomStatusSchema = z.object({
   })).nullable().default([]),
 });
 
-const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-openclaw": "openclaw", "acp-agent-zero": "agent-zero" };
+const CORE_HARNESS_IDS: Record<string, string> = { "acp-cursor": "cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "hermes", "acp-devin": "devin", "acp-droid": "droid", "acp-kimi": "kimi", "acp-antigravity": "antigravity", "acp-openclaw": "openclaw", "acp-agent-zero": "agent-zero" };
 
 export function cloudHarness(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string | undefined) {
   const id = harness === undefined ? undefined : (CORE_HARNESS_IDS[harness] ?? harness);
   return status?.harnesses?.find((item) => item.id === id);
 }
 
-const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "droid", "kimi", "openclaw", "agent-zero"]);
+const CLOUD_HARNESS_IDS = new Set(["claude-code", "codex", "pi", "cursor", "fx", "opencode", "hermes", "devin", "droid", "kimi", "antigravity", "openclaw", "agent-zero"]);
 export function cloudCanRunHarness(harness: string): boolean {
   return CLOUD_HARNESS_IDS.has(CORE_HARNESS_IDS[harness] ?? harness);
 }
@@ -72,7 +73,7 @@ export function cloudCatalogKnown(status: z.infer<typeof cloudroomStatusSchema> 
   return status?.ready === true && status.harnesses !== null;
 }
 
-const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", kimi: "Kimi Code", openclaw: "OpenClaw", "agent-zero": "Agent Zero" };
+const HARNESS_NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", pi: "Pi", cursor: "Cursor", fx: "fx", opencode: "opencode", hermes: "Hermes Agent", devin: "Devin", droid: "Droid", kimi: "Kimi Code", antigravity: "Antigravity", openclaw: "OpenClaw", "agent-zero": "Agent Zero" };
 export function cloudHarnessOption(coreId: string) {
   const label = HARNESS_NAMES[coreId];
   if (!label) return null;
@@ -96,10 +97,58 @@ export function cloudReasoningLevels(status: z.infer<typeof cloudroomStatusSchem
   const profile = cloudHarness(status, harness);
   if (profile?.models === null) return [];
   const remoteModel = harness === "pi" && model ? model.slice(model.indexOf("/") + 1) : model;
-  if (!profile?.models) return profile?.reasoning_levels ?? [];
+  if (!profile?.models || (harness === "acp-opencode" && remoteModel === "default")) return profile?.reasoning_levels ?? [];
   const levels = profile.models.find((item) => item.model === remoteModel)?.reasoning_levels;
   // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133).
   return levels ?? (harness === "claude-code" && remoteModel ? [...new Set(profile.models.flatMap((item) => item.reasoning_levels))] : []);
+}
+
+export function cloudOpenCodeCatalog(
+  status: z.infer<typeof cloudroomStatusSchema> | undefined,
+): readonly { model: string }[] | null {
+  const models = cloudHarness(status, "acp-opencode")?.models;
+  return models && models.length > 0 ? models : null;
+}
+
+export function cloudOpenCodeModelIssue(
+  catalog: readonly { model: string }[] | null,
+  model: string | undefined,
+): { alternatives: string[]; message: string } | null {
+  if (!model || model === "default" || !catalog || catalog.length === 0) return null;
+  if (catalog.some((item) => item.model === model)) return null;
+  const slash = model.indexOf("/");
+  const suffix = slash > 0 ? model.slice(slash + 1) : "";
+  const alternatives = suffix
+    ? catalog
+        .map((item) => item.model)
+        .filter((candidate) => {
+          const at = candidate.indexOf("/");
+          return at > 0 && candidate.slice(at + 1) === suffix;
+        })
+        .slice(0, 4)
+    : [];
+  const message = alternatives.length > 0
+    ? `${model} isn't available in Cloud. Available under another provider: ${alternatives.join(", ")}.`
+    : `${model} isn't configured in Cloud. Pick a Cloud model, or sign in with \`opencode auth login\` or configure ~/.config/opencode/opencode.json(c) on your computer.`;
+  return { alternatives, message };
+}
+
+/** Places Cloud-available OpenCode models first and moves local-only models into `more` so newly configured local models stay selectable. */
+export function partitionCloudOpenCodeModelOptions<T extends { value: string; label: string }>(
+  options: readonly T[],
+  catalog: readonly { model: string }[] | null,
+): { primary: T[]; more: T[] } | null {
+  if (!catalog || catalog.length === 0) return null;
+  const byValue = new Map(options.map((option) => [option.value, option]));
+  const inCloud = new Set<string>();
+  const primary: T[] = [];
+  for (const { model } of catalog) {
+    if (inCloud.has(model)) continue;
+    inCloud.add(model);
+    primary.push(byValue.get(model) ?? ({ value: model, label: model } as T));
+  }
+  const more = options.filter((option) => !inCloud.has(option.value));
+  return { primary, more };
 }
 export function cloudFeatureSupported(status: z.infer<typeof cloudroomStatusSchema> | undefined, harness: string, feature: "steer" | "compact" | "rewind"): boolean {
   const profile = cloudHarness(status, harness);
@@ -109,8 +158,8 @@ const cloudDiskSchema = z.object({ paused: z.boolean(), reason: z.enum(["disk_ca
 export type CloudDisk = z.infer<typeof cloudDiskSchema>;
 const threadStatusSchema = z.object({ authRequired: z.boolean().default(false), starting: z.boolean().default(false), sessionId: z.string().nullable(), paused: z.boolean(), failedStart: z.boolean().default(false), model: z.string(), reasoning: reasoningLevelSchema, serviceTier: serviceTierSchema.default("default"), error: z.string().nullable(), reconnecting: z.boolean().default(false), usageLimit: z.boolean().default(false), launchCap: z.boolean().default(false), disk: cloudDiskSchema.nullable().default(null), awake: z.boolean().default(false), vps: z.boolean().default(false), move: z.enum(["moving", "failed"]).nullable().default(null), waiting: z.string().nullable().default(null), fromCopy: z.boolean().default(false), outOfMemory: z.boolean().default(false), pendingDelivery: z.number() }).nullable();
 
-export function useCloudroomAccount() {
-  return useQuery({ queryKey: ["cloudroom-account"], queryFn: async ({ signal }) => {
+export function useCloudroomAccount(enabled = true) {
+  return useQuery({ enabled, queryKey: ["cloudroom-account"], queryFn: async ({ signal }) => {
     const status = await sdk.cloudroom.status(signal);
     if (status.account && typeof document !== "undefined" && document.visibilityState === "visible") {
       void fetchWithAppSurface("/api/v1/cloudroom/account/activity", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
@@ -139,8 +188,8 @@ export function useCloudroomSignIn() {
 }
 
 export const cloudroomConnectionQuery = { queryKey: ["cloudroom-connection"], queryFn: async ({ signal }: { signal: AbortSignal }) => cloudroomStatusSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom", { signal })).json()) };
-export function useCloudroomConnection() {
-  return useQuery({ ...cloudroomConnectionQuery, refetchInterval: 10000 });
+export function useCloudroomConnection(enabled = true) {
+  return useQuery({ ...cloudroomConnectionQuery, enabled, refetchInterval: 10000 });
 }
 /** The Cloud status right now, for code that asks at one moment instead of watching. Always fresh: a copy up to 10
  *  seconds old could miss a region block or the cloud queue. */
@@ -207,7 +256,7 @@ export function useCloudroomThread(threadId: string, enabled: boolean) {
   }, refetchInterval: 1500 });
 }
 
-const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor"]), threads: z.number(), loops: z.number() })) });
+const cloudLoginsSchema = z.object({ issues: z.array(z.object({ provider: z.enum(["codex", "claude-code", "acp-cursor", "acp-antigravity"]), threads: z.number(), loops: z.number() })) });
 /** Agents Cloud refused for their login, with the threads and loops waiting on each. A local call; the server reads the
  *  website's loops at most every 15 minutes. */
 export function useCloudLogins(enabled: boolean) {

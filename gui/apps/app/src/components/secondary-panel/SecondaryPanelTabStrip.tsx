@@ -27,7 +27,7 @@ import {
   SortableContext,
   useSortable,
 } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { sortableTranslate } from "@/lib/sortable-translate";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -473,7 +473,7 @@ function SortablePanelTab({
   );
   const style = useMemo<CSSProperties>(
     () => ({
-      transform: CSS.Translate.toString(transform),
+      transform: sortableTranslate(transform),
       transition,
     }),
     [transform, transition],

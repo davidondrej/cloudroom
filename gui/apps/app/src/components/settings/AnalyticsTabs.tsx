@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import { useIsFetching, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useSearchParams } from "react-router-dom";
+import { useLocation, useSearchParams } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { AgentHoursSection } from "@/components/settings/AgentHoursSection";

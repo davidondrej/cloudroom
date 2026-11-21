@@ -10,7 +10,7 @@ import {
   type PointerEventHandler,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useAtom } from "jotai";
 import { DndContext, type DragEndEvent } from "@dnd-kit/core";
 import {

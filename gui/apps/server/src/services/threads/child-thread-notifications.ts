@@ -1,5 +1,6 @@
 import {
   describeThreadInterruption,
+  UNDELIVERED_MESSAGE_WARNING,
   type PromptInput,
   type QueuedMessageSystemNotice,
   type SystemMessageSubject,
@@ -52,6 +53,8 @@ export interface ChildThreadTurnNotificationBatchItem {
   failureReason?: string | null;
   /** The recorded stop that ended an interrupted turn, read at flush (#1159). */
   interruption?: SystemThreadInterruptedEventData | null;
+  /** Messages the stop ended the child before it read (#2137). */
+  undeliveredMessageCount?: number;
   turnId?: string;
   /** The automatic retry already queued for a failed child (#1365). */
   queuedRetry?: { sendAt: number | null };
@@ -237,7 +240,14 @@ function formatChildThreadQueuedRetry(
 ): string | null {
   if (item.queuedRetry === undefined) return null;
   const { sendAt } = item.queuedRetry;
-  const when = sendAt === null ? "soon" : `at ${formatChildNoticeTime(sendAt)}`;
+  // UTC as `provider-retry status` prints it, so the two can be compared
+  // (#2148). A time outside Date's range would make toISOString throw.
+  const utc =
+    sendAt === null || Number.isNaN(new Date(sendAt).getTime())
+      ? ""
+      : ` local, ${new Date(sendAt).toISOString()}`;
+  const when =
+    sendAt === null ? "soon" : `at ${formatChildNoticeTime(sendAt)}${utc}`;
   return `Cloudroom will retry ${subject} automatically ${when}. Don't start a replacement. To cancel the retry: room-cli provider-retry cancel ${item.childThread.id}`;
 }
 
@@ -313,7 +323,13 @@ function buildChildThreadBatchStatusLineSegments(
 function formatChildThreadInterruption(
   item: ChildThreadTurnNotificationBatchItem,
 ): string {
-  return item.interruption ? ` (${describeThreadInterruption(item.interruption)})` : "";
+  if (!item.interruption) return "";
+  const count = item.undeliveredMessageCount ?? 0;
+  const unread =
+    count === 0
+      ? ""
+      : `; it may not have read ${count === 1 ? "1 message" : `${count} messages`} sent to it, so send again if still needed`;
+  return ` (${describeThreadInterruption(item.interruption)}${unread})`;
 }
 
 function formatChildThreadFailureReason(
@@ -712,7 +728,22 @@ function withInterruption(
 ): ChildThreadTurnNotificationBatchItem {
   if (item.turnStatus !== "interrupted" || item.turnId === undefined) return item;
   const interruption = getRootTurnInterruption(db, { threadId: item.childThread.id, turnId: item.turnId });
-  return interruption ? { ...item, interruption } : item;
+  if (!interruption) return item;
+  // One row per message: the event route drops a replayed batch's marks.
+  const undelivered =
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, item.childThread.id),
+          eq(events.turnId, item.turnId),
+          eq(events.type, "provider/warning"),
+          sql`json_extract(${events.data}, '$.summary') = ${UNDELIVERED_MESSAGE_WARNING}`,
+        ),
+      )
+      .get()?.count ?? 0;
+  return { ...item, interruption, ...(undelivered > 0 ? { undeliveredMessageCount: undelivered } : {}) };
 }
 
 function scheduleChildThreadTurnNotificationBatchFlush(

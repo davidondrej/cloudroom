@@ -1,11 +1,14 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, stripGitUrlCredentials } from "@cloudroom/domain";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
-import { lstat, mkdtemp, open, readdir, rm, stat } from "node:fs/promises";
+import { createWriteStream, existsSync, realpathSync } from "node:fs";
+import { lstat, mkdtemp, open, readdir, readFile, readlink, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import { promisify } from "node:util";
+import { createGzip } from "node:zlib";
 import { z } from "zod";
 import { getProject, getThread, listProjectSourcesByProjectIds, replaceProjectGitRemoteUrl, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
 import { tarCommand } from "@cloudroom/process-utils";
@@ -25,8 +28,9 @@ type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // A GitHub project with no folder on the Mac (`localPath` null) is cloned only.
 // Teleport also brings the local branch and uncommitted work.
 /** `noEnv`: the thread's sandbox may not have the project's `.env` files (ADR 0342), so none are sent. `resumed`: a copy
- *  that goes on after a pause or an app restart, while the agent may already be working, so a move's edits go aside (#1970). */
-export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean; resumed?: boolean };
+ *  that goes on after a pause or an app restart, while the agent may already be working, so a move's edits go aside (#1970).
+ *  `forkCode`: a fork's or child's code replaces folder files after this copy, so its agent must wait for it (no heartbeat). */
+export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean; resumed?: boolean; forkCode?: boolean };
 
 const exec = promisify(execFile);
 // A stalled piece counts as dropped, so the retry sends it again.
@@ -43,6 +47,10 @@ const copying = new Map<string, string>();
 export const FAILURE_NOTE = ".cloudroom/project-copy-failed.txt";
 // Next to the folder: `room-cli files wait` let the agent go ahead, so it may be working in it. The app never removes it (#1970).
 const GAVE_UP = ".cloudroom-files-gave-up";
+// Next to the folder: touched with `copying`, then each minute while this app copies into it, so `room-cli files wait` stops
+// waiting once this computer goes offline, sleeps, or quits, after 4 silent minutes (#2168). Older apps write none.
+const ALIVE = ".cloudroom-files-alive";
+const BEAT = 60_000;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** The Core workspace and folder a project's Cloud threads use. */
@@ -78,12 +86,12 @@ export async function projectRemote(deps: Deps, project: { id: string; gitRemote
     const real = own ? (() => { try { return realpathSync(path); } catch { return null; } })() : null;
     if (!real || (await git(real, ["rev-parse", "--show-prefix"], 5_000))?.trim() !== "" || remoteKey(await git(dirname(real), ["remote", "get-url", "origin"], 5_000)) !== remoteKey(saved)) return saved;
     // A folder whose own repo has no origin keeps main's behavior for now.
-    const remote = (await git(real, ["remote", "get-url", "origin"], 5_000))?.trim() || null;
+    const remote = stripGitUrlCredentials((await git(real, ["remote", "get-url", "origin"], 5_000))?.trim() ?? "") || null;
     if (!remote || remoteKey(remote) === remoteKey(saved)) return saved;
     // A remote saved meanwhile wins.
     return replaceProjectGitRemoteUrl(deps.db, deps.hub, project.id, saved, remote) ? remote : getProject(deps.db, project.id)?.gitRemoteUrl ?? null;
   }
-  const remote = (await git(path, ["remote", "get-url", "origin"]))?.trim() || null;
+  const remote = stripGitUrlCredentials((await git(path, ["remote", "get-url", "origin"]))?.trim() ?? "") || null;
   if (remote) setProjectGitRemoteUrlIfMissing(deps.db, deps.hub, project.id, remote);
   return remote;
 }
@@ -208,6 +216,8 @@ export function reportProjectCopy(deps: Deps, threadId: string, progress: Projec
 export function copyProject(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, done?: (error?: string, partial?: string) => void | Promise<void>, after: Promise<void> = Promise.resolve(), paused?: () => void): void {
   if (copying.has(job.key)) return;
   copying.set(job.key, job.threadId);
+  // From the start, so a slow first message never reads as an offline computer.
+  const beat = (job.clone || job.copyAll || job.teleport) && !job.forkCode ? heartbeat(client, job.workspace) : undefined;
   const report = (progress: ProjectCopyProgress) => {
     if (!job.clone && !job.copyAll && !job.teleport && progress.phase !== "error") return;
     reportProjectCopy(deps, job.threadId, progress);
@@ -237,7 +247,17 @@ export function copyProject(deps: Deps, client: CloudroomClient, job: ProjectCop
       if (quiet) report({ phase: "complete", completed: 0, total: 0 });
     })
     .catch(() => {})
-    .finally(() => copying.delete(job.key));
+    .finally(() => { clearInterval(beat); copying.delete(job.key); });
+}
+
+/** Touches the copy's heartbeat now and each minute until stopped. A touch that fails waits for the next. A Core that
+ *  can't take it (404 from an older one, 409 when the touch fails) is asked no more, so it logs no error each minute. */
+function heartbeat(client: CloudroomClient, workspace: string): NodeJS.Timeout {
+  const touch = async () => client.alive(workspace, AbortSignal.timeout(BEAT));
+  const timer = setInterval(() => void touch().catch(stop), BEAT).unref();
+  const stop = (error: unknown) => { if (error instanceof CloudroomError && (error.status === 404 || error.status === 409)) clearInterval(timer); };
+  void touch().catch(stop);
+  return timer;
 }
 
 async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, report: (progress: ProjectCopyProgress) => void): Promise<string | undefined> {
@@ -297,14 +317,16 @@ async function writeFailureNote(client: CloudroomClient, job: ProjectCopyJob, me
 
 /** What `room-cli files wait` reads (ADR 0209): `copying`, then `ready` or `failed: REASON`, in a file next to the
  *  project folder (a workspace ID, or a path), so Git never sees it. With `onlyIfCopying`, it changes only a copy still
- *  marked `copying`. Next to the sandbox root (`/code`), only root can write, so it falls back to sudo. */
-export async function writeFilesState(client: CloudroomClient, workspace: string, state: string, onlyIfCopying = false): Promise<void> {
+ *  marked `copying`. Next to the sandbox root (`/code`), only root can write, so it falls back to sudo. With `alive`, a
+ *  heartbeating copy follows, so its silence counts from this write, even if no later beat lands (#2168). */
+export async function writeFilesState(client: CloudroomClient, workspace: string, state: string, onlyIfCopying = false, alive = false): Promise<void> {
   await retry(async () => {
     const target = workspace.startsWith("/") ? workspace : (await client.workspace(workspace))?.path;
     if (!target) return;
     const file = `${target}.cloudroom-files`;
     const write = `state=$(cat) && { printf %s "$state" 2>/dev/null > ${quote(`${file}.tmp`)} && mv -f -- ${quote(`${file}.tmp`)} ${quote(file)} || printf %s "$state" | sudo -n tee ${quote(file)} >/dev/null; }`;
-    await vm(client, onlyIfCopying ? `if [ "$(cat -- ${quote(file)} 2>/dev/null)" = copying ]; then ${write}; fi` : write, Buffer.from(state));
+    const beat = alive ? ` && { touch -- ${quote(`${target}${ALIVE}`)} 2>/dev/null || true; }` : "";
+    await vm(client, onlyIfCopying ? `if [ "$(cat -- ${quote(file)} 2>/dev/null)" = copying ]; then ${write}; fi` : `${write}${beat}`, Buffer.from(state));
   });
 }
 
@@ -503,7 +525,8 @@ async function packProject(root: string, scope: "all" | "changed" | "env", archi
   }
 }
 
-export async function pack(root: string, files: string[], archive: string): Promise<void> {
+export async function pack(root: string, files: string[], archive: string, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform === "win32") return packInNode(root, files, archive);
   await new Promise<void>((resolve, reject) => {
     let stderr = "";
     const tar = spawn(tarCommand(), ["--no-xattrs", "-czf", archive, "--null", "-T", "-"], { cwd: root, env: { ...process.env, COPYFILE_DISABLE: "1" }, stdio: ["pipe", "ignore", "pipe"], timeout: PACK_TIMEOUT, windowsHide: true });
@@ -511,6 +534,53 @@ export async function pack(root: string, files: string[], archive: string): Prom
     tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error(`Could not pack the project files${tar.killed ? ` within ${PACK_TIMEOUT / 60_000} minutes` : ""}. ${stderr.trim()}`.trim())));
     tar.stdin.end(files.map((path) => `${path}\0`).join(""));
   });
+}
+
+/** Windows' tar.exe reads the file list in the ANSI code page, so it can't find a UTF-8 name like `Financiën.md` and the
+ *  full copy fails (#2224). There, Node writes the archive, with each name in a PAX header. */
+async function packInNode(root: string, files: string[], archive: string): Promise<void> {
+  const pad = (size: number) => Buffer.alloc(-size & 511);
+  async function* blocks() {
+    for (const path of files) {
+      const info = await lstat(join(root, path));
+      const link = info.isSymbolicLink() ? (await readlink(join(root, path))).replaceAll("\\", "/") : "";
+      const body = link ? Buffer.alloc(0) : await readFile(join(root, path));
+      const pax = Buffer.from(paxRecord("path", path) + (link ? paxRecord("linkpath", link) : ""));
+      yield Buffer.concat([tarHeader("PaxHeader", "x", pax.length, 0o644, 0), pax, pad(pax.length)]);
+      yield tarHeader(path, link ? "2" : "0", body.length, info.mode & 0o777, Math.max(0, Math.floor(info.mtimeMs / 1000)));
+      yield body;
+      yield pad(body.length);
+    }
+    yield Buffer.alloc(1024);
+  }
+  const signal = AbortSignal.timeout(PACK_TIMEOUT);
+  await pipeline(Readable.from(blocks()), createGzip(), createWriteStream(archive), { signal }).catch((error: unknown) => {
+    throw new Error(`Could not pack the project files${signal.aborted ? ` within ${PACK_TIMEOUT / 60_000} minutes` : ""}. ${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+/** A PAX record starts with its own length, digits included. */
+function paxRecord(key: string, value: string): string {
+  const size = Buffer.byteLength(` ${key}=${value}\n`), length = size + String(size).length;
+  return `${length + (String(length).length > String(size).length ? 1 : 0)} ${key}=${value}\n`;
+}
+
+/** A ustar header, like the VPS app's (docker.ts). The PAX header before it holds the real name. */
+function tarHeader(name: string, type: string, size: number, mode: number, mtime: number): Buffer {
+  const header = Buffer.alloc(512);
+  const field = (value: string, offset: number, length: number) => header.write(value, offset, length, "latin1");
+  const octal = (value: number, offset: number, length: number) => field(`${value.toString(8).padStart(length - 1, "0")}\0`, offset, length);
+  field(name, 0, 100);
+  octal(mode, 100, 8);
+  octal(0, 108, 8);
+  octal(0, 116, 8);
+  octal(size, 124, 12);
+  octal(mtime, 136, 12);
+  field("        ", 148, 8);
+  field(type, 156, 1);
+  field("ustar\u000000", 257, 8);
+  octal(header.reduce((sum, byte) => sum + byte, 0), 148, 7);
+  return header;
 }
 
 /** Unpacks the archive into the project folder, never replacing a file. With `edits` (Teleport's uncommitted edits), it

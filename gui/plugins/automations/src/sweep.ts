@@ -3,7 +3,9 @@ import { z } from "zod";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
+  deleteAutomation,
   listDueAutomations,
+  listFinishedOnceAutomations,
   retryPausedAutomations,
   parseAutomationExecution,
   parseAutomationTrigger,
@@ -17,6 +19,7 @@ import {
   type Db,
 } from "./data.js";
 import { publishAutomationChange } from "./realtime.js";
+import { deleteAutomationScriptDir } from "./script-files.js";
 import { savedReports } from "./review.js";
 import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
@@ -27,6 +30,8 @@ import {
 } from "./run.js";
 
 const DUE_AUTOMATION_BATCH_SIZE = 100;
+// As long as Review shows a run.
+const FINISHED_ONCE_KEEP_MS = 7 * 86_400_000;
 export const SWEEP_INTERVAL_MS = 10_000;
 export const OVERDUE_MS = 2 * 60_000;
 export const OVERDUE_SPACING_MS = 60_000;
@@ -252,6 +257,15 @@ export async function sweepDueAutomations(
   const startedAt = Date.now();
   for (const projectId of retryPausedAutomations(db, now))
     publishAutomationChange(room, projectId, "automations-changed");
+  // A timer or reminder that did its job leaves the list a week later.
+  for (const finished of listFinishedOnceAutomations(db, now - FINISHED_ONCE_KEEP_MS)) {
+    deleteAutomation(db, finished);
+    await deleteAutomationScriptDir({
+      dataDir: args.pluginDataDir,
+      automationId: finished.automationId,
+    }).catch(() => undefined);
+    publishAutomationChange(room, finished.projectId, "automations-changed");
+  }
   const due = listDueAutomations(db, {
     now,
     limit: DUE_AUTOMATION_BATCH_SIZE,

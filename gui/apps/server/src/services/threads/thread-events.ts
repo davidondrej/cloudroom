@@ -38,6 +38,7 @@ import type {
   ThreadEventType,
   ResolvedThreadExecutionOptions,
   SystemErrorEventData,
+  SystemThreadInterruptedEventData,
   SystemThreadInterruptedReason,
   SystemMessageKind,
   SystemMessageSubject,
@@ -163,6 +164,7 @@ interface BuildCwdBranchEntriesArgs {
 interface AppendThreadInterruptedEventArgs {
   reason: SystemThreadInterruptedReason;
   threadId: string;
+  memory?: SystemThreadInterruptedEventData["memory"];
 }
 
 const LEGACY_THREAD_START_TARGET = {
@@ -744,6 +746,7 @@ export function appendThreadInterruptedEventInTransaction(
     scope: threadScope(),
     data: {
       reason: args.reason,
+      ...(args.memory ? { memory: args.memory } : {}),
     },
   });
 }

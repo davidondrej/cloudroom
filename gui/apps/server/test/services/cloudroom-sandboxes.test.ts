@@ -303,13 +303,24 @@ it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and
     expect(calls("restore")).toEqual([parent.id]);
 
     // That restore failed, so the wake finds the sandbox archived, restores it, and delivers. Core first detaches the
-    // thread, so the archived parent hears nothing of its new work.
-    const sent = await post(`/threads/${child.id}/send`, { requestId: "follow-up", mode: "auto", input: [{ type: "text", text: "Continue", mentions: [] }] });
+    // thread, so the archived parent hears nothing of its new work. A view's wake at the same time sends no second one.
+    const [sent] = await Promise.all([
+      post(`/threads/${child.id}/send`, { requestId: "follow-up", mode: "auto", input: [{ type: "text", text: "Continue", mentions: [] }] }),
+      post(`/cloudroom/threads/${child.id}/wake`, { reason: "view" }),
+    ]);
     expect(sent.status, await sent.clone().text()).toBeLessThan(300);
     await waitFor(() => core.includes("/v1/sessions/cr_child/prompts"), "prompt delivery");
     expect(calls("restore")).toEqual([parent.id, parent.id]);
     expect(core.indexOf("/v1/sessions/cr_child/detach")).toBeGreaterThan(-1);
     expect(core.indexOf("/v1/sessions/cr_child/detach")).toBeLessThan(core.indexOf("/v1/sessions/cr_child/prompts"));
+
+    // Another computer archives it again. The Undo here is done, so a view leaves that archive alone (#2246).
+    state = "archived";
+    service.sandboxes.forget(parent.id);
+    const viewed = calls("wake").length;
+    await post(`/cloudroom/threads/${child.id}/wake`, { reason: "view" });
+    await waitFor(() => calls("wake").length > viewed, "the view's wake");
+    expect(calls("restore")).toEqual([parent.id, parent.id]);
 
     // Archiving its last active thread archives the sandbox again.
     expect((await post(`/threads/${child.id}/archive-all`)).status).toBe(200);
@@ -321,7 +332,52 @@ it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and
   }
 });
 
-it("archiving a working child whose parent keeps the sandbox open stops the child's agent, and only it", async () => {
+it("viewing a thread open here never restores an archive without an Undo here, and the list then archives it here (#2246)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const website: { action: string; thread?: string }[] = [];
+  const [done, parent, child] = [null, null, "parent"].map(() => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }));
+  harness.deps.db.update(threads).set({ parentThreadId: parent!.id }).where(eq(threads.id, child!.id)).run();
+  harness.deps.db.insert(cloudroomThreads).values([[done!, done!, "cr_done"], [parent!, parent!, "cr_parent"], [child!, parent!, "cr_child"]].map(([thread, sandbox, session]) =>
+    ({ threadId: (thread as typeof done)!.id, coreUrl: `sandbox:${(sandbox as typeof done)!.id}`, sessionId: session as string, startRequestId: session as string, model: "test-model", reasoning: "medium" }))).run();
+  // The list already took the parent's archive and is still applying it, so the parent and its shared child are open here.
+  const account = "11111111-1111-4111-8111-111111111111";
+  await writeFile(join(harness.deps.config.dataDir, "cloudroom-thread-sync.json"), JSON.stringify({ account, archived: [parent!.id] }));
+  const at = new Date().toISOString();
+  // `done`'s agent archived it when its turn ended; the list shows that only after the view.
+  const archivedRow = { thread: done!.id, session: "cr_done", project: project.id, project_name: project.name, repository: null, title: null, state: "archived", sandbox: null, harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: at, woke_at: null, updated_at: at };
+  const websiteServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const input = await body(req);
+    website.push({ action: input.action, thread: input.thread });
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ threads: website.some(call => call.action === "wake" && call.thread === done!.id) ? [archivedRow] : [], next: `${new Date().toISOString()}~`, more: false });
+    if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
+    if (input.action === "wake") return json({ error: "This thread is archived. Restore it to continue.", code: "sandbox_archived" }, 409);
+    return json({ thread: input.thread, state: "archived", generation: 1, issue: null });
+  });
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: account, email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    // Each view's wake finds its sandbox archived (the parent's second from the website's refusal, kept a while) and
+    // keeps the archive: it asks for the list instead of restoring.
+    const kept = vi.spyOn(service.sync, "changed");
+    for (const viewed of [done!, parent!, child!]) {
+      const before = kept.mock.calls.length;
+      await harness.app.request(`/api/v1/cloudroom/threads/${viewed.id}/wake`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "view" }) });
+      await waitFor(() => kept.mock.calls.length > before || website.some(call => call.action === "restore"), "the view's wake");
+    }
+    await waitFor(() => getThread(harness.deps.db, done!.id)?.archivedAt != null, "the list to archive the thread here", 10_000);
+    expect(website.map(call => call.action)).not.toContain("restore");
+  } finally {
+    service.stop();
+    websiteServer.close();
+  }
+}, 20_000);
+
+it("archiving a working child whose parent, even a hidden fork, keeps the sandbox open stops the child's agent, and only it", async () => {
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
@@ -349,7 +405,9 @@ it("archiving a working child whose parent keeps the sandbox open stops the chil
   const websiteUrl = await listen(websiteServer);
   try {
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
-    const parent = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "active" });
+    // A hidden fork still keeps its own sandbox; only side chats sharing their source's sandbox don't (#2210).
+    const source = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+    const parent = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "active", visibility: "hidden", originKind: "fork", sourceThreadId: source.id });
     const child = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", parentThreadId: parent.id, status: "active" });
     sandbox = parent.id;
     harness.deps.db.insert(cloudroomThreads).values([
@@ -576,8 +634,9 @@ it("sends a new thread's first message before its project copy starts, so a slow
   const core: string[] = [];
   let firstPrompt: { text: string; copyStarted: boolean } | null = null;
   let coreUrl = "";
-  // Workspace lookups: the copy plan, then the `room-cli files wait` status, then the copy itself starting.
-  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/")).length >= 3;
+  // Workspace lookups: the copy plan, then the `room-cli files wait` status, then the copy itself starting. The copy's
+  // heartbeat (#2168) starts at once and moves no files.
+  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/") && !path.endsWith("/alive")).length >= 3;
   const coreServer = createServer(async (req, res) => {
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     core.push(req.url!);

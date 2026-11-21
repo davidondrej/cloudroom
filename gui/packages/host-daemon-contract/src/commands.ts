@@ -367,7 +367,7 @@ const threadTeleportCommandSchema = hostDaemonThreadWorkspaceTargetSchema.extend
   transferId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   action: z.enum(["capture", "read", "import"]),
   // `optional`: an archived child that never started, left out when it saved no conversation (#1767).
-  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode"]), optional: z.boolean().optional() })).optional(),
+  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode", "antigravity"]), optional: z.boolean().optional() })).optional(),
   file: z.string().optional(),
   attachments: z.array(z.string()).optional(),
   keepImages: z.boolean().optional(),

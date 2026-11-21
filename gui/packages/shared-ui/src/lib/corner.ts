@@ -7,10 +7,11 @@ import { useEffect, useSyncExternalStore, type CSSProperties } from "react";
 
 /** Every card that may use the corner, most important first.
  *  `wait`: it shows only once the account's record says yes (once per month for Wrapped and Partner; the quiet
- *  days for Scan and Partner; the 45 days for Scan).
+ *  days for Scan and Partner; the 45 days for Scan; the 3 days after the call ticket was closed or clicked).
  *  `phone`: also shows on a phone. The others are desktop only. */
 export const CORNER_CARDS = [
   { id: "invite", phone: true },
+  { id: "call", wait: true },
   { id: "checklist" },
   { id: "wrapped", wait: true },
   { id: "scan", wait: true },

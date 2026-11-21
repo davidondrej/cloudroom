@@ -71,12 +71,21 @@
  * - FAKE_ACP_CLOSED_STREAM_ERROR
  *                            → JSON error object for those prompts instead;
  *                              "{session}" becomes the prompt's session id
+ * - FAKE_ACP_WAKE_FILE       → after a "wake-later" prompt, send each JSON
+ *                              list of updates the test writes to this file
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
 
 import { createInterface } from "node:readline";
-import { appendFileSync, existsSync, renameSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 
 const failLoad = process.env.FAKE_ACP_FAIL_LOAD === "1";
 const loadSession = process.env.FAKE_ACP_LOAD_SESSION === "1" || failLoad;
@@ -412,6 +421,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+let sendingWakeFileUpdates = false;
+
+/**
+ * Like agy after a background command finishes: sends updates whether or not a prompt is open. Each time the test
+ * writes a JSON list of updates to FAKE_ACP_WAKE_FILE, sends them and removes the file.
+ */
+async function sendWakeFileUpdates() {
+  if (sendingWakeFileUpdates) return;
+  sendingWakeFileUpdates = true;
+  const path = process.env.FAKE_ACP_WAKE_FILE;
+  for (;;) {
+    if (existsSync(path)) {
+      const updates = JSON.parse(readFileSync(path, "utf8"));
+      rmSync(path);
+      for (const update of updates) notifyUpdate(update);
+    }
+    await sleep(10);
+  }
+}
+
 function promptText(prompt) {
   return (Array.isArray(prompt) ? prompt : [])
     .filter((block) => block && block.type === "text")
@@ -585,9 +614,14 @@ async function handlePrompt(message) {
     } catch {
       notifyUpdate(messageChunk("read:denied"));
     }
+  } else if (text.includes("wake-later")) {
+    notifyUpdate(messageChunk(`echo:${text}`));
+    void sendWakeFileUpdates();
   } else if (text.includes("hang")) {
     // Stay pending until the client sends session/cancel.
     return;
+  } else if (text.includes("no-reply")) {
+    // Ends the turn without output, as Kimi does when its model request fails.
   } else if (text.includes("die")) {
     process.exit(7);
   } else if (text.includes("slow")) {

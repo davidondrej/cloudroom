@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -34,6 +34,8 @@ const CURSOR_DASHBOARD_URL =
 const CURSOR_KEYCHAIN_ACCOUNT = "cursor-user";
 const CURSOR_ACCESS_TOKEN_SERVICE = "cursor-access-token";
 const CURSOR_INSTALL_SCRIPT_URL = "https://cursor.com/install";
+const ANTIGRAVITY_INSTALL_SCRIPT_URL =
+  "https://antigravity.google/cli/install.sh";
 /** Cursor's documented native Windows installer (#1897). */
 const CURSOR_WINDOWS_INSTALL_SCRIPT_URL =
   "https://cursor.com/install?win32=true";
@@ -145,7 +147,7 @@ export interface AcpMaintenanceDialect {
   latestVersion?(): Promise<string | null>;
   /** `command` is the agent's resolved executable, for agents asked through their own CLI. */
   readAccount(command: string): Promise<{ email: string | null } | null>;
-  readUsage(): Promise<ProviderUsageResult>;
+  readUsage(command: string): Promise<ProviderUsageResult>;
 }
 
 const installerUrlSchema = z
@@ -529,44 +531,43 @@ export async function getAcpProviderUsage(
   args: AcpMaintenanceTarget,
 ): Promise<ProviderUsageResult> {
   if (args.maintenance === undefined) return { supported: false };
-  if (
-    args.command === null ||
-    (await resolveExecutablePath(args.command)) === null
-  ) {
+  const executable =
+    args.command === null ? null : await resolveExecutablePath(args.command);
+  if (executable === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
-  return args.maintenance.readUsage();
+  return args.maintenance.readUsage(executable);
 }
 
-const CURSOR_LATEST_VERSION_TTL_MS = 60 * 60_000;
-let cursorLatestVersion: { version: string | null; expiresAt: number } | null =
-  null;
+const LATEST_VERSION_TTL_MS = 60 * 60_000;
 
-/** Cursor's install script names the version it installs. Read at most once an hour. */
-async function readCursorLatestVersion(): Promise<string | null> {
-  if (cursorLatestVersion && cursorLatestVersion.expiresAt > Date.now()) {
-    return cursorLatestVersion.version;
-  }
-  let version: string | null = null;
-  try {
-    const response = await fetch(CURSOR_INSTALL_SCRIPT_URL, {
-      signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
-    });
-    if (response.ok) {
-      version = versionFrom(
-        (await response.text()).match(/\/lab\/([0-9A-Za-z.-]+)\//u)?.[1] ??
-          null,
-      );
-    }
-  } catch {
-    version = null;
-  }
-  cursorLatestVersion = {
-    version,
-    expiresAt: Date.now() + CURSOR_LATEST_VERSION_TTL_MS,
+/** Asks for a CLI's newest version at most once an hour. Null when it can't be read. */
+function hourlyLatestVersion(
+  read: () => Promise<string | null>,
+): () => Promise<string | null> {
+  let cached: { version: string | null; expiresAt: number } | null = null;
+  return async () => {
+    if (cached && cached.expiresAt > Date.now()) return cached.version;
+    const version = versionFrom(await read().catch(() => null));
+    cached = { version, expiresAt: Date.now() + LATEST_VERSION_TTL_MS };
+    return version;
   };
-  return version;
 }
+
+async function fetchText(url: string): Promise<string | null> {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
+  });
+  return response.ok ? response.text() : null;
+}
+
+/** Cursor's install script names the version it installs. */
+const readCursorLatestVersion = hourlyLatestVersion(
+  async () =>
+    (await fetchText(CURSOR_INSTALL_SCRIPT_URL))?.match(
+      /\/lab\/([0-9A-Za-z.-]+)\//u,
+    )?.[1] ?? null,
+);
 
 export const CURSOR_ACP_MAINTENANCE: AcpMaintenanceDialect = {
   loginCommand: "cursor-agent login",
@@ -643,11 +644,290 @@ async function readCursorUsage(): Promise<ProviderUsageResult> {
 }
 
 const ANTIGRAVITY_ACCOUNT_TTL_MS = 60_000;
+const ANTIGRAVITY_TIER_TTL_MS = 60 * 60_000;
+const ANTIGRAVITY_STATUSLINE_TIMEOUT_MS = 10_000;
+const ANTIGRAVITY_ACP_TIER_TIMEOUT_MS = 8_000;
+
 let antigravityAccount: {
   command: string;
   signedIn: boolean;
+  email: string | null;
   expiresAt: number;
 } | null = null;
+let antigravityUsageCache: {
+  command: string;
+  result: ProviderUsageResult;
+  expiresAt: number;
+} | null = null;
+let antigravityUsagePending: {
+  command: string;
+  promise: Promise<ProviderUsageResult>;
+} | null = null;
+let antigravityTierCache: {
+  key: string;
+  tier: string | null;
+  expiresAt: number;
+} | null = null;
+
+const antigravityQuotaBucketSchema = z
+  .object({
+    remaining_fraction: z.number().min(0).max(1).nullish(),
+    reset_time: z.string().min(1).nullish(),
+    reset_in_seconds: z.number().nonnegative().nullish(),
+    disabled: z.boolean().nullish(),
+  })
+  .passthrough();
+
+const antigravityStatusLineSchema = z
+  .object({
+    email: z.string().nullish(),
+    plan_tier: z.string().nullish(),
+    quota: z.record(z.string(), antigravityQuotaBucketSchema).nullish(),
+  })
+  .passthrough();
+
+type AntigravityQuotaBucket = z.infer<typeof antigravityQuotaBucketSchema>;
+
+function antigravityResetIso(
+  bucket: AntigravityQuotaBucket,
+  now = Date.now(),
+): string | null {
+  if (bucket.reset_time) {
+    const parsed = Date.parse(bucket.reset_time);
+    if (Number.isFinite(parsed)) return new Date(parsed).toISOString();
+  }
+  if (bucket.reset_in_seconds != null && bucket.reset_in_seconds > 0) {
+    return new Date(now + bucket.reset_in_seconds * 1_000).toISOString();
+  }
+  return null;
+}
+
+/** Normalizes agy's statusLine JSON payload into Cloudroom's compact usage windows (5h + 7d Gemini; 3p only when used > 0%). */
+function normalizeAntigravityUsage(
+  raw: unknown,
+  planTierFallback: string | null = null,
+  now = Date.now(),
+): ProviderUsage {
+  const parsed = antigravityStatusLineSchema.safeParse(raw);
+  if (!parsed.success) {
+    return {
+      status: "error",
+      message: "Antigravity usage response was malformed.",
+      planLabel: planTierFallback,
+      accountEmail: null,
+    };
+  }
+  const email = parsed.data.email?.trim() || null;
+  const planLabel = parsed.data.plan_tier?.trim() || planTierFallback || null;
+  const quota = parsed.data.quota ?? {};
+  const windows: ProviderUsageWindow[] = [];
+  const pushBucket = (key: string, label: string): boolean => {
+    const bucket = quota[key];
+    if (
+      !bucket ||
+      bucket.disabled === true ||
+      bucket.remaining_fraction == null
+    ) {
+      return false;
+    }
+    const usedPercent = clampPercent((1 - bucket.remaining_fraction) * 100);
+    windows.push({
+      label,
+      usedPercent,
+      resetsAt: antigravityResetIso(bucket, now),
+    });
+    return true;
+  };
+  const hasGemini5h = pushBucket("gemini-5h", "Five-hour limit");
+  const hasGemini7d = pushBucket("gemini-weekly", "Weekly limit");
+  pushBucket("3p-5h", "Five-hour · 3P");
+  pushBucket("3p-weekly", "Weekly · 3P");
+  if (!hasGemini5h && !hasGemini7d) {
+    for (const [key, bucket] of Object.entries(quota)) {
+      if (
+        key === "3p-5h" ||
+        key === "3p-weekly" ||
+        bucket.disabled === true ||
+        bucket.remaining_fraction == null
+      ) {
+        continue;
+      }
+      windows.push({
+        label: key,
+        usedPercent: clampPercent((1 - bucket.remaining_fraction) * 100),
+        resetsAt: antigravityResetIso(bucket, now),
+      });
+    }
+  }
+  return {
+    status: "ok",
+    accountEmail: email,
+    planLabel,
+    windows,
+  };
+}
+
+const ANTIGRAVITY_STATUSLINE_PTY_SCRIPT = `
+import json, os, pty, select, subprocess, sys, time
+cmd, out_file, cwd = sys.argv[1], sys.argv[2], sys.argv[3]
+settings = json.dumps({"statusLine": {"type": "command", "command": f"cat > {json.dumps(out_file)}"}})
+master, slave = pty.openpty()
+env = dict(os.environ)
+env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "1"
+p = subprocess.Popen([cmd, "--settings", settings], stdin=slave, stdout=slave, stderr=slave, cwd=cwd, env=env, close_fds=True)
+os.close(slave)
+data = None
+email_seen_at = None
+deadline = time.time() + 10.0
+try:
+    while time.time() < deadline:
+        r, _, _ = select.select([master], [], [], 0.2)
+        if r:
+            try:
+                os.read(master, 4096)
+            except OSError:
+                break
+        if os.path.exists(out_file) and os.path.getsize(out_file) > 10:
+            try:
+                parsed = json.loads(open(out_file, "r", encoding="utf-8").read())
+                if isinstance(parsed, dict) and (parsed.get("quota") or parsed.get("email")):
+                    data = parsed
+                    if parsed.get("quota"):
+                        break
+                    if email_seen_at is None:
+                        email_seen_at = time.time()
+                    elif time.time() - email_seen_at >= 2.0:
+                        break
+            except Exception:
+                pass
+        if p.poll() is not None:
+            break
+finally:
+    p.terminate()
+    try:
+        p.wait(timeout=2)
+    except Exception:
+        p.kill()
+    try:
+        os.close(master)
+    except OSError:
+        pass
+if data is not None:
+    print(json.dumps(data))
+`.trim();
+
+/** Runs `agy` briefly in a PTY with a session-only `statusLine` hook to read email and live quota buckets without spending tokens. */
+async function probeAntigravityStatusLine(command: string): Promise<unknown> {
+  if (process.platform === "win32") return null;
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "cloudroom-agy-usage-"));
+  const outFile = path.join(dir, "status.json");
+  try {
+    const { stdout } = await execFileAsync(
+      "python3",
+      ["-c", ANTIGRAVITY_STATUSLINE_PTY_SCRIPT, command, outFile, dir],
+      {
+        timeout: ANTIGRAVITY_STATUSLINE_TIMEOUT_MS + 4_000,
+        env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+        windowsHide: true,
+      },
+    );
+    const trimmed = stdout.trim();
+    return trimmed ? (JSON.parse(trimmed) as unknown) : null;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+const antigravityAcpTierSchema = z.object({
+  id: z.number().optional(),
+  result: z
+    .object({
+      _meta: z
+        .object({
+          antigravity: z
+            .object({
+              tier: z.object({ name: z.string().min(1) }).nullish(),
+            })
+            .nullish(),
+        })
+        .nullish(),
+    })
+    .nullish(),
+});
+
+/** Reads the subscription tier name (e.g. "Google AI Ultra") from `agy acp`'s session/new metadata, cached per account. */
+async function probeAntigravityTier(
+  command: string,
+  email: string | null,
+): Promise<string | null> {
+  const key = `${command}\0${email ?? ""}`;
+  if (
+    antigravityTierCache?.key === key &&
+    antigravityTierCache.expiresAt > Date.now()
+  ) {
+    return antigravityTierCache.tier;
+  }
+  const tier = await new Promise<string | null>((resolve) => {
+    const child = spawn(command, ["acp"], {
+      cwd: os.tmpdir(),
+      env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" },
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    let done = false;
+    let buffer = "";
+    const finish = (value: string | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      child.kill();
+      resolve(value);
+    };
+    const timer = setTimeout(
+      () => finish(null),
+      ANTIGRAVITY_ACP_TIER_TIMEOUT_MS,
+    );
+    child.on("error", () => finish(null));
+    child.on("exit", () => finish(null));
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline !== -1) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        newline = buffer.indexOf("\n");
+        if (!line) continue;
+        try {
+          const parsed = antigravityAcpTierSchema.safeParse(JSON.parse(line));
+          if (parsed.success && parsed.data.id === 2) {
+            finish(parsed.data.result?._meta?.antigravity?.tier?.name ?? null);
+            return;
+          }
+        } catch {}
+      }
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: 1, clientCapabilities: {} },
+      })}\n${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "session/new",
+        params: { cwd: os.tmpdir(), mcpServers: [] },
+      })}\n`,
+    );
+  });
+  antigravityTierCache = {
+    key,
+    tier,
+    expiresAt: Date.now() + ANTIGRAVITY_TIER_TTL_MS,
+  };
+  return tier;
+}
 
 /** agy keeps its sign-in in the OS keyring, so ask agy itself: signed out, `agy models` says "Please sign in" and
  *  exits 1. It asks Google for the list, so the answer is kept a minute. Any other failure is not a signed-out CLI. */
@@ -658,7 +938,9 @@ async function readAntigravityAccount(
     antigravityAccount?.command === command &&
     antigravityAccount.expiresAt > Date.now()
   ) {
-    return antigravityAccount.signedIn ? { email: null } : null;
+    return antigravityAccount.signedIn
+      ? { email: antigravityAccount.email }
+      : null;
   }
   const signedIn = await execFileAsync(command, ["models"], {
     timeout: USAGE_FETCH_TIMEOUT_MS,
@@ -672,27 +954,141 @@ async function readAntigravityAccount(
       throw error;
     },
   );
+  const email =
+    signedIn && antigravityAccount?.command === command
+      ? antigravityAccount.email
+      : null;
   antigravityAccount = {
     command,
     signedIn,
+    email,
     expiresAt: Date.now() + ANTIGRAVITY_ACCOUNT_TTL_MS,
   };
-  return signedIn ? { email: null } : null;
+  return signedIn ? { email } : null;
 }
+
+async function collectAntigravityUsage(
+  command: string,
+): Promise<ProviderUsageResult> {
+  let account: { email: string | null } | null;
+  try {
+    account = await readAntigravityAccount(command);
+  } catch (error) {
+    return {
+      supported: true,
+      usage: {
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+        planLabel: null,
+        accountEmail: null,
+      },
+    };
+  }
+  if (account === null) {
+    antigravityTierCache = null;
+    return { supported: true, usage: { status: "unauthenticated" } };
+  }
+  const raw = await probeAntigravityStatusLine(command).catch(() => null);
+  const parsed =
+    raw === null ? null : antigravityStatusLineSchema.safeParse(raw);
+  if (!parsed?.success) {
+    const tier = await probeAntigravityTier(command, account.email);
+    return {
+      supported: true,
+      usage: {
+        status: "ok",
+        accountEmail: account.email,
+        planLabel: tier,
+        windows: [],
+      },
+    };
+  }
+  const email = parsed.data.email?.trim() || null;
+  const planTier = parsed.data.plan_tier?.trim() || null;
+  const tier = planTier ?? (await probeAntigravityTier(command, email));
+  if (email && antigravityAccount?.command === command) {
+    antigravityAccount = { ...antigravityAccount, email };
+  }
+  return {
+    supported: true,
+    usage: normalizeAntigravityUsage(raw, tier),
+  };
+}
+
+async function readAntigravityUsage(
+  command: string,
+): Promise<ProviderUsageResult> {
+  if (
+    antigravityUsageCache?.command === command &&
+    antigravityUsageCache.expiresAt > Date.now()
+  ) {
+    return antigravityUsageCache.result;
+  }
+  if (antigravityUsagePending?.command === command) {
+    return antigravityUsagePending.promise;
+  }
+  const promise = collectAntigravityUsage(command)
+    .then((result) => {
+      if (
+        result.supported &&
+        (result.usage.status === "ok" ||
+          result.usage.status === "unauthenticated")
+      ) {
+        antigravityUsageCache = {
+          command,
+          result,
+          expiresAt: Date.now() + ANTIGRAVITY_ACCOUNT_TTL_MS,
+        };
+      }
+      return result;
+    })
+    .finally(() => {
+      if (antigravityUsagePending?.promise === promise) {
+        antigravityUsagePending = null;
+      }
+    });
+  antigravityUsagePending = { command, promise };
+  return promise;
+}
+
+/** agy's install script names its release server, which lists the newest version for each platform. */
+const readAntigravityLatestVersion = hourlyLatestVersion(async () => {
+  const server = (await fetchText(ANTIGRAVITY_INSTALL_SCRIPT_URL))?.match(
+    /^DOWNLOAD_BASE_URL="(https:\/\/[A-Za-z0-9.-]+)"/mu,
+  )?.[1];
+  if (server === undefined) return null;
+  const os = process.platform === "win32" ? "windows" : process.platform;
+  const arch = process.arch === "x64" ? "amd64" : process.arch;
+  const manifest = await fetchText(`${server}/manifests/${os}_${arch}.json`);
+  if (manifest === null) return null;
+  const parsed = z
+    .object({ version: z.string() })
+    .safeParse(JSON.parse(manifest));
+  return parsed.success ? parsed.data.version : null;
+});
 
 export const ANTIGRAVITY_ACP_MAINTENANCE: AcpMaintenanceDialect = {
   loginCommand: "agy acp --login",
-  installer: () =>
-    acpInstallerCommand({
-      scriptUrl: "https://antigravity.google/cli/install.sh",
-      powershellUrl: "https://antigravity.google/cli/install.ps1",
-      args: [],
-    }),
+  // agy's install script stops when agy is already there, so an installed agy updates itself.
+  installer: (installedExecutable) =>
+    installedExecutable !== null
+      ? {
+          command: installedExecutable,
+          args: ["update"],
+          displayCommand: "agy update",
+        }
+      : acpInstallerCommand({
+          scriptUrl: ANTIGRAVITY_INSTALL_SCRIPT_URL,
+          powershellUrl: "https://antigravity.google/cli/install.ps1",
+          args: [],
+        }),
+  latestVersion: readAntigravityLatestVersion,
   readAccount: readAntigravityAccount,
-  readUsage: () => Promise.resolve({ supported: false }),
+  readUsage: readAntigravityUsage,
 };
 
 export const __testing = {
   buildProviderInstallationRun: buildAcpProviderInstallationRun,
   normalizeUsage,
+  normalizeAntigravityUsage,
 };

@@ -4,7 +4,7 @@ import type {
   DraggableSyntheticListeners,
 } from "@dnd-kit/core";
 import { useSortable } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { sortableTranslate } from "@/lib/sortable-translate";
 
 const SIDEBAR_SORTABLE_TRANSITION = {
   duration: 160,
@@ -50,7 +50,7 @@ export function useSidebarSortable({
   } = useSortable({ id, disabled, transition: SIDEBAR_SORTABLE_TRANSITION });
   const style = useMemo<CSSProperties>(
     () => ({
-      transform: displace ? CSS.Translate.toString(transform) : undefined,
+      transform: displace ? sortableTranslate(transform) : undefined,
       transition: displace ? transition : undefined,
       position: isDragging ? "relative" : undefined,
       zIndex: isDragging ? 100 : undefined,

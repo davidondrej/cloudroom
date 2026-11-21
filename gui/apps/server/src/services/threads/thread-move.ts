@@ -26,10 +26,12 @@ import type { AppDeps } from "../../types.js";
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { macAccess } from "../cloudroom/previews.js";
 import { teleportBlocked } from "../cloudroom/store.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
+  detachEnvironmentWithoutOpenThreads,
   provisionUnmanagedEnvironmentForPath,
   reuseEnvironmentForPath,
 } from "./thread-environment-directory.js";
@@ -302,6 +304,11 @@ async function moveLocalThread(
       environmentId: target.id,
     });
     record(tx);
+    if (
+      current?.environmentProviderId ===
+      DEFAULT_ENVIRONMENT_PROVIDER_ID.personalWorkspace
+    )
+      detachEnvironmentWithoutOpenThreads(tx, current.id);
   });
   if (
     current?.environmentProviderId &&

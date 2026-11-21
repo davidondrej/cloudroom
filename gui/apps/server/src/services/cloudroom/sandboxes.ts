@@ -72,7 +72,7 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
 type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin; launcher?: string };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
-export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero";
+export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "antigravity" | "openclaw" | "agent-zero";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
@@ -297,20 +297,105 @@ function contentDigest(tar: Buffer): string {
 export async function macOpencodeLogin(): Promise<string | null> {
   const binary = findCliExecutable("opencode");
   const version = (await macHarnessVersions()).opencode;
+  const dataHome = process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
   const value = binary && version && !version.startsWith("1.")
     ? (await execPortableFile(binary, ["auth", "export", "--standalone"], { timeoutMs: 20_000, maxBuffer: 1024 * 1024 }).catch(() => null))?.stdout ?? null
-    : await readFile(join(process.env.XDG_DATA_HOME || join(homedir(), ".local/share"), "opencode/auth.json"), "utf8").catch(() => null);
+    : await readFile(join(dataHome, "opencode", "auth.json"), "utf8").catch(() => null);
   try { const parsed: unknown = value && JSON.parse(value); return parsed && (!Array.isArray(parsed) || parsed.length) ? value : null; } catch { return null; }
 }
 
-/** What Cloud gets for OpenCode: its login, plus the custom providers in its global opencode.json (feedback #547).
- *  The rest of that file, such as MCP servers, plugins, and permissions, belongs to this computer. */
-async function macOpencodeCloudLogin(): Promise<string | null> {
-  const [auth, text] = await Promise.all([macOpencodeLogin(), readFile(join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode/opencode.json"), "utf8").catch(() => null)]);
-  let provider: unknown;
-  try { provider = text ? (JSON.parse(text) as { provider?: unknown }).provider : undefined; } catch { /* Comments: copy the login only. */ }
-  if (!provider || typeof provider !== "object" || !Object.keys(provider).length) return auth;
-  const config = JSON.stringify({ provider });
+/** Parses JSON or JSONC (line/block comments and trailing commas) without altering string literals. */
+function parseJsonc(text: string): unknown {
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  let stripped = "";
+  let inString = false;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]!;
+    if (inString) {
+      stripped += ch;
+      if (ch === "\\" && i + 1 < src.length) { stripped += src[++i]!; }
+      else if (ch === "\"") { inString = false; }
+      continue;
+    }
+    if (ch === "\"") { inString = true; stripped += ch; continue; }
+    if (ch === "/" && src[i + 1] === "/") {
+      while (i + 1 < src.length && src[i + 1] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+      i += 1;
+      continue;
+    }
+    stripped += ch;
+  }
+  let clean = "";
+  inString = false;
+  for (let i = 0; i < stripped.length; i += 1) {
+    const ch = stripped[i]!;
+    if (inString) {
+      clean += ch;
+      if (ch === "\\" && i + 1 < stripped.length) { clean += stripped[++i]!; }
+      else if (ch === "\"") { inString = false; }
+      continue;
+    }
+    if (ch === "\"") { inString = true; clean += ch; continue; }
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < stripped.length && /\s/.test(stripped[j]!)) j += 1;
+      if (stripped[j] === "}" || stripped[j] === "]") continue;
+    }
+    clean += ch;
+  }
+  return JSON.parse(clean);
+}
+
+function opencodeConfigPaths(): string[] {
+  const base = join(process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config"), "opencode");
+  const paths = [join(base, "opencode.json"), join(base, "opencode.jsonc")];
+  // Match OpenCode's own precedence: base config -> OPENCODE_CONFIG -> OPENCODE_CONFIG_DIR.
+  const customFile = process.env.OPENCODE_CONFIG?.trim();
+  if (customFile) paths.push(customFile);
+  const customDir = process.env.OPENCODE_CONFIG_DIR?.trim();
+  if (customDir && customDir !== base) {
+    paths.push(join(customDir, "opencode.json"), join(customDir, "opencode.jsonc"));
+  }
+  return paths;
+}
+
+function mergeProviderEntries(target: Record<string, unknown>, incoming: Record<string, unknown>): void {
+  for (const [name, entry] of Object.entries(incoming)) {
+    const existing = target[name];
+    target[name] =
+      existing && typeof existing === "object" && !Array.isArray(existing) && entry && typeof entry === "object" && !Array.isArray(entry)
+        ? { ...(existing as Record<string, unknown>), ...(entry as Record<string, unknown>) }
+        : entry;
+  }
+}
+
+/** What Cloud gets for OpenCode: its login, plus the custom providers in its global opencode.json(c) (feedback #547).
+ *  Reads both `provider` (v1) and `providers` (v2). The rest of those files belongs to this computer. */
+export async function macOpencodeCloudLogin(): Promise<string | null> {
+  const [auth, texts] = await Promise.all([
+    macOpencodeLogin(),
+    Promise.all(opencodeConfigPaths().map(file => readFile(file, "utf8").catch(() => null))),
+  ]);
+  const provider: Record<string, unknown> = {};
+  const providers: Record<string, unknown> = {};
+  for (const text of texts) {
+    if (!text) continue;
+    let parsed: unknown;
+    try { parsed = parseJsonc(text); } catch { continue; }
+    const obj = record(parsed);
+    mergeProviderEntries(provider, record(obj.provider));
+    mergeProviderEntries(providers, record(obj.providers));
+  }
+  const picked: Record<string, Record<string, unknown>> = {};
+  if (Object.keys(provider).length) picked.provider = provider;
+  if (Object.keys(providers).length) picked.providers = providers;
+  if (!Object.keys(picked).length) return auth;
+  const config = JSON.stringify(picked);
   return JSON.stringify(auth ? { auth, config } : { config });
 }
 
@@ -675,7 +760,7 @@ export class SandboxDirectory {
     let response: Response;
     try {
       response = await fetch(`${account.website}/api/desktop/${path}`, {
-        method: "POST", redirect: "error", signal: AbortSignal.any([cancel, AbortSignal.timeout(120_000)]),
+        method: "POST", redirect: "error", signal: AbortSignal.any([cancel, AbortSignal.timeout(path === "antigravity" ? 305_000 : 120_000)]),
         headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` },
         body: JSON.stringify(body),
       });
@@ -788,15 +873,53 @@ export class SandboxDirectory {
   async transcribe(file: File): Promise<string | null> {
     const account = await this.account();
     if (!account) return null;
-    const body = new FormData();
-    body.set("file", file, file.name);
-    const response = await fetch(`${account.website}/api/desktop/transcribe`, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
-      headers: { Authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` },
-      body,
+    const auth = `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}`;
+    const url = `${account.website}/api/desktop/transcribe`;
+    if (file.size <= 4 * 1024 * 1024) {
+      const body = new FormData();
+      body.set("file", file, file.name);
+      return await this.readTranscriptionResponse(
+        await fetch(url, {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
+          headers: { Authorization: auth },
+          body,
+        }),
+      );
+    }
+    const uploadRes = await fetch(url, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "upload", bytes: file.size }),
     });
+    const upload = await uploadRes.json().catch(() => ({})) as { key?: unknown; url?: unknown; error?: unknown };
+    if (!uploadRes.ok || typeof upload.key !== "string" || typeof upload.url !== "string") {
+      throw new CloudroomError(typeof upload.error === "string" ? upload.error : `The website returned HTTP ${uploadRes.status}.`);
+    }
+    const putRes = await fetch(upload.url, {
+      method: "PUT", redirect: "error", signal: AbortSignal.timeout(60_000),
+      headers: { "Content-Length": String(file.size) },
+      body: Buffer.from(await file.arrayBuffer()),
+    });
+    if (!putRes.ok) throw new CloudroomError(`Backup audio upload failed (HTTP ${putRes.status}).`);
+    return await this.readTranscriptionResponse(
+      await fetch(url, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "transcribe",
+          key: upload.key,
+          filename: file.name || "recording.webm",
+          mimeType: file.type || "audio/webm",
+        }),
+      }),
+    );
+  }
+
+  private async readTranscriptionResponse(response: Response): Promise<string> {
     const value = await response.json().catch(() => ({})) as { text?: unknown; error?: unknown };
-    if (!response.ok || typeof value.text !== "string") throw new CloudroomError(typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`);
+    if (!response.ok || typeof value.text !== "string") {
+      throw new CloudroomError(typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`);
+    }
     return value.text;
   }
 
@@ -1399,7 +1522,7 @@ export class SandboxDirectory {
   /** Which logins the website holds for this account's sandboxes. */
   async logins(only?: AccountRequest): Promise<Record<SandboxLogin, boolean>> {
     // Missing names mean an older website that cannot hold that login yet.
-    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), openclaw: z.boolean().default(false), "agent-zero": z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins", only));
+    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), antigravity: z.boolean().default(false), openclaw: z.boolean().default(false), "agent-zero": z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins", only));
   }
 
   /** Who the account's GitHub login belongs to, or null when GitHub or an older website can't tell. */
@@ -1408,6 +1531,15 @@ export class SandboxDirectory {
   }
 
   /** Forgets one of the account's logins for every sandbox. */
+  async antigravityLogin(input: Record<string, unknown>) {
+    const only = await this.bind();
+    if (input.action === "disconnect") {
+      await this.call({action:"remove", name:"antigravity"}, "logins", only);
+      return {connected:false, catalog:null};
+    }
+    return z.object({ restart: z.boolean().optional(), refreshDue: z.boolean().optional(), connected: z.boolean().optional(), catalog: z.string().nullable().optional(), url: z.string().url().optional(), ticket: z.string().optional(), cancelled: z.boolean().optional() }).parse(await this.call(input, "antigravity", only));
+  }
+
   removeLogin(name: Exclude<SandboxLogin, "mcp">): Promise<void> {
     const signal = this.session.signal;
     return this.withLogins(async () => {

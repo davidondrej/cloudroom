@@ -19,11 +19,12 @@ use serde_json::{Value, json};
 use std::{io, sync::Arc};
 
 const USAGE: &str = "room-cli loop create --name NAME --prompt TEXT|--prompt-file PATH (--cron 'MIN HOUR DAY MONTH WEEKDAY' [--timezone ZONE] | --at ISO_TIME | --in 30m | --webhook) [--new-thread|--same-thread] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--agent P,M[,LEVEL]]... [--priority 1-4] [--secrets KEY,.env|none|all] [--parent THREAD|none]
+room-cli wake WHEN \"PROMPT\"   A timer or reminder: wakes this thread once, in 5m/2h/1d or at an ISO time, within about a minute
 room-cli loop list
 room-cli loop update ID [--name NAME] [--priority 1-4] [--prompt TEXT] [--cron EXPR [--timezone ZONE] | --at ISO_TIME | --in 30m] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--agent P,M[,LEVEL]]... [--secrets KEY,.env|none|all] [--parent THREAD|none]
 room-cli loop pause|resume|run|delete|hook ID
 room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...
-A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows every loop on the account, with each one's project_id and agent, and `update` changes the agent. --agent, given 2 to 8 times, makes agents that take turns: each run gets the next one in order, and one Cloud can't run (a plan limit, a login, a model) is skipped for the next; one --agent ends the turns. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). --parent picks a manager for a fresh-thread loop: an open Cloud thread in its project that each run starts under, so it can steer and archive them and they can `thread tell --parent` it; `none` clears it. A run whose manager is archived or gone starts top-level. A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
+A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. `run ID` makes it due now and turns a paused loop back on; `pause ID` keeps it off until `resume ID`. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows every loop on the account, with each one's project_id and agent, and `update` changes the agent. --agent, given 2 to 8 times, makes agents that take turns: each run gets the next one in order, and one Cloud can't run (a plan limit, a login, a model) is skipped for the next; one --agent ends the turns. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). Any picked list, even .env or none, blocks `room-cli mac` in its runs. A loop that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop; `update --secrets all` fixes only later runs. --parent picks a manager for a fresh-thread loop: an open Cloud thread in its project that each run starts under, so it can steer and archive them and they can `thread tell --parent` it; `none` clears it. A run whose manager is archived or gone starts top-level. A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
 const MAX_PROMPT: usize = 32_000;
 
 #[derive(Deserialize, Serialize)]
@@ -223,9 +224,13 @@ async fn check_agent(m: &Arc<Manager>, session: &str, input: &Body) -> Result<()
     };
     // Codex, Claude and Cursor name what they offer.
     let selected = model.unwrap_or_else(|| m.config.harnesses[&kind].model.clone());
-    let detail = match m.model_catalog(kind).await {
-        Ok(models) => runtime::supports(kind, &models, &selected, &reasoning).err(),
-        Err(_) => None,
+    let detail = if kind == runtime::Kind::OpenCode {
+        None
+    } else {
+        match m.model_catalog(kind).await {
+            Ok(models) => runtime::supports(kind, &models, &selected, &reasoning).err(),
+            Err(_) => None,
+        }
     };
     let detail = detail.unwrap_or_else(|| format!("{error} {reasoning}"));
     Err(fail(
@@ -378,8 +383,56 @@ fn delay(value: &str) -> Option<String> {
     (count.parse::<u32>().ok()? > 0).then(|| format!("{count} {unit}"))
 }
 
+const WAKE_USAGE: &str = "room-cli wake WHEN \"PROMPT\"   Wake this thread once with a prompt: a timer or a reminder. WHEN is a delay like 5m, 2h, 1d, or an ISO time. Cloudroom checks once a minute, so it fires within about a minute of then.";
+
+/// `wake 5m TEXT` as the one-time `create` it stands for, so setting a timer is one short line.
+fn wake(args: &[String]) -> Option<Vec<String>> {
+    let [when, prompt @ ..] = args else {
+        return None;
+    };
+    let json = prompt.iter().any(|w| w == "--json");
+    let prompt: Vec<&str> = prompt
+        .iter()
+        .map(String::as_str)
+        .filter(|w| *w != "--json")
+        .collect();
+    let prompt = prompt.join(" ");
+    if when.starts_with('-') || prompt.trim().is_empty() {
+        return None;
+    }
+    // The website caps a name at 200 bytes, and a character can take 4.
+    let name = format!("Wake: {}", prompt.chars().take(40).collect::<String>());
+    let timing = if delay(when).is_some() {
+        "--in"
+    } else {
+        "--at"
+    };
+    let mut create = ["create", "--name", &name, timing, when, "--prompt", &prompt]
+        .map(str::to_owned)
+        .to_vec();
+    if json {
+        create.push("--json".to_owned());
+    }
+    Some(create)
+}
+
 /// `room-cli loop ...` in Cloud threads; on the Mac, `room-cli loop create --cloud` does the same.
 pub async fn cli(args: &[String]) -> io::Result<i32> {
+    let woken;
+    let args = if args.first().map(String::as_str) == Some("wake") {
+        let Some(create) = wake(&args[1..]) else {
+            println!("{WAKE_USAGE}");
+            let help = matches!(
+                args.get(1).map(String::as_str),
+                None | Some("--help" | "-h")
+            );
+            return Ok(if help { 0 } else { 2 });
+        };
+        woken = create;
+        &woken[..]
+    } else {
+        args
+    };
     let words: Vec<&str> = args
         .iter()
         .map(String::as_str)

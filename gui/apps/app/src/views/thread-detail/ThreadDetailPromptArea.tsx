@@ -391,7 +391,7 @@ async function runWhileFollowUpShortcutSending(
 }
 
 import { showCloudSignIn, useCloudLocked } from "@/hooks/useCloudLocked";
-import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudOpenCodeCatalog, partitionCloudOpenCodeModelOptions, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
@@ -726,6 +726,7 @@ export function ThreadDetailPromptArea({
     serviceTierFastLabel,
     executionInputSources,
   } = useThreadCreationOptions({
+    cloud: isCloud,
     enabled: thread.archivedAt === null,
     environmentId: thread.environmentId ?? undefined,
     environmentHostId,
@@ -2404,6 +2405,20 @@ export function ThreadDetailPromptArea({
     </>
   );
 
+  const cloudOpenCodeModelsRef =
+    isCloud && thread.providerId === "acp-opencode"
+      ? cloudOpenCodeCatalog(cloudConnection.data)
+      : null;
+  const cloudModelPartition = useMemo(() => {
+    const combined = [...modelOptions, ...moreModelOptions];
+    return (
+      partitionCloudOpenCodeModelOptions(combined, cloudOpenCodeModelsRef) ?? {
+        primary: combined,
+        more: [],
+      }
+    );
+  }, [modelOptions, moreModelOptions, cloudOpenCodeModelsRef]);
+
   const bottomContent = (
     <FollowUpPromptBox
       id={THREAD_DETAIL_COMPOSER_TEXTAREA_ID}
@@ -2421,12 +2436,12 @@ export function ThreadDetailPromptArea({
       focusEndKey={bottomFocusEndKey}
       environmentSummary={environmentSummary}
       contextWindowUsage={contextWindowUsage ?? null}
-      contextWindowNote={thread.providerId === "acp-cursor" ? "Cursor doesn't report token usage, so this is an estimate." : undefined}
+      contextWindowNote={thread.providerId === "acp-cursor" && contextWindowUsage?.estimated ? "Cursor doesn't report token usage, so this is an estimate." : undefined}
       contextWindowActions={contextWindowActions}
       execution={isCloud ? {
         ...bottomExecutionConfig,
         provider: { ...bottomExecutionConfig.provider, selectedId: pendingSwitch?.providerId ?? thread.providerId, options: cloudProviderOptions, hasMultiple: cloudProviderOptions.length > 1 },
-        model: { ...bottomExecutionConfig.model, active: cloudModel ? { model: cloudModel } : null, isLoading: !cloudModel, options: [...modelOptions, ...moreModelOptions], moreOptions: [], loadFailed: false, loadError: null, onChange: (model: string) => handleSelectModel({ providerId: thread.providerId, model }) },
+        model: { ...bottomExecutionConfig.model, active: cloudModel ? { model: cloudModel } : null, isLoading: !cloudModel, options: cloudModelPartition.primary, moreOptions: cloudModelPartition.more, loadFailed: false, loadError: null, onChange: (model: string) => handleSelectModel({ providerId: thread.providerId, model }) },
         reasoning: { ...bottomExecutionConfig.reasoning, value: cloudReasoning, options: cloudFollowUpReasoningOptions, onChange: handleReasoningChange },
         serviceTier: { ...bottomExecutionConfig.serviceTier, value: cloudFastSupported ? serviceTier : "default", supported: cloudFastSupported },
       } : bottomExecutionConfig}

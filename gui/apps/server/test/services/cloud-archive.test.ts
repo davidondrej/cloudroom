@@ -158,6 +158,8 @@ it("rejects a confirmed archive of a family containing another account's thread 
 it("restores shared child loops and keeps the Core restore queued until its sandbox is awake", async () => {
   const { harness, service, parent, child, post } = await archiveFixture(true);
   let awake = true;
+  let coreArchived = false;
+  let archiveSequence = 1;
   const calls: string[] = [],
     restorations: string[] = [];
   const finishArchive = createDeferredPromise<void>();
@@ -180,13 +182,14 @@ it("restores shared child loops and keeps the Core restore queued until its sand
   );
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
     const path = new URL(url).pathname;
-    if (path.endsWith("/archive"))
-      calls.push(
-        (JSON.parse(String(init.body)).archived ? "archive " : "restore ") +
-          path.split("/")[3],
-      );
-    else if (path.endsWith("/stop") || path.endsWith("/sleep"))
-      calls.push(path);
+    if (path.endsWith("/archive") && init.method === "POST") {
+      const id = path.split("/")[3];
+      const { archived } = JSON.parse(String(init.body));
+      coreArchived = archived;
+      calls.push((archived ? "archive " : "restore ") + id);
+      return Response.json({ id, archived });
+    }
+    if (path.endsWith("/stop") || path.endsWith("/sleep")) calls.push(path);
     if (path === "/v1/capabilities")
       return Response.json({
         version: 1,
@@ -197,8 +200,23 @@ it("restores shared child loops and keeps the Core restore queued until its sand
         cloud_threads: true,
         harnesses: [],
       });
+    if (path.endsWith("/requests/archive"))
+      return Response.json({ archived: coreArchived });
+    if (path === `/v1/sessions/cr_${child.id}/stream`) {
+      const record = {
+        sequence: archiveSequence,
+        session_id: "cr_" + child.id,
+        kind: "archive",
+        data: { user: true, archived: true },
+      };
+      const after = Number(new URL(url).searchParams.get("after"));
+      const frame = `id: ${archiveSequence}\nevent: record\ndata: ${JSON.stringify(record)}\n\n`;
+      return new Response(after < archiveSequence ? frame : "", {
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }
     if (path.includes("/stream")) return new Response(null, { status: 503 });
-    return Response.json({}, { status: path.endsWith("/archive") ? 202 : 200 });
+    return Response.json({});
   });
   try {
     const result = await post(parent.id, "archive-all?includeLive=true");
@@ -230,6 +248,27 @@ it("restores shared child loops and keeps the Core restore queued until its sand
     await vi.waitFor(() => expect(pending()?.state).toBe("completed"), {
       timeout: 4000,
     });
+    await vi.waitFor(() =>
+      expect(
+        harness.db
+          .select()
+          .from(cloudroomThreads)
+          .where(eq(cloudroomThreads.threadId, child.id))
+          .get()?.cursor,
+      ).toBe(1),
+    );
+    expect(getThread(harness.db, child.id)?.archivedAt).toBeNull();
+
+    // An archive from another app still applies locally, without writing it back to Core.
+    coreArchived = true;
+    archiveSequence++;
+    await vi.waitFor(
+      () =>
+        expect(getThread(harness.db, child.id)?.archivedAt).toEqual(
+          expect.any(Number),
+        ),
+      { timeout: 4000 },
+    );
     expect(calls).toEqual(["archive cr_" + child.id, "restore cr_" + child.id]);
   } finally {
     finishArchive.resolve();

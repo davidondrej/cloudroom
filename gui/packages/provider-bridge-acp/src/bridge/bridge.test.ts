@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -622,6 +623,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   for (const providerThreadId of startedProviderThreadIds.splice(0)) {
     await stopThread(providerThreadId);
   }
@@ -1193,7 +1195,16 @@ describe("acp bridge", () => {
     );
   });
 
-  it.each<{ name: string; envVars: Record<string, string>; modelLines: string }>([
+  it("fails model/list as not installed when an ACP-native agent's CLI is missing", async () => {
+    const response = await waitForResponse(
+      sendModelList({ agent: { command: "/nonexistent/acp-native-agent", args: [] } }),
+    );
+    expect(response.error?.message).toMatch(
+      /spawn \/nonexistent\/acp-native-agent ENOENT/,
+    );
+  });
+
+  it.each<{ name: string; envVars: Record<string, string>; modelLines?: string }>([
     {
       name: "Cursor's failing auth error",
       envVars: {
@@ -1207,6 +1218,10 @@ describe("acp bridge", () => {
       envVars: {},
       modelLines:
         "You are not authenticated.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n  - grok-4.5",
+    },
+    {
+      name: "a signed-out ACP-native agent (agy)",
+      envVars: { FAKE_ACP_AUTH_METHODS: "oauth-personal" },
     },
   ])("fails model/list as auth required on $name", async ({ envVars, modelLines }) => {
     const authId = sendModelList({ envVars, modelLines });
@@ -2579,19 +2594,24 @@ describe("acp bridge", () => {
       });
       await waitForResponse(turnId);
       await waitForTurnCompleted();
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + 3_000);
       writeFileSync(triggerPath, "resume");
 
-      await waitForFileWithRealTimer(resultPath);
-      expect(readFileSync(resultPath, "utf8")).toBe(
-        permissionMode === "full"
-          ? "yes"
-          : "error:Permission denied: Cloudroom cannot request approval outside an active turn in accept-edits mode.",
-      );
-      expect(
+      // The job's tool call opens a turn of its own, so its approval follows the mode as in any turn.
+      const asked = (): BridgeJsonRpcOutputMessage[] =>
         output.messages.filter(
           (message) => message.method === "interaction/request",
-        ),
-      ).toHaveLength(0);
+        );
+      if (permissionMode === "full") {
+        await waitForFileWithRealTimer(resultPath);
+        expect(readFileSync(resultPath, "utf8")).toBe("yes");
+        expect(asked()).toHaveLength(0);
+      } else {
+        await waitFor(() => asked()[0], "forwarded permission request");
+        expect(existsSync(resultPath)).toBe(false);
+      }
+      expect(threadEventsOfType("turn/started")).toHaveLength(2);
     },
   );
 
@@ -2897,6 +2917,26 @@ describe("acp bridge", () => {
     expect(threadEventsOfType("turn/completed")).toHaveLength(1);
   });
 
+  it("fails a Kimi turn whose steer got no reply, despite earlier output (#1721)", async () => {
+    const { providerThreadId } = await startThread({ dialectId: "kimi" });
+    await waitForResponse(
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "slow first", mentions: [] }],
+      }),
+    );
+    await waitFor(
+      () =>
+        agentMessageTexts().includes("echo:slow first") ? true : undefined,
+      "first prompt echo",
+    );
+    sendTurnRequest("turn/steer", providerThreadId, {
+      expectedTurnId: "turn-1",
+      input: [{ type: "text", text: "no-reply", mentions: [] }],
+    });
+
+    expect(await waitForTurnCompleted()).toMatchObject({ status: "failed" });
+  });
+
   it("delivers stacked steers on the same turn", async () => {
     const { providerThreadId } = await startThread();
     const turnId = sendTurnRequest("turn/start", providerThreadId, {
@@ -3170,6 +3210,144 @@ describe("acp bridge", () => {
 
     expect(threadEventsOfType("turn/input/accepted")).toHaveLength(1);
     startedProviderThreadIds.pop();
+  });
+
+  describe("work the agent starts after its turn ended", () => {
+    const chunk = (text: string): object => ({
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text },
+    });
+    const call = (
+      sessionUpdate: "tool_call" | "tool_call_update",
+      toolCallId: string,
+      status: string,
+    ): object => ({
+      sessionUpdate,
+      toolCallId,
+      status,
+      title: "sleep 60",
+      kind: "execute",
+    });
+    const count = (type: string): number => threadEventsOfType(type).length;
+    const turns = (): number[] => [
+      count("turn/started"),
+      count("turn/completed"),
+    ];
+    const settle = async (done: () => boolean): Promise<void> => {
+      for (let attempt = 0; attempt < 150 && !done(); attempt += 1) {
+        await new Promise((resolveTick) => realSetTimeout(resolveTick, 20));
+      }
+      expect(done()).toBe(true);
+    };
+
+    /** Runs one prompt turn to its end, then returns how the agent sends updates on its own. */
+    async function afterFirstTurn(): Promise<{
+      bbThreadId: string;
+      providerThreadId: string;
+      wake: (...updates: object[]) => Promise<void>;
+    }> {
+      const wakeFile = join(workspaceDir, "wake");
+      const thread = await startThread({
+        envVars: { FAKE_ACP_WAKE_FILE: wakeFile },
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      sendTurnRequest("turn/start", thread.providerThreadId, {
+        input: [{ type: "text", text: "wake-later", mentions: [] }],
+      });
+      await settle(() => count("turn/completed") === 1);
+      return {
+        ...thread,
+        wake: async (...updates) => {
+          writeFileSync(`${wakeFile}.tmp`, JSON.stringify(updates));
+          renameSync(`${wakeFile}.tmp`, wakeFile);
+          await settle(() => !existsSync(wakeFile));
+        },
+      };
+    }
+
+    it("gets a turn of its own, which a message takes over or quiet ends", async () => {
+      const { providerThreadId, wake } = await afterFirstTurn();
+
+      // The prompt's leftovers and a finished background command are not new work.
+      await wake(chunk("leftover"));
+      await settle(() => count("provider/unhandled") === 1);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await wake(call("tool_call_update", "old", "completed"), chunk("woke up"));
+      await settle(() => agentMessageTexts().includes("woke up"));
+      expect(turns()).toEqual([2, 1]);
+
+      const steerId = sendTurnRequest("turn/steer", providerThreadId, {
+        expectedTurnId: "turn-2",
+        input: [{ type: "text", text: "wake-later again", mentions: [] }],
+      });
+      await settle(() => count("turn/completed") === 2);
+      expect(findResponse(steerId)?.error).toBeUndefined();
+      expect(agentMessageTexts().join()).toContain("echo:wake-later again");
+      expect(turns()).toEqual([2, 2]);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      await wake(chunk("woke again"));
+      await settle(() => count("turn/started") === 3);
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(turns()).toEqual([3, 2]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(turns()).toEqual([3, 3]);
+    });
+
+    it("stays open while its command runs, for at most ten quiet minutes", async () => {
+      const { wake } = await afterFirstTurn();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await wake(call("tool_call", "cmd-1", "in_progress"));
+      await settle(() => count("turn/started") === 2);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(turns()).toEqual([2, 1]);
+
+      const closed = count("item/completed");
+      await wake(call("tool_call_update", "cmd-1", "completed"));
+      await settle(() => count("item/completed") > closed);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(turns()).toEqual([2, 2]);
+
+      await wake(call("tool_call", "cmd-2", "in_progress"));
+      await settle(() => count("turn/started") === 3);
+      await vi.advanceTimersByTimeAsync(599_000);
+      expect(turns()).toEqual([3, 2]);
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(turns()).toEqual([3, 3]);
+    });
+
+    it("takes a message that starts a turn as its prompt", async () => {
+      const { providerThreadId, wake } = await afterFirstTurn();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await wake(chunk("woke up"));
+      await settle(() => count("turn/started") === 2);
+
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "hello", mentions: [] }],
+      });
+      await settle(() => count("turn/completed") === 2);
+      expect(agentMessageTexts().join()).toContain("echo:hello");
+      expect(turns()).toEqual([2, 2]);
+    });
+
+    it("ends when the session is released", async () => {
+      const { bbThreadId, providerThreadId, wake } = await afterFirstTurn();
+      await vi.advanceTimersByTimeAsync(2_000);
+      await wake(chunk("woke up"));
+      await settle(() => count("turn/started") === 2);
+
+      sendRequest("thread/stop", {
+        threadId: bbThreadId,
+        providerThreadId,
+        intent: "release",
+        activeTurnId: null,
+      });
+      await settle(() => count("turn/completed") === 2);
+      expect(threadEventsOfType("turn/completed")[1]).toMatchObject({
+        status: "interrupted",
+      });
+      startedProviderThreadIds.pop();
+    });
   });
 
   it("rejects steers when no turn is active", async () => {

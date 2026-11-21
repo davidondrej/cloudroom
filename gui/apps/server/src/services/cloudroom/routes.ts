@@ -46,7 +46,7 @@ import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
-import { cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
+import { callTicket, cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
@@ -235,6 +235,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       .strict().parse(await context.req.json());
     return context.json({ ok: await recordCorner(deps, input.card, input.key, input.event, input.variant) });
   });
+  // The call ticket at the top right (docs/scopes/calls.md#the-ticket-in-the-app): null when the account is owed none.
+  app.get("/api/v1/cloudroom/call-ticket", async (context) => context.json({ ticket: await callTicket(deps) }));
   app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
   app.post("/api/v1/cloudroom/star-prompt", async (context) => {
     z.object({}).strict().parse(await context.req.json());
@@ -577,6 +579,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     });
   }
   app.get("/api/v1/cloudroom/account/cursor", async context => context.json(await cloudroom(deps).cursorAuth()));
+  app.post("/api/v1/cloudroom/account/antigravity", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
+    const ticket = z.string().min(1).max(4096), requestId = z.string().uuid();
+    const input = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("status") }).strict(),
+      z.object({ action: z.literal("refresh") }).strict(),
+      z.object({ action: z.literal("disconnect") }).strict(),
+      z.object({ action: z.literal("begin"), requestId }).strict(),
+      z.object({ action: z.literal("complete"), ticket, code: z.string().min(1).max(4096) }).strict(),
+      z.object({ action: z.literal("cancel"), ticket }).strict(),
+      z.object({ action: z.literal("key"), requestId, apiKey: z.string().min(1).max(4096) }).strict(),
+    ]).safeParse(await context.req.json().catch(() => null));
+    if (!input.success) throw new ApiError(400, "invalid_antigravity_auth", "Invalid Antigravity sign-in request.");
+    return context.json(await cloudroom(deps).antigravityLogin(input.data));
+  });
   for (const action of ["login", "cancel", "key"] as const) {
     app.post(`/api/v1/cloudroom/account/cursor/${action}`, async context => {
       const schema = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), ...(action === "key" ? { apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/) } : {}) }).strict();
@@ -800,7 +818,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (context.req.method === "PATCH" && path === "") {
       const body = await context.req.json<unknown>();
       // A model or harness change switches the thread in place (ADR 0211); a new parent is saved to the website first.
-      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId", "resend", "idleSessionOnly"].includes(key))) {
+      // Visibility, like the section, is sidebar state on this computer only (#2210).
+      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId", "visibility", "resend", "idleSessionOnly"].includes(key))) {
         const parentId = (body as { parentThreadId?: unknown }).parentThreadId;
         if (parentId === undefined || parentId === thread.parentThreadId || thread.deletedAt || (parentId !== null && typeof parentId !== "string") || !updateThreadRequestSchema.safeParse(body).success) return next();
         if (["model", "providerId", "reasoningLevel"].some((key) => key in body)) return context.json({ message: "Change a Cloud thread's parent on its own, then change its model.", code: "cloudroom_parent_alone" }, 400);

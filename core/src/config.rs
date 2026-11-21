@@ -86,6 +86,7 @@ impl Config {
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
             "kimi" => Kind::Kimi,
+            "antigravity" => Kind::Antigravity,
             "openclaw" => Kind::OpenClaw,
             "agent-zero" => Kind::AgentZero,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
@@ -158,6 +159,7 @@ impl Config {
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
             (Kind::Kimi, "kimi", ".kimi-code"),
+            (Kind::Antigravity, "agy", ".gemini/antigravity-cli"),
             // Agent Zero's bridge; the agent itself is the user's own server (ADR 20261116-153548).
             (Kind::AgentZero, "a0", ".agent-zero"),
         ] {

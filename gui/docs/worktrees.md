@@ -65,8 +65,10 @@ it finishes. Uncommitted files stay behind unless the agent names them with
 `--carry`, since other agents may share the checkout. Carried files land before
 `.bb-env-setup.sh` runs, so it can read them. The hooks themselves come from
 where the thread branched off its base branch, not from its commits or carried
-files (see below). Claude Code and Codex threads only for now: Pi resumes
-in its old folder. To fork into a new thread instead, use
+files (see below). It works for every agent. Claude Code and Codex keep their
+native session. Any other agent starts a fresh session in the worktree and gets
+the chat as hidden context, without tool output; a provider opts out of that
+with `resumesInNewFolder`. To fork into a new thread instead, use
 `room-cli thread fork --new-environment worktree`.
 
 ## Copy local files with `.worktreeinclude`

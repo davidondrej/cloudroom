@@ -11,6 +11,7 @@ use std::{
 };
 use tokio::{process::Command, sync::mpsc};
 mod agent_zero;
+pub(crate) mod antigravity;
 pub(crate) mod auth;
 mod claude;
 pub(crate) mod claude_auth;
@@ -31,7 +32,7 @@ mod hermes;
 mod kimi;
 pub(crate) mod linux;
 mod openclaw;
-mod opencode;
+pub(crate) mod opencode;
 mod pi;
 pub(crate) mod pi_auth;
 mod process;
@@ -57,6 +58,7 @@ pub enum Kind {
     Devin,
     Droid,
     Kimi,
+    Antigravity,
     #[serde(rename = "openclaw")]
     OpenClaw,
     #[serde(rename = "agent-zero")]
@@ -174,6 +176,7 @@ pub async fn prepare(
 ) -> io::Result<()> {
     match kind {
         Kind::OpenClaw => openclaw::prepare(config, storage).await,
+        Kind::Antigravity => antigravity::prepare(config, storage).await,
         _ => Ok(()),
     }
 }
@@ -693,6 +696,16 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::Antigravity => (
+                antigravity::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    &profile,
+                    resume.as_ref(),
+                    antigravity::AGY,
+                )),
+                None,
+                None,
+            ),
             Kind::Kimi => (
                 kimi::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(&profile, resume.as_ref(), kimi::KIMI)),
@@ -846,6 +859,7 @@ impl Handle {
                 | Kind::Devin
                 | Kind::Droid
                 | Kind::Kimi
+                | Kind::Antigravity
                 | Kind::OpenClaw
                 | Kind::AgentZero
         ) {
@@ -869,6 +883,7 @@ impl Handle {
             Kind::Devin => devin::start(&startup).await,
             Kind::Droid => droid::start(&startup).await,
             Kind::Kimi => kimi::start(&startup).await,
+            Kind::Antigravity => antigravity::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
             Kind::AgentZero => agent_zero::start(&startup).await,
         }
@@ -915,6 +930,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => cursor::send(self, request, input)
                 .await
@@ -940,6 +956,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
@@ -957,6 +974,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -988,6 +1006,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1079,6 +1098,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => Ok(None),
         }
@@ -1102,6 +1122,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => cursor::interrupt(self, state).await,
         }
@@ -1118,6 +1139,7 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
+            | Kind::Antigravity
             | Kind::OpenClaw
             | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -1168,6 +1190,7 @@ pub fn check_resume_history(
         Kind::Hermes => return hermes::validate(profile, saved, identity),
         Kind::Devin => return devin::validate(profile, saved, identity),
         Kind::Droid => return droid::validate(profile, saved, identity),
+        Kind::Antigravity => return antigravity::validate(profile, saved, identity),
         Kind::Kimi => return kimi::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
         Kind::AgentZero => return agent_zero::validate(profile, saved, identity),
@@ -1213,6 +1236,9 @@ pub fn recover_records(
         }
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
+        Kind::Antigravity => {
+            antigravity::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
         Kind::Kimi => kimi::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
@@ -1289,6 +1315,7 @@ pub fn checkpoint(
         | Kind::Devin
         | Kind::Droid
         | Kind::Kimi
+        | Kind::Antigravity
         | Kind::OpenClaw
         | Kind::AgentZero => Err(io::Error::other("ACP stream has no native records")),
     }

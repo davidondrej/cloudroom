@@ -56,6 +56,7 @@ const until = (timestamp: number) => span(timestamp - Date.now());
 function windowLabel(label: string): string {
   return label
     .replace("Five-hour limit", "5h")
+    .replace("Five-hour · ", "5h ")
     .replace("Weekly limit", "7d")
     .replace("Weekly · ", "7d ")
     .replace("Weekly", "7d")
@@ -577,7 +578,21 @@ function KeyRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
   );
 }
 
-function AccountsSection({ provider, name }: { provider: Provider; name: string }) {
+function AccountsSection({
+  provider,
+  name,
+  canAdd = true,
+  hideWhenEmpty = false,
+  note,
+  onPresence,
+}: {
+  provider: Provider;
+  name: string;
+  canAdd?: boolean;
+  hideWhenEmpty?: boolean;
+  note?: string | undefined;
+  onPresence?: ((present: boolean) => void) | undefined;
+}) {
   const rpc = useRpc<typeof accountsRpcContract>();
   const { providers } = useProviders();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
@@ -593,8 +608,17 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   const load = useCallback(() => {
     rpc
       .call("accounts.list", { provider })
-      .then(setAccounts, (cause: unknown) => setError(errorText(cause)));
-  }, [provider, rpc]);
+      .then(
+        (list) => {
+          setAccounts(list);
+          onPresence?.(list.length > 0);
+        },
+        (cause: unknown) => {
+          setError(errorText(cause));
+          onPresence?.(false);
+        },
+      );
+  }, [provider, rpc, onPresence]);
   useEffect(load, [load]);
   useRealtime(ACCOUNTS_CHANGED, load);
   useEffect(() => {
@@ -665,6 +689,8 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
   }, [loaded, provider]);
 
   const count = accounts?.filter((account) => account.id !== LOCAL).length ?? 0;
+  // Optional subscriptions (Antigravity) stay hidden unless connected on this computer.
+  if (hideWhenEmpty && (accounts === null || accounts.length === 0)) return null;
   // Every account shows the same limits, so the lines match from row to row.
   // Claude leaves out 5h and 7d while they have no use, so those show 0%. Any other limit an account leaves out
   // was not read (the reply check can't read a model's limit): it shows as unknown.
@@ -708,15 +734,17 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
             </>
           ) : null}
         </p>
-        <Button
-          variant="ghost"
-          size="sm"
-          aria-label={`Add ${name} account`}
-          disabled={adding !== null || count >= MAX_ACCOUNTS}
-          onClick={() => setAdding({ mac: false, id: null })}
-        >
-          <Icon name="Plus" /> Add
-        </Button>
+        {canAdd ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-label={`Add ${name} account`}
+            disabled={adding !== null || count >= MAX_ACCOUNTS}
+            onClick={() => setAdding({ mac: false, id: null })}
+          >
+            <Icon name="Plus" /> Add
+          </Button>
+        ) : null}
       </div>
       {accounts === null ? (
         <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
@@ -802,20 +830,29 @@ function AccountsSection({ provider, name }: { provider: Provider; name: string 
           )}
         </div>
       ) : null}
-      {provider === "acp-cursor" ? (
-        <p className="text-xs text-subtle-foreground">
-          Grok signs in with your X subscription. One login covers it, so there's nothing to add here.
-        </p>
+      {note ? (
+        <p className="text-xs text-subtle-foreground">{note}</p>
       ) : null}
       {error ? <p className="text-xs text-destructive-text">{error}</p> : null}
     </section>
   );
 }
 
-const AGENTS: readonly { provider: Provider; name: string }[] = [
+const AGENTS: readonly {
+  provider: Provider;
+  name: string;
+  canAdd?: boolean;
+  hideWhenEmpty?: boolean;
+}[] = [
   { provider: "claude-code", name: "Claude Code" },
   { provider: "codex", name: "Codex" },
   { provider: "acp-cursor", name: "Cursor" },
+  {
+    provider: "acp-antigravity",
+    name: "Antigravity",
+    canAdd: false,
+    hideWhenEmpty: true,
+  },
 ];
 
 /** Settings → Agents → Accounts: every agent's accounts on one page. All threads use the one picked. */
@@ -827,6 +864,7 @@ function AccountsPage() {
     return () => window.clearInterval(timer);
   }, []);
   const [privacy, setPrivacy] = usePrivacyMode();
+  const [hasAntigravity, setHasAntigravity] = useState(false);
   return (
     <div className="space-y-2">
       {/* Hides emails here and in the usage box, for recordings. */}
@@ -836,7 +874,22 @@ function AccountsPage() {
       </label>
       <div className="space-y-6">
         {AGENTS.map((agent) => (
-          <AccountsSection key={agent.provider} {...agent} />
+          <AccountsSection
+            key={agent.provider}
+            {...agent}
+            onPresence={
+              agent.provider === "acp-antigravity"
+                ? setHasAntigravity
+                : undefined
+            }
+            note={
+              agent.provider === "acp-antigravity"
+                ? "Antigravity uses this Mac's Google login, and Grok uses your X subscription. One login covers each, so there's nothing to add here."
+                : agent.provider === "acp-cursor" && !hasAntigravity
+                  ? "Grok signs in with your X subscription. One login covers it, so there's nothing to add here."
+                  : undefined
+            }
+          />
         ))}
       </div>
     </div>
@@ -849,7 +902,7 @@ export default definePluginApp((app) => {
     id: "accounts",
     // Not shown on the page (the tab names it). Settings search finds the page by these.
     title: "Agent accounts",
-    description: "Add and switch Claude Code, Codex, and Cursor subscriptions.",
+    description: "Add and switch Claude Code, Codex, Cursor, and Antigravity subscriptions.",
     component: AccountsPage,
   });
 });

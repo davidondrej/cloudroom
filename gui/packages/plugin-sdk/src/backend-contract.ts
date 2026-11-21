@@ -1338,6 +1338,10 @@ export interface PluginProviderCapabilities {
   /** The provider accepts an explicit context-compaction request — gates the
    * compact affordance. */
   supportsManualCompaction: boolean;
+  /** A saved session resumes in whatever folder it is started in, so a thread
+   * moved to another folder keeps its native session. Defaults to false: the
+   * moved thread then starts a fresh session with the chat as hidden context. */
+  resumesInNewFolder?: boolean;
   /** The provider keeps its own thread archive, so BB mirrors archive and
    * unarchive onto it instead of tracking the state only in bb's own rows. */
   supportsThreadArchive: boolean;

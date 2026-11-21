@@ -9,7 +9,7 @@ import {
 } from "react";
 import { ThreadStorageBrowser } from "./ThreadStorageBrowser";
 import type { ThreadStorageBrowserController } from "./useThreadStorageBrowser";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type {
   Environment,
   GitBranchRefClassification,

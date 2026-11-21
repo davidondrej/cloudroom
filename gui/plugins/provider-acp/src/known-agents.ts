@@ -35,6 +35,49 @@ function ancestorRoots(entries: readonly RootEntry[]) {
 
 export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
   {
+    id: "acp-antigravity",
+    displayName: "Antigravity",
+    icon: declaredIcon("antigravity"),
+    // Signs in by pasting a code from Google's page, so it also works in a terminal with no browser.
+    signInCommand: "agy acp --login",
+    installUrl: "https://antigravity.google/docs/getting-started",
+    installer: {
+      scriptUrl: "https://antigravity.google/cli/install.sh",
+      powershellUrl: "https://antigravity.google/cli/install.ps1",
+    },
+    // `agy acp` was added in 1.5.0.
+    minimumVersion: "1.5.0",
+    // Shown before it's installed: the picker offers Install, then Sign in (ADR 20261121-142131).
+    dialect: "antigravity",
+    providerUsage: true,
+    // Antigravity has no fast mode; its old /fast only skipped planning and was removed in 1.1.0.
+    supportsServiceTier: false,
+    // agy 1.5.14 doesn't advertise session/fork; Cloudroom forks it as text (ADR 20261121-141157).
+    fork: "none",
+    launch: {
+      displayName: "Antigravity",
+      command: "agy",
+      args: ["acp"],
+      env: {},
+      permissionCli: {
+        full: ["--dangerously-skip-permissions"],
+        insertAfterArgs: 1,
+      },
+      // The CLI reads ~/.gemini/config/skills plus its own two, and the bridge adds ~/.agents/skills and ~/.claude/skills
+      // to its skills.json at launch (antigravity.ts); projects use .agents/skills up to the repository root.
+      nativeSkillRoots: {
+        user: plainRoots([
+          ".gemini/config/skills",
+          ".gemini/antigravity-cli/skills",
+          ".gemini/skills",
+          ".agents/skills",
+          CLAUDE_SKILLS_ROOT,
+        ]),
+        project: ancestorRoots([".agents/skills"]),
+      },
+    },
+  },
+  {
     id: "acp-cursor",
     displayName: "Cursor",
     icon: declaredIcon("cursor"),
@@ -390,42 +433,6 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
       nativeSkillRoots: {
         user: plainRoots([".kimi-code/skills", ".agents/skills"]),
         project: ancestorRoots([".kimi-code/skills", ".agents/skills"]),
-      },
-    },
-  },
-  {
-    id: "acp-antigravity",
-    displayName: "Antigravity",
-    icon: declaredIcon("antigravity"),
-    // Signs in by pasting a code from Google's page, so it also works in a terminal with no browser.
-    signInCommand: "agy acp --login",
-    installUrl: "https://antigravity.google/docs/getting-started",
-    installer: {
-      scriptUrl: "https://antigravity.google/cli/install.sh",
-      powershellUrl: "https://antigravity.google/cli/install.ps1",
-    },
-    // `agy acp` was added in 1.5.0.
-    minimumVersion: "1.5.0",
-    visibility: "installed",
-    dialect: "antigravity",
-    fork: "tip",
-    launch: {
-      displayName: "Antigravity",
-      command: "agy",
-      args: ["acp"],
-      env: {},
-      permissionCli: {
-        full: ["--dangerously-skip-permissions"],
-        insertAfterArgs: 1,
-      },
-      // The CLI reads ~/.gemini/config/skills plus its own two; projects use .agents/skills up to the repository root.
-      nativeSkillRoots: {
-        user: plainRoots([
-          ".gemini/config/skills",
-          ".gemini/antigravity-cli/skills",
-          ".gemini/skills",
-        ]),
-        project: ancestorRoots([".agents/skills"]),
       },
     },
   },

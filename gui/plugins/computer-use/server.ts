@@ -85,6 +85,10 @@ export function decideGate(args: {
   return { kind: "free" };
 }
 
+export function takesForeground(tool: string, input: Record<string, unknown>): boolean {
+  return tool === "bring_to_front" || tool === "move_cursor" || input.delivery_mode === "foreground";
+}
+
 const sessionFor = (threadId: string) => `cr-${threadId.slice(-24)}${LIME_CURSOR_SUFFIX}`;
 
 function fail(code: string, message: string, exitCode = 1): PluginCliResult {
@@ -119,7 +123,7 @@ export function outcomeOf(result: PluginCliResult): { outcome: string; effect: s
   }
 }
 
-// Cua Driver 0.35.2 calls an exact bring_to_front unverified whenever a same-app window sits above
+// Cua Driver can call an exact bring_to_front unverified whenever a same-app window sits above
 // the target, even an untitled 41 px Chrome helper (#1506). When the driver's own fields prove the
 // target is the front process's focused, visible ordinary window, and every on-screen window of
 // that app above it is an untitled helper under 100 px, report it as activated.
@@ -263,30 +267,31 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     return null;
   }
 
-  async function approve(args: {
+  async function askApproval(args: {
     threadId: string;
     app: AppIdentity;
     tool: string;
     purpose: string | null;
     status: HostStatus;
-  }): Promise<PluginCliResult | null> {
-    const { threadId, app } = args;
-    const always = await readList(ALWAYS_KEY);
-    const thread = await readList(threadKey(threadId));
-    if (listed([...always, ...thread], app.key)) return null;
-    const pendingKey = `${threadId}\0${app.key}`;
+    foreground: boolean;
+  }): Promise<{ decision: "thread" | "always" | "deny" } | PluginCliResult> {
+    const { threadId, app, foreground } = args;
+    const pendingKey = foreground ? `${threadId}\0foreground\0${app.key}` : `${threadId}\0${app.key}`;
     let entry = pending.get(pendingKey);
     if (!entry) {
       const request = room.ui.requestInput({
         threadId,
         rendererId: APPROVAL_RENDERER_ID,
-        title: `Allow this agent to use ${app.name}?`,
+        title: foreground
+          ? `Allow this agent to bring ${app.name} to the front?`
+          : `Allow this agent to use ${app.name}?`,
         payload: {
           app,
           tool: args.tool,
           purpose: args.purpose,
           platform: args.status.platform,
           permissions: args.status.permissions,
+          ...(foreground ? { foreground: true } : {}),
         },
         timeoutMs: 60 * 60_000,
       });
@@ -316,11 +321,45 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       report(`cancelled_${result.reason}`);
       return fail("approval_cancelled", `The request to use ${app.name} was cancelled (${result.reason}).`);
     }
-    const { decision } = approvalResponseSchema.parse(result.value);
-    report(decision);
-    if (decision === "deny")
+    const parsed = approvalResponseSchema.parse(result.value);
+    report(parsed.decision);
+    return parsed;
+  }
+
+  async function approve(args: {
+    threadId: string;
+    app: AppIdentity;
+    tool: string;
+    purpose: string | null;
+    status: HostStatus;
+  }): Promise<PluginCliResult | null> {
+    const { threadId, app } = args;
+    const always = await readList(ALWAYS_KEY);
+    const thread = await readList(threadKey(threadId));
+    if (listed([...always, ...thread], app.key)) return null;
+    const outcome = await askApproval({ ...args, foreground: false });
+    if ("exitCode" in outcome) return outcome;
+    if (outcome.decision === "deny")
       return fail("app_denied", `The user denied access to ${app.name}. Do not retry; ask the user what to do instead.`);
-    await addTo(decision === "always" ? ALWAYS_KEY : threadKey(threadId), app);
+    await addTo(outcome.decision === "always" ? ALWAYS_KEY : threadKey(threadId), app);
+    return null;
+  }
+
+  // Foreground calls take focus from the user, so ask once each time and never save the grant.
+  async function approveForeground(args: {
+    threadId: string;
+    app: AppIdentity;
+    tool: string;
+    purpose: string | null;
+    status: HostStatus;
+  }): Promise<PluginCliResult | null> {
+    const outcome = await askApproval({ ...args, foreground: true });
+    if ("exitCode" in outcome) return outcome;
+    if (outcome.decision === "deny")
+      return fail(
+        "foreground_denied",
+        `The user denied foreground access to ${args.app.name}. Stay in the background or ask the user what to do instead.`,
+      );
     return null;
   }
 
@@ -378,8 +417,13 @@ export default async function computerUsePlugin(room: BbPluginApi) {
         );
       const blocked = await approve({ threadId, app, tool, purpose, status });
       if (blocked) return blocked;
-      if (control) busy.set(app.key, { threadId, at: Date.now() });
     }
+    if (takesForeground(tool, input)) {
+      const target = app ?? { key: "foreground", name: "your screen cursor" };
+      const blocked = await approveForeground({ threadId, app: target, tool, purpose, status });
+      if (blocked) return blocked;
+    }
+    if (app && control) busy.set(app.key, { threadId, at: Date.now() });
     if (
       app &&
       control &&

@@ -1,4 +1,8 @@
-import { listEvents, listQueuedThreadMessages } from "@cloudroom/db";
+import {
+  createQueuedThreadMessage,
+  listEvents,
+  listQueuedThreadMessages,
+} from "@cloudroom/db";
 import { queuedMessageWaitingOnSchema } from "@cloudroom/domain";
 import { sendMessageResponseSchema } from "@cloudroom/server-contract";
 import { describe, expect, it } from "vitest";
@@ -189,6 +193,96 @@ describe("offline host follow-ups", () => {
       expect(listEvents(harness.db, { threadId: thread.id })).toHaveLength(
         eventCountBeforeSend + 1,
       );
+    });
+  });
+
+  it("holds a queued message the host dropped after it was sent (#2279)", async () => {
+    await withTestHarness(async (harness) => {
+      const host = seedHost(harness.deps, {
+        id: "host-unconfirmed",
+        name: "M5",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/unconfirmed",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+      });
+      seedThreadRuntimeState(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-unconfirmed",
+      });
+      const connect = () => {
+        const session = seedSession(harness.deps, host.id);
+        const socket = registerTestHostRpcCapture(harness.deps, {
+          hostId: host.id,
+          sessionId: session.id,
+        });
+        onDaemonSocketOpen(harness.deps, {
+          hostId: host.id,
+          sessionId: session.id,
+          socket,
+        });
+        return { session, socket };
+      };
+      const { session, socket } = connect();
+      const send = socket.send.bind(socket);
+      socket.send = (data) => {
+        send(data);
+        if (data.includes('"turn.submit"')) {
+          queueMicrotask(() => onDaemonSocketClose(harness.deps, session.id));
+        }
+      };
+      const queued = createQueuedThreadMessage(harness.db, harness.hub, {
+        threadId: thread.id,
+        content: [{ type: "text", text: "Queued work", mentions: [] }],
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        waitingOn: { kind: "thread-busy" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: null,
+      });
+      const sendNow = await harness.app.request(
+        `/api/v1/threads/${thread.id}/queued-messages/${queued.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "auto" }),
+        },
+      );
+      expect(sendNow.status).toBe(200);
+      await waitForQueuedCommand(
+        harness,
+        ({ command }) => command.type === "turn.submit",
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+
+      // The host may still have it: held, never sent again by itself.
+      const [held] = listQueuedThreadMessages(harness.db, thread.id);
+      expect(held).toMatchObject({
+        payloadKind: "retry",
+        sortKey: queued.sortKey,
+        failureReason: expect.stringContaining("It may still arrive"),
+      });
+      connect();
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "host-connected",
+        hostId: host.id,
+      });
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([]);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([held]);
     });
   });
 

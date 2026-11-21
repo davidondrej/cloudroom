@@ -1,7 +1,7 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain";
 import { useEffect } from "react";
 import { useQueries } from "@tanstack/react-query";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { pluginSettingsViewQueryOptions } from "@/hooks/queries/plugin-settings-queries";
 import { APP_COMMAND_GROUPS } from "@/lib/app-command-metadata";
 import { fetchWithAppSurface } from "@/lib/app-surface";

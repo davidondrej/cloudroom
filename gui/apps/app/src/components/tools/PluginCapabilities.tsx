@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { pluginCliCall } from "@cloudroom/domain/plugin-cli";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Button } from "@cloudroom/shared-ui/button";
 import type { PluginCapability, SkillListResponse } from "@cloudroom/server-contract";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";

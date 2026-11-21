@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  stripGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "@cloudroom/domain";
+import {
   createPluginArtifact,
   deletePluginArtifact,
   deleteInstalledPlugin,
@@ -16,7 +20,10 @@ import {
   upsertPluginMarketplace,
   type DbConnection,
 } from "../../src/index.js";
-import type { UpsertInstalledPluginInput } from "../../src/data/plugins.js";
+import {
+  stripPluginGitUrlCredentials,
+  type UpsertInstalledPluginInput,
+} from "../../src/data/plugins.js";
 import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 describe("normalized plugin persistence", () => {
@@ -171,6 +178,44 @@ describe("normalized plugin persistence", () => {
       sourceGitRequestedRef: "main",
       sourceGitRefKind: "branch",
     });
+  });
+
+  it.each([
+    ["https://user:TOKEN@host/r.git", "https://host/r.git"],
+    ["https://TOKEN@github.com/o/r", "https://github.com/o/r"],
+    ["http:///alice:TOKEN@host/repo.git", "http:///host/repo.git"],
+    ["http:/alice@host:repo.git", "http:/alice@host:repo.git"],
+    ["HTTPS://u:p@ss@host:8443/r", "HTTPS://host:8443/r"],
+    ["https://do\\main\\u:TOKEN@host/r", "https://host/r"],
+    ["ftps://u:TOKEN@host/r", "ftps://host/r"],
+    ["git:https://u:TOKEN@host/r@main", "git:https://host/r@main"],
+    ["ssh://git:pw@host:2222/r", "ssh://git@host:2222/r"],
+    ["ssh://git@host/r", "ssh://git@host/r"],
+    ["git@github.com:o/r.git", "git@github.com:o/r.git"],
+    ["git:team@repo.git", "git:team@repo.git"],
+    ["/srv/repo@main", "/srv/repo@main"],
+    ["file:///srv@storage/team/repo.git", "file:///srv@storage/team/repo.git"],
+  ])("strips Git URL credentials: %s", (value, expected) => {
+    expect(stripGitUrlCredentials(value)).toBe(expected);
+  });
+
+  it("strips Git URL credentials in text (#2190)", () => {
+    expect(
+      stripTextGitUrlCredentials(
+        "fatal: could not read Password for 'https://TOKEN@host': no; see ssh://git@h/r",
+      ),
+    ).toBe(
+      "fatal: could not read Password for 'https://host': no; see ssh://git@h/r",
+    );
+    expect(
+      stripTextGitUrlCredentials("unable to access 'http:///alice:TOKEN@h/r/'"),
+    ).toBe("unable to access 'http:///h/r/'");
+    expect(
+      stripTextGitUrlCredentials("git clone https://alice:FAKE,TOKEN@host/repo failed"),
+    ).toBe("git clone https://host/repo failed");
+    expect(
+      stripPluginGitUrlCredentials("git:alice:TOKEN@github.com/org/repo@main"),
+    ).toBe("git:github.com/org/repo@main");
   });
 
   it("strips credentials from Git URLs saved before #1935", () => {

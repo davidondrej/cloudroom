@@ -343,6 +343,20 @@ it("recovers from one transient model mismatch by respawning", async () => {
   );
 }, 90_000);
 
+it("parallel starts survive Pi's shared startup lock (#2154)", async () => {
+  vi.stubEnv("FAKE_PI_LOCK_DIR", join(harness.workspaceDir, "agent.lock"));
+  const responses = await Promise.all(
+    ["a", "b", "c"].map((id) => harness.startThread(`thr_r2_lock_${id}`)),
+  );
+  for (const response of responses) {
+    expect(response.result).toMatchObject({
+      providerThreadId: expect.stringMatching(/^pi_/u),
+    });
+  }
+  expect(harness.readProcessLog().spawned.length).toBeGreaterThan(3);
+  expect(harness.messages.some((m) => m.method === "error")).toBe(false);
+}, 90_000);
+
 it("a child whose extension never reports ready is a construction error, not a hung tool call", async () => {
   vi.stubEnv("FAKE_PI_NO_SESSION_START", "1");
   vi.stubEnv("BB_PI_BRIDGE_READINESS_TIMEOUT_MS", "1500");

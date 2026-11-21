@@ -1,5 +1,5 @@
 import { createContext, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { cloudLoginName, cloudLoginProvider, cloudLoginTitle, type CloudLoginProvider } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";

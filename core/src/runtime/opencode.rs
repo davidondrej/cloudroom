@@ -1,5 +1,5 @@
 //! OpenCode over ACP (ADR 0172). Reuses the Cursor ACP protocol; OpenCode keeps its sessions in its own SQLite file.
-use super::{Handle, Resume, command as child_command, cursor};
+use super::{Handle, Model, Resume, command as child_command, cursor};
 use crate::config::{Config, HarnessConfig};
 use serde_json::{Value, json};
 use std::{io, path::Path};
@@ -84,14 +84,100 @@ pub async fn import(
     Ok(profile.home.join(DATABASE).to_string_lossy().into_owned())
 }
 
+/// Lists configured OpenCode models without creating a session in OpenCode's database.
+pub(crate) async fn list_models(
+    config: &Config,
+    storage: &crate::workspace::storage::Guard,
+) -> io::Result<Vec<Model>> {
+    let profile = config
+        .harnesses
+        .get(&super::Kind::OpenCode)
+        .ok_or_else(|| io::Error::other("OpenCode is not configured"))?;
+    let mut command = base(config, profile)?;
+    command
+        .current_dir(&config.account_home)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .arg("models");
+    let (child, _workload) = storage.spawn_writer(&mut command)?;
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "OpenCode model list timed out"))??;
+    if !output.status.success() {
+        return Err(io::Error::other("OpenCode model list unavailable"));
+    }
+    let models = parse_models(&String::from_utf8_lossy(&output.stdout));
+    if models.is_empty() {
+        return Err(io::Error::other("OpenCode model list is empty"));
+    }
+    Ok(models)
+}
+
+fn parse_models(stdout: &str) -> Vec<Model> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty() && line.contains('/') && !line.contains(char::is_whitespace)
+        })
+        .map(|model| Model {
+            model: model.to_owned(),
+            reasoning_levels: REASONING_LEVELS
+                .iter()
+                .map(|level| (*level).to_owned())
+                .collect(),
+            service_tiers: Vec::new(),
+        })
+        .collect()
+}
+
+fn unavailable_model_message(requested: &str, offered: &[&str]) -> String {
+    if let Some((_, suffix)) = requested.split_once('/') {
+        let mut alternatives: Vec<&str> = offered
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate
+                    .split_once('/')
+                    .is_some_and(|(_, model)| model == suffix)
+            })
+            .collect();
+        alternatives.truncate(4);
+        if !alternatives.is_empty() {
+            return format!(
+                "OpenCode model {requested} is unavailable in Cloud. Available under another provider: {}. Or sign in to its provider on your computer with `opencode auth login`, add it to ~/.config/opencode/opencode.json (or opencode.jsonc), or add its API key in Settings → Cloud environment.",
+                alternatives.join(", ")
+            );
+        }
+    }
+    let mut providers: Vec<&str> = Vec::new();
+    for candidate in offered {
+        if let Some((provider, _)) = candidate.split_once('/')
+            && !providers.contains(&provider)
+        {
+            providers.push(provider);
+            if providers.len() == 6 {
+                break;
+            }
+        }
+    }
+    let context = if providers.is_empty() {
+        " (no OpenCode models are available in Cloud)".to_owned()
+    } else {
+        format!(" (Cloud has providers: {})", providers.join(", "))
+    };
+    format!(
+        "OpenCode model {requested} is unavailable in Cloud{context}. On your computer, sign in to its provider with `opencode auth login`, or add the provider to ~/.config/opencode/opencode.json (or opencode.jsonc); Cloudroom copies both to Cloud. A provider on your computer's localhost can't be reached from Cloud. Provider keys set only as shell variables are not copied; add them in Settings → Cloud environment."
+    )
+}
+
 pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     let (id, mut session) = cursor::open(handle, "OpenCode").await?;
     let requested = handle.profile.model.as_str();
     if requested != "default" && cursor::option_value(&session, "model") != Some(requested) {
-        if !choices(&session, "model").contains(&requested) {
-            return Err(invalid(format!(
-                "OpenCode model {requested} is unavailable in Cloud. On your Mac, sign in to its provider with `opencode auth login`, or add the provider to ~/.config/opencode/opencode.json; Cloudroom copies both to Cloud. A provider on your Mac's localhost can't be reached from Cloud. Provider keys set only as shell variables are not copied; add them in Settings → Cloud environment."
-            )));
+        let available = choices(&session, "model");
+        if !available.contains(&requested) {
+            return Err(invalid(unavailable_model_message(requested, &available)));
         }
         session = set(handle, &id, "model", requested).await?;
     }

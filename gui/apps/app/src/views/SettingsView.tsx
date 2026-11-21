@@ -9,7 +9,7 @@ import {
   useNavigate,
   useLocation,
   matchPath,
-} from "react-router-dom";
+} from "react-router";
 import "@cloudroom/shared-ui/icon-extended";
 import {
   builtInThemes,

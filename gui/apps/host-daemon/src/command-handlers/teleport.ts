@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import {
   chmod,
@@ -15,9 +14,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import { backup, DatabaseSync } from "node:sqlite";
 import { homedir } from "node:os";
-import { promisify } from "node:util";
 import {
   basename,
   dirname,
@@ -29,6 +27,7 @@ import {
 } from "node:path";
 import { HOST_ARTIFACT_MAX_BYTES } from "@cloudroom/host-daemon-contract";
 import { runGit } from "@cloudroom/host-workspace";
+import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
 import { userExecutableProcessOptions } from "../user-executable-env.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 import type {
@@ -62,7 +61,6 @@ type Source = {
   symlink?: boolean;
 };
 type Capture = { nativeId: string; files: Source[]; omitted: string[] };
-const execFileAsync = promisify(execFile);
 const signature = (s: Awaited<ReturnType<typeof stat>>) =>
   `${s.dev}:${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
 
@@ -315,6 +313,28 @@ async function runCapture(
       .map((session) => session.nativeId),
   );
   for (const session of sessions) {
+    if (session.harness === "antigravity") {
+      if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(session.nativeId)) throw new Error("Invalid Antigravity conversation ID");
+      const name = session.nativeId + ".db";
+      const source = join(homedir(), ".gemini", "antigravity-cli", "conversations", name);
+      const info = await lstat(source).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; return null; });
+      if (!info && session.optional && session.threadId !== command.threadId) {
+        capture.omitted.push(session.threadId + " has no saved Antigravity conversation");
+        continue;
+      }
+      if (!info?.isFile() || info.size > HOST_ARTIFACT_MAX_BYTES) throw new Error("Antigravity conversation unavailable or too large");
+      const frozen = join(root, session.threadId + ".db");
+      const db = new DatabaseSync(source, { readOnly: true });
+      try {
+        db.exec("PRAGMA trusted_schema=OFF");
+        if (!db.prepare("SELECT 1 FROM trajectory_meta WHERE cascade_id=? LIMIT 1").get(session.nativeId)) throw new Error("Antigravity conversation identity mismatch");
+        await backup(db, frozen);
+      } finally { db.close(); }
+      const parent = session.threadId === command.threadId;
+      if (parent) capture.nativeId = session.nativeId;
+      await add(source, parent ? name : session.threadId + "/" + name, parent ? "native" : "context", frozen);
+      continue;
+    }
     const opencode = session.harness === "opencode";
     const source = opencode
       ? await exportOpenCode(session.nativeId, root, workspace, options)
@@ -673,17 +693,18 @@ async function runOpenCode(
   cwd: string,
   options: CommandDispatchOptions,
 ): Promise<string> {
-  const { stdout } = await execFileAsync("opencode", args, {
-    cwd,
-    env: {
-      ...process.env,
-      ...options.runtimeManager.getShellEnv(),
-      OPENCODE_DISABLE_AUTOUPDATE: "1",
-    },
-    maxBuffer: HOST_ARTIFACT_MAX_BYTES,
-    timeout: 60_000,
-    windowsHide: true,
-  });
+  const env = {
+    ...process.env,
+    ...options.runtimeManager.getShellEnv(),
+    OPENCODE_DISABLE_AUTOUPDATE: "1",
+  };
+  // Found the way agent startup finds it: OpenCode's installer folder is often
+  // off PATH, and Windows runs its .exe or .cmd (#2277).
+  const { stdout } = await execPortableFile(
+    findCliExecutable("opencode", env) ?? "opencode",
+    args,
+    { cwd, env, maxBuffer: HOST_ARTIFACT_MAX_BYTES, timeoutMs: 60_000 },
+  );
   return stdout;
 }
 

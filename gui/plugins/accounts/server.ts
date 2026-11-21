@@ -376,7 +376,11 @@ export default async function plugin(room: BbPluginApi) {
   };
   // The top account is the one every thread uses (ADR 0197).
   const current = (provider: Provider): string =>
-    provider === "codex" ? codexInUse : (ids(provider)[0] ?? LOCAL);
+    provider === "codex"
+      ? codexInUse
+      : provider === "acp-antigravity"
+        ? LOCAL
+        : (ids(provider)[0] ?? LOCAL);
   const limitedUntil = (provider: Provider, id: string): number | null => {
     const mark = limits[limitKey(provider, id)];
     const until = typeof mark === "object" ? mark.until : mark;
@@ -404,7 +408,9 @@ export default async function plugin(room: BbPluginApi) {
       ? codexView()
       : provider === "acp-cursor"
         ? cursorView()
-        : claudeView();
+        : provider === "acp-antigravity"
+          ? antigravityView()
+          : claudeView();
   const accountName = async (provider: Provider, id: string) => {
     const view = (await views(provider).catch(() => [])).find((entry) => entry.id === id);
     return (
@@ -805,12 +811,99 @@ export default async function plugin(room: BbPluginApi) {
       cursorLocal = { email: await localCursorEmail(), at: Date.now() };
     return rows("acp-cursor", cursorLocal.email);
   };
+  // This Mac's Antigravity subscription, shown in Settings → Agents → Accounts only while connected (David, 2026-11-21).
+  let antigravityLocal: {
+    at: number;
+    connected: boolean;
+    email: string | null;
+    plan: string | null;
+    windows: UsageWindow[];
+  } = { at: 0, connected: false, email: null, plan: null, windows: [] };
+  let antigravityLocalReading: Promise<void> | null = null;
+  const refreshAntigravityLocal = (force = false): Promise<void> => {
+    if (antigravityLocalReading) return antigravityLocalReading;
+    if (!force && antigravityLocal.at > 0 && Date.now() - antigravityLocal.at < USAGE_EVERY_MS)
+      return Promise.resolve();
+    const run = (async () => {
+      const response = await room.sdk.system
+        .usageLimits({ providerId: "acp-antigravity" })
+        .catch(() => null);
+      const now = Date.now();
+      if (response === null) {
+        antigravityLocal = { ...antigravityLocal, at: now };
+        return;
+      }
+      const usage = response["acp-antigravity"];
+      const next =
+        usage?.status === "ok"
+          ? {
+              at: now,
+              connected: true,
+              email: usage.accountEmail ?? null,
+              plan: usage.planLabel ?? null,
+              windows: usage.windows
+                .filter(
+                  (window) =>
+                    !/\b3p\b/iu.test(window.label) || window.usedPercent > 0,
+                )
+                .map((window) => ({
+                  label: window.label,
+                  usedPercent: window.usedPercent,
+                  resetsAt: Date.parse(window.resetsAt ?? "") || null,
+                  checkedAt: now,
+                })),
+            }
+          : usage?.status === "error"
+            ? { ...antigravityLocal, at: now }
+            : { at: now, connected: false, email: null, plan: null, windows: [] };
+      const changed =
+        next.connected !== antigravityLocal.connected ||
+        next.email !== antigravityLocal.email ||
+        next.plan !== antigravityLocal.plan ||
+        JSON.stringify(next.windows) !== JSON.stringify(antigravityLocal.windows);
+      antigravityLocal = next;
+      if (changed) room.realtime.publish(ACCOUNTS_CHANGED, {});
+    })().finally(() => {
+      if (antigravityLocalReading === run) antigravityLocalReading = null;
+    });
+    antigravityLocalReading = run;
+    return run;
+  };
+  const antigravityView = async (refresh = false): Promise<AccountView[]> => {
+    if (refresh || antigravityLocal.at === 0) await refreshAntigravityLocal(refresh);
+    else background(refreshAntigravityLocal());
+    if (!antigravityLocal.connected) return [];
+    const now = Date.now();
+    return [
+      {
+        id: LOCAL,
+        name: localName("acp-antigravity", antigravityLocal.email),
+        email: antigravityLocal.email,
+        plan: antigravityLocal.plan,
+        inUse: true,
+        limitedUntil: null,
+        error: null,
+        credits: null,
+        windows: antigravityLocal.windows.map((window) =>
+          window.resetsAt !== null && window.resetsAt <= now
+            ? { ...window, usedPercent: 0, resetsAt: null }
+            : window,
+        ),
+        needsSignIn: false,
+        limitedLogin: false,
+      },
+    ];
+  };
   // This computer's own login, read now, so a rename never names the login before it.
   const thisLogin = async (provider: Provider): Promise<string | null> => {
     if (provider === "codex") return localCodexEmail();
     if (provider === "claude-code") {
       await refreshMac();
       return macLogin();
+    }
+    if (provider === "acp-antigravity") {
+      await refreshAntigravityLocal(true);
+      return antigravityLocal.connected ? antigravityLocal.email : null;
     }
     cursorLocal = { email: await localCursorEmail(), at: Date.now() };
     return cursorLocal.email;
@@ -1024,6 +1117,7 @@ export default async function plugin(room: BbPluginApi) {
       await kv.set("limits:v1", limits);
       return;
     }
+    if (provider === "acp-antigravity") return;
     const removed = accounts.find((account) => account.id === id);
     accounts = accounts.filter((account) => account.id !== id);
     if (removed?.profile) void dropProfile(removed.profile);
@@ -1102,6 +1196,7 @@ export default async function plugin(room: BbPluginApi) {
       await codexResumed;
       return { following: null };
     }
+    if (provider === "acp-antigravity") return { following: null };
     if (provider === "claude-code" && id === LOCAL) {
       if (!(await refreshMac()))
         throw new Error(
@@ -1133,7 +1228,11 @@ export default async function plugin(room: BbPluginApi) {
     accountsRpcContract,
     {
       "accounts.list": ({ provider, refresh }) =>
-        provider === "claude-code" && refresh ? claudeView(true) : views(provider),
+        provider === "claude-code" && refresh
+          ? claudeView(true)
+          : provider === "acp-antigravity"
+            ? antigravityView(Boolean(refresh))
+            : views(provider),
       "accounts.use": async ({ provider, id, cloud, threadId, where }) => {
         const startedAt = Date.now();
         // Read before the switch changes them.
@@ -1142,7 +1241,11 @@ export default async function plugin(room: BbPluginApi) {
           where: where ?? null,
           to: id === LOCAL ? ("this_mac" as const) : ("added" as const),
           accounts:
-            provider === "codex" ? codexAccounts + 1 : ids(provider).length,
+            provider === "codex"
+              ? codexAccounts + 1
+              : provider === "acp-antigravity"
+                ? 1
+                : ids(provider).length,
           target_at_limit: limitedUntil(provider, id) !== null,
           waiting_threads:
             limited.waiting(provider) +
@@ -1182,6 +1285,10 @@ export default async function plugin(room: BbPluginApi) {
       "accounts.move": async ({ provider, id, direction }) => {
         if (provider === "codex") {
           await codex({ action: "move", id: stored(id), direction });
+          return null;
+        }
+        if (provider === "acp-antigravity") {
+          stored(id);
           return null;
         }
         const before = [...order[provider]];
@@ -1263,11 +1370,16 @@ export default async function plugin(room: BbPluginApi) {
           room.realtime.publish(ACCOUNTS_CHANGED, {});
           return null;
         }
+        if (provider === "acp-antigravity") {
+          throw new Error("This account is no longer connected.");
+        }
         if (provider === "codex") {
           await codex({ action: "rename", id: stored(id), name });
           return null;
         }
-        const account = accounts.find((entry) => entry.id === id);
+        const account = accounts.find(
+          (entry) => entry.provider === provider && entry.id === id,
+        );
         if (!account) throw new Error("This account is no longer connected.");
         account.name = name.trim() || null;
         await changed();
@@ -1484,7 +1596,7 @@ export default async function plugin(room: BbPluginApi) {
       return;
     }
     const provider = providerSchema.safeParse(thread?.providerId);
-    if (!provider.success) return;
+    if (!provider.success || provider.data === "acp-antigravity") return;
     // The machine's own login hit its limit: no account here is limited, and no switch here moves the thread.
     if (onOwnLogin(thread)) return;
     // Local turns started before plugin startup have no known account. Cloud uses the selected login.
@@ -1546,7 +1658,7 @@ export default async function plugin(room: BbPluginApi) {
     const began = turnBegan.get(thread.id);
     turnBegan.delete(thread.id);
     const provider = providerSchema.safeParse(thread.providerId);
-    if (began === undefined || !provider.success || onOwnLogin(thread)) return;
+    if (began === undefined || !provider.success || provider.data === "acp-antigravity" || onOwnLogin(thread)) return;
     // A Local turn on an account's full login that began after the login failed, and ended fine: it works again.
     const observed = threadAccount.get(thread.id);
     const ran = observed?.key.startsWith(`${provider.data}:`) ? observed : undefined;

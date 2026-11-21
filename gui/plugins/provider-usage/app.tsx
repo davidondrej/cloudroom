@@ -222,6 +222,8 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
 
 /** A row's short label. A model's weekly row ("Weekly · Fable") reads "7d fable"; narrow cards drop its "7d". */
 function rowLabel(label: string): { prefix: string | null; label: string } {
+  const fiveHourModel = /^Five-hour · (.+)$/u.exec(label)?.[1];
+  if (fiveHourModel) return { prefix: "5h", label: fiveHourModel };
   const model = /^Weekly · (.+)$/u.exec(label)?.[1];
   if (model) return { prefix: "7d", label: model };
   return {
@@ -358,9 +360,11 @@ function PlanUsage({ plan }: { plan: PlanSummary }) {
 function UsageWindow({
   window,
   last,
+  trailing,
 }: {
   window: UsageWindowValue;
   last: boolean;
+  trailing?: React.ReactNode;
 }) {
   const [showReset, setShowReset] = useState(false);
   const reset = formatUsageReset(window.resetsAt);
@@ -372,10 +376,13 @@ function UsageWindow({
         " / " +
         formatUsdCents(window.cost.limitUsdCents, false);
   const { prefix, label } = rowLabel(window.label);
-  return (
+  const row = (
     <button
       type="button"
-      className="block w-full rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+      className={cn(
+        "block rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+        trailing ? "min-w-0 flex-1" : "w-full",
+      )}
       title={`${window.label} · ${reset ?? "Reset time not reported"}`}
       aria-label={`${window.label}: ${value}. ${reset ?? "Reset time not reported"}`}
       aria-expanded={showReset}
@@ -395,6 +402,13 @@ function UsageWindow({
         </span>
       ) : null}
     </button>
+  );
+  if (!trailing) return row;
+  return (
+    <div className="flex items-start">
+      {row}
+      {trailing}
+    </div>
   );
 }
 
@@ -512,12 +526,29 @@ function TerminalSignIn({ label, providerId, signIn }: { label: string; provider
 /** Sign-in runs on the computer running Cloudroom, so other machines and stored accounts keep their hint. */
 type UsageSignIn = { hostId: string; onSignedIn: () => void };
 
+function isAntigravityExtraWindow(label: string): boolean {
+  return /\b3p\b/iu.test(label);
+}
+
 function ProviderUsageBody({ provider, signIn }: { provider: UsageProvider; signIn?: UsageSignIn | undefined }) {
+  const [showExtra, setShowExtra] = useState(false);
   const usage = provider.usage;
   if (usage === null) return <UsageNote>Usage not reported.</UsageNote>;
   switch (usage.status) {
-    case "ok":
-      return usage.windows.length === 0 ? (
+    case "ok": {
+      const hasCollapsibleExtra =
+        provider.providerId === "acp-antigravity" &&
+        usage.windows.some((window) => isAntigravityExtraWindow(window.label));
+      const primaryWindows = hasCollapsibleExtra
+        ? usage.windows.filter((window) => !isAntigravityExtraWindow(window.label))
+        : usage.windows;
+      const shownWindows =
+        hasCollapsibleExtra && !showExtra ? primaryWindows : usage.windows;
+      const toggleAnchorLabel =
+        hasCollapsibleExtra && primaryWindows.length > 0
+          ? primaryWindows[primaryWindows.length - 1]!.label
+          : null;
+      return shownWindows.length === 0 ? (
         usage.credits ? (
           <CreditsNote detail={usage.credits.detail} />
         ) : (
@@ -525,16 +556,43 @@ function ProviderUsageBody({ provider, signIn }: { provider: UsageProvider; sign
         )
       ) : (
         <div>
-          {usage.windows.map((window, index) => (
+          {shownWindows.map((window, index) => (
             <UsageWindow
               key={window.label}
               window={window}
-              last={!usage.credits && index === usage.windows.length - 1}
+              last={!usage.credits && index === shownWindows.length - 1}
+              trailing={
+                toggleAnchorLabel === window.label ? (
+                  <button
+                    type="button"
+                    aria-label={
+                      showExtra
+                        ? "Hide third-party limits"
+                        : "Show third-party limits"
+                    }
+                    aria-expanded={showExtra}
+                    title={
+                      showExtra
+                        ? "Hide third-party model limits"
+                        : "Show third-party model limits"
+                    }
+                    onClick={() => setShowExtra((open) => !open)}
+                    className="ml-1 mt-[1px] flex size-4 shrink-0 items-center justify-center rounded text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+                  >
+                    <Icon
+                      name={showExtra ? "ChevronUp" : "ChevronDown"}
+                      aria-hidden="true"
+                      className="size-3"
+                    />
+                  </button>
+                ) : undefined
+              }
             />
           ))}
           {usage.credits ? <CreditsNote detail={usage.credits.detail} /> : null}
         </div>
       );
+    }
     case "not_installed":
       return <UsageNote>Not installed on this machine.</UsageNote>;
     case "unauthenticated":
@@ -558,7 +616,12 @@ function accountName(account: UsageProvider): string | null {
 }
 
 /** Agents whose accounts live on Settings → Agents → Accounts (the Accounts plugin). */
-const ACCOUNT_AGENTS = new Set(["claude-code", "codex", "acp-cursor"]);
+const ACCOUNT_AGENTS = new Set([
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+]);
 
 /** A quiet grey "+" at the end of an agent's row: opens the Accounts page on that agent. */
 function AddAccountButton({
@@ -857,6 +920,12 @@ export function ProviderUsageStatusContent({
     >();
     for (const account of activeMachine?.providers ?? []) {
       if (account.usage?.status === "not_installed") continue;
+      // Antigravity appears in the usage box only while connected (David, 2026-11-21).
+      if (
+        account.providerId === "acp-antigravity" &&
+        account.usage?.status !== "ok"
+      )
+        continue;
       const group = groups.get(account.providerId);
       if (group) group.accounts.push(account);
       else

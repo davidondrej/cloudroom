@@ -17,6 +17,7 @@ import {
 } from "./auth-state.js";
 import type { HostDaemon } from "./daemon.js";
 import { enrollDaemonHost } from "./enroll.js";
+import { assertSecureServerUrl } from "./server-client.js";
 import { loadHostIdentity, persistHostId } from "./identity.js";
 import { acquireDaemonLock } from "./lock.js";
 import { resolveHostDaemonLocalApiConfig } from "./local-api-config.js";
@@ -82,13 +83,17 @@ export async function startHostDaemon(
       providedHostName: options.hostName,
     });
     const instanceId = randomUUID();
-    const serverFetch = createCallerProofFetch(fetch);
+    // A redirect could carry the key or session bodies to another origin or to plain HTTP (#2194).
+    const serverFetch = createCallerProofFetch((input, init) =>
+      fetch(input, { ...init, redirect: "error" }),
+    );
     const serverUrl = resolveServerUrl({
       providedServerUrl: hostDaemonConfig.BB_SERVER_URL,
     });
     if (!serverUrl) {
       throw new Error("Host daemon server URL is required");
     }
+    assertSecureServerUrl(serverUrl);
 
     if (persistedAuth && persistedAuth.hostId !== identity.hostId) {
       throw new Error(

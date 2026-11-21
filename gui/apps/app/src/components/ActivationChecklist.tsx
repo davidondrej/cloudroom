@@ -1,7 +1,7 @@
 import { useState, useSyncExternalStore, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAtom, useAtomValue } from "jotai";
-import { matchPath, useLocation, useNavigate } from "react-router-dom";
+import { matchPath, useLocation, useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Switch } from "@cloudroom/shared-ui/switch";

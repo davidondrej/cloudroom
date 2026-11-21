@@ -611,7 +611,7 @@ export interface ThreadsArea {
     args: ThreadStatusArgs,
   ): Promise<ThreadConversationOutlineResult>;
   count(args?: ThreadCountArgs): Promise<ThreadCountResult>;
-  messageForkPoint(args: ThreadStatusArgs & { sequence: number }): Promise<{ exact: boolean; sequence: number | null; textOnly?: boolean }>;
+  messageForkPoint(args: ThreadStatusArgs & { sequence: number }): Promise<{ exact: boolean; sequence: number | null }>;
   defaultExecutionOptions(
     args: ThreadStatusArgs,
   ): Promise<ThreadDefaultExecutionOptionsResult>;
@@ -869,6 +869,7 @@ function sleep(ms: number): Promise<void> {
 // before the server reads the poll already sent on it, so a wait read sees a
 // reset while the server is fine (#1046). Wait reads are GETs, safe to repeat,
 // so retry a few resets in a row before the deadline; all else throws as before.
+// `thread wait --children` reuses it for its list reads (#2283).
 const THREAD_WAIT_RESET_RETRIES = 3;
 const CONNECTION_RESET_CODES = new Set([
   "ECONNRESET",
@@ -876,7 +877,7 @@ const CONNECTION_RESET_CODES = new Set([
   "UND_ERR_SOCKET",
 ]);
 
-async function retryConnectionReset<T>(
+export async function retryConnectionReset<T>(
   deadline: number,
   read: () => Promise<T>,
 ): Promise<T> {

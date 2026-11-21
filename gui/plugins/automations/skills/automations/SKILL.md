@@ -12,6 +12,8 @@ script Run a stored server-side script and capture stdout/stderr/exit.
 
 Use the top-level `room-cli loop` command; `room-cli automation` is the same command. The CLI routes it to this plugin.
 
+A timer or reminder for the current thread needs one line: `room-cli wake <when> "<prompt>"`. It re-prompts this thread once, on its own agent; `<when>` is a delay (`5m`, `2h`, `1d`) or a time, and it fires within about a minute of then. It makes a one-time loop, so `list`, `update`, and `delete` work on it; a week after it ran with no error, it leaves the list. A thread a loop started can wake itself too, with up to 5 wakes waiting.
+
 Pass `--project` explicitly for every automation command. Inside a thread, automations are stamped origin `agent` and record the creating thread automatically. Automation-spawned threads cannot create automations.
 
 Personal supports automations with `--project proj_personal`. Use `room-cli project list --include-personal --json` to include it in discovery; an empty default project list does not mean Personal is unavailable.
@@ -74,7 +76,7 @@ room-cli loop create --template <id> --project <id> [--local]
 room-cli loop settings [--stop-at-limit on|off] [--fallback on|off]
 ```
 
-Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. A fresh-thread Cloud loop gets only the API keys picked with `--secrets KEY,.env|none|all` (`.env` is the project's .env files): pick only what its prompt and script need. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit, and whether a fresh-thread loop at a Claude or Codex limit runs on the other one with the model of the same level (both on by default).
+Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. A fresh-thread Cloud loop gets only the API keys picked with `--secrets KEY,.env|none|all` (`.env` is the project's .env files): pick only what its prompt and script need. Any picked list, even `.env` or `none`, blocks `room-cli mac` in its runs, so a job that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit, and whether a fresh-thread loop at a Claude or Codex limit runs on the other one with the model of the same level (both on by default).
 
 For partial updates, mode replacement, execution targets, or damaged records,
 read [references/updates.md](references/updates.md). Every command supports `--json`.

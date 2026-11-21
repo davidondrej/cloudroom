@@ -1,9 +1,10 @@
+import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
 import {
   ClaudeConnectionButton,
   useClaudeConnection,
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";
@@ -307,6 +308,7 @@ function CodexCloudLogin() {
 }
 
 function CloudLogin({ provider }: { provider: ProviderInfo }) {
+  if (provider.id === "acp-antigravity") return <AntigravityCloudLogin />;
   if (provider.id === "claude-code") return <ClaudeCloudLogin />;
   if (provider.id === "codex") return <CodexCloudLogin />;
   // Pi, opencode, Hermes, fx, and Devin have no Cloud sign-in: the Cloud reuses this Mac's login (ADR 0130).

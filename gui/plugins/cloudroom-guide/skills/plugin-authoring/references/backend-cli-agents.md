@@ -301,8 +301,9 @@ time.
 Inference input includes `serviceId`, `model`, `reasoningEffort: "none"`,
 `prompt`, `outputSchema`, and `timeoutMs`. An optional `env` holds the login
 that the provider with the service's id runs its threads on; pass it to the
-CLI you start. Plugin-served voice input has a
-5 MiB limit. The server rejects a larger file before a host call. Voice input
-includes `serviceId`, `model`, `audioBase64`, `mimeType`, `filename`, `prompt`,
-and `timeoutMs`. The inference success value must be a JSON object. Voice
-`prompt` can be `null`.
+CLI you start. Plugin-served voice input accepts up to 25 MB: clips up to 5 MB
+arrive inline in `audioBase64`, while larger clips (5–25 MB) arrive as a
+single-use internal pull URL in `audioUrl` (resolved against `ROOM_SERVER_URL`
+or `BB_SERVER_URL`). Voice input includes `serviceId`, `model`, `audioBase64`
+or `audioUrl`, `mimeType`, `filename`, `prompt`, and `timeoutMs`. The inference
+success value must be a JSON object. Voice `prompt` can be `null`.

@@ -1,5 +1,6 @@
 import { getAppSettings, getHost, hosts } from "@cloudroom/db";
 import { eq } from "drizzle-orm";
+import { isSecureOrLoopbackUrl } from "@cloudroom/config/loopback";
 import { z } from "zod";
 import type { ServerAccessGrant } from "@get-bb/plugin-sdk";
 import type { ServerAccessStatus } from "@cloudroom/server-contract";
@@ -45,6 +46,24 @@ const availabilitySchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("setup-required"), message: z.string() }),
   z.object({ status: z.literal("unavailable"), message: z.string() }),
 ]);
+
+/** A remote plain-HTTP URL this server opted in to; install commands pass the opt-in on (#2194). */
+export function insecureMachineUrlAllowed(url: string): boolean {
+  return (
+    !isSecureOrLoopbackUrl(url) &&
+    process.env.BB_ALLOW_INSECURE_SERVER_URL === "1"
+  );
+}
+
+function assertMachineUrl(url: string): void {
+  if (
+    !isSecureOrLoopbackUrl(url) &&
+    process.env.BB_ALLOW_INSECURE_SERVER_URL !== "1"
+  )
+    throw new Error(
+      "Use an https:// server URL. Plain HTTP would send machine keys unencrypted; on a network you trust, set BB_ALLOW_INSECURE_SERVER_URL=1 on this server.",
+    );
+}
 
 export function machineServerUrl(deps: Dependencies) {
   const configured = getAppSettings(deps.db).machineServerUrl;
@@ -145,6 +164,7 @@ async function resolve(
     const serverUrl = status.effectiveUrl;
     if (serverUrl === null)
       throw new Error("Set a server URL reachable by machines");
+    assertMachineUrl(serverUrl);
     grant = { id: args.hostId, serverUrl };
   } else {
     const record = listServerAccessProviders().find(
@@ -191,6 +211,7 @@ async function resolve(
       if (!parsed.success)
         throw new Error("Server access provider returned an invalid grant");
       if ("status" in parsed.data) throw new Error(parsed.data.message);
+      assertMachineUrl(parsed.data.serverUrl);
       grant = parsed.data;
     } catch (error) {
       deps.db

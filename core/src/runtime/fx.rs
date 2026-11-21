@@ -101,30 +101,9 @@ pub(super) async fn prepare_turn(handle: &Handle) -> io::Result<()> {
 
 pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::Result<()> {
     let id = handle.native()?;
-    let images = images(handle, input).await?;
+    let images = cursor::images(handle, input).await?;
     let instructed = instructed(&handle.profile.home, &id);
     cursor::prompt(handle, request, input, instructed, images).await
-}
-
-/// Image attachments go inline when fx accepts images; their paths still follow the text.
-async fn images(handle: &Handle, input: &Value) -> io::Result<Vec<Value>> {
-    if handle.acp.lock().unwrap()["promptCapabilities"]["image"] != true {
-        return Ok(Vec::new());
-    }
-    // Leave room in the ACP frame for the text, the instructions, and the envelope.
-    let used = serde_json::to_vec(input)?.len() + cursor::instructions(handle).len() + 4096;
-    let remaining = super::process::MAX_LINE.saturating_sub(used);
-    let (reader, input) = (handle.clone(), input.clone());
-    tokio::task::spawn_blocking(move || super::files::images(&reader, &input, remaining))
-        .await
-        .map_err(io::Error::other)?
-        // No prompt was sent: reject this request and allow queued work to continue.
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot read image attachment: {error}"),
-            )
-        })
 }
 
 /// fx joins a steer to the running turn without cancelling its work. Older fx cancels and resends.

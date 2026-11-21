@@ -63,6 +63,11 @@ let ports = new Set<number>();
 const refreshPorts = async () => { ports = await docker.sandboxPorts(); };
 await refreshPorts().catch(() => {});
 setInterval(() => void refreshPorts().catch(() => {}), 5_000).unref();
+void docker
+  .prune()
+  .catch((error: unknown) =>
+    console.error(JSON.stringify({ prune_failed: String(error) })),
+  );
 
 async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", "http://vps");

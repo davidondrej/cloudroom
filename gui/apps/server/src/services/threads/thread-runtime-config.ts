@@ -4,6 +4,7 @@ import {
   mergeHostAndProviderEnvironment,
 } from "../hosts/host-environment.js";
 import { getAppSettings, getEnvironment, getHost, getProject } from "@cloudroom/db";
+import { stripGitUrlCredentials } from "@cloudroom/domain";
 import type {
   DynamicTool,
   InstructionMode,
@@ -160,7 +161,9 @@ export async function resolveThreadRuntimeCommandConfig(
         id: project.id,
         kind: project.kind,
         name: project.name,
-        gitRemoteUrl: project.gitRemoteUrl,
+        // Plugins never see a legacy row's username or token (#2190).
+        gitRemoteUrl:
+          project.gitRemoteUrl && stripGitUrlCredentials(project.gitRemoteUrl),
       },
       environment: {
         id: environment.id,

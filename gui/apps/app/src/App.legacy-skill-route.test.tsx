@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { AppRoutes } from "./App";
 
 vi.mock("./components/layout/AppLayout", () => ({

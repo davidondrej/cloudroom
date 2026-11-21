@@ -1,7 +1,12 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-export const providerSchema = z.enum(["claude-code", "codex", "acp-cursor"]);
+export const providerSchema = z.enum([
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+]);
 export type Provider = z.infer<typeof providerSchema>;
 export const MAX_ACCOUNTS = 10;
 export const LOCAL = "local";

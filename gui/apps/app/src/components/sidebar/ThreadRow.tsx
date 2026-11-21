@@ -21,7 +21,7 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
 import { SidebarStickyTier } from "@/components/ui/sidebar.js";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import {
   ThreadActionsContextMenu,
   ThreadActionsMenu,

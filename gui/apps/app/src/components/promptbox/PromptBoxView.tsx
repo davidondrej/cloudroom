@@ -572,10 +572,16 @@ export function PromptActionRow({
   submit: PromptSubmitState;
 }) {
   const stopPress = useOwnPress(() => onStop?.());
-  // On touch, keep the press from moving focus: that would pop the keyboard.
-  const voicePress = useOwnPress(onStartVoice, (event) => {
-    if (isPointerCoarse) event.preventDefault();
-  });
+  // On touch, keep the press from moving focus: pointerdown stops the press
+  // itself, and mousedown stops iOS from blurring the editor and dropping click.
+  const voicePress = {
+    ...useOwnPress(onStartVoice, (event) => {
+      if (isPointerCoarse) event.preventDefault();
+    }),
+    onMouseDown: isPointerCoarse
+      ? (event: MouseEvent<HTMLButtonElement>) => event.preventDefault()
+      : undefined,
+  };
   const isVoiceBarVisible = voiceAction.stage === "active";
   const standardActionsClass = cn(
     FADE_CLASS,

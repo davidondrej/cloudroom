@@ -187,7 +187,7 @@ export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];
 /** The cards at the top right, as the app's corner module lists them (packages/shared-ui/src/lib/corner.ts). */
-export const CORNER_CARDS = ["invite", "checklist", "wrapped", "scan", "partner"] as const;
+export const CORNER_CARDS = ["invite", "call", "checklist", "wrapped", "scan", "partner"] as const;
 export type CornerCard = (typeof CORNER_CARDS)[number];
 export const CORNER_ANSWERS = ["opened", "closed"] as const;
 export type CornerAnswer = (typeof CORNER_ANSWERS)[number];

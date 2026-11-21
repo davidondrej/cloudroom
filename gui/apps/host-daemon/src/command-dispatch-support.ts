@@ -42,6 +42,8 @@ export const noopEventSink: Pick<EventSink, "emit" | "flush"> = {
 };
 
 export interface CommandDispatchOptions {
+  /** Set for `environment.attach`: aborted by a cancel received after it (#2171). */
+  attachCancelSignal?: AbortSignal;
   /** An interrupting Stop for this thread is waiting behind the command now running. */
   isThreadStopPending?: (threadId: string) => boolean;
   emitEnvironmentHookProgress?: (

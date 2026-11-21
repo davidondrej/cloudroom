@@ -862,6 +862,8 @@ export async function createWorktree(
         ["-c", "checkout.workers=0", ...gitArgs],
         {
           cwd: args.sourcePath,
+          // The user's post-checkout hook runs, as in their own `git worktree add`.
+          hooks: true,
           ...(args.signal !== undefined ? { signal: args.signal } : {}),
         },
       ));

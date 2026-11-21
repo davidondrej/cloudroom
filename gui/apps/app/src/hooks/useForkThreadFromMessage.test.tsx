@@ -17,7 +17,7 @@ import { useForkThreadFromMessage } from "./useForkThreadFromMessage";
 
 const mocks = vi.hoisted(() => ({
   fetchQuery: vi.fn(),
-  forkPoint: vi.fn(async ({ sequence }: { sequence: number }): Promise<{ exact: boolean; sequence: number | null; textOnly?: boolean }> => ({ exact: true, sequence })),
+  forkPoint: vi.fn(async ({ sequence }: { sequence: number }): Promise<{ exact: boolean; sequence: number | null }> => ({ exact: true, sequence })),
   navigate: vi.fn(),
   setRootComposeProjectId: vi.fn(),
   queryClient: {
@@ -42,8 +42,8 @@ vi.mock("@/lib/sdk", () => ({
   sdk: { threads: { messageForkPoint: mocks.forkPoint } },
 }));
 
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useNavigate: () => mocks.navigate,
@@ -169,10 +169,10 @@ describe("useForkThreadFromMessage", () => {
       | undefined;
     expect(seed?.sourceThreadTitle).toBe("Renamed source");
 
-    mocks.forkPoint.mockResolvedValueOnce({ exact: true, sequence: 4, textOnly: true });
+    mocks.forkPoint.mockResolvedValueOnce({ exact: true, sequence: 4 });
     await act(() => first({ sourceSeqEnd: 4 }));
     expect(mocks.navigate.mock.lastCall?.[1]?.state).toMatchObject({
-      [FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY]: { textOnly: true, sourceSeqEnd: 4 },
+      [FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY]: { sourceSeqEnd: 4 },
     });
     mocks.navigate.mockClear();
     const notice = vi.spyOn(appToast, "message").mockReturnValue("fork");

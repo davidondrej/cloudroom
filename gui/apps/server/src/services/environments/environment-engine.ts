@@ -26,7 +26,6 @@ import {
   invalidHostPathMessage,
 } from "../lib/host-path.js";
 import {
-  cancelPendingEnvironmentHook,
   runEnvironmentHook,
   ENVIRONMENT_HOOK_TIMEOUT_MS,
 } from "./environment-hooks.js";
@@ -599,6 +598,10 @@ async function runCreate(
   }
 }
 
+/** An older daemon kept a runtime for a reused environment ID in its old folder (#2216). */
+export const staleWorkspaceMessage = (path: string): string =>
+  `Cloudroom on that computer still has this worktree's old folder open (${path}). Restart or update Cloudroom there, then try again.`;
+
 export function markProviderEnvironmentAttached(
   db: DbConnection | DbTransaction,
   threadId: string,
@@ -1003,12 +1006,9 @@ async function sweepProviderEnvironmentInSlot(
   )
     return;
   if (!requestEnvironmentRemoval(deps, environmentId, false)) return;
-  if (cancelled && row.providerOwnsPath && row.path !== null) {
-    await cancelPendingEnvironmentHook(deps, {
-      id: `environment:${row.id}:${row.environmentProviderInstanceKey}:setup`,
-      hostId: row.hostId,
-    });
-  }
+  // Setup runs inside `environment.attach`, never as a hook operation, so asking the daemon to cancel a setup hook
+  // always got "unknown" and blocked cleanup forever (#2216). removeEnvironment waits for an attach the engine tracks;
+  // a worktree move's own attach can still be running if its thread is archived or deleted during setup.
   row = getEnvironment(deps.db, environmentId);
   if (row === null || row.teardownStatus === "removed") return;
   if (
@@ -1475,8 +1475,22 @@ function recordEnvironmentProvisioningFailureInTransaction(
 export function settleEnvironmentProvisionCommandResult(
   args: SettleEnvironmentProvisionCommandResultArgs,
 ): CommandResultSideEffectsResult {
+  // An older daemon answers a reused environment ID with its cached runtime's old, maybe deleted, folder: never
+  // record that folder (#2216).
+  const { report, command } = args;
   return settleEnvironmentProvisionOutcome({
     ...args,
+    report:
+      report.ok && report.result.path !== command.path
+        ? {
+            type: report.type,
+            ok: false,
+            completedAt: report.completedAt,
+            executionId: report.executionId,
+            errorCode: "workspace_type_mismatch",
+            errorMessage: staleWorkspaceMessage(report.result.path),
+          }
+        : report,
     headSha: null,
     initiatorStreamed: true,
     mergeBaseBranch:

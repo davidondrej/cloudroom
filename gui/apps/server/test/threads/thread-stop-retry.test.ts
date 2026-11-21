@@ -297,9 +297,13 @@ describe("thread stop dispatch", () => {
       const interrupted = listEvents(harness.db, {
         threadId: thread.id,
       }).filter((event) => event.type === "system/thread/interrupted");
-      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
-        ["memory-limit"],
-      );
+      // The banner shows what the guard measured (#1965).
+      expect(interrupted.map((event) => JSON.parse(event.data))).toEqual([
+        {
+          reason: "memory-limit",
+          memory: { usedBytes: 70 * 2 ** 30, totalBytes: 128 * 2 ** 30 },
+        },
+      ]);
     });
   });
 
@@ -328,9 +332,12 @@ describe("thread stop dispatch", () => {
       const interrupted = listEvents(harness.db, {
         threadId: thread.id,
       }).filter((event) => event.type === "system/thread/interrupted");
-      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
-        ["memory-limit"],
-      );
+      expect(interrupted.map((event) => JSON.parse(event.data))).toEqual([
+        {
+          reason: "memory-limit",
+          memory: { usedBytes: 70 * 2 ** 30, totalBytes: 128 * 2 ** 30 },
+        },
+      ]);
     });
   });
 

@@ -2,7 +2,7 @@
 //! (ADR 0113, 0186). A Rust port of `src/preview/client.py` for macOS. While both ship, they read and write the
 //! same files under the same LaunchAgent label, so the app can switch between them, and they must behave the same.
 
-mod jobs;
+pub(crate) mod jobs;
 mod net;
 #[cfg(test)]
 mod tests;

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router";
 import type { ThreadListEntry } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import {

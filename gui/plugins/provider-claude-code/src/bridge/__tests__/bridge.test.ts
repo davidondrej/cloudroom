@@ -20,6 +20,7 @@ import {
   type JsonValue,
   type RuntimePermissionPolicy,
   type ThreadEvent,
+  UNDELIVERED_MESSAGE_WARNING,
 } from "@cloudroom/domain";
 
 const { forkSessionMock, queryMock } = vi.hoisted(() => ({
@@ -896,10 +897,16 @@ describe("bridge", () => {
     );
 
     expect(options.cwd).toBe("/tmp/worktree");
+    // Claude's own timers are always blocked: `room-cli wake` and loops replace them.
     expect(options.disallowedTools).toEqual([
       "ExitPlanMode",
       "NotebookEdit",
       "Task",
+      "ScheduleWakeup",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "RemoteTrigger",
     ]);
     expect(options.systemPrompt).toBe("You are a manager.");
   });
@@ -925,6 +932,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: true,
       ultracode: true,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -949,6 +957,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: true,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -972,6 +981,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: false,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -994,6 +1004,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: false,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -2512,6 +2523,64 @@ describe("bridge", () => {
       await bridge.flushWork();
       query.finish();
       await bridge.waitForResponse(6);
+    } finally {
+      queries.forEach((query) => query.finish());
+      bridge.restore();
+    }
+  });
+
+  it("marks at a Stop only the steers Claude queued and never started, with their visible text (#2137)", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+
+    try {
+      const threadId = "thread-undelivered-steer";
+      await startBridgeThread({ bridge, threadId });
+      const query = queries[0]!;
+      const call = getLatestQueryCall();
+      const steer = async (requestId: number, input: JsonValue[]) => {
+        bridge.sendRequest(requestId, "turn/steer", {
+          ...canonicalTurnParams({ threadId, expectedTurnId: "turn-1", input }),
+          clientRequestId: `creq_${"23456789ab".slice(0, 9)}${requestId}`,
+        });
+        const prompt = await readNextPrompt(call);
+        await bridge.waitForResponse(requestId);
+        return prompt.uuid!;
+      };
+      const lifecycle = (uuid: string, state: string) =>
+        query.emit({ type: "command_lifecycle", command_uuid: uuid, state, session_id: threadId } as unknown as SDKMessage);
+      const taken = await steer(2, [{ type: "text", text: "taken", mentions: [] }]);
+      const queued = await steer(3, [
+        { type: "text", text: "Also run the tests.", mentions: [] },
+        { type: "text", text: "agent-only context", mentions: [], visibility: "agent-only" },
+      ]);
+      await steer(4, [{ type: "text", text: "no frame yet", mentions: [] }]);
+      lifecycle(taken, "queued");
+      lifecycle(taken, "started");
+      lifecycle(queued, "queued");
+      await bridge.flushWork();
+
+      bridge.sendRequest(5, "thread/stop", {
+        threadId,
+        providerThreadId: threadId,
+        intent: "interrupt",
+        activeTurnId: null,
+      });
+      await bridge.flushWork();
+      query.finish();
+      await bridge.waitForResponse(5);
+
+      const warnings = assembleCapturedThreadEvents(bridge.messages, "claude-code").filter(
+        (event) => event.type === "provider/warning",
+      );
+      expect(warnings).toMatchObject([
+        { summary: UNDELIVERED_MESSAGE_WARNING, details: "Also run the tests." },
+      ]);
     } finally {
       queries.forEach((query) => query.finish());
       bridge.restore();

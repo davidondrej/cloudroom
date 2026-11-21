@@ -16,24 +16,12 @@ import {
 } from "@cloudroom/shared-ui/hover-card";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { PROMPT_MENTION_PILL_CLASS } from "@/components/promptbox/mentions/prompt-mention-display";
+import { MessageContextQuoteGlyph } from "@/components/thread/timeline/MessageContextChip";
 
 /** The draft's reply texts, so a reply chip can show its message. */
 export const PromptDraftContextsContext = createContext<
   readonly PromptDraftContext[] | undefined
 >(undefined);
-
-function QuoteGlyph() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden
-      className="size-3 shrink-0 self-center opacity-60"
-    >
-      <path d="M7 7h4v4H8.5c0 2 1 3 2.5 3.5V17C8 16.5 6 14.5 6 11V8a1 1 0 0 1 1-1Zm8 0h4v4h-2.5c0 2 1 3 2.5 3.5V17c-3-.5-5-2.5-5-6V8a1 1 0 0 1 1-1Z" />
-    </svg>
-  );
-}
 
 function PromptContextChipNodeView({ node, selected }: NodeViewProps) {
   const contexts = useContext(PromptDraftContextsContext);
@@ -58,7 +46,7 @@ function PromptContextChipNodeView({ node, selected }: NodeViewProps) {
       <HoverCard openDelay={250} closeDelay={80}>
         <HoverCardTrigger asChild>
           <span className="inline-flex min-w-0 items-baseline gap-1.5">
-            <QuoteGlyph />
+            <MessageContextQuoteGlyph />
             <span className="truncate italic">{excerpt}</span>
             {number && text ? (
               <span className="shrink-0 text-muted-foreground">#{number}</span>

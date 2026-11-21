@@ -459,11 +459,12 @@ export function PromptBoxInternal({
   };
   const startVoice = () => {
     const current = doc.ref.current;
-    // On touch, close the keyboard first so it does not cover the recording bar.
+    // Start inside the tap gesture before blurring so iOS opens mic permissions right away.
+    void voice?.start();
+    // On touch, close the keyboard so it does not cover the recording bar.
     if (isPointerCoarse && current && !current.isDestroyed) {
       blurActiveKeyboardInputWithin(current.view.dom);
     }
-    void voice?.start();
   };
   const collapse = () => {
     captureHeight();

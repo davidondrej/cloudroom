@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { Link, MemoryRouter, useLocation } from "react-router-dom";
+import { Link, MemoryRouter, useLocation } from "react-router";
 import { useAppSettingsRouteMemory } from "./useAppSettingsRouteMemory";
 
 function RouteMemoryTestSurface() {

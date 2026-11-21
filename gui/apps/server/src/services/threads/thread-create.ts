@@ -1,5 +1,5 @@
 import {
-  COMPUTER,
+  CLOUD_NATIVE_FORK_PROVIDERS,
   usesTextFork,
   personalProjectAllowsEnvironment,
   reasoningLevelSchema,
@@ -24,6 +24,7 @@ import {
   getThread,
 } from "@cloudroom/db";
 import type {
+  AvailableModel,
   ProjectExecutionDefaults,
   Project,
   PromptInput,
@@ -42,6 +43,7 @@ import {
   copyForkSourceHistory,
   recordImportFork,
   recordTextImport,
+  nativeForkPoint,
   textForkMessages,
   resolveThreadForkPoint,
   type ThreadForkHistory,
@@ -50,6 +52,7 @@ import {
 import {
   rememberProjectExecutionDefaultsForCreate,
   resolveProjectExecutionDefaultsForCreate,
+  shouldRememberProjectExecutionDefaults,
 } from "./project-execution-defaults.js";
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import {
@@ -85,9 +88,11 @@ import {
 import {
   buildProviderThreadExecutionDefaults,
   resolveCreateThreadEnvironment,
+  supportedReasoningLevel,
 } from "./thread-default-policy.js";
+import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
 import { assertValidParentThread } from "./thread-parent.js";
-import { GROK_PROVIDER_ID } from "./thread-lifecycle.js";
+import { offersSignIn } from "./thread-lifecycle.js";
 import {
   type ThreadCreateServiceRequestInput,
   type ThreadCreateServiceRequest,
@@ -109,6 +114,8 @@ type ThreadCreateDeps = LoggedPendingInteractionWorkSessionDeps;
 interface ImportedText {
   history: ThreadForkHistory;
   seed: PromptInput[];
+  /** The seed already rides in the first message (a text fork with one). */
+  carried?: true;
 }
 
 interface CreateProvisioningThreadArgs {
@@ -136,15 +143,24 @@ interface ResolveCatalogExecutionDefaultsArgs {
   hostId: string | null;
   providerId: string;
   providerFallbackCandidates: readonly string[];
+  remembersStart: boolean;
   requestedModel: string | null;
   requestedReasoningLevel: boolean;
 }
 
 async function loadCatalogDefaultForProvider(
   deps: ThreadCreateDeps,
-  args: { cwd?: string; hostId: string; model?: string; providerId: string },
+  args: {
+    cwd?: string;
+    hostId: string;
+    model?: string;
+    providerId: string;
+    /** Move a level the provider rejects to one it accepts (#2239). */
+    reconcile?: boolean;
+  },
 ): Promise<
-  { defaults: ProjectExecutionDefaults; fallback: boolean } | ApiError
+  | { defaults: ProjectExecutionDefaults; fallback: boolean; model: AvailableModel }
+  | ApiError
 > {
   const catalog = await resolveSystemProviderModels(deps, {
     ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
@@ -152,10 +168,11 @@ async function loadCatalogDefaultForProvider(
     providerId: args.providerId,
   });
   const loadError = catalog.modelLoadError;
-  // A missing CLI needs a reinstall (#907); a signed-out Grok needs its login (#1160).
+  // A missing CLI needs a reinstall (#907); a signed-out agent with a sign-in command needs its login (#1160).
   const setup =
     loadError !== null &&
-    (loadError.code !== "auth_required" || args.providerId === GROK_PROVIDER_ID)
+    (loadError.code !== "auth_required" ||
+      offersSignIn(deps.providerRegistry, args.providerId))
       ? providerSetupError(deps, loadError)
       : null;
   if (setup !== null) return setup;
@@ -188,13 +205,56 @@ async function loadCatalogDefaultForProvider(
       true,
     );
   }
-  return {
-    defaults: buildProviderThreadExecutionDefaults(deps.providerRegistry, {
-      providerId: args.providerId,
+  const defaults = buildProviderThreadExecutionDefaults(deps.providerRegistry, {
+    providerId: args.providerId,
+    model: defaultModel,
+  });
+  if (args.reconcile === true) {
+    defaults.reasoningLevel = supportedReasoningLevel(deps.providerRegistry, {
+      level: defaults.reasoningLevel,
       model: defaultModel,
+      providerId: args.providerId,
+    });
+  }
+  return { defaults, fallback, model: defaultModel };
+}
+
+const LISTED_MODEL_WAIT_MS = 2_000;
+
+/** A remembered Claude model saved as `claude-opus-5.5` fails to start while
+ *  `claude-opus-5-5` works (#2202). Use the hyphen ID only when the catalog
+ *  lists it and not the dotted one; anything else keeps the remembered value. */
+async function listedRememberedModel(
+  deps: ThreadCreateDeps,
+  args: { cwd?: string; hostId: string; remembered: ProjectExecutionDefaults },
+): Promise<ProjectExecutionDefaults> {
+  const { remembered } = args;
+  const hyphenated = remembered.model.replace(/(\d)\.(\d)/gu, "$1-$2");
+  if (remembered.providerId !== "claude-code" || hyphenated === remembered.model)
+    return remembered;
+  // A cached catalog answers at once; a cold listing gets 2 s, then the start goes on as before.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const catalog = await Promise.race([
+    resolveSystemProviderModels(deps, {
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      hostId: args.hostId,
+      providerId: remembered.providerId,
+    }).catch(() => null),
+    new Promise<null>((resolve) => {
+      timer = setTimeout(resolve, LISTED_MODEL_WAIT_MS, null);
     }),
-    fallback,
-  };
+  ]).finally(() => clearTimeout(timer));
+  // A failed listing returns fallback entries; only a real listing decides.
+  if (catalog === null || catalog.modelLoadError !== null) return remembered;
+  const listed = new Set(
+    [...catalog.models, ...catalog.selectedOnlyModels].map((model) => model.model),
+  );
+  if (listed.has(remembered.model) || !listed.has(hyphenated)) return remembered;
+  deps.logger.warn(
+    { from: remembered.model, to: hyphenated },
+    "Remembered model is not listed; using the listed hyphen ID",
+  );
+  return { ...remembered, model: hyphenated };
 }
 
 async function resolveCatalogExecutionDefaults(
@@ -202,7 +262,44 @@ async function resolveCatalogExecutionDefaults(
   args: ResolveCatalogExecutionDefaultsArgs,
 ): Promise<ProjectExecutionDefaults | null> {
   if (args.executionDefaults !== null) {
-    return args.executionDefaults;
+    // A start saved as the project default keeps the stored ID as is (#2202).
+    const remembered =
+      args.requestedModel !== null || args.hostId === null || args.remembersStart
+        ? args.executionDefaults
+        : await listedRememberedModel(deps, {
+            ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+            hostId: args.hostId,
+            remembered: args.executionDefaults,
+          });
+    // A start saved as the project default never reconciles, so nothing reconciled is saved (#2239).
+    const levels = getSupportedReasoningLevelsForProvider(
+      deps.providerRegistry,
+      args.providerId,
+    );
+    if (
+      args.requestedReasoningLevel ||
+      args.hostId === null ||
+      args.remembersStart ||
+      levels.length === 0 ||
+      levels.includes(remembered.reasoningLevel)
+    )
+      return remembered;
+    const result = await loadCatalogDefaultForProvider(deps, {
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      hostId: args.hostId,
+      model: args.requestedModel ?? remembered.model,
+      providerId: args.providerId,
+    }).catch(() => null);
+    if (result === null || result instanceof ApiError || result.fallback)
+      return remembered;
+    return {
+      ...remembered,
+      reasoningLevel: supportedReasoningLevel(deps.providerRegistry, {
+        level: remembered.reasoningLevel,
+        model: result.model,
+        providerId: args.providerId,
+      }),
+    };
   }
   if (args.requestedModel !== null) {
     // Nothing remembered: start at the requested model's own level (#656).
@@ -212,7 +309,14 @@ async function resolveCatalogExecutionDefaults(
       hostId: args.hostId,
       model: args.requestedModel,
       providerId: args.providerId,
+      reconcile: !args.remembersStart,
     }).catch(() => null);
+    // A missing CLI can't start whatever the model (#2226).
+    if (
+      result instanceof ApiError &&
+      result.body.code === "provider_cli_missing"
+    )
+      throw result;
     return result instanceof ApiError || result?.fallback
       ? null
       : (result?.defaults ?? null);
@@ -234,6 +338,7 @@ async function resolveCatalogExecutionDefaults(
       ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
       hostId: args.hostId,
       providerId,
+      reconcile: !args.remembersStart,
     });
     if (result instanceof ApiError) {
       lastError = result;
@@ -509,7 +614,7 @@ async function createPendingThreadAndAttemptFirstDispatch(
     if (history !== null && args.request.visibility === "visible") {
       copyForkSourceHistory(deps, { fork: thread, history });
     }
-    if (args.importedText) recordTextImport(deps, thread, args.importedText.seed);
+    if (args.importedText) recordTextImport(deps, thread, args.importedText.seed, args.importedText.carried);
     if (args.deferFork && args.fork !== null) {
       recordImportFork(
         deps,
@@ -726,9 +831,12 @@ export async function createThreadFromRequest(
   const localFork = cloudSourceFork && rawRequestInput.executionTarget !== "cloud" && (rawRequestInput.executionTarget === "local" || rawRequestInput.environment.type !== "project-default");
   const cloudFork = cloudSourceFork && !localFork;
   const toCloud = rawRequestInput.executionTarget === "cloud" || (cloudSourceFork && !localFork);
-  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && usesTextFork(
+  // A fork the source's harness can't clone copies the chat as text (ADR 20261121-141157). A Cloud source reaches a Local
+  // clone only through Teleport's copy, which takes Claude Code and Codex.
+  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && !options.forkPoint && !options.freshFork && usesTextFork(
     source.providerId, toCloud && rawRequestInput.model !== undefined ? forkModel(deps, source.id) : undefined,
     rawRequestInput.providerId, rawRequestInput.model, toCloud,
+    isCloudThread(source) ? CLOUD_NATIVE_FORK_PROVIDERS.includes(source.providerId) : (await nativeForkPoint(deps, { sourceThread: source, sourceSeqEnd: rawRequestInput.sourceSeqEnd })) !== null,
   );
   if (source !== null && textFork && rawRequestInput.sourceThreadId) {
     if (toCloud && rawRequestInput.input.length === 0) {
@@ -746,28 +854,28 @@ export async function createThreadFromRequest(
         ? `[Cloudroom] This conversation was forked from another thread. You are continuing it in a fresh ${source.providerId} session.`
         : `[Cloudroom] This conversation was forked from a thread with another agent (${source.providerId}). You are now continuing it as ${rawRequestInput.providerId}.`,
     );
+    const providerId = rawRequestInput.providerId ?? source.providerId;
+    const model = rawRequestInput.model ?? (providerId === source.providerId ? forkModel(deps, source.id) : undefined);
     if (toCloud) {
       const { sourceSeqEnd: _sourceSeqEnd, ...cloudRequest } = rawRequestInput;
-      const sameHarness = (rawRequestInput.providerId ?? source.providerId) === source.providerId;
-      const model = rawRequestInput.model ?? (sameHarness ? forkModel(deps, source.id) : undefined);
-      const thread = await cloudroom(deps).create({ ...cloudRequest, providerId: rawRequestInput.providerId ?? source.providerId, ...(model ? { model } : {}), origin: rawRequestInput.origin ?? "sdk", originKind: "fork", environment: { type: "project-default" }, input: [...seed, ...rawRequestInput.input] }, false, { sourceThreadId: source.id, endSequence });
+      const thread = await cloudroom(deps).create({ ...cloudRequest, providerId, ...(model ? { model } : {}), origin: rawRequestInput.origin ?? "sdk", originKind: "fork", environment: { type: "project-default" }, input: [...seed, ...rawRequestInput.input] }, false, { sourceThreadId: source.id, endSequence });
       deps.telemetry.capture({ name: "thread_created", properties: { execution: cloudExecution(deps, thread.id), is_child_thread: false, provider: thread.providerId } });
       return thread;
     }
     const code = isCloudThread(source) ? await prepareLocalForkCode(deps as AppDeps, source, null, rawRequestInput.environment) : null;
+    const fullSeed = code ? [...seed, code.note] : seed;
     return createThreadFromRequest(deps, {
       ...rawRequestInput,
+      providerId,
+      ...(model ? { model } : {}),
       executionTarget: "local",
       environment: code?.environment ?? rawRequestInput.environment,
-      input: rawRequestInput.input.length ? [...seed, ...(code ? [code.note] : []), ...rawRequestInput.input] : [],
-    }, { ...options, importedText: { history: { kind: "thread", sourceThreadId: source.id, endSequence }, seed } });
+      input: rawRequestInput.input.length ? [...fullSeed, ...rawRequestInput.input] : [],
+    }, { ...options, importedText: { history: { kind: "thread", sourceThreadId: source.id, endSequence }, seed: fullSeed, ...(rawRequestInput.input.length ? { carried: true as const } : {}) } });
   }
   if (localFork && !options.forkPoint && !options.importedText) {
     requireLiveSourceThread(deps, { projectId: rawRequestInput.projectId, sourceThreadId: source.id });
     assertValidParentThread(deps, { parentThreadId: source.id, cloudChild: true });
-    if (!deps.providerRegistry.supportsFork(source.providerId)) {
-      throw new ApiError(400, "invalid_request", `Provider ${source.providerId} does not support thread forks on this ${COMPUTER}`);
-    }
     const prepared = await prepareLocalFork(deps as AppDeps, source, { environment: rawRequestInput.environment, ...(rawRequestInput.sourceSeqEnd === undefined ? {} : { sourceSeqEnd: rawRequestInput.sourceSeqEnd }) });
     return createThreadFromRequest(deps, {
       ...rawRequestInput,
@@ -1022,6 +1130,7 @@ export async function createThreadFromRequest(
       hostId: childHostId,
       providerId,
       providerFallbackCandidates,
+      remembersStart: shouldRememberProjectExecutionDefaults(request),
       requestedModel,
       requestedReasoningLevel,
     },

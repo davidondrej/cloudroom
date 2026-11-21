@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { queryOptions, useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { z } from "zod";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { COLORS, REST, RangeToggle, Stat, sum } from "@/components/settings/UsageSection";

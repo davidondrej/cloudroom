@@ -154,6 +154,11 @@ pinned, sort, limit })`.
 - When polling status, add `--no-pr`: it skips the GitHub pull request lookup, which
   can take up to 10 s, and JSON reports `pullRequest.status` as `skipped`.
 - Use `room-cli thread show <thread-id> --git-diff` to review file changes.
+- Use `room-cli thread show <thread-id> --credits` for one thread's Cloud Credits, such
+  as a Cloud child's: the last 7 days, billed each minute, split by command every
+  few minutes. A `--shared-sandbox` child's use counts under the thread whose sandbox
+  it shares. `credits.status` is `unavailable` with a `message` when they can't be
+  read, never 0. One website read per call, so don't add it when polling.
 - Use `room-cli thread log <thread-id>` to inspect the conversation. The default
   shows only the newest 20 user-message turns and ends with a notice when older
   history was omitted. For timeline text, `--limit <n>` accepts at most 100.
@@ -250,7 +255,7 @@ Archiving a Local thread, 10 seconds later once Undo has passed, frees its idle 
 
 Make a thread a child with `room-cli thread update THREAD --parent-thread PARENT` (or `--self` as the child), or top-level with `--clear-parent-thread`. Unarchiving a child under an archived parent makes it top-level, so its parent stops getting its updates; unarchive the parent first. `room-cli thread unarchive THREAD --keep-parent` keeps the link anyway, but an archived parent gets none of its updates. `room-cli thread unarchive PARENT --with-children` also brings back the threads archived with it (within 10 minutes), still under it. Re-link a top-level child with `--parent-thread`. A Cloud thread sharing another thread's sandbox can only become top-level; one on a cloud VM can't change its parent. Parent changes and `unarchive` run from the desktop app or a Local thread; a Cloud thread's `room-cli` has neither.
 
-To move a Local Claude Code or Codex thread into its own worktree, run `room-cli thread worktree`. The thread keeps its ID and chat and moves into a new Cloudroom-managed worktree from its current commit when its turn ends; Cloudroom deletes the worktree after archive. Other agents may share the checkout, so pass `--carry` with only the uncommitted files this thread changed, and `--allow-dirty` to leave the rest. Then end your turn, and from the next turn work only in the new worktree. To fork into a new thread instead, use `room-cli thread fork --new-environment worktree`. Never run `git worktree add` yourself; Cloudroom never cleans those folders up.
+To move a Local thread of any agent into its own worktree, run `room-cli thread worktree`. The thread keeps its ID and chat (agents other than Claude Code and Codex continue in a fresh session that reads the chat) and moves into a new Cloudroom-managed worktree from its current commit when its turn ends; Cloudroom deletes the worktree after archive. Other agents may share the checkout, so pass `--carry` with only the uncommitted files this thread changed, and `--allow-dirty` to leave the rest. Then end your turn, and from the next turn work only in the new worktree. To fork into a new thread instead, use `room-cli thread fork --new-environment worktree`. Never run `git worktree add` yourself; Cloudroom never cleans those folders up.
 
 ## Chat from a terminal
 

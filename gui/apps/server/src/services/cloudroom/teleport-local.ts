@@ -1,7 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { backup, DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
@@ -45,13 +46,14 @@ import { SKIPPED } from "./project-copy.js";
 import { claudeTranscriptThrough, cloudForkPoint, FORK_HARNESSES, isFiles, localCheckpoint, sourceCode } from "./fork.js";
 import { binding, localTeleports, teleportProgress } from "./store.js";
 
-type Harness = "codex" | "pi" | "claude-code" | "acp-cursor" | "acp-opencode";
+type Harness = "codex" | "pi" | "claude-code" | "acp-cursor" | "acp-opencode" | "acp-antigravity";
 const VM_SESSIONS: Record<Harness, string> = {
   codex: "$HOME/.codex/sessions",
   pi: "$HOME/.pi/agent/sessions",
   "claude-code": "$HOME/.claude/projects",
   "acp-cursor": "$HOME/.cursor/chats",
   "acp-opencode": "$HOME/.local/share/opencode",
+  "acp-antigravity": "$HOME/.gemini/antigravity-cli/conversations",
 };
 const CHUNK = 3 * 1024 * 1024;
 const PREVIEW_MB = 20;
@@ -114,7 +116,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   const phase = teleportProgress(deps.db, threadId)?.phase;
   if (!thread || thread.executionTarget !== "cloud" || thread.parentThreadId || thread.archivedAt || thread.deletedAt
     || !saved?.sessionId || !harness || !(harness in VM_SESSIONS) || (phase && !["complete", "cancelled", "error"].includes(phase)))
-    throw new ApiError(409, "teleport_unavailable", "Teleport to Local needs a Codex, Pi, Claude Code, opencode, or Cursor cloud parent thread.");
+    throw new ApiError(409, "teleport_unavailable", "Teleport to Local needs a Codex, Pi, Claude Code, opencode, Antigravity, or Cursor cloud parent thread.");
   const nativeId = getLastProviderThreadId(deps, threadId);
   if (!nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
@@ -130,6 +132,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   step("downloading");
 
   const vmPath = (await vm(client, findNative(harness, nativeId))).toString().trim();
+  if (harness === "acp-antigravity" && !/^\/tmp\/cloudroom-agy-[A-Za-z0-9_]+\.db$/.test(vmPath)) throw new ApiError(409, "teleport_unavailable", "Antigravity could not snapshot this conversation.");
   if (!vmPath) throw new ApiError(409, "teleport_unavailable", "The cloud conversation file was not found. The thread stays in Cloud.");
   const cloud = await client.sessionWorkspace(saved.sessionId);
   const lineage = harness === "codex" ? await codexLineage(client, vmPath) : [];
@@ -141,13 +144,18 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
     downloadEach(client, lineage, allowed),
   ]);
   step("copying");
-  if (harness === "acp-cursor" || harness === "acp-opencode") await vm(client, `rm -f ${quote(vmPath)}`).catch(() => {});
+  if (harness === "acp-cursor" || harness === "acp-opencode" || harness === "acp-antigravity") await vm(client, `rm -f ${quote(vmPath)}`).catch(() => {});
   // A parent file that differs on the Mac is set aside, unless another Local thread is still using it.
   const inUse = (id: string) => deps.db.select({ id: threads.id }).from(threads)
     .where(and(eq(threads.providerId, "codex"), eq(threads.executionTarget, "local"), isNull(threads.archivedAt), isNull(threads.deletedAt))).all()
     .some((row) => row.id !== threadId && getLastProviderThreadId(deps, row.id) === id);
   for (const [index, path] of lineage.entries()) await installNative("codex", "", path, parents[index]!, environment.path, inUse);
-  if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
+  if (harness === "acp-antigravity") {
+    if (deps.db.select({id: threads.id}).from(threads).where(and(eq(threads.providerId, harness), eq(threads.executionTarget, "local"), isNull(threads.archivedAt), isNull(threads.deletedAt))).all()
+      .some(row => row.id !== threadId && getLastProviderThreadId(deps, row.id) === nativeId)) throw new Error("This Antigravity conversation is already open in another Local thread.");
+    await importAntigravity(nativeId, session);
+  }
+  else if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
   else await installNative(harness, nativeId, vmPath, session, environment.path);
   const aside = randomUUID();
   const kept = await applyChanges(environment.path, changes.archive, aside, changes.base);
@@ -506,6 +514,19 @@ export async function vm(client: CloudroomClient, command: string, signal?: Abor
 }
 
 export function findNative(harness: Harness, nativeId: string): string {
+  if (harness === "acp-antigravity") {
+    if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(nativeId)) throw new Error("Invalid Antigravity conversation ID");
+    const script = `import os,sqlite3,sys,tempfile
+from pathlib import Path
+p=Path.home()/".gemini/antigravity-cli/conversations"/(sys.argv[1]+".db")
+if not p.is_file() or p.is_symlink(): sys.exit(1)
+src=sqlite3.connect(p.as_uri()+"?mode=ro",uri=True)
+src.execute("pragma trusted_schema=off")
+if not src.execute("select 1 from trajectory_meta where cascade_id=? limit 1",(sys.argv[1],)).fetchone(): sys.exit(1)
+fd,out=tempfile.mkstemp(prefix="cloudroom-agy-",suffix=".db"); os.close(fd)
+dst=sqlite3.connect(out); src.backup(dst); dst.close(); src.close(); print(out)`;
+    return `python3 -I -c ${quote(script)} ${quote(nativeId)}`;
+  }
   if (harness === "acp-opencode")
     return `mkdir -p ~/.cache/cloudroom && f=~/.cache/cloudroom/opencode-${nativeId}.json && OPENCODE_DISABLE_AUTOUPDATE=1 opencode export ${nativeId} > "$f" </dev/null && echo "$f"`;
   // A Cursor chat is a folder (meta.json plus a SQLite store), so it travels as one archive.
@@ -744,6 +765,53 @@ async function installNative(harness: Harness, nativeId: string, vmPath: string,
   const temporary = `${target}.${randomUUID()}.tmp`;
   await writeFile(temporary, data, { mode: 0o600 });
   await rename(temporary, target);
+}
+
+/** SQLite's backup includes the WAL. Preserve an existing Local copy and refuse to replace a diverged conversation. */
+async function importAntigravity(id: string, bytes: Buffer) {
+  if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
+    throw new Error("Invalid Antigravity conversation ID");
+  const folder = join(homedir(), ".gemini", "antigravity-cli", "conversations");
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  const target = join(folder, id + ".db"),
+    staged = join(folder, "." + randomUUID() + ".db");
+  await writeFile(staged, bytes, { mode: 0o600, flag: "wx" });
+  try {
+    const incoming = new DatabaseSync(staged, { readOnly: true });
+    try {
+      incoming.exec("PRAGMA trusted_schema=OFF");
+      if (!incoming.prepare("SELECT 1 FROM trajectory_meta WHERE cascade_id=? LIMIT 1").get(id))
+        throw new Error("Antigravity conversation identity mismatch");
+      if (existsSync(target)) {
+        if (!(await lstat(target)).isFile())
+          throw new Error("Antigravity conversation is not a regular file");
+        incoming.prepare("ATTACH DATABASE ? AS previous").run(target);
+        if (
+          !incoming
+            .prepare("SELECT 1 FROM previous.trajectory_meta WHERE cascade_id=? LIMIT 1")
+            .get(id) ||
+          incoming
+            .prepare("SELECT * FROM previous.steps EXCEPT SELECT * FROM main.steps LIMIT 1")
+            .get()
+        )
+          throw new Error(
+            "This Local Antigravity conversation changed. The thread stays in Cloud.",
+          );
+        const previous = target + ".before-teleport-" + randomUUID();
+        await writeFile(previous, "", { flag: "wx", mode: 0o600 });
+        await backup(incoming, previous, { source: "previous" });
+        incoming.exec("DETACH DATABASE previous");
+        await chmod(target, 0o600);
+        await backup(incoming, target);
+      } else {
+        await link(staged, target);
+      }
+    } finally {
+      incoming.close();
+    }
+  } finally {
+    await rm(staged, { force: true });
+  }
 }
 
 async function importOpenCode(deps: AppDeps, threadId: string, environment: { id: string; hostId: string; path: string }, nativeId: string, data: Buffer) {

@@ -628,16 +628,92 @@ describe("ServerConnection", () => {
       expect(socket.close).not.toHaveBeenCalled();
       expect(setSession).not.toHaveBeenLastCalledWith(null);
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
+        {
           commandType: "thread.stop",
-          requestId: "invalid-transcription",
-        }),
+          issueCodes: ["too_small"],
+          messageType: "host-rpc.request",
+          payloadLength: expect.any(Number),
+        },
         "Rejected invalid host RPC command",
       );
     } finally {
       await connection.shutdown();
     }
   });
+
+  const secretRpc = {
+    type: "host-rpc.request",
+    // UUID-shaped secret: a valid request ID can still be private.
+    requestId: "5ec2e7aa-0000-4000-8000-5ec2e7aa5ec2",
+    command: { type: "thread.stop", "sk-secret-key": true },
+  };
+  it.each([
+    ["invalid JSON", "OPENAI_API_KEY=sk-secret-value", null, null, null],
+    [
+      "an unknown type",
+      JSON.stringify({ type: "sk-secret-value", env: { KEY: "sk-secret" } }),
+      null,
+      ["invalid_union"],
+      null,
+    ],
+    [
+      "a secret property name",
+      JSON.stringify({ type: "heartbeat-ack", "sk-secret-value": true }),
+      null,
+      ["unrecognized_keys"],
+      "heartbeat-ack",
+    ],
+    [
+      "a rejected RPC command",
+      JSON.stringify(secretRpc),
+      "thread.stop",
+      ["invalid_union"],
+      "host-rpc.request",
+    ],
+  ])(
+    "logs %s without its payload",
+    async (_label, data, commandType, issueCodes, messageType) => {
+      const logFields = {
+        commandType,
+        issueCodes,
+        messageType,
+        payloadLength: data.length,
+      };
+      const { connection, logger, webSocket } = createConnectionFixture();
+      try {
+        await connection.start();
+        const socket = webSocket.sockets[0];
+        socket?.onmessage?.({ data });
+
+        if (data.includes(secretRpc.requestId)) {
+          expect(logger.warn).toHaveBeenCalledWith(
+            logFields,
+            "Rejected invalid host RPC command",
+          );
+          expect(socket?.send).toHaveBeenCalledWith(
+            expect.stringContaining(secretRpc.requestId),
+          );
+          expect(socket?.close).not.toHaveBeenCalled();
+        } else {
+          expect(logger.error).toHaveBeenCalledWith(
+            logFields,
+            "Invalid server websocket message; closing connection",
+          );
+          await vi.waitFor(() => expect(socket?.close).toHaveBeenCalled());
+        }
+        const logged = JSON.stringify(
+          Object.values(logger).flatMap((log) => log.mock.calls),
+          (_key, value: unknown) =>
+            value instanceof Error
+              ? { ...value, message: value.message, stack: value.stack }
+              : value,
+        );
+        expect(logged).not.toMatch(/OPENAI|sk-secret|5ec2e7aa/);
+      } finally {
+        await connection.shutdown();
+      }
+    },
+  );
 
   it("deduplicates inactive-session invalidation and reconnects only the current session", async () => {
     const { connection, logger, setSession, webSocket } =

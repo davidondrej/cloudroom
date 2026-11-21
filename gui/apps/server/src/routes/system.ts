@@ -58,6 +58,10 @@ import {
   transcribeVoiceInput,
 } from "../services/ai/voice-transcription.js";
 import {
+  getVoiceTranscriptionJob,
+  startVoiceTranscriptionJob,
+} from "../services/ai/voice-transcription-jobs.js";
+import {
   listInstallableProviderInfos,
   listSystemProviderInfos,
   resolveSystemExecutionOptions,
@@ -625,23 +629,41 @@ export function registerSystemRoutes(
     context.json(await restartSystemModelDiscovery(deps, body)),
   );
 
-  post(routes.voiceTranscription, async (context) => {
+  async function readVoiceForm(context: {
+    req: { formData(): Promise<FormData> };
+  }): Promise<{ file: File; prompt?: string; clientId?: string }> {
     const formData = await context.req.formData();
     const file = formData.get("file");
     if (!(file instanceof File)) {
       throw new ApiError(400, "invalid_request", "Audio file is required");
     }
+    const rawPrompt = formData.get("prompt");
+    const rawClientId = formData.get("clientId");
+    return {
+      file,
+      prompt: typeof rawPrompt === "string" ? rawPrompt : undefined,
+      clientId: typeof rawClientId === "string" ? rawClientId : undefined,
+    };
+  }
+
+  post(routes.voiceTranscription, async (context) => {
+    const form = await readVoiceForm(context);
     return context.json({
       text: await transcribeVoiceInput(deps, {
-        file,
-        prompt:
-          typeof formData.get("prompt") === "string"
-            ? String(formData.get("prompt"))
-            : undefined,
+        ...form,
         relayed: getGateAuthKind(context) !== null,
       }),
     });
   });
+
+  post(routes.startVoiceTranscriptionJob, async (context) => {
+    const form = await readVoiceForm(context);
+    return context.json(startVoiceTranscriptionJob(deps, form), 202);
+  });
+
+  get(routes.voiceTranscriptionJob, (context) =>
+    context.json(getVoiceTranscriptionJob(deps, context.req.param("id"))),
+  );
 
   get(routes.version, async (context, query) =>
     context.json(

@@ -11,7 +11,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useNavigate, type NavigateOptions } from "react-router-dom";
+import { useNavigate, type NavigateOptions } from "react-router";
 import { useStore } from "jotai";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { isRoutePath, resolveRouteHref } from "@/lib/route-paths";

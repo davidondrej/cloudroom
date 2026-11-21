@@ -757,6 +757,7 @@ export function LoopDialog({
                         className="group flex h-8 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-state-hover"
                       >
                         <ProviderModelPicker
+                          cloud={loop.cloud}
                           value={value}
                           onChange={(next) =>
                             saveAgents(

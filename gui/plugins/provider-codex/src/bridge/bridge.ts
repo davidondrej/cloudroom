@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -1034,8 +1035,65 @@ async function initializeChild(
 }
 
 const codexThreadIdentityResultSchema = z
-  .object({ thread: z.object({ id: z.string().min(1) }).passthrough() })
+  .object({
+    thread: z
+      .object({
+        id: z.string().min(1),
+        path: z.string().nullish().catch(null),
+      })
+      .passthrough(),
+  })
   .passthrough();
+
+const codexRolloutMetaSchema = z.object({
+  type: z.literal("session_meta"),
+  payload: z.object({
+    dynamic_tools: z.array(z.object({ name: z.string() })).nullish(),
+  }),
+});
+
+// Cloudroom's built-in tools (RESERVED_AGENT_TOOL_NAMES in the plugin SDK's
+// host-policy). Core starts Cloud threads without them, so a Teleported thread
+// never has them; only plugin tools are worth a notice.
+const CLOUDROOM_BUILT_IN_TOOL_NAMES = new Set(["update_environment_directory"]);
+
+// Last notice per native thread, so a rebuild doesn't repeat it.
+const missingToolNotices = new Map<string, string>();
+
+// Codex keeps the tools thread/start gave a thread: resume and fork ignore
+// new ones, and no request adds them (#2097). The rollout's first line lists
+// the kept ones; Core drops that list when it uploads a Cloud thread.
+async function toolsMissingFromCodexThread(
+  rolloutPath: string | null | undefined,
+  dynamicTools: readonly DynamicTool[] | undefined,
+): Promise<string[]> {
+  const wanted = (dynamicTools ?? [])
+    .map((tool) => tool.name)
+    .filter((name) => !CLOUDROOM_BUILT_IN_TOOL_NAMES.has(name));
+  if (!rolloutPath || wanted.length === 0) return [];
+  try {
+    const file = await open(rolloutPath, "r");
+    try {
+      const { buffer, bytesRead } = await file.read({
+        buffer: Buffer.alloc(1024 * 1024),
+        position: 0,
+      });
+      const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n", 1)[0];
+      const meta = codexRolloutMetaSchema.safeParse(
+        JSON.parse(firstLine ?? ""),
+      );
+      if (!meta.success) return [];
+      const kept = new Set(
+        (meta.data.payload.dynamic_tools ?? []).map((tool) => tool.name),
+      );
+      return wanted.filter((name) => !kept.has(name));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return [];
+  }
+}
 
 const codexConfigReadResultSchema = z
   .object({
@@ -1357,6 +1415,22 @@ async function constructThreadSession(
     );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
+    if (args.request.kind !== "start") {
+      const missing = await toolsMissingFromCodexThread(
+        result.thread.path,
+        args.dynamicTools,
+      );
+      const summary = `This Codex thread started without ${missing.join(", ")}, and Codex can't add tools to an existing thread. Start a new thread to use ${missing.length === 1 ? "it" : "them"}.`;
+      if (
+        missing.length > 0 &&
+        missingToolNotices.get(codexThreadId) !== summary
+      ) {
+        missingToolNotices.set(codexThreadId, summary);
+        sendThreadDeltas(session, [
+          { kind: "provider.warning", category: "general", summary },
+        ]);
+      }
+    }
     // A message edit's start or fork replaces the thread's current native
     // session and keeps its Goal. A fork into a new Cloudroom thread starts
     // without one.

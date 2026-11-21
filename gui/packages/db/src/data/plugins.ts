@@ -1,4 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
+import {
+  stripGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "@cloudroom/domain";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { installedPlugins, pluginArtifacts, pluginSettings } from "../schema.js";
 
@@ -190,24 +194,18 @@ function normalizedColumns(
 
 // Rows saved before #1935 can hold Git URLs with a username or token. Strip
 // them on read so they never reach git argv, update details, or the API.
-// URL userinfo may hold quotes and spaces; only / ? # \ end it.
-const GIT_URL_CREDENTIALS = /(https?:\/\/|^git:)[^/?#\\]*@/giu;
-// Free text: a URL also ends at whitespace.
-const TEXT_GIT_URL_CREDENTIALS = /(https?:\/\/)[^\s/?#\\]*@/giu;
-
-export function stripGitUrlCredentials(value: string): string {
-  return value.replace(GIT_URL_CREDENTIALS, "$1");
+// A plugin source can also be `git:user:TOKEN@host/repo@ref`.
+export function stripPluginGitUrlCredentials(value: string): string {
+  return stripGitUrlCredentials(value).replace(/^git:[^/?#\\]*@/iu, "git:");
 }
-
-export function stripTextGitUrlCredentials(value: string): string {
-  return value.replace(TEXT_GIT_URL_CREDENTIALS, "$1");
-}
+export { stripTextGitUrlCredentials };
 
 function withoutGitUrlCredentials(row: InstalledPluginRow): InstalledPluginRow {
   return {
     ...row,
-    source: stripGitUrlCredentials(row.source),
-    sourceGitUrl: row.sourceGitUrl && stripGitUrlCredentials(row.sourceGitUrl),
+    source: stripPluginGitUrlCredentials(row.source),
+    sourceGitUrl:
+      row.sourceGitUrl && stripPluginGitUrlCredentials(row.sourceGitUrl),
     updateStatusDetail:
       row.updateStatusDetail &&
       stripTextGitUrlCredentials(row.updateStatusDetail),
@@ -287,7 +285,7 @@ export function listUnnormalizedPluginRegistrations(
     .from(installedPlugins)
     .where(eq(installedPlugins.normalizationVersion, 0))
     .all()
-    .map((row) => ({ ...row, source: stripGitUrlCredentials(row.source) }));
+    .map((row) => ({ ...row, source: stripPluginGitUrlCredentials(row.source) }));
 }
 
 export function normalizeInstalledPluginRegistration(

@@ -81,7 +81,7 @@ fn model_format(kind: runtime::Kind) -> &'static str {
     }
 }
 
-/// One agent's models, shaped like the Local `provider models --json`. Only Codex, Claude Code and Cursor list
+/// One agent's models, shaped like the Local `provider models --json`. Codex, Claude Code, Cursor and OpenCode list
 /// theirs; the others answer with their default and how they name models.
 async fn models(
     State(m): State<Arc<Manager>>,
@@ -96,29 +96,47 @@ async fn models(
             &format!("Unknown provider {id}. See room-cli provider list."),
         ));
     };
+    let fallback = || json!({"id":id,"model":profile.model,"note":model_format(kind)});
     if !matches!(
         kind,
-        runtime::Kind::Codex | runtime::Kind::Claude | runtime::Kind::Cursor
+        runtime::Kind::Codex
+            | runtime::Kind::Claude
+            | runtime::Kind::Cursor
+            | runtime::Kind::OpenCode
     ) {
-        return Ok(Json(
-            json!({"id":id,"model":profile.model,"note":model_format(kind)}),
-        ));
+        return Ok(Json(fallback()));
     }
     if m.storage.blocks() {
+        if kind == runtime::Kind::OpenCode {
+            return Ok(Json(fallback()));
+        }
         return Err(fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "Model lists are unavailable while this sandbox's disk is critically low.",
         ));
     }
     // A saved list answers at once; the first call asks the agent itself.
-    let models = m.catalog(kind, true).await.map_err(session_failure)?;
-    let list: Vec<Value> = models
-        .iter()
-        .map(|model| {
-            let efforts: Vec<Value> = model.reasoning_levels.iter().map(|level| json!({"reasoningEffort":level})).collect();
-            json!({"id":model.model,"model":model.model,"supportedReasoningEfforts":efforts,"isDefault":model.model == profile.model})
-        })
-        .collect();
+    let models = match m.catalog(kind, true).await {
+        Ok(models) => models,
+        Err(_) if kind == runtime::Kind::OpenCode => return Ok(Json(fallback())),
+        Err(error) => return Err(session_failure(error)),
+    };
+    let mut list: Vec<Value> = Vec::with_capacity(models.len() + 1);
+    if kind == runtime::Kind::OpenCode && !models.iter().any(|model| model.model == "default") {
+        let efforts: Vec<Value> = runtime::OPENCODE_REASONING_LEVELS
+            .iter()
+            .map(|level| json!({"reasoningEffort":level}))
+            .collect();
+        list.push(json!({"id":"default","model":"default","supportedReasoningEfforts":efforts,"isDefault":profile.model == "default"}));
+    }
+    list.extend(models.iter().map(|model| {
+        let efforts: Vec<Value> = model
+            .reasoning_levels
+            .iter()
+            .map(|level| json!({"reasoningEffort":level}))
+            .collect();
+        json!({"id":model.model,"model":model.model,"supportedReasoningEfforts":efforts,"isDefault":model.model == profile.model})
+    }));
     Ok(Json(json!(list)))
 }
 

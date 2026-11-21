@@ -70,6 +70,8 @@ describe("@cloudroom/templates", () => {
         "Ask the user a blocking question only when",
       );
       expect(rendered).not.toMatch(/\{\{|\n\n\n/u);
+      // #2257: the "Built with Cloudroom" line goes on new PR and issue descriptions, never on reviews.
+      expect(rendered).toContain("(the description only, never reviews or comments)");
     }
     // Each kind of thread gets only its own lines.
     const local = systemPrompt("local");
@@ -92,6 +94,11 @@ describe("@cloudroom/templates", () => {
     // #1739: Codex can SIGTERM a plain retained server; Cloud agents start servers with a TTY or detached.
     expect(cloud).toContain("setsid nohup <cmd> > /tmp/<name>.log 2>&1 < /dev/null &");
     expect(local).not.toContain("setsid nohup");
+    // #2165: Cloud /var/tmp can be noexec, so executables go to /tmp.
+    expect(cloud).toContain(
+      "Put generated executables in `/tmp` or the project.",
+    );
+    expect(local).not.toContain("/var/tmp");
   });
 
   it("offers Mac access and Local computer use only off Windows", () => {

@@ -25,10 +25,9 @@ import * as legacyPaths from "./path-mutations.js";
 
 export { browseHostDirectory } from "./host-files.js";
 
-const IMAGE_BYTES = 10 * 1024 * 1024;
-const FILE_BYTES = 25 * 1024 * 1024;
-/** A 25 MB file as base64 in JSON, with room to spare. */
-const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+const READ_FILE_BYTES = 50 * 1024 * 1024;
+/** A 50 MB file as base64 in JSON, with room to spare. */
+const MAX_OUTPUT_BYTES = 80 * 1024 * 1024;
 const TIMEOUT_MS = 120_000;
 
 type Options = Pick<CommandDispatchOptions, "runtimeManager">;
@@ -69,7 +68,7 @@ function fileType(path: string): { mimeType: string | undefined; image: boolean;
   const mimeType = mimeTypes.lookup(path) || undefined;
   // SVG is text the viewer can show and edit; other images are bytes.
   const image = Boolean(mimeType?.startsWith("image/") && mimeType !== "image/svg+xml");
-  return { mimeType, image, limit: image ? IMAGE_BYTES : FILE_BYTES };
+  return { mimeType, image, limit: READ_FILE_BYTES };
 }
 
 function withType<T extends object>(result: T, mimeType: string | undefined): T {

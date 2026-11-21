@@ -159,6 +159,12 @@ A browser login can't run in a sandbox: Droid signs in with `FACTORY_API_KEY` fr
 
 Hosted sandboxes copy the Mac's `config.toml` and every token in `credentials/` (one per region: `kimi-code.json` for kimi.com, `kimi-code-env-<hash>.json` for kimi.ai) at wake, and save the sandbox's renewed copies before sleep. Kimi rotates refresh tokens, so the Mac and a sandbox may sign each other out (ADR 20261107-081737). Without a login, a start fails with a message to run `kimi login` on the user's computer (Mac, Windows, or Linux).
 
+## Antigravity
+
+Core starts Google's `agy acp` as the agent user. The API harness ID is `antigravity` and the desktop provider ID is `acp-antigravity`. Core applies the selected ACP `model` and `thought_level` and resumes the native conversation by ID. Teleport copies only that conversation's SQLite backup.
+
+Hosted Cloud sign-in offers Google's link and code or a Gemini API key. The login sandbox queries the account's actual ACP choices. Logins are encrypted per user and delivered on wake. Self-hosted users can install `agy` and run `agy acp --login` as the runtime user. Google documents consumer plan restrictions on third-party automation in its [FAQ](https://antigravity.google/docs/faq/).
+
 ## Agent Zero
 
 `src/runtime/agent_zero.rs` runs Agent Zero's `a0 acp` bridge over the shared ACP protocol (ADR 20261116-153548). Agent Zero itself is the user's own server; the sandbox has only the pinned bridge (`A0_INSTALL` in `web/lib/sandbox-logins.ts`; the Agent Zero login also runs it on wake, so older sandboxes get it). Core discovers `a0` in the agent account's `.local/bin` or `/usr/local/bin` once `~/.agent-zero` exists, and starts it with `--host`: the Cloud environment's `AGENT_ZERO_HOST`, else the one in `~/.agent-zero/.env` (the Mac's copied `a0` login). A missing host, localhost, Docker's host name, or a private address fails the start with a hint, before the bridge runs. Computer use and the host browser are off.

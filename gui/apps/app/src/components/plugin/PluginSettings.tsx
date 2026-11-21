@@ -19,7 +19,7 @@ import {
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { ScopedInstructionRules } from "@/components/settings/ScopedInstructionRules";
 import {
   SettingsSection,

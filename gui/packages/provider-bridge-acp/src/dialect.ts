@@ -2,7 +2,12 @@ import type { ReasoningLevel } from "@cloudroom/domain";
 import type { DeltaItemShape } from "@cloudroom/provider-bridge-protocol";
 import { basename } from "node:path";
 import { z } from "zod";
+import { prepareAntigravityLaunch } from "./antigravity.js";
 import type { AcpContextEstimateTuning } from "./context-estimate.js";
+import {
+  readCursorSessionContextUsage,
+  type AcpContextUsageReading,
+} from "./cursor-store-usage.js";
 import {
   ANTIGRAVITY_ACP_MAINTENANCE,
   CURSOR_ACP_MAINTENANCE,
@@ -60,6 +65,13 @@ export interface AcpDialect {
   openSession?(opening: AcpSessionOpening): Promise<string>;
   sessionMcpServers?: false;
   hidesModel?(id: string): boolean;
+  // The effort a new thread starts at when the model offers it, instead of the agent's own saved level.
+  defaultReasoningLevel?: ReasoningLevel;
+  // Args, from the launch's, that delete a session; model discovery's probe session would otherwise stay in the user's list.
+  deleteSessionArgs?(
+    launchArgs: readonly string[],
+    sessionId: string,
+  ): string[] | undefined;
   emptyTurnError?: string;
   toolIdentity?(event: AcpToolCallUpdateEvent): AcpToolIdentity | undefined;
   classifyToolCall?(
@@ -93,6 +105,11 @@ export interface AcpDialect {
   isBusySession?(message: string): boolean;
   maintenance?: AcpMaintenanceDialect;
   contextEstimate?: AcpContextEstimateTuning;
+  readContextUsage?(args: {
+    sessionId: string;
+    model: string | undefined;
+    env: Readonly<Record<string, string | undefined>>;
+  }): AcpContextUsageReading | undefined;
 }
 
 export function acpPromptResultSchemaFor(dialect: AcpDialect) {
@@ -269,10 +286,11 @@ export const CURSOR_ACP_DIALECT: AcpDialect = {
   classifyToolCall: cursorClassifyToolCall,
   handleClientRequest: cursorHandleClientRequest,
   maintenance: CURSOR_ACP_MAINTENANCE,
+  readContextUsage: readCursorSessionContextUsage,
   contextEstimate: {
     baseTokens: 19_000,
     charsPerToken: 3.4,
-    defaultWindowTokens: 200_000,
+    defaultWindowTokens: 300_000,
   },
 };
 
@@ -456,6 +474,14 @@ function openCodeStartError(
 
 export const OPENCODE_ACP_DIALECT: AcpDialect = {
   id: "opencode",
+  // OpenCode and Kilo keep every session, and `-c` resumes the latest one (#1236). Swapping the `acp` subcommand
+  // keeps a wrapper launch (`npx -y opencode-ai acp`, `node kilo.js acp`) on the same CLI.
+  deleteSessionArgs: (launchArgs, sessionId) => {
+    const acp = launchArgs.lastIndexOf("acp");
+    return acp < 0
+      ? undefined
+      : [...launchArgs.slice(0, acp), "session", "delete", sessionId];
+  },
   normalizeCommandEvent: normalizeOpenCodeCommandEvent,
   startError: openCodeStartError,
 };
@@ -492,6 +518,8 @@ export const KIMI_ACP_DIALECT: AcpDialect = {
 export const ANTIGRAVITY_ACP_DIALECT: AcpDialect = {
   id: "antigravity",
   maintenance: ANTIGRAVITY_ACP_MAINTENANCE,
+  prepareLaunch: prepareAntigravityLaunch,
+  defaultReasoningLevel: "high",
 };
 
 // Agent Zero runs on its own server and reaches the thread's folder only through its `a0` bridge's host tools, which

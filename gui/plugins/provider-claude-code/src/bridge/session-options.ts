@@ -50,6 +50,15 @@ const SUMMARIZED_ADAPTIVE_THINKING = {
   display: "summarized",
 } satisfies Exclude<Options["thinking"], undefined>;
 const CLAUDE_CODE_EXECUTABLE_ENV = "BB_CLAUDE_CODE_EXECUTABLE";
+// Claude's own timers and schedules. Cloudroom can't see them, so a reply they wake can get lost: `room-cli wake` and
+// loops replace them. The `/loop` and `/schedule` skills run on these tools, so they go too.
+const CLAUDE_TIMER_TOOLS = [
+  "ScheduleWakeup",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "RemoteTrigger",
+];
 
 export function toSdkEffort(
   reasoningLevel: ReasoningLevel,
@@ -70,6 +79,7 @@ function buildFlagSettings(
     disableClaudeAiConnectors: params.claudeAiConnectorsEnabled !== true,
     enableWorkflows: params.workflowsEnabled,
     ultracode: params.reasoningLevel === "ultracode",
+    skillOverrides: { loop: "off", schedule: "off" },
     ...(deny.length > 0 ? { permissions: { deny } } : {}),
   };
 }
@@ -328,8 +338,6 @@ export function buildSessionOptions(
     ...(extraArgs ? { extraArgs } : {}),
     ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
     ...(params.plugins ? { plugins: params.plugins } : {}),
-    ...(params.disallowedTools && params.disallowedTools.length > 0
-      ? { disallowedTools: [...params.disallowedTools] }
-      : {}),
+    disallowedTools: [...(params.disallowedTools ?? []), ...CLAUDE_TIMER_TOOLS],
   };
 }

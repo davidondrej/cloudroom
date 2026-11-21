@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import type { SystemVersionResponse } from "@cloudroom/server-contract";

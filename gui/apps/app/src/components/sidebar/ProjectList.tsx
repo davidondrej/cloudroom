@@ -7,7 +7,7 @@ import {
   type PointerEventHandler,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAtom, useAtomValue, useSetAtom, useStore } from "jotai";
 import type {
   ProjectResponse,

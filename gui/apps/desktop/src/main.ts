@@ -251,6 +251,7 @@ import {
 import { parseDesktopSystemConfig } from "./desktop-system-config.js";
 import { ensurePackagedUserShellPath } from "./desktop-shell-path.js";
 import { resolveDesktopReloadShortcut } from "./desktop-reload-shortcut.js";
+import { registerAltChordMenuGuard } from "./desktop-alt-chord-menu-guard.js";
 import {
   createLogTailer,
   createLogLineBuffer,
@@ -1239,6 +1240,9 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
   registerApplicationRendererReloadShortcut(
     (browserWindow as BrowserWindow).webContents,
   );
+  if (process.platform === "win32") {
+    registerAltChordMenuGuard((browserWindow as BrowserWindow).webContents);
+  }
   registerDesktopContextMenu({ webContents: browserWindow.webContents });
   browserWindow.on("enter-full-screen", () => {
     sendDesktopWindowStateChanged(browserWindow);

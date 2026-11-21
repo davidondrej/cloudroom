@@ -566,7 +566,19 @@ export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
     };
   }
   if (credentials.expired) {
-    return { supported: true, usage: { status: "expired" } };
+    // Codex renews an expired access token itself while a refresh token is saved; it would only 401 here.
+    return credentials.canRenew
+      ? {
+          supported: true,
+          usage: {
+            status: "error",
+            message:
+              "Codex renews its sign-in on its next reply. Usage shows after that.",
+            planLabel: null,
+            accountEmail: credentials.accountEmail,
+          },
+        }
+      : { supported: true, usage: { status: "expired" } };
   }
   try {
     const headers = new Headers({

@@ -238,7 +238,7 @@ function InvitePopup() {
     } catch (failure) { setProblem(errorText(failure)); } finally { setBusy(false); }
   };
   return (
-    <div className="fixed right-4 top-14 z-50 w-80 space-y-3 rounded-xl border border-border bg-surface-raised p-4 shadow-lg">
+    <div className="fixed right-4 top-14 z-50 w-80 space-y-3 rounded-xl border border-border bg-surface-raised-solid p-4 shadow-lg">
       <p className="text-sm"><b>{invite.from}</b> shared the project <b>github.com/{invite.repo}</b> with you. You'll both see each other's Cloud threads in it, and can take them over.</p>
       {problem && <p role="alert" className="text-xs text-destructive">{problem}</p>}
       <div className="flex justify-end gap-2">

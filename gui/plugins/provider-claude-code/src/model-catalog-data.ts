@@ -15,6 +15,8 @@ export interface ClaudeCodeCatalogEntryData {
   model: string;
   description: string;
   defaultReasoningEffort: ClaudeCodeReasoningLevel;
+  /** A Local turn on an older, known CLI version fails with a clear reason (#2235). */
+  minimumCliVersion?: string;
 }
 
 export function claudeModelLabel(id: string, tag?: string): string | null {
@@ -54,12 +56,14 @@ export const CLAUDE_CODE_ACTIVE_CATALOG_DATA: readonly ClaudeCodeCatalogEntryDat
       description:
         "Fable 5.2 for demanding reasoning; requires Claude Code v2.1.321+",
       defaultReasoningEffort: "high",
+      minimumCliVersion: "2.1.321",
     },
     {
       model: "claude-fable-5-1",
       description:
         "Fable 5.1 for demanding reasoning; requires Claude Code v2.1.257+",
       defaultReasoningEffort: "high",
+      minimumCliVersion: "2.1.257",
     },
     {
       model: DEFAULT_CLAUDE_CODE_MODEL,

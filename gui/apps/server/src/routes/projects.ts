@@ -52,6 +52,7 @@ import {
   isWindowsHostPath,
   isWindowsNetworkOrDevicePath,
   PROMPT_HISTORY_ENTRY_LIMIT,
+  stripGitUrlCredentials,
   UNSUPPORTED_WINDOWS_NETWORK_PROJECT_PATH_MESSAGE,
 } from "@cloudroom/domain";
 import { getHostPathFlavorForHost } from "../services/lib/host-path.js";
@@ -149,7 +150,9 @@ function toProjectResponseProjectFields(
     id: project.id,
     kind: project.kind,
     name: project.name,
-    gitRemoteUrl: project.gitRemoteUrl,
+    // Rows saved before #2190 can hold a remote's username or token.
+    gitRemoteUrl:
+      project.gitRemoteUrl && stripGitUrlCredentials(project.gitRemoteUrl),
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
   };
@@ -685,6 +688,13 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
           headers: { "x-bb-content-encoding": result.contentEncoding },
           ifNoneMatch: context.req.header("if-none-match"),
         }),
+      {
+        directLocal: {
+          ifRange: context.req.header("if-range"),
+          includeContentEncodingHeader: true,
+          range: context.req.header("range"),
+        },
+      },
     );
   });
 

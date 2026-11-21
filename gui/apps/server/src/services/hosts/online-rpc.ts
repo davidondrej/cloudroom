@@ -1,7 +1,8 @@
 import { hostCommandMayWake } from "./wake-policy.js";
 import { isHostCleanupAllowed } from "./cleanup-context.js";
 import { assertMachineLifecycleAdmission } from "../machines/lifecycle.js";
-import { getHost, getThread } from "@cloudroom/db";
+import { getHost, getSessionById, getThread } from "@cloudroom/db";
+import { stripTextGitUrlCredentials } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import {
   type HostDaemonOnlineRpcResponseMessage,
@@ -281,7 +282,13 @@ async function callHostOnlineRpcWithRetry(
   });
 
   if (!response.ok) {
-    throw new ApiError(502, response.errorCode, response.errorMessage, false);
+    // Older daemons send clone errors with the remote's token (#2190).
+    throw new ApiError(
+      502,
+      response.errorCode,
+      stripTextGitUrlCredentials(response.errorMessage),
+      false,
+    );
   }
 
   if (response.commandType !== args.command.type) {
@@ -339,19 +346,95 @@ export function isHostUnavailableApiError(error: unknown): boolean {
   );
 }
 
+// Commands to a host leave in the order they were made, also after a wait,
+// so a cancel never overtakes the command it cancels (#2171).
+const hostSendQueues = new WeakMap<object, Map<string, Promise<void>>>();
+
 function requestHostOnlineRpcResponse(
-  deps: Pick<WorkSessionDeps, "hub">,
+  deps: Pick<WorkSessionDeps, "db" | "hub">,
   args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
 ): Promise<HostDaemonOnlineRpcResponseMessage> {
-  return deps.hub.requestHostOnlineRpc({
-    hostId: args.hostId,
-    message: {
-      type: "host-rpc.request",
-      requestId: randomUUID(),
-      command: args.command,
-    },
-    timeoutMs: args.timeoutMs,
+  const send = () =>
+    deps.hub.requestHostOnlineRpc({
+      hostId: args.hostId,
+      message: {
+        type: "host-rpc.request",
+        requestId: randomUUID(),
+        command: args.command,
+      },
+      timeoutMs: args.timeoutMs,
+    });
+  const queue =
+    hostSendQueues.get(deps.hub) ?? new Map<string, Promise<void>>();
+  hostSendQueues.set(deps.hub, queue);
+  const ahead = queue.get(args.hostId);
+  if (ahead === undefined && silentDaemonSession(deps, args.hostId) === null) {
+    return send();
+  }
+  const startedAt = Date.now();
+  // Resolves once sent, not once answered, so the next command can follow.
+  const sending = (ahead ?? Promise.resolve()).then(async () => {
+    await waitForAnsweringDaemon(deps, args, startedAt);
+    return { response: send() };
   });
+  const released = sending.then(
+    () => undefined,
+    () => undefined,
+  );
+  queue.set(args.hostId, released);
+  void released.then(() => {
+    if (queue.get(args.hostId) === released) queue.delete(args.hostId);
+  });
+  return sending.then(({ response }) => response);
+}
+
+function silentDaemonSession(
+  deps: Pick<WorkSessionDeps, "db" | "hub">,
+  hostId: string,
+) {
+  const sessionId = deps.hub.getDaemonSessionIdForHost(hostId);
+  const session = sessionId && getSessionById(deps.db, { sessionId });
+  return session &&
+    session.status === "active" &&
+    session.leaseExpiresAt <= Date.now()
+    ? session
+    : null;
+}
+
+// Every daemon message renews its lease, and the daemon drops a socket after
+// that much silence, but the server keeps it until a close arrives, so the
+// machine still lists as connected. A command sent into it waits out its
+// timeout with its delivery unknown (#2171). Wait up to one more lease for the
+// daemon to speak, and send nothing if it stays silent, as terminals do (#1631).
+async function waitForAnsweringDaemon(
+  deps: Pick<WorkSessionDeps, "db" | "hub">,
+  args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
+  startedAt: number,
+): Promise<void> {
+  for (;;) {
+    const session = silentDaemonSession(deps, args.hostId);
+    if (session === null) return;
+    const now = Date.now();
+    if (now - startedAt >= Math.min(args.timeoutMs, session.leaseTimeoutMs)) {
+      const host = getHost(deps.db, args.hostId);
+      const silentS = Math.round(
+        (now - session.leaseExpiresAt + session.leaseTimeoutMs) / 1000,
+      );
+      throw new ApiError(
+        502,
+        "host_unavailable",
+        `${host?.name ?? "The machine"} has sent nothing for ${silentS} s, so its connection is stale. Nothing was sent to it (step: ${args.command.type}). Check that it is awake and online, then try again.`,
+        {
+          details: inactiveHostUnavailableDetails(
+            "disconnected",
+            host ?? undefined,
+          ),
+          retryable: false,
+        },
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 export function hostCommandTimeoutError(): ApiError {

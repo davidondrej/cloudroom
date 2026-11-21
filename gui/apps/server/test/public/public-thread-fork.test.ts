@@ -20,7 +20,9 @@ import {
   threadTimelineResponseSchema,
 } from "@cloudroom/server-contract";
 import { describe, expect, it } from "vitest";
+import { applyLoggedThreadLifecycleEvent } from "../../src/services/threads/lifecycle-outcome.js";
 import { appendClientTurnEventInTransaction } from "../../src/services/threads/thread-events.js";
+import { retryFailedTurn } from "../../src/services/threads/turn-retry.js";
 import { sendQueuedMessage } from "../../src/services/threads/queued-messages.js";
 import { sendThreadMessage } from "../../src/services/threads/thread-send.js";
 import {
@@ -1259,8 +1261,7 @@ describe("fork branch point and inherited history", () => {
       expect(running.status).toBe(400);
       expect(await readJson(running)).toMatchObject({
         code: "fork_source_session_unavailable",
-        message:
-          "Cannot fork at sequence 14: the turn containing it has not completed",
+        message: "Fork from a message whose turn has finished.",
       });
 
       const preview = async (seq: number) => readJson(await harness.app.request(`/api/v1/threads/${sourceThread.id}/fork-point/${seq}`));
@@ -1307,8 +1308,7 @@ describe("fork branch point and inherited history", () => {
       expect(beforeFirstTurn.status).toBe(400);
       expect(await readJson(beforeFirstTurn)).toMatchObject({
         code: "fork_source_session_unavailable",
-        message:
-          "Cannot fork at sequence 2: no turn has started at or before it",
+        message: "Fork from a message whose turn has finished.",
       });
     });
   });
@@ -1340,7 +1340,34 @@ describe("fork branch point and inherited history", () => {
     });
   });
 
-  it("lets a tip-only provider fork at its latest turn but not earlier", async () => {
+  it("forks a harness without native fork as text, and a retry sends the chat once", async () => {
+    await withTestHarness({}, async (harness) => {
+      const { sourceThread } = seedConversationForkSource(harness, { providerId: "acp-cursor", runningThirdTurn: false });
+      const preview = await harness.app.request(`/api/v1/threads/${sourceThread.id}/fork-point/10`);
+      expect(await readJson(preview)).toEqual({ exact: true, sequence: 11 });
+
+      const response = await postFork(harness, { sourceThreadId: sourceThread.id, input: textInput("Continue") });
+      expect(response.status, await response.clone().text()).toBe(201);
+      const fork = threadResponseSchema.parse(await readJson(response));
+      expect(fork.providerId).toBe("acp-cursor");
+      const start = await waitForForkStart(harness, fork.id);
+      expect(start.fork).toBeUndefined();
+      expect(JSON.stringify(start.input)).toContain("word second");
+
+      // The first turn fails before it starts; its retry re-sends the chat once, not twice.
+      applyLoggedThreadLifecycleEvent(harness.deps, { event: { type: "run.failed" }, threadId: fork.id });
+      await retryFailedTurn(harness.deps, {
+        thread: threadResponseSchema.parse(await readJson(await harness.app.request(`/api/v1/threads/${fork.id}`))),
+        request: { turnRequestId: null, sendAt: null, reason: "Retry" },
+      });
+      const requests = listEvents(harness.db, { threadId: fork.id }).filter((event) => event.type === "client/turn/requested");
+      const retried = JSON.stringify(turnRequestEventDataSchema.parse(JSON.parse(requests.at(-1)!.data)).input);
+      expect(requests.length).toBeGreaterThan(1);
+      expect(retried.split("This conversation was forked").length - 1).toBe(1);
+    });
+  });
+
+  it("lets a tip-only provider fork natively at its latest turn and as text earlier", async () => {
     await withTestHarness({}, async (harness) => {
       const { sourceThread } = seedConversationForkSource(harness, {
         providerId: TIP_ONLY_PROVIDER_ID,
@@ -1348,7 +1375,7 @@ describe("fork branch point and inherited history", () => {
       });
 
       const preview = await harness.app.request(`/api/v1/threads/${sourceThread.id}/fork-point/5`);
-      expect(await readJson(preview)).toEqual({ exact: true, sequence: 7, textOnly: true });
+      expect(await readJson(preview)).toEqual({ exact: true, sequence: 7 });
       const switched = await harness.app.request("/api/v1/threads", {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1363,15 +1390,20 @@ describe("fork branch point and inherited history", () => {
       const switchedStart = await waitForForkStart(harness, switchedFork.id);
       expect(JSON.stringify(switchedStart.input)).toContain("Reply only with ok.");
       expect(JSON.stringify(switchedStart.input)).not.toContain("word second");
+      // Same harness, earlier reply: a text copy of the chat so far (ADR 20261121-141157).
       const earlier = await postFork(harness, {
         sourceThreadId: sourceThread.id,
         sourceSeqEnd: 5,
+        input: textInput("Continue"),
       });
-      expect(earlier.status).toBe(400);
-      expect(await readJson(earlier)).toMatchObject({
-        code: "fork_source_session_unavailable",
-        message: `Provider ${TIP_ONLY_PROVIDER_ID} can only fork at the end of a session, not from an earlier point in it`,
-      });
+      expect(earlier.status, await earlier.clone().text()).toBe(201);
+      const earlierFork = threadResponseSchema.parse(await readJson(earlier));
+      expect(earlierFork.providerId).toBe(TIP_ONLY_PROVIDER_ID);
+      expect(await readConversationTexts(harness, earlierFork.id)).toEqual(["Reply only with ok.", "ok", "Continue"]);
+      const earlierStart = await waitForForkStart(harness, earlierFork.id);
+      expect(earlierStart.fork).toBeUndefined();
+      expect(JSON.stringify(earlierStart.input)).toContain("Reply only with ok.");
+      expect(JSON.stringify(earlierStart.input)).not.toContain("word second");
 
       const tip = await postFork(harness, {
         sourceThreadId: sourceThread.id,

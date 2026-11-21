@@ -40,7 +40,10 @@ import {
   callHostRetryableOnlineRpc,
   callHostRetryableOnlineRpcForWork,
 } from "../services/hosts/online-rpc.js";
-import { requireDaemonFileContentResult } from "../services/hosts/daemon-file-response.js";
+import {
+  remapDaemonFileRouteError,
+  requireDaemonFileContentResult,
+} from "../services/hosts/daemon-file-response.js";
 import { generateCommitMessage } from "../services/ai/commit-message.js";
 import { archiveEnvironmentThreads } from "../services/threads/thread-archive.js";
 import {
@@ -561,16 +564,21 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
       repoRelativePath,
     );
     const ref = resolveDiffFileRef(query);
-    const result = await callHostRetryableOnlineRpc(deps, {
-      hostId: environment.hostId,
-      timeoutMs: COMMAND_TIMEOUT_MS,
-      command: {
-        type: "host.read_file",
-        path: absolutePath,
-        rootPath: environment.path,
-        ...(ref !== undefined ? { ref } : {}),
-      },
-    });
+    let result;
+    try {
+      result = await callHostRetryableOnlineRpc(deps, {
+        hostId: environment.hostId,
+        timeoutMs: COMMAND_TIMEOUT_MS,
+        command: {
+          type: "host.read_file",
+          path: absolutePath,
+          rootPath: environment.path,
+          ...(ref !== undefined ? { ref } : {}),
+        },
+      });
+    } catch (error) {
+      return remapDaemonFileRouteError(error);
+    }
     const contentResult = requireDaemonFileContentResult(result);
     return context.json({
       path: contentResult.path,

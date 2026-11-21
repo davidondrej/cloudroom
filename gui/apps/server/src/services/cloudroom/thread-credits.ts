@@ -148,8 +148,9 @@ export async function threadCredits(deps: AppDeps, threadId: string): Promise<Th
   const cached = cache.get(threadId), now = Date.now();
   if (cached && now - cached.at < CACHE_MS) return cached.value;
   const sandboxes = cloudroom(deps).sandboxes;
-  // Signed out, this app can't have used Cloud Credits: no error on every Local thread's card.
-  if (!await sandboxes.account()) return { credits: 0, pending: false, awakeMinutes: 0, partial: false, rows: [] };
+  // Signed out, this app can't have used Cloud Credits: no error on every Local thread's card. A Cloud thread's are
+  // unknown, not 0 (#2223).
+  if (!await sandboxes.account()) return { credits: thread.executionTarget === "cloud" ? null : 0, pending: false, awakeMinutes: 0, partial: false, rows: [] };
   const site = await sandboxes.threadCredits(threadId).catch((error: unknown) => {
     throw new ApiError(error instanceof CloudroomError && error.status ? 400 : 503, "cloud_thread_credits", error instanceof Error ? error.message : String(error));
   });

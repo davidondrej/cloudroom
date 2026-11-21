@@ -112,6 +112,7 @@ interface FilePreviewBodyProps {
   lineOverflowMode: CodeOverflowMode;
   viewMode: FilePreviewViewMode;
   markdownLinkRouting?: MarkdownLinkRouting;
+  mediaRefreshCount: number;
   onSelectionAddToChat?: (text: string) => void;
   onDownload?: (path: string) => void;
 }
@@ -167,17 +168,22 @@ interface CsvFilePreviewProps {
 interface FilePreviewImageProps {
   url: string;
   alt: string;
+  path: string;
+  onDownload?: (path: string) => void;
 }
 
 interface FilePreviewVideoProps {
   url: string;
   title: string;
+  path: string;
+  onDownload?: (path: string) => void;
 }
 
 interface FilePreviewAudioProps {
   url: string;
   path: string;
   sizeBytes: number | null;
+  onDownload?: (path: string) => void;
 }
 
 interface FilePreviewMessageProps {
@@ -458,6 +464,17 @@ export function FilePreview({
   markdownLinkRouting,
   statusLabel = null,
 }: FilePreviewProps) {
+  const [mediaRefresh, setMediaRefresh] = useState({ count: 0, path });
+  const mediaRefreshCount = mediaRefresh.path === path ? mediaRefresh.count : 0;
+  const handleRefresh = onRefresh
+    ? () => {
+        setMediaRefresh((current) => ({
+          count: current.path === path ? current.count + 1 : 1,
+          path,
+        }));
+        onRefresh();
+      }
+    : undefined;
   const toggleKind = getFilePreviewToggleKind(state);
   const filePreviewLineRange = getFilePreviewLineRange(state);
   const rawContents = getRawFilePreviewContents(state);
@@ -519,7 +536,7 @@ export function FilePreview({
           onOpenInEditor={onOpenInEditor}
           onRevealInFinder={onRevealInFinder}
           onDownload={onDownload}
-          onRefresh={onRefresh}
+          onRefresh={handleRefresh}
           isRefreshing={isRefreshing}
           statusLabel={statusLabel}
           toggleKind={toggleKind}
@@ -536,11 +553,23 @@ export function FilePreview({
         lineOverflowMode={lineOverflowMode}
         viewMode={bodyViewMode}
         markdownLinkRouting={markdownLinkRouting}
+        mediaRefreshCount={mediaRefreshCount}
         onSelectionAddToChat={onSelectionAddToChat}
         onDownload={onDownload}
       />
     </div>
   );
+}
+
+function appendMediaRefreshParam(url: string, refreshCount: number): string {
+  if (refreshCount <= 0 || /^(?:blob|data):/iu.test(url)) {
+    return url;
+  }
+  const hashIndex = url.indexOf("#");
+  const baseUrl = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+  const hash = hashIndex >= 0 ? url.slice(hashIndex) : "";
+  const separator = baseUrl.includes("?") ? "&" : "?";
+  return `${baseUrl}${separator}v=${refreshCount}${hash}`;
 }
 
 function FilePreviewBody({
@@ -549,6 +578,7 @@ function FilePreviewBody({
   lineOverflowMode,
   viewMode,
   markdownLinkRouting,
+  mediaRefreshCount,
   onSelectionAddToChat,
   onDownload,
 }: FilePreviewBodyProps) {
@@ -583,17 +613,32 @@ function FilePreviewBody({
     );
   }
   if (state.kind === "image") {
-    return <FilePreviewImage url={state.url} alt={path} />;
+    return (
+      <FilePreviewImage
+        url={appendMediaRefreshParam(state.url, mediaRefreshCount)}
+        alt={path}
+        path={path}
+        onDownload={onDownload}
+      />
+    );
   }
   if (state.kind === "video") {
-    return <FilePreviewVideo url={state.url} title={path} />;
+    return (
+      <FilePreviewVideo
+        url={appendMediaRefreshParam(state.url, mediaRefreshCount)}
+        title={path}
+        path={path}
+        onDownload={onDownload}
+      />
+    );
   }
   if (state.kind === "audio") {
     return (
       <FilePreviewAudio
-        url={state.url}
+        url={appendMediaRefreshParam(state.url, mediaRefreshCount)}
         path={path}
         sizeBytes={state.sizeBytes}
+        onDownload={onDownload}
       />
     );
   }
@@ -1164,8 +1209,41 @@ function CsvFilePreview({ file, onSelectionAddToChat }: CsvFilePreviewProps) {
   );
 }
 
-function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
+function FilePreviewMediaError({
+  message,
+  path,
+  onDownload,
+}: {
+  message: string;
+  path: string;
+  onDownload?: (path: string) => void;
+}) {
+  return (
+    <FilePreviewMessage message={message} role="alert">
+      {onDownload ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={() => onDownload(path)}
+        >
+          <Icon name="Download" aria-hidden />
+          Save to Downloads
+        </Button>
+      ) : null}
+    </FilePreviewMessage>
+  );
+}
+
+function FilePreviewImage({
+  url,
+  alt,
+  path,
+  onDownload,
+}: FilePreviewImageProps) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const imageTabLightbox = useImageTabLightbox();
 
   useLayoutEffect(() => {
@@ -1173,6 +1251,16 @@ function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
       imageTabLightbox.update({ alt, src: url });
     }
   }, [alt, imageTabLightbox, url]);
+
+  if (failedUrl === url) {
+    return (
+      <FilePreviewMediaError
+        message="Failed to load image."
+        path={path}
+        onDownload={onDownload}
+      />
+    );
+  }
 
   return (
     <div className="pt-4">
@@ -1188,7 +1276,12 @@ function FilePreviewImage({ url, alt }: FilePreviewImageProps) {
           setIsLightboxOpen(true);
         }}
       >
-        <img src={url} alt={alt} className="mx-auto block h-auto max-w-full" />
+        <img
+          src={url}
+          alt={alt}
+          className="mx-auto block h-auto max-w-full"
+          onError={() => setFailedUrl(url)}
+        />
       </button>
       {imageTabLightbox === null ? (
         <ImageLightbox
@@ -1212,8 +1305,23 @@ function formatDuration(seconds: number): string {
     : `${minutes}:${rest}`;
 }
 
-function FilePreviewAudio({ url, path, sizeBytes }: FilePreviewAudioProps) {
+function FilePreviewAudio({
+  url,
+  path,
+  sizeBytes,
+  onDownload,
+}: FilePreviewAudioProps) {
   const [duration, setDuration] = useState<number | null>(null);
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  if (failedUrl === url) {
+    return (
+      <FilePreviewMediaError
+        message="Failed to load audio."
+        path={path}
+        onDownload={onDownload}
+      />
+    );
+  }
   const format = path.split(".").at(-1)?.toUpperCase() ?? null;
   const details: [string, string][] = [];
   if (duration !== null && Number.isFinite(duration)) {
@@ -1230,6 +1338,7 @@ function FilePreviewAudio({ url, path, sizeBytes }: FilePreviewAudioProps) {
         controls
         preload="metadata"
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)}
+        onError={() => setFailedUrl(url)}
       />
       <dl className="mt-5 grid grid-cols-[6rem_1fr] gap-y-2 text-sm">
         {details.map(([label, value]) => (
@@ -1243,7 +1352,22 @@ function FilePreviewAudio({ url, path, sizeBytes }: FilePreviewAudioProps) {
   );
 }
 
-function FilePreviewVideo({ url, title }: FilePreviewVideoProps) {
+function FilePreviewVideo({
+  url,
+  title,
+  path,
+  onDownload,
+}: FilePreviewVideoProps) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  if (failedUrl === url) {
+    return (
+      <FilePreviewMediaError
+        message="Failed to load video."
+        path={path}
+        onDownload={onDownload}
+      />
+    );
+  }
   return (
     <div className="pt-4">
       <video
@@ -1252,6 +1376,7 @@ function FilePreviewVideo({ url, title }: FilePreviewVideoProps) {
         className="block max-h-[34rem] w-full bg-black"
         controls
         preload="metadata"
+        onError={() => setFailedUrl(url)}
       />
     </div>
   );

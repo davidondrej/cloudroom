@@ -67,6 +67,10 @@ export interface CreateQueuedThreadMessageInput {
   /** Non-null only for one of core's own system notices. */
   systemNotice: QueuedMessageSystemNotice | null;
   hardQueue?: boolean;
+  /** A put-back row's old place in the queue; new rows go last. */
+  sortKey?: string;
+  /** Holds the row from automatic sends, in the same insert as the wait. */
+  failureReason?: string;
 }
 
 export interface UpdateQueuedThreadMessageInput {
@@ -297,9 +301,11 @@ export function createQueuedThreadMessageInTransaction(
   const now = Date.now();
   const id = createQueuedThreadMessageId();
   const lastQueuedMessage = getLastQueuedThreadMessage(tx, input.threadId);
-  const sortKey = lastQueuedMessage
-    ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
-    : createOrderKeyBetween({ previousKey: null, nextKey: null });
+  const sortKey =
+    input.sortKey ??
+    (lastQueuedMessage
+      ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
+      : createOrderKeyBetween({ previousKey: null, nextKey: null }));
   return tx
     .insert(queuedThreadMessages)
     .values({
@@ -327,6 +333,7 @@ export function createQueuedThreadMessageInTransaction(
         input.payload.kind === "retry" ? input.payload.attempt : null,
       retryReason: input.payload.kind === "retry" ? input.payload.reason : null,
       hardQueue: input.hardQueue ?? false,
+      failureReason: input.failureReason ?? null,
       claimedAt: null,
       claimToken: null,
       sortKey,

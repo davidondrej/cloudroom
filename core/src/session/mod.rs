@@ -442,6 +442,8 @@ pub enum Error {
     Conflict(&'static str),
     /// A 409 whose text names its cause, such as the saved reason a new agent didn't start (#1802).
     Refused(String),
+    /// A 409 for a session whose agent failed to start before any turn ran (`code: "never_started"`).
+    NeverStarted(String),
     /// A refused effort, with the levels the model takes (`invalid_reasoning_effort`).
     Effort(String),
     /// Carries the underlying cause so API clients can see why storage failed.
@@ -453,7 +455,7 @@ impl Error {
         match self {
             Self::NotFound => "session not found".into(),
             Self::Conflict(message) => (*message).into(),
-            Self::Refused(message) => message.clone(),
+            Self::Refused(message) | Self::NeverStarted(message) => message.clone(),
             Self::Effort(message) => format!("invalid reasoning effort: {message}"),
             // A locked journal or a write that found no space: the only way in is `vm run` (#211).
             Self::Storage(detail)
@@ -519,6 +521,8 @@ pub struct Manager {
     codex_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     claude_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     cursor_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
+    opencode_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
+    antigravity_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     codex_auth: runtime::auth::CodexAuth,
     claude_auth: Arc<runtime::claude_auth::ClaudeAuth>,
     claude_login: runtime::claude_login::ClaudeLogin,
@@ -714,6 +718,8 @@ impl Manager {
             codex_models: tokio::sync::Mutex::new(None),
             claude_models: tokio::sync::Mutex::new(None),
             cursor_models: tokio::sync::Mutex::new(None),
+            opencode_models: tokio::sync::Mutex::new(None),
+            antigravity_models: tokio::sync::Mutex::new(None),
             codex_auth: runtime::auth::CodexAuth::default(),
             claude_auth: Arc::new(runtime::claude_auth::ClaudeAuth::default()),
             claude_login: runtime::claude_login::ClaudeLogin::default(),
@@ -1004,6 +1010,9 @@ impl Manager {
 
     /// Account checks shared by new sessions and Teleport's preflight.
     async fn harness_ready(self: &Arc<Self>, kind: runtime::Kind) -> Result<()> {
+        if kind == runtime::Kind::Antigravity && runtime::antigravity::needs_login(&self.config) {
+            return Err(Error::Conflict(runtime::antigravity::SIGN_IN));
+        }
         if kind == runtime::Kind::Claude {
             match self
                 .claude_auth
@@ -1100,6 +1109,7 @@ impl Manager {
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Antigravity => runtime::antigravity::LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };
@@ -1577,6 +1587,19 @@ impl Manager {
             .collect::<Vec<_>>()
             .join(" ");
         (!why.is_empty()).then(|| why.chars().take(1000).collect())
+    }
+
+    /// Why a session's agent failed to start before any turn ran, without wrapper prefixes.
+    pub(crate) fn failed_start_reason(&self, id: &str) -> Option<String> {
+        let failed = (self.local.lock().unwrap().sessions.get(id)).is_some_and(|s| {
+            s.state == SessionState::Failed && !s.has_dispatched && s.close_request.is_none()
+        });
+        let why = failed.then(|| self.start_failure(id)).flatten()?;
+        Some(
+            why.rsplit_once("Cause: ")
+                .map_or(&why[..], |(_, cause)| cause)
+                .to_owned(),
+        )
     }
 
     /// Hands the website the new session, then closes the old one (#237). The website applies it once, and a retry

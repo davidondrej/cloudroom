@@ -17,8 +17,12 @@ import { useEnvironment } from "@/hooks/queries/environment-queries";
 import {
   useHostProviderCliStatus,
   useSystemConfig,
+  useSystemProviderUsageLimits,
 } from "@/hooks/queries/system-queries";
-import { systemExecutionOptionsQueryKey } from "@/hooks/queries/query-keys";
+import {
+  hostProviderCliStatusQueryKey,
+  systemExecutionOptionsQueryKey,
+} from "@/hooks/queries/query-keys";
 import {
   modelCatalogCacheKey,
   writeCachedModelCatalog,
@@ -53,17 +57,18 @@ export function useRoutedHostId(
   );
 }
 
-/** The install Cloudroom can run for a provider whose CLI is missing or broken on the routed machine. */
+/** The install Cloudroom can run on the routed machine for a provider whose CLI is missing or broken, or `outdated`. */
 function useProviderCliFix(
   providerId: string,
   routing: SystemProvidersQuery | undefined,
   enabled: boolean,
+  outdated = false,
 ) {
   const hostId = useRoutedHostId(routing, enabled);
   const cliStatus = useHostProviderCliStatus({ hostId, enabled });
   const status = cliStatus.data?.[providerId];
   const issue =
-    enabled && status && !status.installed
+    enabled && status && status.installed === outdated
       ? buildProviderCliIssue({ provider: providerId, status })
       : null;
   const { runningJobKey, queuedJobKeys, startInstall } =
@@ -188,6 +193,19 @@ export function ModelUnavailable({
   useEffect(() => {
     if (needsSignIn && signInsInProgress.has(signInKey)) retryLoad(true);
   }, [needsSignIn, retryLoad, signInKey]);
+  // The install panel has no Reload: each time it opens, quietly re-check the CLI, so one installed in a terminal
+  // loads its models by itself.
+  const routedHostId = useRoutedHostId(routing, error?.code === "missing_executable");
+  useEffect(() => {
+    if (error?.code !== "missing_executable" || routedHostId === null) return;
+    const statusKey = hostProviderCliStatusQueryKey(routedHostId);
+    void queryClient
+      .refetchQueries({ queryKey: statusKey, exact: true })
+      .then(() => {
+        const status = queryClient.getQueryData<Record<string, { installed?: boolean }>>(statusKey)?.[providerId];
+        if (status?.installed) retryLoad(true);
+      });
+  }, [error?.code, providerId, queryClient, retryLoad, routedHostId]);
 
   const startSignIn = () => {
     signInsInProgress.add(signInKey);
@@ -213,11 +231,15 @@ export function ModelUnavailable({
     );
   }
 
-  const label = cliFix?.broken
-    ? `${providerLabel} install is broken`
+  const label = cliFix
+    ? cliFix.installing
+      ? `${cliFix.broken ? "Reinstalling" : "Installing"} ${providerLabel}…`
+      : cliFix.broken
+        ? `${providerLabel} install is broken`
+        : `Get ${providerLabel}`
     : failed || error
-      ? shortReason(error)
-      : "No models";
+        ? shortReason(error)
+        : "No models";
   const detail = retry.isError
     ? retry.error.message
     : error
@@ -236,17 +258,15 @@ export function ModelUnavailable({
       ) : null}
       {cliFix ? (
         <>
-          <span className="text-center text-foreground">{label}</span>
-          <Button size="sm" disabled={cliFix.installing} onClick={cliFix.install}>
-            <Icon
-              name={cliFix.installing ? "Spinner" : "Download"}
-              className={cliFix.installing ? "size-3.5 animate-spin" : "size-3.5"}
-              aria-hidden
-            />
-            {cliFix.installing
-              ? `Installing ${providerLabel}…`
-              : `${cliFix.broken ? "Reinstall" : "Install"} ${providerLabel}`}
-          </Button>
+          <span className="text-center text-sm font-medium text-foreground">{label}</span>
+          {cliFix.installing ? (
+            <Icon name="Spinner" className="size-4 animate-spin" aria-hidden />
+          ) : (
+            <Button size="sm" className="h-8 gap-1.5 px-4" onClick={cliFix.install}>
+              <Icon name="Download" className="size-3.5" aria-hidden />
+              {cliFix.broken ? "Reinstall" : "Install"}
+            </Button>
+          )}
         </>
       ) : helpUrl ? (
         <a
@@ -264,21 +284,80 @@ export function ModelUnavailable({
       <span className="sr-only" role={retry.isError ? "alert" : undefined}>
         {detail}
       </span>
-      <button
-        type="button"
-        aria-label={`Retry loading ${providerLabel} models`}
-        disabled={retry.isPending}
-        onClick={() => retry.mutate(error?.canRestart === true)}
-        className={cn(
-          "flex size-7 items-center justify-center rounded-lg border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60",
-          QUIET_FILL,
-        )}
-      >
-        <Icon
-          name={retry.isPending ? "Spinner" : "RotateCcw"}
-          className={retry.isPending ? "size-3.5 animate-spin" : "size-3.5"}
-        />
-      </button>
+      {/* Models reload by themselves after an install, so the install path has no Reload. */}
+      {cliFix ? null : (
+        <button
+          type="button"
+          aria-label={`Retry loading ${providerLabel} models`}
+          disabled={retry.isPending}
+          onClick={() => retry.mutate(error?.canRestart === true)}
+          className={cn(
+            "flex size-7 items-center justify-center rounded-lg border text-muted-foreground hover:bg-state-hover hover:text-foreground disabled:opacity-60",
+            QUIET_FILL,
+          )}
+        >
+          <Icon
+            name={retry.isPending ? "Spinner" : "RotateCcw"}
+            className={retry.isPending ? "size-3.5 animate-spin" : "size-3.5"}
+          />
+        </button>
+      )}
+    </div>
+  );
+}
+
+// A provider's newest model family. Which models an account gets depends on its CLI version and its plan.
+const NEWEST_MODELS: Record<
+  string,
+  { idPrefix: string; name: string; planOwner: string }
+> = {
+  "acp-antigravity": { idPrefix: "gemini-4", name: "Gemini 4", planOwner: "Google" },
+};
+
+/** Says why a provider's list lacks its newest models: an old CLI (with its update), or the account's plan. */
+export function MissingModelsNote({
+  providerId,
+  providerLabel,
+  routing,
+  modelIds,
+}: {
+  providerId: string;
+  providerLabel: string;
+  routing?: SystemProvidersQuery;
+  modelIds: readonly string[];
+}) {
+  const newest = NEWEST_MODELS[providerId];
+  const missing =
+    newest !== undefined &&
+    modelIds.length > 0 &&
+    !modelIds.some((id) => id.startsWith(newest.idPrefix));
+  const update = useProviderCliFix(providerId, routing, missing, true);
+  const hostId = useRoutedHostId(routing, missing);
+  const usage = useSystemProviderUsageLimits({
+    ...(hostId === null ? {} : { hostId }),
+    providerIds: [providerId],
+    enabled: missing && update === null,
+  }).usage[providerId];
+  if (!missing) return null;
+  const plan = usage?.status === "ok" ? usage.planLabel : null;
+  return (
+    <div className="flex shrink-0 items-center gap-2 border-t border-foreground/[0.07] px-3 py-2 text-xs text-muted-foreground">
+      <Icon name="Info" className="size-3.5 shrink-0" aria-hidden />
+      <span className="min-w-0 flex-1">
+        {update
+          ? `Update ${providerLabel} to get ${newest.name} models.`
+          : `Your ${newest.planOwner} plan${plan ? ` (${plan})` : ""} has no ${newest.name} models.`}
+      </span>
+      {update ? (
+        <Button
+          size="sm"
+          className="h-7 shrink-0 px-3"
+          disabled={update.installing}
+          onClick={update.install}
+        >
+          {update.installing ? "Updating…" : "Update"}
+        </Button>
+      ) : null}
     </div>
   );
 }

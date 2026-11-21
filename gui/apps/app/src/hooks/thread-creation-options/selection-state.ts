@@ -29,6 +29,7 @@ export type ScopedExecutionInputSources =
   | ExistingThreadExecutionInputSources;
 
 export interface UsePromptModelReasoningOptions {
+  cloud?: boolean;
   enabled?: boolean;
   environmentId?: string;
   environmentHostId?: string;

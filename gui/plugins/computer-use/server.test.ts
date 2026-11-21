@@ -2,14 +2,14 @@ import {
   createFakePluginHost,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { assetFor } from "./driver.js";
-import { install } from "./host.js";
-import computerUsePlugin, { acceptFocusedWindow, decideGate } from "./server.js";
+import { install, pruneOldVersions } from "./host.js";
+import computerUsePlugin, { acceptFocusedWindow, decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
 vi.mock("node:fs", async (actual) => {
@@ -344,4 +344,71 @@ describe("active computer-use indicator state", () => {
       active: [],
     });
   });
+});
+
+describe("foreground focus gate", () => {
+  const readyStatus = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0.55.0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: true, screenRecording: true },
+  };
+
+  it("identifies foreground calls", () => {
+    expect(takesForeground("bring_to_front", { pid: 1 })).toBe(true);
+    expect(takesForeground("move_cursor", { x: 1, y: 2 })).toBe(true);
+    expect(takesForeground("click", { pid: 1, delivery_mode: "foreground" })).toBe(true);
+    expect(takesForeground("click", { pid: 1 })).toBe(false);
+    expect(takesForeground("drag", { pid: 1 })).toBe(false);
+  });
+
+  it("asks once for foreground calls even on always-allowed apps and blocks on deny", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      appForPid: { key: "com.brave.Browser", name: "Brave" },
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await fake.bb.storage.kv.set("always-allowed", [{ key: "com.brave.Browser", name: "Brave" }]);
+    await computerUsePlugin(fake.bb);
+
+    const deniedCall = fake.harness.runCli(
+      ["call", "click", '{"pid":42,"delivery_mode":"foreground"}'],
+      { threadId: "thr_1" },
+    );
+    await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+    expect(fake.harness.pendingInteractions[0]?.payload).toMatchObject({ foreground: true });
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "deny" });
+    const denied = await deniedCall;
+    expect(denied.exitCode).toBe(1);
+    expect(JSON.parse(denied.stdout ?? "").error).toBe("foreground_denied");
+
+    // Allow once succeeds, and a second foreground call still asks again.
+    for (let i = 0; i < 2; i++) {
+      const allowedCall = fake.harness.runCli(["call", "bring_to_front", '{"pid":42}'], { threadId: "thr_1" });
+      await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+      fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "thread" });
+      expect((await allowedCall).exitCode).toBe(0);
+    }
+  });
+});
+
+it("pruneOldVersions removes sibling driver versions and keeps the active one and staging dirs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cua-prune-"));
+  try {
+    await mkdir(join(root, "0.35.2"));
+    await mkdir(join(root, "0.55.0"));
+    await mkdir(join(root, ".install-abc"));
+    await pruneOldVersions(join(root, "0.55.0"));
+    expect((await readdir(root)).sort()).toEqual([".install-abc", "0.55.0"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

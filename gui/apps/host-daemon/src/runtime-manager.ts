@@ -172,6 +172,8 @@ export interface EnsureEnvironmentArgs {
   targetThreadId?: string;
   workspacePath?: string;
   provision?: ProvisionWorkspaceArgs;
+  /** Aborted by a cancel that arrived before this provision registered (#2171). */
+  cancelSignal?: AbortSignal;
 }
 
 interface CancelEnvironmentProvisionArgs {
@@ -296,6 +298,13 @@ function providerProcessEnvFromShellEnv(
     env.BB_PROVIDER_BRIDGE_RECORD_DIR = recordDir;
   }
   return Object.keys(env).length > 0 ? env : null;
+}
+
+function provisionCancelledError(): WorkspaceError {
+  return new WorkspaceError(
+    "provision_cancelled",
+    "Environment provisioning was cancelled",
+  );
 }
 
 export class RuntimeManager {
@@ -964,6 +973,9 @@ export class RuntimeManager {
     const pendingProvision = this.createPendingEnvironmentProvision(
       args.environmentId,
     );
+    if (args.cancelSignal?.aborted) {
+      pendingProvision.abortController.abort(provisionCancelledError());
+    }
     const creation = Promise.resolve()
       .then(() =>
         this.createEntry({
@@ -1043,12 +1055,7 @@ export class RuntimeManager {
       return { aborted: false };
     }
 
-    pending.abortController.abort(
-      new WorkspaceError(
-        "provision_cancelled",
-        "Environment provisioning was cancelled",
-      ),
-    );
+    pending.abortController.abort(provisionCancelledError());
     return { aborted: true };
   }
 
@@ -1221,6 +1228,7 @@ export class RuntimeManager {
   }
 
   private async createEntry(args: CreateEntryArgs): Promise<RuntimeEntry> {
+    args.provisionSignal.throwIfAborted();
     const provision =
       args.provision ??
       (args.workspacePath ? { path: args.workspacePath } : null);

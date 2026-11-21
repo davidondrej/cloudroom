@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { arrayMove } from "@dnd-kit/sortable";
 import type { Host } from "@cloudroom/domain";
 import type { ProjectWithThreadsResponse } from "@cloudroom/server-contract";

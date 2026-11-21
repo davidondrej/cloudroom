@@ -216,6 +216,8 @@ import type {
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionForm,
+  SystemVoiceTranscriptionJobResponse,
+  SystemVoiceTranscriptionJobStartResponse,
   SystemVoiceTranscriptionResponse,
   TerminalListResponse,
   ThemeCatalogResponse,
@@ -1569,7 +1571,7 @@ export const publicApiRoutes = {
       path: "/threads/:id/fork-point/:sequence",
       method: "get",
       request: noRequest<{ param: { id: string; sequence: string } }>(),
-      response: jsonResponse<{ exact: boolean; sequence: number | null; textOnly?: boolean }>(),
+      response: jsonResponse<{ exact: boolean; sequence: number | null }>(),
     }),
     defaultExecutionOptions: defineRoute({
       path: "/threads/:id/default-execution-options",
@@ -1889,6 +1891,20 @@ export const publicApiRoutes = {
       method: "post",
       request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
       response: jsonResponse<SystemVoiceTranscriptionResponse>(),
+    }),
+    startVoiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs",
+      method: "post",
+      request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobStartResponse, 202>({
+        status: 202,
+      }),
+    }),
+    voiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs/:id",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobResponse>(),
     }),
     version: defineRoute({
       path: "/system/version",

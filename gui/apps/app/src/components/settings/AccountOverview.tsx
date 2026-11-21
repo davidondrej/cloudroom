@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import type { CloudroomStatus } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";

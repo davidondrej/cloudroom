@@ -13,6 +13,8 @@ const WAITING_LIMIT_MS = 60 * 60_000;
 const POLL_MS = 60_000;
 /** Lets a burst of thread status changes settle into one check. */
 const SETTLE_MS = 1_000;
+/** At most this many thread lookups at once, so many threads don't open as many loopback connections (#2207). */
+const LOOKUP_LIMIT = 6;
 const levelSchema = z.enum(["off", "working", "always"]);
 const LEVEL_LABELS: Record<z.infer<typeof levelSchema>, string> = {
   off: "Off",
@@ -48,6 +50,20 @@ function loadConfiguration(value: unknown): Configuration {
   const legacy = legacySchema.safeParse(value);
   if (!legacy.success) return { level: "working", selection: { mode: "all" } };
   return { level: legacy.data.enabled ? "always" : "working", selection: legacy.data.selection };
+}
+
+/** `Promise.all(items.map(run))`, with at most `limit` runs at once. */
+async function mapLimited<T, R>(items: T[], limit: number, run: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await run(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 export const keepAwakeRpcContract = defineRpcContract({
@@ -112,9 +128,10 @@ export default async function keepAwakePlugin(room: BbPluginApi): Promise<void> 
       const local = (await room.sdk.threads.listRunning({ signal: running })).flatMap(({ id, hostId }) =>
         hostId === null ? [] : [{ id, hostId }],
       );
-      const waiting = await Promise.all(local.map(({ id }) => waitedTooLong(id, running)));
+      const waiting = await mapLimited(local, LOOKUP_LIMIT, ({ id }) => waitedTooLong(id, running));
+      // Grace starts after the lookups, so a slower capped check can't hand over an expired one.
       local.forEach(({ hostId }, i) => {
-        if (!waiting[i]) awakeUntil.set(hostId, now + GRACE_MS);
+        if (!waiting[i]) awakeUntil.set(hostId, Date.now() + GRACE_MS);
       });
     } catch (error) {
       // Blind to running threads: keep awake machines awake rather than let one sleep mid-task.

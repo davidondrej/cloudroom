@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import {
   cloudroomThreads,
   createThread,
+  environments,
   getEnvironment,
   getThread,
   listEvents,
@@ -24,7 +25,7 @@ import { runQueuedMessageDispatch } from "../../src/services/threads/queued-mess
 import { moveThreadToProject } from "../../src/services/threads/thread-move.js";
 import { requestThreadWorktreeMove } from "../../src/services/threads/thread-worktree-move.js";
 import {
-  reportQueuedCommandError,
+  registerTestHostRpcCapture,
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
 } from "../helpers/commands.js";
@@ -193,6 +194,41 @@ describe("thread move", () => {
       });
     });
   });
+
+  it.each([
+    ["personal-workspace", null],
+    ["git-worktree", "git-worktree"],
+  ])(
+    "moves off a %s folder shared only by an archived thread still stopping; its provider becomes %s (#1955)",
+    async (providerId, after) => {
+    await withTestHarness(async (harness) => {
+      const { thread, oldEnvironment } = seedTwoProjects(harness, "idle");
+      harness.db
+        .update(environments)
+        .set({ environmentProviderId: providerId })
+        .where(eq(environments.id, oldEnvironment.id))
+        .run();
+      const sibling = seedThread(harness.deps, {
+        projectId: thread.projectId,
+        environmentId: oldEnvironment.id,
+      });
+      harness.db
+        .update(threads)
+        .set({ archivedAt: Date.now(), status: "stopping" })
+        .where(eq(threads.id, sibling.id))
+        .run();
+
+      const pending = move(harness, thread.id, "Cloudroom");
+      await releaseOldRuntime(harness, thread.id);
+      expect((await pending).status).toBe(200);
+      // A detached Personal folder is never removed; a worktree stays with
+      // its provider, so main's save-and-park cleanup runs once it stops.
+      expect(
+        getEnvironment(harness.db, oldEnvironment.id)?.environmentProviderId,
+      ).toBe(after);
+    });
+  },
+  );
 
   it("waits for a running turn to end, then moves", async () => {
     await withTestHarness(async (harness) => {
@@ -417,7 +453,15 @@ describe("thread worktree", () => {
   it("reads the new worktree's hooks from the source's base, not from the thread's own commit", async () => {
     await withTestHarness(async (harness) => {
       seedPrimaryHost(harness.deps, seedHostSession(harness.deps, { id: "host-primary" }).host.id);
-      const { host } = seedHostSession(harness.deps, { id: "host-move-hooks" });
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-move-hooks",
+      });
+      // Like the real daemon: setup never runs as a hook operation, so it can't cancel one (#2216).
+      registerTestHostRpcCapture(harness.deps, {
+        hostId: host.id,
+        sessionId: session.id,
+        onEnvironmentHookCancel: async () => ({ status: "unknown" }),
+      });
       const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: "/tmp/move-hooks-checkout" });
       const folder = seedEnvironment(harness.deps, {
         hostId: host.id,
@@ -459,7 +503,29 @@ describe("thread worktree", () => {
         5_000,
       );
       expect(attach.command).toMatchObject({ setupScriptTimeoutMs: 15 * 60 * 1000, hookBaseBranch: "origin/main" });
-      await reportQueuedCommandError(harness, attach, { errorCode: "setup_script_failed", errorMessage: "stop here" });
+      // An older daemon answers a reused environment ID with its cached runtime's old, deleted folder (#2216).
+      await reportQueuedCommandSuccess(harness, attach, {
+        path: "/tmp/move-hooks-old",
+        isGitRepo: true,
+        isWorktree: true,
+        branchName: "room/t",
+        defaultBranch: "main",
+      });
+      // The move fails, the thread stays put, and its new worktree is removed instead of blocking cleanup forever.
+      const { environmentId } = attach.command as { environmentId: string };
+      await vi.waitFor(
+        () =>
+          expect(
+            listEvents(harness.db, { threadId: thread.id })
+              .map((event) => JSON.parse(event.data).message)
+              .at(-1),
+          ).toContain("old folder open (/tmp/move-hooks-old)"),
+        { timeout: 3000 },
+      );
+      expect(
+        getEnvironment(harness.db, environmentId)?.teardownStatus,
+      ).toBe("removed");
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(folder.id);
     });
   });
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";

@@ -3,6 +3,7 @@ import type {
   PendingInteractionPermissionGrantApprovalSubject,
   ThreadEvent,
   SystemThreadProvisioningStatus,
+  SystemThreadInterruptedEventData,
   SystemThreadInterruptedReason,
   UserQuestionInteractionLifecycle,
 } from "@cloudroom/domain";
@@ -118,9 +119,13 @@ function createThreadOperationMetadata(
   };
 }
 
+const gb = (bytes: number, round: (n: number) => number = Math.round) =>
+  `${round((bytes / 2 ** 30) * 10) / 10} GB`;
+
 function threadInterruptedTitle(
   reason: SystemThreadInterruptedReason,
   cause?: "host-connection-lost",
+  memory?: SystemThreadInterruptedEventData["memory"],
 ): string {
   if (cause === "host-connection-lost") {
     return "Stopped — connection to host was lost";
@@ -133,7 +138,9 @@ function threadInterruptedTitle(
     case "provider-turn-idle":
       return "Stopped — provider turn stopped responding";
     case "memory-limit":
-      return "Stopped — used over half of your computer's memory";
+      return memory
+        ? `Stopped — used ${gb(memory.usedBytes, Math.ceil)}, over half of your computer's ${gb(memory.totalBytes)} of memory`
+        : "Stopped — used over half of your computer's memory";
     default:
       return assertNever(reason);
   }
@@ -544,7 +551,11 @@ export function parseOperationMessage(
   if (decoded.type === "system/thread/interrupted") {
     return op(decoded, meta, "thread-interrupted", {
       opType: "thread-interrupted",
-      title: threadInterruptedTitle(decoded.reason, decoded.cause),
+      title: threadInterruptedTitle(
+        decoded.reason,
+        decoded.cause,
+        decoded.memory,
+      ),
       status: "interrupted",
     });
   }

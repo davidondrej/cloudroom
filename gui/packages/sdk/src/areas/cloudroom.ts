@@ -16,6 +16,9 @@ export interface CloudroomStorage {
 export type MacAccessLevel = "off" | "read-only" | "ask" | "full";
 
 export type CloudroomThreadStatus = { model: string; reasoning: string; error?: string | null; reconnecting?: boolean; waiting?: string | null };
+/** A thread's Cloud Credits from the last 7 days, split by what used them (docs/scopes/thread-purpose.md). `credits` is
+ *  null when they can't be known yet; `pending`: billed, but the split isn't ready; `partial`: the thread is older than 7 days. */
+export type CloudroomThreadCredits = { credits: number | null; pending: boolean; awakeMinutes: number; partial: boolean; rows: { name: string; credits: number; ms: number | null; rest?: true }[] };
 
 export interface CloudroomStatus {
   storage?: CloudroomStorage | null;
@@ -369,6 +372,8 @@ export interface CloudroomArea {
    *  say why its start or messages aren't going through yet (older apps send neither); `waiting` is the website's
    *  words while its sandbox's server restarts or is full. */
   threadStatus(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadStatus | null>;
+  /** One website read per thread a minute at most (the app server caches it). */
+  threadCredits(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadCredits>;
   retryStart(threadId: string): Promise<void>;
   /** Clears package caches and Git-ignored dependency and build folders on a Cloud thread's sandbox, even while a full disk pauses its agent. */
   clearDisk(threadId: string): Promise<{ freedBytes: number }>;
@@ -513,6 +518,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     runOnVm: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/vm/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ code: number | null; stdout: string; stderr: string; truncated: boolean }>,
     logout: () => transport.readVoid(request("/logout", {})),
     threadStatus: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })) as Promise<CloudroomThreadStatus | null>,
+    threadCredits: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/credits`, { signal })) as Promise<CloudroomThreadCredits>,
     threadWorkspace: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/workspace`, { signal })) as Promise<CloudroomThreadWorkspace | null>,
     teleport: (threadId, action = "start", choice) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...choice }) })) as Promise<TeleportProgress>,
     teleportCheck: (threadId, choice) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check", ...choice }) })) as Promise<{ model: string; reasoning: string; warnings: string[] }>,

@@ -2,7 +2,7 @@ import { StrictMode, useEffect } from "react";
 import { COMPUTER } from "@cloudroom/domain";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter } from "react-router";
 import { App } from "./App";
 import {
   isPhoneRelay,

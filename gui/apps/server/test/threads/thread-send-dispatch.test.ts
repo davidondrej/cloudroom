@@ -1,3 +1,4 @@
+import { AgentRuntimeTurnBusyError } from "@cloudroom/agent-runtime";
 import {
   archiveThread,
   createPendingInteraction,
@@ -889,6 +890,22 @@ describe("startup queue waits", () => {
           JSON.parse(row.waitingOn!),
         ),
       ).toEqual([{ kind: "turn-starting" }]);
+
+      // A start the host refused as competing, before touching the live
+      // turn, leaves that turn running, not the thread failed.
+      const start = await waitForQueuedCommand(
+        harness,
+        (queued) => queued.command.type === "thread.start",
+      );
+      const busy = new AgentRuntimeTurnBusyError(thread.id);
+      await reportQueuedCommandError(harness, start, {
+        errorCode: busy.code,
+        errorMessage: busy.message,
+      });
+      expect(getThread(harness.db, thread.id)?.status).toBe("active");
+      expect(
+        listEvents(harness.db, { threadId: thread.id }).map((e) => e.type),
+      ).not.toContain("system/error");
     });
   });
 

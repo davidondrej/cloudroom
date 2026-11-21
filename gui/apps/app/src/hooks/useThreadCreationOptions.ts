@@ -1,3 +1,5 @@
+import { cloudHarness, useCloudroomConnection } from "@/hooks/queries/cloudroom-queries";
+import { antigravityCloudModels, useAntigravityCloud } from "@/lib/antigravity-cloud";
 import {
   useCallback,
   useEffect,
@@ -391,23 +393,31 @@ export function useThreadCreationOptions(
   const executionOptionsProviderId = executionOptionsQueryEnabled
     ? rawSelectedProviderId || undefined
     : undefined;
+  const cloudStatus = useCloudroomConnection(options?.cloud === true && rawSelectedProviderId === "acp-antigravity");
+  const agyProfile = options?.cloud ? cloudHarness(cloudStatus.data, "acp-antigravity") : undefined;
+  const agySelected = !!agyProfile && rawSelectedProviderId === "acp-antigravity";
   const executionOptionsQuery = useSystemExecutionOptions({
     enabled: executionOptionsQueryEnabled,
     ...executionOptionsRouting,
-    providerId: executionOptionsProviderId,
+    providerId: agySelected ? undefined : executionOptionsProviderId,
   });
   const hostsQuery = useHosts();
   const providers = executionOptionsQuery.data?.providers ?? EMPTY_PROVIDERS;
-  const isLoadingModels =
+  const selfHostedModels = cloudStatus.data?.selfHosted ? agyProfile?.models : undefined;
+  const agyAuth = useAntigravityCloud(agySelected && !selfHostedModels);
+  const agyModels = useMemo(() => antigravityCloudModels(selfHostedModels
+    ? selfHostedModels.map(m => [m.model, m.model, m.reasoning_levels.join(","), m.reasoning_levels[0] ?? "none"].join("\t")).join("\n")
+    : agyAuth.data?.catalog ?? ""), [agyAuth.data?.catalog, selfHostedModels]);
+  const isLoadingModels = agySelected ? agyAuth.isLoading :
     executionOptionsQueryEnabled &&
     (executionOptionsQuery.isLoading ||
       (executionOptionsQuery.isPlaceholderData &&
         (executionOptionsQuery.data?.models.length ?? 0) === 0));
-  const modelLoadError =
+  const modelLoadError = agySelected ? null :
     executionOptionsQuery.data?.modelLoadError ?? NO_MODEL_LOAD_ERROR;
-  const modelLoadFailed =
+  const modelLoadFailed = agySelected ? agyAuth.isError :
     executionOptionsQuery.isError || modelLoadError !== null;
-  const modelCatalogIsVerified =
+  const modelCatalogIsVerified = agySelected ? (selfHostedModels !== undefined || agyAuth.data !== undefined) :
     executionOptionsQuery.data !== undefined &&
     !executionOptionsQuery.isPlaceholderData &&
     !executionOptionsQuery.isError &&
@@ -565,16 +575,17 @@ export function useThreadCreationOptions(
   } = useMemo(
     () =>
       resolveModelCatalogSelection({
-        models: executionOptionsQuery.data?.models ?? [],
+        models: agySelected ? agyModels : executionOptionsQuery.data?.models ?? [],
         selectedOnlyModels:
-          executionOptionsQuery.data?.selectedOnlyModels ?? [],
-        selectedModel: rawSelectedModel,
+          agySelected ? [] : executionOptionsQuery.data?.selectedOnlyModels ?? [],
+        selectedModel: agySelected && agyModels.length === 0 ? "" : rawSelectedModel,
         preferredReasoningLevel,
         provider: selectedProviderInfo,
         catalogIsVerified: modelCatalogIsVerified,
         formatModelLabel,
       }),
     [
+      agySelected, agyModels,
       executionOptionsQuery.data?.models,
       executionOptionsQuery.data?.selectedOnlyModels,
       modelCatalogIsVerified,
@@ -831,7 +842,7 @@ export function useThreadCreationOptions(
     (value: string) => {
       touchedThreadFieldsRef.current.add("selectedModel");
       const nextModel =
-        executionOptionsQuery.data?.models.find(
+        (agySelected ? agyModels : executionOptionsQuery.data?.models)?.find(
           (model) => model.model === value,
         ) ??
         executionOptionsQuery.data?.selectedOnlyModels.find(
@@ -870,6 +881,7 @@ export function useThreadCreationOptions(
     },
     [
       effectiveProviderId,
+      agySelected, agyModels,
       executionOptionsQuery.data?.models,
       executionOptionsQuery.data?.selectedOnlyModels,
       preferredReasoningLevel,

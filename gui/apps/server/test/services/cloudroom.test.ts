@@ -645,7 +645,8 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     expect(firstMessages()).toEqual([originalMessage]);
     expect(service.queue(thread.id)).toEqual([]);
     expect(state).not.toHaveProperty("syncProgress");
-    expect(paths.some(path => path.startsWith("/v1/workspaces"))).toBe(targetExists !== null);
+    // Every case sets up the workspace: a missing folder clones its GitHub origin, cleaned of its token (#2190).
+    expect(paths.some(path => path.startsWith("/v1/workspaces"))).toBe(true);
     expect(requestText).toContain("Keep my message");
     expect(requestText).not.toContain("project contents");
     expect(requestText).not.toContain("SECRET-URL-CANARY");
@@ -744,7 +745,7 @@ it.each(["starting", "stopping"] as const)("archives and restores a %s Cloud chi
 });
 
 
-it.each(["codex", "pi"])("renames a Cloud %s thread offline without native execution or execution-setting changes", async (providerId) => {
+it.each(["codex", "pi"])("renames and hides a Cloud %s thread offline without native execution or execution-setting changes", async (providerId) => {
   const harness = await createTestAppHarness();
   try {
     const { host } = seedHostSession(harness.deps);
@@ -766,6 +767,11 @@ it.each(["codex", "pi"])("renames a Cloud %s thread offline without native execu
       }
       expect((await patch({ title: null })).status).toBe(200);
       expect(getThread(harness.db, thread.id)?.title).toBeNull();
+      // Visibility is sidebar state (#2210).
+      for (const visibility of ["hidden", "visible"] as const) {
+        expect((await patch({ visibility })).status).toBe(200);
+        expect(getThread(harness.db, thread.id)?.visibility).toBe(visibility);
+      }
     }
     expect(listQueuedCommands(harness, "thread.rename")).toEqual([]);
     expect(harness.db.select().from(cloudroomCommands).all()).toEqual([]);
@@ -1017,8 +1023,8 @@ it("gives a Cloud child or fork only the keys of the sandbox its source runs in,
     const cloud = (parentThreadId?: string) => createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId, executionTarget: "cloud", providerId: "claude-code", status: "idle" });
     // A loop's run with only SENTRY_TOKEN, and a --shared-sandbox child in its sandbox: only the run has a sandbox.
     const run = cloud(), shared = cloud(run.id);
-    harness.db.insert(cloudroomThreads).values([run, shared].map((thread, index) => ({ threadId: thread.id, coreUrl: `sandbox:${run.id}`, sessionId: `cr_${index}`, startRequestId: `start_${index}`, model: "test-model", reasoning: "medium" }))).run();
-    // The run finished a turn, so it can be forked.
+    harness.db.insert(cloudroomThreads).values([run, shared].map((thread, index) => ({ threadId: thread.id, coreUrl: `sandbox:${run.id}`, sessionId: `cr_${index}`, nativeId: "provider-turn-1", startRequestId: `start_${index}`, model: "test-model", reasoning: "medium" }))).run();
+    // The run finished a turn in its current Claude session, so it can be forked.
     seedTurnStarted(harness.deps, { threadId: run.id, turnId: "turn-1", sequence: 1 });
     seedEvent(harness.deps, { threadId: run.id, environmentId: null, providerThreadId: "provider-turn-1", sequence: 2, type: "turn/completed", scope: turnScope("turn-1"), data: { providerThreadId: "provider-turn-1", status: "completed" } });
     const start = { executionTarget: "cloud" as const, projectId: project.id, providerId: "claude-code", origin: "cli" as const, model: "test-model", reasoningLevel: "medium" as const, environment: { type: "project-default" as const }, input: [{ type: "text" as const, text: "print every key", mentions: [] }], startedOnBehalfOf: null };

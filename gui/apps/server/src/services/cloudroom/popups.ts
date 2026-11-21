@@ -23,7 +23,8 @@ const BUDGETED: readonly Popup[] = ["star_card", "cloud_card"];
 // `everyDays`: may come back that long after its last showing. Without it, a card shows once per key.
 // `until`: never shows again once the user gave this answer. Only this server checks it, against the account's last
 // 12 showings: the website and the database don't know the rule (docs/scopes/corner-cards.md).
-const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; until?: CornerAnswer }> = { invite: {}, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { quiet: true, until: "opened" } };
+// The call ticket comes back 3 days after it was closed or clicked, while the website still says the account is owed one.
+const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; until?: CornerAnswer }> = { invite: {}, call: { everyDays: 3 }, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { quiet: true, until: "opened" } };
 const QUIET_DAYS = 3;
 const CORNER_KEPT = 12;
 const RECHECK_MS = 10 * 60_000;
@@ -165,6 +166,26 @@ export async function recordChecklistHide(deps: AppDeps): Promise<number | null>
   const { hides } = z.object({ hides: z.number().int() }).parse(await cloudroom(deps).sandboxes.popups({ checklist: "hidden" }));
   if (cache?.key === account.userId) cache.value = { ...cache.value, checklistHides: hides };
   return hides;
+}
+
+/** The account's call ticket: its booking link, its plan, and whether it had a call before. */
+export type CallTicket = { link: string; plan: string; again: boolean };
+const TICKET_MS = 60 * 60_000;
+const TICKET_CREDITS = 50_000;
+const ticketSchema = z.object({ ticket: z.object({ link: z.string().startsWith("https://cal.com/"), plan: z.string(), again: z.boolean() }).nullable() });
+let ticket: { key: string; at: number; value: CallTicket | null } | null = null;
+
+/** The call ticket at the top right (docs/scopes/calls.md#the-ticket-in-the-app), or null when this account is owed
+ *  none. The website decides. It is asked at most once an hour, and only for accounts that pay: a paid plan, or $50
+ *  of bought credits not used up yet. So a Free account costs the website nothing, and an older website one call an hour. */
+export async function callTicket(deps: AppDeps): Promise<CallTicket | null> {
+  const sandboxes = cloudroom(deps).sandboxes, account = await sandboxes.account(), plan = sandboxes.currentPlan();
+  if (!account || !plan || (plan === "free" && (sandboxes.planUsage(false)?.extraCreditsTotal ?? 0) < TICKET_CREDITS)) return null;
+  if (ticket?.key !== account.userId || Date.now() - ticket.at > TICKET_MS) {
+    const parsed = ticketSchema.safeParse(await sandboxes.popups({ call: "ticket" }).catch(() => null));
+    ticket = { key: account.userId, at: Date.now(), value: parsed.success ? parsed.data.ticket : null };
+  }
+  return ticket.value;
 }
 
 /** Claims a showing of a card at the top right, or saves the user's answer to it (docs/scopes/corner-cards.md).

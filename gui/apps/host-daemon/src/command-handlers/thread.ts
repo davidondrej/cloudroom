@@ -39,8 +39,8 @@ type ExistingThreadRuntimeCommand =
 const TURN_SUBMIT_ACTIVE_TURN_WAIT_MS = 5_000;
 const TURN_SUBMIT_STEER_ATTEMPTS = 2;
 // The check fetches the bridge, creates the runtime, starts the bridge, and
-// asks provider/installation/status (each up to 30 s), maybe twice after a
-// shell env change. A slow first check after an app update still fits.
+// asks provider/installation/status (each up to 30 s), again after a timeout
+// or a shell env change. A slow first check after an app update still fits.
 const PROVIDER_CLI_CHECK_TIMEOUT_MS = 120_000;
 
 interface ResumeThreadRuntimeIfMissingArgs {
@@ -135,10 +135,19 @@ async function requireSupportedProviderCliForThreadStart({
           command.bridgeLaunch,
           options,
         );
-        return options.providerInstallationStatus({
-          providerId: command.providerId,
-          bridgeLaunch,
-          ...(requirement !== undefined ? { requirement } : {}),
+        const probe = () =>
+          options.providerInstallationStatus({
+            providerId: command.providerId,
+            bridgeLaunch,
+            ...(requirement !== undefined ? { requirement } : {}),
+          });
+        // A busy machine can make one probe miss the bridge's 30 s request
+        // timeout. Ask once more before failing the start (#2251).
+        return probe().catch((error: unknown) => {
+          if ((error as { code?: unknown } | null)?.code !== "rpc_timeout") {
+            throw error;
+          }
+          return probe();
         });
       },
       signal,

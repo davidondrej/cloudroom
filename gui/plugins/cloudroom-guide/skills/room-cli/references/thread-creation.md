@@ -202,6 +202,9 @@ status|branches|paths|diff|diff-files|diff-file|diff-patch <id>` and
   `room-cli provider models acp-cursor --restart` (or any `acp-*`, `codex`, `pi`)
   restarts model discovery and reloads the list on the selected machine. It
   does not stop threads, reinstall the CLI, or change credentials.
+- OpenCode and Kilo Code list models per project, since a project's
+  `opencode.json` can hide providers: pass `--environment <id>` to see the list
+  a thread there gets.
 - Top-level `customModels` in the same `config.json` registers extra picker
   models. Use a provider ID returned by the target host's catalog. Acceptance
   of unlisted models is provider-specific; consult that provider's skill.

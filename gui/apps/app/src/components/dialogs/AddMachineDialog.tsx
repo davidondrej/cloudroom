@@ -21,7 +21,7 @@ import { MachineStatusDot } from "@/components/machines/MachineStatusDot";
 import { useHosts } from "@/hooks/queries/host-queries";
 import { sdk } from "@/lib/sdk";
 import { useClipboardCopy } from "@/lib/clipboard";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { getSettingsMachineRoutePath } from "@/lib/route-paths";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 

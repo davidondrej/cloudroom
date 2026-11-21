@@ -49,6 +49,7 @@ export default function plugin(room: BbPluginApi) {
       supportsNativeUserQuestion: false,
       fork: "checkpoint",
       supportsManualCompaction: true,
+      resumesInNewFolder: true,
       supportsThreadArchive: true,
       supportsThreadRename: true,
       permissionModes: ["accept-edits", "auto", "full"],

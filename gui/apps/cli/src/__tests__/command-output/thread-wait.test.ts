@@ -104,6 +104,10 @@ describe("room-cli thread wait command output", () => {
       child("child-failed", "error"),
     ]);
     stubServerApi({ "v1.threads.$get": list });
+    // A brief connection reset is retried instead of ending the wait (#2283).
+    list.mockRejectedValueOnce(
+      new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
+    );
 
     await runCommand(["thread", "wait", "parent", "--children"], register);
 

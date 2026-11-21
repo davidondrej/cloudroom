@@ -35,6 +35,8 @@ export interface AcpAgentDefinition {
   permissionModes?: PluginProviderCapabilities["permissionModes"];
   providerUsage?: boolean;
   providerInstallation?: boolean;
+  /** False hides the Standard/Fast toggle: the agent has no fast mode. */
+  supportsServiceTier?: boolean;
   installer?:
     | { scriptUrl: string; powershellUrl?: string; args?: readonly string[] }
     | { npmPackage: string };

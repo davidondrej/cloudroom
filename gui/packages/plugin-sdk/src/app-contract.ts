@@ -3308,6 +3308,8 @@ export type ExperimentalProviderModelPickerRouting =
  * model catalog depends on the selected workspace.
  */
 export interface ExperimentalProviderModelPickerProps {
+  /** Discover models for a Cloud thread. Defaults to local discovery. */
+  cloud?: boolean;
   value: ExperimentalProviderModelPickerValue;
   onChange(value: ExperimentalProviderModelPickerValue): void;
   /** Route discovery through an explicit machine or existing environment. */

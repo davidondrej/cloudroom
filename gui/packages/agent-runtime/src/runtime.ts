@@ -159,6 +159,9 @@ export class AgentRuntimeRecoveryError extends Error {
 }
 
 export class AgentRuntimeTurnBusyError extends Error {
+  /** The host's error code, so the server knows the refusal changed nothing. */
+  readonly code = "turn_busy";
+
   constructor(threadId: string) {
     super(
       `Refusing to start a competing turn for thread "${threadId}" while another turn is active or starting`,
@@ -1664,6 +1667,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       return runThreadOperation({
         threadId,
         work: async () => {
+          // A start replaces the thread's session, which ends a live turn's
+          // agent, so a competing start is refused before it touches it (#1584).
+          assertThreadCanStartTurn(threadId);
           const processKey = resolveProviderProcessKey({
             bridgeLaunch,
             providerId,

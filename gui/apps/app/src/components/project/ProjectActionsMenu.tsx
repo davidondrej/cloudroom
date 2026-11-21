@@ -6,7 +6,7 @@ import {
 import { findLocalPathProjectSourceForHost } from "@cloudroom/domain";
 import type { ProjectResponse } from "@cloudroom/server-contract";
 import type { MouseEvent, ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { Button } from "@cloudroom/shared-ui/button";
 
 import { COARSE_POINTER_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";

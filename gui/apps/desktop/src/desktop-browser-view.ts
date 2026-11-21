@@ -519,9 +519,10 @@ export function createDesktopBrowserViewManager(
   }
 
   function partitionForProfile(profile: DesktopBrowserTabProfile): string {
+    // 16 hex chars: Windows IndexedDB fails past 260-char paths, and long preview hostnames already use most of them (#1843).
     return profile.kind === "personal"
       ? partition
-      : `persist:${AUTOMATION_PARTITION_PREFIX}${createHash("sha256").update(profile.id).digest("hex")}`;
+      : `persist:${AUTOMATION_PARTITION_PREFIX}${createHash("sha256").update(profile.id).digest("hex").slice(0, 16)}`;
   }
 
   function ensureHardenedSession(tabPartition: string): Session {

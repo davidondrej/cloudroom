@@ -157,6 +157,42 @@ export type SystemVoiceTranscriptionResponse = z.infer<
   typeof systemVoiceTranscriptionResponseSchema
 >;
 
+export const systemVoiceTranscriptionJobStartResponseSchema = z.object({
+  id: z.string().min(1),
+});
+export type SystemVoiceTranscriptionJobStartResponse = z.infer<
+  typeof systemVoiceTranscriptionJobStartResponseSchema
+>;
+
+export const systemVoiceTranscriptionJobErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean().optional(),
+});
+export type SystemVoiceTranscriptionJobError = z.infer<
+  typeof systemVoiceTranscriptionJobErrorSchema
+>;
+
+export const systemVoiceTranscriptionJobResponseSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({ id: z.string().min(1), status: z.literal("pending") }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("completed"),
+      text: z.string(),
+    }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("failed"),
+      error: systemVoiceTranscriptionJobErrorSchema,
+    }),
+  ],
+);
+export type SystemVoiceTranscriptionJobResponse = z.infer<
+  typeof systemVoiceTranscriptionJobResponseSchema
+>;
+
 export const systemProviderStateSchema = providerHealthSchema.extend({
   providerId: z.string().min(1),
   displayName: z.string().min(1),

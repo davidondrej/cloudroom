@@ -90,6 +90,10 @@
       "type": "registry:ui"
     },
     {
+      "name": "hugeicons-icon",
+      "type": "registry:ui"
+    },
+    {
       "name": "icon",
       "type": "registry:ui"
     },

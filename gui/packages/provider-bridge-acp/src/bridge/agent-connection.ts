@@ -54,8 +54,8 @@ export interface AcpAgentConnection {
 }
 
 export class AcpAgentExitedError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "AcpAgentExitedError";
   }
 }
@@ -314,6 +314,8 @@ export function createAcpAgentConnection(
     rejectAllPending(
       new AcpAgentExitedError(
         `Failed to launch ACP agent "${options.command}": ${error.message}`,
+        // Keeps spawn's ENOENT, so a missing CLI reads as not installed.
+        { cause: error },
       ),
     );
     options.onExit({ code: null, signal: null, stderrTail: error.message });

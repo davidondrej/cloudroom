@@ -256,6 +256,23 @@ export function resolveThreadForkPoint(
   return descriptor === null ? tip : { ...tip, descriptor };
 }
 
+/** A Local source's own session at that point, or null when its harness can't clone it there. The fork then copies
+ *  the chat as text, so every harness can fork (ADR 20261121-141157). Waits for harnesses to register, so a fork right
+ *  after launch doesn't miss a native one. */
+export async function nativeForkPoint(
+  deps: Pick<AppDeps, "db" | "providerRegistry">,
+  args: { sourceSeqEnd: number | undefined; sourceThread: Thread },
+): Promise<ThreadForkPoint | null> {
+  await deps.providerRegistry.whenRegistrationsSettled();
+  if (!deps.providerRegistry.supportsFork(args.sourceThread.providerId)) return null;
+  try {
+    return resolveThreadForkPoint(deps, args);
+  } catch (error) {
+    if (error instanceof ApiError && error.body.code === "fork_source_session_unavailable") return null;
+    throw error;
+  }
+}
+
 /**
  * The events that carry the conversation a fork inherits. Everything else the
  * source recorded is either the source's own bookkeeping (identity,
@@ -419,6 +436,7 @@ export function recordTextImport(
   deps: Pick<AppDeps, "db">,
   thread: Pick<Thread, "environmentId" | "id">,
   seed: PromptInput[],
+  carried?: true,
 ): void {
   deps.db.transaction(
     (tx) =>
@@ -432,7 +450,7 @@ export function recordTextImport(
           operationId: createEventId(),
           status: "completed",
           message: "Imported as text.",
-          metadata: { seed },
+          metadata: { seed, ...(carried ? { carried } : {}) },
         },
       }),
     { behavior: "immediate" },

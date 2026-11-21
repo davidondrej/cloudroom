@@ -183,6 +183,11 @@ export function createFileOpenerTabForRequest({
     registrations: fileOpeners,
     preference,
     path: routedFile.path,
+    // The .html preview default is for thread surfaces only; workspace tabs
+    // also need an environment to get an HTML preview URL.
+    builtInRendersHtml:
+      Boolean(threadId) &&
+      (owner.kind !== "workspace-file-preview" || owner.environmentId !== null),
     ...(viewer !== undefined ? { override: viewer } : {}),
   });
   return resolved.kind === "plugin"

@@ -5,7 +5,7 @@ export type Json =
   | string
   | Json[]
   | { [key: string]: Json };
-export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "openclaw" | "agent-zero";
+export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "antigravity" | "openclaw" | "agent-zero";
 export type CodexAuthStatus = {
   state: "missing" | "waiting" | "connected" | "limited" | "unavailable" | "error" | "expired";
   email: string | null; plan: string | null; message: string | null;
@@ -89,7 +89,9 @@ export type SessionSummary = {
   last_app_prompt?: { request_id: string; sequence: number } | null;
 };
 
+export const antigravitySignInRequired = "Sign in with Google or enter a Gemini API key to use Antigravity in Cloud. Your prompt is saved.";
 const rejectionMessages: Record<string, string> = {
+  antigravity_auth_required: antigravitySignInRequired,
   cursor_auth_required: "Connect your Cursor account to use Cursor in Cloud. Your prompt is saved.",
   cursor_auth_unavailable: "Cursor in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   cursor_auth_busy: "Close Cursor sessions before changing the cloud login. Existing threads were not changed.",
@@ -122,7 +124,7 @@ const rejectionMessages: Record<string, string> = {
   switching: "This thread is switching agents. Send it again in a moment.",
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
-export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
+export const authRequiredMessages = new Set([rejectionMessages.antigravity_auth_required, rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
 // Why Core could not check the Claude login (core/src/session/mod.rs, #1222). Only these exact causes are shown.
 const claudeCheckCauses = ["the login check timed out", "the Claude CLI could not run", "the Claude CLI exited with an error", "the Claude CLI gave an unreadable answer"];
 const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
@@ -674,8 +676,14 @@ export class CloudroomClient {
     }
   }
 
+  /** A project copy's heartbeat for `room-cli files wait` (#2168). Older cores answer 404. */
+  async alive(id: string, signal?: AbortSignal): Promise<void> {
+    requestId(id);
+    await this.#json(`/v1/workspaces/${id}/alive`, {}, signal);
+  }
+
   start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; through?: string; last_turn_id?: string }; continue_from?: string } = {}) {
-    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw" && harness !== "agent-zero")
+    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "antigravity" && harness !== "openclaw" && harness !== "agent-zero")
       throw new CloudroomError("Unsupported Cloudroom harness");
     return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body));
   }
@@ -886,7 +894,20 @@ export class CloudroomClient {
   }
   async archiveSession(sessionId: string, id: string, archived: boolean): Promise<void> {
     requestId(id);
-    await this.#json(`${sessionPath(sessionId)}/archive`, { request_id: id, archived });
+    const response = await this.#request(
+      `${sessionPath(sessionId)}/archive`,
+      { request_id: id, archived },
+      AbortSignal.timeout(this.#timeoutMs),
+    );
+    await response.body?.cancel();
+  }
+
+  /** The request-status endpoint includes the session's current archive flag without loading its history.
+   *  Core returns the flag even when there is no receipt with this name. */
+  async isSessionArchived(sessionId: string, signal?: AbortSignal): Promise<boolean> {
+    const { archived } = await this.#json(`${sessionPath(sessionId)}/requests/archive`, undefined, signal);
+    if (typeof archived !== "boolean") throw new CloudroomError("Invalid Cloudroom archive status");
+    return archived;
   }
 
   resume(sessionId: string, id: string, keepPaused = false) {
@@ -946,7 +967,7 @@ export class CloudroomClient {
     );
     if (
       value.session_id !== sessionId ||
-      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "openclaw" && value.harness !== "agent-zero")
+      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "antigravity" && value.harness !== "openclaw" && value.harness !== "agent-zero")
     ) {
       throw new CloudroomError(
         "Cloudroom session mismatch or unsupported harness",

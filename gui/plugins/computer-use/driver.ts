@@ -1,19 +1,19 @@
 export const DRIVER = {
-  version: "0.35.2",
-  releaseUrl: "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.35.2",
+  version: "0.55.0",
+  releaseUrl: "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.55.0",
   macTeamId: "YCK386LBJ7",
   assets: {
     darwin: {
-      file: "cua-driver-rs-0.35.2-darwin-universal-binary.tar.gz",
-      sha256: "ec8d9a073ee8c5e81113de682ba17b040eaacd58e84139f851540092c6b8d3b6",
+      file: "cua-driver-rs-0.55.0-darwin-universal-binary.tar.gz",
+      sha256: "e6246d3da20abe019e2660e8b5f77e0c12cf9b386597a76393116994a36db6ce",
     },
     "linux-x64": {
-      file: "cua-driver-rs-0.35.2-linux-x86_64-binary.tar.gz",
-      sha256: "3a47b35ae8e083af8975c62f873a142f4a47c248c630a0eebfdf90de14d6fccf",
+      file: "cua-driver-rs-0.55.0-linux-x86_64-binary.tar.gz",
+      sha256: "1cb8aa6d30e5cdf5bf4d222cb3693a50af2c178073a49dc59e88737c5f7807e6",
     },
     "linux-arm64": {
-      file: "cua-driver-rs-0.35.2-linux-arm64-binary.tar.gz",
-      sha256: "484d5c5cffa9c32d09244d4dfee078a1c4e8a175e1173f9129ec3bd113e45deb",
+      file: "cua-driver-rs-0.55.0-linux-arm64-binary.tar.gz",
+      sha256: "401f7f4a9ad276dbcdb324f1b00e152987a46985b68c9e625ac01101f5e6af77",
     },
   },
 } as const;
@@ -27,13 +27,15 @@ export function assetFor(platform: string, arch: string) {
 
 // The driver lets kill_app stop only apps launch_app started in the same session (#1950).
 export const SESSION_TOOLS = new Set([
-  "browser_click", "browser_dialog", "browser_download", "browser_navigate", "browser_pointer",
-  "browser_prepare", "browser_set_input_files", "browser_type", "click", "clipboard_read",
+  "browser_click", "browser_dialog", "browser_download", "browser_motion_policy",
+  "browser_navigate", "browser_pointer", "browser_prepare", "browser_select",
+  "browser_set_input_files", "browser_type", "click", "clipboard_read",
   "clipboard_write", "double_click", "drag", "end_session", "get_agent_cursor_state",
-  "get_browser_state", "get_cursor_position", "get_desktop_state", "get_screen_size", "get_session",
-  "get_window_state", "hotkey", "invoke_menu", "kill_app", "launch_app", "move_cursor",
-  "press_key", "right_click", "scroll", "set_agent_cursor_enabled", "set_agent_cursor_motion",
-  "set_agent_cursor_theme", "set_value", "set_window_frame", "start_recording", "start_session",
+  "get_browser_state", "get_cursor_position", "get_desktop_state", "get_guide",
+  "get_screen_size", "get_session", "get_window_state", "hotkey", "invoke_menu",
+  "kill_app", "launch_app", "move_cursor", "press_key", "right_click", "scroll",
+  "set_agent_cursor_enabled", "set_agent_cursor_motion", "set_agent_cursor_theme",
+  "set_value", "set_window_frame", "start_recording", "start_session",
   "type_text", "verify_state",
 ]);
 

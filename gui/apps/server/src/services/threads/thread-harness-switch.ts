@@ -184,7 +184,7 @@ async function switchThenResend(
     return thread;
   });
   // A queued retry replays the old harness's model, so it can only fail now.
-  cancelRetriesForExplicitStop(deps, threadId);
+  cancelRetriesForExplicitStop(deps, threadId, { chosen: false });
   deps.hub.notifyThread(threadId, ["execution-options-changed"], {
     projectId: from.projectId,
   });

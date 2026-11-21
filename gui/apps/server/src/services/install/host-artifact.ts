@@ -23,7 +23,6 @@ const HOST_DEPENDENCIES = [
   "@parcel/watcher",
   "fs-native-extensions",
   "node-pty",
-  "pino",
   "pino-roll",
 ] as const;
 const HOST_DAEMON_FILES = [

@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID, sameLevelModel } from "@cloudroom/domain";
 import { useCreateThread } from "@/hooks/mutations/thread-runtime-mutations";
 import { cloudCatalogKnown, cloudHarness, fetchCloudroomConnection } from "@/hooks/queries/cloudroom-queries";

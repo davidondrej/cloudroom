@@ -21,7 +21,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 import {
   EMPTY_ORDERED_MENTION_SUGGESTIONS,
@@ -2773,6 +2773,74 @@ describe("PromptBoxInternal compact layout", () => {
     }
   });
 
+  it("starts voice input before dismissing the keyboard when a touch synthesizes mousedown", () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      const start = vi.fn(() => {
+        expect(document.activeElement).toBe(getPromptEditorElement());
+      });
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            voice: {
+              state: "idle",
+              isSupported: true,
+              stream: null,
+              start,
+              stop: vi.fn(),
+              cancel: vi.fn(),
+            },
+          })}
+        />,
+      );
+
+      const editor = getPromptEditorElement();
+      act(() => editor.focus());
+      const mic = screen.getByRole("button", { name: "Start voice input" });
+      fireEvent.pointerDown(mic, { button: 0, pointerType: "touch" });
+      fireEvent.pointerUp(mic, { button: 0, pointerType: "touch" });
+
+      const allowsFocusChange = fireEvent.mouseDown(mic, { button: 0 });
+      if (allowsFocusChange) act(() => editor.blur());
+      expect(allowsFocusChange).toBe(false);
+      fireEvent.mouseUp(mic, { button: 0 });
+      fireEvent.click(mic, { detail: 1 });
+
+      expect(start).toHaveBeenCalledOnce();
+      expect(document.activeElement).not.toBe(editor);
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("does not prevent mousedown on stop or fine-pointer mic buttons", () => {
+    const restoreMatchMedia = mockPointerCoarse(false);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            submission: { isRunning: true, onStop: vi.fn() },
+            voice: {
+              state: "idle",
+              isSupported: true,
+              stream: null,
+              start: vi.fn(),
+              stop: vi.fn(),
+              cancel: vi.fn(),
+            },
+          })}
+        />,
+      );
+
+      const stop = screen.getByRole("button", { name: "Stop run" });
+      const mic = screen.getByRole("button", { name: "Start voice input" });
+      expect(fireEvent.mouseDown(stop, { button: 0 })).toBe(true);
+      expect(fireEvent.mouseDown(mic, { button: 0 })).toBe(true);
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
   it("submits on touch release without waiting for or duplicating the click", () => {
     const onSubmit = vi.fn();
     render(
@@ -4282,13 +4350,58 @@ describe("PromptBoxInternal prompt actions", () => {
     expect(latestChange(changes)?.mentions).toEqual([]);
   });
 
-  it("does not duplicate command text immediately before the cursor", async () => {
-    const { changes, promptBoxRef } = renderPromptBox("Start /goal ");
+  it.each(["Goal", "Plan"])(
+    "turns plain %s command text before the cursor into its pill (#2156)",
+    async (label) => {
+      const text = `Start /${label.toLowerCase()} `;
+      const { changes, promptBoxRef } = renderPromptBox(text);
+
+      await focusPromptEnd(promptBoxRef);
+      await selectPromptAction(label);
+
+      await waitFor(() =>
+        expect(latestChange(changes)?.mentions).toEqual([
+          expect.objectContaining({ start: 6, end: text.length - 1 }),
+        ]),
+      );
+      expect(latestValue(changes)).toBe(text);
+    },
+  );
+
+  it("adds no second Plan pill when the draft already has one (#2156)", async () => {
+    const pill: PromptTextMention = {
+      start: 0,
+      end: 5,
+      resource: {
+        kind: "command",
+        trigger: "/",
+        name: "plan",
+        source: "command",
+        origin: "user",
+        label: "plan",
+        argumentHint: null,
+      },
+    };
+    const { changes, promptBoxRef } = renderPromptBox("/plan then /plan ", {
+      initialMentionRanges: [pill],
+    });
 
     await focusPromptEnd(promptBoxRef);
-    await selectPromptAction("Goal");
+    await selectPromptAction("Plan");
 
     expect(changes).toHaveLength(0);
+  });
+
+  it("leaves /plan inside a word such as docs/plan as text (#2156)", async () => {
+    const { changes, promptBoxRef } = renderPromptBox("docs/plan ");
+
+    await focusPromptEnd(promptBoxRef);
+    await selectPromptAction("Plan");
+
+    await waitFor(() =>
+      expect(latestValue(changes)?.startsWith("docs/plan ")).toBe(true),
+    );
+    expect(latestChange(changes)?.mentions[0]?.start).toBeGreaterThanOrEqual(10);
   });
 
   it("replaces a just-selected plan action with goal at the cursor", async () => {

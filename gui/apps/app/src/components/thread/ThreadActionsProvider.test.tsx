@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { createDeferredPromise } from "@cloudroom/test-helpers";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import {
   useChildThreads,
   useThreadMentionCandidates,
@@ -41,8 +41,8 @@ vi.mock("@/components/ui/app-route-anchor", () => ({
   useRouteNavigate: () => mocks.navigate,
 }));
 
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return { ...actual, useNavigate: () => mocks.navigate };
 });
 

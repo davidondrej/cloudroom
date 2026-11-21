@@ -50,7 +50,8 @@ pub(super) fn command(
         None => uuid()?,
     };
     // Claude keeps only the last `--settings`, so every setting goes in one, the Command Guard's hooks included.
-    let mut settings = json!({"fastMode": false, "enableWorkflows": false});
+    // `/loop` and `/schedule` run on Claude's own timers, which are blocked below.
+    let mut settings = json!({"fastMode": false, "enableWorkflows": false, "skillOverrides": {"loop": "off", "schedule": "off"}});
     if strip_ai_co_authors {
         settings["attribution"] = json!({"commit": "", "pr": PR_FOOTER});
     }
@@ -96,7 +97,8 @@ pub(super) fn command(
         ])
         .args([
             "--disallowedTools",
-            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage",
+            // The last five are Claude's own timers: `room-cli wake` and loops replace them.
+            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage,ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger",
         ])
         .args([
             "--mcp-config",

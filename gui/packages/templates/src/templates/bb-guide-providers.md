@@ -38,7 +38,8 @@ preserves conversation threads, credentials, and project files. Use it when mode
 loading fails, or when the model list looks stale after a CLI upgrade, a Pi
 `models.json` edit, or an `opencode.json` provider change; it does not
 repair login or installation problems. Other providers must explicitly support
-this action.
+this action. OpenCode and Kilo Code list models per project, since a project's
+`opencode.json` can hide providers: pass `--environment <id>` to see that list.
 
 Model lists answer from the machine's last stored list while a background
 refresh runs, so a list can be hours old. A provider whose refresh keeps

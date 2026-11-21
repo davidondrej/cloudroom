@@ -1194,6 +1194,7 @@ function helpText(): string {
 
 room-cli loop list --project <id>          Also lists the Cloud loops whose thread is in that project
 room-cli loop create --project <id> --name <name> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) (--prompt <text> (--provider <id> --model <model> [--reasoning <level>] | --agent <provider,model[,level]>...) [--service-tier default|fast] [--permission-mode accept-edits|auto|full] | --script <inline> | --script-file <path> [--host <name-or-id>]) [--priority 1-4]
+room-cli wake <when> "<prompt>"            A timer or reminder: wakes this thread once, in 5m/2h/1d or at a time (same as loop wake)
 room-cli loop create --template <id> --project <id> [--local] [any flag above]   A Cloud loop unless --local; the template fills in the rest (paid plans)
 room-cli loop templates                    Ready-made loops, with their priority, schedule, and agent (paid plans)
 room-cli loop show <loopId> --project <id>
@@ -1226,6 +1227,8 @@ and they wait while it is off. A Local webhook loop made here starts paused: a p
 room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--agent <provider,model[,level]>...] [--priority 1-4] [--secrets <KEY,.env|none|all>]
 --secrets picks the only API keys (Settings → Cloud environment) a fresh-thread Cloud loop's runs and script get, plus
 .env for the project's .env files: pick just what it needs, like --secrets SENTRY_TOKEN,.env, or none. Without it, all.
+Any picked list, even .env or none, blocks room-cli mac in its runs: a job that needs the Mac keeps all
+(no --secrets here; update --secrets all fixes only later runs). A Cloud thread with picked keys can't widen a loop.
 A Cloud loop belongs to its project: it saves the project's GitHub repo, .env files and agent, and needs no thread.
 Use --thread <cloudThreadId> --same-thread instead for a loop that re-prompts one Cloud thread.
 room-cli loop list --cloud [--thread <cloudThreadId>]   All Cloud loops, in every project
@@ -1504,6 +1507,42 @@ async function runReportCommand(
   return { exitCode: 0, stdout: optionalJson(args, { reported: true }) ?? "Loop run reported\n" };
 }
 
+const WAKE_USAGE =
+  'room-cli wake <when> "<prompt>"   Wake this thread once with a prompt: a timer or a reminder.\n  <when> is a delay like 5m, 2h, 1d, or a time like 2026-12-01T09:00. It fires within about a minute of then.\n';
+
+/** `wake 2m "text"` as the `create` it stands for: a one-time re-prompt of the calling thread, on its own agent.
+ *  The words after the time are the prompt as typed, so a prompt may hold `--flags`. */
+async function wakeAsCreate(
+  room: Pick<BbPluginApi, "sdk">,
+  argv: string[],
+  ctx: PluginCliContext,
+): Promise<string[]> {
+  const [when, ...words] = argv.filter((word) => word !== "--json");
+  const prompt = words.join(" ").trim();
+  if (!when || when.startsWith("-") || !prompt) throw new Error(`Usage: ${WAKE_USAGE}`);
+  if (!ctx.threadId) {
+    throw new Error("room-cli wake wakes the thread it runs in. Outside a thread, use room-cli loop create.");
+  }
+  const [thread, own] = await Promise.all([
+    room.sdk.threads.get({ threadId: ctx.threadId }),
+    room.sdk.threads.defaultExecutionOptions({ threadId: ctx.threadId }),
+  ]);
+  if (!own?.model) throw new Error("Couldn't read this thread's agent. Use room-cli loop create instead.");
+  // `--flag=value` keeps a value that starts with `--` a value.
+  return [
+    "create",
+    `--project=${thread.projectId}`,
+    `--name=Wake: ${prompt.length > 50 ? `${prompt.slice(0, 49)}…` : prompt}`,
+    `--${DURATION_PATTERN.test(when) ? "in" : "at"}=${when}`,
+    `--prompt=${prompt}`,
+    `--provider=${thread.providerId}`,
+    `--model=${own.model}`,
+    ...(own.reasoningLevel ? [`--reasoning=${own.reasoningLevel}`] : []),
+    `--target-thread=${ctx.threadId}`,
+    ...(argv.includes("--json") ? ["--json"] : []),
+  ];
+}
+
 export function registerAutomationCli(args: {
   bb: Pick<BbPluginApi, "cli" | "sdk">;
   service: AutomationService;
@@ -1524,6 +1563,12 @@ export function registerAutomationCli(args: {
         summary: "Create a loop, or add one from a template",
         usage:
           "room-cli loop create --project <id> --name <name> [schedule flags] [mode flags] [--priority 1-4] | room-cli loop create --template <id> --project <id> [--local]",
+      },
+      {
+        // A plugin has one top-level command, so the CLI sends `room-cli wake` here.
+        name: "wake",
+        summary: "Wake this thread once with a prompt: a timer or a reminder",
+        usage: WAKE_USAGE.trimEnd(),
       },
       {
         name: "templates",
@@ -1597,8 +1642,13 @@ export function registerAutomationCli(args: {
         usage: "room-cli loop settings [--stop-at-limit on|off] [--fallback on|off] [--json]",
       },
     ],
-    async run(argv: string[], ctx: PluginCliContext): Promise<PluginCliResult> {
+    async run(given: string[], ctx: PluginCliContext): Promise<PluginCliResult> {
       try {
+        const wake = given[0] === "wake";
+        if (wake && (given.length === 1 || given[1] === "--help" || given[1] === "-h")) {
+          return { exitCode: 0, stdout: WAKE_USAGE };
+        }
+        const argv = wake ? await wakeAsCreate(bb, given.slice(1), ctx) : given;
         const parsed = parseArgs(argv);
         const command = parsed.command;
         if (command === "help" || command === "--help" || command === "-h") {

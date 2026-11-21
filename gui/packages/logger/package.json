@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@cloudroom/config": "workspace:*",
-    "pino": "^9.6.0",
     "pino-roll": "^4.0.0"
   },
   "devDependencies": {

@@ -300,10 +300,18 @@ export type SystemThreadInterruptedReason = z.infer<
 export const systemThreadInterruptedEventDataSchema = z.object({
   reason: systemThreadInterruptedReasonSchema,
   cause: z.literal("host-connection-lost").optional(),
+  /** Memory guard stops: what it measured, so the banner can say it (#1965). */
+  memory: z
+    .object({ usedBytes: z.number(), totalBytes: z.number() })
+    .optional(),
 });
 export type SystemThreadInterruptedEventData = z.infer<
   typeof systemThreadInterruptedEventDataSchema
 >;
+
+/** The warning for a message a Stop may have ended the agent before it read (#2137). */
+export const UNDELIVERED_MESSAGE_WARNING =
+  "May not have been delivered: the agent stopped before reading it";
 
 /** Plain words for a recorded stop, for parent notices and `thread show` (#1159). */
 export function describeThreadInterruption(

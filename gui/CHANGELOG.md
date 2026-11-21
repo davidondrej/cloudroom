@@ -2,6 +2,21 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 161
+
+The Antigravity Update (2026-11-21)
+
+### Changes
+
+- Antigravity is a full agent now: one-click Google sign-in, High thinking by default, and it shows even before you install it.
+- Antigravity runs in Cloud threads too, and its plan and quota show in the usage box and Settings.
+- Fork and Move to worktree work for every agent, not just Claude Code and Codex.
+- Long voice recordings are never lost, on your phone or your computer.
+- Computer use no longer steals focus from the chat input while you type.
+- Archiving a Cloud thread is instant, and Undo works in split panes.
+- Cursor's context meter shows real usage, and large local images open in previews.
+- Security fixes.
+
 ## 160
 
 One-click scans on new threads (2026-11-19)

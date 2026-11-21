@@ -25,6 +25,7 @@ export interface ProviderServerCapabilities {
   reasoningLevels: readonly ReasoningLevel[];
   fork: ProviderFork;
   supportsManualCompaction: boolean;
+  resumesInNewFolder?: boolean;
 }
 
 export interface ProviderInstallRank {
@@ -78,6 +79,8 @@ export interface ProviderRegistryService {
   supportsFork(providerId: string): boolean;
   supportsSessionRewind(providerId: string): boolean;
   supportsManualCompaction(providerId: string): boolean;
+  /** Whether a moved thread keeps its native session in the new folder. */
+  resumesInNewFolder(providerId: string): boolean;
   getExtensionKindSchemas(
     kind: ExtensionKind,
   ): PluginProviderExtensionKindDeclaration | null;
@@ -89,6 +92,14 @@ export interface ProviderRegistryService {
   whenProviderRegistered(providerId: string): Promise<void>;
   whenRegistrationsSettled(): Promise<void>;
   markRegistrationsSettled(): void;
+}
+
+// The default harness order starts with these, when installed; every other harness follows in install order
+// (ADR 20261121-135940).
+const LEADING_PROVIDER_IDS = ["claude-code", "codex", "acp-antigravity", "acp-cursor"];
+function leadingIndex(id: string): number {
+  const index = LEADING_PROVIDER_IDS.indexOf(id);
+  return index === -1 ? LEADING_PROVIDER_IDS.length : index;
 }
 
 const REGISTRATIONS_SETTLED_TIMEOUT_MS = 30_000;
@@ -156,6 +167,9 @@ export function createProviderRegistryService(
     a: ProviderRegistration,
     b: ProviderRegistration,
   ): number {
+    const leadA = leadingIndex(a.info.id);
+    const leadB = leadingIndex(b.info.id);
+    if (leadA !== leadB) return leadA - leadB;
     const rankA = registrationRanks.get(a);
     const rankB = registrationRanks.get(b);
     const installA = rankA?.installRank ?? null;
@@ -339,6 +353,13 @@ export function createProviderRegistryService(
       return (
         getRegistration(providerId)?.serverCapabilities
           .supportsManualCompaction ?? false
+      );
+    },
+
+    resumesInNewFolder(providerId) {
+      return (
+        getRegistration(providerId)?.serverCapabilities.resumesInNewFolder ??
+        false
       );
     },
 

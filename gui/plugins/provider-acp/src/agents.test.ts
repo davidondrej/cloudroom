@@ -309,6 +309,14 @@ describe("acpProviderDeclaration", () => {
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-opencode")!,
     );
     expect(opencode.experimental_modelDiscoveryRestart).toBe(true);
+    // A project's opencode.json can hide providers, so it lists per project; so does its fork Kilo.
+    expect(opencode.models).toEqual({ scope: "workspace" });
+    expect(
+      acpProviderDeclaration(
+        KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-kilo")!,
+      ).models,
+    ).toEqual({ scope: "workspace" });
+    expect(cursor.models).toEqual({ scope: "host" });
   });
 
   it("gives a configured agent honest copy when it names no sign-in command", () => {

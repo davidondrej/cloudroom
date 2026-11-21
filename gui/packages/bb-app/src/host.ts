@@ -215,6 +215,8 @@ async function refusesConnection(serverUrl: string): Promise<boolean> {
 export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Promise<void> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("BB_")));
   const proxyUrl = env.ROOM_SERVER_URL === undefined && env.ROOM_DATA_DIR === undefined ? installedMachineProxyUrl() : null;
+  // The installer's plain-HTTP opt-in must reach `machine enroll` (#2194).
+  if (process.env.BB_ALLOW_INSECURE_SERVER_URL === "1") env.BB_ALLOW_INSECURE_SERVER_URL = "1";
   if (env.ROOM_DATA_DIR !== undefined) env.BB_DATA_DIR = env.ROOM_DATA_DIR;
   if (env.ROOM_HOST_DAEMON_PORT !== undefined) env.BB_HOST_DAEMON_PORT = env.ROOM_HOST_DAEMON_PORT;
   if (env.ROOM_SERVER_URL !== undefined) env.BB_SERVER_URL = env.ROOM_SERVER_URL;

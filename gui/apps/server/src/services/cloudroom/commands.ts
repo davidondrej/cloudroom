@@ -10,7 +10,7 @@ import { z } from "zod";
 import { findCliExecutable } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import { firstAgentThreadId } from "../system/first-agent.js";
-import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
+import { CloudroomClient, CloudroomConnectionError, CloudroomError, UPLOAD_PART, antigravitySignInRequired, authRequiredMessages, type CodexAuthStatus, type SessionRecord, type VmRun, type VmRunResult } from "./client.js";
 import { CLOUD_HARNESSES, HARNESS_NAMES, appendStartProgress, endedTurn, projectShown, sessionHarness, type EarlierSession, isAcpProvider, isCloudProvider, projectFollowUp, projectInitialPrompt, projectRecord, projectRecords, recordSaving, retractStillQueuedPrompts, STREAM_BATCH_MAX_RECORDS, STREAM_BATCH_MS, startStepRunning, type CloudProvider, type StartStep } from "./events.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
 import { codexOutage } from "./openai-status.js";
@@ -313,6 +313,8 @@ function coreModel(harness: CloudProvider, model: string, capabilities: z.infer<
 
 function reasoningLevels(harness: string, model: string, capabilities: Capabilities): string[] | undefined {
   const profile = harnessProfile(capabilities, harness);
+  if (harness === "acp-opencode" && (model === "default" || profile?.models === null)) return profile?.reasoning_levels;
+  if (harness === "acp-antigravity") return profile?.models?.find(item => item.model === model)?.reasoning_levels ?? profile?.reasoning_levels;
   // Claude runs exact models its catalog omits, such as claude-opus-5-5[1m]; core allows any VM level (ADR 0133),
   // and `none`, which runs any model without an effort override (#1059).
   const anyLevel =
@@ -344,9 +346,20 @@ function takesNoEffort(
 
 function validateReasoning(harness: string, model: string, reasoning: string, capabilities: z.infer<typeof capabilitiesSchema>): void {
   const profile = harnessProfile(capabilities, harness);
-  if (profile?.models === null) throw new ApiError(503, "model_catalog_unavailable", "Cloud model discovery is unavailable. Try again when the cloud harness is ready.");
+  if (profile?.models === null && harness !== "acp-opencode" && harness !== "acp-antigravity") throw new ApiError(503, "model_catalog_unavailable", "Cloud model discovery is unavailable. Try again when the cloud harness is ready.");
   const levels = reasoningLevels(harness, model, capabilities);
   if (profile?.models && !levels) {
+    const slash = harness === "acp-opencode" ? model.indexOf("/") : -1;
+    const suffix = slash > 0 ? model.slice(slash + 1) : "";
+    const sameModel = suffix
+      ? profile.models.map((item) => item.model).filter((candidate) => {
+          const at = candidate.indexOf("/");
+          return at > 0 && candidate.slice(at + 1) === suffix;
+        }).slice(0, 4)
+      : [];
+    if (sameModel.length > 0) {
+      throw new ApiError(400, "invalid_model", `${model} is not available in Cloud. Available under another provider: ${sameModel.join(", ")}.`);
+    }
     const name = HARNESS_NAMES[harness as CloudProvider] ?? harness;
     const offers = profile.models.slice(0, 4).map((item) => item.model).join(", ");
     const claudeHint = harness !== "claude-code" && model.startsWith("claude") ? " Use the claude-code provider for Claude." : "";
@@ -1191,10 +1204,14 @@ class CloudroomService {
       const wake = wakes();
       const thread = getThread(this.deps.db, sandbox);
       const project = this.sandboxProject(thread?.projectId), parent = thread?.parentThreadId ?? undefined;
-      // A sandbox archived while one of its threads is active (a missed or racing restore) comes back for it.
+      // A sandbox archived while one of its threads is active comes back only for an Undo here whose restore didn't land.
+      // Any other archive (its agent's, another computer's, one the list is still applying) wins, and the list brings it
+      // here (#2246).
       const found = await this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent).catch(async (error: unknown) => {
         if (!(error instanceof CloudroomError && error.code === "sandbox_archived") || !coreInUse(this.deps.db, SANDBOX_PREFIX + sandbox)) throw error;
-        await this.sandboxes.restore(sandbox);
+        const undo = this.undos.get(sandbox);
+        if (!undo || getThread(this.deps.db, undo)?.archivedAt !== null) { this.sync.changed(); throw error; }
+        await this.restore(undo, true);
         return this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent);
       });
       if (!found) throw new SandboxAsleep();
@@ -1813,6 +1830,15 @@ class CloudroomService {
     catch (error) { throw new ApiError(error instanceof CloudroomError && error.status === 409 ? 409 : 503, "claude_auth_unavailable", `Could not reach Claude sign-in on your VM: ${publicError(error)}`); }
   }
 
+  async antigravityLogin(input: Record<string, unknown>) {
+    const result = await this.sandboxes.antigravityLogin(input);
+    if (result.connected && (input.action === "complete" || input.action === "key")) {
+      this.loopLogins = null;
+      this.resumeStarts("acp-antigravity");
+    }
+    return result;
+  }
+
   async cursorAuth(action?: "login" | "cancel" | "key", requestId?: string, apiKey?: string) {
     const status = await this.cursorAuthStatus(action, requestId, apiKey);
     // A new Cursor login: the starts that waited for it continue by themselves.
@@ -2160,7 +2186,7 @@ class CloudroomService {
     const project = getProject(this.deps.db, request.projectId);
     if (!project) throw new ApiError(404, "project_not_found", "Project not found");
     if (!isCloudProvider(request.providerId) || (!fork && (request.originKind || request.sourceThreadId)) || request.sendAt || request.pluginSubmission || (request.environment.type !== "project-default" && !codeFrom))
-      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, Droid, Kimi Code, OpenClaw, Agent Zero and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
+      throw new ApiError(400, "cloudroom_unsupported", "Cloud supports new Codex, Pi, Cursor, fx, opencode, Hermes Agent, Devin, Droid, Kimi Code, Antigravity, OpenClaw, Agent Zero and Claude Code threads in a cloud folder. Forks, scheduling and native machine targets are not supported.");
     if (request.permissionMode && request.permissionMode !== "full") throw new ApiError(400, "cloudroom_unsupported", "Cloud uses the full permission mode; restricted modes are not supported.");
     if (request.startedOnBehalfOf || request.sourceSeqEnd !== undefined) throw new ApiError(400, "cloudroom_unsupported", "Cloud continuation and delegated starts are not enabled.");
     // A new sandbox starts on first delivery, so check against the last known capabilities.
@@ -2202,8 +2228,8 @@ class CloudroomService {
       return getThread(this.deps.db, previous.id)!;
     }
     const remoteModel = capabilities ? coreModel(request.providerId, model, capabilities) : null;
-    // A sleeping sandbox's saved catalog may predate a login (say, Cursor's key); its Core checks the model at start.
-    if (capabilities && remoteModel && !piDefault && !(sandbox && profile?.models === null)) validateReasoning(request.providerId, remoteModel.model, reasoning, capabilities);
+    // A sleeping sandbox's saved catalog may predate a login or OpenCode config edit; its Core checks the model at start.
+    if (capabilities && remoteModel && !piDefault && !(sandbox && (profile?.models === null || request.providerId === "acp-opencode"))) validateReasoning(request.providerId, remoteModel.model, reasoning, capabilities);
     const workspace = project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) };
     const providerId = request.providerId;
     const projectNote = project.id === PERSONAL_PROJECT_ID ? undefined : await localProjectNote(this.deps, project.id);
@@ -2548,17 +2574,20 @@ class CloudroomService {
     return false;
   }
 
-  private async startFailure(client: CloudroomClient, sessionId: string): Promise<string | null> {
+  private async startFailure(client: CloudroomClient, sessionId: string, requireReady = false): Promise<string | null> {
     const signal = AbortSignal.timeout(30_000);
     while (!signal.aborted) {
       const session = await client.session(sessionId, signal).catch(() => null);
-      if (session?.state === "idle") return null;
+      if (session?.state === "idle" || session && Object.values(session.receipts).some(r => r.command === "start" && r.state === "completed")) return null;
       if (session && isDead(session.state)) {
+        const receipt = Object.values(session.receipts).find(r => r.command === "start" && r.error);
+        if (receipt?.error) return receipt.error;
         const reasons = (await client.events(sessionId).catch(() => [])).map((record) => record.kind === "state" ? z.object({ reason: z.string() }).safeParse(record.data).data?.reason : undefined);
         return reasons.filter(Boolean).at(-1) ?? `The new agent stopped (${session.state}).`;
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
+    if (requireReady) throw new CloudroomError("Antigravity is still starting.", 409, "session_waking");
     return null;
   }
 
@@ -2767,8 +2796,10 @@ class CloudroomService {
     const status = getThread(this.deps.db, threadId)?.status, behind = status === "active" || status === "stopping";
     this.detach(threadId);
     if (behind) saveStatus(this.deps.db, threadId, "idle");
-    const saved = binding(this.deps.db, threadId);
-    if (!behind || !saved?.cursor || sandboxThread(saved.coreUrl) !== threadId) return;
+    const saved = binding(this.deps.db, threadId), sandbox = saved && sandboxThread(saved.coreUrl);
+    // An archive here or from the list ends an Undo still pending: no later wake sends its restore (#2246).
+    if (sandbox && this.undos.get(sandbox) === threadId) this.undos.delete(sandbox);
+    if (!behind || !saved?.cursor || sandbox !== threadId) return;
     // At most 3 reads at once, so archiving many threads never sends a burst to the website.
     const lane = this.archiveLane++ % this.archiveLanes.length;
     this.archiveLanes[lane] = this.archiveLanes[lane]!.then(() => this.readHistory(threadId, true)).then(() => {
@@ -3031,31 +3062,39 @@ class CloudroomService {
     }
   }
 
-  /** Restores the sandbox the thread runs in, which may be another thread's: an unarchived child keeps its parent's. */
-  async restore(threadId: string): Promise<void> {
+  /** Restores the sandbox the thread runs in, which may be another thread's: an unarchived child keeps its parent's.
+   *  `retry`: a wake sends a pending Undo's restore again, only while it is still pending. */
+  async restore(threadId: string, retry = false): Promise<void> {
     const saved = binding(this.deps.db, threadId), sandbox = sandboxThread(saved?.coreUrl ?? "");
     if (!saved || !sandbox) return;
     const shared = sandbox !== threadId && saved.sessionId;
     const sending = commands(this.deps.db, threadId, "sending");
-    if (shared && !sending.some(c => c.command === "unarchive_session" && JSON.parse(c.input).session === shared)) {
+    if (shared && !retry && !sending.some(c => c.command === "unarchive_session" && JSON.parse(c.input).session === shared)) {
       this.enqueue(threadId, randomUUID(), "unarchive_session", { session: shared });
     }
-    for (const pending of sending) {
+    for (const pending of retry ? [] : sending) {
       if ((pending.command === "stop" || pending.command === "sleep") && JSON.parse(pending.input).archivedAt != null) {
         saveCommandState(this.deps.db, threadId, pending.id, "cancelled");
       }
     }
     // The website lists the thread archived until it takes this, up to ~90 s after a fresh archive.
-    const restore = { at: Infinity };
+    const restore = { at: Infinity }, before = this.restores.get(sandbox);
     this.restores.set(sandbox, restore);
+    if (!retry) this.undos.set(sandbox, threadId);
+    let skipped = false;
     try {
       await this.inArchiveOrder(sandbox, async () => {
         // Naming the session resumes only the loops its archive paused (#237).
         await this.requireOwnThread(saved);
         if (getThread(this.deps.db, threadId)?.archivedAt !== null) return;
+        // A retry checks under the lock: another wake's retry may have landed while it waited.
+        if (retry && this.undos.get(sandbox) !== threadId) { skipped = true; return; }
         await this.sandboxes.restore(sandbox, saved.sessionId ?? undefined);
         await this.sync.archivedOnWebsite(sandbox, false);
+        if (this.undos.get(sandbox) === threadId) this.undos.delete(sandbox);
       });
+      // A skipped retry sent nothing: the list keeps the restore that did land, not this one.
+      if (skipped) { if (this.restores.get(sandbox) === restore) before ? this.restores.set(sandbox, before) : this.restores.delete(sandbox); return; }
       restore.at = Date.now();
       if (shared) void this.deliver(threadId).catch(error => this.warn("Shared thread restore will retry", error, { threadId }));
     } catch (error) {
@@ -3063,10 +3102,24 @@ class CloudroomService {
       throw error;
     }
   }
+  /** An Undo here whose restore hasn't landed, by sandbox: the thread restored. A wake that finds the sandbox archived
+   *  sends it again; nothing else may restore an archive. */
+  private readonly undos = new Map<string, string>();
   /** Restores sent from here, by sandbox: when the website took each, `Infinity` until it does. */
   private readonly restores = new Map<string, { at: number }>();
   /** A list asked `at` is older than this computer's restore of the thread: its archived row is the past. */
   restoredSince(threadId: string, at: number): boolean { return (this.restores.get(threadId)?.at ?? 0) > at; }
+
+  /** A user's archive record can replay after Undo. Read current state in order with our own
+   *  archive writes, and leave a restore queued during the read in charge. */
+  private currentUserArchive(saved: Binding, client: CloudroomClient, sessionId: string, signal: AbortSignal): Promise<Thread | null> {
+    return this.inArchiveOrder(sandboxThread(saved.coreUrl) ?? saved.threadId, async () => {
+      if (signal.aborted || !(await client.isSessionArchived(sessionId, signal))) return null;
+      const thread = getThread(this.deps.db, saved.threadId);
+      if (!thread || thread.archivedAt !== null || thread.deletedAt !== null) return null;
+      return commands(this.deps.db, thread.id, "sending").some(c => c.command === "unarchive_session") ? null : thread;
+    });
+  }
 
   /** A shared child's archive lives in Core, so every computer sees it (#237). An asleep sandbox isn't woken for it. */
   private async archiveShared(saved: Binding, archived: boolean): Promise<void> {
@@ -3644,6 +3697,18 @@ class CloudroomService {
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.deps, codeFrom, transfer) : null };
             }),
         ]);
+        if (harness === "acp-antigravity" && !fork && !sideChat) {
+          const failure = await this.startFailure(client, started.sessionId, true);
+          if (failure) {
+            // Core stored a terminal receipt for this start. Retry with a fresh ID, preserving the first prompt.
+            saveBinding(this.deps.db, threadId, { startRequestId: randomUUID() });
+            if (cloudLoginProvider(failure) === harness)
+              throw new CloudroomError(antigravitySignInRequired, 409, "antigravity_auth_required");
+            if (failure.includes("Antigravity no longer offers the selected model"))
+              void this.sandboxes.antigravityLogin({ action: "refresh", rejectedModel: true }).catch(() => {});
+            throw new ApiError(400, "cloudroom_start_failed", failure);
+          }
+        }
         const copy = planned instanceof Error ? null : planned;
         // Like any failed copy, the card shows only for a project with no folder on the Mac; otherwise only the agent
         // is told, and pulls what it needs (docs/scopes/sandboxes.md, David, 2026-10-13).
@@ -3676,7 +3741,7 @@ class CloudroomService {
           });
           const folder = target && (files.length || started.code || unplanned || sandbox === threadId && (await lookup())?.head) ? target
             : started.code ? (await lookup())?.path ?? null : null;
-          if (folder) await writeFilesState(client, folder, "copying");
+          if (folder) await writeFilesState(client, folder, "copying", false, files.length > 0 && !started.code);
           this.prepTries.delete(threadId);
           return folder;
         })().catch((error: unknown) => {
@@ -3691,7 +3756,7 @@ class CloudroomService {
         saved = binding(this.deps.db, threadId)!;
         const marked = workspace ? Promise.resolve() : null;
         const landed = this.landing(threadId, client, started, files.length > 0, workspace, marked);
-        if (copy) this.copy(client, copy, landed, firstSent);
+        if (copy) this.copy(client, started.code ? { ...copy, forkCode: true } : copy, landed, firstSent);
         else if (replan && workspace) reportProjectCopy(this.deps, threadId, { phase: "waiting", completed: 0, total: 0, error: unplanned });
         else if (workspace || started.code) void landed(unplanned);
         else if (sandbox) void this.ensureBranch(threadId, true);
@@ -3919,11 +3984,15 @@ class CloudroomService {
       // Cloud parent hears why, once, so it doesn't wait blind or spawn a twin (#865).
       const unstarted = !binding(this.deps.db, threadId)?.sessionId, live = getThread(this.deps.db, threadId);
       // A refusal that lands after an archive or removal starts no clock: it would outlive an unarchive.
-      const refusing = unstarted && Boolean(live && !live.archivedAt && !live.deletedAt) && error instanceof CloudroomError && error.status === 409 && error.retryable;
+      const startingAntigravity = step === "start" && live?.providerId === "acp-antigravity";
+      const refusing = unstarted && Boolean(live && !live.archivedAt && !live.deletedAt) && error instanceof CloudroomError && error.retryable && (error.status === 409 || startingAntigravity);
       if (!refusing) this.refusedSince.delete(threadId);
       else if (!this.refusedSince.has(threadId)) this.refusedSince.set(threadId, Date.now());
       const stuck = refusing && Date.now() - this.refusedSince.get(threadId)! >= 120_000;
-      if ((startRefused(error) || stuck) && unstarted) void this.noticeCloudParent(threadId, error instanceof CloudroomError && error.code === CLOUD_REGION ? "blocked" : "refused", "refused", message).catch((error: unknown) => this.warn("A child report could not be sent", error, { threadId }));
+      if (stuck && startingAntigravity) {
+        this.failStart(threadId, "Antigravity could not start. Your prompt is saved. Retry when ready.", error, step);
+        this.refusedSince.delete(threadId);
+      } else if ((startRefused(error) || stuck) && unstarted) void this.noticeCloudParent(threadId, error instanceof CloudroomError && error.code === CLOUD_REGION ? "blocked" : "refused", "refused", message).catch((error: unknown) => this.warn("A child report could not be sent", error, { threadId }));
       // The cause tells a Stop whether anything answered (#1699).
       throw Object.assign(new ApiError(permanent ? 400 : 503, error instanceof CloudroomError ? error.code ?? "cloudroom_unavailable" : "cloudroom_unavailable", message), { cause: error });
     } finally { releaseCopy?.(); }
@@ -4415,6 +4484,11 @@ class CloudroomService {
               else cloudTurnsElsewhere.add(saved.threadId);
             }
           }
+          const archive = record.kind === "archive" && fresh && acts(record) && this.isHome(saved.threadId);
+          const userArchive = archive && (record.data as { user?: unknown } | null)?.user === true;
+          // Read before saving the cursor so a failed status check can retry.
+          const mirroredArchive = userArchive ? await this.currentUserArchive(saved, client, record.session_id, controller.signal) : null;
+          if (userArchive && controller.signal.aborted) return;
           const eventTypes = projectRecord(this.deps.db, saved.threadId, record, outage);
           // Past history the website only showed, progress is saved as each record is handled (projectRecord saves the
           // cursor otherwise), so a detach right after an action (an archive) never repeats it on the next connect.
@@ -4429,12 +4503,13 @@ class CloudroomService {
           else if (owned) this.tellLocalParent(saved.threadId, owned, turn);
           const reply = ended ? getLastThreadOutput(this.deps.db, saved.threadId) : null;
           if (reply) void saveCloudImages(this.deps, saved.threadId, reply).catch((error: unknown) => this.warn("Chat images could not be saved", error, { threadId: saved.threadId }));
+          if (mirroredArchive) this.sync.local?.archive(mirroredArchive);
           // Agents archive their own thread with `room-cli thread archive --self`; like renames, this applies on reconnect,
           // on home. With Core reporting it, the website archives the thread, and home archives its children once the
           // website's list shows that (cascade). One that kept live sessions never reaches the website: home shows it.
           // Core holds the report while any other session in the sandbox is open (a side chat, a kept child), so then
           // home shows it here at once, as on main.
-          if (record.kind === "archive" && fresh && acts(record) && this.isHome(saved.threadId)) {
+          if (archive && !userArchive) {
             const kept = z.object({ kept_live: z.array(z.string()) }).catch({ kept_live: [] }).parse(record.data).kept_live;
             const live = bindings(this.deps.db).filter((b) => b.coreUrl === saved.coreUrl && b.sessionId !== null && kept.includes(b.sessionId)).map((b) => b.threadId);
             const others = bindings(this.deps.db).some((b) => b.coreUrl === saved.coreUrl && b.threadId !== saved.threadId && !getThread(this.deps.db, b.threadId)?.archivedAt && !getThread(this.deps.db, b.threadId)?.deletedAt);

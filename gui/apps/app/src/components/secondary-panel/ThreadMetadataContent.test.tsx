@@ -8,7 +8,7 @@ import {
   screen,
 } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { Environment, Host, Thread } from "@cloudroom/domain";
 import type { EnvironmentDisplayHostContext } from "@cloudroom/core-ui";
 import type {

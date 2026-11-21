@@ -20,6 +20,7 @@ import {
 } from "@cloudroom/db";
 import {
   promptInputSchema,
+  type ClientTurnRequestId,
   type PromptInput,
   type QueuedMessagePayload,
   type QueuedMessageWaitingOn,
@@ -59,6 +60,7 @@ import {
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
+  holdUnconfirmedQueuedMessage,
   recordQueuedMessageWait,
   settleQueueRowDispatched,
   type QueuedDispatchMessage,
@@ -775,17 +777,34 @@ async function runDispatchAttempt(
     return reattempt(afterWait);
   }
   let saving = false;
+  let savedRequestId: ClientTurnRequestId | undefined;
   try {
     await sendThreadMessage(deps, {
       environment,
       payload: resolvedPayload,
       thread,
       trigger: args.trigger,
-      onStartSettled: args.onStartSettled,
+      onStartSettled: (error) => {
+        args.onStartSettled?.(error);
+        // The computer dropped after the turn was sent: it may still have it,
+        // so the consumed row comes back held, never sent by itself (#2279).
+        if (
+          claimed !== null &&
+          savedRequestId !== undefined &&
+          isHostUnavailableApiError(error)
+        ) {
+          holdUnconfirmedQueuedMessage(deps, {
+            claimed,
+            requestId: savedRequestId,
+            retryOf: args.retryOf,
+          });
+        }
+      },
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       ...(claimed !== null && !sendNow ? { queueDelivered: claimed.id } : {}),
       beforeAppendInTransaction: ({ tx, requestId }) => {
         saving = true;
+        savedRequestId = requestId;
         args.beforeDispatch?.(requestId);
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();

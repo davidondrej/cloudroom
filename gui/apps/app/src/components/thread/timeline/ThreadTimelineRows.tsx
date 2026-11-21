@@ -12,7 +12,7 @@ import {
 import type { CSSProperties, ReactNode } from "react";
 import { useComposedRefs } from "@radix-ui/react-compose-refs";
 import { useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { TimelineImageGallery } from "./TimelineImageGallery";
 import type {
   PromptInput,

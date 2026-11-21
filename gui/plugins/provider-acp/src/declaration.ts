@@ -60,7 +60,9 @@ export function acpProviderDeclaration(
     family: ACP_FAMILY,
     ...(agent.icon === undefined ? {} : { icon: agent.icon }),
     strings: acpStrings(agent),
-    serviceTiers: [...ACP_SERVICE_TIERS],
+    ...(agent.supportsServiceTier === false
+      ? {}
+      : { serviceTiers: [...ACP_SERVICE_TIERS] }),
     ...(agent.visibility === undefined
       ? {}
       : { experimental_visibility: agent.visibility }),
@@ -109,7 +111,8 @@ export function acpProviderDeclaration(
         : { acpMinimumVersion: agent.minimumVersion }),
       acpLaunchSpec: { ...agent.launch },
     },
-    models: { scope: "host" },
+    // A project's opencode.json can hide providers, so OpenCode and its fork Kilo list models per project (#1236).
+    models: { scope: agent.dialect === "opencode" ? "workspace" : "host" },
     // Every ACP bridge caches its agent's models, so `--restart` is how a
     // signed-in agent or an edited agent config (opencode.json) shows (#1236).
     experimental_modelDiscoveryRestart: true,
@@ -121,6 +124,7 @@ export function acpProviderDeclaration(
     },
     capabilities: {
       ...ACP_BASE_CAPABILITIES,
+      supportsServiceTier: agent.supportsServiceTier ?? true,
       fork: agent.fork ?? DEFAULT_FORK,
       permissionModes: [
         ...(agent.permissionModes ?? ACP_BASE_CAPABILITIES.permissionModes),

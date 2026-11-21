@@ -67,7 +67,7 @@ async function reconnect(provider: keyof typeof SIGN_IN): Promise<void> {
 
 /** `openSettings` handles agents without an inline sign-in here (Claude Code connects in Settings → Agents). */
 export function reconnectCloud(provider: CloudLoginProvider, openSettings: () => void): void {
-  if (provider === "claude-code") openSettings();
+  if (provider === "claude-code" || provider === "acp-antigravity") openSettings();
   else void reconnect(provider);
 }
 

@@ -1,6 +1,6 @@
 import { hostPathEquals } from "./host-path-sql.js";
 import { and, asc, desc, eq, isNotNull, isNull } from "drizzle-orm";
-import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, stripGitUrlCredentials } from "@cloudroom/domain";
 import type {
   DbConnection,
   DbQueryConnection,
@@ -162,7 +162,7 @@ function insertProjectRow(
       id: createProjectId(),
       name: input.name,
       sortKey,
-      ...(input.gitRemoteUrl ? { gitRemoteUrl: input.gitRemoteUrl } : {}),
+      ...(input.gitRemoteUrl ? { gitRemoteUrl: stripGitUrlCredentials(input.gitRemoteUrl) } : {}),
       ...(input.githubRepoId ? { githubRepoId: input.githubRepoId } : {}),
       createdAt: now,
       updatedAt: now,
@@ -294,7 +294,8 @@ export interface UpdateProjectInput {
 }
 
 /** Saves the project's GitHub repo ID, and its remote under the repo's current name after a rename or transfer. With
- *  `from`, only while the remote is still the one the lookup started with, so a newer save is never undone. */
+ *  `from`, only while the remote is still the one the lookup started with, so a newer save is never undone. The remote
+ *  is the saved one renamed, so a legacy row keeps its token as on main (#2190). */
 export function setProjectGithubRepo(
   db: DbConnection,
   notifier: DbNotifier,
@@ -318,7 +319,7 @@ export function setProjectGitRemoteUrlIfMissing(
 ) {
   const updated = db
     .update(projects)
-    .set({ gitRemoteUrl, updatedAt: Date.now() })
+    .set({ gitRemoteUrl: stripGitUrlCredentials(gitRemoteUrl), updatedAt: Date.now() })
     .where(and(eq(projects.id, id), isNull(projects.gitRemoteUrl)))
     .returning()
     .get();
@@ -339,7 +340,7 @@ export function replaceProjectGitRemoteUrl(
 ) {
   const updated = db
     .update(projects)
-    .set({ gitRemoteUrl, githubRepoId: null, updatedAt: Date.now() })
+    .set({ gitRemoteUrl: stripGitUrlCredentials(gitRemoteUrl), githubRepoId: null, updatedAt: Date.now() })
     .where(and(eq(projects.id, id), eq(projects.gitRemoteUrl, from)))
     .returning()
     .get();

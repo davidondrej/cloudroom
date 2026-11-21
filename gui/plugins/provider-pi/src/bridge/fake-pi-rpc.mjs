@@ -152,6 +152,22 @@ process.on("SIGTERM", () => {
 if (process.env.FAKE_PI_EXIT_BEFORE_FIRST_RESPONSE === "1") {
   exit();
 }
+// FAKE_PI_LOCK_DIR: pi's startup lock in its shared agent dir, held 300ms.
+// A start that finds it held crashes the way pi 0.84 does (#2154): a stack
+// long enough to push the message out of the bridge's 4 KB stderr tail.
+const lockDir = process.env.FAKE_PI_LOCK_DIR;
+if (lockDir) {
+  try {
+    mkdirSync(lockDir);
+    setTimeout(() => rmSync(lockDir, { recursive: true, force: true }), 300);
+  } catch {
+    logProcessStep("exit");
+    process.stderr.write(
+      `Error: Lock file is already being held\n${"    at lockSync (lockfile.js)\n".repeat(200)}{\n  code: 'ELOCKED'\n}\n`,
+    );
+    process.exit(1);
+  }
+}
 
 const MODELS = [
   {

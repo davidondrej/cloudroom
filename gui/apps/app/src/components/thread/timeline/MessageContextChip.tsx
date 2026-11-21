@@ -3,13 +3,17 @@ import type { MessageContextBlockSegment } from "@cloudroom/client-core";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 
-function QuoteGlyph() {
+export function MessageContextQuoteGlyph({
+  className,
+}: {
+  className?: string;
+}) {
   return (
     <svg
       viewBox="0 0 24 24"
       fill="currentColor"
       aria-hidden
-      className="size-3 shrink-0 self-center opacity-60"
+      className={cn("size-3 shrink-0 self-center opacity-60", className)}
     >
       <path d="M7 7h4v4H8.5c0 2 1 3 2.5 3.5V17C8 16.5 6 14.5 6 11V8a1 1 0 0 1 1-1Zm8 0h4v4h-2.5c0 2 1 3 2.5 3.5V17c-3-.5-5-2.5-5-6V8a1 1 0 0 1 1-1Z" />
     </svg>
@@ -65,7 +69,7 @@ export function MessageContextChip({
             : "inline-flex min-w-0 max-w-full cursor-pointer select-none items-center gap-1.5 rounded-md bg-foreground/[0.06] py-1 pl-2 pr-1.5 text-xs leading-4 text-foreground transition-colors hover:bg-foreground/[0.09] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring dark:bg-foreground/[0.08] dark:hover:bg-foreground/[0.12]"
         }
       >
-        <QuoteGlyph />
+        <MessageContextQuoteGlyph />
         {expanded ? (
           <>
             <span className="font-medium text-muted-foreground">{heading}</span>

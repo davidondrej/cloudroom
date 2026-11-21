@@ -1153,6 +1153,33 @@ export function isAutomationSpawnedThread(db: Db, threadId: string): boolean {
   );
 }
 
+/** A thread's wakes that have not fired yet: one-time loops it made to re-prompt itself. */
+export function countWaitingWakes(db: Db, threadId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS waiting FROM automations
+       WHERE enabled = 1 AND trigger_type = 'once'
+         AND target_thread_id = ? AND created_by_thread_id = ?`,
+    )
+    .get(threadId, threadId) as { waiting: number };
+  return row.waiting;
+}
+
+/** One-time loops whose run succeeded before `before`: timers and reminders that did their job. A failed or
+ *  paused one stays, so its reason stays readable. */
+export function listFinishedOnceAutomations(
+  db: Db,
+  before: number,
+): { projectId: string; automationId: string }[] {
+  return db
+    .prepare(
+      `SELECT project_id AS projectId, id AS automationId FROM automations
+       WHERE trigger_type = 'once' AND enabled = 0
+         AND last_run_status = 'succeeded' AND last_run_at < ?`,
+    )
+    .all(before) as { projectId: string; automationId: string }[];
+}
+
 export function listRunningAutomationRuns(db: Db): AutomationRunRow[] {
   return db
     .prepare(

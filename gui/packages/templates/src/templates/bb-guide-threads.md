@@ -221,6 +221,7 @@ Inspecting:
     --work-status                          Include git working-tree status
     --git-diff                             Include git diff
     --no-pr                                Skip the GitHub pull request lookup
+    --credits                              Include Cloud Credits, last 7 days (one website read)
     --diff-target <type>                   Diff scope: uncommitted, branch_committed, all, commit
     --diff-sha <sha>                       Commit SHA (for --diff-target commit)
     --diff-merge-base <branch>             Override merge-base branch for diff

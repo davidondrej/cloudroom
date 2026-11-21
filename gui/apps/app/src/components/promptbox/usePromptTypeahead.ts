@@ -48,7 +48,8 @@ interface Dismissal {
 interface PillInsert {
   editor: Editor;
   range: { from: number; to: number };
-  resource: PromptMentionResource;
+  /** Null inserts `serializedText` as plain typed text. */
+  resource: PromptMentionResource | null;
   serializedText: string;
   trailingText: string;
   dismissal: Dismissal | null;
@@ -365,13 +366,15 @@ export function usePromptTypeahead({
         .focus()
         .deleteRange(pill.range)
         .insertContent([
-          {
-            type: "mention",
-            attrs: {
-              resource: pill.resource,
-              serializedText: pill.serializedText,
-            },
-          },
+          pill.resource === null
+            ? { type: "text", text: pill.serializedText }
+            : {
+                type: "mention",
+                attrs: {
+                  resource: pill.resource,
+                  serializedText: pill.serializedText,
+                },
+              },
           ...(pill.trailingText
             ? [{ type: "text", text: pill.trailingText }]
             : []),
@@ -405,10 +408,12 @@ export function usePromptTypeahead({
     insertPill({
       editor,
       range: { from: active.from, to: active.to },
-      resource: promptCommandResourceFromSuggestion({
-        suggestion: item,
-        trigger: active.char,
-      }),
+      resource: item.insertAsText
+        ? null
+        : promptCommandResourceFromSuggestion({
+            suggestion: item,
+            trigger: active.char,
+          }),
       serializedText: `${active.char}${item.name}`,
       trailingText,
       dismissal: {

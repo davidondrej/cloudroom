@@ -7,7 +7,8 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
                                           run it again after a failure to start only the missing readers
   readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed
                                           or archived reader once; prints "done" (and writes DIR/lines.txt, without chat IDs
-                                          that are not in a reader's slice) or "running N/M"
+                                          that are not in a reader's slice) or "running N/M"; a failed room-cli read is
+                                          retried until --max, then it exits with the error
   readers.py archive DIR               -> archives every reader thread
 
 Other scans reuse it (the Cyber scan): SCAN_READER_PROMPT, SCAN_TITLE and SCAN_READER_REASONING, set on spawn, replace
@@ -32,6 +33,15 @@ def cli(*args, check=False):
 
 def room(*args):
     return json.loads(cli(*args, "--json", check=True).stdout)
+
+
+def read(errors, *args):
+    """wait()'s room-cli reads. A failed one (a timeout, a busy app) returns None and adds to errors: the next pass tries
+    again, and it never counts as a failed reader, so it never restarts or archives one (#2157)."""
+    try:
+        return room(*args)
+    except (subprocess.CalledProcessError, ValueError) as e:
+        errors.append(((getattr(e, "stderr", None) or "").strip() or str(e)).splitlines()[-1])
 
 
 def load(d):
@@ -136,12 +146,19 @@ def heading(d, state, n):
 def wait(d, limit=540):
     state, end = load(d), time.time() + limit
     while True:
-        status = {t["id"]: t["status"] for t in room("thread", "list", "--project", PROJECT, "--include-hidden")}
+        errors = []
+        threads = read(errors, "thread", "list", "--project", PROJECT, "--include-hidden")
+        status = {t["id"]: t["status"] for t in threads or []}
         for n, r in list(state["readers"].items()):
+            if errors or time.time() > end:  # a stalled app makes every read wait out its 45 s timeout: end the pass
+                break
             now = status.get(r["id"], "error")
             if "output" in r or now not in ("idle", "error"):
                 continue
-            output = (room("thread", "output", r["id"]).get("output") or "").strip() if now == "idle" else ""
+            got = read(errors, "thread", "output", r["id"]) if now == "idle" else {}
+            if got is None:
+                continue
+            output = (got.get("output") or "").strip()
             if " | " in output or r["tries"] >= 2:
                 r["output"], r["invented"] = drop_invented(output, slice_ids(d, n))
             else:
@@ -149,7 +166,8 @@ def wait(d, limit=540):
                 start(d, state, n)
         save(d, state)
         done = sum("output" in r for r in state["readers"].values())
-        report(d, state, "patterns" if done == len(state["readers"]) else "reading")
+        if not errors:  # its own retries would add ~50 s to a stalled pass
+            report(d, state, "patterns" if done == len(state["readers"]) else "reading")
         if done == len(state["readers"]):
             with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:
                 f.write("\n\n".join(heading(d, state, n) + r["output"] for n, r in state["readers"].items() if r["output"]))
@@ -157,8 +175,11 @@ def wait(d, limit=540):
             invented = [f"{n} ({r['invented']})" for n, r in state["readers"].items() if r.get("invented")]
             return print("done" + (f", no output from readers {', '.join(failed)}" if failed else "")
                          + (f", dropped invented chat IDs from readers {', '.join(invented)}" if invented else ""))
-        if time.time() > end:
-            return print(f"running {done}/{len(state['readers'])}")
+        if time.time() + 20 > end:  # the next pass would start past --max
+            running = f"running {done}/{len(state['readers'])}"
+            if errors:
+                sys.exit(f"{running}. room-cli could not read the readers ({errors[-1]}). They keep working: run wait again.")
+            return print(running)
         time.sleep(20)
 
 

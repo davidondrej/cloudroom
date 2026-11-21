@@ -96,6 +96,7 @@ const HARNESSES = {
   "claude-code": "claude-code",
   "acp-cursor": "cursor",
   "acp-opencode": "opencode",
+  "acp-antigravity": "antigravity",
 } as const;
 type Harness = (typeof HARNESSES)[keyof typeof HARNESSES];
 function harnessOf(providerId: string): Harness | undefined {
@@ -115,6 +116,7 @@ const openCloudChild = (child: { id: string; title: string | null }) =>
 const TEXT = ["native", "lineage", "context"];
 const HISTORY_LIMIT = 64 * 1024 * 1024;
 const HOST_MESSAGE_LIMIT = 96 * 1024 * 1024;
+const HERE = process.platform === "win32" ? "PC" : COMPUTER;
 const services = new WeakMap<AppDeps["db"], Teleport>();
 export function teleports(deps: AppDeps): Teleport {
   let service = services.get(deps.db);
@@ -257,7 +259,7 @@ class Teleport {
       throw new ApiError(
         409,
         "teleport_unavailable",
-        "Teleport supports Codex, Pi, Claude Code, and opencode.",
+        "Teleport supports Codex, Pi, Claude Code, opencode, and Antigravity.",
       );
     const all = [thread];
     for (let i = 0; i < all.length; i++)
@@ -324,12 +326,18 @@ class Teleport {
           },
         ];
       if (source.id !== thread.id && source.archivedAt) return [];
+      // Name the prerequisite that failed; archived children are left out, so archiving is a child's way past it (#2248).
+      const name = source.title ?? source.id;
       throw new ApiError(
         409,
         "teleport_unavailable",
-        !nativeId && pendingImportFork(this.deps.db, source.id)
-          ? `Send ${source.title ?? "this imported chat"} a message first, then Teleport.`
-          : `Cannot capture the saved local conversation for ${source.title ?? source.id}.`,
+        env && env.hostId !== environment.hostId
+          ? `${name} runs on another computer, so Teleport can't take its conversation from this ${HERE}. Archive it to leave it out, then Teleport.`
+          : !harnessOf(source.providerId)
+            ? `${name} runs an agent Teleport can't take; it supports Codex, Pi, Claude Code, Cursor, opencode, and Antigravity. Archive it to leave it out, then Teleport.`
+            : !nativeId && pendingImportFork(this.deps.db, source.id)
+              ? `Send ${source.title ?? "this imported chat"} a message first, then Teleport.`
+              : `${name} has no saved conversation on this ${HERE} yet. Send it a message first${source.id === thread.id ? "" : ", or archive it to leave it out"}, then Teleport.`,
       );
     });
     const last = getLastExecutionOptions(this.deps, threadId);
@@ -397,7 +405,10 @@ class Teleport {
     const existing = teleportProgress(this.deps.db, threadId);
     if (existing && !["cancelled", "complete"].includes(existing.phase))
       throw new ApiError(409, "teleport_in_progress", "Teleport is already running for this thread.");
-    const { thread, environment, all, execution } = this.validate(threadId, choice);
+    const { thread, environment, all, sessions, execution } = this.validate(
+      threadId,
+      choice,
+    );
     try {
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
@@ -411,8 +422,17 @@ class Teleport {
       .all()
       .filter((other) => !all.some((source) => source.id === other.id)).length;
     const warnings = [
-      ...(all.length > 1 ? [`${all.length - 1} child thread(s) move to Cloud with it.`] : []),
-      ...(sharing ? [`${sharing} other open thread(s) use this folder; they stay on this ${process.platform === "win32" ? "PC" : COMPUTER}.`] : []),
+      // Only the parent moves; children stop and stay, and their history goes with it (docs/scopes/teleport.md, #2248).
+      ...(sessions.length > 1
+        ? [
+            `${sessions.length - 1} child thread(s) stop and stay on this ${HERE}; their history goes to Cloud with this thread.`,
+          ]
+        : []),
+      ...(sharing
+        ? [
+            `${sharing} other open thread(s) use this folder; they stay on this ${HERE}.`,
+          ]
+        : []),
     ];
     return { model: execution.model, reasoning: execution.reasoning, warnings };
   }

@@ -23,7 +23,7 @@ import {
 import { createPortal } from "react-dom";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { ProjectResponse } from "@cloudroom/server-contract";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import {
   usePromptDraftHasInput,
   usePromptDraftInputThreadIds,

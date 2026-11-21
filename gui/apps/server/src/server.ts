@@ -56,6 +56,7 @@ import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
 import { registerInternalThreadMemoryLimitRoutes } from "./internal/thread-memory-limit.js";
 import { registerInternalPluginHostArtifactRoutes } from "./internal/plugin-host-artifacts.js";
+import { registerInternalVoiceAudioRoutes } from "./services/ai/voice-audio-store.js";
 import { registerInternalSessionRoutes } from "./internal/session.js";
 import { registerInternalSkillRoutes } from "./internal/skills.js";
 import { registerInternalToolCallRoutes } from "./internal/tool-calls.js";
@@ -151,6 +152,8 @@ function unauthorizedResponse(): Response {
     },
   );
 }
+
+const VOICE_AUDIO_INTERNAL_PATH = /^\/internal\/voice-audio\/[a-f0-9]{64}$/u;
 
 function normalizeInternalAuthPath(path: string): string {
   if (path === "/") {
@@ -607,10 +610,22 @@ export function createApp(
     return next();
   });
   app.use("/internal/*", async (context, next) => {
+    const normalizedPath = normalizeInternalAuthPath(context.req.path);
+    if (
+      context.req.method === "GET" &&
+      VOICE_AUDIO_INTERNAL_PATH.test(normalizedPath)
+    ) {
+      if (
+        context.req.header("origin") !== undefined ||
+        context.req.header("sec-fetch-site") !== undefined
+      ) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return next();
+    }
     if (!isTrustedCaller(context) && arrivedOverLoopback(context)) {
       return callerProofRequiredResponse(context);
     }
-    const normalizedPath = normalizeInternalAuthPath(context.req.path);
     if (normalizedPath === "/internal/hosts/enroll-key") {
       return next();
     }
@@ -758,6 +773,7 @@ export function createApp(
   registerInternalSessionRoutes(internalApi, deps, pluginService);
   registerInternalSkillRoutes(internalApi, deps);
   registerInternalPluginHostArtifactRoutes(internalApi, deps);
+  registerInternalVoiceAudioRoutes(internalApi, deps);
   registerInternalEventRoutes(internalApi, deps);
   registerInternalToolCallRoutes(internalApi, deps);
   registerInternalInteractiveRequestRoutes(internalApi, deps);

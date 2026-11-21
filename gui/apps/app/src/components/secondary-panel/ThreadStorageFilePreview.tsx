@@ -21,6 +21,18 @@ import {
 } from "@cloudroom/client-core";
 
 const GENERIC_HTML_IFRAME_SANDBOX = "allow-scripts";
+// The server's HTML preview routes refuse files over 5 MB (HTTP 413). The
+// decoded text may have lost a 3-byte UTF-8 BOM, so leave room for it.
+const HTML_PREVIEW_MAX_TEXT_BYTES = 5 * 1024 * 1024 - 3;
+
+export function exceedsHtmlPreviewLimit(content: string): boolean {
+  // UTF-8 needs 1 to 3 bytes per UTF-16 code unit; encode only when unsure.
+  if (content.length * 3 <= HTML_PREVIEW_MAX_TEXT_BYTES) return false;
+  return (
+    content.length > HTML_PREVIEW_MAX_TEXT_BYTES ||
+    new TextEncoder().encode(content).byteLength > HTML_PREVIEW_MAX_TEXT_BYTES
+  );
+}
 
 interface SecondaryPanelFilePreviewProps {
   activePath: string;
@@ -108,7 +120,14 @@ function resolveSecondaryPanelFilePreviewState({
     return { kind: "loading" };
   }
 
-  if (htmlPreviewUrl !== null && isHtmlFilePreviewPath(activePath)) {
+  if (
+    htmlPreviewUrl !== null &&
+    isHtmlFilePreviewPath(activePath) &&
+    !(
+      filePreview.kind === "text" &&
+      exceedsHtmlPreviewLimit(filePreview.content)
+    )
+  ) {
     if (filePreview.kind !== "text") {
       return {
         kind: "iframe",

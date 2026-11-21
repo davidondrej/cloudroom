@@ -8,7 +8,7 @@ import {
   screen,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { PromptTextMention, ThreadListEntry } from "@cloudroom/domain";
 import type { TimelineTitleLink } from "@cloudroom/thread-view";
 import { ConversationMessageContent } from "./ConversationMessageContent";

@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 import { useSetAtom, useStore } from "jotai";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import {
   closePanesForThreadsAtom,
   splitLayoutAtom, maximizedPaneIdAtom,
@@ -46,7 +46,9 @@ import {
 import { useThreadArchive } from "./useThreadArchive";
 import { destroyPersistedBrowserViewsForThread } from "@/components/secondary-panel/browserViewVisibilityCoordinator";
 import { getThreadReadToggleAction } from "@cloudroom/client-core";
-import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
+import type { PaneContent } from "@/lib/split-layout";
+import { paneContentRoute, reconcileLayoutForContent, threadPaneContent } from "@/views/thread-detail/splitThreadNavigation";
+import { getThreadRoutePath } from "@/lib/route-paths";
 import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import {
@@ -168,16 +170,16 @@ export function ThreadActionsProvider({
   }, []);
 
   const syncNavigationAfterClose = useCallback(
-    (result: ClosePanesForThreadsResult, fallback: () => string | undefined) => {
+    (result: ClosePanesForThreadsResult, fallback: () => PaneContent | undefined) => {
       if (result.removedAny && result.focusedRoute) {
         if (result.focusedRoute.threadId === viewedThreadIdRef.current) return;
-        const path = getThreadRoutePath(result.focusedRoute);
-        navigate(path, { replace: true });
-        return path;
+        const content = threadPaneContent(result.focusedRoute);
+        navigate(paneContentRoute(content), { replace: true });
+        return content;
       }
-      const path = fallback();
-      if (path) navigate(path);
-      return path;
+      const content = fallback();
+      if (content) navigate(paneContentRoute(content));
+      return content;
     },
     [navigate],
   );
@@ -276,7 +278,7 @@ export function ThreadActionsProvider({
             });
             closeDialog();
             syncNavigationAfterClose(closePanesForThreads([thread.id]), () =>
-              viewedThreadIdRef.current === thread.id ? getRootComposeRoutePath() : undefined,
+              viewedThreadIdRef.current === thread.id ? { kind: "new-thread" } : undefined,
             );
           },
         },
@@ -338,7 +340,7 @@ export function ThreadActionsProvider({
       const opened = openedSectionTargetsRef.current;
       const openedTargets =
         opened?.threadId === thread.id ? opened.targets : [];
-      const fallbackAfterArchive = () => {
+      const fallbackAfterArchive = (): PaneContent | undefined => {
         const viewed = viewedThreadIdRef.current;
         if (!viewed || !archivedThreadIds.has(viewed)) return;
         const listedThreadIds = new Set(
@@ -357,22 +359,27 @@ export function ThreadActionsProvider({
             isAvailable,
           );
         return fallback
-          ? getThreadRoutePath({ projectId: fallback.projectId ?? thread.projectId, threadId: fallback.threadId })
-          : getRootComposeRoutePath();
+          ? threadPaneContent({ projectId: fallback.projectId ?? thread.projectId, threadId: fallback.threadId })
+          : { kind: "new-thread" };
       };
       const closed = closePanesForThreads([...archivedThreadIds]);
       const destination = syncNavigationAfterClose(closed, fallbackAfterArchive);
-      const remaining = store.get(splitLayoutAtom);
+      const afterClose = store.get(splitLayoutAtom);
+      // Apply the route's pane change now so the workspace effect reuses this exact layout.
+      const remaining = destination ? reconcileLayoutForContent(afterClose, destination) : afterClose;
+      if (remaining !== afterClose) store.set(splitLayoutAtom, remaining);
       const remainingMaximized = store.get(maximizedPaneIdAtom);
       return () => {
         // Leave later navigation, resizing, and other archive actions in the user's hands.
         const current = route.current;
-        if (current !== original && (current.revision !== original.revision + 1 || current.location.pathname !== destination)) return;
+        if (current !== original && (
+          !destination ||
+          current.revision !== original.revision + 1 ||
+          current.location.pathname !== paneContentRoute(destination)
+        )) return;
         if (store.get(splitLayoutAtom) !== remaining || store.get(maximizedPaneIdAtom) !== remainingMaximized) return;
-        if (closed.removedAny) {
-          store.set(splitLayoutAtom, layout);
-          store.set(maximizedPaneIdAtom, maximized);
-        }
+        if (remaining !== layout) store.set(splitLayoutAtom, layout);
+        if (remainingMaximized !== maximized) store.set(maximizedPaneIdAtom, maximized);
         if (destination) {
           const { pathname, search, hash, state } = original.location;
           navigate(pathname + search + hash, { replace: true, state });

@@ -18,7 +18,7 @@ import { MAC_MCP_KEY, useMcpSignIn } from "@/components/CloudMcpSignIn";
 import { useThisComputer } from "@/hooks/useHostDaemon";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
 import { getPluginConfigurationRoutePath, getPluginDetailRoutePath } from "@/lib/route-paths";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 
 const ENVIRONMENT_KEY = ["cloudroom-environment"];
 const SKILLS_KEY = ["cloudroom-cloud-skills"];

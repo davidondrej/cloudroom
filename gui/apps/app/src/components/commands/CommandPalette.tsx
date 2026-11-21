@@ -8,7 +8,7 @@ import {
 } from "react";
 import { pluginCommandId, pluginCommandIdSchema, type ThreadListEntry } from "@cloudroom/domain";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -40,9 +40,10 @@ import { buildPluginPagePaletteActions } from "@/lib/command-palette/palette-plu
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getActiveThreadPanelOpener } from "@/components/plugin/plugin-thread-panel-navigation";
 import {
-  getProjectComposeRoutePath,
+  getRootComposeRoutePath,
   getThreadRoutePath,
 } from "@/lib/route-paths";
+import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import { pluginListQueryOptions } from "@/hooks/queries/plugin-settings-queries";
 import {
   buildPluginSettingsEntries,
@@ -109,6 +110,7 @@ export interface CommandPaletteProps {
 
 export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const setRootComposeProjectId = useSetRootComposeProjectId();
   const runner = useAppCommandRunner();
   const shortcuts = useAppCommandShortcuts(PALETTE_COMMAND_IDS);
   const listId = useId();
@@ -339,13 +341,20 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
   const chooseThread = useCallback(
     (item: ThreadPaletteNavigationItem) => {
       pendingRunRef.current = () => {
+        if (item.threadId === null) {
+          // Open the composer directly. The legacy /projects/:id route
+          // redirects and flashes a loading frame first.
+          setRootComposeProjectId(item.projectId);
+          void navigate(getRootComposeRoutePath(), {
+            state: { focusPrompt: true },
+          });
+          return;
+        }
         void navigate(
-          item.threadId === null
-            ? getProjectComposeRoutePath(item.projectId)
-            : getThreadRoutePath({
-                projectId: item.projectId,
-                threadId: item.threadId,
-              }),
+          getThreadRoutePath({
+            projectId: item.projectId,
+            threadId: item.threadId,
+          }),
           item.messageSeq === null
             ? undefined
             : {
@@ -358,7 +367,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
       };
       setOpen(false);
     },
-    [navigate],
+    [navigate, setRootComposeProjectId],
   );
 
   const handleAfterCloseAutoFocus = useCallback(() => {

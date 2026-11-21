@@ -15,7 +15,7 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { sortableTranslate } from "@/lib/sortable-translate";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -90,7 +90,7 @@ export function useSortableSettingsRow({
     transition,
   } = useSortable({ id, disabled });
   const style = useMemo<CSSProperties>(
-    () => ({ transform: CSS.Translate.toString(transform), transition }),
+    () => ({ transform: sortableTranslate(transform), transition }),
     [transform, transition],
   );
   const handle = (

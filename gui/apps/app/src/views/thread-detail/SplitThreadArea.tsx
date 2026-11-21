@@ -16,7 +16,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useRouteState } from "@/hooks/useRouteState";
 import {
   getThreadRoutePath,
@@ -291,22 +291,33 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
     [routeContent, routeThread],
   );
 
+  const [reconciledContent, setReconciledContent] =
+    useState<PaneContent | null>(null);
   useEffect(() => {
     if (currentContent === null) {
       return;
     }
+    setReconciledContent(currentContent);
     setLayout((previous) =>
       reconcileLayoutForContent(previous, currentContent),
     );
   }, [currentContent, setLayout]);
 
-  const layout: SplitLayout | null =
-    storedLayout ??
-    (currentContent?.kind === "thread" && routeThread
-      ? createSinglePaneLayout(routeThread)
-      : currentContent
-        ? reconcileLayoutForContent(null, currentContent)
-        : null);
+  // The effect above runs after paint. Until it does, render the layout it
+  // will store, so a route change never flashes the previous pane's chat.
+  // Once reconciled, trust the stored layout: layout ops update it before
+  // their route transition lands.
+  const layout = useMemo<SplitLayout | null>(() => {
+    if (currentContent === null) return storedLayout;
+    if (storedLayout === null) {
+      return currentContent.kind === "thread" && routeThread
+        ? createSinglePaneLayout(routeThread)
+        : reconcileLayoutForContent(null, currentContent);
+    }
+    return currentContent === reconciledContent
+      ? storedLayout
+      : reconcileLayoutForContent(storedLayout, currentContent);
+  }, [currentContent, reconciledContent, routeThread, storedLayout]);
   const panes = layout === null ? [] : listPanes(layout.root);
   const isSplitActive = splitWorkspaceActive && panes.length > 1;
   const maximizedPane =

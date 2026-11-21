@@ -1608,6 +1608,31 @@ describe("dispatchCommand", () => {
     expect(runtime.startThread).toHaveBeenCalledTimes(2);
   });
 
+  it("asks again when the first installation probe times out", async () => {
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    const providerInstallationStatus = vi
+      .fn<() => Promise<ProviderCliStatus>>()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("JSON-RPC request timed out"), {
+          code: "rpc_timeout",
+        }),
+      )
+      .mockResolvedValue(supportedCodexInstallationStatus());
+    const options = makeDispatchOptions({
+      runtimeManager: manager,
+      providerInstallationStatus,
+    });
+
+    await expect(
+      dispatchCommand(createInstallationGatedThreadStart("thread-1"), options),
+    ).resolves.toEqual({ providerThreadId: "provider-thread-1" });
+    expect(providerInstallationStatus).toHaveBeenCalledTimes(2);
+  });
+
   it("shares one in-flight probe between concurrent thread starts", async () => {
     const runtime = createRuntime();
     const manager = new RuntimeManager({

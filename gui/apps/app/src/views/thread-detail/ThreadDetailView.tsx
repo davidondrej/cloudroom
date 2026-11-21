@@ -15,7 +15,7 @@ import { moveThreadDetailBootstrap } from "@/hooks/cache-owners/thread-detail-ca
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
 import { useSystemProviderInfo } from "@/hooks/queries/system-queries";
 import { useCloudroomConnection, cloudFeatureSupported, useOpenCloudFile, useCloudroomThread, useCloudroomThreadWorkspace } from "@/hooks/queries/cloudroom-queries";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAtom, useSetAtom } from "jotai";
 import { findPane, replacePaneContent } from "@/lib/split-layout";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
@@ -1078,10 +1078,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     }),
     [thread?.providerId, threadProviderPluginId],
   );
-  const isForkAvailable = isThreadForkable(
-    thread ?? null,
-    threadProviderInfo?.capabilities.supportsFork ?? false,
-  );
+  const isForkAvailable = isThreadForkable(thread ?? null);
   const pluginPanelActions = usePluginPanelActions({
     forkAvailable: isForkAvailable,
     openPluginPanel,
@@ -2396,7 +2393,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     ],
   );
   const handleAutoOpenImage = useCallback(
-    (link: ThreadTimelineLocalFileLink) => {
+    (link: ThreadTimelineLocalFileLink): boolean => {
       const { kind } = resolveThreadLocalFileLink({
         hostFileLinksAvailable,
         link,
@@ -2408,8 +2405,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         kind === "open-thread-storage-path" ||
         kind === "open-host-path"
       ) {
-        handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
+        return handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
       }
+      return false;
     },
     [
       handleOpenTimelineLocalFileLink,
@@ -2420,13 +2418,16 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   );
   useAutoOpenGeneratedImages({
     enabled: isFocused && !renderSecondaryPanelAsDrawer,
-    isTurnRunning:
-      thread !== undefined &&
-      isRunningThreadRuntimeDisplayStatus(thread.runtime.displayStatus),
+    isThreadStatusFresh:
+      hasThreadDetailBootstrapSettled &&
+      !threadDetailBootstrapQuery.isFetching &&
+      !isFetching &&
+      !isPlaceholderData,
     openImage: handleAutoOpenImage,
     rows: timelineLoading ? null : timelineRows,
     threadId,
-    workspaceRootPath: workspacePreviewRootPath,
+    threadStatus: thread?.runtime.displayStatus ?? null,
+    workspaceRootPath: timelineWorkspaceRootPath ?? null,
   });
   const handleOpenTimelineLink = useCallback<ThreadTimelineLinkHandler>(
     ({ href }) => handleOpenUrlByPreference(href),

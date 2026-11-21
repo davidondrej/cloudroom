@@ -1,6 +1,7 @@
 import { execFile, spawn, type ExecFileException } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
+import { gitSafetyArgs } from "bb-environment-provider-host/git";
 import {
   createGitBranchQueries,
   resolvePreferredLocalDefaultBranch,
@@ -38,6 +39,8 @@ export interface RunGitOptions extends GitProcessOptions {
   maxBufferBytes?: number;
   allowTruncatedStdout?: boolean;
   onStderr?: (chunk: string) => void;
+  /** Runs hooks, as the user's own `git clone` would. */
+  hooks?: boolean;
 }
 
 interface ResolveGitProcessEnvArgs {
@@ -237,6 +240,7 @@ export async function runGit(
   if (options.signal?.aborted) {
     throw createGitCommandCancelledError(args, options.signal.reason);
   }
+  const gitArgs = [...gitSafetyArgs(options.hooks), ...args];
   try {
     const processOptions = {
       cwd: options.cwd,
@@ -253,12 +257,12 @@ export async function runGit(
     const stderrListener = options.onStderr;
     const result =
       stderrListener === undefined
-        ? await execFileAsync("git", args, processOptions)
+        ? await execFileAsync("git", gitArgs, processOptions)
         : await new Promise<{ stdout: string; stderr: string }>(
             (resolve, reject) => {
               const child = execFile(
                 "git",
-                args,
+                gitArgs,
                 processOptions,
                 (error, stdout, stderr) => {
                   if (error) {
@@ -713,8 +717,9 @@ async function fetchRemoteBranchesNonInteractively(
   cwd: string,
   options: GitTimeoutOptions,
 ): Promise<FetchRemoteBranchesResult> {
+  const args = [...gitSafetyArgs(), "fetch", "--all", "--prune", "--quiet"];
   return new Promise((resolve) => {
-    const child = spawn("git", ["fetch", "--all", "--prune", "--quiet"], {
+    const child = spawn("git", args, {
       cwd,
       detached: supportsProcessGroups(),
       windowsHide: true,
@@ -875,8 +880,9 @@ export async function readGitBlob(
     );
   }
 
+  const args = [...gitSafetyArgs(), "cat-file", "blob", target];
   try {
-    const result = await execFileAsync("git", ["cat-file", "blob", target], {
+    const result = await execFileAsync("git", args, {
       cwd,
       windowsHide: true,
       encoding: "buffer",

@@ -157,6 +157,8 @@ import {
   runAcpDynamicToolMcpServer,
   type AcpMcpServerConfig,
 } from "./tool-proxy-mcp.js";
+import { createAcpWake } from "./wake.js";
+import type { AcpWake } from "./wake.js";
 import { isPathInsideRoots } from "./workspace-path.js";
 
 interface AcpSessionPolicy {
@@ -181,9 +183,11 @@ interface AcpThreadSession {
   construction: AcpSessionParams;
   providerThreadId: string;
   cwd: string;
+  env: Readonly<Record<string, string | undefined>>;
   dialect: AcpDialect;
   translator: AcpDeltaTranslator;
   contextEstimate: AcpContextEstimate | undefined;
+  lastExactContextWindow: number | undefined;
   model: string | undefined;
   connection: AcpAgentConnection;
   supportsImageInput: boolean;
@@ -193,6 +197,7 @@ interface AcpThreadSession {
   policy: AcpSessionPolicy;
   pendingInstructions: string | undefined;
   activePromptKind: "turn" | "compaction" | null;
+  wake: AcpWake;
   compactionAgentMessage: string;
   queuedInputs: AcpPendingTurnInput[];
   promptRequestPending: boolean;
@@ -326,7 +331,36 @@ function emitForSession(
   );
 }
 
+function emitStoredContextUsage(session: AcpThreadSession): boolean {
+  if (session.providerThreadId === "") {
+    return false;
+  }
+  const reading = session.dialect.readContextUsage?.({
+    sessionId: session.providerThreadId,
+    model: session.model,
+    env: session.env,
+  });
+  if (reading === undefined) {
+    return false;
+  }
+  session.lastExactContextWindow = reading.size;
+  sendThreadDeltas(session.bbThreadId, [
+    {
+      kind: "contextWindow",
+      used: reading.used,
+      size: reading.size,
+      estimated: reading.estimated,
+      ...(reading.snapshot ? { snapshot: reading.snapshot } : {}),
+      attach: "open",
+    },
+  ]);
+  return true;
+}
+
 function emitContextEstimate(session: AcpThreadSession): void {
+  if (emitStoredContextUsage(session)) {
+    return;
+  }
   const estimate = session.contextEstimate;
   if (estimate === undefined) {
     return;
@@ -335,7 +369,7 @@ function emitContextEstimate(session: AcpThreadSession): void {
     {
       kind: "contextWindow",
       used: estimate.used(),
-      size: estimate.windowSize(session.model),
+      size: session.lastExactContextWindow ?? estimate.windowSize(session.model),
       estimated: true,
       attach: "open",
     },
@@ -761,6 +795,7 @@ interface AcpDynamicToolBridge {
 let cachedModelCatalog: { key: string; catalog: AgentModelCatalog } | null =
   null;
 const SESSION_MODEL_DISCOVERY_TTL_MS = 60_000;
+const DISCOVERY_SESSION_DELETE_TIMEOUT_MS = 5_000;
 let cachedSessionDiscoveredModels: {
   key: string;
   models: AvailableModel[];
@@ -860,6 +895,7 @@ async function loadSessionDiscoveredModels(
   agent: AcpAgentCommandParam,
   reasoningProbePriorityModelIds: readonly string[],
   parameterizedModelPicker: boolean,
+  deleteSessionArgs: AcpDialect["deleteSessionArgs"],
 ): Promise<AvailableModel[] | null> {
   const key = JSON.stringify({
     agent,
@@ -892,6 +928,7 @@ async function loadSessionDiscoveredModels(
   });
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let probeSessionId: string | undefined;
   const timeoutReached = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
       connection.kill();
@@ -923,6 +960,7 @@ async function loadSessionDiscoveredModels(
       })(),
       timeoutReached,
     ]);
+    probeSessionId = newSession.sessionId;
     if (timeout !== undefined) {
       clearTimeout(timeout);
       timeout = undefined;
@@ -961,6 +999,14 @@ async function loadSessionDiscoveredModels(
     };
     return models;
   } catch (error) {
+    // A signed-out agent (agy answers session/new with -32000) must show Sign in, not a fake "Agent default" model.
+    if (error instanceof AcpAuthRequiredError || isAcpAuthRequiredResponse(error)) {
+      throw new AcpModelListAuthRequiredError();
+    }
+    // A missing CLI must show Install, not "Agent default" (the list-command path does the same).
+    if (error instanceof Error && isMissingExecutableError(error.cause)) {
+      throw error.cause;
+    }
     process.stderr.write(
       `acp bridge: ACP-native model discovery for "${agent.command}" failed: ${
         error instanceof Error ? error.message : String(error)
@@ -971,7 +1017,24 @@ async function loadSessionDiscoveredModels(
     if (timeout !== undefined) {
       clearTimeout(timeout);
     }
-    connection.kill();
+    const exited = connection.kill();
+    const deleteArgs =
+      probeSessionId === undefined
+        ? undefined
+        : deleteSessionArgs?.(agent.args, probeSessionId);
+    if (deleteArgs !== undefined) {
+      // Best effort, in the background once the agent is gone: a delete never fails or slows the list.
+      void exited
+        .then(() =>
+          execPortableFile(agent.command, deleteArgs, {
+            cwd: agent.cwd ?? process.cwd(),
+            env: childEnv,
+            timeoutMs: DISCOVERY_SESSION_DELETE_TIMEOUT_MS,
+          }),
+        )
+        // Not logged: the error quotes the whole command, which can carry a key (`env OPENAI_API_KEY=… opencode`).
+        .catch(() => undefined);
+    }
   }
 }
 
@@ -1555,6 +1618,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       const resolution = pendingInteractionResolutionSchema.safeParse(result);
       const response = resolution.success
         ? resolveAcpPermissionDecision({
@@ -1568,6 +1632,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       respondPermission(pending, null);
     });
 }
@@ -1687,6 +1752,7 @@ function liveSessionForThread(
 }
 
 function removeSession(session: AcpThreadSession): void {
+  session.wake.end();
   for (const controller of session.pendingToolCalls) controller.abort();
   if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
     sessionsByRoomThreadId.delete(session.bbThreadId);
@@ -1830,12 +1896,14 @@ async function startAgentSession(
     construction: params,
     providerThreadId: "",
     cwd: params.cwd,
+    env: childEnv,
     dialect,
     translator,
     contextEstimate:
       dialect.contextEstimate === undefined
         ? undefined
         : createAcpContextEstimate(dialect.contextEstimate),
+    lastExactContextWindow: undefined,
     model: undefined,
     connection,
     supportsImageInput: false,
@@ -1848,6 +1916,20 @@ async function startAgentSession(
     },
     pendingInstructions: [params.instructions, dialect.workspaceInstructions?.(params.cwd)].filter(Boolean).join("\n\n") || undefined,
     activePromptKind: null,
+    wake: createAcpWake({
+      isIdle: () => session.activePromptKind === null,
+      isHeld: () =>
+        session.pendingPermissions.size > 0 ||
+        session.pendingToolCalls.size > 0,
+      isNotice: dialect.isNotice,
+      openTurn: () => {
+        session.activePromptKind = "turn";
+        emitForSession(session, ACP_TURN_STARTED_METHOD, {
+          threadId: roomThreadId,
+        });
+      },
+      closeTurn: () => finishTurn(session, "end_turn"),
+    }),
     compactionAgentMessage: "",
     queuedInputs: [],
     promptRequestPending: false,
@@ -2019,6 +2101,8 @@ async function startAgentSession(
     ) {
       throw new Error(`ACP agent "${agentLabel}" could not reload the session`);
     }
+    let loadedSession = false;
+    let emittedLoadUsage = false;
     if (sessionId === undefined) {
       session.loading = false;
       session.loadingSessionId = undefined;
@@ -2057,6 +2141,7 @@ async function startAgentSession(
         });
       }
     } else {
+      loadedSession = true;
       session.model = await selectAcpNativeModel({
         connection,
         sessionId,
@@ -2070,6 +2155,7 @@ async function startAgentSession(
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
       if (loadUsageUpdate) {
+        emittedLoadUsage = true;
         emitStartNotification(ACP_UPDATE_METHOD, {
           threadId: session.bbThreadId,
           update: loadUsageUpdate,
@@ -2101,6 +2187,9 @@ async function startAgentSession(
       emitForSession(session, deferred.method, deferred.params);
     }
     deferredEmits.length = 0;
+    if (loadedSession && !emittedLoadUsage) {
+      emitStoredContextUsage(session);
+    }
     return session;
   } catch (error) {
     session.stopping = true;
@@ -2217,6 +2306,10 @@ async function releaseSession(session: AcpThreadSession): Promise<void> {
     "ACP session released before the steer was sent",
   );
   cancelPendingPermissions(session);
+  // A turn the agent started itself has no prompt to end it.
+  if (session.wake.active) {
+    finishTurn(session, "cancelled");
+  }
   const exited = session.connection.kill();
   removeSession(session);
   await Promise.all([exited, releaseCursorMcpApproval(session)]);
@@ -2351,6 +2444,7 @@ function finishTurn(
   if (session.activePromptKind !== "turn") {
     return;
   }
+  endWake(session);
   for (const controller of session.pendingToolCalls) controller.abort();
   session.activePromptKind = null;
   dropQueuedTurnInputs(session, "ACP turn ended before the steer was sent");
@@ -2369,16 +2463,31 @@ const TURN_OUTPUT_UPDATES: ReadonlySet<string> = new Set([
   "tool_call",
 ]);
 
+/** Ends a turn the agent started itself, whether it is over or a prompt takes it over. */
+function endWake(session: AcpThreadSession): void {
+  if (!session.wake.active) {
+    return;
+  }
+  session.wake.end();
+  cancelPendingPermissions(session);
+}
+
 function runTurn(
   session: AcpThreadSession,
   firstInput: AcpPendingTurnInput,
 ): void {
   session.activePromptKind = "turn";
-  session.turnOutput = false;
   emitForSession(session, ACP_TURN_STARTED_METHOD, {
     threadId: session.bbThreadId,
   });
+  runPrompts(session, firstInput);
+}
 
+/** Sends the input, then each steer queued behind it, and ends the turn. */
+function runPrompts(
+  session: AcpThreadSession,
+  firstInput: AcpPendingTurnInput,
+): void {
   session.turnSettled = (async () => {
     let pending = firstInput;
     for (;;) {
@@ -2390,6 +2499,9 @@ function runTurn(
 
       let stopReason: z.infer<typeof acpStopReasonSchema>;
       session.cancelRequested = false;
+      // Only this prompt's output counts: a follow-up sent after a steer's
+      // cancel must not borrow the earlier reply's (#1721).
+      session.turnOutput = false;
       try {
         session.promptRequestPending = true;
         const prompt = buildPromptContentBlocks(session, pending.input);
@@ -2404,6 +2516,7 @@ function runTurn(
           requestSteerCancel(session);
         }
         const result = await promptResult;
+        session.wake.promptEnded();
         const lateText = session.dialect.lateTextMs;
         if (lateText !== undefined) await new Promise((resolve) => setTimeout(resolve, lateText));
         stopReason = result.stopReason;
@@ -2415,6 +2528,7 @@ function runTurn(
           stopReason = (await joined) ?? stopReason;
         }
       } catch (error) {
+        session.wake.promptEnded();
         session.promptRequestPending = false;
         dropTurnInput(pending, "ACP turn failed before the prompt was sent");
         dropQueuedTurnInputs(
@@ -2641,6 +2755,7 @@ function handleAgentNotification(
     return;
   }
   session.contextEstimate?.addUpdate(parsed.data.update);
+  session.wake.note(parsed.data.update);
   if (TURN_OUTPUT_UPDATES.has(parsed.data.update.sessionUpdate)) {
     session.turnOutput = true;
   }
@@ -2708,14 +2823,27 @@ async function handleModelList(
   params: AcpModelListParams,
   dialectId: string | undefined,
 ): Promise<void> {
+  const defaultLevel = resolveAcpDialect({
+    ...(dialectId === undefined ? {} : { dialectId }),
+    command: params.listCommand?.command ?? params.agent?.command ?? "",
+  }).defaultReasoningLevel;
   function sendModels(models: readonly AvailableModel[]): void {
+    const configured = applyConfiguredReasoningToModels(models, {
+      reasoningCli: params.reasoningCli,
+      nativeReasoning: params.nativeReasoning,
+    });
     sendResult(
       id,
       splitPrimaryModels(
-        applyConfiguredReasoningToModels(models, {
-          reasoningCli: params.reasoningCli,
-          nativeReasoning: params.nativeReasoning,
-        }),
+        defaultLevel === undefined
+          ? configured
+          : configured.map((model) =>
+              model.supportedReasoningEfforts.some(
+                (effort) => effort.reasoningEffort === defaultLevel,
+              )
+                ? { ...model, defaultReasoningEffort: defaultLevel }
+                : model,
+            ),
         params.primaryModels,
       ),
     );
@@ -2743,6 +2871,10 @@ async function handleModelList(
           params.agent,
           params.reasoningProbePriorityModelIds,
           params.parameterizedModelPicker,
+          resolveAcpDialect({
+            ...(dialectId === undefined ? {} : { dialectId }),
+            command: params.agent.command,
+          }).deleteSessionArgs,
         )
       : null;
   if (sessionDiscoveredModels) {
@@ -2886,10 +3018,15 @@ async function handleRequest(
       const modelPicker = decodeAcpModelPickerOptions(
         request.params.providerOptions,
       );
+      const launchSpec = decodeLaunchSpec(request.params.providerOptions);
+      const { cwd } = request.params;
       await handleModelList(
         request.id,
         buildAcpModelListParams(
-          decodeLaunchSpec(request.params.providerOptions),
+          // Like thread start: list in the project, where its agent config applies (#1236).
+          launchSpec !== null && launchSpec.cwd === undefined && cwd
+            ? { ...launchSpec, cwd }
+            : launchSpec,
           modelPicker,
         ),
         decodeDialectId(request.params.providerOptions),
@@ -3006,7 +3143,7 @@ async function handleRequest(
         sendError(request.id, -32000, "No active ACP session");
         return;
       }
-      if (session.activePromptKind !== null) {
+      if (session.activePromptKind !== null && !session.wake.active) {
         sendError(request.id, -32000, "A turn is already active");
         return;
       }
@@ -3015,6 +3152,17 @@ async function handleRequest(
         decodeLaunchSpec(params.options.providerOptions),
         params.options,
       );
+      // A message that compacts, or needs a new session, first ends a turn the agent started itself.
+      if (
+        session.wake.active &&
+        (isStandaloneBuiltinCompactCommand(params.input) ||
+          session.providerStreamClosed ||
+          session.sessionLost ||
+          (!switchesPermissionModeInPlace(session, construction) &&
+            !isDeepStrictEqual(construction, session.construction)))
+      ) {
+        finishTurn(session, "end_turn");
+      }
       if (session.providerStreamClosed || session.sessionLost) {
         const closed = session.providerStreamClosed;
         const previousProviderThreadId = session.providerThreadId;
@@ -3057,6 +3205,10 @@ async function handleRequest(
       };
       if (isStandaloneBuiltinCompactCommand(params.input)) {
         startCompaction(session, pending);
+      } else if (session.wake.active) {
+        // The message becomes the prompt of the turn the agent started itself.
+        endWake(session);
+        runPrompts(session, pending);
       } else {
         runTurn(session, pending);
       }
@@ -3100,6 +3252,13 @@ async function handleRequest(
         input: params.input,
         requestId: null,
       };
+      // A turn the agent started itself has no prompt to steer: this one becomes its prompt.
+      if (session.wake.active) {
+        endWake(session);
+        sendResult(request.id, { threadId: params.threadId });
+        runPrompts(session, pending);
+        return;
+      }
       const steerMeta = session.dialect.steerMeta;
       if (
         session.joinsSteering &&

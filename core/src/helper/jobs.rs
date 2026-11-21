@@ -156,7 +156,7 @@ fn expanduser(text: &str, home: &Path) -> PathBuf {
 }
 
 /// Python's `shlex.quote`.
-pub(super) fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     if text.is_empty() {
         return "''".into();
     }

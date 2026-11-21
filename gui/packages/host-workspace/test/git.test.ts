@@ -319,6 +319,23 @@ describe("command timeouts", () => {
     });
   });
 
+  it("never runs the checkout's own fsmonitor or hook programs (#2189)", async () => {
+    const repoPath = await initReadGitBlobRepo();
+    const marker = path.join(repoPath, "ran");
+    const script = path.join(repoPath, ".git", "hooks", "post-index-change");
+    await fs.writeFile(script, `#!/bin/sh\necho "$0" >> "${marker}"\n`, {
+      mode: 0o755,
+    });
+    await runGit(["config", "core.fsmonitor", script], { cwd: repoPath });
+    // A changed stat makes status refresh and rewrite the index.
+    await fs.utimes(path.join(repoPath, "README.md"), 0, 0);
+
+    await runGit(["status", "--short", "--branch", "--untracked-files=no"], {
+      cwd: repoPath,
+    });
+
+    await expect(fs.access(marker)).rejects.toThrow();
+  });
 });
 
 describe("fetchRemoteBranches", () => {

@@ -144,7 +144,7 @@ describe("thread execution plan input sources", () => {
         },
       );
 
-      expect(resolution.providerId).toBe("codex");
+      expect(resolution.providerId).toBe("claude-code");
       expect(resolution.executionDefaults).toBeNull();
       expect(resolution.requestedModel).toBeNull();
     });

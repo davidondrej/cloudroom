@@ -130,6 +130,8 @@ async function main(): Promise<void> {
   if (helpTarget !== undefined && !KNOWN_COMMAND_NAMES.has(helpTarget)) {
     process.argv.splice(2, 2, helpTarget, "--help");
   }
+  // `room-cli wake` is the Loops plugin's `room-cli loop wake`: a plugin has one top-level command.
+  if (process.argv[2] === "wake") process.argv.splice(2, 1, "loop", "wake");
   const firstArg = process.argv[2];
   const groups = selectCommandGroups(firstArg);
   if (groups.length === 0) {

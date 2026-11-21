@@ -1,6 +1,7 @@
 import {
   deleteQueuedThreadMessage,
   getThread,
+  hostDaemonSessions,
   listQueuedThreadMessages,
 } from "@cloudroom/db";
 import type { PromptInput } from "@cloudroom/domain";
@@ -107,6 +108,9 @@ it("holds after a run, joins only exact copies, until the card is gone", async (
 
     // A held same-text card keeps holding past the window, until deleted.
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + WINDOW + 1);
+    // A live daemon heartbeats through the jump (#2171).
+    const leaseExpiresAt = Date.now() + 30_000;
+    h.db.update(hostDaemonSessions).set({ leaseExpiresAt }).run();
     expect(await tell(h, id)).toEqual([HELD]);
     expect(cards(h, id)).toHaveLength(3);
     for (const row of cards(h, id)) {

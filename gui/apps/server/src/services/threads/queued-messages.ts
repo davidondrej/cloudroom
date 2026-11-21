@@ -128,8 +128,10 @@ export function createAutomaticQueuedMessageEligibility(
       if (hold === "plan-limit" && row.systemNotice !== null) return false;
     }
     if (row.payloadKind === "retry") return true;
+    // A held retry waits for the user, so it must not hold the rest (#2279).
     retryQueued ??= listQueuedThreadMessages(deps.db, args.thread.id).some(
-      (queued) => queued.payloadKind === "retry",
+      (queued) =>
+        queued.payloadKind === "retry" && queued.failureReason === null,
     );
     return !retryQueued;
   };

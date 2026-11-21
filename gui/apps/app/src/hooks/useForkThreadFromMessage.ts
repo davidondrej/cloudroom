@@ -14,7 +14,6 @@ import type { ThreadTimelineForkMessageHandler } from "@/components/thread/timel
 import { getThreadDisplayTitle } from "@/lib/thread-title";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import { threadDefaultExecutionOptionsQueryKey } from "@/hooks/queries/query-keys";
-import { findCachedProviderInfo } from "@/hooks/queries/system-queries";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 
 interface UseForkThreadFromMessageArgs {
@@ -42,11 +41,7 @@ export function useForkThreadFromMessage({
       const source = sourceThreadRef.current;
       if (
         source === null ||
-        !isThreadForkable(
-          source,
-          findCachedProviderInfo(queryClient, source.providerId)?.capabilities
-            .supportsFork ?? false,
-        ) ||
+        !isThreadForkable(source) ||
         forkInFlightRef.current
       ) {
         return;
@@ -65,7 +60,9 @@ export function useForkThreadFromMessage({
               }),
           }),
         ]);
-        if (sourceThreadRef.current?.id !== source.id || executionOptions === null) {
+        if (sourceThreadRef.current?.id !== source.id) return;
+        if (executionOptions === null) {
+          appToast.message("Couldn't load this thread's settings to fork it.");
           return;
         }
 
@@ -80,7 +77,6 @@ export function useForkThreadFromMessage({
             reasoningLevel: executionOptions.reasoningLevel,
             serviceTier: executionOptions.serviceTier,
             sourceSeqEnd: sequence,
-            ...(point.textOnly && { textOnly: true }),
             sourceThreadId: source.id,
             sourceThreadTitle: getThreadDisplayTitle(source),
           };

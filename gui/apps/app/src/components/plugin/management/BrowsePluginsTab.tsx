@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   ResourceCollectionViewport,

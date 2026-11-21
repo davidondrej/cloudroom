@@ -642,7 +642,7 @@ describe("retrying a failed turn", () => {
       expect(data.retryOfRequestId).toBe(requestId);
       expect(data.retryAttempt).toBe(2);
       expect(data.input).toHaveLength(1);
-      expect(data.input[0]?.text).toBe("Please continue.");
+      expect(data.input[0]?.text).toMatch(/^\[Cloudroom\] Automatic retry: /);
       expect(data.input[0]?.visibility).toBe("agent-only");
     });
   });

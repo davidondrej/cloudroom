@@ -23,6 +23,7 @@ import {
   type HostDaemonToolCallResponse,
   type HostDaemonSkillTree,
 } from "@cloudroom/host-daemon-contract";
+import { isSecureOrLoopbackUrl } from "@cloudroom/config/loopback";
 import { HOST_ARTIFACT_MAX_BYTES } from "@cloudroom/host-daemon-contract/protocol";
 import type { PendingInteractionCreate, ToolCallRequest } from "@cloudroom/domain";
 import type { HostDaemonLogger } from "./logger.js";
@@ -254,20 +255,22 @@ async function retryInteractiveRequestRegistration<T>(
 }
 
 export function usesSecureInternalFetchTransport(serverUrl: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(serverUrl);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol === "https:") {
-    return true;
-  }
+  return isSecureOrLoopbackUrl(serverUrl);
+}
 
-  return (
-    parsed.hostname === "127.0.0.1" ||
-    parsed.hostname === "localhost" ||
-    parsed.hostname === "::1"
+/** Refuses a remote plain-HTTP server URL unless BB_ALLOW_INSECURE_SERVER_URL=1 opts in: the host key and session traffic would cross the network unencrypted (#2194). */
+export function assertSecureServerUrl(
+  serverUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (
+    usesSecureInternalFetchTransport(serverUrl) ||
+    env.BB_ALLOW_INSECURE_SERVER_URL === "1"
+  ) {
+    return;
+  }
+  throw new Error(
+    `Refusing to connect to ${serverUrl} over plain HTTP: this machine's key would travel unencrypted. Use an https:// server address (Cloudroom Connect or Tailscale Serve), or, on a network you trust, set BB_ALLOW_INSECURE_SERVER_URL=1 in this machine's env.json.`,
   );
 }
 

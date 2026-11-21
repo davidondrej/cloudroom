@@ -1,4 +1,4 @@
-import { matchPath } from "react-router-dom";
+import { matchPath } from "react-router";
 import {
   PLUGIN_DETAIL_ROUTE_PATH,
   PLUGINS_ROUTE_PATH,

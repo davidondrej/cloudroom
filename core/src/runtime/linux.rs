@@ -39,19 +39,27 @@ case "${XDG_CONFIG_HOME-}" in /Users/*|/Volumes/*) [ -e "$XDG_CONFIG_HOME" ] || 
 case "${GH_CONFIG_DIR-}" in /Users/*|/Volumes/*) [ -e "$GH_CONFIG_DIR" ] || unset GH_CONFIG_DIR ;; esac
 unset _cloudroom_parent _cloudroom_dir _cloudroom_x
 "#;
-/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
-const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
-if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
-require('./keys.cjs');
-"#;
 /// Like BASH_ENV, gives the Anthropic keys back once to Node that Claude starts without a shell, such as an MCP server,
 /// unless its own settings set one (#1340).
-const NODE_KEYS: &str = r#"for (const name of process.env.CLAUDECODE ? ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] : []) {
+macro_rules! node_keys {
+    () => {
+        r#"for (const name of process.env.CLAUDECODE ? ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] : []) {
   const alias = 'CLOUDROOM_APP_' + name;
   if (alias in process.env && !(name in process.env)) process.env[name] = process.env[alias];
   delete process.env[alias];
 }
-"#;
+"#
+    };
+}
+const NODE_KEYS: &str = node_keys!();
+/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU. It restores the
+/// keys itself, without requiring keys.cjs: `node --permission` may read only the preload it was given (#2225).
+const NODE_CPUS: &str = concat!(
+    r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
+if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
+"#,
+    node_keys!()
+);
 /// Python 3.13 reads PYTHON_CPU_COUNT itself; older versions count every host CPU for worker pools. Then it runs the
 /// `sitecustomize` this one hides (the user's or the system's), since Python loads only the first it finds. Like
 /// NODE_KEYS, it gives the Anthropic keys back once to Python that Claude starts without a shell (#1340).
@@ -95,8 +103,8 @@ pub(crate) fn agent_env() -> &'static [(&'static str, String)] {
     })
 }
 
-/// One `--require`, since Next.js workers fold repeated ones into a single missing path (#1632): cpus.cjs loads
-/// keys.cjs itself, so the keys come back with or without a quota.
+/// One `--require`, since Next.js workers fold repeated ones into a single missing path (#1632): cpus.cjs holds
+/// keys.cjs's code too, so the keys come back with or without a quota.
 fn node_options(dir: &Path, quota: bool) -> String {
     let file = if quota { "cpus.cjs" } else { "keys.cjs" };
     format!("--require {}", dir.join(file).display())
@@ -906,15 +914,18 @@ bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
 
     #[test]
     fn node_gets_one_preload_that_caps_cpus_and_restores_keys() {
-        // Next.js workers fold repeated `--require`s into one missing path, so Core passes one (#1632).
+        // Next.js workers fold repeated `--require`s into one missing path, so Core passes one (#1632). Permission
+        // mode lets Node read only that preload and the script (#2225).
         let dir = std::env::temp_dir().join(format!("node-preload-test-{}", std::process::id()));
         write_helpers(&dir).unwrap();
-        let script = "const os = require('node:os'); process.stdout.write(`${os.cpus.toString().includes('usable')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)";
+        let script = dir.join("check.js");
+        fs::write(&script, "const os = require('node:os'); process.stdout.write(`${os.cpus.toString().includes('usable')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)").unwrap();
         for (quota, expected) in [(true, "true|app|undefined"), (false, "false|app|undefined")] {
             let options = node_options(&dir, quota);
             assert_eq!(options.matches("--require").count(), 1, "{options}");
             let output = std::process::Command::new("node")
-                .args(["-e", script])
+                .arg("--permission")
+                .arg(&script)
                 .env_clear()
                 .env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .env("NODE_OPTIONS", options)

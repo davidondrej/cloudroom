@@ -353,6 +353,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "acp-antigravity",
+        logoUrl: "/api/v1/system/providers/acp-antigravity/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-cursor",
         logoUrl: "/api/v1/system/providers/acp-cursor/logo",
         icon: undefined,
@@ -410,11 +415,6 @@ describe("buildPluginProviderRegistration", () => {
       {
         id: "acp-kimi",
         logoUrl: "/api/v1/system/providers/acp-kimi/logo",
-        icon: undefined,
-      },
-      {
-        id: "acp-antigravity",
-        logoUrl: "/api/v1/system/providers/acp-antigravity/logo",
         icon: undefined,
       },
       {

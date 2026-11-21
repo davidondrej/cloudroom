@@ -287,21 +287,33 @@ async function serveThreadStorageRawFile(
   deps: LoggedWorkSessionDeps,
   threadId: string,
   rawPath: string,
-  ifNoneMatch: string | undefined,
+  headers: {
+    ifNoneMatch?: string;
+    ifRange?: string;
+    range?: string;
+  },
 ): Promise<Response> {
   const filePath = parseSafeRelativeRoutePath(rawPath);
   const target = await requireThreadStorageTarget(deps, { threadId });
+  const isHtml = isHtmlPreviewPath(filePath.relativePath);
 
   return serveDaemonFileContent(
     deps,
     {
       hostId: target.hostId,
-      ...(!isHtmlPreviewPath(filePath.relativePath) ? { ifNoneMatch } : {}),
+      ...(!isHtml ? { ifNoneMatch: headers.ifNoneMatch } : {}),
       path: path.join(target.storagePath, filePath.relativePath),
       rootPath: target.storagePath,
     },
     (result) =>
-      createRawFilePreviewResponse(result, filePath.relativePath, ifNoneMatch),
+      createRawFilePreviewResponse(
+        result,
+        filePath.relativePath,
+        headers.ifNoneMatch,
+      ),
+    isHtml
+      ? undefined
+      : { directLocal: { ifRange: headers.ifRange, range: headers.range } },
   );
 }
 
@@ -309,7 +321,11 @@ async function serveThreadWorktreeRawFile(
   deps: LoggedWorkSessionDeps,
   threadId: string,
   rawPath: string,
-  ifNoneMatch: string | undefined,
+  headers: {
+    ifNoneMatch?: string;
+    ifRange?: string;
+    range?: string;
+  },
 ): Promise<Response> {
   const filePath = parseSafeRelativeRoutePath(rawPath);
   const thread = requirePublicThread(deps.db, threadId);
@@ -317,17 +333,25 @@ async function serveThreadWorktreeRawFile(
     throw new ApiError(409, "invalid_request", "Thread has no environment");
   }
   const environment = requireReadyEnvironment(deps.db, thread.environmentId);
+  const isHtml = isHtmlPreviewPath(filePath.relativePath);
 
   return serveDaemonFileContent(
     deps,
     {
       hostId: environment.hostId,
-      ...(!isHtmlPreviewPath(filePath.relativePath) ? { ifNoneMatch } : {}),
+      ...(!isHtml ? { ifNoneMatch: headers.ifNoneMatch } : {}),
       path: path.join(environment.path, filePath.relativePath),
       rootPath: environment.path,
     },
     (result) =>
-      createRawFilePreviewResponse(result, filePath.relativePath, ifNoneMatch),
+      createRawFilePreviewResponse(
+        result,
+        filePath.relativePath,
+        headers.ifNoneMatch,
+      ),
+    isHtml
+      ? undefined
+      : { directLocal: { ifRange: headers.ifRange, range: headers.range } },
   );
 }
 
@@ -706,7 +730,11 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps,
       context.req.param("id"),
       context.req.param("filePath"),
-      context.req.header("if-none-match"),
+      {
+        ifNoneMatch: context.req.header("if-none-match"),
+        ifRange: context.req.header("if-range"),
+        range: context.req.header("range"),
+      },
     ),
   );
 
@@ -762,7 +790,11 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       deps,
       context.req.param("id"),
       context.req.param("filePath"),
-      context.req.header("if-none-match"),
+      {
+        ifNoneMatch: context.req.header("if-none-match"),
+        ifRange: context.req.header("if-range"),
+        range: context.req.header("range"),
+      },
     ),
   );
 
@@ -827,6 +859,12 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         createDaemonFileContentResponse(result, {
           ifNoneMatch: context.req.header("if-none-match"),
         }),
+      {
+        directLocal: {
+          ifRange: context.req.header("if-range"),
+          range: context.req.header("range"),
+        },
+      },
     );
   });
 
@@ -883,6 +921,12 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
         createDaemonFileContentResponse(result, {
           ifNoneMatch: context.req.header("if-none-match"),
         }),
+      {
+        directLocal: {
+          ifRange: context.req.header("if-range"),
+          range: context.req.header("range"),
+        },
+      },
     );
   });
 }

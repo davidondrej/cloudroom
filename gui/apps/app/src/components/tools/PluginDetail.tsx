@@ -19,7 +19,7 @@ import {
 } from "@cloudroom/shared-ui/tooltip";
 import { formatHomePathForDisplay } from "@cloudroom/shared-ui/lib/utils";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
 import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import {

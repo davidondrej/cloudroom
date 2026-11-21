@@ -475,8 +475,8 @@ polling never resolves a dependency tree or builds. A candidate that fails to
 build is reported as available and fails when you apply it.
 
 cloudroom ships no build toolchain. The first time a git or path plugin is built on
-a machine, cloudroom downloads a pinned esbuild + Tailwind set into
-`<dataDir>/plugins/toolchain-<versions>/` and reuses it afterwards. Installing
+a machine, cloudroom downloads a locked esbuild + Tailwind set into
+`<dataDir>/plugins/toolchain-<versions>-<lock hash>/` and reuses it afterwards. Installing
 a prebuilt npm plugin never triggers that download.
 
 To build a plugin yourself, run `room-cli plugin build` with Cloudroom

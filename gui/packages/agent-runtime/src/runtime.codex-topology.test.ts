@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThreadEvent } from "@cloudroom/domain";
-import { createAgentRuntime } from "./runtime.js";
+import { AgentRuntimeTurnBusyError, createAgentRuntime } from "./runtime.js";
 import {
   createScriptedEchoLaunch,
   createScriptedEchoRequestRecord,
@@ -300,6 +300,19 @@ describe("codex process topology", () => {
       runtime,
       timeoutMs: 5_000,
     });
+    expect(topology.spawned()).toBe(1);
+    // A competing start is refused before it ends the held turn's app-server.
+    await expect(
+      runtime.startThread({
+        clientRequestId: "creq_cdxtpgy584",
+        environmentId: "env-1",
+        input: [promptTextInput({ text: "second notice" })],
+        options: fullRuntimeOptions,
+        projectId: "p1",
+        providerId: "codex",
+        threadId: "t1",
+      }),
+    ).rejects.toBeInstanceOf(AgentRuntimeTurnBusyError);
     expect(topology.spawned()).toBe(1);
 
     await runtime.stopThread({ threadId: "t1" });

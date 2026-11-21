@@ -15,7 +15,7 @@ import type {
 import type { ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
-import { useInRouterContext, useNavigate } from "react-router-dom";
+import { useInRouterContext, useNavigate } from "react-router";
 import { getSettingsRoutePath } from "@/lib/route-paths";
 import {
   stripModelBrandPrefix,
@@ -75,6 +75,7 @@ import { type PickerOption } from "./OptionPicker";
 import { ModelPickerHarnessStrip, useEdgeFade } from "./ModelPickerHarnessStrip";
 import { PickerLoadingRows } from "./PickerLoadingRows";
 import {
+  MissingModelsNote,
   ModelUnavailable,
   restartProviderModels,
   useRoutedHostId,
@@ -1288,6 +1289,17 @@ export function ModelReasoningPicker({
                       />
                     )}
                   </div>
+                )}
+
+                {lockModelSelection || activeModelIsLoading ? null : (
+                  <MissingModelsNote
+                    providerId={activeProviderId}
+                    providerLabel={activeProviderLabel}
+                    routing={providerRouting}
+                    modelIds={[...activeModelOptions, ...activeMoreModelOptions].map(
+                      (option) => option.value,
+                    )}
+                  />
                 )}
 
                 {effectiveShowServiceTiers ? (

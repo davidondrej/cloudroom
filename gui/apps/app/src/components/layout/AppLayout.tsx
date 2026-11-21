@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { atom, useAtom, useAtomValue, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
-import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
+import { Link, matchPath, useLocation, useNavigate } from "react-router";
 import type { ProjectResponse } from "@cloudroom/server-contract";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";

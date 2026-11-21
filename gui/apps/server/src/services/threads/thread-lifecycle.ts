@@ -1,3 +1,4 @@
+import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import { advanceEnvironmentProvisioning } from "../environments/environment-engine.js";
 import { revokeThreadDesktopBrowserControl } from "../desktop-browsers.js";
 import {
@@ -35,6 +36,7 @@ import {
 import { assertNever } from "@cloudroom/core-ui";
 import {
   type ProvisioningTranscriptEntry,
+  type SystemThreadInterruptedEventData,
   type SystemThreadInterruptedReason,
   type Thread,
   type ThreadEventScope,
@@ -226,6 +228,7 @@ interface HasProviderTurnCompletedEventAtOrAfterArgs {
 
 interface RequestThreadStopArgs extends Omit<ThreadStopCommandArgs, "intent"> {
   interruptionReason: SystemThreadInterruptedReason;
+  memory?: SystemThreadInterruptedEventData["memory"];
 }
 
 const AWAITED_THREAD_STOP_TIMEOUT_MS = 60_000;
@@ -482,6 +485,7 @@ interface ApplyActiveTurnInterruptionArgs {
 interface MarkThreadStopRequestedWithEventArgs {
   reason: SystemThreadInterruptedReason;
   threadId: string;
+  memory?: SystemThreadInterruptedEventData["memory"];
 }
 
 function hasActiveThreadProvisioningContext(
@@ -579,6 +583,7 @@ function markThreadStoppingWithEventInTransaction(
   appendThreadInterruptedEventInTransaction(deps.db, {
     threadId: args.threadId,
     reason: args.reason,
+    memory: args.memory,
   });
   deps.hub.notifyThread(args.threadId, ["events-appended"], {
     eventTypes: ["system/thread/interrupted"],
@@ -818,18 +823,27 @@ function recordEmptyThreadStartProviderSessionInTransaction(
   });
 }
 
-/** Grok's own auth errors name no fix (#1160); other providers keep theirs. */
-export const GROK_PROVIDER_ID = "acp-grok";
+/** ACP agents' own auth errors name no fix (#1160): those that declare a sign-in command get its hint. */
+export function offersSignIn(
+  registry: Pick<ProviderRegistryService, "get">,
+  providerId: string,
+): boolean {
+  return registry.get(providerId)?.info.strings?.signInCommand !== undefined;
+}
 
-/** A signed-out Grok's failure gains its sign-in hint, e.g. `grok login`. */
+/** A signed-out agent's failure gains its sign-in hint, e.g. `agy acp --login`. */
 function threadFailureMessage(
   deps: ThreadCommandResultSettlementDeps,
   providerId: string,
   report: ThreadFailureResultReport,
 ): string {
+  const strings = deps.providerRegistry.get(providerId)?.info.strings;
+  // Cursor's own error already names its command; agy's and Grok's don't.
   const hint =
-    providerId === GROK_PROVIDER_ID && report.errorCode === "auth_required"
-      ? deps.providerRegistry.get(providerId)?.info.strings?.signInHint
+    report.errorCode === "auth_required" &&
+    strings?.signInCommand !== undefined &&
+    !report.errorMessage.includes(strings.signInCommand)
+      ? strings.signInHint
       : undefined;
   return hint === undefined
     ? report.errorMessage
@@ -928,6 +942,12 @@ export function settleThreadStartCommandResult(
         threadId: thread.id,
       })
     ) {
+      return emptyCommandResultSideEffects();
+    }
+    // The host refused this start before touching the live turn it competed
+    // with, so that turn's own end settles the thread: its result stands and
+    // the parent hears no false failure (#1584).
+    if (args.report.errorCode === "turn_busy") {
       return emptyCommandResultSideEffects();
     }
     clearThreadProvisionSchedule(thread.id);
@@ -1459,6 +1479,7 @@ function markThreadStopRequested(
         {
           reason: args.interruptionReason,
           threadId: args.threadId,
+          memory: args.memory,
         },
       );
     },
@@ -1619,6 +1640,7 @@ export function requestThreadStopForCurrentState(
   thread: RequestThreadStopForCurrentStateThread,
   environment: RequestThreadStopForCurrentStateEnvironment | null,
   interruptionReason: "manual-stop" | "memory-limit" = "manual-stop",
+  memory?: SystemThreadInterruptedEventData["memory"],
 ): void {
   if (hasLiveThreadRuntime(deps, thread)) {
     if (environment === null) {
@@ -1628,6 +1650,7 @@ export function requestThreadStopForCurrentState(
       environmentId: environment.id,
       hostId: environment.hostId,
       interruptionReason,
+      memory,
       threadId: thread.id,
     });
     return;

@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -111,12 +111,15 @@ linux("never writes through a clone's symlink into .git", async () => {
   expect(readFileSync(join(child, "alias/config"), "utf8")).toBe("x");
 });
 
-linux("a failed pack leaves no archive on the parent's disk", async () => {
+linux("a failed pack leaves no archive on the parent's disk, and clears day-old ones a cut-off transfer left", async () => {
   const parent = folder("parent", {});
   writeFileSync(join(parent, "big.bin"), randomBytes(2 * 1024 * 1024));
   const home = join(root, "parent-home");
+  const cache = folder("parent-home/.cache/cloudroom", { "child_old.tgz.list": "", "copy-1.tgz": "", "fork_now.bundle": "" });
+  const old = Date.now() / 1000 - 2 * 86_400;
+  for (const name of ["child_old.tgz.list", "copy-1.tgz"]) utimesSync(join(cache, name), old, old);
   await expect(sourceCode(sandbox(home, parent, undefined, "ulimit -f 512; "), parent, "full")).rejects.toThrow();
-  expect(readdirSync(join(home, ".cache/cloudroom"))).toEqual([]);
+  expect(readdirSync(cache).sort()).toEqual(["copy-1.tgz", "fork_now.bundle"]);
 });
 
 linux("children started together share one pack, later ones share the next, which holds what the parent wrote after, and full packs wait their turn", async () => {

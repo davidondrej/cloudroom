@@ -1,4 +1,3 @@
-import { CLOUD_NATIVE_FORK_PROVIDERS } from "@cloudroom/domain";
 import type {
   PermissionMode,
   PromptInput,
@@ -23,7 +22,6 @@ export interface ForkThreadCreateSeed {
   sourceSeqEnd: number | undefined;
   sourceThreadId: string;
   sourceThreadTitle: string;
-  textOnly?: boolean;
 }
 
 interface BuildForkThreadRequestArgs extends ForkThreadCreateSeed {
@@ -32,25 +30,16 @@ interface BuildForkThreadRequestArgs extends ForkThreadCreateSeed {
   requestId?: string | undefined;
   input: PromptInput[];
   pluginSubmission: AppCreateThreadRequest["pluginSubmission"];
-  providerSupportsFork: boolean;
 }
 
-type ForkableThread = Pick<
-  Thread,
-  "archivedAt" | "environmentId" | "executionTarget" | "providerId"
->;
+type ForkableThread = Pick<Thread, "archivedAt" | "environmentId" | "executionTarget">;
 
-export function isThreadForkable(
-  sourceThread: ForkableThread | null,
-  providerSupportsFork: boolean,
-): boolean {
+/** Every harness can fork; the server copies the chat as text when it can't clone the session (ADR 20261121-141157). */
+export function isThreadForkable(sourceThread: ForkableThread | null): boolean {
   if (sourceThread === null || sourceThread.archivedAt !== null) {
     return false;
   }
-  if (sourceThread.executionTarget === "cloud") {
-    return CLOUD_NATIVE_FORK_PROVIDERS.includes(sourceThread.providerId);
-  }
-  return sourceThread.environmentId !== null && providerSupportsFork;
+  return sourceThread.executionTarget === "cloud" || sourceThread.environmentId !== null;
 }
 
 export function buildForkThreadRequest({
@@ -62,17 +51,13 @@ export function buildForkThreadRequest({
   pluginSubmission,
   projectId,
   providerId,
-  providerSupportsFork,
   reasoningLevel,
   requestId,
   serviceTier,
   sourceSeqEnd,
   sourceThreadId,
-}: BuildForkThreadRequestArgs): AppCreateThreadRequest | null {
+}: BuildForkThreadRequestArgs): AppCreateThreadRequest {
   const cloud = executionTarget === "cloud";
-  if (!cloud && !providerSupportsFork) {
-    return null;
-  }
 
   return {
     environment: cloud ? { type: "project-default" } : environment,

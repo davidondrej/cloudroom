@@ -6,7 +6,7 @@ import {
   Routes,
   useLocation,
   useParams,
-} from "react-router-dom";
+} from "react-router";
 import { AppLayout } from "./components/layout/AppLayout";
 import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
@@ -18,6 +18,7 @@ import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
 import { CornerHost } from "./components/CornerHost";
 import { PartnerCard } from "./components/PartnerCard";
+import { CallTicket } from "./components/CallTicket";
 import { SharedThreadOpener } from "./components/SharedThreadOpener";
 import { InstallAppSheet } from "./components/InstallAppSheet";
 import { AuthCallbackView } from "./views/AuthCallbackView";
@@ -466,6 +467,7 @@ export function App() {
               <StarPrompt />
               <Wrapped />
               <PartnerCard />
+              <CallTicket />
               <SharedThreadOpener />
               <InstallAppSheet />
               <CloudroomAccountPanels />

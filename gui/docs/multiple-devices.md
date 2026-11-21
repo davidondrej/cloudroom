@@ -36,7 +36,11 @@ Existing remote host daemons that target a direct tailnet IP or
 upgraded server. Prefer signing in to Cloudroom and re-adding the machine from
 Settings → Machines so its installer records the cloudroom.run route. The
 private alternative is to open bb through the Tailscale Serve URL and re-run
-the Add machine installer from there.
+the Add machine installer from there. Machines refuse a non-loopback
+`http://` server URL. On a trusted network only, set
+`BB_ALLOW_INSECURE_SERVER_URL=1` in the server's `env.json`; new install
+commands pass it on, and an existing machine needs it in its own `env.json`
+(in `~/.bb-machines/<server-host>`).
 
 For compatibility only, `npx bb-app --server-bind-host 0.0.0.0` restores direct
 IPv4 network access. The public API is unauthenticated and permits command

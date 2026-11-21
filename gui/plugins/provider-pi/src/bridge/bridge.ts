@@ -645,6 +645,10 @@ async function handleModelList(
       gate.status === "not_installed"
         ? "Could not find the pi CLI on this host. Install @earendil-works/pi-coding-agent and retry."
         : (gate.statusMessage ?? "Pi is not supported on this host."),
+      // A spawn ENOENT's code, so a spawn is refused before its thread exists (#2226).
+      gate.status === "not_installed" && gate.launchMissing
+        ? { reason: "missing_executable" }
+        : undefined,
     );
     return;
   }

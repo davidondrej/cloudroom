@@ -11,7 +11,7 @@ import {
 } from "@testing-library/react";
 import { createStore, Provider as JotaiProvider } from "jotai";
 import { useContext, useMemo, useState, type ReactNode } from "react";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
@@ -54,6 +54,7 @@ const threadStore = vi.hoisted(
     new Map<string, { archivedAt: number | null; deletedAt: number | null }>(),
 );
 const viewportState = vi.hoisted(() => ({ compact: false }));
+const renderedThreadIds = vi.hoisted((): string[] => []);
 const sidebarState = vi.hoisted(() => ({ showing: true }));
 const panelFullScreenState = vi.hoisted(() => ({
   isMainCollapsed: false,
@@ -281,6 +282,7 @@ vi.mock("./ThreadDetailView", () => ({
     projectId: string;
     threadId: string;
   }) => {
+    renderedThreadIds.push(threadId);
     const pane = useContext(PaneContext);
     const [isPanelOpen, setIsPanelOpen] = useState(threadId === "thr-a");
     const composerHost = useMemo<PluginComposerHost>(() => {
@@ -636,6 +638,7 @@ beforeEach(() => {
   panelFullScreenState.isMainCollapsed = false;
   panelGroupLayoutState.layout = [100, 0];
   commandHandlers.clear();
+  renderedThreadIds.length = 0;
   commandPresentationState.isModifierHeld = false;
   commandPresentationState.shortcut = null;
   threadStore.set("thr-a", { archivedAt: null, deletedAt: null });
@@ -653,6 +656,23 @@ afterEach(() => {
 });
 
 describe("SplitThreadArea", () => {
+  it("never renders the stale stored pane when the route changes", () => {
+    renderSplitArea({
+      path: threadPath("thr-a"),
+      layout: {
+        root: {
+          type: "pane",
+          paneId: "pane-1",
+          content: threadContent("thr-b"),
+        },
+        focusedPaneId: "pane-1",
+      },
+    });
+
+    expect(screen.getByTestId("pane-thr-a")).toBeTruthy();
+    expect(renderedThreadIds).not.toContain("thr-b");
+  });
+
   it("hosts Browser-tab navigation on compact plugin-panel routes", async () => {
     viewportState.compact = true;
 

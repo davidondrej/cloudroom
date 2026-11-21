@@ -283,6 +283,7 @@ function EmbeddedThreadChatWithComposer({
   );
   const defaultExecutionOptions = executionOptionsQuery.data;
   const threadCreationOptions = useThreadCreationOptions({
+    cloud: threadQuery.data?.executionTarget === "cloud",
     enabled: true,
     scope: "component-local",
     environmentId: composer.executionEnvironmentId,

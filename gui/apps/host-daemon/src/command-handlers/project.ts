@@ -5,6 +5,10 @@ import {
   WorkspaceError,
   type GitProcessOptions,
 } from "@cloudroom/host-workspace";
+import {
+  stripGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "@cloudroom/domain";
 import { ExpectedCommandDispatchError } from "../command-dispatch-support.js";
 
 const PROJECT_CLONE_TIMEOUT_MS = 20 * 60 * 1000;
@@ -63,7 +67,8 @@ export async function inspectProjectPath(
   const gitRemoteUrl = result.exitCode === 0 ? result.stdout.trim() : "";
   return {
     path: resolvedPath,
-    gitRemoteUrl: gitRemoteUrl || null,
+    // A token in the remote stays in the repo's own config, never leaves this machine (#2190).
+    gitRemoteUrl: stripGitUrlCredentials(gitRemoteUrl) || null,
   };
 }
 
@@ -91,7 +96,9 @@ export async function cloneProject(args: {
           for (;;) {
             const match = /\r\n|\r|\n/u.exec(pendingProgress);
             if (match === null) return;
-            args.onProgress?.(pendingProgress.slice(0, match.index));
+            args.onProgress?.(
+              stripTextGitUrlCredentials(pendingProgress.slice(0, match.index)),
+            );
             pendingProgress = pendingProgress.slice(
               match.index + match[0].length,
             );
@@ -103,15 +110,27 @@ export async function cloneProject(args: {
       env: args.env,
       ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
       timeoutMs: PROJECT_CLONE_TIMEOUT_MS,
+      // A new clone has no config of its own: the user's global and template
+      // hooks run, as in their own `git clone`.
+      hooks: true,
       ...(onStderr === undefined ? {} : { onStderr }),
     });
   } catch (error) {
+    // The message repeats git's argv, so the remote's token too. Redact that exact
+    // URL first: free-text parsing stops at whitespace, but userinfo can contain spaces.
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const message = stripTextGitUrlCredentials(
+      rawMessage.replaceAll(args.remoteUrl, () =>
+        stripGitUrlCredentials(args.remoteUrl),
+      ),
+    );
     if (error instanceof WorkspaceError) {
-      throw new ExpectedCommandDispatchError(error.code, error.message);
+      throw new ExpectedCommandDispatchError(error.code, message);
     }
-    throw new Error(error instanceof Error ? error.message : String(error));
+    throw new Error(message);
   } finally {
-    if (pendingProgress.length > 0) args.onProgress?.(pendingProgress);
+    if (pendingProgress.length > 0)
+      args.onProgress?.(stripTextGitUrlCredentials(pendingProgress));
   }
   return inspectProjectPath(
     targetPath,

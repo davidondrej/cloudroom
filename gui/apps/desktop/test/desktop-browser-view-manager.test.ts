@@ -1868,6 +1868,9 @@ describe("DesktopBrowserViewManager", () => {
     expect(automated.options.webPreferences.partition).not.toBe(
       personal.options.webPreferences.partition,
     );
+    expect(automated.options.webPreferences.partition).toMatch(
+      /^persist:bb-browser-automation-[0-9a-f]{16}$/,
+    );
     expect(requireFakeView(2).options.webPreferences.partition).toBe(
       automated.options.webPreferences.partition,
     );

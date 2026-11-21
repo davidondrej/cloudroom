@@ -203,8 +203,16 @@ export function createDesktopBrowserBroker(args: {
     tabId: string,
   ): DesktopBrowserNativeTab {
     const tab = tabsFor(instance, threadId).find((tab) => tab.tabId === tabId);
-    if (!tab) throw new Error("Browser tab is outside the requested thread");
-    return tab;
+    if (tab) return tab;
+    // A page's window.close() destroys its tab: say so, not "wrong thread" (#2151).
+    const exists = args.manager
+      .listTabs({ hostWebContentsId: instance.webContentsId, threadId: null })
+      .some((tab) => tab.tabId === tabId);
+    throw new Error(
+      exists
+        ? "Browser tab is outside the requested thread"
+        : "Browser tab was closed or does not exist (a page can close its own tab)",
+    );
   }
 
   /** Personal tabs carry the user's logins: agents may never capture or control them. */

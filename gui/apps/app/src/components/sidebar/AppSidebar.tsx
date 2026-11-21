@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { OverflowFade } from "@/components/ui/overflow-fade.js";
 import {
   Sidebar,

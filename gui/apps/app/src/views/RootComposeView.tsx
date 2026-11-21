@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useProjectSuggestions } from "@/hooks/queries/cloudroom-queries";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
 import {
-  findCachedProviderInfo,
-  useSystemProviders,
-} from "@/hooks/queries/system-queries";
-import {
-  COMPUTER,
   findLocalPathProjectSourceForHost,
   type EnvironmentStatus,
   type Host,
@@ -403,7 +399,6 @@ function readForkThreadCreateSeedFromLocationState(
     sourceSeqEnd: value.sourceSeqEnd as number | undefined,
     sourceThreadId: value.sourceThreadId,
     sourceThreadTitle: value.sourceThreadTitle.trim(),
-    ...(value.textOnly === true && { textOnly: true }),
   };
 }
 
@@ -600,16 +595,9 @@ export function RootComposeView() {
               permissionMode: request.permissionMode,
               pluginSubmission: request.pluginSubmission,
               providerId: request.providerId,
-              providerSupportsFork:
-                request.providerId !== forkSeed.providerId ||
-                (findCachedProviderInfo(queryClient, forkSeed.providerId)
-                  ?.capabilities.supportsFork ??
-                  false),
               reasoningLevel: request.reasoningLevel,
               serviceTier: request.serviceTier,
             });
-      if (createRequest === null)
-        throw new Error(`This agent can't fork on this ${COMPUTER}. Pick Cloud instead.`);
       // A phone shows the message in a thread at once, instead of a spinner on Send.
       // Forks, scheduled sends, and plugin sends open on something else, so they wait as before.
       const showsStartingThread =
@@ -689,7 +677,6 @@ export function RootComposeView() {
         : {
             providerId: forkSeed.providerId,
             model: forkSeed.model,
-            textOnly: forkSeed.textOnly === true,
             reasoningLevel: forkSeed.reasoningLevel,
             serviceTier: forkSeed.serviceTier,
             permissionMode: forkSeed.permissionMode,

@@ -22,6 +22,7 @@ export interface ClaudeCodeCatalogEntry {
   description: string;
   supportedReasoningEfforts: readonly ModelReasoningEffort[];
   defaultReasoningEffort: AvailableModel["defaultReasoningEffort"];
+  minimumCliVersion?: string;
 }
 
 export const CLAUDE_XHIGH_CAPABLE_REASONING_EFFORTS: readonly ModelReasoningEffort[] =
@@ -37,4 +38,5 @@ export const CLAUDE_CODE_ACTIVE_CATALOG: readonly ClaudeCodeCatalogEntry[] =
     description: entry.description,
     supportedReasoningEfforts: CLAUDE_XHIGH_CAPABLE_REASONING_EFFORTS,
     defaultReasoningEffort: entry.defaultReasoningEffort,
+    minimumCliVersion: entry.minimumCliVersion,
   }));

@@ -9,6 +9,7 @@ Commands:
   thread        Manage this thread and its child threads
   provider      List the agents and models a child thread can use
   loop          Schedule work for this thread (alias: automation)
+  wake          Set a timer or reminder: wakes this thread once with a prompt
   mac           Run commands and copy files on the user's computer
   secret        Ask the user for API keys
   snippets      Manage synced personal and Organization snippets
@@ -169,9 +170,15 @@ async fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
     }
     if matches!(
         args.first().map(String::as_str),
-        Some("automation" | "loop")
+        Some("automation" | "loop" | "wake")
     ) {
-        match cloudroom::session::automation::cli(&args[1..]).await {
+        // `room-cli wake` is `room-cli loop wake`.
+        let rest = if args[0] == "wake" {
+            &args[..]
+        } else {
+            &args[1..]
+        };
+        match cloudroom::session::automation::cli(rest).await {
             Ok(code) => std::process::exit(code),
             Err(error) => {
                 eprintln!("{error}");

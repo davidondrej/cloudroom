@@ -468,7 +468,7 @@
       ],
       "outputs": ["src/generated/plugin-starter-files.generated.ts"]
     },
-    // Plugin theme CSS (from the app's theme.css + tw-animate-css) and the
+    // Plugin theme CSS (from the app's theme.css + tw-animate.css) and the
     // shared-runtime export manifest (introspected from installed packages).
     "@cloudroom/plugin-build#generate": {
       "dependsOn": [],
@@ -478,6 +478,7 @@
         "src/runtime-shims.mjs",
         "$TURBO_ROOT$/apps/app/package.json",
         "$TURBO_ROOT$/apps/app/src/components/ui/theme.css",
+        "$TURBO_ROOT$/apps/app/src/components/ui/tw-animate.css",
         "$TURBO_ROOT$/packages/plugin-sdk/src/**",
         "$TURBO_ROOT$/packages/shared-ui/src/**",
         "$TURBO_ROOT$/pnpm-lock.yaml"

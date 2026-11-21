@@ -1,11 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { createThread, getProject, replaceProjectGitRemoteUrl, setProjectGithubRepo } from "@cloudroom/db";
-import { copyProject, envRefusal, localFiles, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
+import { copyProject, envRefusal, githubRepository, localFiles, localProjectNote, pack, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
 import { redactSecrets } from "../../src/services/cloudroom/shares.js";
 import { seedHostSession, seedPrimaryHost, seedProjectWithSource } from "../helpers/seed.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
@@ -32,6 +32,23 @@ it("Teleport to Cloud copies staged, unstaged, and untracked work plus ignored .
     // Decision (#140): a project at a repo root keeps its ignored `.env` files at any depth, since monorepo apps need theirs.
     // A committed `.env.example` comes from the clone, so its edit stays here (#1405); staged new, renamed and intent-to-add ones are sent.
     expect((await localFiles(root, "env")).sort()).toEqual([".env", ".env.ita", ".env.local", ".env.test", "apps/web/.env"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+it("Windows packs non-ASCII and long file names so the sandbox's tar unpacks them unchanged (#2224)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cloudroom-project-copy-"));
+  const files = ["docs/Financiën.md", `src/${"lang-".repeat(30)}.ts`, "😀 notes.txt"];
+  try {
+    for (const path of files) {
+      mkdirSync(dirname(join(root, path)), { recursive: true });
+      writeFileSync(join(root, path), path);
+    }
+    await pack(root, files, join(root, "out.tgz"), "win32");
+    mkdirSync(join(root, "cloud"));
+    execFileSync("tar", ["-xzf", join(root, "out.tgz"), "-C", join(root, "cloud")]);
+    expect(files.map((path) => readFileSync(join(root, "cloud", path), "utf8"))).toEqual(files);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -71,9 +88,10 @@ it("sends a Cloud loop run's child no .env files when the run didn't pick them (
     writeFileSync(join(root, ".env.local"), "SECRET=2\n");
     writeFileSync(join(root, "app.js"), "ok\n");
     // The fake Core keeps every uploaded piece; the last command unpacks them.
-    const pieces: Buffer[] = [];
+    const pieces: Buffer[] = [], beats: string[] = [];
     const client = {
       workspace: async () => ({ path: "/code/project" }),
+      alive: async (id: string) => { beats.push(id); },
       runOnVm: async (_input: unknown, _signal?: AbortSignal, bytes?: Uint8Array) => { if (bytes?.length) pieces.push(Buffer.from(bytes)); return { code: 0, stdout: "", stderr: "" }; },
     } as unknown as CloudroomClient;
     const copied = (noEnv: boolean) => new Promise<string[]>((resolve, reject) => {
@@ -88,6 +106,8 @@ it("sends a Cloud loop run's child no .env files when the run didn't pick them (
     });
     expect(await copied(true)).toEqual(["app.js"]);
     expect(await copied(false)).toEqual([".env", ".env.local", "app.js"]);
+    // Without this heartbeat, `room-cli files wait` can't tell that this computer went offline (#2168).
+    expect(beats).toContain("w");
   } finally {
     rmSync(root, { recursive: true, force: true });
     await harness.cleanup();
@@ -159,6 +179,32 @@ it("a project folder on this computer that became its own checkout saves and clo
     expect(saved(elsewhere!.project)).toEqual(["git@github.com:Example/Outer", 1]);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    await harness.cleanup();
+  }
+});
+
+it("a project whose GitHub origin has a token saves it clean and copies as a GitHub project, like its template (#2190)", async () => {
+  const harness = await createTestAppHarness();
+  const app = mkdtempSync(join(tmpdir(), "cloudroom-project-copy-"));
+  try {
+    execFileSync("git", ["-C", app, "init", "-q"]);
+    execFileSync("git", ["-C", app, "remote", "add", "origin", "https://alice:FAKE_TOKEN@github.com/example/app.git"]);
+    writeFileSync(join(app, ".env"), "A=1\n");
+    const { deps } = harness;
+    const { host } = seedHostSession(deps, { id: "host_token" });
+    seedPrimaryHost(deps, host.id);
+    const { project } = seedProjectWithSource(deps, { hostId: host.id, path: app });
+    const thread = createThread(deps.db, deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+    // A new Cloud thread reads the note first, which saves the remote.
+    expect(await localProjectNote(deps, project.id)).toBeUndefined();
+    const saved = getProject(deps.db, project.id)?.gitRemoteUrl ?? null;
+    expect(saved).toBe("https://github.com/example/app.git");
+    // The template (sandboxProject) clones githubRepository(saved); the copy must agree, empty folder or pre-cloned.
+    const plan = (filled: boolean) => planProjectCopyOrThrow(deps, { workspace: async () => ({ path: "/w" }), runOnVm: async () => ({ code: filled ? 1 : 0 }) } as unknown as CloudroomClient, thread.id, "w");
+    expect(await plan(false)).toMatchObject({ repository: githubRepository(saved), clone: true, copyAll: false });
+    expect(await plan(true)).toMatchObject({ repository: githubRepository(saved), clone: false, copyAll: false });
+  } finally {
+    rmSync(app, { recursive: true, force: true });
     await harness.cleanup();
   }
 });

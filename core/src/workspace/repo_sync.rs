@@ -20,6 +20,9 @@ const CONFIG: &str = "/etc/cloudroom/repo-sync.json";
 /// The thread's own branch, noted in the repo's Git config the first time a check finds it on a `room/...` branch. It
 /// survives sleep and wake; the script pushes only from it or the target branch.
 const HOME: &str = "cloudroom.repo-sync-home";
+/// The problem the agent was last told about, noted in the repo's Git config so a lasting one is told once, also after
+/// a wake (a fresh Core, #2169). A good sync clears it.
+const TOLD: &str = "cloudroom.repo-sync-told";
 const CHECK: Duration = Duration::from_secs(10);
 const LIMIT: Duration = Duration::from_secs(120);
 /// One sync, run as the agent with the target branch as `$1`. Prints `blocked PATH` per file left out and ends with
@@ -47,7 +50,27 @@ current=$(git symbolic-ref -q --short HEAD) || say busy detached
 home=$(git config --get cloudroom.repo-sync-home)
 [ "$current" = "$branch" ] || [ "$current" = "${home:-}" ] || say refused "$current"
 grep -qs 'filter=lfs' .gitattributes && say failed "this repo uses Git LFS, which RepoSync doesn't support yet."
-g fetch -q origin "+refs/heads/$branch:$target" 2>/dev/null || say failed "could not fetch $branch from GitHub: the branch is missing, or the GitHub login can't read the repo"
+# Fetches the target into its private ref, once more after a short pause (a network blip). A failure quotes Git with
+# logins (#1847, up to a URL's last @, since a password may hold a /) and timings removed, so a lasting one is told
+# once. Only Git's "couldn't find" means no branch.
+fetch() {
+  local i err said
+  for i in 1 2; do
+    err=$(g fetch -q origin "+refs/heads/$branch:$target" 2>&1) && return
+    case $err in *"couldn't find remote ref"*) say failed "GitHub has no branch \`$branch\` in this repo. Ask the user to pick another branch in Settings → Cloud → RepoSync." ;; esac
+    [ "$i" = 2 ] || sleep 3
+  done
+  said=$(printf '%s\n' "$err" | { grep -E '^(fatal|error):' || printf '%s\n' "$err"; } | sed -E 's#(invalid credential line: ).*#\1[secret removed]#; s|://[^[:space:]]*@|://[secret removed]@|g; s#(gh[pousr]|github_pat)_[A-Za-z0-9_.-]+#[secret removed]#g; s#(basic|bearer)[[:blank:]]+[A-Za-z0-9._~+/=-]{12,}#\1 [secret removed]#Ig; s/ after [0-9]+ m[a-z]*//' | grep . | tail -n 2 | paste -sd ' ' - | cut -c1-300)
+  # Curl quotes pieces of a URL login it misparsed (a host cut from a password with an @), and Git a proxy whole, with
+  # or without a scheme, so Git's words go unquoted when the remote URL or any proxy (Git config or env) holds a login.
+  { git remote get-url origin | grep '://.*@'; git config --get-regexp '\.proxy$'; env | grep -iE '^(https?|all)_proxy='; } 2>/dev/null | grep -q @ && said="(not shown: the remote URL or a proxy holds a login)"
+  case $err in
+    *'could not read Username'*|*'could not read Password'*|*'Authentication failed'*|*'Repository not found'*|*'returned error: 403'*|*'(publickey)'*)
+      say failed "the GitHub login can't read this repo. Ask the user to check it in Settings → Cloud environment → GitHub. Git said: ${said:-nothing}" ;;
+  esac
+  say failed "fetching \`$branch\` from GitHub failed; RepoSync tries again on its own. Git said: ${said:-nothing}"
+}
+fetch
 # Commits another GitHub branch already has (a teammate's work merged in) never go; the thread's own branch may hold its own.
 mine_on=""; [ "$current" = "${home:-}" ] && mine_on="origin/$current"
 mine=$(git rev-list --count HEAD "^$target" --not ${mine_on:+--exclude=$mine_on} --remotes=origin)
@@ -78,7 +101,7 @@ if ! git diff --cached --quiet; then
   out=$(g commit -q --no-verify -m "RepoSync: $names" 2>&1) || say failed "git commit failed: $(printf %s "$out" | tail -n 3 | tr '\n' ' ')"
 fi
 for try in 1 2; do
-  [ "$try" = 1 ] || g fetch -q origin "+refs/heads/$branch:$target" 2>/dev/null || say failed "could not fetch $branch from GitHub"
+  [ "$try" = 1 ] || fetch
   [ -n "$(git rev-list -n 1 "$target..HEAD")" ] || say clean
   if ! git merge-base --is-ancestor "$target" HEAD; then
     left=$(git diff --name-only | head -n 3 | paste -sd ' ' -)
@@ -117,8 +140,6 @@ struct Folder {
     /// `git status` (with HEAD) right after the last sync that finished: nothing changed since means nothing to do.
     done: String,
     ran: Option<Instant>,
-    /// The problem the agent was last told about, so a lasting one is told once; a good sync clears it.
-    told: Option<String>,
     blocked: Vec<String>,
     /// Whether the thread's own branch is noted in the repo's Git config (`HOME`).
     home: bool,
@@ -284,6 +305,18 @@ impl RepoSync {
                     "[Cloudroom] RepoSync could not sync {name}: {detail}"
                 )),
             };
+            let told = self.git(&path, &["config", "--get", TOLD]).await;
+            let new_problem = match &problem {
+                None if result != "busy" && told.is_some() => {
+                    self.git(&path, &["config", "--unset", TOLD]).await;
+                    false
+                }
+                Some(p) if tell.is_some() && told.as_ref() != Some(p) => {
+                    self.git(&path, &["config", TOLD, p]).await;
+                    true
+                }
+                _ => false,
+            };
             let mut all = self.folders.lock().unwrap();
             let f = all.entry(path).or_default();
             f.ran = Some(Instant::now());
@@ -303,10 +336,7 @@ impl RepoSync {
                 }
                 f.blocked = blocked;
             }
-            if problem.is_none() && result != "busy" {
-                f.told = None;
-            } else if problem.is_some() && problem != f.told {
-                f.told.clone_from(&problem);
+            if new_problem {
                 news.extend(problem);
             }
             if let Some(session) = &tell {

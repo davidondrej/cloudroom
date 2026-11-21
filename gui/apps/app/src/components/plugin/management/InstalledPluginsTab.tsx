@@ -1,7 +1,7 @@
 import { useSetPluginEnabled } from "@/components/plugin/useSetPluginEnabled";
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { EmptyState } from "@cloudroom/shared-ui/empty-state";
 import { Switch } from "@cloudroom/shared-ui/switch";
 import {

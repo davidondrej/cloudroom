@@ -297,6 +297,7 @@ const interleavedProviderOrder = [
   "codex",
   "pi",
   "acp-cursor",
+  "acp-antigravity",
 ];
 
 describe("usage-based provider ordering", () => {
@@ -404,7 +405,7 @@ describe("usage-based provider ordering", () => {
         await providerIds(
           await harness.app.request("/api/v1/system/providers"),
         ),
-      ).toEqual(["claude-code", "codex", "pi", "acp-cursor"]);
+      ).toEqual(["claude-code", "codex", "pi", "acp-cursor", "acp-antigravity"]);
     });
   });
 

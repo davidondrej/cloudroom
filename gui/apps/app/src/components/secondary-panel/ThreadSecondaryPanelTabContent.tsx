@@ -23,11 +23,13 @@ import {
   buildThreadStorageRawContentUrl,
   buildThreadWorktreeRawContentUrl,
 } from "@/lib/file-content-urls";
-import type {
-  EnvironmentFilePreviewSource,
-  FilePreview,
-  FilePreviewLineRange,
-  WorkspaceFilePreviewStatusLabel,
+import {
+  buildDirectMediaFilePreview,
+  getMediaFilePreviewType,
+  type EnvironmentFilePreviewSource,
+  type FilePreview,
+  type FilePreviewLineRange,
+  type WorkspaceFilePreviewStatusLabel,
 } from "@cloudroom/client-core";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { PANEL_SCROLL_SLOT_CLASS } from "./panelChromeClasses";
@@ -332,22 +334,74 @@ export function WorkspaceFilePreviewTabContent({
   statusLabel,
   threadId,
 }: WorkspaceFilePreviewTabContentProps) {
+  const isWorkingTreeMedia =
+    source?.kind === "working-tree" &&
+    getMediaFilePreviewType(activePath) !== null;
   const environmentQuery = useEnvironment(environmentId ?? null, {
     enabled:
       environmentId !== null &&
       environmentId !== undefined &&
-      markdownLinkRouting?.localImage === undefined,
+      (markdownLinkRouting?.localImage === undefined ||
+        (!threadId && isWorkingTreeMedia)),
     staleTime: 5_000,
   });
+  const environmentRootPath = environmentQuery.data?.path ?? null;
+  const environmentProjectId = environmentQuery.data?.projectId;
+  const directMediaUrl =
+    isWorkingTreeMedia
+      ? threadId
+        ? buildThreadWorktreeRawContentUrl(threadId, activePath)
+        : environmentId && environmentProjectId !== undefined
+          ? buildProjectFileContentUrl(environmentProjectId, activePath, {
+              environmentId,
+            })
+          : null
+      : null;
+  const directMediaPreview = useMemo(
+    () =>
+      directMediaUrl === null
+        ? null
+        : buildDirectMediaFilePreview({
+            name: activePath.split("/").at(-1),
+            path: activePath,
+            url: directMediaUrl,
+          }),
+    [activePath, directMediaUrl],
+  );
+  const waitingForDirectMediaUrl =
+    isWorkingTreeMedia &&
+    directMediaPreview === null &&
+    !threadId &&
+    Boolean(environmentId) &&
+    environmentQuery.isLoading;
   const agentFileEdit = useAgentFileEdit(threadId, activePath);
   const workspaceFilePreviewQuery = useEnvironmentFilePreview(
     environmentId,
     activePath,
     source,
-    { enabled: isPanelOpen },
+    {
+      enabled:
+        isPanelOpen && directMediaPreview === null && !waitingForDirectMediaUrl,
+    },
   );
-  const environmentRootPath = environmentQuery.data?.path ?? null;
-  const environmentProjectId = environmentQuery.data?.projectId;
+  const previewProps =
+    directMediaPreview !== null
+      ? {
+          error: null,
+          filePreview: directMediaPreview,
+          isLoading: false,
+          isRefreshing: false,
+          onRefresh: () => {},
+        }
+      : waitingForDirectMediaUrl
+        ? {
+            error: null,
+            filePreview: undefined,
+            isLoading: true,
+            isRefreshing: false,
+            onRefresh: () => void environmentQuery.refetch(),
+          }
+        : filePreviewQueryProps(workspaceFilePreviewQuery);
   const resolvedMarkdownLinkRouting = useMemo(() => {
     if (
       source === null ||
@@ -386,7 +440,7 @@ export function WorkspaceFilePreviewTabContent({
   return (
     <AgentFileEditContext.Provider value={agentFileEdit}>
       <SecondaryPanelFilePreview
-        {...filePreviewQueryProps(workspaceFilePreviewQuery)}
+        {...previewProps}
         activePath={activePath}
         copyPath={copyPath}
         htmlPreviewUrl={

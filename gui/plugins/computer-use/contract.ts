@@ -84,6 +84,7 @@ export const approvalPayloadSchema = z
     purpose: z.string().nullable(),
     platform: z.string(),
     permissions: permissionsSchema,
+    foreground: z.boolean().optional(),
   })
   .strict();
 export type ApprovalPayload = z.infer<typeof approvalPayloadSchema>;

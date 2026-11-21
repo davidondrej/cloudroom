@@ -103,6 +103,28 @@ describe("environment command dispatch", () => {
         expect.objectContaining({ key: "workspace-path" }),
       ]),
     );
+
+    // A failed worktree move's retry reuses the ID with a new folder: setup runs there, not the old runtime (#2216).
+    const retryPath = await makeTempDir("bb-dispatch-provider-owned-retry-");
+    await commitHooks(retryPath, { setup: "printf retried > setup-marker\n" });
+    const retry = await dispatchCommand(
+      {
+        type: "environment.attach",
+        contributedEnv: [],
+        environmentId: "env-provider-owned",
+        initiator: null,
+        path: retryPath,
+        setupScriptTimeoutMs: 10_000,
+      },
+      makeDispatchOptions({
+        runtimeManager: harness.manager,
+        dataDir: await makeTempDir("bb-dispatch-provider-owned-data-"),
+      }),
+    );
+    expect(retry.path).toBe(retryPath);
+    await expect(
+      fs.readFile(`${retryPath}/setup-marker`, "utf8"),
+    ).resolves.toBe("retried");
   });
 
   it("fails attachment when the setup script fails", async () => {

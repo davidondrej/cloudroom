@@ -2,7 +2,7 @@ import { and, asc, eq } from "drizzle-orm";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { pluginMarketplaceIcons, pluginMarketplaces } from "../schema.js";
 import {
-  stripGitUrlCredentials,
+  stripPluginGitUrlCredentials,
   stripTextGitUrlCredentials,
 } from "./plugins.js";
 
@@ -29,7 +29,7 @@ function withoutUrlCredentials(
 ): PluginMarketplaceRow {
   return {
     ...row,
-    manifestUrl: stripGitUrlCredentials(row.manifestUrl),
+    manifestUrl: stripPluginGitUrlCredentials(row.manifestUrl),
     lastError: row.lastError && stripTextGitUrlCredentials(row.lastError),
   };
 }

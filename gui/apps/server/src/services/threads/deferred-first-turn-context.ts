@@ -23,6 +23,8 @@ export interface DeferredFirstTurnContext {
   requestSequence: number;
   /** The retry chain of the request this was saved on (its original request id). */
   retryChainRequestId?: string;
+  /** Sent in the first message (a text fork's seed), so every request since holds it, retries included. */
+  carried?: true;
 }
 
 export interface PromptWithGroups {
@@ -67,7 +69,7 @@ export function resolveDeferredFirstTurnContext(
   // A retry re-sends its failed request's input, which already holds what that request carried (#1153).
   const seed =
     retryOfRequestId !== undefined &&
-    newest?.retryChainRequestId === retryOfRequestId
+    (newest?.carried || newest?.retryChainRequestId === retryOfRequestId)
       ? null
       : newest;
   // A failed request that carried a note already holds it, in its retry's input or in the seed saved from it.

@@ -30,8 +30,8 @@ room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
 room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
-room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
@@ -71,6 +71,13 @@ const LOCAL_ONLY: [&str; 27] = [
     "interactions",
     "worktree",
 ];
+/// `thread read|unread` in a Cloud thread (#2242). The helper blocks the app's local API for plain commands below Full
+/// access, so both Mac commands need `--write`, as in helper/jobs.rs.
+fn mark_note(verb: &str) -> String {
+    format!(
+        "`room-cli thread {verb}` prints no messages: it only changes a thread's unread dot in the user's app. Run it only when the user asks: room-cli mac run --write '~/.local/bin/room-cli thread {verb} THREAD_ID'. To read a thread's messages: room-cli thread log CHILD_ID for your child threads, room-cli team read THREAD_ID for a teammate's, or room-cli mac run --write '~/.local/bin/room-cli thread log THREAD_ID' for another thread of the user's. With --write, Full Mac access runs it at once and Ask first asks the user; with Read-only, ask the user to run it on their Mac."
+    )
+}
 /// `thread compact`'s follow-up unless `--then` or `--no-then`. The Local CLI sends the same.
 const COMPACT_THEN: &str = "Keep going with your task. If it's done, say what we should do next.";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
@@ -407,9 +414,10 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 pub(super) fn session_failure(error: super::Error) -> Failure {
     let status = match error {
         super::Error::NotFound => StatusCode::NOT_FOUND,
-        super::Error::Conflict(_) | super::Error::Refused(_) | super::Error::Effort(_) => {
-            StatusCode::CONFLICT
-        }
+        super::Error::Conflict(_)
+        | super::Error::Refused(_)
+        | super::Error::NeverStarted(_)
+        | super::Error::Effort(_) => StatusCode::CONFLICT,
         super::Error::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     fail(status, &error.message())
@@ -683,7 +691,7 @@ fn check_start(
     provider
         .map(|p| {
             crate::runtime::Kind::named(p).ok_or_else(|| {
-                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx, openclaw or agent-zero")
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, antigravity, fx, openclaw or agent-zero")
             })
         })
         .transpose()
@@ -1114,13 +1122,8 @@ pub(super) async fn deliver(
 /// A tell refused because its agent never started (a stopped or archived one isn't started again) says why, with its
 /// own code: the website otherwise calls Core's refusals busy, and its sender retries in vain (#2036).
 fn never_started(m: &Manager, id: &str, error: super::Error) -> Failure {
-    let failed =
-        (m.local.lock().unwrap().sessions.get(id)).is_some_and(|s| s.failed_start().is_some());
-    match (&error, failed.then(|| m.start_failure(id)).flatten()) {
+    match (&error, m.failed_start_reason(id)) {
         (super::Error::Conflict(super::GONE), Some(why)) => {
-            let why = why
-                .rsplit_once("Cause: ")
-                .map_or(&why[..], |(_, cause)| cause);
             let error = format!("its agent never started: {why}");
             (
                 StatusCode::CONFLICT,
@@ -1834,6 +1837,11 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             _ => return usage(),
         },
+        // #2242: the generic redirect led an agent that wanted a thread's messages to mark it read on the Mac.
+        "read" | "unread" => {
+            eprintln!("{}", mark_note(command));
+            return Ok(2);
+        }
         other if LOCAL_ONLY.contains(&other) => {
             eprintln!("{}", super::info::on_computer(&format!("thread {other}")));
             return Ok(2);
@@ -1846,8 +1854,22 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mark_waited, mention, missing_value, plain};
+    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain};
     use serde_json::json;
+
+    // #2242: the Mac commands it prints must run as printed: the caller's verb, no shell pipe, and --write.
+    #[test]
+    fn a_mark_note_prints_runnable_mac_commands() {
+        for verb in ["read", "unread"] {
+            let note = mark_note(verb);
+            assert!(note.contains(&format!("room-cli thread {verb} THREAD_ID'")));
+            assert!(!note.contains('|'));
+            assert_eq!(
+                note.matches("mac run").count(),
+                note.matches("mac run --write '").count()
+            );
+        }
+    }
 
     // #1668: an own-sandbox spawn printed nothing while it waited, and its request ID stayed inside Core, so a retry
     // after the agent's command gave up started a second child. Its ID now comes first, like a top-level start's.

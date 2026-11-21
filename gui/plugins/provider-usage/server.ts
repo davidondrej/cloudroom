@@ -205,7 +205,12 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         .catch(() => [])
     ).filter((source) => source.method === ACCOUNTS_LIST_METHOD);
     for (const source of sources)
-      for (const providerId of ["claude-code", "codex", "acp-cursor"]) {
+      for (const providerId of [
+        "claude-code",
+        "codex",
+        "acp-cursor",
+        "acp-antigravity",
+      ]) {
         const raw: unknown = await room.sdk.plugins
           .callRpc({
             pluginId: source.pluginId,
@@ -224,8 +229,15 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         const mac = accounts.find((account) => account.id === "local");
         const localEntry = (machine: UsageMachine, entry: UsageProvider) => {
           if (!machine.primary || !mac) return entry;
+          const measuredEmail =
+            entry.usage?.status === "ok" ? entry.usage.accountEmail : null;
+          const sameLogin =
+            !mac.email ||
+            !measuredEmail ||
+            mac.email.trim().toLowerCase() === measuredEmail.trim().toLowerCase();
           return {
-            ...entry, accountLabel: mac.name ?? entry.accountLabel,
+            ...entry,
+            accountLabel: (sameLogin ? mac.name : null) ?? entry.accountLabel,
             usage: providerId === "claude-code" && mac.email && (mac.inUse || mac.limitedUntil)
               ? accountUsage(mac, entry.usage) : entry.usage,
           };
