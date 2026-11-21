@@ -8,6 +8,7 @@ import {
 } from "react";
 import type {
   FitAddon,
+  Ghostty,
   ITheme,
   Terminal as TerminalEmulator,
 } from "ghostty-web";
@@ -53,6 +54,7 @@ export const TERMINAL_FONT_FAMILY =
 const TERMINAL_FONT_CSS_VARIABLE = "--font-terminal";
 const TERMINAL_TOUCH_FOCUS_MAX_DURATION_MS = 700;
 const TERMINAL_TOUCH_FOCUS_MOVEMENT_THRESHOLD_PX = 10;
+const TERMINAL_TEXT_INPUT_ECHO_WINDOW_MS = 100;
 
 type TerminalFitScheduler = () => void;
 
@@ -424,6 +426,121 @@ export function encodeTerminalInputChunks(value: string): string[] {
     );
   }
   return chunks;
+}
+
+/**
+ * Loads a wasm instance for one terminal. ghostty-web 0.4.0 corrupts a shared
+ * instance's memory when a terminal is freed and the next one opens at another
+ * width (coder/ghostty-web#210), so the new terminal drew garbage and the old
+ * terminal's text, e.g. after unfolding a foldable phone.
+ */
+export async function loadTerminalGhostty(): Promise<Ghostty> {
+  const { Ghostty: GhosttyLoader } = await import("ghostty-web");
+  return GhosttyLoader.load();
+}
+
+type TerminalBeforeInputEvent = Pick<
+  InputEvent,
+  "data" | "inputType" | "isComposing"
+>;
+
+/**
+ * Maps a text edit to the bytes the matching key sends. Android keyboards
+ * report keys as keyCode 229 and deliver the text through `beforeinput`,
+ * which ghostty-web 0.4.0 ignores, so typing there sent nothing.
+ */
+function terminalDataFromBeforeInput(
+  event: TerminalBeforeInputEvent,
+): string | null {
+  if (event.isComposing) {
+    return null;
+  }
+  switch (event.inputType) {
+    case "insertText":
+      return event.data ? event.data.replace(/\r?\n/g, "\r") : null;
+    case "insertLineBreak":
+    case "insertParagraph":
+      return "\r";
+    case "deleteContentBackward":
+      return "\x7f";
+    case "deleteContentForward":
+      return "\x1b[3~";
+    default:
+      return null;
+  }
+}
+
+interface AttachTerminalTextInputArgs {
+  element: HTMLElement;
+  onData: (data: string) => void;
+}
+
+interface TerminalInputEcho {
+  at: number;
+  data: string | null;
+}
+
+function isRecentTerminalInputEcho(
+  echo: TerminalInputEcho | null,
+  event: InputEvent,
+): boolean {
+  return (
+    echo !== null &&
+    event.timeStamp - echo.at < TERMINAL_TEXT_INPUT_ECHO_WINDOW_MS &&
+    (echo.data === null || echo.data === event.data)
+  );
+}
+
+/**
+ * Sends text that arrives as `beforeinput` instead of a key press. Must be
+ * attached after the terminal opens, so its keydown listener sees whether
+ * ghostty already handled the key.
+ */
+export function attachTerminalTextInput({
+  element,
+  onData,
+}: AttachTerminalTextInputArgs): () => void {
+  // Some Android keyboards also report a key ghostty handled, or text it just
+  // sent on compositionend, as `beforeinput`; skip those echoes.
+  let handledKey: TerminalInputEcho | null = null;
+  let composedText: TerminalInputEcho | null = null;
+  const handleKeyDown = (event: KeyboardEvent) => {
+    handledKey = event.defaultPrevented
+      ? { at: event.timeStamp, data: null }
+      : null;
+  };
+  const handleCompositionEnd = (event: CompositionEvent) => {
+    composedText = event.data
+      ? { at: event.timeStamp, data: event.data }
+      : null;
+  };
+  const handleBeforeInput = (event: InputEvent) => {
+    const data = terminalDataFromBeforeInput(event);
+    if (data === null) {
+      return;
+    }
+    event.preventDefault();
+    const isEcho =
+      isRecentTerminalInputEcho(handledKey, event) ||
+      isRecentTerminalInputEcho(composedText, event);
+    handledKey = null;
+    composedText = null;
+    if (!isEcho) {
+      onData(data);
+    }
+  };
+  element.setAttribute("autocapitalize", "off");
+  element.setAttribute("autocomplete", "off");
+  element.setAttribute("autocorrect", "off");
+  element.setAttribute("spellcheck", "false");
+  element.addEventListener("keydown", handleKeyDown);
+  element.addEventListener("compositionend", handleCompositionEnd);
+  element.addEventListener("beforeinput", handleBeforeInput, true);
+  return () => {
+    element.removeEventListener("keydown", handleKeyDown);
+    element.removeEventListener("compositionend", handleCompositionEnd);
+    element.removeEventListener("beforeinput", handleBeforeInput, true);
+  };
 }
 
 export function forwardTerminalData({
@@ -860,18 +977,18 @@ export function ThreadTerminalView({
     let resizeObserver: ResizeObserver | null = null;
     let selectionChangeDisposable: { dispose: () => void } | null = null;
     let stopObservingFonts: (() => void) | null = null;
+    let detachTextInput: (() => void) | null = null;
 
     async function mountTerminal(
       containerElement: HTMLDivElement,
     ): Promise<void> {
       const {
         FitAddon: LoadedFitAddon,
-        init,
         OSC8LinkProvider,
         Terminal,
         UrlRegexProvider,
       } = await import("ghostty-web");
-      await init();
+      const ghostty = await loadTerminalGhostty();
       if (disposed) {
         return;
       }
@@ -881,6 +998,7 @@ export function ThreadTerminalView({
         cursorBlink: true,
         fontFamily: readTerminalFontFamily(),
         fontSize: 12,
+        ghostty,
         scrollback: 10_000,
         theme: buildTerminalTheme(),
       });
@@ -889,6 +1007,11 @@ export function ThreadTerminalView({
       terminal.loadAddon(fitAddon);
       const currentActiveElement = document.activeElement;
       terminal.open(containerElement);
+      const openedTerminal = terminal;
+      detachTextInput = attachTerminalTextInput({
+        element: containerElement,
+        onData: (data) => openedTerminal.input(data, true),
+      });
       const linkHandlers = {
         onActivate: requestOpenTerminalLink,
         onHover: (target: TerminalLinkTarget | null) => {
@@ -1092,6 +1215,7 @@ export function ThreadTerminalView({
       }
       resizeObserver?.disconnect();
       selectionChangeDisposable?.dispose();
+      detachTextInput?.();
       transport?.dispose();
       terminal?.dispose();
       terminalRef.current = null;

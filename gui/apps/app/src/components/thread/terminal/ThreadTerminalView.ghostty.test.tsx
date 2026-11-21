@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { init, Terminal } from "ghostty-web";
+import { init, Terminal, type Ghostty } from "ghostty-web";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  attachTerminalTextInput,
   captureTerminalContextMenuState,
   forwardTerminalData,
+  loadTerminalGhostty,
   writeTerminalOutput,
 } from "./ThreadTerminalView";
 
@@ -24,17 +26,71 @@ const canvasContext = new Proxy(
   },
 );
 
-function openTerminal(host: HTMLElement): Terminal {
+interface OpenTerminalOptions {
+  cols?: number;
+  ghostty?: Ghostty;
+}
+
+function openTerminal(
+  host: HTMLElement,
+  { cols = 80, ghostty }: OpenTerminalOptions = {},
+): Terminal {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
     canvasContext as CanvasRenderingContext2D,
   );
-  const terminal = new Terminal({ cols: 80, rows: 24 });
+  const terminal = new Terminal({ cols, ghostty, rows: 24 });
   terminal.open(host);
   return terminal;
 }
 
 function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+function writeAndWait(terminal: Terminal, data: string): Promise<void> {
+  return new Promise((resolve) => {
+    terminal.write(data, resolve);
+  });
+}
+
+function screenLines(terminal: Terminal): string[] {
+  return Array.from(
+    { length: terminal.rows },
+    (_, row) =>
+      terminal.buffer.active.getLine(row)?.translateToString(true) ?? "",
+  );
+}
+
+function beforeInput(
+  target: Element,
+  init: { data?: string; inputType: string; isComposing?: boolean },
+): void {
+  target.dispatchEvent(
+    new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    }),
+  );
+}
+
+function openTerminalWithTextInput(host: HTMLElement) {
+  const terminal = openTerminal(host);
+  const detach = attachTerminalTextInput({
+    element: host,
+    onData: (data) => terminal.input(data, true),
+  });
+  const sent: string[] = [];
+  terminal.onData((data) => {
+    sent.push(data);
+  });
+  return {
+    sent,
+    dispose: () => {
+      detach();
+      terminal.dispose();
+    },
+  };
 }
 
 beforeAll(async () => {
@@ -125,5 +181,99 @@ describe("ghostty terminal", () => {
 
     expect(capturedSelection).toBe("alpha");
     terminal.dispose();
+  });
+
+  it("keeps a closed terminal's screen out of the next one at another width", async () => {
+    render(<div data-testid="terminal-host" />);
+    const host = screen.getByTestId("terminal-host");
+    const closed = openTerminal(host, {
+      cols: 55,
+      ghostty: await loadTerminalGhostty(),
+    });
+    await writeAndWait(
+      closed,
+      "user@host:~$ exit\r\nlogout\r\n\r\nTerminal exited with code 0\r\n",
+    );
+    closed.dispose();
+
+    const next = openTerminal(host, {
+      cols: 103,
+      ghostty: await loadTerminalGhostty(),
+    });
+    await writeAndWait(next, "user@host:~$ ");
+
+    const [promptLine, ...restOfScreen] = screenLines(next);
+    expect(promptLine).toBe("user@host:~$");
+    expect(restOfScreen.join("")).toBe("");
+    next.dispose();
+  });
+});
+
+describe("terminal text input from mobile keyboards", () => {
+  it("sends text, Backspace and Enter that arrive without a key code", () => {
+    render(<div data-testid="terminal-host" />);
+    const host = screen.getByTestId("terminal-host");
+    const { sent, dispose } = openTerminalWithTextInput(host);
+    const textarea = host.querySelector("textarea");
+    if (textarea === null) {
+      throw new Error("Expected the terminal input textarea");
+    }
+
+    fireEvent.keyDown(textarea, { key: "Unidentified", keyCode: 229 });
+    beforeInput(textarea, { data: "l", inputType: "insertText" });
+    fireEvent.keyDown(host, { key: "Unidentified", keyCode: 229 });
+    beforeInput(host, { data: "s", inputType: "insertText" });
+    beforeInput(host, { inputType: "deleteContentBackward" });
+    beforeInput(host, { inputType: "insertParagraph" });
+
+    expect(sent).toEqual(["l", "s", "\x7f", "\r"]);
+    dispose();
+  });
+
+  it("does not send a key twice when the keyboard also reports it as text", () => {
+    render(<div data-testid="terminal-host" />);
+    const host = screen.getByTestId("terminal-host");
+    const { sent, dispose } = openTerminalWithTextInput(host);
+
+    fireEvent.keyDown(host, { key: "a", code: "KeyA" });
+    beforeInput(host, { data: "a", inputType: "insertText" });
+    fireEvent.keyDown(host, { key: "Enter", code: "Enter" });
+    beforeInput(host, { inputType: "insertParagraph" });
+
+    expect(sent).toEqual(["a", "\r"]);
+    dispose();
+  });
+
+  it("does not resend text the keyboard just composed", () => {
+    render(<div data-testid="terminal-host" />);
+    const host = screen.getByTestId("terminal-host");
+    const { sent, dispose } = openTerminalWithTextInput(host);
+
+    host.dispatchEvent(new CompositionEvent("compositionstart"));
+    beforeInput(host, {
+      data: "ls",
+      inputType: "insertCompositionText",
+      isComposing: true,
+    });
+    host.dispatchEvent(
+      new CompositionEvent("compositionend", { bubbles: true, data: "ls" }),
+    );
+    beforeInput(host, { data: "ls", inputType: "insertText" });
+    beforeInput(host, { data: " ", inputType: "insertText" });
+
+    expect(sent).toEqual(["ls", " "]);
+    dispose();
+  });
+
+  it("turns off keyboard autocorrect and capitalisation on the terminal", () => {
+    render(<div data-testid="terminal-host" />);
+    const host = screen.getByTestId("terminal-host");
+    const { dispose } = openTerminalWithTextInput(host);
+
+    expect(host.getAttribute("autocapitalize")).toBe("off");
+    expect(host.getAttribute("autocomplete")).toBe("off");
+    expect(host.getAttribute("autocorrect")).toBe("off");
+    expect(host.getAttribute("spellcheck")).toBe("false");
+    dispose();
   });
 });
