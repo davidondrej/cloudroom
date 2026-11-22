@@ -4219,6 +4219,51 @@ describe("PromptBoxInternal prompt actions", () => {
     );
   });
 
+  it("opens an images-only picker from Photos on touch screens", async () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({ attachments: { onAttachFiles: vi.fn() } })}
+        />,
+      );
+      const photoInput = document.querySelector(
+        'input[type="file"][accept="image/*"]',
+      );
+      if (!(photoInput instanceof HTMLInputElement)) {
+        throw new Error("Photo input was not rendered");
+      }
+      const clickPhotoInput = vi
+        .spyOn(photoInput, "click")
+        .mockImplementation(() => {});
+
+      // Touch screens show the menu as a bottom drawer.
+      const trigger = screen.getByRole("button", { name: "Prompt actions" });
+      fireEvent.pointerDown(trigger, { button: 0 });
+      fireEvent.click(trigger);
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Photos" }));
+
+      expect(clickPhotoInput).toHaveBeenCalledOnce();
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("keeps Photos out of the menu with a mouse", async () => {
+    render(
+      <PromptBoxInternal
+        {...createPromptBoxProps({ attachments: { onAttachFiles: vi.fn() } })}
+      />,
+    );
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Prompt actions" }),
+      { button: 0 },
+    );
+    const menu = await screen.findByRole("menu", { name: "Prompt actions" });
+    expect(within(menu).getByRole("menuitem", { name: "Attach files" })).toBeTruthy();
+    expect(within(menu).queryByRole("menuitem", { name: "Photos" })).toBeNull();
+  });
+
   it("inserts the skills trigger with no trailing space", async () => {
     const { changes, onCommandQueryChange } = renderPromptBox("");
 

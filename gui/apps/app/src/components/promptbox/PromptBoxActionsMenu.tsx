@@ -33,6 +33,8 @@ interface PromptBoxActionsMenuProps {
   actions?: readonly PromptBoxAction[];
   isAttaching?: boolean;
   onAttach?: () => void;
+  /** Opens the phone's photo picker, newest screenshot first. */
+  onAttachPhotos?: () => void;
   onAction: (action: PromptBoxAction) => void;
   pluginItems?: readonly PluginComposerPlusMenuContribution[];
 }
@@ -120,6 +122,7 @@ export function PromptBoxActionsMenu({
   actions = [],
   isAttaching = false,
   onAttach,
+  onAttachPhotos,
   onAction,
   pluginItems = [],
 }: PromptBoxActionsMenuProps) {
@@ -207,6 +210,22 @@ export function PromptBoxActionsMenu({
       >
         {onAttach ? (
           <>
+            {onAttachPhotos ? (
+              <DropdownMenuItem
+                disabled={isAttaching}
+                onSelect={() => {
+                  selectedItemRef.current = true;
+                  onAttachPhotos();
+                }}
+              >
+                <Icon
+                  name="Image"
+                  className="size-4 text-muted-foreground"
+                  aria-hidden
+                />
+                Photos
+              </DropdownMenuItem>
+            ) : null}
             <DropdownMenuItem
               disabled={isAttaching}
               onSelect={() => {
