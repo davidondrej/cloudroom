@@ -17,7 +17,11 @@
     Goto cloudroomHelperStopped
   ${EndIf}
   ; Ask it to exit: `pause` waits up to 10 s and keeps the device paired (`stop` is for sign-out).
-  ${If} ${FileExists} "$INSTDIR\resources\app.asar.unpacked\node_modules\bb-app\server\dist\assets\python\python.exe"
+  ; Not from an elevated setup: files it writes there would belong to Administrators, and the normal app couldn't
+  ; open them (#2459). The force-stop below still ends the helper.
+  System::Call 'shell32::IsUserAnAdmin()i .r0'
+  ${If} $0 == 0
+  ${AndIf} ${FileExists} "$INSTDIR\resources\app.asar.unpacked\node_modules\bb-app\server\dist\assets\python\python.exe"
   ${AndIf} ${FileExists} "$PROFILE\.gui-cloudroom\cloudroom-preview\client.py"
     nsExec::Exec `"$INSTDIR\resources\app.asar.unpacked\node_modules\bb-app\server\dist\assets\python\python.exe" -B -E -s "$PROFILE\.gui-cloudroom\cloudroom-preview\client.py" pause "$PROFILE\.gui-cloudroom\cloudroom-preview"`
     Pop $0

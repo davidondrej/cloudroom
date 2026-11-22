@@ -103,6 +103,10 @@ export interface AcpDialect {
   // It answers a prompt before sending the reply's last text; the turn stays open this long for it.
   lateTextMs?: number;
   isBusySession?(message: string): boolean;
+  // It asks for approval before sending rawInput; a call titled just this has its command only in the streamed args.
+  streamedArgsTitle?: string;
+  // Part of its restore error when it can't reach its servers: the session is intact, so never start fresh.
+  unreachableError?: string;
   maintenance?: AcpMaintenanceDialect;
   contextEstimate?: AcpContextEstimateTuning;
   readContextUsage?(args: {
@@ -283,6 +287,7 @@ function cursorHandleClientRequest(
 
 export const CURSOR_ACP_DIALECT: AcpDialect = {
   id: "cursor",
+  unreachableError: "Failed to initialize session services",
   classifyToolCall: cursorClassifyToolCall,
   handleClientRequest: cursorHandleClientRequest,
   maintenance: CURSOR_ACP_MAINTENANCE,
@@ -512,6 +517,7 @@ export const KIMI_ACP_DIALECT: AcpDialect = {
   id: "kimi",
   emptyTurnError:
     "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in the .kimi-code/sessions folder in your home folder.",
+  streamedArgsTitle: "Bash",
 };
 
 // A signed-out `agy acp` answers session/new with "Authentication required", so the picker offers `agy acp --login`.

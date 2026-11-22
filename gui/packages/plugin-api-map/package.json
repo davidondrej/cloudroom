@@ -18,7 +18,7 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs tsconfig.tsbuildinfo",
     "scaffold:surface-entry": "node scripts/scaffold-surface-entry.mjs",
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"

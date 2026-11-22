@@ -39,6 +39,9 @@ import {
 } from "./plugin-browse-discovery";
 import { pluginRowSignal } from "./plugin-status";
 import { CatalogEntryIconChip, PluginLogoChip } from "./plugin-ui";
+
+/** Plugins Cloudroom makes itself (docs/scopes/cloudroom-agent.md): its logo in color, and a "By Cloudroom" badge. */
+const BY_CLOUDROOM = new Set(["provider-cloudroom-agent"]);
 import { PluginsFeatured } from "./PluginsFeatured";
 
 // As wide as the Skills page: the featured bento needs the room.
@@ -326,6 +329,11 @@ function PluginRow({
           className="block max-w-full truncate rounded-sm text-left text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           {row.title}
+          {BY_CLOUDROOM.has(row.pluginId) ? (
+            <span className="ml-2 rounded-full bg-primary/15 px-1.5 py-0.5 align-middle text-2xs font-medium text-primary">
+              By Cloudroom
+            </span>
+          ) : null}
         </button>
         {row.description === "" ? null : (
           <p className="truncate text-xs text-muted-foreground">
@@ -367,7 +375,14 @@ function PluginRowIcon({
   const signal = row.plugin === null ? null : pluginRowSignal(row.plugin);
   return (
     <span className="relative shrink-0">
-      {row.entry !== null ? (
+      {BY_CLOUDROOM.has(row.pluginId) ? (
+        <img
+          src="/icon-192.png?v=room"
+          alt=""
+          aria-hidden="true"
+          className="size-8 rounded-[22%] object-cover"
+        />
+      ) : row.entry !== null ? (
         <CatalogEntryIconChip
           entry={row.entry}
           className="size-8"

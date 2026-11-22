@@ -59,7 +59,7 @@ export function useRoutedHostId(
 }
 
 /** The install Cloudroom can run on the routed machine for a provider whose CLI is missing or broken, or `outdated`. */
-function useProviderCliFix(
+export function useProviderCliFix(
   providerId: string,
   routing: SystemExecutionOptionsQuery | undefined,
   enabled: boolean,

@@ -419,7 +419,11 @@ fn fork_of(session: &Session) -> Option<&str> {
 
 /// Whether `child` was started by `ancestor` or by a thread under it.
 fn under(local: &Local, ancestor: &str, child: &Session) -> bool {
-    let mut parent = child.parent_session.as_deref();
+    below(local, ancestor, child.parent_session.as_deref())
+}
+
+/// Whether a thread whose parent is `parent` is under `ancestor`.
+fn below<'a>(local: &'a Local, ancestor: &str, mut parent: Option<&'a str>) -> bool {
     // Bounded, in case saved history ever holds a parent loop.
     for _ in 0..local.sessions.len() {
         match parent {
@@ -455,15 +459,20 @@ fn continued_from<'a>(local: &'a Local, session: &Session) -> Option<&'a str> {
 /// A side chat may use the child threads of the thread it was forked from, like its own,
 /// and a session the child threads of the sessions it continued once they closed (#1296).
 fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
+    reaches(local, caller, child.parent_session.as_deref())
+}
+
+/// `may_use` for a thread whose parent is `parent`.
+fn reaches(local: &Local, caller: &str, parent: Option<&str>) -> bool {
     let mut caller = Some(caller);
     // Bounded, in case saved history ever holds a loop.
     for _ in 0..=local.sessions.len() {
         let Some(id) = caller else { return false };
         let session = local.sessions.get(id);
-        if under(local, id, child)
+        if below(local, id, parent)
             || session
                 .and_then(fork_of)
-                .is_some_and(|source| under(local, source, child))
+                .is_some_and(|source| below(local, source, parent))
         {
             return true;
         }
@@ -471,6 +480,20 @@ fn may_use(local: &Local, caller: &str, child: &Session) -> bool {
     }
     false
 }
+
+/// A child the caller could use before it was made top-level: the user moved it out, or its archived parent kept it
+/// open (#2271). Its start still names the parent it had.
+fn moved_out(local: &Local, caller: &str, child: &Session) -> bool {
+    child.parent_session.is_none()
+        && child
+            .receipts
+            .values()
+            .filter(|r| r.command == "start")
+            .filter_map(|r| r.input["parent_session"].as_str())
+            .any(|parent| reaches(local, caller, Some(parent)))
+}
+
+pub(super) const MOVED_OUT: &str = "this child was moved to the top level, out of this thread's tree, so this thread can no longer read, tell or stop it";
 
 pub(super) const NOT_IN_TREE: &str = "not in this thread's tree: tell reaches its subagents, its parent (`room-cli thread tell --parent TEXT`) and the threads under its parent";
 
@@ -1167,13 +1190,21 @@ impl Manager {
         let local = self.local.lock().unwrap();
         match local.sessions.get(child) {
             Some(c) if may_use(&local, parent, c) => Ok(()),
+            Some(c) if moved_out(&local, parent, c) => Err(Error::Conflict(MOVED_OUT)),
             _ => Err(Error::Conflict("not a child thread of this thread")),
         }
     }
 
     /// `thread tell`'s target: true for a thread under the caller, false for any other it may tell.
     pub(crate) fn tell_target(&self, caller: &str, target: &str) -> Result<bool> {
-        may_tell(&self.local.lock().unwrap(), caller, target).ok_or(Error::Conflict(NOT_IN_TREE))
+        let local = self.local.lock().unwrap();
+        may_tell(&local, caller, target).ok_or_else(|| {
+            let moved = local
+                .sessions
+                .get(target)
+                .is_some_and(|t| moved_out(&local, caller, t));
+            Error::Conflict(if moved { MOVED_OUT } else { NOT_IN_TREE })
+        })
     }
 
     /// Every thread under `id`: its ID, whether it is archived, and whether to keep it open because it, a thread
@@ -1345,6 +1376,38 @@ mod tests {
         let local = Local::open(&dir).unwrap();
         assert_eq!(local.snapshot_at, snapshot["sequence"].as_u64().unwrap());
         assert_eq!(title(&local.sessions["cr_kid"]).as_deref(), Some("A"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// #2271: a child made top-level says so to the thread that started it and to threads above that one, not to others.
+    #[test]
+    fn a_child_moved_to_the_top_level_is_told_apart_from_a_stranger() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-moved-out-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (id, input) in [
+            ("top", json!({})),
+            ("p", json!({"parent_session":"top"})),
+            ("kid", json!({"parent_session":"p"})),
+            ("other", json!({})),
+        ] {
+            let start =
+                json!({"request_id":"s","command":"start","state":"completed","input":input});
+            local.append(id, "receipt", start, None).unwrap();
+        }
+        assert!(
+            !moved_out(&local, "p", &local.sessions["kid"]),
+            "still a child"
+        );
+        local.append("kid", "detach", json!({}), None).unwrap();
+        drop(local);
+        let local = Local::open(&dir).unwrap();
+        let kid = &local.sessions["kid"];
+        assert!(!may_use(&local, "p", kid));
+        assert_eq!(may_tell(&local, "p", "kid"), None);
+        for (caller, moved) in [("p", true), ("top", true), ("other", false), ("kid", false)] {
+            assert_eq!(moved_out(&local, caller, kid), moved, "{caller}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

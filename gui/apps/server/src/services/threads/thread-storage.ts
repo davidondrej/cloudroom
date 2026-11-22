@@ -1,4 +1,5 @@
-import { getLatestSessionForHost } from "@cloudroom/db";
+import { getLatestSessionForHost, getThread } from "@cloudroom/db";
+import { chatFileCopySegments } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { joinHostPathSegments } from "../lib/host-path.js";
 import type { WorkSessionDeps } from "../../types.js";
@@ -31,4 +32,33 @@ export async function requireLiveThreadStoragePath(
 ): Promise<string> {
   const session = requireConnectedHostSession(deps, args.hostId);
   return joinHostPathSegments(session.dataDir, "thread-storage", args.threadId);
+}
+
+const CHAT_FILE_COPY_FORK_DEPTH = 5;
+type ForkedThread = { id: string; sourceThreadId: string | null };
+
+/** Where the copy of a file a Local thread's chat showed may be. The host daemon saves an image to the thread's
+ *  storage when a message shows it (saveChatImages). A fork shows its source's messages too, so the storage of each
+ *  thread it was forked from follows. */
+export async function listChatFileCopies(
+  deps: Pick<WorkSessionDeps, "db">,
+  args: { hostId: string; path: string; thread: ForkedThread },
+): Promise<Array<{ path: string; rootPath: string }>> {
+  const segments = chatFileCopySegments(args.path);
+  const copies: Array<{ path: string; rootPath: string }> = [];
+  let thread: ForkedThread | null = args.thread;
+  while (segments && thread && copies.length < CHAT_FILE_COPY_FORK_DEPTH) {
+    const rootPath = await requireThreadStoragePath(deps, {
+      hostId: args.hostId,
+      threadId: thread.id,
+    });
+    copies.push({
+      path: joinHostPathSegments(rootPath, ...segments),
+      rootPath,
+    });
+    thread = thread.sourceThreadId
+      ? getThread(deps.db, thread.sourceThreadId)
+      : null;
+  }
+  return copies;
 }

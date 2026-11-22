@@ -415,13 +415,14 @@ it("reports a bash call's cwd as the thread's working directory, never an empty 
   expect(JSON.stringify(harness.deltasOf(threadId))).not.toContain('"cwd":""');
 }, 90_000);
 
-it("a resumed thread reports the session header's cwd, not the cwd bb asked for", async () => {
+it("a thread resumed in a new folder runs there, not in the session header's old one (#2072)", async () => {
   const headerDir = mkdtempSync(join(tmpdir(), "bb-pi-header-cwd-"));
   try {
     const sessionDir = join(harness.workspaceDir, "sessions");
     mkdirSync(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "thr-resume-cwd.jsonl");
     writeFileSync(
-      join(sessionDir, "thr-resume-cwd.jsonl"),
+      sessionFile,
       `${JSON.stringify({ type: "session", version: 3, id: "sess-1", timestamp: "2026-01-01T00:00:00.000Z", cwd: headerDir })}\n`,
     );
     const threadId = "thr-resume-cwd";
@@ -433,6 +434,12 @@ it("a resumed thread reports the session header's cwd, not the cwd bb asked for"
       options: FULL_PERMISSION_OPTIONS,
     });
     expect(resumed.result).toMatchObject({ providerThreadId: threadId });
+    // Real pi runs its tools in the header's cwd, so the old folder still
+    // existing must not keep the thread writing there.
+    const header = JSON.parse(
+      readFileSync(sessionFile, "utf8").split("\n", 1)[0]!,
+    );
+    expect(header).toMatchObject({ id: "sess-1", cwd: harness.workspaceDir });
     turnStart(threadId, '/tool bash {"command":"pwd"}', "creq_rsm2345678");
     await harness.waitForDelta(threadId, (d) => d.kind === "item.close");
     const opened = harness
@@ -441,7 +448,7 @@ it("a resumed thread reports the session header's cwd, not the cwd bb asked for"
     expect(opened?.item).toMatchObject({
       type: "command",
       command: "pwd",
-      cwd: headerDir,
+      cwd: harness.workspaceDir,
     });
   } finally {
     rmSync(headerDir, { recursive: true, force: true });

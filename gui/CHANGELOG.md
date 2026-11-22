@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 163
+
+Live bubbles for background commands (2026-11-22)
+
+### Changes
+
+- Background commands show as live bubbles in the chat, so you always see why an agent replied on its own.
+- Long threads open and update faster, thanks to a rebuilt chat timeline.
+- Images in Local chats keep showing, even after the original file is deleted.
+- Claude Code sign-in goes straight to login, and Kimi approvals show the real command.
+- Pick Electric lime or Crisp white for the Cloud icon in Appearance.
+- Security fixes.
+
 ## 162
 
 GitLab projects in the cloud (2026-11-21)

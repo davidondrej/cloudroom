@@ -231,3 +231,32 @@ export function matchesAutomationStatusFilters(
   }
   return false;
 }
+
+function clockLabel(hour: number, minute: number): string {
+  const minutes = minute === 0 ? "" : `:${String(minute).padStart(2, "0")}`;
+  return `${hour % 12 || 12}${minutes}${hour < 12 ? "AM" : "PM"}`;
+}
+
+/** A cron in a few characters, for a template card: "Every 2h", "Every 30m", "Daily 3AM". Other crons get the long description. */
+export function cronCadence(cron: string): string {
+  const [minute = "", hour = "", day = "", month, weekday] = cron
+    .trim()
+    .split(/\s+/u);
+  const every = (spec: string) => /^\*\/(\d+)$/u.exec(spec)?.[1];
+  const long = () =>
+    formatAutomationTrigger({ triggerType: "schedule", cron, timezone: "UTC" });
+  if (month !== "*" || weekday !== "*" || !/^\d+$|^\*\/\d+$/u.test(minute))
+    return long();
+  const at = Number(minute);
+  if (every(minute))
+    return hour === "*" && day === "*" ? `Every ${every(minute)}m` : long();
+  if (hour === "*") return day === "*" ? "Every 1h" : long();
+  if (every(hour)) return day === "*" ? `Every ${every(hour)}h` : long();
+  const span = /^(\d+)-(\d+)\/(\d+)$/u.exec(hour);
+  if (span && day === "*")
+    return `Every ${span[3]}h, ${clockLabel(Number(span[1]), at)}-${clockLabel(Number(span[2]), at)}`;
+  if (!/^\d+$/u.test(hour)) return long();
+  const clock = clockLabel(Number(hour), at);
+  if (day === "*") return `Daily ${clock}`;
+  return every(day) ? `Every ${every(day)}d, ${clock}` : long();
+}

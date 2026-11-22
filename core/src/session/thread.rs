@@ -1381,6 +1381,17 @@ fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
         .map(|i| words[i])
 }
 
+/// A Core session ID: `cr_` and up to 80 ASCII letters, digits, underscores or hyphens, as the app checks them.
+fn session_id(id: &str) -> bool {
+    id.strip_prefix("cr_").is_some_and(|key| {
+        !key.is_empty()
+            && key.len() <= 80
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    })
+}
+
 /// A thread ID without the `@thread:` prefix agents write in chat. The Local CLI accepts both too.
 fn mention(word: &str) -> &str {
     let id = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
@@ -1742,6 +1753,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                         println!("{thread}");
                         return Ok(0);
                     }
+                    // A child moved to the top level says so, as `output` does (#2271).
+                    // Only a well-formed session ID goes into the request, which waits 3 s at most; anything else,
+                    // a timeout or another error gets the old answer.
+                    let read = if session_id(ids[0]) {
+                        let path = format!("/children/{}", ids[0]);
+                        let limit = Some(std::time::Duration::from_secs(3));
+                        crate::mac::request_within(crate::mac::SOCKET, "GET", &path, None, limit)
+                            .await
+                    } else {
+                        Ok(Value::Null)
+                    };
+                    if let Err(error) = read
+                        && error.to_string() == super::children::MOVED_OUT
+                    {
+                        eprintln!("{}: {error}.", ids[0]);
+                        return Ok(1);
+                    }
                     eprintln!(
                         "{} is not a child thread of this thread. See room-cli thread list.",
                         ids[0]
@@ -1917,8 +1945,29 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain};
+    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain, session_id};
     use serde_json::json;
+
+    // #2271: `thread show`'s moved-child check puts the ID in a request path, so only a whole session ID gets there.
+    #[test]
+    fn only_a_whole_session_id_reaches_the_moved_child_check() {
+        assert!(session_id("cr_child_ab12-CD_3"));
+        assert!(session_id(&format!("cr_{}", "a".repeat(80))));
+        for bad in [
+            "",
+            "cr_",
+            "kid",
+            "thr_abc",
+            "cr_a b",
+            "cr_a/../stop",
+            "cr_a?x=1",
+            "cr_a\r\nX: y",
+            "cr_é",
+        ] {
+            assert!(!session_id(bad), "{bad:?}");
+        }
+        assert!(!session_id(&format!("cr_{}", "a".repeat(81))));
+    }
 
     // #2242: the Mac commands it prints must run as printed: the caller's verb, no shell pipe, and --write.
     #[test]

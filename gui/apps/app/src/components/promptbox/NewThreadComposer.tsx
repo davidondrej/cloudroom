@@ -1786,6 +1786,8 @@ export function NewThreadComposer({
     : localSubmitDisabledReason;
   const seededMachine =
     seed?.executionTarget !== undefined || seed?.environment !== undefined;
+  // A Local pick counts only when Cloud could have taken the thread.
+  const pickedLocal = pickedEnvironment?.target === "local" && !cloudLocked && cloudCanRunHarness(selectedProviderId);
   const submitDraft = useCallback(
     async (
       blockedReason: string | null,
@@ -1854,7 +1856,7 @@ export function NewThreadComposer({
           clearCloudroomRequestId(promptDraft.storageKey);
         clearReuseEnvironment();
         if (selectionScope === "new-thread") {
-          saveNewThreadMachine(projectId, seededMachine, storedExecutionTarget, executionTarget);
+          saveNewThreadMachine(projectId, seededMachine, storedExecutionTarget, executionTarget, pickedLocal);
         }
         if (pickRevisionRef.current === submittedPickRevision) {
           setUserPickedEnvironment(null);
@@ -1907,6 +1909,7 @@ export function NewThreadComposer({
       vpsConnected,
       wantedCloudTarget,
       seededMachine,
+      pickedLocal,
       storedExecutionTarget,
       pickedEnvironment,
       effectiveEnvironmentValue,

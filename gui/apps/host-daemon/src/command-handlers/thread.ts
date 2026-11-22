@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   AgentRuntimeTurnBusyError,
   type AgentRuntimeBridgeLaunch,
@@ -14,6 +16,7 @@ import type { RuntimeEntry } from "../runtime-manager.js";
 import {
   CommandDispatchError,
   ExpectedCommandDispatchError,
+  getErrorCode,
   resolveRuntimeBridgeLaunch,
   type CommandDispatchOptions,
   type CommandOf,
@@ -179,10 +182,16 @@ async function requireSupportedProviderCliForThreadStart({
   const currentVersion = status.currentVersion
     ? ` ${status.currentVersion}`
     : "";
+  // Name the file: a Mac can hold several copies, and "update it" must reach this one.
+  const home = homedir() + path.sep;
+  const file = status.executablePath?.startsWith(home)
+    ? `~${path.sep}${status.executablePath.slice(home.length)}`
+    : status.executablePath;
+  const location = file ? ` at ${file}` : "";
   const requiredVersion = status.minimumSupportedVersion ?? "a newer version";
   throw new ExpectedCommandDispatchError(
     "provider_cli_unsupported_version",
-    `Provider "${command.providerId}"${currentVersion} is too old for this operation. Update it to ${requiredVersion} or newer.`,
+    `Provider "${command.providerId}"${currentVersion}${location} is too old for this operation. Update it to ${requiredVersion} or newer.`,
   );
 }
 
@@ -272,6 +281,57 @@ async function resumeThreadRuntimeIfMissing(
       throw error;
     }
     await resume();
+  }
+}
+
+// Cursor's CLI never retries its servers: cut off, it hangs (`rpc_timeout`) or gives up (`agent_unreachable`).
+const CURSOR_OUTAGE_CODES = new Set(["rpc_timeout", "agent_unreachable"]);
+const CURSOR_RESUME_RETRY_FOR_MS = 3 * 60_000;
+const CURSOR_RESUME_RETRY_DELAY_MS = 5_000;
+const STOP_CHECK_MS = 500;
+
+/**
+ * Reopens a thread for a message, waiting out a Cursor outage. A failed resume
+ * ends that Cursor and the message is sent only after one succeeds, so a retry
+ * can't send it twice.
+ */
+async function resumeBeforeTurn(
+  args: ResumeThreadRuntimeIfMissingArgs,
+): Promise<void> {
+  const { command, options } = args;
+  const { threadId } = command;
+  const retryUntil = Date.now() + CURSOR_RESUME_RETRY_FOR_MS;
+  const stopped = () => options.isThreadStopPending?.(threadId) === true;
+  for (;;) {
+    try {
+      return await resumeThreadRuntimeIfMissing(args);
+    } catch (error) {
+      if (command.resumeContext.providerId !== "acp-cursor") throw error;
+      const code = getErrorCode(error);
+      if (!stopped()) {
+        if (!CURSOR_OUTAGE_CODES.has(code)) throw error;
+        if (Date.now() >= retryUntil) {
+          throw new CommandDispatchError(
+            code,
+            "Cursor didn't answer after 3 minutes of retries. Your message was not sent; send it again to retry.",
+            { cause: error },
+          );
+        }
+        options.logger.warn(
+          { err: error, threadId },
+          "Cursor didn't answer; reopening the thread",
+        );
+        const nextTryAt = Date.now() + CURSOR_RESUME_RETRY_DELAY_MS;
+        while (!stopped() && Date.now() < nextTryAt) await delay(STOP_CHECK_MS);
+      }
+      if (stopped()) {
+        throw new CommandDispatchError(
+          "stopped_before_send",
+          "Stopped before Cursor reconnected. Your message was not sent.",
+          { cause: error },
+        );
+      }
+    }
   }
 }
 
@@ -424,7 +484,11 @@ export async function ensureThreadRuntime(
       `Thread ${command.threadId} still runs a turn in environment ${busyEnvironmentId}`,
     );
   }
-  await resumeThreadRuntimeIfMissing({ command, entry, options });
+  if (command.type === "turn.submit") {
+    await resumeBeforeTurn({ command, entry, options });
+  } else {
+    await resumeThreadRuntimeIfMissing({ command, entry, options });
+  }
   return entry;
 }
 

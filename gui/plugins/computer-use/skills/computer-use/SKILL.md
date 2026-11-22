@@ -83,12 +83,19 @@ room-cli computer-use setup [--screen-recording]   # shows macOS permission prom
 
 ## The user's browser
 
-- The user can switch tabs at any time.
-- The address bar always drives the active tab.
-- Work only in tabs you opened. Open one with `hotkey` cmd+t.
-- Right before each Return, read the address bar again.
-- If it shows a page you didn't open, stop. Never type over it.
-- One URL per command. Never chain navigations.
+- Prefer `browser-harness` for Chromium browsers.
+- It works in a background tab and never touches the user's tabs.
+- With computer use, the user can switch tabs at any time.
+- Every click, key, and address bar change hits the active tab.
+- Work only in tabs you opened, unless the user points you to one.
+- Yours means a blank tab you opened, or a page you loaded in it.
+- Open a tab with `hotkey` `cmd+t` (`ctrl+t` on Linux), with `pid` and `window_id`.
+- Before every action, read the active tab's title and address bar.
+- Put that check and the action in the same command.
+- Abort the command if the tab isn't yours.
+- After `set_value`, check the tab title again before pressing Return.
+- If the tab isn't yours, stop and ask the user.
+- Never press `cmd+t` again or switch tabs to recover.
 
 ## Asking another agent to do it
 

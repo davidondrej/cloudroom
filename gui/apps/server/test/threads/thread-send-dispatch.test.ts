@@ -866,6 +866,39 @@ describe("startup queue waits", () => {
     });
   });
 
+  it("keeps an explicitly sent needs-attention notice out of the stale drop (#2452)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedProviderThreadFixture({
+        harness,
+        status: "active",
+        value: 2452,
+      });
+      const notice = {
+        input: textInput("child needs help"),
+        parentThreadId: thread.id,
+        systemMessageKind: "child-needs-attention" as const,
+        systemMessageSubject: null,
+      };
+      await queueParentSystemMessage(harness.deps, {
+        ...notice,
+        interactionId: "pint_2452",
+      });
+      const parked = listQueuedThreadMessages(harness.db, thread.id)[0]!;
+      expect(JSON.parse(parked.systemNotice!).interactionId).toBe("pint_2452");
+
+      await sendQueuedMessageNow(harness.deps, {
+        mode: "auto",
+        queuedMessageId: parked.id,
+        threadId: thread.id,
+      });
+      const requeued = listQueuedThreadMessages(harness.db, thread.id);
+      expect(requeued).toHaveLength(1);
+      expect(JSON.parse(requeued[0]!.systemNotice!)).not.toHaveProperty(
+        "interactionId",
+      );
+    });
+  });
+
   it("parks a second notice while the first starts a fresh session (#1584)", async () => {
     await withTestHarness(async (harness) => {
       const { thread } = seedProviderThreadFixture({ harness, value: 1584 });

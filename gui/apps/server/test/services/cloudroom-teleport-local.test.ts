@@ -2,13 +2,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import { tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
 import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
-import { allowance, applyChanges, cloudChanges, codexLineage, conversationParser, download, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
+import { allowance, applyChanges, cloudChanges, codexLineage, conversationParser, download, moveAntigravityConversation, moveAntigravityWorkspace, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
   const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-local-"));
@@ -118,7 +120,22 @@ it.skipIf(process.platform === "win32")("A child's blobless clone lands its pare
   }
 });
 
-it.skipIf(process.platform !== "linux")("Teleport packs fail on an unreadable file and skip only dangling links on Windows", async () => {
+it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));
+  try {
+    await writeFile(join(root, "a.md"), "agents\n");
+    await writeFile(join(root, "secret.txt"), "x");
+    await chmod(join(root, "secret.txt"), 0o000);
+    const pack = (names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), false)}`], { cwd: root, encoding: "utf8" });
+    expect(packChangesCommand("~/x.tgz", false)).toBe("tar -czf ~/x.tgz --null -T -");
+    expect(pack(["a.md", "secret.txt"]).status).not.toBe(0);
+  } finally {
+    await chmod(join(root, "secret.txt"), 0o600).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.skipIf(process.platform !== "linux")("Windows Teleport packs dereference links, skip dangling links, and fail on unreadable files", async () => {
   const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));
   try {
     await writeFile(join(root, "a.md"), "agents\n");
@@ -126,14 +143,12 @@ it.skipIf(process.platform !== "linux")("Teleport packs fail on an unreadable fi
     await symlink("missing.md", join(root, "dangling.md"));
     await writeFile(join(root, "secret.txt"), "x");
     await chmod(join(root, "secret.txt"), 0o000);
-    const pack = (windows: boolean, names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), windows)}`], { cwd: root, encoding: "utf8" });
-    expect(packChangesCommand("~/x.tgz", false)).toBe("tar -czf ~/x.tgz --null -T -");
-    expect(pack(true, ["a.md", "link.md", "dangling.md"]).status).toBe(0);
+    const pack = (names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), true)}`], { cwd: root, encoding: "utf8" });
+    expect(pack(["a.md", "link.md", "dangling.md"]).status).toBe(0);
     const listed = spawnSync("tar", ["-tvzf", join(root, "out.tgz")], { encoding: "utf8" }).stdout;
     expect(listed).toMatch(/^-.* link\.md$/m);
     expect(listed).not.toContain("dangling.md");
-    expect(pack(true, ["a.md", "secret.txt"]).status).not.toBe(0);
-    expect(pack(false, ["a.md", "secret.txt"]).status).not.toBe(0);
+    expect(pack(["a.md", "secret.txt"]).status).not.toBe(0);
   } finally {
     await chmod(join(root, "secret.txt"), 0o600).catch(() => {});
     await rm(root, { recursive: true, force: true });
@@ -307,6 +322,53 @@ it.skipIf(process.platform === "win32")("Teleport to Local ignores a cloud .clou
     expect(readdirSync(outside)).toEqual([]);
     expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("mac");
     expect(readFileSync(join(root, ".cloudroom", "teleport", "run", "a.txt"), "utf8")).toBe("cloud");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("Antigravity's saved workspace moves to the Local folder, so its commands run there (#2453)", () => {
+  // trajectory_metadata_blob of a conversation agy 1.5.12 started in /tmp/agyrepro/code.
+  const cloud = Buffer.from("0a1d0a1966696c653a2f2f2f746d702f616779726570726f2f636f64651a00120c08f1f68cd8061089aebd87021a2437343332333835392d343136312d346462642d626235332d313836393735363933656530322436633133633163352d313363642d343635662d386165362d3662626162623166616163363a1966696c653a2f2f2f746d702f616779726570726f2f636f646592011364656661756c742d636c692d70726f6a656374", "hex");
+  const id = "6c13c1c5-13cd-465f-8ae6-6bbabb1faac6";
+  const to = process.platform === "win32" ? "C:\\Users\\me\\my project" : "/Users/me/my project";
+  const local = moveAntigravityWorkspace(cloud, "/tmp/agyrepro/code", to);
+  expect(local.toString("latin1").split(pathToFileURL(to).href).length).toBe(3);
+  expect(local.toString("latin1")).not.toContain("agyrepro");
+  expect(local.toString("latin1")).toContain("$" + id + ":"); // the rest is untouched
+  expect(local.toString("latin1").endsWith("\x92\x01\x13default-cli-project")).toBe(true);
+  expect(moveAntigravityWorkspace(cloud, "/tmp/agyrepro/co", "/elsewhere")).toEqual(cloud);
+  // A 10-byte varint (a negative int64) is valid protobuf and is kept as it came.
+  const negative = Buffer.from([0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]);
+  expect(moveAntigravityWorkspace(Buffer.concat([negative, cloud]), "/tmp/agyrepro/code", to)).toEqual(Buffer.concat([negative, local]));
+
+  // Only the exact agy table without triggers or foreign keys, holding a blob up to 1 MiB, is written. Else it stays as it came.
+  const temp = mkdtempSync(join(tmpdir(), "cloudroom-agy-"));
+  try {
+    const install = (name: string, steps: string, data: Buffer | string = cloud, trigger = "") => {
+      const file = join(temp, `${name}.db`), db = new DatabaseSync(file);
+      db.exec('CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`))');
+      db.exec(`CREATE TABLE \`trajectory_meta\` (\`trajectory_id\` text,\`cascade_id\` text,PRIMARY KEY (\`trajectory_id\`)); CREATE TABLE steps (${steps}); ${trigger}`);
+      db.prepare("INSERT INTO trajectory_meta VALUES ('t', ?)").run(id);
+      db.prepare("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)").run(data);
+      db.prepare("INSERT INTO steps (idx) VALUES (0)").run();
+      const read = () => db.prepare("SELECT hex(data) data, (SELECT count(*) FROM steps) steps FROM trajectory_metadata_blob").get();
+      const before = read();
+      db.close();
+      moveAntigravityConversation(file, id, "/tmp/agyrepro/code", to);
+      const check = new DatabaseSync(file);
+      try { return { before, after: check.prepare("SELECT hex(data) data, (SELECT count(*) FROM steps) steps FROM trajectory_metadata_blob").get() }; }
+      finally { check.close(); }
+    };
+    expect(install("agy", "idx integer").after).toEqual({ data: local.toString("hex").toUpperCase(), steps: 1 });
+    const kept = [
+      install("trigger", "idx integer", cloud, "CREATE TRIGGER t AFTER UPDATE ON trajectory_metadata_blob BEGIN INSERT INTO steps VALUES (1); END;"),
+      install("index", "idx integer", cloud, "CREATE INDEX big ON trajectory_metadata_blob(zeroblob(1000)) WHERE data != x'00';"),
+      install("foreign-key", "idx integer, main text REFERENCES trajectory_metadata_blob(id) ON UPDATE CASCADE"),
+      install("big-blob", "idx integer", Buffer.concat([cloud, Buffer.from([0x9a, 0x06, 0x80, 0x80, 0x40]), Buffer.alloc(1 << 20)])),
+      install("text", "idx integer", "file:///tmp/agyrepro/code\0" + "x".repeat(2 << 20)),
+    ];
+    for (const { before, after } of kept) expect(after).toEqual(before);
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }

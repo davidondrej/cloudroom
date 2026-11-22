@@ -4,7 +4,8 @@ import { backup, DatabaseSync } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { chmod, cp, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, normalize, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import {
@@ -21,13 +22,13 @@ import {
   threadPluginMetadata,
   threads,
 } from "@cloudroom/db";
-import { getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { chatFileCopySegments, chatImagePaths, getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
 import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
-import { resolvePrimaryHostId } from "../hosts/primary-host.js";
+import { readPrimaryHostIdFromDataDir, resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { provisionUnmanagedEnvironmentForPath } from "../threads/thread-environment-directory.js";
@@ -115,11 +116,18 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   const saved = binding(deps.db, threadId);
   const harness = thread?.providerId as Harness | undefined;
   const phase = teleportProgress(deps.db, threadId)?.phase;
-  if (!thread || thread.executionTarget !== "cloud" || thread.parentThreadId || thread.archivedAt || thread.deletedAt
-    || !saved?.sessionId || !harness || !(harness in VM_SESSIONS) || (phase && !["complete", "cancelled", "error"].includes(phase)))
+  // Name the real blocker instead of the generic refusal (#1974). An unfinished move comes first: the thread may be about
+  // to change place, so say nothing about where it is. "This computer" is only its own saved host id, never a fallback guess.
+  if (phase && !["complete", "cancelled", "error"].includes(phase))
+    throw new ApiError(409, "teleport_unavailable", `A Teleport for this thread is still in progress (${phase}). Try again once it finishes.`);
+  if (thread && thread.executionTarget !== "cloud") {
+    const hostId = thread.environmentId ? getEnvironment(deps.db, thread.environmentId)?.hostId : undefined;
+    throw new ApiError(409, "teleport_unavailable", hostId && hostId === readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir }) ? `This thread is already on this ${computer}.` : "This thread is not in Cloud.");
+  }
+  if (!thread || thread.parentThreadId || thread.archivedAt || thread.deletedAt || !harness || !(harness in VM_SESSIONS))
     throw new ApiError(409, "teleport_unavailable", "Teleport to Local needs a Codex, Pi, Claude Code, opencode, Antigravity, or Cursor cloud parent thread.");
   const nativeId = getLastProviderThreadId(deps, threadId);
-  if (!nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
+  if (!saved?.sessionId || !nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(409, "teleport_unavailable", "This cloud thread has no saved conversation yet.");
   const environment = await localEnvironment(deps, thread);
   const client = await cloudroom(deps).teleportClient(threadId, "teleport_local");
@@ -154,7 +162,7 @@ async function run(deps: AppDeps, threadId: string, step: (value: TeleportLocalS
   if (harness === "acp-antigravity") {
     if (deps.db.select({id: threads.id}).from(threads).where(and(eq(threads.providerId, harness), eq(threads.executionTarget, "local"), isNull(threads.archivedAt), isNull(threads.deletedAt))).all()
       .some(row => row.id !== threadId && getLastProviderThreadId(deps, row.id) === nativeId)) throw new Error("This Antigravity conversation is already open in another Local thread.");
-    await importAntigravity(nativeId, session);
+    await importAntigravity(nativeId, session, cloud.path, environment.path);
   }
   else if (harness === "acp-opencode") await importOpenCode(deps, threadId, environment, nativeId, session);
   else await installNative(harness, nativeId, vmPath, session, environment.path);
@@ -412,24 +420,19 @@ type ImageDeps = Pick<AppDeps, "db" | "hub" | "config" | "providerRegistry">;
 async function savedCloudFile(deps: ImageDeps, threadId: string, path: string): Promise<string> {
   const hostId = resolvePrimaryHostId(deps);
   if (!hostId) throw new ApiError(409, "host_unavailable", "This computer's local host is not ready.");
-  return join(await requireThreadStoragePath(deps, { hostId, threadId }), "Cloud files", normalize(path));
+  const copy = chatFileCopySegments(path);
+  if (!copy) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
+  return join(await requireThreadStoragePath(deps, { hostId, threadId }), ...copy);
 }
-
-const CHAT_IMAGE = /!\[[^\]]*\]\(\s*(?:<([^>]+)>|([^)\s]+))/g;
-const CODE = /```[\s\S]*?```|`[^`\n]*`/g;
 
 /** When a turn ends, its sandbox is still awake: saves the images its last message shows, so they still show after the
  *  sandbox is rebuilt from a copy without /tmp (a failover's move home, cold storage). Never wakes the sandbox. */
 export async function saveCloudImages(deps: ImageDeps, threadId: string, text: string): Promise<void> {
-  const paths = new Set<string>();
-  for (const [, wrapped, bare] of text.replace(CODE, "").matchAll(CHAT_IMAGE)) {
-    const path = (() => { try { return decodeURI(wrapped ?? bare ?? ""); } catch { return ""; } })();
-    if (path.startsWith("/") && /\.(png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(path)) paths.add(path);
-  }
-  if (!paths.size) return;
+  const paths = chatImagePaths(text).filter((path) => path.startsWith("/"));
+  if (!paths.length) return;
   const client = await cloudroom(deps).threadClient(threadId, false).catch(() => null);
   if (!client) return;
-  for (const path of [...paths].slice(0, 10)) {
+  for (const path of paths) {
     const data = await download(client, path, PREVIEW_MB).catch(() => null);
     if (!data) continue;
     const saved = await savedCloudFile(deps, threadId, path);
@@ -772,8 +775,81 @@ async function installNative(harness: Harness, nativeId: string, vmPath: string,
   await rename(temporary, target);
 }
 
+/** agy runs commands in the first workspace saved in its conversation: `trajectory_metadata_blob`, a protobuf whose
+ *  field 7 lists workspace URIs and field 1 holds workspaces (folder URI 1, git root URI 2). Moves `from` to `to` there. */
+export function moveAntigravityWorkspace(blob: Uint8Array, from: string, to: string): Buffer {
+  const move = (value: Buffer) => {
+    if (!value.toString().startsWith("file://")) return value;
+    const path = decodeURIComponent(new URL(value.toString()).pathname), root = from.replace(/\/+$/, "");
+    if (path !== root && !path.startsWith(root + "/")) return value;
+    return Buffer.from(pathToFileURL(join(to, path.slice(root.length))).href);
+  };
+  // Unchanged bytes are copied in ranges, so a large blob costs no more than its own size.
+  const rewrite = (data: Buffer, map: (field: number, value: Buffer) => Buffer) => {
+    const parts: Buffer[] = [];
+    let at = 0, copied = 0;
+    const varint = () => {
+      let value = 0;
+      for (let scale = 1; ; scale *= 128) {
+        if (at >= data.length || scale > 2 ** 63) throw new Error("Invalid protobuf");
+        const byte = data[at++]!;
+        value += (byte & 127) * scale;
+        if (byte < 128) return value;
+      }
+    };
+    const encode = (value: number) => {
+      const bytes: number[] = [];
+      for (; value > 127; value = Math.floor(value / 128)) bytes.push((value % 128) | 128);
+      return Buffer.from([...bytes, value]);
+    };
+    while (at < data.length) {
+      const start = at, key = varint(), type = key % 8;
+      if (type === 0) varint();
+      else if (type === 1 || type === 5) at += type === 1 ? 8 : 4;
+      else if (type !== 2) throw new Error("Invalid protobuf");
+      const length = type === 2 ? varint() : 0, value = data.subarray(at, at += length);
+      if (at > data.length) throw new Error("Invalid protobuf");
+      const mapped = type === 2 ? map(Math.floor(key / 8), value) : value;
+      if (mapped === value) continue;
+      parts.push(data.subarray(copied, start), encode(key), encode(mapped.length), mapped);
+      copied = at;
+    }
+    return parts.length ? Buffer.concat([...parts, data.subarray(copied)]) : data;
+  };
+  return rewrite(Buffer.from(blob), (field, value) =>
+    field === 7 ? move(value) : field === 1 ? rewrite(value, (inner, uri) => (inner === 1 || inner === 2 ? move(uri) : uri)) : value);
+}
+
+/** Writes the moved workspace into the staged copy only when it is exactly the layout agy 1.5 makes: anything else, or an
+ *  error, leaves the copy as it came. No triggers or foreign keys, so the update changes this one row and nothing else. */
+export function moveAntigravityConversation(file: string, id: string, from: string, to: string) {
+  const db = new DatabaseSync(file);
+  try {
+    db.exec("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=OFF");
+    const table = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='trajectory_metadata_blob'").get();
+    if (table?.sql !== 'CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`))'
+      || db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' LIMIT 1").get()
+      || db.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='trajectory_metadata_blob' COLLATE NOCASE AND sql IS NOT NULL LIMIT 1").get()
+      || db.prepare("SELECT 1 FROM sqlite_master m, pragma_foreign_key_list(m.name) WHERE m.type='table' LIMIT 1").get()
+      || !db.prepare("SELECT 1 FROM trajectory_meta WHERE cascade_id=? LIMIT 1").get(id)) return;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = db.prepare("SELECT data FROM trajectory_metadata_blob WHERE id='main' AND typeof(data)='blob' AND length(data) <= 1048576").get();
+      const moved = row?.data instanceof Uint8Array ? moveAntigravityWorkspace(row.data, from, to) : null;
+      if (moved && !moved.equals(row!.data as Uint8Array))
+        db.prepare("UPDATE trajectory_metadata_blob SET data=? WHERE id='main'").run(moved);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    db.close();
+  }
+}
+
 /** SQLite's backup includes the WAL. Preserve an existing Local copy and refuse to replace a diverged conversation. */
-async function importAntigravity(id: string, bytes: Buffer) {
+async function importAntigravity(id: string, bytes: Buffer, from: string, to: string) {
   if (!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(id))
     throw new Error("Invalid Antigravity conversation ID");
   const folder = join(homedir(), ".gemini", "antigravity-cli", "conversations");
@@ -782,6 +858,9 @@ async function importAntigravity(id: string, bytes: Buffer) {
     staged = join(folder, "." + randomUUID() + ".db");
   await writeFile(staged, bytes, { mode: 0o600, flag: "wx" });
   try {
+    try {
+      moveAntigravityConversation(staged, id, from, to);
+    } catch {} // Commands then still run in the Cloud folder (#2453), as before.
     const incoming = new DatabaseSync(staged, { readOnly: true });
     try {
       incoming.exec("PRAGMA trusted_schema=OFF");
@@ -815,7 +894,7 @@ async function importAntigravity(id: string, bytes: Buffer) {
       incoming.close();
     }
   } finally {
-    await rm(staged, { force: true });
+    await Promise.all(["", "-wal", "-shm"].map((suffix) => rm(staged + suffix, { force: true })));
   }
 }
 

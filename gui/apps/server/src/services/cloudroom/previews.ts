@@ -2,9 +2,11 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { CLOUDROOM_CORE_PATH, CLOUDROOM_PYTHON_PATH, CLOUDROOM_PREVIEW_SCRIPT_PATH } from "../../cloudroom-workspace-asset.js";
@@ -99,8 +101,20 @@ export async function setupPreviews(deps: Deps): Promise<void> {
     // The helper's own reason, such as launchctl's, so Settings and the API say why (#109).
     const { stderr, killed, code } = error as { stderr?: string; killed?: boolean; code?: unknown };
     const reason = killed ? "setup took over 30 seconds" : String(stderr ?? "").trim().split("\n").at(-1)?.slice(0, 300).replace(/\.$/, "") || String(code ?? "unknown error");
-    throw new ApiError(503, "cloudroom_preview_setup", `Previews and Mac access could not start: ${reason}.`);
+    const repair = process.platform === "win32" ? windowsPreviewRepair(reason, folder(deps), `${process.env.USERDOMAIN ? `${process.env.USERDOMAIN}\\` : ""}${userInfo().username}`) : null;
+    throw new ApiError(503, "cloudroom_preview_setup", `Previews and ${COMPUTER_TITLE} access could not start: ${repair ?? `${reason}.`}`);
   }
+}
+
+/** Windows: an elevated Cloudroom or installer left files in the helper's folder that only Administrators can open, so the
+ *  normal app gets "Permission denied" every launch (#2459). The repair needs an elevated shell once. */
+export function windowsPreviewRepair(reason: string, dir: string, user: string): string | null {
+  if (!/\[(?:Errno 13|WinError 5)\].*cloudroom-preview/.test(reason)) return null;
+  // Single-quoted, so PowerShell expands nothing in a path or name ($, backticks). It reads curly single quotes as quotes too.
+  // One grant on the folder itself: Windows passes it down to the files there. No /T, which walks into a junction inside
+  // the folder even with /L; /L changes a link itself, never what it points to.
+  const literal = (text: string) => `'${text.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
+  return `Windows won't let Cloudroom open its preview files, probably because Cloudroom or its installer ran as administrator. Open PowerShell as administrator, run icacls ${literal(dir)} /grant ${literal(`${user}:(OI)(CI)F`)} /C /L and restart Cloudroom.`;
 }
 
 /** The helper rewrites status.json at least every 30 s while it runs. */

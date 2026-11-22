@@ -40,6 +40,7 @@ import { ThreadProviderContext } from "@/components/thread/thread-provider-conte
 import {
   cloudGitEnvironmentId,
   defaultAppSettings,
+  isBackgroundCommandTaskType,
   isStopHeldReport,
   resolveEnvironmentMergeBaseBranch,
   type PromptInput,
@@ -229,6 +230,7 @@ import { getFileExtension, isChatCardPluginInteraction } from "@/lib/plugin-slot
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
 import { CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
 import { PendingClaudeSignInRow } from "@/components/thread/timeline/AuthFailureRow";
+import { BackgroundCommandBubbles } from "@/components/thread/timeline/BackgroundCommandBubble";
 import { findLatestCloudLoginRowId } from "@/components/thread/timeline/CloudLoginRow";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -1187,6 +1189,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     (thread.executionTarget === "cloud"
       ? queuedMessagesForEditEligibility.length === 0
       : queuedMessagesForEditEligibility.every(isStopHeldReport));
+  const waitingCommands = activeBackgroundCommands.filter((row) =>
+    isBackgroundCommandTaskType(row.taskType),
+  );
   const sentMessageEditWaitsForBackgroundWork =
     activeWorkflows.length > 0 ||
     (thread?.activeBackgroundAgentCount ?? 0) > 0 ||
@@ -3230,6 +3235,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                 <ThreadOriginMarker origin={threadOrigin} />
               ) : undefined,
               trailingContent:
+                waitingCommands.length > 0 ||
                 chatCardInteraction ||
                 cloudThreadState.data?.usageLimit ||
                 (thread.providerId === "claude-code" &&
@@ -3240,6 +3246,8 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                       !providerAuthFailed &&
                       !findLatestCloudLoginRowId(displayedTimelineRows)))) ? (
                   <>
+                    {/* Running background commands: the agent continues by itself when each ends. */}
+                    <BackgroundCommandBubbles rows={waitingCommands} />
                     {/* Out of Cloud Credits: a row where the work stopped (ADR 20261118-214337). */}
                     {cloudThreadState.data?.usageLimit && (
                       <CloudUsageLimitNotice

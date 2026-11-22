@@ -29,8 +29,8 @@ import {
   extractThreadTimelineActivePlanTurn,
   type ThreadEventWithMeta,
 } from "../src/index.js";
-import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/accepted-client-request-context.js";
-import { parseOperationMessage } from "../src/parse-operation-message.js";
+import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/events.js";
+import { parseOperationEvent } from "../src/messages.js";
 import {
   createTimelineEventFactory,
   fromRows,
@@ -2045,9 +2045,11 @@ describe("buildThreadTimelineFromEvents", () => {
         seq: 1,
       });
 
-      expect(parseOperationMessage(event.event, event.meta)).toMatchObject({
+      expect(
+        parseOperationEvent(event.event, event.meta, { threadName: "" }),
+      ).toMatchObject({
         kind: "operation",
-        title: message,
+        row: { title: message },
       });
     },
   );
@@ -2065,9 +2067,11 @@ describe("buildThreadTimelineFromEvents", () => {
       seq: 1,
     });
 
-    expect(parseOperationMessage(event.event, event.meta)).toMatchObject({
+    expect(
+      parseOperationEvent(event.event, event.meta, { threadName: "" }),
+    ).toMatchObject({
       kind: "operation",
-      title: "Ownership change completed",
+      row: { title: "Ownership change completed" },
     });
   });
 

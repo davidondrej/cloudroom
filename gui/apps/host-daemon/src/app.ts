@@ -44,6 +44,7 @@ import {
   type CreateReconnectingWebSocket,
 } from "./server-connection.js";
 import { runtimeErrorLogFields, summarizeError } from "./error-utils.js";
+import { saveChatImages } from "./chat-images.js";
 import { ensureThreadStorageRoot } from "./thread-storage-root.js";
 import type { AgentRuntime, AgentRuntimeOptions } from "@cloudroom/agent-runtime";
 import { createProtocolSelfUpdater } from "./protocol-self-update.js";
@@ -511,6 +512,21 @@ export async function createHostDaemonApp(
     applyMachineEnvironment: (shell) =>
       machineEnvironment.shellEnvironment(shell),
     onEvent: ({ environmentId, event }) => {
+      if (
+        event.type === "item/completed" &&
+        event.item.type === "agentMessage"
+      ) {
+        void saveChatImages({
+          text: event.item.text,
+          threadId: event.threadId,
+          threadStorageRootPath,
+        }).catch((error: unknown) => {
+          options.logger.warn(
+            { threadId: event.threadId, ...runtimeErrorLogFields(error) },
+            "Chat images could not be saved",
+          );
+        });
+      }
       try {
         eventSink.emit({
           threadId: event.threadId,

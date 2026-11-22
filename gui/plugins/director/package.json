@@ -1,0 +1,41 @@
+{
+  "name": "bb-plugin-director",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "One agent that wakes on a timer, reads your stopped threads, and unblocks the obvious ones.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Director",
+    "description": "One agent that wakes on a timer, reads your stopped threads, and unblocks the obvious ones.",
+    "branding": {
+      "icon": "Target"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx"
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "@cloudroom/domain": "workspace:*",
+    "@cloudroom/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

@@ -207,6 +207,8 @@ interface AcpThreadSession {
   /** The live agent lost this session (#889); rebuild it before the next turn. */
   sessionLost: boolean;
   loading: boolean;
+  /** A thread/resume the daemon retries, as no message is sent yet: Stop may end it, and an outage fails it. */
+  retryableResume: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
   stopping: boolean;
@@ -1607,6 +1609,12 @@ function handlePermissionRequest(
     options: parsed.data.options,
     cwd: session.cwd,
     classifyToolCall: session.dialect.classifyToolCall,
+    // Only the agent's own call, bound by its exact ID, before any output.
+    streamedArgsTitle:
+      bound?.event?.toolCallId === toolCall?.toolCallId &&
+      toolCall?.rawOutput === undefined
+        ? session.dialect.streamedArgsTitle
+        : undefined,
   });
   void sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
     providerThreadId: session.providerThreadId,
@@ -1799,6 +1807,8 @@ type AcpSessionStartRequest =
       kind: "resume";
       params: AcpSessionParams;
       resumeProviderThreadId: string;
+      /** A thread/resume, which comes before any message. */
+      beforeTurn?: true;
       /** Restart after a lost session (#889) or closed stream (#890): aborts on Stop; `reloadOnly` never starts fresh. */
       recovery?: { signal: AbortSignal; reloadOnly: boolean };
     }
@@ -1939,6 +1949,10 @@ async function startAgentSession(
     providerStreamClosed: false,
     sessionLost: false,
     loading: false,
+    retryableResume:
+      request.kind === "resume" &&
+      request.beforeTurn === true &&
+      dialect.unreachableError !== undefined,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
     stopping: false,
@@ -2087,6 +2101,16 @@ async function startAgentSession(
         loadedModels = configState?.models;
         sessionId = request.resumeProviderThreadId;
       } catch (error) {
+        if (
+          session.retryableResume &&
+          error instanceof AcpAgentResponseError &&
+          error.message.includes(dialect.unreachableError!)
+        ) {
+          throw Object.assign(
+            new Error(`The agent couldn't reach its servers: ${error.message}`, { cause: error }),
+            { code: "agent_unreachable" },
+          );
+        }
         // Resume failed, so a fresh session starts below; log why so the lost context is traceable.
         console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
         sessionId = undefined;
@@ -3122,6 +3146,7 @@ async function handleRequest(
               kind: "resume",
               params: sessionParams,
               resumeProviderThreadId: request.params.providerThreadId,
+              beforeTurn: true,
             }
           : request.method === "thread/fork"
             ? {
@@ -3319,7 +3344,11 @@ const threadStopRequestedSchema = z.object({
 function handleParsedMessage(parsed: unknown): void {
   const stopRequested = threadStopRequestedSchema.safeParse(parsed);
   if (stopRequested.success) {
-    sessionRecoveries.get(stopRequested.data.params.threadId)?.abort();
+    const { threadId } = stopRequested.data.params;
+    sessionRecoveries.get(threadId)?.abort();
+    const opening = sessionsByRoomThreadId.get(threadId);
+    // Cut off from its servers, Cursor never answers session/load, so Stop ends it.
+    if (opening?.retryableResume && opening.loading) void opening.connection.kill();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);

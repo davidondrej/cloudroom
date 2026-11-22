@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-guard";
-import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, threads, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, listOpenBackgroundTaskItemRowsForThread, threads, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
 import { and, desc, eq } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
 import { CORE_PLAN_LIMIT, LIMIT_RESUME } from "../system/plan-limit-telemetry.js";
-import { LEGACY_CODEX_GOAL_EXTENSION_KIND, THREAD_ACCOUNT_SWITCH_OPERATION, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, serviceTierSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus } from "@cloudroom/domain";
+import { LEGACY_CODEX_GOAL_EXTENSION_KIND, CLOUD_AGENT_GONE_STATES, THREAD_ACCOUNT_SWITCH_OPERATION, cloudBackgroundCommandEnd, cloudBackgroundCommandEvent, cloudDeltaEvent, cloudItemEvent, codexItemEvent, isStreamDeltaEvent, joinStreamDeltas, reasoningLevelSchema, serviceTierSchema, threadEventSchema, threadScope, turnScope, encodeClientTurnRequestIdNumber, type ProvisioningTranscriptEntry, type SystemThreadProvisioningStatus, type ThreadEvent, type ThreadEventTurnStatus, type CloudBackgroundCommand } from "@cloudroom/domain";
 import { z } from "zod";
 import { cloudAccountSwitch } from "./account-switches.js";
 import { CloudroomError, type SessionRecord } from "./client.js";
@@ -469,6 +469,24 @@ export function projectRecords(
       } else if (data.type === "system" && record.native && object.parse(JSON.parse(record.native)).subtype === "compact_boundary" && command(tx, data.request_id)?.command !== "compact") {
         // Claude compacts by itself when the context fills, or for a typed "/compact <focus>". The compact command's receipt records its own.
         emit({ ...base, type: "thread/compacted" });
+      }
+    }
+    // Claude's background commands live outside turns: one often ends between turns and starts the next by itself.
+    const openCommand = (id: string): CloudBackgroundCommand | null => {
+      const row = tx.select({ type: events.type, data: events.data, createdAt: events.createdAt }).from(events)
+        .where(and(eq(events.threadId, threadId), eq(events.itemId, id))).orderBy(desc(events.sequence)).limit(1).get();
+      return row?.type === "item/backgroundTask/progress" ? { description: String(JSON.parse(row.data).item?.description ?? ""), startedAt: row.createdAt } : null;
+    };
+    const commandBase = saved.nativeId ? { threadId, providerThreadId: saved.nativeId, scope: threadScope() } : null;
+    if (harness === "claude-code" && data.type === "system" && record.native && commandBase) {
+      const event = cloudBackgroundCommandEvent(object.parse(JSON.parse(record.native)), commandBase, openCommand, record.timestamp_ms ?? null);
+      if (event) emit(event);
+    }
+    // The agent's process is gone, and its commands with it: Claude never reports how they ended.
+    if (record.kind === "state" && commandBase && CLOUD_AGENT_GONE_STATES.includes(String(data.state))) {
+      for (const open of listOpenBackgroundTaskItemRowsForThread(tx, { threadId })) {
+        const command = openCommand(open.itemId);
+        if (command) emit(cloudBackgroundCommandEnd(commandBase, open.itemId, command, "stopped", record.timestamp_ms ?? null));
       }
     }
     const recordTurn = typeof data.request_id === "string" ? data.request_id : saved.turnId;

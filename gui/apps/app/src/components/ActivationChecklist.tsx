@@ -220,7 +220,7 @@ export function ActivationChecklist() {
     if (!step.prompt) return navigate(getPluginConfigurationRoutePath({ pluginId: "connect" }));
     selectCloudForNewThreads();
     void navigate(getRootComposeRoutePath(), {
-      state: { focusPrompt: true, initialPrompt: step.prompt(data.second === "codex" ? "Codex" : "Claude Code"), replaceInitialPrompt: true },
+      state: { focusPrompt: true, initialPrompt: step.prompt(data.second === "codex" ? "Codex" : "Claude Code"), replaceInitialPrompt: true, executionTarget: "cloud" },
     });
   };
   return (

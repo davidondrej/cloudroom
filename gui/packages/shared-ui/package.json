@@ -291,7 +291,7 @@
     }
   },
   "scripts": {
-    "clean": "rimraf tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs tsconfig.tsbuildinfo",
     "typecheck": "bun check"
   },
   "bb": {

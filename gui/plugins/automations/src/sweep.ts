@@ -45,6 +45,18 @@ const busyThreadSchema = z
 const idleThreadSchema = z
   .object({ status: z.literal("idle"), deletedAt: z.null() })
   .passthrough();
+const liveThreadSchema = z
+  .object({ archivedAt: z.null(), deletedAt: z.null(), dispatchingMessageCount: z.number().optional() })
+  .passthrough();
+const queuedRowsSchema = z.array(
+  z
+    .object({
+      threadId: z.string(),
+      failureReason: z.string().nullish(),
+      payload: z.object({ kind: z.string(), reason: z.string().nullish() }).passthrough(),
+    })
+    .passthrough(),
+);
 
 const hostListSchema = z.array(
   z.object({ status: z.enum(["connected", "disconnected"]) }).passthrough(),
@@ -69,7 +81,16 @@ type ProjectListApi = {
   };
 };
 type SweepApi = AgentRunApi &
-  ProjectListApi & { sdk: { hosts: { list(): Promise<unknown> } } };
+  ProjectListApi & {
+    sdk: {
+      hosts: { list(): Promise<unknown> };
+      threads: {
+        queue?: {
+          list(args: Parameters<BbPluginApi["sdk"]["threads"]["queue"]["list"]>[0]): Promise<unknown>;
+        };
+      };
+    };
+  };
 
 export async function listLiveProjects(room: ProjectListApi) {
   const [visible, hidden] = await Promise.all([
@@ -109,13 +130,14 @@ async function lastThreadHolds(
   db: Db,
   automation: AutomationRow,
   now: number,
+  oneAgent: boolean,
 ): Promise<boolean> {
   const [last] = listAutomationRuns(db, {
     automationId: automation.id,
     limit: 1,
   });
   if (!last?.threadId || now - (last.finishedAt ?? 0) > RECOVERY_WAIT_MS)
-    return false;
+    return oneAgent && (await failedStreakWorksOn(room, db, automation, now));
   const thread = await room.sdk.threads.get({ threadId: last.threadId }).catch(() => null);
   if (
     last.status === "failed" &&
@@ -131,7 +153,49 @@ async function lastThreadHolds(
     ]);
     return true;
   }
-  return busyThreadSchema.safeParse(thread).success;
+  return (
+    busyThreadSchema.safeParse(thread).success ||
+    (oneAgent && (await failedStreakWorksOn(room, db, automation, now)))
+  );
+}
+
+/** A failed run's thread can run the slot's work again on its own: a retry internet-watch or provider-retry queued, or
+ *  one a drain is sending right now. Then the loop's retry waits instead of starting a second thread (#2454). Every
+ *  failed run of the current failure streak counts, not only the last. A queued row whose send failed, or an archived
+ *  or deleted thread, never sends, so it holds nothing; an unreadable thread or queue holds nothing, as before. Loops
+ *  that take turns between agents, and provider-retry's limit retries, are left out: the loop's next run cancels those
+ *  retries and hands off to another agent (fallback.ts), as before. */
+async function failedStreakWorksOn(
+  room: SweepApi,
+  db: Db,
+  automation: AutomationRow,
+  now: number,
+): Promise<boolean> {
+  const runs = listAutomationRuns(db, {
+    automationId: automation.id,
+    limit: Math.max(automation.consecutiveFailures, 1),
+  }).filter(
+    (run) => run.status === "failed" && run.threadId && now - (run.finishedAt ?? 0) <= RECOVERY_WAIT_MS,
+  );
+  if (runs.length === 0) return false;
+  const rows = queuedRowsSchema.safeParse(await room.sdk.threads.queue?.list({}).catch(() => null));
+  const retrying = new Set(
+    (rows.data ?? []).flatMap((row) =>
+      row.payload.kind === "retry" && !row.failureReason && row.payload.reason !== "Rate limited" ? [row.threadId] : [],
+    ),
+  );
+  for (const run of runs) {
+    const thread = await room.sdk.threads.get({ threadId: run.threadId! }).catch(() => null);
+    const live = liveThreadSchema.safeParse(thread);
+    if (
+      live.success &&
+      (busyThreadSchema.safeParse(thread).success ||
+        (live.data.dispatchingMessageCount ?? 0) > 0 ||
+        retrying.has(run.threadId!))
+    )
+      return true;
+  }
+  return false;
 }
 
 async function processDueAutomation(
@@ -173,7 +237,7 @@ async function processDueAutomation(
   if (
     execution.mode === "agent" &&
     args.automation.targetThreadId === null &&
-    (await lastThreadHolds(room, db, args.automation, args.now))
+    (await lastThreadHolds(room, db, args.automation, args.now, (execution.agents?.length ?? 0) <= 1))
   )
     return false;
 

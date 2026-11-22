@@ -708,6 +708,8 @@ export function revokeDesktopToken(account: SandboxAccount): void {
   }).then(response => response.body?.cancel(), () => {});
 }
 
+const AGENT_GRANT_RENEW_MS = 86_400_000, AGENT_GRANT_RETRY_MS = 5_000, AGENT_GRANT_RETRY_MAX_MS = 300_000;
+
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
@@ -1437,6 +1439,37 @@ export class SandboxDirectory {
   /** GPU sessions live on the website (docs/scopes/gpus.md): `room-cli gpu` steps, and the cards and answers of GpuApprovals. */
   async gpu(body: Record<string, unknown>): Promise<unknown> {
     return this.call(body, "gpu");
+  }
+
+  private agentGrant: { key: string; value: unknown; until: number; delay: number; error: unknown } | null = null;
+  /** Cloudroom Agent (docs/scopes/cloudroom-agent.md): a token that can only buy inference, tied to this sign-in. Its
+   *  plugin asks every few seconds, so an account change is seen at once. The website is asked once a day per sign-in,
+   *  and after a failure with growing waits. */
+  async inference(): Promise<unknown> {
+    const account = await this.account();
+    if (!account) {
+      this.agentGrant = null;
+      throw new CloudroomError("Sign in to Cloudroom to use Cloudroom Agent.", 401);
+    }
+    const key = `${account.website} ${account.userId} ${account.token}`, now = Date.now();
+    const saved = this.agentGrant?.key === key ? this.agentGrant : null;
+    if (saved && now < saved.until) {
+      if (saved.value) return saved.value;
+      throw saved.error;
+    }
+    try {
+      const value = await this.call({}, "inference", { account, signal: this.session.signal });
+      this.agentGrant = { key, value, until: now + AGENT_GRANT_RENEW_MS, delay: 0, error: null };
+      return value;
+    } catch (error) {
+      const refused = error instanceof CloudroomError && (error.status === 401 || error.status === 403);
+      const old = saved?.value as { expiresAt?: number } | null | undefined;
+      const value = !refused && old?.expiresAt && old.expiresAt > now ? old : null;
+      const delay = Math.min(saved?.delay ? saved.delay * 2 : AGENT_GRANT_RETRY_MS, AGENT_GRANT_RETRY_MAX_MS);
+      this.agentGrant = { key, value, until: now + delay, delay, error };
+      if (value) return value;
+      throw error;
+    }
   }
 
   private member: { userId: string; value: boolean; at: number } | null = null;

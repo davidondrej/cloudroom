@@ -1,4 +1,8 @@
 import {
+  CLOUD_AGENT_GONE_STATES,
+  cloudBackgroundCommandEnd,
+  cloudBackgroundCommandEvent,
+  type CloudBackgroundCommand,
   cloudDeltaEvent,
   cloudItemEvent,
   codexItemEvent,
@@ -96,6 +100,8 @@ export class CloudThreadEvents {
   readonly promptLog: { requestId: string; text: string }[] = [];
   private readonly prompts = new Map<string, Data>();
   private readonly started = new Set<string>();
+  // Background commands that started and have not ended, by item ID.
+  private readonly commands = new Map<string, CloudBackgroundCommand>();
   private turnId: string | null = null;
   private piReply: { id: string; turnId: string; text: string } | null = null;
 
@@ -221,6 +227,11 @@ export class CloudThreadEvents {
     }
     if (record.kind === "state") {
       this.state = text(data.state) || this.state;
+      // The agent's process is gone, and its commands with it: Claude never reports how they ended.
+      if (CLOUD_AGENT_GONE_STATES.includes(this.state)) {
+        for (const [id, command] of this.commands) out.push(cloudBackgroundCommandEnd(this.commandBase(), id, command, "stopped", record.timestamp_ms));
+        this.commands.clear();
+      }
       const requestId = text(data.request_id);
       if (this.state === "starting_turn" && requestId) {
         this.turnId = requestId;
@@ -270,6 +281,16 @@ export class CloudThreadEvents {
     const native = object(record.native);
     if (typeof native.method === "string")
       return this.codexFrame(native.method, object(native.params));
+    if (data.type === "system") {
+      const task = cloudBackgroundCommandEvent(native, this.commandBase(), (id) => this.commands.get(id) ?? null, record.timestamp_ms);
+      if (task) {
+        const item = object(task.item);
+        if (task.type === "item/backgroundTask/progress") this.commands.set(text(item.id), { description: text(item.description), startedAt: record.timestamp_ms });
+        else this.commands.delete(text(item.id));
+        out.push(task);
+      }
+      return out;
+    }
     const turnId = text(data.request_id) || this.turnId;
     if (!turnId || !this.started.has(turnId) || !(piText || data.item_id))
       return out;
@@ -297,6 +318,10 @@ export class CloudThreadEvents {
       cloudItemEvent(record.kind, data, base, id);
     if (event) out.push(event);
     return out;
+  }
+
+  private commandBase() {
+    return { threadId: this.threadId, providerThreadId: PROVIDER_THREAD, scope: threadScope() };
   }
 
   private codexFrame(method: string, params: Data): unknown[] {
@@ -330,11 +355,11 @@ export class CloudThreadEvents {
 
 export type { CompletedTurnDisplay };
 
-export function cloudTimelineRows(
+export function cloudTimeline(
   feed: CloudThreadEvents,
   threadName: string,
   completedTurnDisplay: CompletedTurnDisplay,
-): TimelineRow[] {
+) {
   return buildThreadTimelineFromEvents({
     acceptedClientRequestContext: {
       acceptedClientRequestEvents: [],
@@ -352,7 +377,7 @@ export function cloudTimelineRows(
       turnMessageDetail: "summary",
       workspaceRoot: null,
     },
-  }).rows;
+  });
 }
 
 export function cloudTurnDetails(

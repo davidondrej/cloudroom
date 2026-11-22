@@ -432,6 +432,7 @@ export {
   createQueuedThreadMessage,
   createQueuedThreadMessageInTransaction,
   deleteClaimedQueuedThreadMessageInTransaction,
+  keepQueuedThreadNoticeForUser,
   deleteQueuedThreadMessage,
   deleteQueuedThreadRetries,
   getQueuedThreadMessage,

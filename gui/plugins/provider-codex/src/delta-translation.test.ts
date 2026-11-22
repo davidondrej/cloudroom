@@ -1980,6 +1980,23 @@ describe("codex error and warning translation", () => {
     ]);
   });
 
+  it("explains a failed workspace routing lookup, not its 401 (#2426)", () => {
+    const final = (message: string) =>
+      createHarness().translate(
+        codexEvent("error", {
+          threadId: "t1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: { message, codexErrorInfo: "other", additionalDetails: null },
+        }),
+      )[0];
+    expect(final("workspace routing discovery timed out")).toMatchObject({
+      detail: expect.stringContaining("not this thread or its worktree"),
+    });
+    const unauthorized = "workspace routing discovery unauthorized (401)";
+    expect(final(unauthorized)).toMatchObject({ detail: unauthorized });
+  });
+
   it("says plainly when Codex sends only a bare Bad Request", () => {
     const harness = createHarness();
     const events = harness.translate(

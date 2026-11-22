@@ -546,6 +546,43 @@ async function handlePrompt(message) {
       outcome = "error";
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
+  } else if (text.includes("request-kimi-permission")) {
+    // Kimi Code 2.5.2 asks before tool.call.started: the call has only the title "Bash" and the
+    // streamed args JSON. ":other-id" asks for a different call; ":structured" also sends rawInput;
+    // ":titled" names the command in the title; ":output" sends rawOutput with the permission.
+    const args = JSON.stringify({ command: "git diff --stat" });
+    notifyUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "kimi-call-1",
+      title: text.includes(":titled") ? "git status" : "Bash",
+      kind: "execute",
+      status: "pending",
+      ...(text.includes(":structured")
+        ? { rawInput: { command: "git status" } }
+        : {}),
+      content: [{ type: "content", content: { type: "text", text: "" } }],
+    });
+    notifyUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "kimi-call-1",
+      status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: args } }],
+    });
+    const otherId = text.includes(":other-id");
+    const result = await requestClient("session/request_permission", {
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: otherId ? "kimi-call-2" : "kimi-call-1",
+        title: "Bash",
+        ...(otherId ? { kind: "execute" } : {}),
+        ...(text.includes(":output") ? { rawOutput: args } : {}),
+      },
+      options: [
+        { optionId: "approve_once", name: "Approve once", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    }).catch(() => undefined);
+    notifyUpdate(messageChunk(`permission:${result?.outcome?.optionId}`));
   } else if (text.includes("request-permission")) {
     const backgroundPermission = process.env.FAKE_ACP_BACKGROUND_PERMISSION;
     if (backgroundPermission) {

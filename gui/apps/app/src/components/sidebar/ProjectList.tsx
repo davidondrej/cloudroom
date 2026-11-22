@@ -612,7 +612,11 @@ export function ProjectListSearchThreadsAction({
 export function ProjectListShell({ children }: ProjectListShellProps) {
   return (
     <SidebarStickyStack data-sidebar-sticky-density="compact-actions">
-      <SidebarGroupContent>{children}</SidebarGroupContent>
+      <SidebarGroupContent>
+        {/* A plugin's own row above Pinned (the Director draws into it). */}
+        <div data-sidebar-top-slot="" />
+        {children}
+      </SidebarGroupContent>
     </SidebarStickyStack>
   );
 }

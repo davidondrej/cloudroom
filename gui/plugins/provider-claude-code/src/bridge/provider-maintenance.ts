@@ -101,13 +101,27 @@ function claudeInstallerCommand(): ProviderInstallationCommand {
   });
 }
 
-// Windows' native installer leaves claude.exe off PATH, so sign in with the
-// path we found. The sign-in terminal runs PowerShell: `&` runs a quoted path,
-// and a `'` inside single quotes is doubled (C:\Users\O'Brien).
-function claudeLoginCommand(command: string): string {
-  return process.platform === "win32" && path.win32.isAbsolute(command)
-    ? `& '${command.replaceAll("'", "''")}' /login`
-    : "claude /login";
+// `auth login` signs in without opening a session, so the home folder the
+// terminal starts in never shows Claude's folder-trust prompt (#2270). Older or
+// unknown versions may lack it and would read it as a prompt, so keep `/login`.
+// Sign in with the path we found: Windows' native installer leaves claude.exe
+// off PATH, and a Mac's PATH can put an older copy first. The Windows sign-in
+// terminal runs PowerShell: `&` runs a quoted path, and a `'` inside single
+// quotes is doubled (C:\Users\O'Brien).
+function claudeLoginCommand(command: string, version: string | null): string {
+  const login =
+    version !== null &&
+    compareVersions(version, CLAUDE_MINIMUM_SUPPORTED_VERSION) >= 0
+      ? "auth login"
+      : "/login";
+  if (process.platform === "win32") {
+    return path.win32.isAbsolute(command)
+      ? `& '${command.replaceAll("'", "''")}' ${login}`
+      : `claude ${login}`;
+  }
+  return formatCommand(path.isAbsolute(command) ? command : "claude", [
+    ...login.split(" "),
+  ]);
 }
 
 function claudeDistTags(value: string | null): {
@@ -553,7 +567,7 @@ function healthResult(
       minimumSupportedVersion: null,
       canInstall: true,
       canUpdate: status !== "not_installed",
-      loginCommand: claudeLoginCommand(command),
+      loginCommand: claudeLoginCommand(command, args.installedVersion ?? null),
     },
   };
 }

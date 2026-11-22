@@ -54,7 +54,6 @@
               "plugins/environment-git-worktree/host.test.ts": 1,
               "plugins/provider-codex/src/bridge/bridge.archived-rebuild.test.ts": 1,
               "plugins/provider-codex/src/bridge/bridge.zero-work-turn.test.ts": 1,
-              "plugins/provider-pi/src/bridge/bridge.lifecycle.test.ts": 1,
               "plugins/provider-pi/src/bridge/bridge.round2.test.ts": 4,
               "plugins/tasks/editor/editor.test.tsx": 1,
               "plugins/tasks/shell/shell.test.tsx": 3,

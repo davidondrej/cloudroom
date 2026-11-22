@@ -4416,6 +4416,19 @@ describe("public thread data routes", () => {
           },
         );
         expect(fileErrorResponse.status).toBe(200);
+        if (errorCode === "ENOENT") {
+          // A missing file is looked up in the thread's saved chat file copies, which have none here.
+          const copyCommand = await waitForQueuedCommand(
+            harness,
+            ({ command }) =>
+              command.type === "host.read_file" &&
+              command.path !== hostFilePath,
+          );
+          await reportQueuedCommandError(harness, copyCommand, {
+            errorCode,
+            errorMessage: "No copy",
+          });
+        }
 
         const fileResponse = await filePromise;
         expect(fileResponse.status).toBe(expectedStatus);
@@ -4427,6 +4440,61 @@ describe("public thread data routes", () => {
       });
     },
   );
+
+  it("shows the saved copy of a chat image whose file is gone, a fork's source's copy too", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, project, environment, thread } = seedThreadFixture(harness);
+      const fork = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        sourceThreadId: thread.id,
+      });
+      const imagePath = "/tmp/ui-preview/option-a.png";
+      const storageOf = (threadId: string) =>
+        `/tmp/bb-host-data/${host.id}/thread-storage/${threadId}`;
+      const copyOf = (threadId: string) =>
+        `${storageOf(threadId)}/Cloud files/tmp/ui-preview/option-a.png`;
+      const readOf = (path: string) =>
+        waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "host.read_file" && command.path === path,
+        );
+      const gone = { errorCode: "ENOENT", errorMessage: "Path does not exist" };
+
+      const imagePromise = harness.app.request(
+        `/api/v1/threads/${fork.id}/host-files/content?path=${encodeURIComponent(imagePath)}`,
+      );
+      await reportQueuedCommandError(harness, await readOf(imagePath), gone);
+      await reportQueuedCommandError(
+        harness,
+        await readOf(copyOf(fork.id)),
+        gone,
+      );
+      const copyCommand = await readOf(copyOf(thread.id));
+      expect(copyCommand.command).toMatchObject({
+        rootPath: storageOf(thread.id),
+      });
+      await reportQueuedCommandSuccess(
+        harness,
+        copyCommand,
+        {
+          path: copyOf(thread.id),
+          content: Buffer.from("image").toString("base64"),
+          contentEncoding: "base64",
+          mimeType: "image/png",
+          sizeBytes: 5,
+          sha256: "0".repeat(64),
+        },
+        { hostId: host.id },
+      );
+
+      const image = await imagePromise;
+      expect(image.status).toBe(200);
+      expect(image.headers.get("content-type")).toBe("image/png");
+      expect(Buffer.from(await image.arrayBuffer()).toString()).toBe("image");
+    });
+  });
 
   it("maps thread storage root-escape failures to invalid_path", async () => {
     await withTestHarness(async (harness) => {

@@ -49,6 +49,11 @@ async function fixtures() {
     { type: "last-prompt", lastPrompt: "Refactor the API" },
   ].map((line) => JSON.stringify(line)).join("\n"));
   await utimes(join(root, "claude", "projects", "-claude-project", "claude-1.jsonl"), new Date("2026-10-09"), new Date("2026-10-09"));
+  // "Yes, clear context" on a plan starts a new session whose first prompt is the approved plan (#2314).
+  await writeFile(join(root, "claude", "projects", "-claude-project", "claude-plan.jsonl"), [
+    { type: "user", origin: { kind: "auto-continuation" }, entrypoint: "claude-desktop", cwd: join(root, "claude-project"), timestamp: at(1), message: { role: "user", content: "Implement the following plan:\n\nShip it" } },
+    { type: "assistant", timestamp: at(2), message: { model: "claude-test", content: [{ type: "text", text: "Shipped." }] } },
+  ].map((line) => JSON.stringify(line)).join("\n"));
   await writeFile(join(piDir, "2026-09-01_pi-old.jsonl"), [
     { type: "session", id: "pi-old", timestamp: at(0), cwd: project },
     { type: "message", timestamp: at(1), message: { role: "user", content: "Old format question" } },
@@ -319,6 +324,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
         ["codex", "0199a000-0000-7000-8000-00000000000d", "Plain Codex question", project],
         ["codex", "0199a000-0000-7000-8000-00000000000e", "Response-only Codex question", project],
         ["claude-code", "claude-1", "Refactor the API", join(root, "claude-project")],
+        ["claude-code", "claude-plan", "Implement the following plan:", join(root, "claude-project")],
         ["acp-hermes-agent", "h-cli", "Deploy plan", join(root, "hermes-project")],
         ["acp-hermes-agent", "h-telegram", "Hi from Telegram", homedir()],
         ["pi", "pi-1", "Login fix", project],
@@ -327,6 +333,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
 
       const result = await importAll(harness, host.id, [
         { harness: "claude-code", id: "claude-1" },
+        { harness: "claude-code", id: "claude-plan" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000c" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000d" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000e" },
@@ -342,6 +349,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(claude.deferred).toBeNull();
       expect(claude.startFork).toEqual({ sourceProviderThreadId: "claude-1" });
       expect(claude.sent).toBe("What's next?");
+      expect(threadMessages(harness.deps.db, threadId("claude-plan"))).toEqual([{ role: "user", text: "Implement the following plan:\n\nShip it" }, { role: "agent", text: "Shipped." }]);
 
       expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000c"))).toEqual([
         { role: "user", text: "Compressed Codex question" },
@@ -404,6 +412,44 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
     ].map((line) => JSON.stringify(line)).join("\n"));
     await withTestHarness(async (harness) => {
       expect(await listNativeSessions(harness.deps)).toEqual([{ harness: "codex", id, title: "Keep this message", cwd: root, updatedAt: expect.any(Number) }]);
+    });
+  });
+
+  it("ignores null Claude message content parts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "import-claude-null-"));
+    const project = join(root, "project");
+    const claudeDir = join(root, "claude", "projects", "project");
+    await mkdir(project, { recursive: true });
+    await mkdir(claudeDir, { recursive: true });
+    for (const [name, value] of [["PI_CODING_AGENT_DIR", "pi"], ["HERMES_HOME", "hermes"], ["CLAUDE_CONFIG_DIR", "claude"], ["CODEX_HOME", "codex"], ["T3CODE_HOME", "t3"]]) {
+      vi.stubEnv(name!, join(root, value!));
+    }
+    await writeFile(join(claudeDir, "claude-null.jsonl"), [
+      { type: "user", cwd: project, timestamp: "2026-10-01T10:00:00.000Z", message: { role: "user", content: [null, { type: "text", text: "Keep this message" }] } },
+      { type: "assistant", timestamp: "2026-10-01T10:00:01.000Z", message: { content: [null, { type: "text", text: "Keep this reply" }] } },
+    ].map((line) => JSON.stringify(line)).join("\n"));
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { id: "host-import-claude-null" });
+      expect((await listNativeSessions(harness.deps)).map(({ id, title }) => [id, title])).toEqual([["claude-null", "Keep this message"]]);
+      const result = await importAll(harness, host.id, [{ harness: "claude-code", id: "claude-null" }]);
+      expect(result.skipped).toEqual([]);
+      expect(threadMessages(harness.deps.db, result.imported[0]!.threadId)).toEqual([{ role: "user", text: "Keep this message" }, { role: "agent", text: "Keep this reply" }]);
+    });
+  });
+
+  it("handles unmatched Claude system reminders in linear time", async () => {
+    const root = await mkdtemp(join(tmpdir(), "import-claude-reminders-"));
+    const claudeDir = join(root, "claude", "projects", "project");
+    await mkdir(claudeDir, { recursive: true });
+    for (const name of ["PI_CODING_AGENT_DIR", "HERMES_HOME", "CODEX_HOME", "T3CODE_HOME"]) vi.stubEnv(name, join(root, name));
+    vi.stubEnv("CLAUDE_CONFIG_DIR", join(root, "claude"));
+    const text = "<system-reminder>".repeat(20_000);
+    await writeFile(join(claudeDir, "claude-reminders.jsonl"), JSON.stringify({ type: "user", cwd: root, message: { content: text } }));
+    await withTestHarness(async (harness) => {
+      const started = performance.now();
+      const sessions = await listNativeSessions(harness.deps);
+      expect(sessions.map((session) => session.title)).toEqual([`${text.slice(0, 77)}…`]);
+      expect(performance.now() - started).toBeLessThan(2_000);
     });
   });
 

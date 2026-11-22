@@ -449,6 +449,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     else if (body.thread && body.argv[0] === "stop") void service.gpuApprovals.recheck(body.thread);
     return context.json(reply);
   });
+  // Cloudroom Agent (docs/scopes/cloudroom-agent.md): its plugin asks for a token that can only buy inference, signed
+  // in as this account. The account's own sign-in never leaves this server.
+  app.post("/api/v1/cloudroom/account/inference", async (context) => {
+    return context.json(await cloudroom(deps).sandboxes.inference().catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 401 || status === 403 ? status : 503, "cloud_inference", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>);
+  });
   // Import from this Mac: the list shows names only, and values go straight to the website.
   app.get("/api/v1/cloudroom/account/environment/mac", async (context) => context.json({ names: Object.keys(await macVariables()).sort() }));
   app.post("/api/v1/cloudroom/account/environment/mac", async (context) => {

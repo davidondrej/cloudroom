@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "clean": "rimraf tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs tsconfig.tsbuildinfo",
     "typecheck": "node ./scripts/build-registry.mjs --check && bun check",
     "test": "node ./scripts/build-registry.mjs --check && vitest run --config vitest.config.ts"
   },

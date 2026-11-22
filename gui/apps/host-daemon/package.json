@@ -16,7 +16,7 @@
     "start": "node dist/index.js",
     "start:prod": "node --import tsx ../../scripts/set-env.mjs NODE_ENV=production node dist/index.js",
     "dev": "node --conditions=source --import tsx scripts/dev-supervisor.mjs",
-    "clean": "rimraf dist",
+    "clean": "node ../../scripts/rm.mjs dist",
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },

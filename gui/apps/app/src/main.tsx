@@ -19,6 +19,7 @@ import { AppToaster } from "./components/AppToaster";
 import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";
 import { appToast } from "./components/ui/app-toast";
 import { registerProviderCliInstallQueryClient } from "./components/provider-cli/provider-cli-install-store";
+import { initializeCloudIconStyle } from "./hooks/useCloudIconStyle";
 import { initializeCorners } from "./hooks/useCorners";
 import { initializePreferredTheme } from "./hooks/useTheme";
 import { initializeFavicon } from "./lib/favicon-color-preference";
@@ -82,6 +83,7 @@ registerProviderCliInstallQueryClient(appQueryClient);
 
 initializePreferredTheme();
 initializeCorners();
+initializeCloudIconStyle();
 applyCachedAppThemeCss();
 initializeFavicon();
 

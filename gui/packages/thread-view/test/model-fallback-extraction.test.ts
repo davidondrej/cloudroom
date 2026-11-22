@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { extractThreadTimelineModelFallback } from "../src/model-fallback-extraction.js";
-import type { ThreadEventWithMeta } from "../src/group-event-projection-turns.js";
+import { extractThreadTimelineModelFallback } from "../src/extractors.js";
+import type { ThreadEventWithMeta } from "../src/index.js";
 
 function event(
   sequence: number,

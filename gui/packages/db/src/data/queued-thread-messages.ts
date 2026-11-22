@@ -376,6 +376,22 @@ export function createQueuedThreadMessage(
   return row;
 }
 
+/**
+ * A notice the user edited or sent is theirs: drop its interaction ID so the
+ * drain never discards it as stale (#2452). Unreadable JSON stays as it is.
+ */
+function noticeKeptForUser() {
+  const notice = queuedThreadMessages.systemNotice;
+  return sql`CASE WHEN json_valid(${notice}) THEN json_remove(${notice}, '$.interactionId') ELSE ${notice} END`;
+}
+
+export function keepQueuedThreadNoticeForUser(db: DbConnection, id: string) {
+  db.update(queuedThreadMessages)
+    .set({ systemNotice: noticeKeptForUser() })
+    .where(eq(queuedThreadMessages.id, id))
+    .run();
+}
+
 export function updateQueuedThreadMessage(
   db: DbConnection,
   notifier: DbNotifier,
@@ -398,6 +414,7 @@ export function updateQueuedThreadMessage(
         .update(queuedThreadMessages)
         .set({
           content: JSON.stringify(input.content),
+          systemNotice: noticeKeptForUser(),
           updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
         })
         .where(eq(queuedThreadMessages.id, input.id))

@@ -14,6 +14,7 @@ import {
   type AcpToolCallOperationInput,
   type AcpToolCallPathOptions,
   classifyAcpToolCall as classifyAcpToolCallOperation,
+  extractAcpCommand,
   extractAcpToolCallPaths,
   resolveAcpFileChangeWriteScope,
 } from "./tool-call-operation.js";
@@ -22,10 +23,11 @@ import {
   extractAcpToolCallOutputText,
   type AcpInjectedTool,
 } from "./tool-classification.js";
-import type {
-  AcpPermissionOptionKind,
-  AcpToolCallUpdateEvent,
-  AcpToolKind,
+import {
+  extractAcpContentText,
+  type AcpPermissionOptionKind,
+  type AcpToolCallUpdateEvent,
+  type AcpToolKind,
 } from "./wire.js";
 import type { AcpDialect } from "./dialect.js";
 
@@ -48,15 +50,59 @@ interface AcpPermissionToolCall extends AcpToolCallOperationInput {
   injectedTool?: AcpInjectedTool | undefined;
 }
 
+function rawInputCommand(rawInput: unknown): string | undefined {
+  return extractAcpCommand({ rawInput });
+}
+
+// The args JSON the agent streamed into a call that has not run yet; never its output.
+function streamedArgsCommand(
+  started: AcpToolCallUpdateEvent,
+): string | undefined {
+  const entry = started.content?.length === 1 ? started.content[0] : undefined;
+  if (
+    entry?.type !== "content" ||
+    started.rawOutput !== undefined ||
+    started.status === "completed" ||
+    started.status === "failed"
+  ) {
+    return undefined;
+  }
+  const text = extractAcpContentText(entry.content);
+  try {
+    return text === undefined ? undefined : rawInputCommand(JSON.parse(text));
+  } catch {
+    return undefined;
+  }
+}
+
 function classifyAcpPermission(
   toolCall: AcpPermissionToolCall,
   options: AcpToolCallPathOptions | undefined,
+  streamedArgsTitle: string | undefined,
 ): AcpToolCallOperation {
   const own = classifyAcpToolCallOperation(toolCall, options);
-  if (own.kind !== "generic" || !toolCall.startedToolCall) {
-    return own;
+  const started = toolCall.startedToolCall;
+  const operation =
+    own.kind !== "generic" || !started
+      ? own
+      : classifyAcpToolCallOperation(started, options);
+  if (
+    !started ||
+    operation.kind !== "command" ||
+    operation.command !== streamedArgsTitle
+  ) {
+    return operation;
   }
-  return classifyAcpToolCallOperation(toolCall.startedToolCall, options);
+  const source = operation === own ? toolCall : started;
+  if (rawInputCommand(source.rawInput) !== undefined) {
+    return operation;
+  }
+  // Kimi asks before it sends rawInput, so the title is just "Bash" and the command is only in the streamed args (#2433).
+  const command =
+    rawInputCommand(toolCall.rawInput) ??
+    rawInputCommand(started.rawInput) ??
+    streamedArgsCommand(started);
+  return command === undefined ? operation : { kind: "command", command };
 }
 
 function permissionToolCallEvent(
@@ -152,13 +198,15 @@ export function buildAcpPermissionInteractionPayload(args: {
   options: readonly { kind: AcpPermissionOptionKind }[];
   cwd?: string | undefined;
   classifyToolCall?: AcpDialectToolCallClassifier | undefined;
+  // The bare title of the agent's own call that has its command only in the streamed args.
+  streamedArgsTitle?: string | undefined;
 }): PendingInteractionPayload {
   const toolCall = args.toolCall;
   const pathOptions = { cwd: args.cwd };
   const availableDecisions = buildAcpApprovalDecisions(args.options);
   const reason = permissionReason(toolCall) ?? null;
   const operation = toolCall
-    ? classifyAcpPermission(toolCall, pathOptions)
+    ? classifyAcpPermission(toolCall, pathOptions, args.streamedArgsTitle)
     : undefined;
   if (toolCall && operation?.kind === "file_change") {
     const ownPaths = extractAcpToolCallPaths(toolCall, pathOptions);

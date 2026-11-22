@@ -1020,6 +1020,51 @@ COPY_ACL = '/bin/ls -ldeL' if sys.platform == 'darwin' else 'ls -ldL'
 TEMP_FOLDERS = ('/private/tmp', '/private/var/folders')
 
 
+def disk_path(path):
+    """macOS: an open folder's real path in the letter case stored on disk, as `pwd -P` shows it (F_GETPATH). realpath
+    keeps the typed case, such as ~/CODE for ~/code. None if it can't tell."""
+    if sys.platform != 'darwin' or not hasattr(fcntl, 'F_GETPATH'):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b'\0', 1)[0]) or None
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+
+
+def real_folder(path):
+    """The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..`
+    never skips a missing part, and its real path must be that same folder. Raises OSError as starting there would."""
+    info, real = os.stat(path), disk_path(path) or os.path.realpath(path)
+    if not os.path.isdir(path):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path))
+    same = os.stat(real)
+    if (same.st_dev, same.st_ino) != (info.st_dev, info.st_ino):
+        raise PermissionError('The folder changed while the Mac checked it, so this command did not run.')
+    return real, [info.st_dev, info.st_ino]
+
+
+def in_temp(folder):
+    """Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same
+    folder, such as other letter case, still counts."""
+    roots = set()
+    for root in TEMP_FOLDERS:
+        with contextlib.suppress(OSError):
+            info = os.stat(root)
+            roots.add((info.st_dev, info.st_ino))
+    for path in (folder, *map(str, Path(folder).parents)):
+        if any(path == root for root in TEMP_FOLDERS):
+            return True
+        with contextlib.suppress(OSError):
+            info = os.stat(path)
+            if (info.st_dev, info.st_ino) in roots:
+                return True
+    return False
+
+
 def copy_command(copy):
     """The command for a `room-cli mac push` (#222), built here from the job's names, never from the sandbox's command.
     Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
@@ -1153,9 +1198,14 @@ class MacJobs:
                 return self.ask(core, job, text)
             command, hidden = visible(job['command'].rstrip(), 600, 10)
             warnings = f"Warning: {hidden:,} more characters of this command are not shown, and will also run.\n\n" if hidden else ''
-            if any(word in job['command'] for word in ('/tmp', '/var/folders', 'TMPDIR')):
+            # The folder is the real path the command runs in (refusal resolves it), so `.`, `..` and links can't hide it.
+            cwd, home = job.get('cwd') or '~', os.path.realpath(Path.home())
+            folder, cut = visible('~' + cwd[len(home):] if cwd == home or cwd.startswith(home + '/') else cwd, 200, 1)
+            if cut:
+                warnings += f"Warning: {cut:,} more characters of the folder are not shown.\n\n"
+            if (any(word in job['command'] for word in ('/tmp', '/var/folders', 'TMPDIR')) or
+                    in_temp(cwd)):
                 warnings += 'Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n'
-            folder, cut = visible(job.get('cwd') or '~', 200, 1)
             text = f"Command:\n{block(command)}\n\nFolder: {folder}{'…' if cut else ''}"
             if job.get('stdin'):
                 try:
@@ -1226,6 +1276,7 @@ class MacJobs:
 
     def refusal(self, core, job):
         """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+        job.pop('approved_folder', None)  # Only Ask first's own check below approves a folder, never the job itself.
         level, closed = self.closed(core)
         if closed:
             return closed
@@ -1239,7 +1290,15 @@ class MacJobs:
             return 'Read-only and Ask first Mac access need macOS. The user can switch Mac access to Full in the Cloudroom sidebar.'
         if level == 'read-only':
             return 'Mac access is Read-only, so this command cannot change the Mac. The user can switch it to Ask first or Full in the Cloudroom sidebar.'
-        if level == 'ask' and self.approve(core, job):
+        if level != 'ask':
+            return 'The user did not approve this command on their Mac. Do not retry it unless they ask you to.'
+        # Ask first shows, and then runs in, the same real folder: never the agent's text, whose `..` or links could point
+        # elsewhere, such as a temp folder it filled.
+        try:
+            job['cwd'], job['approved_folder'] = real_folder(str(Path.home() / os.path.expanduser(job.get('cwd') or '~')))
+        except OSError as error:
+            return str(error)
+        if self.approve(core, job):
             # The user may have lowered Mac access while the popup was open.
             return None if mac_level(self.enabled() or {}) in ('ask', 'full') else 'Mac access was lowered, so this command did not run.'
         return 'The user did not approve this command on their Mac. Do not retry it unless they ask you to.'
@@ -1403,13 +1462,28 @@ class MacJobs:
                      f'export ROOM_SERVER_URL={shlex.quote(server)}; ')
         # Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
         # hands the unchanged command to sh. Inside fish's '…' only \ and ' are special.
-        command = ("exec /bin/sh -c '" + job['command'].replace('\\', '\\\\').replace("'", "\\'") + "'"
-                   if login.endswith('/fish') else job['command'])
+        fish = lambda text: "'" + text.replace('\\', '\\\\').replace("'", "\\'") + "'"
+        command = 'exec /bin/sh -c ' + fish(job['command']) if login.endswith('/fish') else job['command']
+        # An approved command must start in its folder, whatever the login files did: builtins, so their functions can't
+        # pose as cd, and the folder checked once there (#2470). zsh's `command` skips builtins; dash and ksh have no
+        # `builtin`, so other shells use `command`.
+        approved = job.get('cwd') if job.get('approved_folder') is not None and isinstance(job.get('cwd'), str) else None
+        changed = 'The folder changed after it was approved, so this command did not run.'
+        if approved and login.endswith('/fish'):
+            command = (f'builtin cd {fish(approved)}; and builtin test (builtin pwd -P) = {fish(approved)}; '
+                       f'or begin; builtin echo {fish(changed)} >&2; builtin exit 126; end; {command}')
+        elif approved:
+            b = 'builtin' if login.endswith('/zsh') else 'command'
+            command = (f'{b} cd -- {shlex.quote(approved)} && {b} test "$({b} pwd -P)" = {shlex.quote(approved)} '
+                       f'|| {{ {b} echo {shlex.quote(changed)} >&2; {b} exit 126; }}; {command}')
         shell = [login, '-lc', path + command]
         try:
             if refused:
                 raise PermissionError(refused)
             folder = Path.home() / os.path.expanduser(job.get('cwd') or '~')
+            # The folder the user approved must still be the same folder, at the same real path.
+            if approved and real_folder(str(folder)) != (approved, job['approved_folder']):
+                raise PermissionError(changed)
             with self.lock:  # A stop that arrives while the command starts either skips or kills it.
                 if job['id'] in self.cancelled:
                     self.cancelled.discard(job['id'])
@@ -1769,6 +1843,10 @@ def windows(folder, stop):
             return
         start = uuid.uuid4().hex
         (folder / 'started').unlink(missing_ok=True)
+        # The helper needs these before it confirms, and its own error is lost once it detaches (#2459).
+        (folder / 'stop').unlink(missing_ok=True)
+        if (folder / 'ports.json').exists():
+            (folder / 'ports.json').open('rb').close()
         command = [sys.executable, '-B', '-E', '-s', str(folder / 'client.py'), 'run', str(folder)]
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         for extra in (subprocess.CREATE_BREAKAWAY_FROM_JOB, 0):  # Outlive the app's job object when it allows that.
@@ -1833,12 +1911,31 @@ def launch(folder, stop=False):
         raise OSError(f'launchctl failed (exit code {started.returncode})' + (': ' + reason if reason else '') + '. ' + LOGIN_ITEMS)
 
 
+def grant_user(folder):
+    """Windows: mkdir's 0o700 gives the user only OWNER RIGHTS, so a file an elevated Cloudroom or installer writes here
+    belongs to Administrators and the normal app can't open it (#2459). Name the user too; new files inherit it. Best effort,
+    and only with the user's normal token: an elevated grant could reach a folder the user may not change."""
+    import ctypes
+    system = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32'
+    run = lambda *command: subprocess.run(command, capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return
+        # Not while a file is already blocked: icacls would pin its entries, and then the repair in Settings would fail.
+        for path in folder.iterdir():
+            if path.is_file():
+                path.open('rb').close()
+        sid = run(str(system / 'whoami.exe'), '/user', '/fo', 'csv', '/nh').stdout.strip().split(',')[-1].strip('"')
+        if sid.startswith('S-1-'):
+            run(str(system / 'icacls.exe'), str(folder), '/grant', f'*{sid}:(OI)(CI)F', '/C', '/Q')
+
+
 def parked(folder, account):
     """Where an account's setup waits while another account is signed in (#109)."""
     return folder.with_name(folder.name + '-' + (str(uuid.UUID(account)) if account else 'none'))
 
 
-def configure(folder, connection_file, activate, allow_private, mac_access=None, launcher=None, restart=False, own=False):
+def configure(folder, connection_file, activate, allow_private, mac_access=None, launcher=None, restart=False, own=False, grant=True):
     connection = private_json(connection_file)
     # Sandbox-only accounts have no VM address; their cores come from the website while awake.
     binding = [(connection.get('url') or 'sandboxes').rstrip('/'), (connection.get('account') or {}).get('id')]
@@ -1858,6 +1955,8 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
         parked(folder, binding[1]).rename(folder)
         old = private_json(folder / 'config.json') if (folder / 'config.json').exists() else None
     folder.mkdir(mode=0o700, parents=True, exist_ok=True); folder.chmod(0o700)
+    if WINDOWS and grant:  # The folder this account uses, before any helper file is written; each launch also fixes an older one.
+        grant_user(folder)
     source = Path(__file__).resolve()
     target = folder / 'client.py'
     allow_private = bool(allow_private if allow_private is not None else (old or {}).get('allowPrivateSsh', False))
@@ -1920,12 +2019,14 @@ def main():
     parser.add_argument('--own-threads', action='store_true', help='Cloudroom Dev: use only the sandboxes of threads this app woke')
     args = parser.parse_args()
     folder = args.directory.expanduser().resolve()
+    # Windows: no access grant through a junction or link, which could point it at another folder (#2459).
+    grant = os.path.normcase(os.path.abspath(args.directory.expanduser())) == os.path.normcase(str(folder))
     if args.command == 'configure':
         if args.connection is None:
             raise ValueError('--connection is required')
         print(json.dumps(configure(folder, args.connection.expanduser().resolve(strict=True), not args.no_start, args.allow_private_ssh,
                                    'full' if args.mac_access == 'on' else args.mac_access,
-                                   str(args.launcher.resolve(strict=True)) if args.launcher else None, args.restart, args.own_threads)))
+                                   str(args.launcher.resolve(strict=True)) if args.launcher else None, args.restart, args.own_threads, grant)))
     elif args.command == 'run':
         run(folder)
     elif args.command in {'stop', 'pause'}:

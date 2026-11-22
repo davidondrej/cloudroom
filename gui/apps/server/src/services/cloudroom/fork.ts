@@ -683,12 +683,12 @@ export async function uploadInParts(client: CloudroomClient, file: string, data:
 }
 
 /** Puts the source's code in the fork's folder once its project copy landed. Returns why it could not, or null. */
-export async function landForkCode(client: CloudroomClient, started: { sessionId: string; transfer: string; code: Promise<Code | Error | null> | null }): Promise<string | null> {
+export async function landForkCode(client: CloudroomClient, started: { sessionId: string; transfer: string; code: Promise<Code | Error | null> | null }, stop?: AbortSignal): Promise<string | null> {
   const code = await started.code;
   if (!code) return "The source thread's code was not copied, since it has no project folder.";
   try {
     if (code instanceof Error) throw code;
-    await applyForkCode(client, (await client.sessionWorkspace(started.sessionId)).path, started.transfer, code);
+    await applyForkCode(client, (await client.sessionWorkspace(started.sessionId)).path, started.transfer, code, stop);
     return null;
   } catch (error) {
     // A failed upload, or a dropped landing whose shell never reached its `rm`, leaves the archive behind.
@@ -701,7 +701,7 @@ export async function landForkCode(client: CloudroomClient, started: { sessionId
  *  the folder already has changes. A folder with no Git repository gets one. Plain files go on top of a GitHub clone
  *  and delete only symlinks in their way; with no clone they replace the folder's files, so files the source deleted are gone here too;
  *  dependencies, build output and `.cloudroom` stay. */
-async function applyForkCode(client: CloudroomClient, workspace: string, id: string, code: Code): Promise<void> {
+async function applyForkCode(client: CloudroomClient, workspace: string, id: string, code: Code, stop?: AbortSignal): Promise<void> {
   const files = isFiles(code.data);
   const file = `.cache/cloudroom/${id}.${files ? "tgz" : "bundle"}`;
   await uploadInParts(client, file, code.data);
@@ -710,7 +710,8 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
     await vm(client, `mkdir -p ${quote(workspace)} && cd ${quote(workspace)} && python3 -I -c ${quote(PRUNE)} . ~/${file} ${skipped} && tar -xzf ~/${file}; code=$?; rm -f ~/${file}; exit $code`, AbortSignal.timeout(PIECE_TIMEOUT));
     return;
   }
-  const land = () => client.runOnVm({
+  // Past the copy deadline, `files wait` said failed and the agent may have committed: no reset (#2023).
+  const land = () => stop?.aborted ? Promise.reject(new Error("The copy deadline passed, so it was not reset")) : client.runOnVm({
     command: [
       // The child of a project not on GitHub, or whose clone failed, has no repository yet.
       // Never on the default branch, so a push can't reach the user's main; the app renames it to the thread's room/ branch.

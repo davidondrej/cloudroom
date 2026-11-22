@@ -133,6 +133,12 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     pluginId: "provider-pi",
     defaultEnabled: true,
   },
+  // Off until the user turns it on (David, 2026-11-18, docs/scopes/cloudroom-agent.md).
+  {
+    name: "provider-cloudroom-agent",
+    pluginId: "provider-cloudroom-agent",
+    defaultEnabled: false,
+  },
   {
     name: "provider-usage",
     pluginId: "provider-usage",
@@ -234,6 +240,12 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
   {
     name: "workflows",
     pluginId: "workflows",
+    defaultEnabled: false,
+  },
+  // Off while the team uses it internally (docs/scopes/director.md).
+  {
+    name: "director",
+    pluginId: "director",
     defaultEnabled: false,
   },
 ];

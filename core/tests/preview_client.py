@@ -593,18 +593,78 @@ class MacJobTests(unittest.TestCase):
                 shown.append(args[3])
             def communicate(self):
                 return 'Allow\n', None
-        job = {'id': 'job', 'command': 'bash -s\necho two\N{RIGHT-TO-LEFT OVERRIDE}', 'cwd': '/tmp/a\nb' + 'c' * 300,
+        job = {'id': 'job', 'command': 'bash -s\necho two\N{RIGHT-TO-LEFT OVERRIDE}', 'cwd': '/opt/a\nb' + 'c' * 300,
                'write': True, 'stdin': ''.join(f'echo {n}\r\n' for n in range(25)).encode().hex()}
         with mock.patch.object(preview.subprocess, 'Popen', Popup):
             self.assertTrue(preview.MacJobs(Path('/unused')).approve(SimpleNamespace(key='core'), job))
         lines = shown[0].split('\n')
+        self.assertEqual(lines[2:4], ['Warning: 109 more characters of the folder are not shown.', ''])
+        del lines[2:4]
         self.assertEqual(lines[2:12], ['Warning: 44 more characters of its input are not shown, and will also run.', '',
                                        'Command:', '    bash -s', '    echo two\\u202e', '',
-                                       'Folder: /tmp/a\\nb' + 'c' * 191 + '…', '', 'Input (25 lines):', '    echo 0\\r'])
+                                       'Folder: /opt/a\\nb' + 'c' * 191 + '…', '', 'Input (25 lines):', '    echo 0\\r'])
         self.assertEqual(lines[12:], [f'    echo {n}\\r' for n in range(1, 20)])
         self.assertTrue(all(c.isprintable() or c == '\n' for c in shown[0]))
         # Escapes count against the limit, and the hidden count stays in the agent's own characters.
         self.assertEqual(preview.visible('\0' * 300, 600, 10), ('\\x00' * 150, 150))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Mac access is macOS and Linux only')
+    def test_ask_first_popup_shows_the_folder_the_command_runs_in(self):
+        # #2470: `.` and `..` in the agent's folder text could show a project folder while the command ran in a temp folder.
+        shown, home = [], Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, home)
+        (home / 'code').mkdir(); (home / 'temp/b').mkdir(parents=True); (home / 'file').touch()
+        (home / 'temp-link').symlink_to(home / 'temp')  # Another spelling of the temp folder, like other letter case on macOS.
+        popup = mock.Mock(side_effect=lambda args, **_: shown.append(args[3]) or mock.Mock(communicate=lambda: ('Allow', None)))
+        jobs, job = preview.MacJobs(Path('/unused')), {'id': 'job', 'command': 'make', 'write': True,
+                                                     'cwd': '~/code/' + './' * 100 + '../' * 30 + str(home).lstrip('/') + '/temp/b'}
+        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'TEMP_FOLDERS', (str(home / 'temp-link'),)), \
+                mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.subprocess, 'Popen', popup), \
+                mock.patch.object(jobs, 'closed', return_value=('ask', None)), mock.patch.object(preview, 'mac_level', return_value='ask'):
+            self.assertIsNone(jobs.refusal(SimpleNamespace(key='core'), job))
+            # `..` never skips a missing part or a file, which the OS would refuse to start in.
+            for bad in ('~/missing/../code', '~/file/../code'):
+                self.assertRegex(jobs.refusal(SimpleNamespace(key='core'), {'id': 'bad', 'command': 'make', 'write': True, 'cwd': bad}),
+                                 'No such file|Not a directory')
+            # Full never runs the folder check, even for a job that names an approved folder itself.
+            full = {'id': 'full', 'command': 'make', 'write': True, 'approved_folder': [0, 0]}
+            with mock.patch.object(jobs, 'closed', return_value=('full', None)):
+                self.assertIsNone(jobs.refusal(SimpleNamespace(key='core'), full))
+            self.assertNotIn('approved_folder', full)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(job['cwd'], str(home / 'temp/b'))  # The command runs in this folder.
+        self.assertIn('Warning: the command uses files in a temp folder.', shown[0])
+        self.assertTrue(shown[0].endswith('Folder: ~/temp/b'))
+        # macOS: the folder's path as stored on disk (F_GETPATH) wins over realpath, which keeps a typed ~/CODE for ~/code.
+        # Another folder's path refuses, and a failed lookup falls back to realpath.
+        cases = ((home / 'temp-link/b', str(home / 'temp-link/b')), (home / 'code', PermissionError), (OSError(), str(home / 'temp/b')))
+        for found, expected in cases:
+            def lookup(*_, found=found):
+                if isinstance(found, OSError):
+                    raise found
+                return str(found).encode() + bytes(9)
+            with mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.fcntl, 'F_GETPATH', 50, create=True), \
+                    mock.patch.object(preview.fcntl, 'fcntl', lookup):
+                if expected is PermissionError:
+                    self.assertRaises(PermissionError, preview.real_folder, str(home / 'temp/b'))
+                else:
+                    self.assertEqual(preview.real_folder(str(home / 'temp/b'))[0], expected)
+        # Once allowed, it runs there, even if a login file changes folder.
+        connection, folder, results = home / 'cloudroom.json', home / 'cloudroom-preview', []
+        connection.write_text('{}'); connection.chmod(0o600)
+        for profile in ('.profile', '.zprofile', '.bash_profile'):
+            (home / profile).write_text('cd /\n')
+        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'review', lambda *_: None), \
+                mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.MacJobs, 'ask', lambda *_: True):
+            preview.configure(folder, connection, False, None, 'ask')
+            core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
+                                   config=preview.private_json(folder / 'config.json'),
+                                   fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
+            preview.MacJobs(folder).execute(core, 'mac', {'id': 'run', 'command': 'pwd', 'cwd': '~/code/../temp/b', 'write': True})
+        self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode().strip(), str(home / 'temp/b'))
+        # A folder swapped after Allow no longer matches what was approved, so it does not start.
+        (home / 'temp/b').rename(home / 'temp/old'); (home / 'temp/b').mkdir()
+        self.assertNotEqual(preview.real_folder(job['cwd']), (job['cwd'], job['approved_folder']))
 
     @unittest.skipIf(sys.platform == 'win32', 'Mac access is macOS and Linux only')
     def test_push_places_only_its_named_item(self):

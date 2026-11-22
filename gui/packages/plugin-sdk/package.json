@@ -1,6 +1,6 @@
 {
   "name": "@get-bb/plugin-sdk",
-  "version": "0.6.52",
+  "version": "0.6.53",
   "homepage": "https://github.com/get-bb/bb#readme",
   "bugs": {
     "url": "https://github.com/get-bb/bb/issues"
@@ -37,6 +37,12 @@
       "types": "./bundled-types/bb-plugin-sdk-ai-services.d.ts",
       "import": "./dist/ai-services.js",
       "default": "./dist/ai-services.js"
+    },
+    "./provider-usage": {
+      "source": "./src/provider-usage.ts",
+      "types": "./bundled-types/bb-plugin-sdk-provider-usage.d.ts",
+      "import": "./dist/provider-usage.js",
+      "default": "./dist/provider-usage.js"
     },
     "./provider-bridge/testing": {
       "source": "./src/provider-bridge-testing.ts",
@@ -140,7 +146,7 @@
     "build": "node scripts/build-runtime.mjs",
     "build:runtime": "node scripts/build-runtime.mjs",
     "build:types": "node scripts/build-bundled-dts.mjs",
-    "clean": "rimraf bundled-types dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs bundled-types dist tsconfig.tsbuildinfo",
     "prepack": "node scripts/build-bundled-dts.mjs && node scripts/build-runtime.mjs",
     "test": "vitest run --config vitest.config.ts",
     "typecheck": "bun check"

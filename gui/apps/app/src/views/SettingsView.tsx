@@ -56,6 +56,10 @@ import {
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
 import { useBrandMark } from "@/hooks/useBrandMark";
+import {
+  useCloudIconStyle,
+  type CloudIconStyle,
+} from "@/hooks/useCloudIconStyle";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -439,6 +443,86 @@ function CornersSetting() {
                 className={cn(
                   "ml-auto",
                   corners !== option.value && "opacity-0",
+                  COARSE_POINTER_ICON_SIZE_CLASS,
+                )}
+              />
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </SettingsWithControl>
+  );
+}
+
+const CLOUD_ICON_OPTIONS: ReadonlyArray<{
+  iconClassName: string;
+  label: string;
+  value: CloudIconStyle;
+}> = [
+  {
+    iconClassName: "text-primary [&_path]:stroke-[1.9]",
+    label: "Electric lime",
+    value: "electric-lime",
+  },
+  {
+    iconClassName: "text-neutral-950 dark:text-white [&_path]:stroke-[2]",
+    label: "Crisp white",
+    value: "crisp-white",
+  },
+];
+
+function CloudIconSetting() {
+  const [cloudIcon, setCloudIcon] = useCloudIconStyle();
+  const active =
+    CLOUD_ICON_OPTIONS.find((option) => option.value === cloudIcon) ??
+    CLOUD_ICON_OPTIONS[0]!;
+  return (
+    <SettingsWithControl
+      label="Cloud icon"
+      description="Color of the Cloud icon in the composer and sidebar."
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
+            aria-label="Cloud icon"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", active.iconClassName)}
+                aria-hidden
+              />
+              <span className="min-w-0 truncate">{active.label}</span>
+            </span>
+            <Icon
+              name="ChevronDown"
+              className="size-3.5 text-muted-foreground"
+            />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className={SETTINGS_DROPDOWN_CONTENT_CLASS}
+        >
+          {CLOUD_ICON_OPTIONS.map((option) => (
+            <DropdownMenuItem
+              key={option.value}
+              onSelect={() => setCloudIcon(option.value)}
+            >
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", option.iconClassName)}
+                aria-hidden
+              />
+              {option.label}
+              <Icon
+                name="Check"
+                className={cn(
+                  "ml-auto",
+                  cloudIcon !== option.value && "opacity-0",
                   COARSE_POINTER_ICON_SIZE_CLASS,
                 )}
               />
@@ -918,6 +1002,7 @@ export function AppearanceSettingsSection({
           faviconColor={faviconColor}
           onFaviconColorChange={onFaviconColorChange}
         />
+        <CloudIconSetting />
         <SplitDimmingSetting />
         <SidebarFooterSettings />
         <SettingsWithControl

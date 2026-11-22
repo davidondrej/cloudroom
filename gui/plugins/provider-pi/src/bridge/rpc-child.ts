@@ -22,7 +22,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const NO_REQUEST_TIMEOUT = 0;
 const STDERR_TAIL_BYTES = 4_096;
 const SIGTERM_GRACE_MS = 4_000;
-const SIGKILL_ESCALATION_MS = 4_000;
+export const SIGKILL_ESCALATION_MS = 4_000;
 
 export interface PiRpcChildExitInfo {
   code: number | null;

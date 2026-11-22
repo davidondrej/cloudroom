@@ -16,7 +16,7 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
     "generate:test-bridges": "node ./scripts/build-test-bridges.mjs",
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",

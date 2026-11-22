@@ -608,6 +608,16 @@ const UNSUPPORTED_MODEL_PATTERN =
   /model is not supported when using Codex with a ChatGPT account/iu;
 const UNSUPPORTED_MODEL_NOTE =
   "This account can't use this model now. Pick another one in the model picker (or `room-cli thread update <thread> --model <model>`), then send again. A loop that starts new threads keeps its own model: change it in the loop's Agent setting (or `room-cli loop update <loop> --project <project> --model <model>`).";
+/**
+ * Before each model request, Codex asks chatgpt.com which workspace backend to
+ * use. Each thread's Codex keeps the answer in memory, so one thread can work
+ * while a restarted one can't get an answer (#2426). The 401 variant is handled
+ * separately (#2206).
+ */
+const ROUTING_DISCOVERY_PATTERN =
+  /\bworkspace routing discovery (?:timed out|failed)\b/iu;
+const ROUTING_DISCOVERY_NOTE =
+  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree. The chat is kept: send again to retry. If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
 
 function codexProviderErrorDelta(
   state: CodexEventTranslationState,
@@ -649,6 +659,12 @@ function codexProviderErrorDelta(
           : BARE_BAD_REQUEST_NOTE
         : null,
       unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
+      willRetry !== true &&
+      ROUTING_DISCOVERY_PATTERN.test(
+        `${error.message}\n${error.additionalDetails ?? ""}`,
+      )
+        ? ROUTING_DISCOVERY_NOTE
+        : null,
     ]
       .filter(Boolean)
       .join("\n"),

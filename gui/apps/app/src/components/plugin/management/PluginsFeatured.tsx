@@ -18,6 +18,8 @@ const HERO = { id: "aura", shot: "alpine", size: "285%", position: "62% 2%", tex
 const WIDE = { id: "ambient", shot: "poppy-hill", size: "210%", position: "100% 85%", text: "A live scene behind your chats that shows what your agents are doing." };
 const FRESH = { id: "repo-sync", text: "Cloud threads push their work to main on their own." };
 const SMALL = "automations";
+/** Cloudroom's own agent (docs/scopes/cloudroom-agent.md) takes the wide tile. Ambient keeps it where the agent isn't listed. */
+const AGENT = { id: "provider-cloudroom-agent", text: "Claude Code or Codex hit its limit? Keep going in one click, on frontier open source models." };
 
 const CATEGORY_ICONS: Record<string, IconName> = {
   "themes-and-appearance": "Palette", "thread-management": "PanelLeft", "thread-content": "MessageSquare", "memory-and-context": "Brain",
@@ -46,16 +48,57 @@ function Open({ row, onOpenPlugin }: { row: PluginListRow; onOpenPlugin: OpenPlu
     />
   );
 }
-function Toggle({ row }: { row: InstalledRow }) {
+function Toggle({ row, className }: { row: InstalledRow; className?: string }) {
   const { toggle, enabled } = usePluginEnabledToggle(row.plugin);
-  return <Switch checked={enabled} disabled={toggle.isPending} onCheckedChange={(next) => toggle.mutate(next)} aria-label={`${enabled ? "Disable" : "Enable"} ${row.title}`} />;
+  return <Switch className={className} checked={enabled} disabled={toggle.isPending} onCheckedChange={(next) => toggle.mutate(next)} aria-label={`${enabled ? "Disable" : "Enable"} ${row.title}`} />;
 }
 /** An on/off switch when installed, Install when not, like a row of the list below. */
-function Control({ row, onInstall, className }: { row: PluginListRow; onInstall: Actions["onInstall"]; className?: string }) {
-  if (row.plugin !== null) return <Toggle row={{ ...row, plugin: row.plugin }} />;
+function Control({ row, onInstall, className, switchClassName }: { row: PluginListRow; onInstall: Actions["onInstall"]; className?: string; switchClassName?: string }) {
+  if (row.plugin !== null) return <Toggle row={{ ...row, plugin: row.plugin }} className={switchClassName} />;
   const entry = row.entry;
   if (entry === null || row.installed) return null;
   return <ResourceInstallControl accessibleLabel={`Install ${row.title}`} className={cn("h-7 px-2.5 text-xs", className)} onAction={() => onInstall(addPluginInitialFromEntry(entry))} />;
+}
+
+/** The agent tile's halftone (David's pick, 2026-11-22): dots sized by a wave times a 2D bell curve near the top right,
+ *  fading out toward the text on the left. Worked out once: 680 x 265 units, scaled to the tile. */
+const DOT_W = 680, DOT_H = 265;
+const bell = (x: number, mu: number, sigma: number) => Math.exp(-((x - mu) ** 2) / (2 * sigma * sigma));
+const DOTS = Array.from({ length: Math.ceil(DOT_H / 11) }, (_, row) => row * 11 + 6).flatMap((y) =>
+  Array.from({ length: Math.ceil(DOT_W / 11) }, (_, col) => col * 11 + 6).flatMap((x) => {
+    const wave = 0.5 + 0.5 * Math.sin(x * 0.028 + Math.cos(y * 0.04) * 2) * Math.cos(y * 0.035 - x * 0.006);
+    const v = Math.min(1, (0.35 * wave + 0.85 * bell(x, 560, 150) * bell(y, 80, 120)) * Math.min(1, Math.max(0, (x - 180) / 260)));
+    return v > 0.04 ? [{ x, y, r: 0.6 + v * 4.2, opacity: 0.15 + 0.75 * v }] : [];
+  }),
+);
+function Halftone() {
+  return (
+    <>
+      <svg aria-hidden className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${DOT_W} ${DOT_H}`} preserveAspectRatio="xMaxYMid slice">
+        {DOTS.map((dot) => <circle key={`${dot.x}-${dot.y}`} cx={dot.x} cy={dot.y} r={dot.r} fill="var(--primary)" opacity={dot.opacity} />)}
+      </svg>
+      <div aria-hidden className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,var(--card)_38%,color-mix(in_oklab,var(--card)_70%,transparent)_55%,transparent_80%)]" />
+    </>
+  );
+}
+
+function AgentTile({ row, className, ...actions }: { row: PluginListRow; className?: string } & Actions) {
+  return (
+    <div className={cn(TILE, "flex flex-col justify-end border border-primary/30 bg-card p-5", className)}>
+      <Halftone />
+      <Open row={row} onOpenPlugin={actions.onOpenPlugin} />
+      <img src="/icon-192.png?v=room" alt="" aria-hidden className="pointer-events-none absolute left-5 top-5 size-12 rounded-[22%] object-cover" />
+      <div className="pointer-events-none relative">
+        <p className="text-2xs font-semibold uppercase tracking-wider text-primary">By Cloudroom</p>
+        <p className="mt-1 text-xl font-semibold tracking-tight text-foreground">{row.title}</p>
+        <p className="mt-1 max-w-xs text-xs leading-snug text-muted-foreground">{AGENT.text}</p>
+      </div>
+      <div data-row-action className="absolute right-4 top-4">
+        {/* Lighter when off, so it reads on the bright dots. */}
+        <Control row={row} onInstall={actions.onInstall} switchClassName="data-[state=unchecked]:bg-neutral-500" />
+      </div>
+    </div>
+  );
 }
 
 function ArtTile({ row, spec, eyebrow, big = false, className, ...actions }: { row: PluginListRow; spec: typeof HERO; eyebrow: ReactNode; big?: boolean; className?: string } & Actions) {
@@ -151,15 +194,19 @@ function showCategory(label: string) {
  *  never shows a bento with holes (an unreachable catalog, an app older than a featured plugin). */
 export function PluginsFeatured({ rows, groups, onInstall, onOpenPlugin }: { rows: readonly PluginListRow[]; groups: readonly PluginListGroup[] } & Actions) {
   const find = (id: string) => rows.find((row) => row.pluginId === id);
-  const [hero, wide, fresh, small] = [find(HERO.id), find(WIDE.id), find(FRESH.id), find(SMALL)];
-  if (!hero || !wide || !fresh || !small) return null;
+  const [hero, wide, fresh, small, agent] = [find(HERO.id), find(WIDE.id), find(FRESH.id), find(SMALL), find(AGENT.id)];
+  if (!hero || !(agent || wide) || !fresh || !small) return null;
   const actions = { onInstall, onOpenPlugin };
   const installs = hero.entry?.installs ?? 0;
   return (
     <div className="@container space-y-6 pb-3">
       <section aria-label="Featured plugins" className="grid auto-rows-[12rem] grid-cols-2 gap-2.5 @3xl:grid-cols-4">
         <ArtTile row={hero} spec={HERO} big className="col-span-2 row-span-2" eyebrow={installs ? `Featured · ${count(installs)} installs` : "Featured"} {...actions} />
-        <ArtTile row={wide} spec={WIDE} className="col-span-2" eyebrow="Make it yours" {...actions} />
+        {agent ? (
+          <AgentTile row={agent} className="col-span-2" {...actions} />
+        ) : wide ? (
+          <ArtTile row={wide} spec={WIDE} className="col-span-2" eyebrow="Make it yours" {...actions} />
+        ) : null}
         <FreshTile row={fresh} {...actions} />
         <SmallTile row={small} {...actions} />
       </section>

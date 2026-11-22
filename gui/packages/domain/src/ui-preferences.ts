@@ -317,7 +317,7 @@ export const uiPreferenceDefinitions = {
   "defaults.startingMachine": defineUiPreference(
     z.enum(["cloud", "last"]),
     "last",
-    "Where new threads start: last for where the last new thread started (Cloud before any), or cloud.",
+    "Where new threads start: last for Cloud, except a project where Local was picked in the last 24 hours, or cloud for always Cloud.",
   ),
   "defaults.showUltraEfforts": defineUiPreference(
     z.boolean(),

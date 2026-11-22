@@ -2701,6 +2701,43 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("permission:yes");
   });
 
+  it.each([
+    ["kimi", "request-kimi-permission", "git diff --stat"],
+    [undefined, "request-kimi-permission", "Bash"],
+    ["kimi", "request-kimi-permission:other-id", "Bash"],
+    ["kimi", "request-kimi-permission:structured", "git status"],
+    ["kimi", "request-kimi-permission:titled", "git status"],
+    ["kimi", "request-kimi-permission:output", "Bash"],
+  ])(
+    "shows a %s approval for %s the command %s (#2433)",
+    async (dialectId, text, command) => {
+      const { providerThreadId } = await startThread({
+        permissionMode: "accept-edits",
+        permissionEscalation: "ask",
+        ...(dialectId ? { dialectId } : {}),
+      });
+      await waitForResponse(
+        sendTurnRequest("turn/start", providerThreadId, {
+          input: [{ type: "text", text, mentions: [] }],
+        }),
+      );
+      const forwarded = await waitFor(
+        () =>
+          output.messages.find(
+            (message) =>
+              message.method === "interaction/request" &&
+              message.id !== undefined,
+          ),
+        "forwarded permission request",
+      );
+      expect(forwarded.params).toMatchObject({
+        payload: { subject: { kind: "command", command } },
+      });
+      await denyForwardedPermission();
+      await waitForTurnCompleted();
+    },
+  );
+
   it("answers session-grant decisions with the allow_always option", async () => {
     const { providerThreadId } = await startThread({
       permissionMode: "accept-edits",

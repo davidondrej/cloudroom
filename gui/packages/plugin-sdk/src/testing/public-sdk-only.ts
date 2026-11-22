@@ -28,7 +28,7 @@ const PRIVATE_PACKAGE_PREFIX = "@cloudroom/";
 /** Specifiers plugin code (server, host, bridge, app) may import. */
 const PLUGIN_IMPORT_ALLOWLIST: readonly RegExp[] = [
   /^@get-bb\/plugin-sdk$/u,
-  /^@get-bb\/plugin-sdk\/(?:host|app|provider-bridge|provider-bridge\/acp)$/u,
+  /^@get-bb\/plugin-sdk\/(?:host|app|provider-usage|provider-bridge|provider-bridge\/acp)$/u,
   /^zod$/u,
   /^node:/u,
   /^\.\.?\//u,

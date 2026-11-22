@@ -10,7 +10,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import { useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "react-router";
 import { TimelineImageGallery } from "./TimelineImageGallery";
@@ -87,6 +87,8 @@ import {
   PlanLimitRow,
   PlanLimitSwitchedRow,
 } from "./PlanLimitRow.js";
+import { isBackgroundCommandTaskType } from "@cloudroom/domain";
+import { BackgroundCommandBubble } from "./BackgroundCommandBubble.js";
 import {
   CloudLoginRow,
   cloudLoginRowProvider,
@@ -1596,6 +1598,14 @@ function TimelineRowView({
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
+  }
+  if (
+    spacing === "top-level" &&
+    row.kind === "work" &&
+    row.workKind === "workflow" &&
+    isBackgroundCommandTaskType(row.taskType)
+  ) {
+    return <BackgroundCommandBubble row={row} />;
   }
   const cloudLogin = cloudLoginRowProvider(row);
   if (cloudLogin) {

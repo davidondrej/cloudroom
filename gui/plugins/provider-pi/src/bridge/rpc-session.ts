@@ -496,6 +496,27 @@ export class PiRpcSession {
     this.child?.kill();
   }
 
+  get exited(): boolean {
+    return !this.child || this.child.exited;
+  }
+
+  /** Whether this session's pi has exited, waiting up to timeoutMs for it. */
+  async waitForExit(timeoutMs: number): Promise<boolean> {
+    const child = this.child;
+    if (!child || child.exited) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        child.waitForExit().then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   static async forkSessionFile(args: {
     sourceFile: string;
     targetFile: string;

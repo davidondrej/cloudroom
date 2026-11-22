@@ -159,6 +159,36 @@ describe("ACP provider maintenance", () => {
     },
   );
 
+  // #1823: cmux ships a `grok` wrapper that only forwards to the real CLI.
+  it.skipIf(process.platform === "win32")(
+    "treats a wrapper whose CLI is missing as not installed",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-grok-"));
+      try {
+        const command = path.join(dir, "grok");
+        await writeFile(
+          command,
+          `#!/bin/sh\necho "Error: grok not found in PATH" >&2\nexit 127\n`,
+        );
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: () => ({ command: "sh", args: [], displayCommand: "" }),
+          command,
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: "not_installed" },
+        });
+        expect(await getAcpProviderInstallationStatus(target)).toMatchObject({
+          installed: false,
+          installAction: { kind: "install" },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === "win32")(
     "checks Hermes without running its update-checking --version",
     async () => {

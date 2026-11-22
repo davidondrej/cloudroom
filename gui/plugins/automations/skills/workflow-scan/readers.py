@@ -24,11 +24,12 @@ ID = re.compile(r"(?<![A-Za-z0-9-])([a-z]-[0-9a-f]{8})(?![A-Za-z0-9])(?:, *| +)?
 LEAD = re.compile(r"[\s#|*_`>\[(\d.)+-]*")  # markup before a chat line's own ID: headings, tables, lists, bold, code
 
 
-def cli(*args, check=False):
+def cli(*args, check=False, timeout=None):
     # Windows: subprocess can't start room-cli.cmd by bare name, and cmd.exe would re-parse its arguments
     # (cutting a prompt at its first newline). room-cli reads them from ROOM_CLI_ARGV instead, like room-cli.ps1 passes them.
     env = {**os.environ, "ROOM_CLI_ARGV": json.dumps(args)} if WIN else None
-    return subprocess.run([CLI] if WIN else [CLI, *args], env=env, check=check, capture_output=True, encoding="utf-8", errors="replace")
+    return subprocess.run([CLI] if WIN else [CLI, *args], env=env, check=check, capture_output=True, encoding="utf-8", errors="replace",
+                          timeout=timeout)
 
 
 def room(*args):

@@ -66,9 +66,10 @@ function usePopupState() {
 // The cards above the chat input, most important first. Only the first one that wants to show does (ADR 20261111-222457).
 // The update card is a notice. The Cloud and star cards spend the account's weekly budget when they show. The skill
 // card shows only while that budget has a card left, and keeps its own limit of one a week (docs/scopes/skill-suggestions.md).
-const CARDS = ["update", "cloud", "skill", "star"] as const;
+// So does the "build next" note: it spends none of the budget, and is asked once per round (docs/scopes/build-next.md).
+const CARDS = ["update", "cloud", "skill", "build", "star"] as const;
 type Card = (typeof CARDS)[number];
-const cardWantsAtom = atom<Record<Card, number>>({ update: 0, cloud: 0, skill: 0, star: 0 });
+const cardWantsAtom = atom<Record<Card, number>>({ update: 0, cloud: 0, skill: 0, build: 0, star: 0 });
 const REFUSED_WAIT_MS = 10 * 60_000;
 const cardRefusedAtom = atom(false);
 

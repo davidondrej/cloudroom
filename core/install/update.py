@@ -32,6 +32,7 @@ CLAUDE_CODE = '2.1.281'  # The Claude Code version tested with this release.
 TAG = 'cloudroom-core-update'
 QUIET_MS = 10 * 60_000  # Restart only after 10 minutes without session activity.
 RETRY_SECONDS = 15 * 60
+RECOVERY_SECONDS = 2 * 3600  # Large histories can take half an hour or more to load before the core answers.
 IDLE = ('idle', 'sleeping', 'closed', 'process_lost', 'failed', 'saved_history_only')
 
 
@@ -259,15 +260,51 @@ def restarts():
 
 
 def start():
-    """Start the core and return systemd's restart count, which survives manual starts."""
-    count = restarts()
+    """Start the core and return systemd's restart count, read after the reset a manual start does."""
     run('systemctl', 'start', 'cloudroom.service')
-    return count
+    return restarts()
+
+
+def cpu_time():
+    """The running core's PID and CPU ticks, or None. The ticks grow while it loads history before answering."""
+    try:
+        pid = run('systemctl', 'show', 'cloudroom.service', '-p', 'MainPID', '--value')
+        fields = Path('/proc', pid, 'stat').read_text().rsplit(')', 1)[1].split()
+        return pid, int(fields[11]) + int(fields[12])  # utime + stime
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def answers(values, timeout):
+    """Whether the core answers HTTP at all, with any status. One try, no retries."""
+    request = urllib.request.Request(f'http://127.0.0.1:{port(values)}/v1/ready',
+                                     headers={'Authorization': 'Bearer ' + values['CLOUDROOM_TOKEN']})
+    try:
+        urllib.request.urlopen(request, timeout=timeout).close()
+    except urllib.error.HTTPError:
+        pass
+    except OSError:  # Refused, reset, or no reply: the core accepts connections before it loads history.
+        return False
+    return True
 
 
 def verify(values, before, expected, features, baseline, deadline=300):
     """The new core runs, reports the release, and kept every session."""
-    stop = time.monotonic() + deadline
+    begun = time.monotonic()
+    base, extended, last = begun + deadline, 0, cpu_time()
+    # Until the first HTTP reply, allow `deadline` more seconds after each rise in CPU time, up to a hard limit.
+    while (left := max(base, extended) - time.monotonic()) > 0 and not answers(values, min(30, left)):
+        if restarts() > baseline:
+            raise RuntimeError('The core keeps restarting')
+        now = cpu_time()
+        if last and now and now[0] == last[0] and now[1] > last[1]:
+            extended = min(time.monotonic() + deadline, begun + RECOVERY_SECONDS)
+        last = now
+        time.sleep(max(0, min(3, max(base, extended) - time.monotonic())))
+    if left <= 0:
+        raise RuntimeError('The core did not answer')
+    # After the first reply: main's deadline, or only what is left of the current extension.
+    stop = base if time.monotonic() <= base else max(base, extended)
     while True:
         try:
             # The same sessions by ID, since a restart can reorder which 1,000 the dashboard lists. A lost one fails its lookup.
@@ -301,6 +338,8 @@ def verify(values, before, expected, features, baseline, deadline=300):
         if failures:
             raise RuntimeError('; '.join(failures))
         if not waiting:
+            if restarts() > baseline:  # A crash and automatic restart between checks must not pass.
+                raise RuntimeError('The core restarted during verification')
             return
         if time.monotonic() > stop:
             raise RuntimeError('The core did not finish starting')

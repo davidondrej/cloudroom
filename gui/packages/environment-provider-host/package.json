@@ -41,7 +41,7 @@
     }
   },
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
     "typecheck": "bun check"
   },
   "dependencies": {

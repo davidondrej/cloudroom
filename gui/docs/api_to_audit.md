@@ -5,6 +5,13 @@
 `bb.agents.contributeInstructions` can receive `ctx.experimental_execution` with the resolved `providerId` and `model` for a user message. It is absent for callers without a resolved target.
 
 
+## `experimental_createHostUsageSource`
+
+Plugins can bundle host-local usage handlers from `@get-bb/plugin-sdk/provider-usage`
+in SDK 0.6.53. Each call owns its cache. The plugin supplies its schemas, plugin
+ID, and optional provider ID, then registers its own list and fetch RPC methods.
+Before stabilizing, check whether another usage source needs a different cache policy.
+
 ## `app.commands.register`
 
 `app.commands.register` requires SDK 0.4.91; `defaultShortcut` and keyboard

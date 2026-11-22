@@ -37,7 +37,10 @@ if (reason) console.log(JSON.stringify({hookSpecificOutput:{hookEventName:"PreTo
 }
 
 export function codexGuardConfig(command) {
-  const hook = { async: false, command, timeout: 10, type: "command" };
+  // On a busy Windows machine, starting PowerShell plus the app as Node alone can pass 10s.
+  // A timed-out guard only warns and lets the command run, so give Windows more room.
+  const timeout = process.platform === "win32" ? 30 : 10;
+  const hook = { async: false, command, timeout, type: "command" };
   const identity = { event_name: "pre_tool_use", hooks: [hook], matcher: "Bash" };
   const hash = "sha256:" + createHash("sha256").update(JSON.stringify(identity)).digest("hex");
   // Codex uses a fixed synthetic root (C:\ on Windows, / on Unix), regardless of cwd.

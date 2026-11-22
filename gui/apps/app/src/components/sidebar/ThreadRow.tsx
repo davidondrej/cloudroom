@@ -90,7 +90,7 @@ import {
 } from "./sidebarRowClasses";
 import type { ConsumeDragClickSuppression } from "@/components/ui/use-drag-click-suppression";
 import type { SidebarSortableDragBindings } from "./sortableMotion";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import type {
   SidebarNestTargetState,
   SidebarReorderPlacement,
@@ -808,7 +808,7 @@ function ThreadRowComponent({
       aria-label={thread.executionTarget === "cloud" ? "Cloud thread" : "Local thread"}
       className={cn(
         "pointer-events-none size-3.5 shrink-0",
-        showCloudIcon ? "text-primary [&_path]:stroke-[1.9]" : "text-muted-foreground opacity-50",
+        showCloudIcon ? "cloud-icon-sidebar" : "text-muted-foreground opacity-50",
       )}
     />
   );

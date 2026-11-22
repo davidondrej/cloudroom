@@ -1,6 +1,6 @@
 # Manage Agent State — DeepAPI Endpoint Reference
 
-Generated endpoint reference for the `manage-agent-state` rows of the `deepapi` skill router. Bundle version: 2b2f7801435a. This file is always managed — it is refreshed with the bundle even when `../SKILL.md` has been customized.
+Generated endpoint reference for the `manage-agent-state` rows of the `deepapi` skill router. Bundle version: 6bd40d93d0dc. This file is always managed — it is refreshed with the bundle even when `../SKILL.md` has been customized.
 
 Shared protocol (environment, auth, idempotency, dry-run, polling, and error handling) lives in `../SKILL.md`. This file carries the full per-endpoint detail.
 
@@ -214,7 +214,7 @@ Read the workspace credit balance without spending anything.
 - Polling: This route returns a terminal envelope directly.
 
 Safety:
-- Check availableMicrousd before starting paid work; if it cannot cover the planned maxCostUsd, stop and ask the user to top up at https://deepapi.co/credits. Offer to open the page; after they agree, use the platform-native browser command, or print the link if no desktop browser is available.
+- Check availableMicrousd before starting paid work; if it cannot cover the planned maxCostUsd, stop and ask the user to top up at https://deepapi.co/credits. Offer to open the page; after they agree, use the platform-native browser command, or print the link if no desktop browser is available. When output is a note instead of numbers, this key has no balance to check or top up: skip this check and never send the user to deepapi.co.
 
 Response schema:
 ```json

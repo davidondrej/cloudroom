@@ -18,6 +18,10 @@
     "category": "cloud-and-remote",
     "screenshots": []
   },
+  "director": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
   "custom-instructions": {
     "category": "memory-and-context",
     "screenshots": []
@@ -47,6 +51,10 @@
     "screenshots": []
   },
   "provider-pi": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
+  "provider-cloudroom-agent": {
     "category": "agents-and-providers",
     "screenshots": []
   },

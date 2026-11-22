@@ -369,6 +369,21 @@ fn flag<'a>(words: &[&'a str], name: &str) -> Option<&'a str> {
         .and_then(|i| words.get(i + 1).copied())
 }
 
+/// The desktop's Local-only target flags, read as the request reads `--name` and the rest: a Cloud loop can't move,
+/// so update refuses them before any request (#2361).
+fn target_flag(words: &[&str]) -> Option<&'static str> {
+    ["--target-thread", "--environment", "--new-environment"]
+        .into_iter()
+        .find(|name| flag(words, name).is_some())
+}
+
+/// A `--project` create can't honor, read as `flag` reads the rest: empty, repeated, or not `own`, this thread's
+/// `ROOM_PROJECT_ID` (as `thread spawn` refuses it).
+fn bad_project(words: &[&str], own: &str) -> bool {
+    let named = words.iter().filter(|w| **w == "--project").count();
+    named > 1 || (named == 1 && flag(words, "--project").is_none_or(|p| p.is_empty() || p != own))
+}
+
 /// `--in 30m` as `30 minutes`.
 fn delay(value: &str) -> Option<String> {
     let split = value.find(|c: char| !c.is_ascii_digit())?;
@@ -419,7 +434,8 @@ fn wake(args: &[String]) -> Option<Vec<String>> {
 /// `room-cli loop ...` in Cloud threads; on the Mac, `room-cli loop create --cloud` does the same.
 pub async fn cli(args: &[String]) -> io::Result<i32> {
     let woken;
-    let args = if args.first().map(String::as_str) == Some("wake") {
+    let wake_call = args.first().map(String::as_str) == Some("wake");
+    let args = if wake_call {
         let Some(create) = wake(&args[1..]) else {
             println!("{WAKE_USAGE}");
             let help = matches!(
@@ -472,6 +488,26 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     return Ok(2);
                 };
                 body["id"] = json!(id);
+                if let Some(name) = target_flag(&words) {
+                    eprintln!(
+                        "{name} is for Local loops: a Cloud loop can't move. Create a new loop with --same-thread in the thread it should re-prompt instead."
+                    );
+                    return Ok(2);
+                }
+            } else if !wake_call {
+                // The website files a Cloud loop under the caller's thread, so another project was silently ignored (#1880).
+                let own = std::env::var("ROOM_PROJECT_ID").unwrap_or_default();
+                if bad_project(&words, &own) {
+                    let own = if own.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {own}")
+                    };
+                    eprintln!(
+                        "A Cloud thread creates loops only in its own project{own}. Give its ID once or omit --project; for another project, run room-cli loop create --cloud --project ID on the Mac."
+                    );
+                    return Ok(2);
+                }
             }
             let prompt = match (flag(&words, "--prompt"), flag(&words, "--prompt-file")) {
                 (Some(text), None) => Some(text.to_owned()),
@@ -579,4 +615,56 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
     let answer = crate::mac::request(crate::mac::SOCKET, "POST", "/automation", Some(body)).await?;
     println!("{answer}");
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn update_refuses_local_target_flags() {
+        use super::target_flag;
+        assert_eq!(
+            target_flag(&["update", "id", "--name", "n", "--target-thread", "t"]),
+            Some("--target-thread")
+        );
+        // `--prompt --json --target-thread t`: room-cli drops --json first.
+        assert_eq!(
+            target_flag(&["update", "id", "--prompt", "--target-thread", "t"]),
+            Some("--target-thread")
+        );
+        assert_eq!(
+            target_flag(&[
+                "update",
+                "id",
+                "--cloud",
+                "--prompt",
+                "--environment=staging"
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn create_refuses_another_project() {
+        use super::bad_project;
+        let create =
+            |extra: &[&'static str]| [&["create", "--name", "n", "--in", "5m"], extra].concat();
+        assert!(bad_project(&create(&["--project", "b"]), "a"));
+        assert!(bad_project(&create(&["--project", "b"]), ""));
+        assert!(!bad_project(&create(&["--project", "a"]), "a"));
+        assert!(!bad_project(&create(&[]), "a"));
+        // Review of #424: a repeat or an empty value is refused, and prompt text isn't an option.
+        assert!(bad_project(
+            &create(&["--project", "a", "--project", "b"]),
+            "a"
+        ));
+        assert!(bad_project(
+            &create(&["--project", "a", "--project", "a"]),
+            "a"
+        ));
+        assert!(bad_project(&create(&["--project"]), "a"));
+        assert!(!bad_project(
+            &create(&["--prompt", "--project=b is the flag to check"]),
+            "a"
+        ));
+    }
 }

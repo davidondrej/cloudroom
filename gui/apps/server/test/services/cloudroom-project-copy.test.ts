@@ -203,6 +203,12 @@ it("a project whose GitHub origin has a token saves it clean and copies as a Git
     const plan = (filled: boolean) => planProjectCopyOrThrow(deps, { workspace: async () => ({ path: "/w" }), runOnVm: async () => ({ code: filled ? 1 : 0 }) } as unknown as CloudroomClient, thread.id, "w");
     expect(await plan(false)).toMatchObject({ repository: githubRepository(saved), clone: true, copyAll: false });
     expect(await plan(true)).toMatchObject({ repository: githubRepository(saved), clone: false, copyAll: false });
+    // A project with neither a local folder on this machine nor a GitHub remote skips /v1/workspaces altogether.
+    const { project: emptyProject } = seedProjectWithSource(deps, { hostId: host.id, path: join(app, "missing") });
+    const emptyThread = createThread(deps.db, deps.hub, { executionTarget: "cloud", projectId: emptyProject.id, providerId: "codex", status: "idle" });
+    let workspaceChecked = false;
+    expect(await planProjectCopyOrThrow(deps, { workspace: async () => { workspaceChecked = true; return null; } } as unknown as CloudroomClient, emptyThread.id, "w")).toBeNull();
+    expect(workspaceChecked).toBe(false);
   } finally {
     rmSync(app, { recursive: true, force: true });
     await harness.cleanup();

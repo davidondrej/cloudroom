@@ -682,7 +682,7 @@ it("sends a new thread's first message before its project copy starts, so a slow
 it.each([
   ["existing checkout", null], ["fresh clone", null], ["existing checkout", "index.lock"], ["existing checkout", "terminated"],
   ["existing checkout", "checkout probe"], ["personal child", "checkout probe"], ["existing checkout", "status write"], ["existing checkout", "status write x3"],
-  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"], ["fresh clone", "clone 504"], ["existing checkout", "branch dropped"],
+  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"], ["fresh clone", "clone 504"], ["existing checkout", "branch dropped"], ["existing checkout", "workspace slow"], ["child", "workspace late"],
 ] as const)("`room-cli files wait` reads a new thread's %s as copying until its branch and files are ready (#816, fault: %s)", async (kind, fault) => {
   const root = await mkdtemp(join(tmpdir(), "cloudroom-files-ready-"));
   const folder = join(root, "project"), origin = join(root, "origin.git"), mac = join(root, "mac");
@@ -722,6 +722,8 @@ it.each([
       const result = spawnSync("/bin/bash", ["-c", new URL(req.url, "http://core").searchParams.get("command")!], { input: Buffer.concat(chunks) });
       return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
     }
+    // Branch setup's workspace read outlasts the client's own deadline once, shortened below (#2023).
+    if (req.url === "/v1/sessions/cr_one/workspace" && fault?.startsWith("workspace") && await marker() === "copying" && faults-- > 0) await new Promise(resolve => setTimeout(resolve, 3_000));
     if (req.url === "/v1/sessions/cr_one/workspace") return fault === "checkout probe" && faults-- > 0 ? json({ error: "busy" }, 500) : json({ path: folder, branch: null, head: checkout().branch ? "head" : null });
     const input = await body(req);
     if (req.url?.split("?")[0] === "/v1/vm/run") {
@@ -764,6 +766,12 @@ it.each([
   });
   coreUrl = await listen(coreServer);
   const websiteUrl = await listen(websiteServer);
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  // `workspace late`: the retry window (3.5 of the copy's 9 minutes) closes before the read times out, so a retry that
+  // would answer just before the deadline, and then switch the branch after it, never starts.
+  const later = setTimeout, short: Record<number, number> = fault === "workspace late" ? { 30_000: 2_000, 210_000: 1_000 } : { 30_000: 2_000 };
+  if (fault?.startsWith("workspace")) vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => timeout(short[ms] ?? ms));
+  if (fault === "workspace late") vi.spyOn(globalThis, "setTimeout").mockImplementation(((run: () => void, ms?: number, ...args: unknown[]) => later(run, ms === 9 * 60_000 ? 8_000 : ms, ...args)) as typeof setTimeout);
   try {
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
     const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId: "files-ready", title: "Files ready", projectId: project.id, parentThreadId: parent?.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, input: [{ type: "text", text: "test", mentions: [] }] }) });
@@ -777,6 +785,13 @@ it.each([
     await waitFor(() => atFirstPrompt !== undefined, "first message");
     // The agent's first `room-cli files wait` must wait: with no status, a folder with files reads as nothing running.
     expect(atFirstPrompt).toBe("copying");
+    if (fault === "workspace late") {
+      for (let i = 0; i < 400 && !(await marker())?.startsWith("failed"); i++) await new Promise(resolve => later(resolve, 25));
+      // It fails at once, as main does, and nothing changes the branch or the marker after the deadline.
+      await new Promise(resolve => later(resolve, 8_000));
+      expect({ marker: await marker(), branch: checkout().branch }).toEqual({ marker: expect.stringMatching(/^failed: Cloudroom could not set up the thread's branch .*: Cloudroom request cancelled or timed out$/), branch: "main" });
+      return;
+    }
     await waitFor(() => atDone !== undefined, "ready or failed", 15_000);
     if (fault === "index.lock" || fault === "terminated") expect(atDone).toMatchObject({ marker: expect.stringMatching(fault === "index.lock" ? /^failed: Cloudroom could not switch the folder to the thread's branch room\/.*, so it is still on main\. Git said: .*index\.lock/s : /^failed: .*Git said: exit code null$/), branch: "main" });
     // The child's parent has no folder, so its code (none) ends as failed, after the branch.
@@ -786,6 +801,7 @@ it.each([
     if (kind === "child" && !fault) expect(git(folder, "log", "-1", "--format=%s")).toBe("Parent work");
     expect(await readdir(folder)).toContain("file19.txt");
   } finally {
+    vi.restoreAllMocks();
     service.stop();
     coreServer.close(); websiteServer.close();
     await harness.cleanup();
@@ -869,7 +885,7 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
     expect(count("awake") - failedFrom).toBeLessThanOrEqual(3);
     expect(count("register")).toBe(0);
 
-    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+    const deliveries = vi.spyOn((service as unknown as { delivery: { deliverPending: (id: string) => Promise<void> } }).delivery, "deliverPending");
     const failing = count("awake");
     await waitFor(() => count("awake") > failing, "another failed awake check");
     await new Promise(resolve => setTimeout(resolve, 1_600));
@@ -922,7 +938,7 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
     const threads = Array.from({ length: 3 }, () => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }));
     harness.deps.db.insert(cloudroomThreads).values(threads.map((thread, i) => ({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: `cr_${i}`, startRequestId: `start_${i}`, model: "test-model", reasoning: "medium" }))).run();
-    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+    const deliveries = vi.spyOn((service as unknown as { delivery: { deliverPending: (id: string) => Promise<void> } }).delivery, "deliverPending");
 
     await new Promise(resolve => setTimeout(resolve, 4_000));
     expect(deliveries.mock.calls.map(([id]) => id).sort()).toEqual(threads.map(thread => thread.id).sort());
@@ -1039,7 +1055,7 @@ it("a message to a stopped thread is saved first, then resumes it once its resto
 
     // Without saved capabilities the app must ask the sandbox first. Two attempts wait on its slow wake: a first try and a
     // new message.
-    const asked = vi.spyOn(service as unknown as { liveCapabilities: () => Promise<unknown> }, "liveCapabilities");
+    const asked = vi.spyOn((service as unknown as { rt: { liveCapabilities: () => Promise<unknown> } }).rt, "liveCapabilities");
     const slow = send("after-stop"), other = send("no-capabilities");
     await waitFor(() => asked.mock.calls.length === 2 && wakes === 1, "both attempts asking the sandbox");
     // Meanwhile a retry of the first, with saved capabilities, saves the message at once.

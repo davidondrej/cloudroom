@@ -1250,6 +1250,7 @@ room-cli loop list --cloud [--thread <cloudThreadId>]   All Cloud loops, in ever
 room-cli loop show|pause|resume|run|hook <cloudLoopId>
 room-cli loop runs <cloudLoopId> [--limit <count>]   What each run did, from its loop report
 room-cli loop update <cloudLoopId> [--name <name>] [--priority 1-4] [--prompt <text>] [schedule flags] [--script <inline> | --script-file <path> | --no-script] [--provider <id>] [--model <model>] [--reasoning <level>] [--agent <provider,model[,level]>...] [--secrets <KEY,.env|none|all>]
+  (--target-thread, --environment, and --new-environment are Local only: a Cloud loop can't move)
 room-cli loop delete <cloudLoopId> --yes
 `;
 }
@@ -1398,6 +1399,9 @@ async function runCloudCommand(room: Pick<BbPluginApi, "sdk">, args: ParsedArgs,
       ...(boolFlag(args, "new-thread") ? { new_thread: true } : boolFlag(args, "same-thread") ? { new_thread: false } : {}), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) }, "created");
   }
   if (args.command === "update") {
+    // A Cloud loop can't move to another thread or environment (#2361): refuse before any request, never claim it moved.
+    const target = AGENT_TARGET_FLAG_NAMES.find((name) => args.flags.has(name));
+    if (target) throw new Error(`--${target} is for Local loops: a Cloud loop can't move. Create a new Cloud loop with --thread <cloudThreadId> --same-thread or --project <id> instead.`);
     const fields = { ...(flag(args, "name") ? { name: flag(args, "name") } : {}), ...(flag(args, "prompt") ? { prompt: flag(args, "prompt") } : {}), ...await cloudJev(room, args, ctx, false), ...cloudSchedule(args), ...await cloudScript(room, args, ctx), ...cloudAgent(args), ...parsePriority(args), ...cloudSecrets(args) };
     return one({ action: "update", id: requireId(), ...fields }, "updated");
   }

@@ -181,6 +181,55 @@ describe("room-cli provider command output", () => {
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual(["[]"]);
   });
 
+  it("room-cli provider models lists the calling thread's project, or --project (#1236)", async () => {
+    // A project whose folder moved lists nothing; the machine lists gpt-5.
+    const get = vi.fn(async (args: { query: { projectId?: string } }) => ({
+      providers: [],
+      models: args.query.projectId
+        ? []
+        : [{ model: "gpt-5", displayName: "GPT-5", isDefault: true }],
+      selectedOnlyModels: [],
+      modelLoadError: null,
+    }));
+    stubServerApi({ "v1.system.execution-options.$get": get });
+    vi.stubEnv("ROOM_PROJECT_ID", "proj-env");
+
+    await runCommand(
+      ["provider", "models", "acp-opencode", "--json"],
+      register,
+    );
+    await runCommand(
+      [
+        "provider",
+        "models",
+        "acp-opencode",
+        "--project",
+        "proj-flag",
+        "--json",
+      ],
+      register,
+    );
+
+    expect(get).toHaveBeenNthCalledWith(1, {
+      query: { providerId: "acp-opencode", projectId: "proj-env" },
+    });
+    expect(get).toHaveBeenNthCalledWith(2, {
+      query: { providerId: "acp-opencode" },
+    });
+    expect(get).toHaveBeenNthCalledWith(3, {
+      query: { providerId: "acp-opencode", projectId: "proj-flag" },
+    });
+    expect(get).toHaveBeenCalledTimes(3);
+    expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
+      JSON.stringify(
+        [{ model: "gpt-5", displayName: "GPT-5", isDefault: true }],
+        null,
+        2,
+      ),
+      "[]",
+    ]);
+  });
+
   it("rejects simultaneous machine and environment selectors", async () => {
     await expect(
       runCommand(

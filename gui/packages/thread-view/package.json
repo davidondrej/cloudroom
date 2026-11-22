@@ -11,14 +11,13 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@cloudroom/domain": "workspace:*",
-    "@cloudroom/server-contract": "workspace:*",
-    "zod": "^4.3.6"
+    "@cloudroom/server-contract": "workspace:*"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",

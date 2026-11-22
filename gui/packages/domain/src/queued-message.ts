@@ -219,6 +219,8 @@ export const queuedMessageSystemNoticeSchema = z.object({
   childReport: z
     .object({ at: z.number(), sequences: z.record(z.string(), z.number()) })
     .optional(),
+  /** A child's needs-attention notice: the interaction it reports (#2452). */
+  interactionId: z.string().optional(),
 });
 export type QueuedMessageSystemNotice = z.infer<
   typeof queuedMessageSystemNoticeSchema

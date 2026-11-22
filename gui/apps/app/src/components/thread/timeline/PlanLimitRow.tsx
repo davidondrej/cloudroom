@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useRef,
   useState,
   type ComponentType,
   type CSSProperties,
@@ -26,7 +27,16 @@ import {
   getProviderIconInfo,
   getProviderIconTintStyle,
 } from "@/lib/provider-icon";
-import { usePlanLimitAgents, type PlanLimitAgent } from "./plan-limit-agents";
+import {
+  restartProviderModels,
+  useProviderCliFix,
+} from "@/components/pickers/ModelUnavailable";
+import { CLOUDROOM_AGENT_LIVE } from "@/components/plugin/management/plugin-browse-discovery";
+import {
+  CLOUDROOM_AGENT_ID,
+  usePlanLimitAgents,
+  type PlanLimitAgent,
+} from "./plan-limit-agents";
 import {
   atLimit,
   nextAccount,
@@ -49,6 +59,8 @@ type PlanLimitAccountSwitch = NonNullable<
 
 /** Only a recent limit's card counts as seen: an old thread opened again after a restart would count it twice. */
 const CARD_VIEW_MS = 24 * 60 * 60_000;
+/** After Cloudroom Agent installs, its model should list within seconds. Past this, setup didn't work. */
+const SETUP_CHECK_MS = 30_000;
 /** A switch whose new agent never got going (say its message is still queued) stops showing as in progress. */
 const SWITCH_STALE_MS = 3 * 60_000;
 
@@ -79,6 +91,7 @@ export function PlanLimitRow({
 }) {
   const {
     thread,
+    environmentId,
     model,
     self,
     selfResetsAt,
@@ -88,7 +101,16 @@ export function PlanLimitRow({
     agents,
     agentsLoaded,
     primary,
+    cloudroomAgent,
+    cloudroomAgentMissing,
   } = usePlanLimitAgents(threadId);
+  // Cloudroom Agent that isn't on this computer yet is installed by the same click, then takes over.
+  const agentInstall = useProviderCliFix(
+    CLOUDROOM_AGENT_ID,
+    environmentId ? { environmentId } : undefined,
+    cloudroomAgentMissing,
+  );
+  const [setup, setSetup] = useState<"running" | "failed" | null>(null);
   const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState<string | null>(null);
@@ -122,6 +144,60 @@ export function PlanLimitRow({
     return () => clearTimeout(timer);
   }, [busy, pending]);
   const stopped = status === "idle" || status === "error";
+  const switchTo = (agent: PlanLimitAgent) => {
+    setSwitching({ from: self, to: agent, startedAt: Date.now() });
+    update.mutate(
+      {
+        id: threadId,
+        providerId: agent.providerId,
+        model: agent.model,
+        reasoningLevel: agent.reasoningLevel,
+        resend: true,
+      },
+      {
+        onSuccess: () =>
+          void queryClient.invalidateQueries({
+            queryKey: ["cloudroom-thread", threadId],
+          }),
+        onError: () => setSwitching(null),
+      },
+    );
+  };
+  const installing = agentInstall?.installing ?? false;
+  const canInstall = agentInstall !== null;
+  const installRan = useRef(false);
+  // Setup is installing, then checking for its model, then the switch, or Retry. After a failure only a click switches.
+  useEffect(() => {
+    if (setup !== "running" || !stopped || switching) return;
+    if (cloudroomAgent) {
+      setSetup(null);
+      switchTo(cloudroomAgent);
+      return;
+    }
+    if (installing) {
+      installRan.current = true;
+      return;
+    }
+    if (installRan.current && canInstall) {
+      // The install ended and it still isn't installed: the install's own message says why.
+      setSetup("failed");
+      return;
+    }
+    const timer = setTimeout(() => setSetup("failed"), SETUP_CHECK_MS);
+    return () => clearTimeout(timer);
+    // oxlint-disable-next-line react/exhaustive-deps -- `switchTo` is this render's own, and runs once per click
+  }, [setup, stopped, switching, cloudroomAgent, installing, canInstall]);
+  const setUpAgent = () => {
+    installRan.current = false;
+    setSetup("running");
+    if (agentInstall) return agentInstall.install();
+    // Installed, but its model didn't list: look again.
+    void restartProviderModels(
+      queryClient,
+      CLOUDROOM_AGENT_ID,
+      environmentId ? { environmentId } : undefined,
+    ).catch(() => setSetup("failed"));
+  };
   const shown =
     !!thread && stopped && !switching && !switched;
   const provider = thread?.providerId ?? "";
@@ -177,25 +253,6 @@ export function PlanLimitRow({
       isCloud,
     });
   };
-  const switchTo = (agent: PlanLimitAgent) => {
-    setSwitching({ from: self, to: agent, startedAt: Date.now() });
-    update.mutate(
-      {
-        id: threadId,
-        providerId: agent.providerId,
-        model: agent.model,
-        reasoningLevel: agent.reasoningLevel,
-        resend: true,
-      },
-      {
-        onSuccess: () =>
-          void queryClient.invalidateQueries({
-            queryKey: ["cloudroom-thread", threadId],
-          }),
-        onError: () => setSwitching(null),
-      },
-    );
-  };
   const name = self?.name ?? thread.providerId;
   const reset = formatUsageReset(selfResetsAt);
   // Cloud keeps its own Antigravity login, so picking an account here can't move a Cloud Antigravity thread.
@@ -206,6 +263,11 @@ export function PlanLimitRow({
   const vendor = thread.providerId === "codex" ? "OpenAI" : name;
   const SelfIcon = self?.icon;
   const retryAt = refusal || !selfResetsAt ? null : Date.parse(selfResetsAt);
+  const settingUp = setup === "running" || installing;
+  const setupFailed = setup === "failed" && !installing && !cloudroomAgent;
+  // Setup keeps the button while the agent is neither missing nor listed yet.
+  const offersAgent =
+    CLOUDROOM_AGENT_LIVE && (cloudroomAgent !== null || canInstall || setup !== null);
 
   return (
     <div className={cn("flex flex-col gap-3 py-1", className)}>
@@ -237,7 +299,7 @@ export function PlanLimitRow({
             {busy}
           </Button>
         </div>
-      ) : canSwitch || primary || retryAt ? (
+      ) : canSwitch || primary || retryAt || offersAgent ? (
         <div className="flex flex-wrap items-center gap-2 pl-7">
           {retryAt ? (
             <Button
@@ -327,6 +389,39 @@ export function PlanLimitRow({
                 </>
               ) : null}
             </SplitButton>
+          ) : null}
+          {offersAgent ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={settingUp}
+              onClick={() =>
+                cloudroomAgent ? switchTo(cloudroomAgent) : setUpAgent()
+              }
+            >
+              {settingUp ? (
+                <Icon
+                  name="Spinner"
+                  className="size-3.5 animate-spin"
+                  aria-hidden
+                />
+              ) : (
+                <LogoIcon logo={agentOf(CLOUDROOM_AGENT_ID)} className="size-3.5" />
+              )}
+              {installing
+                ? "Installing Cloudroom Agent"
+                : settingUp
+                  ? "Checking Cloudroom Agent"
+                  : setupFailed
+                    ? "Retry Cloudroom Agent"
+                    : "Continue with Cloudroom Agent"}
+            </Button>
+          ) : null}
+          {setupFailed ? (
+            <span role="status" className="text-sm text-muted-foreground">
+              Cloudroom Agent didn't finish setting up.
+            </span>
           ) : null}
         </div>
       ) : null}

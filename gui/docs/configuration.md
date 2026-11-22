@@ -691,7 +691,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
-| `defaults.startingMachine`        | `last` (default: where the project's last new thread started) or `cloud` |
+| `defaults.startingMachine`        | `last` (default: Cloud, except a project where Local was picked in the last 24 hours) or `cloud` |
 | `defaults.showUltraEfforts`       | `true` adds Claude Ultracode and Codex Ultra to the effort menu (default `false`) |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no

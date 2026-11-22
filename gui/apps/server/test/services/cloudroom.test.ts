@@ -824,10 +824,10 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
     expect(parentOf(own.id)).toBeNull();
     expect((await patch(own.id, lead.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(lead.id);
-    const service = cloudroom(harness.deps) as unknown as { childTurnEnded?: (child: { id: string; parentThreadId: string }, status: string) => void; tellLocalParent(threadId: string, status: string, turn: string): void; noticeCloudParent(threadId: string, status: string, turn: string): Promise<void> };
+    const service = cloudroom(harness.deps) as unknown as { childTurnEnded?: (child: { id: string; parentThreadId: string }, status: string) => void; children: { tellLocalParent(threadId: string, status: string, turn: string): void; noticeCloudParent(threadId: string, status: string, turn: string): Promise<void> } };
     const reports = vi.fn();
     service.childTurnEnded = reports;
-    service.tellLocalParent(own.id, "completed", "turn-1");
+    service.children.tellLocalParent(own.id, "completed", "turn-1");
     expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed");
     expect((await patch(own.id, cloudParent.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(cloudParent.id);
@@ -858,10 +858,10 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
 
     const notices = (id: string) => harness.db.select().from(cloudroomCommands).all().filter(row => row.threadId === id).map(row => JSON.parse(row.input).text);
     harness.db.insert(cloudroomCommands).values({ id: `first_${own.id}`, threadId: own.id, command: "prompt", input: JSON.stringify({ text: "Start", parent_thread: cloudParent.id }), state: "completed", createdAt: 1 }).run();
-    await service.noticeCloudParent(own.id, "completed", "turn-2");
+    await service.children.noticeCloudParent(own.id, "completed", "turn-2");
     expect(notices(cloudParent.id)).toEqual([]);
     expect((await patch(own.id, shared.id)).status).toBe(200);
-    await service.noticeCloudParent(own.id, "completed", "turn-3");
+    await service.children.noticeCloudParent(own.id, "completed", "turn-3");
     expect(notices(shared.id)).toEqual([expect.stringContaining(`Child thread ${own.id} completed`)]);
   } finally { cloudroom(harness.deps).stop(); website.close(); await harness.cleanup(); }
 });
@@ -1398,7 +1398,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     const remove = async (id: string) => { const response = await harness.app.request(`/api/v1/threads/${thread.id}/queued-messages/${id}`, { method: "DELETE" }); return { status: response.status, ...await response.json() }; };
     const config = join(harness.config.dataDir, "cloudroom.json"), connection = await readFile(config, "utf8");
     await writeFile(config, JSON.stringify({ sandboxToken: "a".repeat(64) }), { mode: 0o600 });
-    (service as unknown as { lastCapabilities: null }).lastCapabilities = null;
+    (service as unknown as { rt: { lastCapabilities: null } }).rt.lastCapabilities = null;
     for (const [id, status] of [["%20", 404], ["missing", 404], [tagged("second"), 200]] as const) {
       expect(await quick(remove(id))).toMatchObject({ status });
     }
@@ -1761,8 +1761,8 @@ it.each([
   const service = cloudroom(harness.deps);
   const website = await fakeLoginsWebsite();
   (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
-  (service as unknown as { sandboxMode: () => Promise<boolean> }).sandboxMode = async () => true;
-  const syncLogins = () => (service as unknown as { syncLogins: () => Promise<void> }).syncLogins();
+  (service as unknown as { rt: { sandboxMode: () => Promise<boolean> } }).rt.sandboxMode = async () => true;
+  const syncLogins = () => (service as unknown as { auth: { syncLogins: () => Promise<void> } }).auth.syncLogins();
   try {
     if (copyLogins !== null) await sync.setCopyLogins(harness.deps, copyLogins);
     await sync.setCopyMacGithub(harness.deps, githubCard);
@@ -1792,13 +1792,13 @@ it.each([
   const service = cloudroom(harness.deps);
   const website = await fakeLoginsWebsite();
   (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
-  (service as unknown as { sandboxMode: () => Promise<boolean> }).sandboxMode = async () => true;
+  (service as unknown as { rt: { sandboxMode: () => Promise<boolean> } }).rt.sandboxMode = async () => true;
   const rules = service.sandboxes.skipLogins;
   service.sandboxes.skipLogins = async () => new Set([...await rules(), "codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
   try {
     await sync.setCopyLogins(harness.deps, copyLogins);
     if (removed) await sync.markLogin(harness.deps, "kimi", "blocked");
-    await (service as unknown as { syncLogins: () => Promise<void> }).syncLogins();
+    await (service as unknown as { auth: { syncLogins: () => Promise<void> } }).auth.syncLogins();
     await mkdir(join(home, "credentials"));
     await writeFile(join(home, "config.toml"), 'default_model = "fake"\n');
     await writeFile(join(home, "credentials", "kimi-code.json"), '{"access_token":"fake"}');
@@ -1986,7 +1986,7 @@ it("tells a Cloud parent once when Core keeps refusing its child's start for now
       vi.spyOn(Date, "now").mockReturnValue(now + after);
       hold = Boolean(archive);
       if (unarchive) unarchiveThread(harness.db, harness.hub, id);
-      const started = (service as unknown as { deliver(id: string): Promise<void> }).deliver(id);
+      const started = (service as unknown as { delivery: { deliver(id: string): Promise<void> } }).delivery.deliver(id);
       if (archive) { await expect.poll(() => held, { interval: 5 }).not.toBeNull(); archiveThread(harness.db, harness.hub, id); held!(); }
       await expect(started).rejects.toThrow();
       await new Promise(resolve => setImmediate(resolve));

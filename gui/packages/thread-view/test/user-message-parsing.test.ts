@@ -1,103 +1,72 @@
 import { describe, expect, it } from "vitest";
-import { turnScope, type PromptTextMention } from "@cloudroom/domain";
+import type { PromptTextMention } from "@cloudroom/domain";
 import {
   createTimelineEventFactory,
   decodeThreadEventRow,
   type TimelineEventFactory,
 } from "./timeline-test-harness.js";
-import type { BuildEventProjectionMessagesOptions } from "../src/event-projection-types.js";
-import type { AcceptedClientRequest } from "../src/accepted-client-request-context.js";
 import {
   parsePromptInput,
-  parseAcceptedSteersFromClientRequest,
-  parsePendingSteersFromClientRequest,
-  parseUsersFromClientRequest,
-} from "../src/user-message-parsing.js";
+  type AcceptedClientRequest,
+} from "../src/events.js";
+import {
+  buildClientUserRows,
+  resolveTurnRequestKind,
+  shouldPreservePendingMessages,
+} from "../src/messages.js";
 
 type ClientTurnRequestedEventRow = ReturnType<
   TimelineEventFactory["clientTurnRequested"]
 >;
 
-interface AcceptedClientRequestFixtureArgs {
-  turnId?: string;
-}
-
 const AGENT_STEER_TEXT = "Please account for the restart";
 const SENDER_THREAD_ID = "thr_sender";
 
-const standardProjectionOptions: BuildEventProjectionMessagesOptions = {
-  threadStatus: "active",
-  threadName: "",
-};
-
-function agentSteerRequest(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "agent",
-    senderThreadId: SENDER_THREAD_ID,
-    target: { kind: "auto", expectedTurnId: "turn-1" },
-    text: AGENT_STEER_TEXT,
-  });
+function asRequested(row: ClientTurnRequestedEventRow) {
+  const { event, meta } = decodeThreadEventRow(row);
+  if (event.type !== "client/turn/requested") {
+    throw new Error("Expected client/turn/requested event");
+  }
+  return { event, meta };
 }
 
-function systemSteerRequest(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "system",
-    senderThreadId: null,
-    target: { kind: "auto", expectedTurnId: "turn-1" },
-    text: "[bb system] Mid-turn nudge",
-  });
+function parseUsers(
+  row: ClientTurnRequestedEventRow,
+  accepted?: AcceptedClientRequest,
+) {
+  const { event, meta } = asRequested(row);
+  if (resolveTurnRequestKind(event, accepted) !== "message") return [];
+  return buildClientUserRows(
+    event,
+    meta,
+    accepted ? "accepted" : "pending",
+    accepted,
+    "active",
+  );
 }
 
-function systemMessageRequest(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "system",
-    senderThreadId: null,
-    target: { kind: "new-turn" },
-    text: "[bb system] Maintenance notice.",
-  });
+function parsePendingSteers(row: ClientTurnRequestedEventRow) {
+  const { event, meta } = asRequested(row);
+  if (
+    resolveTurnRequestKind(event, undefined) !== "steer" ||
+    !shouldPreservePendingMessages("active")
+  ) {
+    return [];
+  }
+  return buildClientUserRows(event, meta, "pending", undefined, "active");
 }
 
-function userMessageRequest(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "user",
-    target: { kind: "new-turn" },
-    text: "Hello",
-  });
+function parseAcceptedSteers(
+  row: ClientTurnRequestedEventRow,
+  accepted: AcceptedClientRequest,
+) {
+  const { event, meta } = asRequested(row);
+  if (resolveTurnRequestKind(event, accepted) !== "steer") return [];
+  return buildClientUserRows(event, meta, "accepted", accepted, "active");
 }
 
-function userSteerRequest(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "user",
-    target: { kind: "auto", expectedTurnId: "turn-1" },
-    text: "Mid-turn steer",
-  });
-}
-
-function userSteerRequestWithoutExpectedTurn(): ClientTurnRequestedEventRow {
-  const event = createTimelineEventFactory({ threadId: "thread-1" });
-  return event.clientTurnRequested({
-    initiator: "user",
-    target: { kind: "steer", expectedTurnId: null },
-    text: "Fallback message",
-  });
-}
-
-function acceptedClientRequest(
-  args: AcceptedClientRequestFixtureArgs = {},
-): AcceptedClientRequest {
-  return {
-    meta: {
-      id: "event-accepted",
-      seq: 2,
-      createdAt: 2,
-    },
-    turnId: args.turnId ?? "turn-1",
-  };
+function acceptedClientRequest(turnId = "turn-1"): AcceptedClientRequest {
+  return { meta: { id: "event-accepted", seq: 2, createdAt: 2 }, turnId };
 }
 
 describe("user message parsing", () => {
@@ -110,11 +79,7 @@ describe("user message parsing", () => {
         visibility: "agent-only",
       },
       { type: "text", text: "Visible request", mentions: [] },
-      {
-        type: "localFile",
-        path: "/tmp/hidden.md",
-        visibility: "agent-only",
-      },
+      { type: "localFile", path: "/tmp/hidden.md", visibility: "agent-only" },
       { type: "localFile", path: "/tmp/visible.md" },
     ]);
 
@@ -131,30 +96,31 @@ describe("user message parsing", () => {
   });
 
   it("hides prompt input rows that only contain agent-only parts", () => {
-    const parsed = parsePromptInput([
-      {
-        type: "text",
-        text: "[bb system]\n\nHidden agent-only context was removed.",
-        mentions: [],
-        visibility: "agent-only",
-      },
-    ]);
-
-    expect(parsed).toBeNull();
+    expect(
+      parsePromptInput([
+        {
+          type: "text",
+          text: "[bb system]\n\nHidden agent-only context was removed.",
+          mentions: [],
+          visibility: "agent-only",
+        },
+      ]),
+    ).toBeNull();
   });
 
   it("populates initiator, senderThreadId, and turnRequest for user-initiated messages", () => {
-    const { event, meta } = decodeThreadEventRow(userMessageRequest());
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const row = parseUsers(
+      f.clientTurnRequested({
+        initiator: "user",
+        target: { kind: "new-turn" },
+        text: "Hello",
+      }),
+    )[0];
 
-    const message =
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null;
-
-    expect(message).toMatchObject({
-      kind: "user",
+    expect(row).toMatchObject({
+      kind: "conversation",
+      role: "user",
       initiator: "user",
       senderThreadId: null,
       turnRequest: { isGrouped: false, kind: "message", status: "pending" },
@@ -163,8 +129,8 @@ describe("user message parsing", () => {
   });
 
   it("renders grouped queued turn requests as separate user messages", () => {
-    const factory = createTimelineEventFactory({ threadId: "thread-1" });
-    const row = factory.clientTurnRequested({
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
       initiator: "user",
       target: { kind: "new-turn" },
       text: "First\n\nSecond",
@@ -174,91 +140,54 @@ describe("user message parsing", () => {
         [{ type: "text", text: "Second", mentions: [] }],
       ],
     });
-    const { event, meta } = decodeThreadEventRow(row);
+    const rows = parseUsers(req);
 
-    const messages = parseUsersFromClientRequest({
-      decoded: event,
-      meta,
-      options: standardProjectionOptions,
-    });
-
-    expect(messages).toHaveLength(2);
-    expect(messages.map((message) => message.text)).toEqual([
-      "First",
-      "Second",
+    expect(rows.map((r) => r.text)).toEqual(["First", "Second"]);
+    expect(rows.map((r) => r.id)).toEqual([
+      `thread-1:user-seed:${req.seq}`,
+      `thread-1:user-seed:${req.seq}-1`,
     ]);
-    expect(messages.map((message) => message.id)).toEqual([
-      `${event.threadId}:user-seed:${meta.seq}`,
-      `${event.threadId}:user-seed:${meta.seq}-1`,
-    ]);
-    expect(messages.map((message) => message.turnRequest)).toEqual([
+    expect(rows.map((r) => r.turnRequest)).toEqual([
       { isGrouped: true, kind: "message", status: "pending" },
       { isGrouped: true, kind: "message", status: "pending" },
     ]);
   });
 
   it("uses the base id for the first visible grouped turn request", () => {
-    const factory = createTimelineEventFactory({ threadId: "thread-1" });
-    const row = factory.clientTurnRequested({
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
       initiator: "user",
       target: { kind: "new-turn" },
       text: "Visible",
       input: [
-        {
-          type: "text",
-          text: "Hidden agent context",
-          mentions: [],
-          visibility: "agent-only",
-        },
+        { type: "text", text: "Hidden", mentions: [], visibility: "agent-only" },
         { type: "text", text: "Visible", mentions: [] },
       ],
       inputGroups: [
-        [
-          {
-            type: "text",
-            text: "Hidden agent context",
-            mentions: [],
-            visibility: "agent-only",
-          },
-        ],
+        [{ type: "text", text: "Hidden", mentions: [], visibility: "agent-only" }],
         [{ type: "text", text: "Visible", mentions: [] }],
       ],
     });
-    const { event, meta } = decodeThreadEventRow(row);
+    const rows = parseUsers(req);
 
-    const messages = parseUsersFromClientRequest({
-      decoded: event,
-      meta,
-      options: standardProjectionOptions,
-    });
-
-    expect(
-      messages.map((message) => ({ id: message.id, text: message.text })),
-    ).toEqual([
-      { id: `${event.threadId}:user-seed:${meta.seq}`, text: "Visible" },
+    expect(rows.map((r) => ({ id: r.id, text: r.text }))).toEqual([
+      { id: `thread-1:user-seed:${req.seq}`, text: "Visible" },
     ]);
   });
 
   it("populates initiator, senderThreadId, and turnRequest for agent-initiated messages", () => {
-    const factory = createTimelineEventFactory({ threadId: "thread-1" });
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
     const agentText = "[message from thread:thr_sender]\n\nHi";
-    const row = factory.clientTurnRequested({
-      initiator: "agent",
-      senderThreadId: SENDER_THREAD_ID,
-      target: { kind: "new-turn" },
-      text: agentText,
-    });
-    const { event, meta } = decodeThreadEventRow(row);
+    const row = parseUsers(
+      f.clientTurnRequested({
+        initiator: "agent",
+        senderThreadId: SENDER_THREAD_ID,
+        target: { kind: "new-turn" },
+        text: agentText,
+      }),
+    )[0];
 
-    const message =
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null;
-
-    expect(message).toMatchObject({
-      kind: "user",
+    expect(row).toMatchObject({
       initiator: "agent",
       senderThreadId: SENDER_THREAD_ID,
       turnRequest: { isGrouped: false, kind: "message", status: "pending" },
@@ -270,24 +199,17 @@ describe("user message parsing", () => {
     "[bb message from thread:thr_legacy; reply later]\n\nLegacy handoff",
     "[message from thread:thr_legacy]\n\nLegacy handoff",
   ])("recovers agent attribution from a cross-thread envelope: %s", (text) => {
-    const factory = createTimelineEventFactory({ threadId: "thread-1" });
-    const row = factory.clientTurnRequested({
-      initiator: "user",
-      senderThreadId: null,
-      target: { kind: "new-turn" },
-      text,
-    });
-    const { event, meta } = decodeThreadEventRow(row);
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const row = parseUsers(
+      f.clientTurnRequested({
+        initiator: "user",
+        senderThreadId: null,
+        target: { kind: "new-turn" },
+        text,
+      }),
+    )[0];
 
-    const message =
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null;
-
-    expect(message).toMatchObject({
-      kind: "user",
+    expect(row).toMatchObject({
       initiator: "agent",
       senderThreadId: "thr_legacy",
       text,
@@ -295,17 +217,17 @@ describe("user message parsing", () => {
   });
 
   it("populates initiator for system-initiated messages with a turnRequest", () => {
-    const { event, meta } = decodeThreadEventRow(systemMessageRequest());
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const row = parseUsers(
+      f.clientTurnRequested({
+        initiator: "system",
+        senderThreadId: null,
+        target: { kind: "new-turn" },
+        text: "[bb system] Maintenance notice.",
+      }),
+    )[0];
 
-    const message =
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null;
-
-    expect(message).toMatchObject({
-      kind: "user",
+    expect(row).toMatchObject({
       initiator: "system",
       senderThreadId: null,
       turnRequest: { isGrouped: false, kind: "message", status: "pending" },
@@ -313,9 +235,9 @@ describe("user message parsing", () => {
   });
 
   it("preserves mentions for system-initiated messages", () => {
-    const factory = createTimelineEventFactory({ threadId: "thread-1" });
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
     const mentionText = "@thread:thr_child";
-    const text = `[bb system]\n\n${mentionText} needs help.\nIt is blocked on a pending interaction.\n\nReview the blocker. If you can resolve it from existing context, reply to the thread with guidance. Otherwise, ask the user for the missing decision.`;
+    const text = `[bb system]\n\n${mentionText} needs help.`;
     const mentionStart = "[bb system]\n\n".length;
     const mention: PromptTextMention = {
       start: mentionStart,
@@ -327,116 +249,73 @@ describe("user message parsing", () => {
         threadId: "thr_child",
       },
     };
-    const row = factory.clientTurnRequested({
-      initiator: "system",
-      senderThreadId: null,
-      target: { kind: "new-turn" },
-      text,
-      input: [{ type: "text", text, mentions: [mention] }],
-    });
-    const { event, meta } = decodeThreadEventRow(row);
+    const row = parseUsers(
+      f.clientTurnRequested({
+        initiator: "system",
+        senderThreadId: null,
+        target: { kind: "new-turn" },
+        text,
+        input: [{ type: "text", text, mentions: [mention] }],
+      }),
+    )[0];
 
-    const message =
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null;
-
-    expect(message).toMatchObject({
-      kind: "user",
-      initiator: "system",
-      senderThreadId: null,
-      text,
-      turnRequest: { isGrouped: false, kind: "message", status: "pending" },
-    });
-    expect(message?.mentions).toEqual([mention]);
+    expect(row).toMatchObject({ initiator: "system", text });
+    expect(row?.mentions).toEqual([mention]);
   });
 
   it("treats steers as steer requests regardless of initiator", () => {
-    for (const row of [
-      userSteerRequest(),
-      agentSteerRequest(),
-      systemSteerRequest(),
-    ]) {
-      const { event, meta } = decodeThreadEventRow(row);
-      if (event.type !== "client/turn/requested") {
-        throw new Error("Expected client/turn/requested event");
-      }
-      const expectedText = event.input
-        .filter((part) => part.type === "text")
-        .map((part) => part.text)
-        .join("");
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const cases = [
+      f.clientTurnRequested({
+        initiator: "user",
+        target: { kind: "auto", expectedTurnId: "turn-1" },
+        text: "Mid-turn steer",
+      }),
+      f.clientTurnRequested({
+        initiator: "agent",
+        senderThreadId: SENDER_THREAD_ID,
+        target: { kind: "auto", expectedTurnId: "turn-1" },
+        text: AGENT_STEER_TEXT,
+      }),
+      f.clientTurnRequested({
+        initiator: "system",
+        senderThreadId: null,
+        target: { kind: "auto", expectedTurnId: "turn-1" },
+        text: "[bb system] Mid-turn nudge",
+      }),
+    ];
+    for (const req of cases) {
       const accepted = acceptedClientRequest();
-
-      expect(
-        parsePendingSteersFromClientRequest({
-          acceptedClientRequest: undefined,
-          decoded: event,
-          meta,
-          options: standardProjectionOptions,
-        })[0] ?? null,
-      ).toMatchObject({
-        kind: "user",
+      expect(parsePendingSteers(req)[0]).toMatchObject({
         turnRequest: { isGrouped: false, kind: "steer", status: "pending" },
-        text: expectedText,
-        sourceSeqStart: meta.seq,
+        sourceSeqStart: req.seq,
       });
-      expect(
-        parseAcceptedSteersFromClientRequest({
-          acceptedClientRequest: accepted,
-          decoded: event,
-          meta,
-          options: standardProjectionOptions,
-        })[0] ?? null,
-      ).toMatchObject({
-        kind: "user",
+      expect(parseAcceptedSteers(req, accepted)[0]).toMatchObject({
         turnRequest: { isGrouped: false, kind: "steer", status: "accepted" },
-        text: expectedText,
         sourceSeqStart: accepted.meta.seq,
       });
-      expect(
-        parseUsersFromClientRequest({
-          decoded: event,
-          meta,
-          options: standardProjectionOptions,
-        })[0] ?? null,
-      ).toBeNull();
+      expect(parseUsers(req)).toEqual([]);
     }
   });
 
   it("splits grouped steers into separate pending and accepted user messages", () => {
-    const eventFactory = createTimelineEventFactory({ threadId: "thread-1" });
-    const row = eventFactory.clientTurnRequested({
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
       initiator: "user",
       target: { kind: "auto", expectedTurnId: "turn-1" },
       text: "flattened",
-      input: [
-        { type: "text", text: "First grouped steer", mentions: [] },
-        { type: "text", text: "\n\n", mentions: [] },
-        { type: "text", text: "Second grouped steer", mentions: [] },
-      ],
       inputGroups: [
         [{ type: "text", text: "First grouped steer", mentions: [] }],
         [{ type: "text", text: "Second grouped steer", mentions: [] }],
       ],
     });
-    const { event, meta } = decodeThreadEventRow(row);
-    if (event.type !== "client/turn/requested") {
-      throw new Error("Expected client/turn/requested event");
-    }
     const accepted = acceptedClientRequest();
 
     expect(
-      parsePendingSteersFromClientRequest({
-        acceptedClientRequest: undefined,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      }).map((message) => ({
-        id: message.id,
-        text: message.text,
-        turnRequest: message.turnRequest,
+      parsePendingSteers(req).map((r) => ({
+        id: r.id,
+        text: r.text,
+        turnRequest: r.turnRequest,
       })),
     ).toEqual([
       {
@@ -451,16 +330,11 @@ describe("user message parsing", () => {
       },
     ]);
     expect(
-      parseAcceptedSteersFromClientRequest({
-        acceptedClientRequest: accepted,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      }).map((message) => ({
-        id: message.id,
-        sourceSeqStart: message.sourceSeqStart,
-        text: message.text,
-        turnRequest: message.turnRequest,
+      parseAcceptedSteers(req, accepted).map((r) => ({
+        id: r.id,
+        sourceSeqStart: r.sourceSeqStart,
+        text: r.text,
+        turnRequest: r.turnRequest,
       })),
     ).toEqual([
       {
@@ -479,59 +353,27 @@ describe("user message parsing", () => {
   });
 
   it("uses visible grouped steer order when assigning ids", () => {
-    const eventFactory = createTimelineEventFactory({ threadId: "thread-1" });
-    const row = eventFactory.clientTurnRequested({
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
       initiator: "user",
       target: { kind: "auto", expectedTurnId: "turn-1" },
       text: "Visible steer\n\nSecond visible steer",
-      input: [
-        {
-          type: "text",
-          text: "Hidden steer context",
-          mentions: [],
-          visibility: "agent-only",
-        },
-        { type: "text", text: "Visible steer", mentions: [] },
-        { type: "text", text: "\n\n", mentions: [] },
-        { type: "text", text: "Second visible steer", mentions: [] },
-      ],
       inputGroups: [
-        [
-          {
-            type: "text",
-            text: "Hidden steer context",
-            mentions: [],
-            visibility: "agent-only",
-          },
-        ],
+        [{ type: "text", text: "Hidden", mentions: [], visibility: "agent-only" }],
         [{ type: "text", text: "Visible steer", mentions: [] }],
         [{ type: "text", text: "Second visible steer", mentions: [] }],
       ],
     });
-    const { event, meta } = decodeThreadEventRow(row);
-    if (event.type !== "client/turn/requested") {
-      throw new Error("Expected client/turn/requested event");
-    }
     const accepted = acceptedClientRequest();
 
     expect(
-      parsePendingSteersFromClientRequest({
-        acceptedClientRequest: undefined,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      }).map((message) => ({ id: message.id, text: message.text })),
+      parsePendingSteers(req).map((r) => ({ id: r.id, text: r.text })),
     ).toEqual([
       { id: "thread-1:user-seed:1", text: "Visible steer" },
       { id: "thread-1:user-seed:1-1", text: "Second visible steer" },
     ]);
     expect(
-      parseAcceptedSteersFromClientRequest({
-        acceptedClientRequest: accepted,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      }).map((message) => ({ id: message.id, text: message.text })),
+      parseAcceptedSteers(req, accepted).map((r) => ({ id: r.id, text: r.text })),
     ).toEqual([
       { id: "thread-1:user-seed:1", text: "Visible steer" },
       { id: "thread-1:user-seed:1-1", text: "Second visible steer" },
@@ -539,73 +381,49 @@ describe("user message parsing", () => {
   });
 
   it("renders a steer accepted by a different turn as a message", () => {
-    const { event, meta } = decodeThreadEventRow(userSteerRequest());
-    const accepted = acceptedClientRequest({ turnId: "turn-2" });
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
+      initiator: "user",
+      target: { kind: "auto", expectedTurnId: "turn-1" },
+      text: "Mid-turn steer",
+    });
+    const accepted = acceptedClientRequest("turn-2");
 
-    expect(
-      parseAcceptedSteersFromClientRequest({
-        acceptedClientRequest: accepted,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null,
-    ).toBeNull();
-
-    expect(
-      parseUsersFromClientRequest({
-        acceptedClientRequest: accepted,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null,
-    ).toMatchObject({
-      kind: "user",
-      scope: turnScope("turn-2"),
-      sourceSeqStart: meta.seq,
+    expect(parseAcceptedSteers(req, accepted)).toEqual([]);
+    expect(parseUsers(req, accepted)[0]).toMatchObject({
+      turnId: "turn-2",
+      sourceSeqStart: req.seq,
       text: "Mid-turn steer",
       turnRequest: { isGrouped: false, kind: "message", status: "accepted" },
     });
   });
 
   it("renders an explicit steer without an expected turn as a message", () => {
-    const { event, meta } = decodeThreadEventRow(
-      userSteerRequestWithoutExpectedTurn(),
-    );
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
+      initiator: "user",
+      target: { kind: "steer", expectedTurnId: null },
+      text: "Fallback message",
+    });
 
-    expect(
-      parsePendingSteersFromClientRequest({
-        acceptedClientRequest: undefined,
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null,
-    ).toBeNull();
-
-    expect(
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null,
-    ).toMatchObject({
-      kind: "user",
+    expect(parsePendingSteers(req)).toEqual([]);
+    expect(parseUsers(req)[0]).toMatchObject({
       text: "Fallback message",
       turnRequest: { isGrouped: false, kind: "message", status: "pending" },
     });
   });
 
   it("renders system-originated turns as user messages", () => {
-    const { event, meta } = decodeThreadEventRow(systemMessageRequest());
-
-    expect(
-      parseUsersFromClientRequest({
-        decoded: event,
-        meta,
-        options: standardProjectionOptions,
-      })[0] ?? null,
-    ).toMatchObject({
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({
       initiator: "system",
-      kind: "user",
+      senderThreadId: null,
+      target: { kind: "new-turn" },
+      text: "[bb system] Maintenance notice.",
+    });
+
+    expect(parseUsers(req)[0]).toMatchObject({
+      initiator: "system",
       text: "[bb system] Maintenance notice.",
       turnRequest: { isGrouped: false, kind: "message", status: "pending" },
     });

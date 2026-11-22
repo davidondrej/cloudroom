@@ -39,7 +39,7 @@
   "types": "./src/node.ts",
   "scripts": {
     "build": "node ../../scripts/build-package.mjs",
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },

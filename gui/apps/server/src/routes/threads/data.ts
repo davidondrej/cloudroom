@@ -21,6 +21,7 @@ import {
 } from "@cloudroom/db";
 import type { Hono } from "hono";
 import {
+  CHAT_FILE_COPIES_FOLDER,
   DEFAULT_COMPLETED_TURN_DISPLAY,
   PROMPT_HISTORY_ENTRY_LIMIT,
   threadEventTypeSchema,
@@ -59,7 +60,10 @@ import {
   type DaemonFileReadResult,
   serveDaemonFileContent,
 } from "../../services/hosts/daemon-file-response.js";
-import { requireThreadStoragePath } from "../../services/threads/thread-storage.js";
+import {
+  listChatFileCopies,
+  requireThreadStoragePath,
+} from "../../services/threads/thread-storage.js";
 import { toListedThreadQueuedMessages } from "../../services/threads/thread-queued-messages.js";
 import {
   toThreadEventWithMeta,
@@ -755,7 +759,10 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           limit,
           includeHidden: THREAD_STORAGE_PATH_LIST_INCLUDE_HIDDEN,
           respectGitIgnore: false,
-          excludeNames: [...DEFAULT_PATH_LIST_EXCLUDE_NAMES],
+          excludeNames: [
+            ...DEFAULT_PATH_LIST_EXCLUDE_NAMES,
+            CHAT_FILE_COPIES_FOLDER,
+          ],
         },
       });
       return context.json({
@@ -821,7 +828,10 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           includeDirectories: inclusion.includeDirectories,
           includeHidden: THREAD_STORAGE_PATH_LIST_INCLUDE_HIDDEN,
           respectGitIgnore: false,
-          excludeNames: [...DEFAULT_PATH_LIST_EXCLUDE_NAMES],
+          excludeNames: [
+            ...DEFAULT_PATH_LIST_EXCLUDE_NAMES,
+            CHAT_FILE_COPIES_FOLDER,
+          ],
         },
       });
       return context.json({
@@ -909,24 +919,47 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const environment = requireEnvironment(deps.db, thread.environmentId);
-
-    return serveDaemonFileContent(
-      deps,
-      {
-        hostId: environment.hostId,
-        ifNoneMatch: context.req.header("if-none-match"),
-        path: query.path,
-      },
-      (result) =>
-        createDaemonFileContentResponse(result, {
+    const serve = (file: { path: string; rootPath?: string }) =>
+      serveDaemonFileContent(
+        deps,
+        {
+          hostId: environment.hostId,
           ifNoneMatch: context.req.header("if-none-match"),
-        }),
-      {
-        directLocal: {
-          ifRange: context.req.header("if-range"),
-          range: context.req.header("range"),
+          ...file,
         },
-      },
-    );
+        (result) =>
+          createDaemonFileContentResponse(result, {
+            ifNoneMatch: context.req.header("if-none-match"),
+          }),
+        {
+          directLocal: {
+            ifRange: context.req.header("if-range"),
+            range: context.req.header("range"),
+          },
+        },
+      );
+
+    try {
+      return await serve({ path: query.path });
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      // The file is gone: show the copy the thread kept when its chat showed it.
+      const copies = await listChatFileCopies(deps, {
+        hostId: environment.hostId,
+        path: query.path,
+        thread,
+      }).catch(() => []);
+      for (const copy of copies) {
+        try {
+          return await serve(copy);
+        } catch (copyError) {
+          // Only a missing copy sends us to the next one; anything else would just repeat.
+          const missing =
+            copyError instanceof ApiError && copyError.status === 404;
+          if (!missing) break;
+        }
+      }
+      throw error;
+    }
   });
 }

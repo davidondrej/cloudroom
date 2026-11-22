@@ -11,7 +11,7 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs tsconfig.tsbuildinfo",
     "test": "vitest run --config vitest.config.ts",
     "generate": "node ./scripts/generate-plugin-theme.mjs && node ./scripts/generate-runtime-export-manifest.mjs",
     "typecheck": "bun check",

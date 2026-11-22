@@ -24,7 +24,8 @@ const BUDGETED: readonly Popup[] = ["star_card", "cloud_card"];
 // `until`: never shows again once the user gave this answer. Only this server checks it, against the account's last
 // 12 showings: the website and the database don't know the rule (docs/scopes/corner-cards.md).
 // The call ticket comes back 3 days after it was closed or clicked, while the website still says the account is owed one.
-const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; until?: CornerAnswer }> = { invite: {}, call: { everyDays: 3 }, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { quiet: true, until: "opened" } };
+// `build` is the note on the chat input: once per round, its key (docs/scopes/build-next.md).
+const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; until?: CornerAnswer }> = { invite: {}, call: { everyDays: 3 }, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { quiet: true, until: "opened" }, build: {} };
 const QUIET_DAYS = 3;
 const CORNER_KEPT = 12;
 const RECHECK_MS = 10 * 60_000;

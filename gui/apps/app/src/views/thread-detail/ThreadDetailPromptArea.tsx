@@ -6,6 +6,7 @@ import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/Telepor
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
 import { SkillSuggestionCard } from "@/components/thread/SkillSuggestionCard";
+import { BuildNextCard } from "@/components/thread/BuildNextCard";
 import { StarCard } from "@/components/StarPrompt";
 import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import { ProjectCopyNotice } from "@/components/thread/ProjectCopyNotice";
@@ -41,7 +42,7 @@ import {
   usePromptSuggestion,
   type PromptSuggestionAction,
 } from "@/components/promptbox/usePromptSuggestion";
-import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
+import { PERSONAL_PROJECT_ID, isBackgroundCommandTaskType } from "@cloudroom/domain";
 import type {
   ReasoningLevel,
   PendingInteraction,
@@ -438,6 +439,14 @@ export function ThreadDetailPromptArea({
   thread,
 }: ThreadDetailPromptAreaProps) {
   const isCloud = thread.executionTarget === "cloud";
+  // Background commands show as bubbles in the chat; this card keeps only background agents.
+  const backgroundAgents = useMemo(
+    () =>
+      activeBackgroundCommands.filter(
+        (row) => !isBackgroundCommandTaskType(row.taskType),
+      ),
+    [activeBackgroundCommands],
+  );
   const teleporting = Boolean(thread.teleport && !["complete", "cancelled"].includes(thread.teleport.phase));
   const transferredChild = Boolean(thread.teleport?.phase === "complete" && thread.teleport.owner !== thread.id);
   const remoteMac = viewingOtherMac();
@@ -2212,9 +2221,9 @@ export function ThreadDetailPromptArea({
           expandedSection={expandedBannerSection}
           onToggleSection={handleToggleBannerSection}
           leading={
-            activeBackgroundCommands.length > 0 ? (
+            backgroundAgents.length > 0 ? (
               <ThreadBackgroundCommandsCard
-                commands={activeBackgroundCommands}
+                commands={backgroundAgents}
                 isExpanded={isBackgroundCommandsExpanded}
                 onToggle={() =>
                   setIsBackgroundCommandsExpanded((value) => !value)
@@ -2286,7 +2295,7 @@ export function ThreadDetailPromptArea({
       activeWorkflows,
       expandedWorkflowIds,
       toggleWorkflowExpanded,
-      activeBackgroundCommands,
+      backgroundAgents,
       isBackgroundCommandsExpanded,
       modelFallback,
       pullRequestSection,
@@ -2391,6 +2400,7 @@ export function ThreadDetailPromptArea({
       {!isCloud && !teleporting && canTeleport && <TryCloudCard threadId={thread.id} active={thread.status === "active"} attached={cardsOnInput} onMove={startTeleport} />}
       <SkillSuggestionCard threadId={thread.id} idle={runtimeDisplayStatus === "idle" && !isStopRequested} turnKey={thread.updatedAt} attached={cardsOnInput}
         onUse={(prompt) => { setBottomComposerText(prompt, []); focusBottomPluginComposer(); }} />
+      <BuildNextCard working={runtimeDisplayStatus === "active" && !isStopRequested && !pendingInteractionNode} attached={cardsOnInput} />
       <StarCard active={thread.status === "active"} attached={cardsOnInput} />
       <DesktopUpdateCard attached={cardsOnInput} />
     </>

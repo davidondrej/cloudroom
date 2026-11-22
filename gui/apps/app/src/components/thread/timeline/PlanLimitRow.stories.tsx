@@ -78,7 +78,27 @@ function model(
   };
 }
 
+// Its plugin is off by default (docs/scopes/cloudroom-agent.md): only the rows that turn it on list it.
+const cloudroomAgent = makeProviderInfo({
+  id: "cloudroom-agent",
+  displayName: "Cloudroom Agent",
+  icon: { glyph: "Cloud" },
+  strings: {
+    signInHint: "",
+    expiredHint: "",
+    installUrl: "https://cloudroom.dev",
+    iconTint: { light: "#5C7A00", dark: "#BFFF00" },
+  },
+});
+
 const catalogs: Record<string, AvailableModel[]> = {
+  "cloudroom-agent": [
+    model("cloudroom/cloudroom-agent", "Cloudroom Agent", [
+      "low",
+      "medium",
+      "high",
+    ]),
+  ],
   "claude-code": [
     model("claude-opus-5-5[1m]", "Claude Opus 5.5 (1M)", ALL_EFFORTS),
   ],
@@ -170,7 +190,9 @@ function seededClient(
   othersUsedPercent: number,
   withAccounts: boolean,
   refusal = false,
+  withCloudroomAgent = false,
 ): QueryClient {
+  const listed = withCloudroomAgent ? [...providers, cloudroomAgent] : providers;
   const client = new QueryClient({
     defaultOptions: {
       queries: { gcTime: Infinity, retry: false, staleTime: Infinity },
@@ -206,7 +228,7 @@ function seededClient(
     codex: refusal ? 20 : othersUsedPercent,
     "acp-cursor": othersUsedPercent,
   };
-  for (const provider of providers) {
+  for (const provider of listed) {
     client.setQueryData<SystemExecutionOptionsResponse>(
       systemExecutionOptionsQueryKey({
         environmentId: null,
@@ -214,7 +236,7 @@ function seededClient(
         providerId: provider.id,
       }),
       {
-        providers,
+        providers: listed,
         models: catalogs[provider.id] ?? [],
         selectedOnlyModels: [],
         permissionCeiling: "full",
@@ -235,13 +257,15 @@ function Preview({
   othersUsedPercent,
   withAccounts = false,
   refusal = false,
+  withCloudroomAgent = false,
 }: {
   othersUsedPercent: number;
   withAccounts?: boolean;
   refusal?: boolean;
+  withCloudroomAgent?: boolean;
 }) {
   const [client] = useState(() =>
-    seededClient(othersUsedPercent, withAccounts, refusal),
+    seededClient(othersUsedPercent, withAccounts, refusal, withCloudroomAgent),
   );
   return (
     <QueryClientProvider client={client}>
@@ -288,6 +312,18 @@ export function States() {
         hint="Codex refused (OpenAI's filter): continue on another agent; no account switch, every account has the filter"
       >
         <Preview othersUsedPercent={36} refusal withAccounts />
+      </StoryRow>
+      <StoryRow
+        label="Cloudroom Agent on"
+        hint="its own button, after the account and agent buttons"
+      >
+        <Preview othersUsedPercent={36} withAccounts withCloudroomAgent />
+      </StoryRow>
+      <StoryRow
+        label="Cloudroom Agent is the only way on"
+        hint="its button, after the retry at the reset"
+      >
+        <Preview othersUsedPercent={100} withCloudroomAgent />
       </StoryRow>
     </StoryCard>
   );

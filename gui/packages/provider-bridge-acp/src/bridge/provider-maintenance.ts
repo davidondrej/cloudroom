@@ -21,7 +21,7 @@ import {
   formatCommand,
   installationRunUnavailable,
   npmGlobalInstallCommand,
-  readCliVersion,
+  probeCliVersion,
   resolveExecutablePath,
   versionFrom,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
@@ -280,10 +280,22 @@ function healthResult(args: {
 // confirm Hermes is installed (#929).
 const CLIS_WITHOUT_SAFE_VERSION = new Set(["hermes"]);
 
-function readAcpCliVersion(command: string): Promise<string | null> {
-  return CLIS_WITHOUT_SAFE_VERSION.has(path.parse(command).name.toLowerCase())
-    ? Promise.resolve(null)
-    : readCliVersion(command);
+// cmux's `grok` wrapper prints "grok not found in PATH" when the real CLI is
+// missing (#1823). Only that counts as missing, not an unreadable version or
+// another agent's missing helper.
+const GROK_WRAPPER_MISSING = /(?:^|[^\w.-])grok not found in PATH/u;
+async function probeAcpCli(
+  command: string,
+): Promise<{ version: string | null; missing: boolean }> {
+  const name = path.parse(command).name.toLowerCase();
+  if (CLIS_WITHOUT_SAFE_VERSION.has(name)) {
+    return { version: null, missing: false };
+  }
+  const { version, failedOutput } = await probeCliVersion(command);
+  return {
+    version,
+    missing: name === "grok" && GROK_WRAPPER_MISSING.test(failedOutput ?? ""),
+  };
 }
 
 export async function getAcpProviderHealth(
@@ -301,7 +313,8 @@ export async function getAcpProviderHealth(
   if (executable === null) {
     return healthResult({ target, status: "not_installed" });
   }
-  const version = await readAcpCliVersion(command);
+  const { version, missing } = await probeAcpCli(command);
+  if (missing) return healthResult({ target, status: "not_installed" });
   if (versionUnsupported(version, target.minimumVersion)) {
     return healthResult({
       target,
@@ -339,13 +352,14 @@ export async function getAcpProviderInstallationStatus(
   args: AcpMaintenanceTarget,
 ): Promise<ProviderInstallationStatus> {
   const executableName = args.command ?? "";
-  const resolvedExecutable =
+  const found =
     args.command === null ? null : await resolveExecutablePath(args.command);
+  const { version: currentVersion, missing } =
+    found === null || args.command === null
+      ? { version: null, missing: true }
+      : await probeAcpCli(args.command);
+  const resolvedExecutable = missing ? null : found;
   const installed = resolvedExecutable !== null;
-  const currentVersion =
-    installed && args.command !== null
-      ? await readAcpCliVersion(args.command)
-      : null;
   const unsupported = versionUnsupported(currentVersion, args.minimumVersion);
   const latestVersion =
     currentVersion === null

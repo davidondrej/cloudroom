@@ -15,7 +15,7 @@ import {
 } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { DndContext, DragOverlay, useDroppable } from "@dnd-kit/core";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import {
   SortableContext,
   verticalListSortingStrategy,

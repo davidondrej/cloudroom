@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
   createEventId,
   environmentHasLiveThreads,
@@ -56,7 +57,7 @@ export interface ThreadMoveResult {
 export type MoveRequester = "local" | "cloud-agent";
 
 const AGENT_MOVE_REFUSED =
-  "The agent asked to move this thread to another project. Cloudroom didn't move it because Mac access isn't Full. Move it from the thread menu.";
+  `The agent asked to move this thread to another project. Cloudroom didn't move it because ${COMPUTER_TITLE} access isn't Full. Move it from the thread menu.`;
 const AGENT_MOVE_LIMITED =
   "The agent asked to move this thread to another project. Cloudroom didn't move it because this sandbox has only the API keys picked for its Cloud loop. Move it from the thread menu.";
 const AGENT_MOVE_UNCHECKED =

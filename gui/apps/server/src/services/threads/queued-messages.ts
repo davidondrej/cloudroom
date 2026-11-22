@@ -4,6 +4,7 @@ import {
   createQueuedThreadMessageInTransaction,
   deleteClaimedQueuedThreadMessageInTransaction,
   getQueuedThreadMessage,
+  keepQueuedThreadNoticeForUser,
   getEnvironment,
   isErrorQueueReleaseHeld,
   getHost,
@@ -53,7 +54,10 @@ import {
 } from "./thread-events.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
 import { deliverParentSystemMessage } from "./parent-system-messages.js";
-import { withChildReportAge } from "./child-thread-notifications.js";
+import {
+  isChildInteractionSettled,
+  withChildReportAge,
+} from "./child-thread-notifications.js";
 import {
   createQueuedMessageClaimLostError,
   createQueuedMessageNotDeliveredError,
@@ -426,6 +430,32 @@ async function sendClaimedQueuedMessage(
 }
 
 /**
+ * Drops a claimed child needs-attention notice whose interaction settled
+ * while it waited, so the automatic drain doesn't wake the parent for nothing.
+ * The caller moves on to the next row itself, which keeps the order (#2452).
+ */
+function dropSettledChildNotice(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  claimed: ClaimedQueuedThreadMessageRow,
+): boolean {
+  let interactionId: string | undefined;
+  try {
+    interactionId = queuedMessageSystemNoticeSchema.parse(
+      JSON.parse(claimed.systemNotice ?? "null"),
+    ).interactionId;
+  } catch {
+    return false; // Ordinary rows and unreadable notices go the usual way.
+  }
+  if (!isChildInteractionSettled(deps.db, interactionId)) return false;
+  const dropped = deps.db.transaction(
+    (tx) => deleteClaimedQueuedThreadMessageInTransaction(tx, claimed),
+    { behavior: "immediate" },
+  );
+  if (dropped) deps.hub.notifyThread(claimed.threadId, ["queue-changed"]);
+  return dropped;
+}
+
+/**
  * Delivers a claimed row that is one of core's own system notices.
  *
  * Such a row is not a user dispatch and does not go through the checkpoint:
@@ -460,6 +490,8 @@ async function sendClaimedSystemNotice(
       queuedMessage.content,
       notice.childReport,
     ),
+    // An explicit send that requeues keeps the user's override (#2452).
+    interactionId: args.sendNow ? undefined : notice.interactionId,
     parentThread: args.thread,
     sendNow: args.sendNow,
     systemMessageKind: notice.kind,
@@ -592,6 +624,12 @@ export async function sendQueuedMessage(
       throw new ApiError(404, "invalid_request", "Queued message not found");
     return toThreadQueuedMessage(existing);
   }
+  if (sendNow && queuedMessage.systemNotice !== null) {
+    // Send now makes the notice the user's, even if it has to wait (#2452).
+    keepQueuedThreadNoticeForUser(deps.db, queuedMessage.id);
+  } else if (!sendNow && dropSettledChildNotice(deps, queuedMessage)) {
+    return toThreadQueuedMessage(queuedMessage);
+  }
   const thread = getThread(deps.db, args.threadId);
   if (
     thread &&
@@ -697,6 +735,9 @@ export async function sendNextQueuedMessageIfPresent(
   ) {
     releaseClaim(deps, nextQueuedMessage);
     return false;
+  }
+  if (dropSettledChildNotice(deps, nextQueuedMessage)) {
+    return sendNextQueuedMessageIfPresent(deps, args);
   }
 
   try {

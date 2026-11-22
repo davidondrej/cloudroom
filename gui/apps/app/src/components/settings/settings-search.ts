@@ -126,6 +126,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Show Cloudroom name", "logo brand wordmark title top bar video"],
     ["Palette", "colors custom theme"],
     ["Favicon color", "icon dock tab"],
+    ["Cloud icon", "electric lime crisp white monochrome color sidebar composer"],
     ["Fade inactive splits", "dim split panes"],
     ["Sidebar footer", "buttons reorder"],
     ["Question cards", "agent questions ask"],

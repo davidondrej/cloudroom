@@ -159,6 +159,7 @@ async function switchThenResend(
     }
     const override = await resolveHarnessSwitchOverride(deps, thread, target);
     if (run.late) throw switchTimeout();
+    requireReady(deps, thread, target);
     const environment = thread.environmentId
       ? getEnvironment(deps.db, thread.environmentId)
       : null;
@@ -200,6 +201,28 @@ async function switchThenResend(
   return options.resend
     ? resendAfterSwitch(deps, threadId, replyBy, () => run.late)
     : null;
+}
+
+/** An agent that can't build its launch options (say Cloudroom Agent, signed out) says why before the current one stops. */
+function requireReady(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  thread: Thread,
+  target: HarnessSwitch,
+): void {
+  try {
+    deps.providerRegistry.get(target.providerId)?.deriveProviderOptions({
+      threadId: thread.id,
+      projectId: thread.projectId,
+      model: target.model,
+      permissionMode: "full",
+    });
+  } catch (error) {
+    throw new ApiError(
+      409,
+      "harness_switch_not_ready",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /** A hidden nudge, sent like any message so it carries the earlier conversation. */

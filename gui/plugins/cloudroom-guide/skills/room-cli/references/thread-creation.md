@@ -203,8 +203,9 @@ status|branches|paths|diff|diff-files|diff-file|diff-patch <id>` and
   restarts model discovery and reloads the list on the selected machine. It
   does not stop threads, reinstall the CLI, or change credentials.
 - OpenCode and Kilo Code list models per project, since a project's
-  `opencode.json` can hide providers: pass `--environment <id>` to see the list
-  a thread there gets.
+  `opencode.json` can hide providers. `provider models` lists the calling
+  thread's project; pass `--project <id>` for the list a new thread in another
+  project gets, or `--environment <id>` for a thread there.
 - Top-level `customModels` in the same `config.json` registers extra picker
   models. Use a provider ID returned by the target host's catalog. Acceptance
   of unlisted models is provider-specific; consult that provider's skill.

@@ -11,6 +11,7 @@ import {
   events,
   getLatestThreadOutputEventRow,
   getLatestThreadSequence,
+  getPendingInteraction,
   getRootTurnInterruption,
   getThread,
   isSqliteFullError,
@@ -108,6 +109,7 @@ interface QueueChildThreadTurnNotificationArgs {
 interface QueueChildThreadNeedsAttentionNotificationArgs {
   blockerSummary: string | null;
   childThread: ChildThreadNotificationSource;
+  interactionId: string;
   parentThreadId: string;
 }
 
@@ -861,16 +863,32 @@ export async function queueChildThreadTurnNotificationBestEffort(
   }
 }
 
+/**
+ * True once a child's interaction was answered or interrupted, so its
+ * needs-attention notice would wake the parent for nothing (#2452). A row
+ * that is gone, or still pending or resolving, keeps the notice.
+ */
+export function isChildInteractionSettled(
+  db: DbConnection,
+  interactionId: string | undefined,
+): boolean {
+  if (interactionId === undefined) return false;
+  const status = getPendingInteraction(db, interactionId)?.status;
+  return status === "resolved" || status === "interrupted";
+}
+
 export async function queueChildThreadNeedsAttentionNotificationBestEffort(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadNeedsAttentionNotificationArgs,
 ): Promise<void> {
+  if (isChildInteractionSettled(deps.db, args.interactionId)) return;
   try {
     await queueParentSystemMessage(deps, {
       input: buildChildThreadNeedsAttentionInput({
         blockerSummary: args.blockerSummary,
         childThread: args.childThread,
       }),
+      interactionId: args.interactionId,
       parentThreadId: args.parentThreadId,
       systemMessageKind: systemMessageKindForTemplate(
         "systemMessageChildThreadNeedsAttention",

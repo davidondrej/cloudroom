@@ -211,7 +211,7 @@ sudo python3 core-$v/install/update.py upgrade "$PWD/core-$v"
 sudo cat /var/lib/cloudroom-update/state.json
 ```
 
-The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. A large history can take many minutes to load; the script keeps waiting while Core is busy loading it, for up to 2 hours. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
 
 Upgrades don't add accounts or change SSH when `CLOUDROOM_STORE=self-hosted`. Mac access, secret requests, and previews run over Core's own port. A server already on SSH previews keeps them untouched.
 

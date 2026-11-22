@@ -823,8 +823,7 @@ describe("dispatchCommand", () => {
       .mockReturnValueOnce(newRuntime);
     const manager = new RuntimeManager({
       createRuntime: createRuntimeSpy,
-      provisionWorkspace: async (args) =>
-        createWorkspace(args.path),
+      provisionWorkspace: async (args) => createWorkspace(args.path),
     });
     await manager.ensureEnvironment({
       environmentId: "env-old",
@@ -1149,8 +1148,7 @@ describe("dispatchCommand", () => {
       .mockReturnValueOnce(newRuntime);
     const manager = new RuntimeManager({
       createRuntime: createRuntimeSpy,
-      provisionWorkspace: async (args) =>
-        createWorkspace(args.path),
+      provisionWorkspace: async (args) => createWorkspace(args.path),
     });
     await manager.ensureEnvironment({
       environmentId: "env-old",
@@ -1200,8 +1198,7 @@ describe("dispatchCommand", () => {
       .mockReturnValueOnce(newRuntime);
     const manager = new RuntimeManager({
       createRuntime: createRuntimeSpy,
-      provisionWorkspace: async (args) =>
-        createWorkspace(args.path),
+      provisionWorkspace: async (args) => createWorkspace(args.path),
     });
     await manager.ensureEnvironment({
       environmentId: "env-old",
@@ -1371,6 +1368,9 @@ describe("dispatchCommand", () => {
       }),
     ).rejects.toMatchObject({
       code: "provider_cli_unsupported_version",
+      message: expect.stringContaining(
+        "0.135.0 at /usr/local/bin/example-agent is too old",
+      ),
     });
 
     expect(runtime.startThread).not.toHaveBeenCalled();

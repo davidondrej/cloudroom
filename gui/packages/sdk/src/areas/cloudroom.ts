@@ -139,6 +139,8 @@ export type AutoDeleteSetting = { days: AutoDeleteDays; kept: number | null; pla
  *  may break, so the app offers to move them to Cloud. */
 export type CloudVps = {
   connected: boolean; name: string | null; useForCloud: boolean; fallback: boolean; busy: string | null;
+  /** The live health check's answer; `connected` only means paired. Null when not paired, absent from older websites (#2025). */
+  state?: "online" | "busy" | "unreachable" | null;
   critical?: { kind: "memory" | "disk"; used: number; total: number } | null;
   health: { cpu: number; memory: { used: number; total: number }; disk: { used: number; total: number }; running: number; os?: string | null } | null;
 };
@@ -357,6 +359,8 @@ export interface CloudroomArea {
   projectShares(input: { action: string } & Record<string, unknown>): Promise<unknown>;
   /** GPUs (docs/scopes/gpus.md): one `room-cli gpu` step for `/api/desktop/gpu`, signed in as this account. */
   gpu(input: { argv: string[]; thread?: string }): Promise<unknown>;
+  /** Cloudroom Agent (docs/scopes/cloudroom-agent.md): a token from `/api/desktop/inference` that can only buy inference. */
+  inference(): Promise<unknown>;
   setAutoDelete(days: AutoDeleteDays): Promise<AutoDeleteSetting>;
   /** Names of API keys and tokens set in this Mac's login shell, never their values. */
   macVariables(signal?: AbortSignal): Promise<{ names: string[] }>;
@@ -521,6 +525,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     org: (input) => transport.readJson(request("/org", input)),
     projectShares: (input) => transport.readJson(request("/project-shares", input)),
     gpu: (input) => transport.readJson(request("/gpu", input)),
+    inference: () => transport.readJson(request("/inference", {})),
     setAutoDelete: (days) => transport.readJson(request("/auto-delete", { days })) as Promise<AutoDeleteSetting>,
     macVariables: (signal) => transport.readJson(request("/environment/mac", undefined, signal)) as Promise<{ names: string[] }>,
     importMacVariables: (names) => transport.readJson(request("/environment/mac", { names })) as Promise<CloudEnvironment>,

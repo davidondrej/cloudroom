@@ -12,11 +12,13 @@ and versions go to OSV (api.osv.dev), and the threat lists come from CISA's list
 """
 import base64, calendar, concurrent.futures, glob, json, math, os, platform, plistlib, re, shutil, subprocess, sys, time
 import urllib.request
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "workflow-scan"))
+from readers import cli  # room-cli that also starts on Windows (room-cli.cmd, arguments in ROOM_CLI_ARGV)
 
 HOME = os.path.expanduser("~")
 UA = {"User-Agent": "cloudroom-cyber-scan"}
 ROOTS = ["code", "Code", "Developer", "Documents/code", "Documents/GitHub", "GitHub", "projects", "Projects", "src", "dev",
-         "work", "repos"]
+         "work", "repos", "source/repos"]
 SKIP_DIRS = {"node_modules", "Library", ".cache", "vendor", "target", "dist", "build", ".venv", "venv", ".Trash"}
 
 
@@ -205,21 +207,26 @@ def local_repos():
             if top.count(os.sep) - root.count(os.sep) >= 3:
                 dirs[:] = []
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
-    try:  # Cloudroom's own projects are the user's repos too
-        for p in json.loads(run(["room-cli", "project", "list", "--json"]) or "[]"):
+    error = None
+    try:  # Cloudroom's own projects are the user's repos too; a failed lookup is not an empty list (#2345)
+        out = cli("project", "list", "--json", timeout=30)
+        if out.returncode:
+            raise OSError(((out.stderr or "").strip() or f"exit code {out.returncode}").splitlines()[-1])
+        for p in json.loads(out.stdout):
             for src in p.get("sources") or [] if isinstance(p, dict) else []:
                 path = src.get("type") == "local_path" and src.get("path")
                 if path and os.path.exists(os.path.join(path, ".git")):  # only folders on this computer
                     paths.add(os.path.realpath(path))
-    except (ValueError, TypeError, AttributeError):
-        pass
-    return sorted(paths)
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError) as e:
+        error = f"Cloudroom's project list: failed to load ({e}), so project repos outside the usual code folders were not checked"
+    return sorted(paths), error
 
 
 def active_repos(days, limit, limit_github):
     cutoff = time.time() - days * 86400
     repos = {}
-    for path in local_repos():
+    paths, error = local_repos()
+    for path in paths:
         last = git(path, "for-each-ref", "--sort=-committerdate", "--count=1", "--format=%(committerdate:unix)", "refs/heads")
         if not last.isdigit() or int(last) < cutoff:
             continue
@@ -240,7 +247,7 @@ def active_repos(days, limit, limit_github):
     local = sorted((r for r in repos.values() if r["path"]), key=lambda r: -r["last"])
     remote = sorted((r for r in repos.values() if not r["path"]), key=lambda r: -r["last"])
     kept = local[:limit] + remote[:limit_github]
-    return kept, len(repos) - len(kept)
+    return kept, len(repos) - len(kept), error
 
 
 def commit_days(repo):
@@ -546,7 +553,10 @@ def kev_matches(kev, app_list):
 
 def progress(data):
     if os.environ.get("ROOM_THREAD_ID"):
-        run(["room-cli", "loop", "scan-progress", "--data=" + json.dumps(data)])
+        try:
+            cli("loop", "scan-progress", "--data=" + json.dumps(data), timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass  # the progress card misses an update; the scan goes on
 
 
 def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
@@ -554,7 +564,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     started = time.time()
     with concurrent.futures.ThreadPoolExecutor(4) as pool:
         computer_f, threats_f = pool.submit(mac), pool.submit(threats)
-        repos, skipped = active_repos(days, max_repos, max_github)
+        repos, skipped, projects_error = active_repos(days, max_repos, max_github)
         for r in repos:
             r["packages"] = repo_packages(r["path"]) if r["path"] else []
             r["secrets"] = repo_secrets(r["path"]) if r["path"] else []
@@ -572,7 +582,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
               (osv_failed, "packages: the OSV lookup failed"),
               (sum(1 for d in results if d.get("failed")), "advisories: their details failed to load"),
               (max(0, len(all_ids) - MAX_ADVISORIES), f"advisories past the first {MAX_ADVISORIES}"))
-    unchecked = [f"{n} {text}" for n, text in counts if n]
+    unchecked = [f"{n} {text}" for n, text in counts if n] + ([projects_error] if projects_error else [])
     unchecked += [f"{name}: failed to load" for name, ok in (("CISA's exploited list", recent["kev"]),
                                                               ("GitHub's critical advisories", recent["github_critical"])) if not ok]
     if sys.platform != "darwin":  # mac() reads macOS only: missing computer facts must not look clean

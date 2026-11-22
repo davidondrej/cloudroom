@@ -13,7 +13,7 @@ import {
 import { macOnline, markMacOff, SAVED_API, startupMac } from "./cloud-mode";
 import {
   CloudThreadEvents,
-  cloudTimelineRows,
+  cloudTimeline,
   cloudTurnDetails,
   type CompletedTurnDisplay,
 } from "./cloud-timeline";
@@ -991,7 +991,7 @@ class CloudServer {
             })
           : json({ message: "Turn not found." }, 404);
       }
-      const rows = cloudTimelineRows(thread.events, title, display);
+      const { rows, activeBackgroundCommands } = cloudTimeline(thread.events, title, display);
       const maxSeq = thread.events.events.length;
       const status = this.status(id);
       return json({
@@ -1002,7 +1002,7 @@ class CloudServer {
         activePromptMode: null,
         activeThinking: null,
         activeWorkflows: [],
-        activeBackgroundCommands: [],
+        activeBackgroundCommands,
         pendingTodos: null,
         goal: null,
         modelFallback: null,

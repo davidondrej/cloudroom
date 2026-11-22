@@ -1075,6 +1075,14 @@ describe("automation data access", () => {
     ["active past the cap", "active", RECOVERY_WAIT_MS, ["thr_1", "thr_2"]],
     ["idle", "idle", 0, ["thr_1", "thr_2"]],
     ["error", "error", 0, ["thr_1", "thr_2"]],
+    // A failed thread with a queued retry (internet-watch, provider-retry) will run again on its own (#2454).
+    ["error with a queued retry", "error+retry", 0, ["thr_1"]],
+    ["error with a retry mid-send", "error+sending", 0, ["thr_1"]],
+    ["error with a retry whose send failed", "error+retry+failed", 0, ["thr_1", "thr_2"]],
+    ["archived with a queued retry", "error+retry+archived", 0, ["thr_1", "thr_2"]],
+    // Agents that take turns, or a limit retry the loop hands to the other provider: the next run goes, as before.
+    ["error with a queued retry, agents taking turns", "error+retry+rotating", 0, ["thr_1", "thr_2"]],
+    ["error with a limit retry", "error+retry+limit", 0, ["thr_1", "thr_2"]],
     // A finished run's thread can work on too: a child reports back or a person continues it (#1279).
     ["active after a finished run", "active", 0, ["thr_1"], "idle"],
     // A failed run's thread that came back and finished did its slot's work: a daily loop's retry would redo it (#1443).
@@ -1112,6 +1120,10 @@ describe("automation data access", () => {
       onTestFinished(() => void vi.useRealTimers());
       const db = createTestDb();
       const automation = createScheduledAutomation(db, 1000, "auto_test", cron);
+      if (status.includes("rotating")) {
+        const agents = [{ providerId: "codex", model: "gpt-5", reasoningLevel: "medium" }, { providerId: "codex", model: "gpt-6.1-sol", reasoningLevel: "medium" }];
+        db.prepare("UPDATE automations SET execution = json_set(execution, '$.agents', json(?))").run(JSON.stringify(agents));
+      }
       const spawned: string[] = [];
       let threadStatus: string = "active";
       const room = {
@@ -1121,10 +1133,24 @@ describe("automation data access", () => {
           threads: {
             get: async ({ threadId }: { threadId: string }) => ({
               id: threadId,
-              status: threadStatus,
-              archivedAt: null,
+              status: threadStatus.split("+")[0],
+              archivedAt: threadStatus.includes("archived") ? 1 : null,
               deletedAt: null,
+              dispatchingMessageCount: threadStatus.includes("sending") ? 1 : 0,
             }),
+            queue: {
+              list: async () =>
+                threadStatus.includes("retry")
+                  ? [
+                      {
+                        id: "q_1",
+                        threadId: "thr_1",
+                        failureReason: threadStatus.includes("failed") ? "Could not send." : null,
+                        payload: { kind: "retry", reason: threadStatus.includes("limit") ? "Rate limited" : "Internet dropped" },
+                      },
+                    ]
+                  : [],
+            },
             send: async () => {
               throw new Error("not expected");
             },
@@ -1756,6 +1782,14 @@ describe("automation service", () => {
       await (row.reported ? expect(report, row.name).resolves.toEqual({ reported: true }) : expect(report, row.name).rejects.toThrow("Nothing to report"));
     }
   });
+});
+
+it("a Cloud loop update refuses --target-thread instead of claiming it moved (#2361)", async () => {
+  const automations = vi.fn();
+  let cli: PluginCliRegistration | undefined;
+  registerAutomationCli({ bb: { sdk: { cloudroom: { automations } } as never, cli: { register: (r) => void (cli = r) } }, service: {} as never });
+  expect(await cli!.run(["update", "00000000-0000-4000-8000-000000000000", "--target-thread", "thr_x"], {})).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("Cloud loop can't move") });
+  expect(automations).not.toHaveBeenCalled();
 });
 
 describe("automation CLI --script-file", () => {

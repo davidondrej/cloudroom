@@ -549,11 +549,12 @@ export function RootComposeView() {
   const [forkSeed, setForkSeed] = useState<ForkThreadCreateSeed | null>(() =>
     readForkThreadCreateSeedFromLocationState(location.state),
   );
-  const [startLocal] = useState(
-    () =>
-      (location.state as { executionTarget?: unknown } | null)
-        ?.executionTarget === "local",
-  );
+  // Set by a link that needs one machine, whatever the project last used.
+  const [startOn] = useState<"local" | "cloud" | null>(() => {
+    const target = (location.state as { executionTarget?: unknown } | null)
+      ?.executionTarget;
+    return target === "local" || target === "cloud" ? target : null;
+  });
 
   const handleProjectChange = useCallback(
     (projectId: string) => {
@@ -665,8 +666,8 @@ export function RootComposeView() {
   const composerSeed = useMemo(
     () =>
       forkSeed === null
-        ? startLocal
-          ? { executionTarget: "local" as const }
+        ? startOn
+          ? { executionTarget: startOn }
           : undefined
         : {
             providerId: forkSeed.providerId,
@@ -684,7 +685,7 @@ export function RootComposeView() {
                   },
                 }),
           },
-    [forkSeed, startLocal],
+    [forkSeed, startOn],
   );
 
   return (

@@ -7,7 +7,8 @@
 //! minutes, its computer is offline or asleep, or the app closed, so `wait` stops (#2168).
 use crate::helper::jobs::quote;
 use std::{
-    io,
+    io::{self, Read},
+    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -117,6 +118,12 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
             }
             Some(Copy::Ready(folder)) => {
                 println!("Project files are ready in {}.", folder.display());
+                if let Some(doc) = late_instructions(&folder) {
+                    println!(
+                        "If {} is not already in your instructions, read it now and follow it: your session may have started before it arrived.",
+                        doc.display()
+                    );
+                }
                 return Ok(0);
             }
             Some(Copy::Failed(folder, reason)) => {
@@ -173,6 +180,56 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
         tokio::time::sleep(POLL).await;
     }
 }
+
+/// The project instructions Codex picks at startup, which a copy that landed later kept from it: the harness starts
+/// before the copy (ADR 0101), and Codex reads them only then (#2359). None when a Codex setting might skip or cap them
+/// (an untrusted project, `project_doc_*`), or when they pass Codex's default 32 KiB budget: the agent goes on as before.
+/// Only Codex gets it: Core sets `CODEX_HOME` for Codex alone, and other harnesses read other files.
+fn late_instructions(folder: &Path) -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty())?);
+    let configs = [
+        home.join("config.toml"),
+        PathBuf::from("/etc/codex/config.toml"),
+        folder.join(".codex/config.toml"),
+    ];
+    // Fails closed: a config it can't read plainly, or one that might set them, even through a TOML escape, means no hint.
+    // One non-blocking open, so a pipe never holds the wait.
+    let settings = |config: PathBuf| {
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NONBLOCK)
+            .open(config)
+        {
+            Ok(file) => file,
+            Err(error) => return error.kind() != io::ErrorKind::NotFound,
+        };
+        let mut text = String::new();
+        !file.metadata().is_ok_and(|meta| meta.is_file())
+            || file
+                .take(CONFIG_LIMIT + 1)
+                .read_to_string(&mut text)
+                .is_err()
+            || text.len() as u64 > CONFIG_LIMIT
+            || ["untrusted", "project_doc", "\\"]
+                .iter()
+                .any(|word| text.contains(word))
+    };
+    if configs.into_iter().any(settings) {
+        return None;
+    }
+    // Codex takes the first of these that exists.
+    let doc = ["AGENTS.override.md", "AGENTS.md"]
+        .into_iter()
+        .map(|name| folder.join(name))
+        .find(|doc| doc.is_file())?;
+    (doc.metadata().ok()?.len() <= 32 * 1024).then_some(doc)
+}
+
+const CONFIG_LIMIT: u64 = 64 * 1024;
+#[cfg(target_os = "linux")]
+const NONBLOCK: i32 = 0o4000;
+#[cfg(not(target_os = "linux"))]
+const NONBLOCK: i32 = 0x4;
 
 /// After a failed or missing copy, names the Git checkouts in `repos`, since one may be this project's repository (#2256).
 /// Cloudroom can't tell which, so the agent checks the origin and branch; nothing is switched or copied for it. The folder

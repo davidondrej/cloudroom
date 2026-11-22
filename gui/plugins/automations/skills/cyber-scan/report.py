@@ -8,13 +8,15 @@ report.json:
    "findings": [{"severity": "CRITICAL|HIGH|MEDIUM|LOW", "score": 9.8, "id": "CVE-2026-1234", "title": "...",
                  "where": "owner/repo · npm seroval 1.5.4", "fix": "Update to 1.6.2"}],
    "loops": [{"name": "...", "schedule": "Every hour", "why": "..."}]}
-"score" and "id" are optional: only use IDs and scores from findings.json, never invent them.
+"id" is optional: only use IDs from findings.json, never invent them.
+"score" is 0.1-10.0 (from findings.json when it matches real risk, otherwise estimated for its severity); missing scores default to the tier midpoint.
 """
-import html, json, os, sys, time
+import html, json, math, os, sys, time
 
 COLOR = {"CRITICAL": "var(--destructive-text)", "HIGH": "var(--warning-text)", "MEDIUM": "var(--attention, var(--foreground))",
          "LOW": "var(--muted-foreground)"}
 RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+DEFAULT_SCORE = {"CRITICAL": 9.5, "HIGH": 7.5, "MEDIUM": 5.0, "LOW": 2.5}
 CSS = """
 .cs{font:inherit;color:var(--foreground)}
 .cs .head{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin:2px 0 12px}
@@ -43,14 +45,24 @@ def esc(value):
     return html.escape(str(value or ""))
 
 
+def score_of(finding, sev):
+    raw = finding.get("score")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw) and 0.1 <= raw <= 10:
+        return round(float(raw), 1)
+    return DEFAULT_SCORE.get(sev, 2.5)
+
+
 def render(data):
-    findings = sorted(data.get("findings") or [], key=lambda f: (RANK.get(str(f.get("severity")).upper(), 4), -(f.get("score") or 0)))
+    findings = sorted(
+        data.get("findings") or [],
+        key=lambda f: (RANK.get(str(f.get("severity") or "LOW").upper(), 4), -score_of(f, str(f.get("severity") or "LOW").upper())),
+    )
     counts = {s: sum(str(f.get("severity")).upper() == s for f in findings) for s in RANK}
     head = " · ".join(f'<span style="color:{COLOR[s]}">{n} {s.lower()}</span>' for s, n in counts.items() if n) or "No serious problems found"
     rows = []
     for f in findings:
         sev = str(f.get("severity") or "LOW").upper()
-        score = f'<b>{float(f["score"]):.1f}</b>' if isinstance(f.get("score"), (int, float)) else ""
+        score = f'<b>{score_of(f, sev):.1f}</b>'
         vid = f'<div class="id">{esc(f["id"])}</div>' if f.get("id") else ""
         fix = f'<div class="fix">{esc(f["fix"])}</div>' if f.get("fix") else ""
         rows.append(f'<div class="f"><div class="sev" style="color:{COLOR.get(sev, COLOR["LOW"])}">{score}<span>{esc(sev)}</span></div>'

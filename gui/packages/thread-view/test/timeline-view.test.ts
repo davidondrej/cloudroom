@@ -17,7 +17,7 @@ import {
   type TimelineBundleSummaryRow,
   type TimelineStepSummaryRow,
   type TimelineViewDelegationWorkRow,
-} from "../src/timeline-view.js";
+} from "../src/view.js";
 
 interface WorkRowOverrides {
   createdAt?: number;
