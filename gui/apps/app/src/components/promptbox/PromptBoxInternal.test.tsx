@@ -4099,6 +4099,22 @@ describe("PromptBoxInternal prompt actions", () => {
     expect(onAttachFiles).toHaveBeenCalledWith([image]);
   });
 
+  it("names a pasted image that arrives without a name", async () => {
+    const onAttachFiles = vi.fn().mockResolvedValue(undefined);
+    const { promptBoxRef } = renderPromptBox("", { onAttachFiles });
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({
+      files: [new File(["image"], "", { type: "image/png" })],
+    });
+
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+    const [[pasted]] = onAttachFiles.mock.calls as [[File[]]];
+    expect(pasted.map(({ name, type }) => ({ name, type }))).toEqual([
+      { name: "image.png", type: "image/png" },
+    ]);
+  });
+
   it("pastes deeply nested clipboard html without overflowing the stack", async () => {
     const { changes, promptBoxRef } = renderPromptBox("");
     const depth = 2_000;
