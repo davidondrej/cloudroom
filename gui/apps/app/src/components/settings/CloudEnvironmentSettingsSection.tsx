@@ -190,13 +190,18 @@ function GithubCard({ synced }: { synced: number }) {
   const state = status.data?.state;
   const connected = state === "connected";
   const account = useQuery({ queryKey: ["cloudroom-github-account"], queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal), enabled: connected, retry: false });
-  // A switch or reconnect may land on another account.
-  useEffect(() => { if (connected) void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-account"] }); }, [connected, queryClient]);
+  // A switch or reconnect may land on another account, or on other repos.
+  useEffect(() => {
+    if (!connected) return;
+    void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-account"] });
+    void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-repos"] });
+  }, [connected, queryClient]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
+  // With `repos`, cloud agents get only the repos the user then picks on GitHub (#2084).
   const connect = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (repos: boolean) => {
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current);
+      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
       if (result.state === "waiting" && result.verification_url && new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
     },
     onSettled: refresh,
@@ -205,13 +210,23 @@ function GithubCard({ synced }: { synced: number }) {
   const disconnect = useMutation({ mutationFn: () => sdk.cloudroom.disconnectGithub(), onSettled: refresh });
   const code = state === "waiting" ? status.data?.user_code : null;
   const url = state === "waiting" ? status.data?.verification_url : null;
+  const openGithub = (page: string | null | undefined) => { if (page && new URL(page).origin === "https://github.com") openUrlInExternalBrowser(page); };
+  // After the code is approved, GitHub's page for picking repos opens by itself, once: GitHub's own page only says "all set".
+  const hadCode = useRef(false);
+  useEffect(() => {
+    if (code) hadCode.current = true;
+    else if (url && hadCode.current) { hadCode.current = false; if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); }
+  }, [code, url]);
+  // The account says which kind of login is connected. Until it loads, a switch could start the wrong kind.
+  const loading = connected && account.isLoading;
   const copyAndOpen = async (value: string) => {
     await copyToClipboardWithToast(value, { successMessage: "Code copied. Paste it on github.com." });
-    if (url && new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url);
+    openGithub(url);
   };
   const busy = connect.isPending || disconnect.isPending;
   const user = account.data;
-  const problem = errorText(status.error ?? connect.error ?? disconnect.error) ?? (state === "error" || state === "expired" ? status.data?.message : null);
+  // A failed switch leaves the older login connected, and still says what failed.
+  const problem = errorText(status.error ?? connect.error ?? disconnect.error) ?? (state === "error" || state === "expired" || connected ? status.data?.message : null);
 
   return (
     <Card icon="Github" title="GitHub" description="Every cloud thread clones, pushes, and opens PRs as this account.">
@@ -223,6 +238,12 @@ function GithubCard({ synced }: { synced: number }) {
             <Button size="sm" variant="outline" onClick={() => void copyAndOpen(code)}><Icon name="Copy" className="size-3.5" />Copy & open GitHub</Button>
             <Button size="sm" variant="ghost" className="text-subtle-foreground" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel</Button>
           </div>
+        ) : url ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-xs text-subtle-foreground">GitHub is connected. Now pick the repos cloud agents may use. This card updates by itself.</p>
+            <Button size="sm" variant="outline" onClick={() => openGithub(url)}><Icon name="Github" className="size-3.5" />Pick repos on GitHub</Button>
+            <Button size="sm" variant="ghost" className="text-subtle-foreground" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel</Button>
+          </div>
         ) : (
           <div className="flex items-center justify-between gap-3">
             {connected ? (
@@ -232,7 +253,7 @@ function GithubCard({ synced }: { synced: number }) {
                   <p className="truncate text-sm text-foreground">
                     {user ? <>@{user.login}{user.name && <span className="ml-1.5 text-xs text-subtle-foreground">{user.name}</span>}</> : "GitHub"}
                   </p>
-                  <p className="text-xs text-subtle-foreground">Connected</p>
+                  <p className="text-xs text-subtle-foreground">{!user ? "Connected" : user.reposUrl ? "Connected · only the repos you chose on GitHub" : "Connected · every repo this account can reach"}</p>
                 </div>
               </div>
             ) : (
@@ -240,7 +261,10 @@ function GithubCard({ synced }: { synced: number }) {
             )}
             {!status.isPending && !status.isError && (
               <div className="flex shrink-0 gap-2">
-                <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy} onClick={() => connect.mutate()}>
+                {connected && user?.reposUrl
+                  ? <Button size="sm" variant="outline" onClick={() => openGithub(user.reposUrl)}>Change repos</Button>
+                  : <Button size="sm" variant={connected ? "outline" : "ghost"} className={connected ? undefined : "text-subtle-foreground"} disabled={busy || loading} onClick={() => connect.mutate(true)}>{connected ? "Limit to specific repos" : "Only specific repos"}</Button>}
+                <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy || loading} onClick={() => connect.mutate(Boolean(user?.reposUrl))}>
                   {connected ? "Switch account" : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
                 </Button>
                 {connected && <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy} onClick={() => disconnect.mutate()}>Disconnect</Button>}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { threadTabsSchema } from "@cloudroom/server-contract";
 import type { PluginFileOpenerSlot } from "@/lib/plugin-slots";
-import type { OpenSecondaryPanelTabRequest } from "@/components/secondary-panel/useThreadFileTabs";
+import type { OpenSecondaryPanelTabRequest } from "@/components/right-panel/store/use-panel-tabs";
 import {
   buildFileOpenerPanelTab,
   createFileOpenerOriginalTab,

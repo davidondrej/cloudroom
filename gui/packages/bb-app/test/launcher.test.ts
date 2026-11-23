@@ -537,6 +537,27 @@ describe("bb-app launcher", () => {
     expect(context.serverUrl).toBe("https://bb.example.test");
   });
 
+  it("keeps the desktop app's human-click key over a saved env.json setting", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "bb-app-human-click-"));
+    writeFileSync(
+      join(dataDir, "env.json"),
+      JSON.stringify({ env: { CLOUDROOM_HUMAN_CLICK_KEY: "", BB_TELEMETRY: "0" } }),
+      "utf8",
+    );
+
+    const runtime = await resolveRuntime({
+      entrypointUrl: pathToFileURL("/repo/packages/bb-app/dist/bb-app.js").href,
+      env: { BB_DATA_DIR: dataDir, CLOUDROOM_HUMAN_CLICK_KEY: "desktop-key" },
+      homeDir: "/home/tester",
+      options: { help: false },
+      mode: "local",
+    });
+
+    expect(runtime.serverEnv.CLOUDROOM_HUMAN_CLICK_KEY).toBe("desktop-key");
+    // Other saved settings still apply.
+    expect(runtime.serverEnv.BB_TELEMETRY).toBe("0");
+  });
+
   it("uses managed config server URL over ambient env", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "bb-app-server-config-"));
     writeFileSync(

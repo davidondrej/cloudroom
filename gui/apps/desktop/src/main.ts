@@ -35,6 +35,10 @@ import {
   APP_SURFACE_DESKTOP,
   APP_SURFACE_ENV_NAME,
 } from "@cloudroom/config/app-surface";
+import {
+  createHumanClickSigner,
+  HUMAN_CLICK_PUBLIC_KEY_ENV,
+} from "@cloudroom/config/human-click";
 import { applyPackagedDesktopRuntimeEnv } from "@cloudroom/config/runtime";
 import type { ConnectCredential } from "@cloudroom/connect-client";
 import { COMPUTER, type AppKeybindings } from "@cloudroom/domain";
@@ -436,8 +440,11 @@ let systemConfigSync: SystemConfigSync | null = null;
 let systemConfigRefreshToken = 0;
 let refreshRemoteSystemConfig: (() => void) | null = null;
 const applicationWindowWebContentsIds = new Set<number>();
+// Made fresh at each launch and kept in memory: only this app can make a human click.
+const humanClickSigner = createHumanClickSigner();
 const localCallerAuth = createLocalCallerAuth({
   isAppWebContents: (id) => applicationWindowWebContentsIds.has(id),
+  signHumanClick: humanClickSigner.sign,
   localServerUrl: () => currentRuntime?.serverUrl ?? builtinServerUrl,
   reloadAppWindows: () => reloadApplicationWindows(),
 });
@@ -2419,6 +2426,8 @@ async function startOwnedRuntime(
     env: {
       ...process.env,
       [APP_SURFACE_ENV_NAME]: APP_SURFACE_DESKTOP,
+      // Only the public half: the server it starts trusts this app's clicks (ADR 0260).
+      [HUMAN_CLICK_PUBLIC_KEY_ENV]: humanClickSigner.publicKey,
       BB_DESKTOP_VERSION: process.env.BB_DESKTOP_VERSION,
       BB_DESKTOP_UPDATE_NEEDS_PASSWORD: appUpdateNeedsPassword() ? "1" : undefined,
     },

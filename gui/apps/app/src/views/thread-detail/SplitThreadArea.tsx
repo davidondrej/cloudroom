@@ -109,7 +109,7 @@ import {
   shouldUseMacosDesktopChrome,
 } from "@/lib/room-desktop";
 import { SplitWorkspaceSecondaryPanelHost } from "./SplitWorkspaceSecondaryPanelHost";
-import { SecondaryPanelHostLayoutContext } from "@/components/secondary-panel/SecondaryPanelHostLayoutContext";
+import { SecondaryPanelHostLayoutContext } from "@/components/right-panel/shell/panel-tokens";
 import {
   CONTEXT_INACTIVE_TEXT_CLASS,
   CONTEXT_SELECTION_SURFACE_CLASS,

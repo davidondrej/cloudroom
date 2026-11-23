@@ -415,6 +415,8 @@ export interface CallerProofIssuer {
   start(): StartedCallerProof;
   finish(id: string, claim: string): Promise<string | null>;
   verify(token: string | undefined): boolean;
+  /** True for a token this process issued to its own code, like the phone relay. */
+  isInternal(token: string | undefined): boolean;
   issueInternal(): string;
 }
 
@@ -561,6 +563,13 @@ export async function createCallerProofIssuer(
       if (now() - lastUsedAt > TOKEN_IDLE_MS) return false;
       tokens.set(key, now());
       return true;
+    },
+    isInternal(token) {
+      return (
+        token !== undefined &&
+        token.length <= MAX_TOKEN_LENGTH &&
+        internalTokens.has(sha256(token))
+      );
     },
     issueInternal() {
       const token = randomBytes(32).toString("base64url");

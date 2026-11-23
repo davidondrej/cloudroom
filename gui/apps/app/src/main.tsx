@@ -16,6 +16,7 @@ import { viewingOtherMac } from "./cloud/mac-connection";
 import { keepOtherMacOnScreen } from "./cloud/other-mac";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppToaster } from "./components/AppToaster";
+import { HumanClickRequests } from "./components/plugin/HumanClickRequests";
 import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";
 import { appToast } from "./components/ui/app-toast";
 import { registerProviderCliInstallQueryClient } from "./components/provider-cli/provider-cli-install-store";
@@ -118,7 +119,12 @@ function render() {
           <BrowserRouter>
             <App />
             <AppToaster />
-            {macIsOff() && <CloudModeNotice />}
+            {macIsOff() ? (
+              <CloudModeNotice />
+            ) : (
+              // Only the desktop app on this computer can answer, so a phone or another Mac never asks.
+              !isPhoneRelay() && !viewingOtherMac() && <HumanClickRequests />
+            )}
           </BrowserRouter>
         </QueryClientProvider>
       </AppErrorBoundary>

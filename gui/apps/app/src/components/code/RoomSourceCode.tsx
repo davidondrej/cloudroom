@@ -18,8 +18,8 @@ import {
   type VirtualFileMetrics,
 } from "@pierre/diffs";
 import { Button } from "@cloudroom/shared-ui/button";
-import { getDiffShadowRoots } from "@/components/git-diff/git-diff-patch-text";
-import { usePierreLineSelectionActions } from "@/components/git-diff/PierreLineSelectionActions.js";
+import { getDiffShadowRoots } from "@/components/diff/patch-utils";
+import { usePierreLineSelectionActions } from "@/components/diff/line-selection";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import { useResolvedCodeThemePair } from "@/lib/code-theme";
 import { PierreWorkerPoolBoundary } from "@/lib/pierre-worker-pool-boundary";

@@ -4,14 +4,14 @@ import {
   createPluginPanelFixedPanelTab,
   type PluginPanelFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import type { FileOpenerPreferenceMap } from "@/lib/file-opener-preference";
 import {
   resolveFileOpenerReplacement,
   type FileOpenerOverride,
 } from "@/lib/plugin-slot-resolvers";
 import type { PluginFileOpenerSlot } from "@/lib/plugin-slots";
-import type { OpenSecondaryPanelTabRequest } from "@/components/secondary-panel/useThreadFileTabs";
+import type { OpenSecondaryPanelTabRequest } from "@/components/right-panel/store/use-panel-tabs";
 
 const FILE_OPENER_ACTION_ID_PREFIX = "file-opener:";
 

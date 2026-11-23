@@ -1574,6 +1574,13 @@ describe("acp bridge", () => {
     await expect(startThread({ envVars, model: "fake/gone" })).rejects.toThrow(
       'Model "fake/gone" rejected: model not found: fake/gone',
     );
+    // #711: without session/set_model, keep the config option's reason.
+    await expect(
+      startThread({
+        envVars: { FAKE_ACP_MODEL_CONFIG: "1", FAKE_ACP_NO_SET_MODEL: "1" },
+        model: "fake/gone",
+      }),
+    ).rejects.toThrow('Model "fake/gone" rejected: model not found: fake/gone');
   });
 
   it("rebuilds the session when a turn picks a different model", async () => {

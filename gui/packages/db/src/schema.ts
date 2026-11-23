@@ -997,6 +997,10 @@ export const queuedThreadMessages = sqliteTable(
       .$type<QueuedMessagePayloadKind>()
       .notNull()
       .default("inline"),
+    // An `inline` row typed in the app's message box, which the repeat guard never holds (#264).
+    fromComposer: integer("from_composer", { mode: "boolean" })
+      .notNull()
+      .default(false),
     // Set together, and only on a `retry` row: the ORIGINAL request this row
     // re-submits, which attempt it is (2 is the first retry), and why it is
     // being retried in the retrier's words ("Rate limited").

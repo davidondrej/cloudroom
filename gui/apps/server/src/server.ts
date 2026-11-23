@@ -105,6 +105,7 @@ import {
   allowedAppOrigins,
   browserRequestProblem,
 } from "./browser-request-guard.js";
+import { installHumanClick } from "./human-click.js";
 import {
   arrivedOverLoopback,
   assertTrustedCaller,
@@ -745,6 +746,10 @@ export function createApp(
     plugins: pluginService,
     notifyCatalogChanged: () => deps.hub.notifySystem(["plugins-changed"]),
     warn: (message) => deps.logger.warn(message),
+  });
+  installHumanClick(app, deps, {
+    catalog: pluginCatalogService,
+    plugins: pluginService,
   });
   registerCallerProofRoutes(publicApi, deps.callerProofs);
   registerProjectRoutes(publicApi, deps);

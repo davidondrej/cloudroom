@@ -267,6 +267,8 @@ const sendMessageRequestFieldsSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   mode: sendMessageModeSchema,
   senderThreadId: z.string().min(1).optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
   pluginSubmission: z
     .object({ pluginId: pluginIdSchema, data: jsonValueSchema })
     .optional(),
@@ -319,7 +321,7 @@ export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
 // `sendAt` is deliberately dropped: an edit rewrites a message that has
 // already been dispatched, so there is nothing left to schedule.
 export const editMessageRequestSchema = sendMessageRequestFieldsSchema
-  .omit({ mode: true, sendAt: true, pluginSubmission: true })
+  .omit({ mode: true, sendAt: true, pluginSubmission: true, fromComposer: true })
   .extend({
     operationId: z.string().min(1),
     expectedRequestSequence: z.number().int().nonnegative().optional(),
@@ -414,6 +416,8 @@ export const createQueuedMessageRequestSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   senderThreadId: z.string().min(1).optional(),
   hardQueue: z.boolean().optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
 });
 export type CreateQueuedMessageRequest = z.infer<
   typeof createQueuedMessageRequestSchema

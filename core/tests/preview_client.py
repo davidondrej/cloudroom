@@ -73,7 +73,7 @@ class PreviewTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         sock = Path(self.directory.name) / 'upstream.sock'
         self.upstream = UnixServer(str(sock), App)
-        self.tunnel = SimpleNamespace(socket_path=sock, generation='test-generation', closed=False,
+        self.tunnel = SimpleNamespace(socket_path=sock, generation='test-generation', closed=False, reuse=True,
             process=SimpleNamespace(poll=lambda: None), connections=set(), connections_lock=threading.Lock())
         self.server = preview.Server(('127.0.0.1', 0), preview.Proxy)
         self.server.authority = f'p3000-test.localhost:{self.server.server_port}'
@@ -97,6 +97,16 @@ class PreviewTests(unittest.TestCase):
         body = b'x' * 131072
         self.assertEqual(self.request('POST', '/', body=body)[2], body)
         self.assertIn(('Content-Security-Policy', "frame-ancestors 'self'"), self.request()[1])
+        # A browser connection keeps one tunnel for its next requests, not one per dev module (#2428), unless an older
+        # Core would count only the tunnel's first request as activity.
+        for reuse, tunnels in [(True, 1), (False, 3)]:
+            self.tunnel.reuse = reuse
+            with mock.patch.object(preview.Upstream, 'connect', autospec=True, side_effect=preview.Upstream.connect) as connect, \
+                    contextlib.closing(http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)) as connection:
+                for _ in range(3):
+                    connection.request('GET', '/', headers={'Host': self.server.authority})
+                    self.assertEqual(connection.getresponse().read(), b'ok')
+                self.assertEqual(connect.call_count, tunnels)
 
     def test_host_origin_and_websocket_requests_are_private(self):
         for headers in [

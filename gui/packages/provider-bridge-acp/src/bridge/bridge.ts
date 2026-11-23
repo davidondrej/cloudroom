@@ -1178,6 +1178,14 @@ function isAcpAuthRequiredResponse(error: unknown): boolean {
   );
 }
 
+/** omp answers an unknown method with -32603 "Unknown ACP ext method: ...". */
+function isAcpMethodNotFound(error: unknown): boolean {
+  return (
+    error instanceof AcpAgentResponseError &&
+    (error.code === -32601 || /unknown acp ext method/i.test(error.message))
+  );
+}
+
 function withAcpAuthRequiredRecovery(error: unknown): unknown {
   if (error instanceof AcpAuthRequiredError) return error;
   if (
@@ -1276,6 +1284,7 @@ async function selectAcpNativeModel(args: {
   if (shouldSetModel) {
     let configState: AcpConfigStateResult | null = null;
     let setModel = true;
+    let configError: unknown;
     if (modelOption) {
       try {
         configState = await args.connection.request({
@@ -1288,8 +1297,8 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
         setModel = false;
-      } catch {
-        setModel = true;
+      } catch (error) {
+        configError = error;
       }
     }
     if (setModel) {
@@ -1300,15 +1309,21 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
       } catch (error) {
+        // An agent without set_model (OpenCode, omp) already gave the real reason (#711).
+        const reason =
+          configError instanceof AcpAgentResponseError &&
+          isAcpMethodNotFound(error)
+            ? configError
+            : error;
         if (
-          !(error instanceof AcpAgentResponseError) ||
-          isAcpAuthRequiredResponse(error)
+          !(reason instanceof AcpAgentResponseError) ||
+          isAcpAuthRequiredResponse(reason)
         ) {
-          throw error;
+          throw reason;
         }
         throw new AcpAgentResponseError(
-          `Model "${selection.modelId}" rejected: ${error.message}`,
-          error.code,
+          `Model "${selection.modelId}" rejected: ${reason.message}`,
+          reason.code,
         );
       }
     }

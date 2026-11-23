@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CreditsBar } from "@/components/CloudQueue";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
@@ -25,10 +26,12 @@ function Avatar({
   email,
   ready,
   inMenu,
+  hidden,
 }: {
   email: string;
   ready: boolean;
   inMenu?: boolean;
+  hidden: boolean;
 }) {
   return (
     <span
@@ -38,7 +41,11 @@ function Avatar({
         inMenu ? "size-8 text-xs" : "size-6 text-[11px]",
       )}
     >
-      {email.charAt(0).toUpperCase()}
+      {hidden ? (
+        <Icon name="UserRound" className="size-3.5" />
+      ) : (
+        email.charAt(0).toUpperCase()
+      )}
       <span
         className={cn(
           "absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2",
@@ -79,6 +86,7 @@ export function SettingsAccountMenu() {
   const navigate = useNavigate();
   const closeOnMobile = useCloseMobileSidebar();
   const [signOutOpen, setSignOutOpen] = useState(false);
+  const [privacy] = usePrivacyMode();
   const email = status?.signingIn ? undefined : status?.account?.email;
   const account = getSettingsSectionRoutePath("account");
 
@@ -107,6 +115,8 @@ export function SettingsAccountMenu() {
     );
   }
 
+  // Privacy mode hides the email here too, and the avatar's first letter with it.
+  const shown = hideEmail(email, privacy);
   const ready = status?.ready === true;
   const plan = status?.plan
     ? `${status.plan.charAt(0).toUpperCase()}${status.plan.slice(1)} plan`
@@ -137,8 +147,8 @@ export function SettingsAccountMenu() {
               "h-10 data-[state=open]:bg-sidebar-accent",
             )}
           >
-            <Avatar email={email} ready={ready} />
-            <span className="min-w-0 flex-1 truncate">{email}</span>
+            <Avatar email={email} ready={ready} hidden={privacy} />
+            <span className="min-w-0 flex-1 truncate">{shown}</span>
             <Icon
               name="ChevronsUpDown"
               className="size-3.5 shrink-0 text-muted-foreground"
@@ -152,10 +162,10 @@ export function SettingsAccountMenu() {
           className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-60 border-foreground/10 p-1.5"
         >
           <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-2">
-            <Avatar email={email} ready={ready} inMenu />
+            <Avatar email={email} ready={ready} inMenu hidden={privacy} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm text-foreground">
-                {email}
+                {shown}
               </span>
               <span className="block truncate text-xs text-muted-foreground">
                 {plan ? `${plan} · ${connection}` : connection}

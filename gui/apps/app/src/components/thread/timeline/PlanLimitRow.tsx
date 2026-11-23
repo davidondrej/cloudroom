@@ -23,6 +23,7 @@ import { formatUsageReset } from "@cloudroom/shared-ui/lib/usage-format";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
+import { useThread } from "@/hooks/queries/thread-queries";
 import {
   getProviderIconInfo,
   getProviderIconTintStyle,
@@ -221,6 +222,7 @@ export function PlanLimitRow({
         <PlanLimitSwitchedRow
           switched={switched}
           refusal={refusal}
+          detail={detail}
           className={className}
         />
       );
@@ -242,7 +244,17 @@ export function PlanLimitRow({
       />
     );
   }
-  if (!stopped) return null;
+  if (!stopped) {
+    return (
+      <PlanLimitPastRow
+        threadId={threadId}
+        rowAt={rowAt}
+        refusal={refusal}
+        detail={detail}
+        className={className}
+      />
+    );
+  }
   const isCloud = thread.executionTarget === "cloud";
   const pickAccount = (accountId: string) => {
     setBusy("Switching account");
@@ -254,7 +266,10 @@ export function PlanLimitRow({
     });
   };
   const name = self?.name ?? thread.providerId;
-  const reset = formatUsageReset(selfResetsAt);
+  const limit =
+    modelLimitName(detail) ??
+    (selfLimit !== "plan limit" ? selfLimit : limitName(detail));
+  const reset = formatUsageReset(selfResetsAt) ?? detailReset(detail, rowAt);
   // Cloud keeps its own Antigravity login, so picking an account here can't move a Cloud Antigravity thread.
   const canSwitch =
     !refusal &&
@@ -281,7 +296,7 @@ export function PlanLimitRow({
             aria-hidden
           />
         )}
-        {refusal ? `${name} refused this task` : `${name} hit its ${selfLimit}`}
+        {refusal ? `${name} refused this task` : `${name} hit its ${limit}`}
         {refusal || reset ? (
           <span className="text-sm font-normal text-muted-foreground">
             {refusal ? `${vendor}'s safety filter` : reset}
@@ -563,10 +578,12 @@ function SwitchStep({
 export function PlanLimitSwitchedRow({
   switched,
   refusal = false,
+  detail = null,
   className,
 }: {
   switched: PlanLimitSwitch;
   refusal?: boolean | undefined;
+  detail?: string | null;
   className?: string;
 }) {
   const agentOf = useAgentOf();
@@ -580,11 +597,83 @@ export function PlanLimitSwitchedRow({
       )}
     >
       <LogoIcon logo={from} className="size-3.5" />
-      {from.name} {refusal ? "refused the task" : "hit its plan limit"}
+      {from.name} {refusal ? "refused the task" : `hit its ${limitName(detail)}`}
       <Icon name="ArrowRight" className="size-3.5" aria-hidden />
       <LogoIcon logo={to} className="size-3.5" />
       {to.name} took over
     </p>
+  );
+}
+
+/** An earlier or running plan-limit / refusal row without a switch: one quiet line, like AuthFailureRow. */
+export function PlanLimitPastRow({
+  threadId,
+  rowAt,
+  refusal = false,
+  detail = null,
+  className,
+}: {
+  threadId: string;
+  rowAt?: number | undefined;
+  refusal?: boolean | undefined;
+  detail?: string | null;
+  className?: string;
+}) {
+  const thread = useThread(threadId).data;
+  const agentOf = useAgentOf();
+  const [showDetail, setShowDetail] = useState(false);
+  const providerId = pastLimitProvider(detail, thread?.providerId);
+  const agent = providerId ? agentOf(providerId) : null;
+  const name = agent?.name ?? "Agent";
+  const reset = refusal ? null : detailReset(detail, rowAt);
+  const expandableRefusal = refusal && Boolean(detail);
+  const summary = (
+    <>
+      {agent ? (
+        <LogoIcon logo={agent} className="size-3.5" />
+      ) : (
+        <Icon name="AlertCircle" className="size-3.5 shrink-0" aria-hidden />
+      )}
+      <span>
+        {refusal
+          ? `${name} refused the task`
+          : `${name} hit its ${limitName(detail)}`}
+        {reset ? ` · ${reset}` : ""}
+      </span>
+    </>
+  );
+  if (!expandableRefusal) {
+    return (
+      <p
+        className={cn(
+          "flex flex-wrap items-center gap-2 py-1 text-sm text-muted-foreground",
+          className,
+        )}
+      >
+        {summary}
+      </p>
+    );
+  }
+  return (
+    <div className={cn("flex flex-col gap-1 py-1 text-sm text-muted-foreground", className)}>
+      <button
+        type="button"
+        className="flex flex-wrap items-center gap-2 text-left hover:text-foreground"
+        onClick={() => setShowDetail((open) => !open)}
+      >
+        {summary}
+        <Icon
+          name={showDetail ? "ChevronDown" : "ChevronRight"}
+          className="size-3.5"
+          aria-hidden
+        />
+      </button>
+      {showDetail ? (
+        <p className="max-w-[620px] whitespace-pre-wrap pl-5.5 text-xs leading-relaxed">
+          {detail}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -616,21 +705,86 @@ export function PlanLimitAccountSwitchedRow({
   );
 }
 
+/** Model-specific Claude limits ("You've hit your Fable limit") keep their capitalized model name. */
+function modelLimitName(detail: string | null): string | null {
+  const named = /\b(fable|opus|sonnet) limit\b/iu.exec(detail ?? "");
+  if (!named?.[1]) return null;
+  const model = named[1];
+  return `${model.charAt(0).toUpperCase()}${model.slice(1).toLowerCase()} limit`;
+}
+
 /** Claude names the window it hit ("You've hit your weekly limit"); otherwise it is the plan limit. */
 function limitName(detail: string | null): string {
+  const model = modelLimitName(detail);
+  if (model) return model;
   const named =
-    /\b(weekly|session|daily|monthly|5-hour|five-hour) limit\b/i.exec(
+    /\b(weekly|session|daily|monthly|5-hour|five-hour) limit\b/iu.exec(
       detail ?? "",
     );
   return named ? named[0].toLowerCase() : "plan limit";
 }
+
+const RELATIVE_RESET_FRESH_MS = 60_000;
+
+function detailReset(detail: string | null, rowAt?: number): string | null {
+  if (!detail) return null;
+  const resets = /\bresets\s+([^.\n]+)/iu.exec(detail);
+  const value = resets?.[1]?.trim().replace(/[,;:]$/, "");
+  if (value && value.length <= 40) {
+    if (
+      /^in\b/iu.test(value) &&
+      rowAt !== undefined &&
+      Date.now() - rowAt > RELATIVE_RESET_FRESH_MS
+    ) {
+      return null;
+    }
+    return `Resets ${value}`;
+  }
+  const resumes = /\bresumes at\s+([^,.\n]+)/iu.exec(detail);
+  const at = resumes?.[1]?.trim();
+  if (at && at.length <= 40) return `Resets ${at}`;
+  return null;
+}
+
+function pastLimitProvider(
+  detail: string | null,
+  fallback: string | undefined,
+): string | null {
+  const text = detail ?? "";
+  if (
+    /^Claude's plan limit\b/u.test(text) ||
+    modelLimitName(text) !== null ||
+    text.includes("claude.ai/settings/usage")
+  ) {
+    return "claude-code";
+  }
+  if (
+    /^Codex's plan limit\b/u.test(text) ||
+    text.includes("chatgpt.com/codex")
+  ) {
+    return "codex";
+  }
+  if (/^Cursor's plan limit\b/u.test(text)) return "acp-cursor";
+  if (/^Pi's plan limit\b/u.test(text)) return "pi";
+  if (/^Individual quota reached\b/iu.test(text)) return "acp-antigravity";
+  return fallback ?? null;
+}
+
+const FALLBACK_AGENT_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  "acp-cursor": "Cursor",
+  pi: "Pi",
+  "acp-antigravity": "Antigravity",
+};
 
 function useAgentOf(): (providerId: string) => Agent {
   const providers = useSystemProviders().data;
   return (providerId) => {
     const provider = providers?.find((entry) => entry.id === providerId);
     return {
-      name: provider?.displayName ?? providerId,
+      name:
+        provider?.displayName ?? FALLBACK_AGENT_NAMES[providerId] ?? providerId,
       icon: getProviderIconInfo("agent", providerId, provider ?? null).icon,
       tint: provider ? getProviderIconTintStyle(provider) : undefined,
     };

@@ -63,7 +63,10 @@ import { PROMPT_STACK_ROW_ACTION_TAKEOVER_CLASS } from "@/components/promptbox/b
 import { useScrollOverflowState } from "@/components/thread/timeline/useScrollOverflowState";
 import { OverflowFade } from "@/components/ui/overflow-fade";
 import { InlineMessageEditorFrame } from "@/components/promptbox/InlineMessageEditorFrame";
-import { resolveAttachmentPreviewSrc } from "@/components/promptbox/AttachmentPreview";
+import {
+  resolveAttachmentPreviewSrc,
+  useAttachmentThumbnail,
+} from "@/components/promptbox/AttachmentPreview";
 import { useBottomAnchoredScroll } from "@/components/ui/bottom-anchored-scroll-body";
 import {
   HoverCard,
@@ -911,6 +914,7 @@ function QueuedMessageImageThumbnail({
   attachmentCount: number;
 }) {
   const [failed, setFailed] = useState(false);
+  const thumbnail = useAttachmentThumbnail(src);
   return (
     <span
       data-queued-message-image=""
@@ -926,7 +930,7 @@ function QueuedMessageImageThumbnail({
         </span>
       ) : (
         <img
-          src={src}
+          src={thumbnail?.src}
           alt=""
           draggable={false}
           onError={() => setFailed(true)}

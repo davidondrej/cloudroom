@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog"
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { COARSE_POINTER_TEXT_SM_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
-import { LAUNCHER_ACTION_ROW_BASE_CLASS } from "@/components/secondary-panel/launcherRow";
+import { LAUNCHER_ACTION_ROW_BASE_CLASS } from "@/components/right-panel/tabs/tab-primitives";
 import {
   useAppCommandHandler,
   useIndexedAppCommandHandlers,

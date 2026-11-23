@@ -5,11 +5,11 @@ import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { LiveDurationText } from "./LiveDurationText";
 
-const FINISHED_LABEL = {
-  pending: "Background command running:",
-  completed: "Background command finished:",
-  error: "Background command failed:",
-  interrupted: "Background command stopped:",
+const STATUS_LABEL = {
+  pending: "running",
+  completed: "finished",
+  error: "failed",
+  interrupted: "stopped",
 } as const;
 
 /** How long a finished command ran: Cloud reports it, since its start record is gone by then. */
@@ -18,55 +18,68 @@ function finishedMs(row: TimelineWorkflowWorkRow): number {
   return row.completedAt === null ? 0 : row.completedAt - row.startedAt;
 }
 
-/** A background command on the right, where messages to the agent sit: dashed while the agent waits on it, solid where
- *  it ended. Claude starts a turn by itself when one ends, so this says why the agent spoke again. */
-export function BackgroundCommandBubble({ row }: { row: TimelineWorkflowWorkRow }) {
+/** A centered pill on a hairline divider for a background command: dashed while the agent waits on it, solid where it
+ *  ended. Claude starts a turn by itself when one ends, so this separates the reply and says why without looking like
+ *  a user message. */
+export function BackgroundCommandBubble({
+  row,
+}: {
+  row: TimelineWorkflowWorkRow;
+}) {
   const waiting = row.status === "pending";
   const failed = row.status === "error";
   const ms = waiting ? 0 : finishedMs(row);
-  const name = (
-    <span className="break-words font-medium text-foreground">
-      {row.description.trim() || "a background command"}
-    </span>
+  const rawName = row.description.trim() || "Background command";
+  const name = rawName.replace(/\s+/g, " ");
+  const statusLabel = STATUS_LABEL[row.status];
+  const ruleClassName = cn(
+    "min-w-4 flex-1",
+    waiting
+      ? "h-0 border-t border-dashed border-border/80"
+      : "h-px bg-border/80",
   );
-  // Inline text, so a long name wraps like a sentence on narrow screens.
+
   return (
-    <div className="w-full py-1.5" data-message-column="">
-      <p
+    <div
+      role="separator"
+      aria-label={`${name} ${statusLabel}`}
+      className="my-2.5 flex w-full items-center px-2"
+      data-message-column=""
+    >
+      <span className={ruleClassName} aria-hidden="true" />
+      <div
+        title={rawName}
         className={cn(
-          "ml-auto w-fit max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed text-muted-foreground",
+          "inline-flex min-w-0 max-w-[min(85%,30rem)] items-center gap-1.5 rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground",
           waiting
-            ? "border border-dashed border-foreground/25"
-            : "bg-background shadow-message dark:bg-surface-recessed",
+            ? "border-dashed border-foreground/25"
+            : failed
+              ? "border-destructive/40"
+              : "border-border",
         )}
       >
         <Icon
           name="Terminal"
-          className={cn(
-            "mr-2 inline size-3.5 align-[-2px]",
-            failed && "text-destructive",
-          )}
+          className={cn("size-3.5 shrink-0", failed && "text-destructive")}
           aria-hidden="true"
         />
+        <span className="min-w-0 truncate font-medium text-foreground/85">
+          {name}
+        </span>
+        <span className={cn("shrink-0", failed && "text-destructive")}>
+          {statusLabel}
+        </span>
         {waiting ? (
-          <>
-            When {name} finishes, the agent continues{" "}
-            <span className="tabular-nums">
-              <LiveDurationText startedAt={row.startedAt} />
-            </span>
-          </>
-        ) : (
-          <>
-            <span className={cn(failed && "text-destructive")}>
-              {FINISHED_LABEL[row.status]}
-            </span>{" "}
-            {name}
-            {ms > 0 ? (
-              <span className="tabular-nums"> {durationToCompactString(ms)}</span>
-            ) : null}
-          </>
-        )}
-      </p>
+          <span className="shrink-0 tabular-nums text-muted-foreground/65 empty:hidden before:mr-1 before:content-['·']">
+            <LiveDurationText startedAt={row.startedAt} />
+          </span>
+        ) : ms > 0 ? (
+          <span className="shrink-0 tabular-nums text-muted-foreground/65">
+            · {durationToCompactString(ms)}
+          </span>
+        ) : null}
+      </div>
+      <span className={ruleClassName} aria-hidden="true" />
     </div>
   );
 }

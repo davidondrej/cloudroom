@@ -43,14 +43,14 @@ import {
   type ProjectMachineSetupDialogTarget,
 } from "@/components/dialogs/ProjectMachineSetupDialog";
 import { HEADER_ICON_BUTTON_CLASS } from "@/components/layout/AppPageHeader";
-import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/secondary-panel/panelToggleControlState";
+import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/right-panel/shell/panel-tokens";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
-import type { SecondaryPanelPaneRenderContext } from "@/components/secondary-panel/ThreadSecondaryPanel";
+import type { SecondaryPanelPaneRenderContext } from "@/components/right-panel/shell/panel-shell";
 import {
   LazyBrowserTabDeck,
   preloadThreadSecondaryPanel,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { BrowserAddressFocusRequest } from "@/components/right-panel/tabs/browser-tab";
 import { EmptyStatePanel } from "@cloudroom/shared-ui/empty-state";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { PageShell } from "@/components/ui/page-shell.js";
@@ -108,8 +108,8 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
-import { createNewTabFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/panel-atoms";
+import { createNewTabFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import type {
   HostFileTabState,
   ThreadStorageFileTabState,
@@ -146,13 +146,13 @@ import { StartingThread, type StartingThreadMessage } from "./StartingThread";
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
-} from "@/components/secondary-panel/useThreadStorageViewer";
+} from "@/components/right-panel/tabs/thread-storage";
 import {
   useThreadFileTabs,
   type FileSearchSelection,
-} from "@/components/secondary-panel/useThreadFileTabs";
-import { isSecondaryFileTab } from "@cloudroom/client-core";
-import { buildSecondaryPanelTabs } from "@/components/secondary-panel/buildSecondaryPanelTabs";
+} from "@/components/right-panel/store/use-panel-tabs";
+import { isSecondaryFileTab } from "@/components/right-panel/store/tab-ops";
+import { buildSecondaryPanelTabs } from "@/components/right-panel/shell/buildSecondaryPanelTabs";
 import {
   DEFAULT_TERMINAL_COLS,
   DEFAULT_TERMINAL_ROWS,
@@ -161,7 +161,7 @@ import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
-} from "@/components/secondary-panel/terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import {
   getActiveFixedSecondaryTab,
   useSetThreadSecondaryPanelSelection,

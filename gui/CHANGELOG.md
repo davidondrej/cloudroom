@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 164
+
+Share only the repos you pick (2026-11-23)
+
+### Changes
+
+- Connect GitHub can now share only the repos you pick with cloud agents.
+- Hitting a Claude plan limit in a Cloud thread shows the plan-limit card, not a raw error.
+- Cloud previews of dev servers load right away instead of stalling.
+- Image attachments show small thumbnails in the message box, and privacy mode hides your email.
+- Security fixes.
+
 ## 163
 
 Live bubbles for background commands (2026-11-22)

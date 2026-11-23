@@ -1,6 +1,7 @@
 import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { loadHostDaemonStartConfig } from "@cloudroom/config/host-daemon";
 import {
   createHostWatcher,
@@ -180,12 +181,19 @@ export async function startHostDaemon(
       if (userShellEnv !== null) {
         providerUserEnv = providerEnvFromUserShell(userShellEnv);
       }
+      const deepapiDir = join(homedir(), ".deepapi");
+      const basePath = userShellEnv?.PATH ?? process.env.PATH ?? "";
+      const inheritedPath = basePath.split(delimiter).includes(deepapiDir)
+        ? basePath
+        : basePath
+          ? `${basePath}${delimiter}${deepapiDir}`
+          : deepapiDir;
       return prepareRuntimeShellEnv({
         bbExecutableDirectory: roomExecutableDirectory,
         bbExecutablePath: roomExecutablePath,
         dataDir,
         hostDaemonPort: localApiConfig.port,
-        inheritedPath: userShellEnv?.PATH ?? process.env.PATH,
+        inheritedPath,
         powershellExecutionPolicy,
         serverUrl: machineAuthProxy?.serverUrl ?? serverUrl,
         toolsDirectory: await installShim(),

@@ -22,7 +22,7 @@ import {
   createNoopDesktopBrowserApi,
 } from "@/test/room-desktop-test-utils";
 import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
-import { BrowserTabContent } from "./BrowserTabContent";
+import { BrowserTabContent } from "@/components/right-panel/tabs/browser-tab";
 
 const FIND_KEYBINDING = {
   command: "browser.find" as const,

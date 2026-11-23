@@ -9,16 +9,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginDiffRendererProps } from "@get-bb/plugin-sdk";
 import type { DiffFileEntry } from "@cloudroom/server-contract";
-import type {
-  DiffFileContentsResult,
-  RequestDiffFileContents,
-} from "@/components/git-diff/GitDiffCardBody";
+import type { DiffFileContentsResult, RequestDiffFileContents } from "@/components/diff/diff-store";
 import type { DiffPatchState } from "@/hooks/queries/use-environment-diff-patches";
 import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
 } from "@/lib/plugin-slots";
-import { DiffFileCard } from "./DiffFileCard";
+import { DiffFileCard } from "@/components/diff/diff-card";
 import { makeDiffFileEntry } from "@/test/fixtures/diff-files";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 

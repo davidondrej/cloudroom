@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerConfig } from "@cloudroom/config/server";
 import { createCallerProofIssuer } from "@cloudroom/config/caller-proof";
+import { HUMAN_CLICK_PUBLIC_KEY_ENV } from "@cloudroom/config/human-click";
 import { isLoopbackHostname } from "@cloudroom/config/loopback";
 import { moveLegacyUserSkills, resolveUserSkillsRootPath } from "@cloudroom/config/skill-storage-paths";
 import { toOptionalString } from "@cloudroom/config/strings";
@@ -95,6 +96,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   const isProduction = process.env.NODE_ENV === "production";
   const staticDir =
     isProduction && existsSync(appDistDir) ? appDistDir : undefined;
+  // Read once, then dropped, so no process this server starts inherits it.
+  const humanClickPublicKey = process.env[HUMAN_CLICK_PUBLIC_KEY_ENV];
+  delete process.env[HUMAN_CLICK_PUBLIC_KEY_ENV];
   const runtimeConfig: ServerRuntimeConfig = {
     appVersion: serverConfig.BB_APP_VERSION,
     builtinSkillsRootPath: resolveBuiltinSkillsRootPath(),
@@ -103,6 +107,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     featureFlags: serverConfig.featureFlags,
     hostDaemonPort: serverConfig.BB_HOST_DAEMON_PORT,
+    humanClickPublicKey,
     inheritedSkillsRootPaths: serverConfig.BB_INHERITED_SKILLS_ROOTS,
     inferenceFallbackModel: serverConfig.BB_INFERENCE_FALLBACK,
     inferenceModel: serverConfig.BB_INFERENCE,

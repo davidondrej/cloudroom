@@ -57,6 +57,9 @@ export interface CloudroomStatus {
   /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
    *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
   planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number } | null;
+  /** Thread families burning Cloud Credits fast, by top thread: credits in the last hour, and how many subagents used most
+   *  of them (0: the thread itself). The sidebar shows a red line under each (docs/scopes/credit-burn.md). */
+  burning?: Record<string, { credits: number; subagents: number }>;
   /** The switch in Settings → General → DeepAPI. Null hides it. */
   deepapi?: { enabled: boolean } | null;
 }
@@ -86,6 +89,8 @@ export interface CloudroomGithubAccount {
   login: string;
   name: string | null;
   avatarUrl: string | null;
+  /** Set when the login reaches only the repos its owner picked: GitHub's page for changing them. */
+  reposUrl?: string;
 }
 
 /** Every new cloud thread starts with these (synced with the website). Values are never returned; `hint` is the
@@ -298,7 +303,8 @@ export interface CloudroomArea {
   cancelCodexLogin(requestId: string): Promise<CloudroomCodexAuth>;
   /** GitHub for cloud sandboxes: connected when this Mac's `gh` is signed in or the website holds a login. Login runs GitHub's device flow. */
   githubAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
-  githubLogin(requestId: string): Promise<CloudroomCodexAuth>;
+  /** With `repos`, Cloud gets only the repos the user then picks on GitHub. While they pick, the answer is `waiting` with GitHub's page and no code. */
+  githubLogin(requestId: string, repos?: boolean): Promise<CloudroomCodexAuth>;
   cancelGithubLogin(requestId: string): Promise<CloudroomCodexAuth>;
   /** Null when GitHub can't tell right now. */
   githubAccount(signal?: AbortSignal): Promise<CloudroomGithubAccount | null>;
@@ -500,7 +506,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
     projectBranches: (projectId, signal) => transport.readJson(request(`/project-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{defaultBranch:string|null;branches:string[]}>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
-    githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
+    githubLogin: (requestId, repos) => transport.readJson(request("/github/login", repos ? { requestId, repos } : { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     githubAccount: (signal) => transport.readJson(request("/github/account", undefined, signal)) as Promise<CloudroomGithubAccount | null>,
     disconnectGithub: () => transport.readVoid(request("/github/disconnect", {})),

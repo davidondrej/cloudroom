@@ -16,7 +16,7 @@ import {
   type ThreadListEntry,
 } from "@cloudroom/domain";
 import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
-import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
@@ -28,7 +28,7 @@ import {
   ThreadArchiveQuickAction,
 } from "@/components/thread/ThreadActionsMenu";
 import { useThreadActions } from "@/components/thread/ThreadActionsProvider";
-import { useTeleportDirection } from "@/hooks/queries/cloudroom-queries";
+import { useTeleportDirection, useThreadCreditBurn } from "@/hooks/queries/cloudroom-queries";
 import { useQuery } from "@tanstack/react-query";
 import { usePrefetchThreadOnHover } from "@/hooks/queries/thread-queries";
 import { threadPendingInteractionsQueryKey } from "@/hooks/queries/query-keys";
@@ -567,6 +567,8 @@ function ThreadTrailingIndicator({
   );
 }
 
+type CreditBurn = { credits: number; subagents: number };
+
 function ThreadRowComponent({
   projectId,
   thread,
@@ -576,7 +578,8 @@ function ThreadRowComponent({
   onProjectSelect,
   options,
   waiting,
-}: ThreadRowProps & { waiting: WaitingRequest | null }) {
+  burn,
+}: ThreadRowProps & { waiting: WaitingRequest | null; burn: CreditBurn | null }) {
   const [isDropdownActionsOpen, setIsDropdownActionsOpen] = useState(false);
   const [isContextActionsOpen, setIsContextActionsOpen] = useState(false);
   const { renameThread } = useThreadActions();
@@ -649,8 +652,16 @@ function ThreadRowComponent({
     parentOptions?.childActivity ?? NO_COLLAPSED_CHILD_ACTIVITY;
   const hasChildren = childCount > 0;
   const hasHiddenChildren = isParentRow && isParentCollapsed && hasChildren;
-  // A two-line waiting row would break the pinned stack, so it scrolls like a normal row.
-  const stickyLevel = waiting ? undefined : parentOptions?.stickyLevel;
+  // A thread family burning credits fast gets a red second line and a red bottom edge (David, 2026-11-23, design D2,
+  // docs/scopes/credit-burn.md). A red GPU row wins.
+  const burnLine =
+    burn && !waiting
+      ? burn.subagents > 0
+        ? `${burn.subagents} subagent${burn.subagents === 1 ? "" : "s"} using lots of credits`
+        : `Using a lot of credits · ${burn.credits.toLocaleString("en-US")}/hr`
+      : null;
+  // A two-line row would break the pinned stack, so it scrolls like a normal row.
+  const stickyLevel = waiting || burnLine ? undefined : parentOptions?.stickyLevel;
   const trailingIndicatorState: ThreadListIndicatorState = {
     hasPendingInteraction:
       hasPendingInteraction || (hasHiddenChildren && childActivity.pending),
@@ -706,9 +717,11 @@ function ThreadRowComponent({
       ? `Open ${labelTitle} (needs you)`
       : computerUseLabel
         ? `Open ${labelTitle} (${computerUseLabel})`
-        : hasComposerDraft
-          ? `Open ${labelTitle} (unsubmitted draft)`
-          : `Open ${labelTitle}`;
+        : burnLine
+          ? `Open ${labelTitle} (${burnLine})`
+          : hasComposerDraft
+            ? `Open ${labelTitle} (unsubmitted draft)`
+            : `Open ${labelTitle}`;
   const rowDragBindings = options.dragBindings;
   const nestTargetState = options.nestDrop?.state ?? null;
   const reorderPlacement = options.nestDrop?.reorderPlacement ?? null;
@@ -744,6 +757,8 @@ function ThreadRowComponent({
     reorderPlacement && REORDER_PLACEMENT_CLASS[reorderPlacement],
     waiting &&
       "h-auto py-1.5 max-md:pointer-coarse:h-auto bg-destructive/20 hover:bg-destructive/25 shadow-[inset_3px_0_0_var(--destructive)]",
+    burnLine &&
+      cn("h-auto flex-wrap gap-y-0 pt-0.5 pb-1.5 max-md:pointer-coarse:h-auto shadow-[inset_0_-2px_0_var(--destructive)]", !showActive && "bg-sidebar-accent/60"),
     // Opaque, so a pinned row never shows rows scrolling under it.
     needsYou &&
       "bg-[color-mix(in_oklab,var(--attention)_10%,var(--sidebar))] hover:bg-[color-mix(in_oklab,var(--attention)_15%,var(--sidebar))]",
@@ -1052,6 +1067,12 @@ function ThreadRowComponent({
           </span>
         )}
       </span>
+      {burnLine ? (
+        // A second line under the title, the row's full width (design D2).
+        <span className="-mt-1 basis-full truncate pr-2 pl-5 text-xs font-medium text-destructive">
+          {burnLine}
+        </span>
+      ) : null}
     </>
   );
 
@@ -1093,7 +1114,7 @@ function ThreadRowComponent({
  * useChildThreadPendingAttention: the thread list's interactions-changed message keeps it
  * fresh, and no thread-detail subscription tells the server the thread is open.
  */
-function WaitingThreadRow(props: ThreadRowProps) {
+function WaitingThreadRow(props: ThreadRowProps & { burn: CreditBurn | null }) {
   const threadId = props.thread.id;
   const { data } = useQuery({
     queryKey: threadPendingInteractionsQueryKey(threadId),
@@ -1111,12 +1132,14 @@ function WaitingThreadRow(props: ThreadRowProps) {
 
 function ThreadRowWithChildProgress(props: ThreadRowProps) {
   const cells = useHiddenChildCells(props.thread);
+  // Only top threads: subagents' burn shows on their parent's row.
+  const burn = useThreadCreditBurn(props.thread.id, !props.thread.parentThreadId);
   // The open thread shows its own card, so its row stays normal (docs/scopes/sidebar.md).
   const row =
     props.thread.hasPendingInteraction && !props.isActive ? (
-      <WaitingThreadRow {...props} />
+      <WaitingThreadRow {...props} burn={burn} />
     ) : (
-      <ThreadRowComponent {...props} waiting={null} />
+      <ThreadRowComponent {...props} waiting={null} burn={burn} />
     );
   if (!cells) return row;
   return (

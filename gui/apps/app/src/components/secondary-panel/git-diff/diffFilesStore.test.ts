@@ -3,8 +3,8 @@ import {
   DIFF_CARD_HEADER_HEIGHT_PX,
   estimateCardHeight,
   resolveDiffFileCardInitialState,
-} from "./diffFilesStore";
-import { GIT_DIFF_AUTO_COLLAPSE_FILE_THRESHOLD } from "./gitDiffPanelHelpers";
+} from "@/components/diff/diff-store";
+import { GIT_DIFF_AUTO_COLLAPSE_FILE_THRESHOLD } from "@/components/diff/diff-store";
 import { makeDiffFileEntry as buildEntry } from "@/test/fixtures/diff-files";
 
 describe("resolveDiffFileCardInitialState", () => {

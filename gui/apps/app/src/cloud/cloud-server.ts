@@ -2,6 +2,7 @@ import { COMPUTER, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { appToast } from "@/components/ui/app-toast";
 import { sidebarNavigationQueryKey } from "@/hooks/queries/query-keys";
 import { appQueryClient } from "@/lib/app-query-client";
+import { getAppSurface } from "@/lib/app-surface";
 import { wsManager } from "@/lib/ws";
 import {
   cloudApi,
@@ -195,7 +196,11 @@ class CloudThread {
     this.events = new CloudThreadEvents(id);
   }
 
-  async send(text: string, requestId: string | undefined) {
+  async send(
+    text: string,
+    requestId: string | undefined,
+    surface?: string,
+  ) {
     const outgoing: Outgoing | null =
       requestId && this.historyLoaded
         ? {
@@ -205,7 +210,7 @@ class CloudThread {
             after: this.events.promptLog.length,
           }
         : null;
-    await cloudApi.send(this.id, text, requestId);
+    await cloudApi.send(this.id, text, requestId, surface);
     if (outgoing && !this.logged(outgoing)) this.outbox.push(outgoing);
     if (this.historyLoaded) {
       this.keepFollowing();
@@ -532,7 +537,11 @@ class CloudServer {
         typeof body.requestId === "string" && REQUEST_ID.test(body.requestId)
           ? body.requestId
           : undefined;
-      const queuedMessage = await this.thread(thread[1]).send(text, requestId);
+      const queuedMessage = await this.thread(thread[1]).send(
+        text,
+        requestId,
+        await this.usageSurface(),
+      );
       return json(
         queuedMessage
           ? { ok: true, delivery: "queued", queuedMessage }
@@ -633,6 +642,7 @@ class CloudServer {
       reasoning: optional(body.reasoningLevel),
       service_tier: optional(body.serviceTier),
       target: optional(body.cloudTarget),
+      surface: await this.usageSurface(),
     }).catch((failure: unknown) => {
       if (!(failure instanceof CloudError)) throw failure;
       return failure.code === "no_cloud_thread"
@@ -652,6 +662,15 @@ class CloudServer {
       }),
       201,
     );
+  }
+
+  /** The Mac is off, so it can't count this message. The website does, but only while the Mac's saved settings
+   *  have usage data on. */
+  private async usageSurface(): Promise<string | undefined> {
+    const config = object(await this.saved("/api/v1/system/config"));
+    return object(config.generalSettings).telemetryEnabled === true
+      ? getAppSurface()
+      : undefined;
   }
 
   private async account(): Promise<Json> {

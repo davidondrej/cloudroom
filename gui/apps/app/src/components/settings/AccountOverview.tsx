@@ -5,6 +5,7 @@ import { useNavigate } from "react-router";
 import type { CloudroomStatus } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useClaudeConnection } from "@/components/ClaudeConnection";
 import { useCloudLogin } from "@/components/CodexConnectionPanel";
@@ -35,7 +36,9 @@ export function StatusPill({ ok, title, children }: { ok: boolean; title?: strin
   </span>;
 }
 
-export function AccountOverview({ email, onSignOut }: { email: string; onSignOut: () => void }) {
+export function AccountOverview({ email: real, onSignOut }: { email: string; onSignOut: () => void }) {
+  const [privacy] = usePrivacyMode();
+  const email = hideEmail(real, privacy);
   const status = useCloudroomAccount().data;
   const accountId = status?.account?.id;
   const github = useQuery({ queryKey: ["cloudroom-github-auth", accountId], enabled: Boolean(accountId) && status?.ready === true, retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAuth(signal) }).data?.state;

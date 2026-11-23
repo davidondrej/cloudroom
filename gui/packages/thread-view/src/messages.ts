@@ -67,6 +67,9 @@ export function isPlanLimitReply(text: string): boolean {
 }
 
 const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's).";
+/** Claude/Codex plan-limit text when an older Core or saved history missed the wrapper ("You've hit your Fable limit · resets …"). */
+const PROVIDER_PLAN_LIMIT_RE =
+  /\bYou['’]ve (?:hit|reached) your (?:\S+\s+){0,4}limit\b/iu;
 const CODEX_POLICY_CODES = new Set([
   "cyberPolicy",
   "misalignmentPolicyViolation",
@@ -376,10 +379,12 @@ export function buildErrorRow(
     }
   }
 
+  const combinedText = `${rawMessage}\n${rawDetail ?? ""}`;
   const planLimit =
     !isReconnect &&
     (providerErrorInfo?.category === "rate-limit" ||
-      `${rawMessage}\n${rawDetail ?? ""}`.includes(CORE_PLAN_LIMIT));
+      combinedText.includes(CORE_PLAN_LIMIT) ||
+      PROVIDER_PLAN_LIMIT_RE.test(combinedText));
   const refusal = !isReconnect && providerErrorInfo?.category === "policy";
 
   return {

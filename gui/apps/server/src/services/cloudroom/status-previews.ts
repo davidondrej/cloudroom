@@ -255,7 +255,7 @@ export class CloudStatusPreviews {
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
           queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.rt.sandboxes.cloudQueue(), cloudPaused: this.rt.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
-          plan: this.rt.sandboxes.currentPlan(), planUsage: this.rt.sandboxes.planUsage(), deepapi: this.rt.sandboxes.deepapiState(),
+          plan: this.rt.sandboxes.currentPlan(), planUsage: this.rt.sandboxes.planUsage(), burning: this.rt.sandboxes.creditBurn(), deepapi: this.rt.sandboxes.deepapiState(),
         };
       }
       const connection = await this.rt.connection();

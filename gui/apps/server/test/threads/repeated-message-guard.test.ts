@@ -176,3 +176,22 @@ it("does not hold after other input, outside the window, or for Loops", async ()
     expect(await tell(h, id, LIMIT + 1, loop)).toEqual(sent(LIMIT + 1));
   });
 });
+
+it("never holds what a person typed in the app, even after it queued", async () => {
+  await withTestHarness(async (h) => {
+    const id = seedIdleThread(h);
+    const typed = { fromComposer: true as const };
+    expect(await tell(h, id, LIMIT + 1, typed)).toEqual(sent(LIMIT + 1));
+
+    await send(h, id, typed);
+    expect(outcome(await send(h, id, typed))).toBe("thread-busy");
+    finish(h, id);
+    await drain(h.deps, { threadId: id });
+    expect(thread(h, id).status).toBe("active");
+    expect(cards(h, id)).toEqual([]);
+
+    // A script's copy of the same text is still held.
+    finish(h, id);
+    expect(await tell(h, id)).toEqual([HELD]);
+  });
+});

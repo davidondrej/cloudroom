@@ -138,6 +138,9 @@ export class CloudroomAccountService {
         } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
         const handoff = handoffSchema.parse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
         abort.signal.throwIfAborted();
+        // A GitHub login still waiting was started for the account signed in until now: another account ends it,
+        // or its card would show the old account's code and the login would be saved there.
+        if ((await cloudroom(this.deps).sandboxes.account().catch(() => null))?.userId !== handoff.account.id) cancelGithubLogin();
         await cloudroom(this.deps).configure(handoff.connection ? { ...handoff.connection, projectId: input.projectId } : null, handoff.account, abort.signal, origin.origin, handoff.sandboxes?.token);
         linkInstall();
         reply(200, "You’re done here. Everything else happens in the Cloudroom app.");

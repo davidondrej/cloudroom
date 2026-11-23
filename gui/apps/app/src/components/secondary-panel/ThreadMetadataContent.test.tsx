@@ -35,7 +35,7 @@ import {
   EnvironmentRow,
   GitStatusRow,
   ThreadMetadataCard,
-} from "./ThreadMetadataContent";
+} from "@/components/right-panel/tabs/thread-info";
 
 const localHost = { locality: "local", identity: null } as const;
 const connectedLocalHost: EnvironmentDisplayHostContext = {

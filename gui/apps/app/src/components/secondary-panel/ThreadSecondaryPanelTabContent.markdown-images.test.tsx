@@ -8,7 +8,7 @@ import {
   ProjectFilePreviewTabContent,
   ThreadStorageFilePreviewTabContent,
   WorkspaceFilePreviewTabContent,
-} from "./ThreadSecondaryPanelTabContent";
+} from "@/components/right-panel/shell/file-preview-tabs";
 import type { FilePreview } from "@cloudroom/client-core";
 
 function markdownPreview(path: string, url = `/content/${path}`): FilePreview {

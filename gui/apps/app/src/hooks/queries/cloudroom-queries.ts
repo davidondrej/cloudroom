@@ -1,7 +1,7 @@
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE, deriveProjectNameFromPath, reasoningLevelSchema, serviceTierSchema, type ReasoningLevel, type Thread } from "@cloudroom/domain";
-import type { MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
+import type { CloudroomStatus, MacAccessLevel, NativeSession, RepoSuggestion, SessionImportResult } from "@cloudroom/sdk/browser";
 import type { ProjectSelectorSuggestions } from "@/components/pickers/ProjectSelector";
 import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
@@ -158,14 +158,24 @@ const cloudDiskSchema = z.object({ paused: z.boolean(), reason: z.enum(["disk_ca
 export type CloudDisk = z.infer<typeof cloudDiskSchema>;
 const threadStatusSchema = z.object({ authRequired: z.boolean().default(false), starting: z.boolean().default(false), sessionId: z.string().nullable(), paused: z.boolean(), failedStart: z.boolean().default(false), model: z.string(), reasoning: reasoningLevelSchema, serviceTier: serviceTierSchema.default("default"), error: z.string().nullable(), reconnecting: z.boolean().default(false), usageLimit: z.boolean().default(false), launchCap: z.boolean().default(false), disk: cloudDiskSchema.nullable().default(null), awake: z.boolean().default(false), vps: z.boolean().default(false), move: z.enum(["moving", "failed"]).nullable().default(null), waiting: z.string().nullable().default(null), fromCopy: z.boolean().default(false), outOfMemory: z.boolean().default(false), pendingDelivery: z.number() }).nullable();
 
+const accountQuery = { queryKey: ["cloudroom-account"], queryFn: async ({ signal }: { signal: AbortSignal }) => {
+  const status = await sdk.cloudroom.status(signal);
+  if (status.account && typeof document !== "undefined" && document.visibilityState === "visible") {
+    void fetchWithAppSurface("/api/v1/cloudroom/account/activity", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
+  }
+  return status;
+}, refetchInterval: (query: { state: { data?: CloudroomStatus } }) => query.state.data?.signingIn ? 500 : 10000 };
+
 export function useCloudroomAccount(enabled = true) {
-  return useQuery({ enabled, queryKey: ["cloudroom-account"], queryFn: async ({ signal }) => {
-    const status = await sdk.cloudroom.status(signal);
-    if (status.account && typeof document !== "undefined" && document.visibilityState === "visible") {
-      void fetchWithAppSurface("/api/v1/cloudroom/account/activity", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).catch(() => {});
-    }
-    return status;
-  }, refetchInterval: (query) => query.state.data?.signingIn ? 500 : 10000 });
+  return useQuery({ enabled, ...accountQuery });
+}
+
+/** This thread family's fast credit burn, for its sidebar row; null for almost every thread (docs/scopes/credit-burn.md).
+ *  Reads the account query's cache: its other users poll it, so hundreds of rows never add a fetch. Re-renders the row
+ *  only when its own burn changes. */
+export function useThreadCreditBurn(threadId: string, enabled: boolean) {
+  return useQuery({ enabled, queryKey: accountQuery.queryKey, queryFn: accountQuery.queryFn, staleTime: Infinity,
+    select: (status: CloudroomStatus) => status.burning?.[threadId] ?? null }).data ?? null;
 }
 
 /** Starts browser sign-in, or cancels the one in progress. GitHub and Google skip the website's login page. */

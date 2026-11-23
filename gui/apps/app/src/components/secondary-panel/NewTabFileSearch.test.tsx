@@ -3,7 +3,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
-import { NewTabFileSearch } from "./NewTabFileSearch";
+import { NewTabFileSearch } from "@/components/right-panel/tabs/new-tab";
 
 vi.mock("@/hooks/useFileSearchSuggestions", () => ({
   useFileSearchSuggestions: () => ({
@@ -15,8 +15,8 @@ vi.mock("@/hooks/useFileSearchSuggestions", () => ({
   }),
 }));
 
-vi.mock("./threadRecentItems", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./threadRecentItems")>();
+vi.mock("@/components/right-panel/store/panel-atoms", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/components/right-panel/store/panel-atoms")>();
   return {
     ...actual,
     useThreadRecentItems: () => [],

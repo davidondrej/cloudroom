@@ -84,6 +84,7 @@ import {
 } from "./MissingProviderCliRow.js";
 import {
   PlanLimitAccountSwitchedRow,
+  PlanLimitPastRow,
   PlanLimitRow,
   PlanLimitSwitchedRow,
 } from "./PlanLimitRow.js";
@@ -1594,7 +1595,7 @@ function TimelineRowView({
     return (
       <PlanLimitAccountSwitchedRow
         switched={row.planLimitAccountSwitch}
-        detail={row.detail}
+        detail={row.detail ?? row.title}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -1626,7 +1627,7 @@ function TimelineRowView({
         threadId={row.threadId}
         switched={planLimitSwitch}
         refusal={errorRow?.refusal}
-        detail={errorRow?.detail}
+        detail={errorRow?.detail ?? (errorRow?.refusal ? null : errorRow?.title)}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -1636,6 +1637,18 @@ function TimelineRowView({
       <PlanLimitSwitchedRow
         switched={planLimitSwitch}
         refusal={errorRow?.refusal}
+        detail={errorRow?.detail ?? errorRow?.title}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (errorRow?.planLimit || errorRow?.refusal) {
+    return (
+      <PlanLimitPastRow
+        threadId={row.threadId}
+        rowAt={row.createdAt}
+        refusal={errorRow.refusal}
+        detail={errorRow.detail ?? (errorRow.refusal ? null : errorRow.title)}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );

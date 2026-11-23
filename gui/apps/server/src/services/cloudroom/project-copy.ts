@@ -435,7 +435,7 @@ function cloneHint(error: string, login: string): string {
   if (/Authentication failed|Invalid username or token/i.test(error)) return `GitHub rejected the cloud's GitHub login, which may have expired. Connect or switch the account ${fix}.`;
   if (!/repository .*not found/i.test(error)) return "Check that the project's GitHub remote exists and you can access it.";
   return login
-    ? `Cloud sandboxes use GitHub account @${login}, which can't see this repository, or it doesn't exist. Give @${login} access, or use Switch account ${fix}.`
+    ? `Cloud sandboxes use GitHub account @${login}, which can't see this repository, or it doesn't exist. Give @${login} access (Change repos, if Cloudroom only has specific repos), or use Switch account ${fix}.`
     : `The cloud's GitHub login can't see this repository, or it doesn't exist. Check the account ${fix}.`;
 }
 

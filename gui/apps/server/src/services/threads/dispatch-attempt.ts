@@ -639,7 +639,8 @@ async function runDispatchAttempt(
       !sendNow &&
       !firstDispatch &&
       attempt === "start-turn" &&
-      args.queuePayload.kind === "inline"
+      args.queuePayload.kind === "inline" &&
+      !args.queuePayload.fromComposer
     ) {
       const repeat = checkRepeatedMessage(deps.db, {
         input: payload.input,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { exceedsHtmlPreviewLimit } from "./ThreadStorageFilePreview";
+import { exceedsHtmlPreviewLimit } from "@/components/right-panel/tabs/file-preview";
 
 describe("exceedsHtmlPreviewLimit", () => {
   const limit = 5 * 1024 * 1024;

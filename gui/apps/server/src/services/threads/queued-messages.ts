@@ -278,7 +278,9 @@ export async function createQueuedMessageForThread(
               ? { kind: "stopping" }
               : { kind: "thread-busy" },
           sendAt: null,
-          payload: { kind: "inline" },
+          payload: payload.fromComposer
+            ? { kind: "inline", fromComposer: true }
+            : { kind: "inline" },
           systemNotice: null,
           hardQueue: payload.hardQueue === true,
         });

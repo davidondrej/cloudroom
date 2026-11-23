@@ -3,6 +3,7 @@ import type { Hono, MiddlewareHandler } from "hono";
 import type { AppDeps } from "../../types.js";
 import type { PluginService } from "../plugins/plugin-service.js";
 import { ApiError } from "../../errors.js";
+import { assertHumanClick } from "../../human-click.js";
 import { getThread, getThreadSectionById } from "@cloudroom/db";
 import { z } from "zod";
 import { threadGoalSetRequestSchema, updateThreadRequestSchema } from "@cloudroom/server-contract";
@@ -342,7 +343,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.post("/api/v1/cloudroom/account/mac-access", async (context) => {
     const input = z.union([z.object({ level: z.enum(macAccessLevels) }).strict(), z.object({ enabled: z.boolean() }).strict()]).parse(await context.req.json());
-    await setMacAccess(deps, "level" in input ? input.level : input.enabled ? "full" : "off");
+    const level = "level" in input ? input.level : input.enabled ? "full" : "off";
+    // Lowering Mac access is always fine. Raising it needs a click in the app or on a signed-in phone (ADR 0260).
+    if (macAccessLevels.indexOf(level) > macAccessLevels.indexOf(await macAccess(deps) ?? "off")) assertHumanClick(context);
+    await setMacAccess(deps, level);
     cloudroom(deps).applyMacAccess();
     return context.json({ ok: true });
   });
@@ -756,8 +760,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   for (const action of ["login", "cancel"] as const) {
     app.post(`/api/v1/cloudroom/account/github/${action}`, async context => {
-      const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-      return context.json(await githubAuth(deps, action, input.requestId));
+      const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), repos: z.boolean().optional() }).strict().parse(await context.req.json());
+      return context.json(await githubAuth(deps, action, input.requestId, input.repos));
     });
   }
   app.post("/api/v1/cloudroom/account/sign-in", async (context) => context.json(await cloudroomAccount(deps).signIn(await context.req.json())));

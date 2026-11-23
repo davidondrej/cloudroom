@@ -391,18 +391,20 @@ export function registerShowCommand(
             // One website read, so only when asked: coordinators run `show` often.
             opts.credits ? fetchCredits(sdk, threadId) : null,
           ]);
-        // An active thread's error is a stall warning (#977); if that lookup fails, show still prints.
+        // Why a thread failed, or an active thread's stall warning (#977); if that lookup fails, show still prints (#2446).
         const output =
-          thread.status === "error"
-            ? await sdk.threads.output({ threadId })
-            : thread.status === "active"
-              ? await sdk.threads.output({ threadId }).catch(() => null)
-              : idleOutput;
+          thread.status === "error" || thread.status === "active"
+            ? await sdk.threads.output({ threadId }).catch(() => null)
+            : idleOutput;
         const lastError = thread.status === "idle" ? null : (output?.error ?? null);
         const lastInterruption = thread.status === "active" ? null : (output?.interruption ?? null);
 
         if (opts.json) {
-          const environment = await getEnvironment();
+          // The thread is known: a failed environment read leaves it out instead of failing show (#2446).
+          const environment = await getEnvironment().catch((error: unknown) => {
+            if (error instanceof BbRequestTimeoutError) throw error;
+            return null;
+          });
           const jsonPayload: ThreadShowJsonPayload = {
             ...statusPayload,
             execution,

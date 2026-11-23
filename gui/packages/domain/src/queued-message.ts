@@ -171,7 +171,11 @@ export type QueuedMessagePayloadKind = z.infer<
 >;
 
 export const queuedMessagePayloadSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("inline") }),
+  z.object({
+    kind: z.literal("inline"),
+    /** Typed by a person in the app's message box: never held as a repeat (#264). */
+    fromComposer: z.literal(true).optional(),
+  }),
   z.object({
     kind: z.literal("retry"),
     /**

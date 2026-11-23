@@ -13,7 +13,7 @@ import {
   createThreadInfoFixedPanelTab,
   createThreadStorageFilePreviewFixedPanelTab,
   createWorkspaceFilePreviewFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   activateSecondaryPanelTabInState,
   buildOrderedSecondaryPanelFileTabs,
@@ -23,7 +23,7 @@ import {
   updateSecondaryPanelTabInState,
   reorderSecondaryPanelFileTabInState,
   replaceNewTabWithSecondaryPanelTabInState,
-} from "@cloudroom/client-core";
+} from "@/components/right-panel/store/tab-ops";
 
 function makeWorkspaceTab(environmentId: string) {
   return createWorkspaceFilePreviewFixedPanelTab({

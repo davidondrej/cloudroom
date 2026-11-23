@@ -873,6 +873,11 @@ export function oneClickScanStateQueryKey() {
   return ["one-click-scans", "state"] as const;
 }
 
+/** Plugin installs and updates waiting for a click in the app (ADR 0260). */
+export function humanClickRequestsQueryKey() {
+  return ["human-clicks"] as const;
+}
+
 export function pluginSettingsViewQueryKey(pluginId: string) {
   return [PLUGIN_SETTINGS_VIEW_QUERY_KEY, pluginId] as const;
 }

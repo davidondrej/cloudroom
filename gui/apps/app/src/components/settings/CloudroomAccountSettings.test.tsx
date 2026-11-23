@@ -67,3 +67,19 @@ it("opens the settings account menu and confirms before signing out", async () =
   await waitFor(() => expect(sdk.cloudroom.logout).toHaveBeenCalledOnce());
   await screen.findByText("Sign in to Cloudroom");
 });
+it("hides the email in the settings account menu and on the Account page while Privacy mode is on", async () => {
+  window.localStorage.setItem("cloudroom.privacy-mode", "1");
+  try {
+    vi.mocked(sdk.projects.list).mockResolvedValue([]);
+    vi.mocked(sdk.cloudroom.status).mockResolvedValue({ ...signedOut, ready: true, error: null, account: { id: "account", email: "member@example.invalid" } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    clients.push(client);
+    const router = createMemoryRouter([{ path: "*", element: <SidebarProvider><SettingsAccountMenu /><CloudroomAccountSettings /></SidebarProvider> }]);
+    render(<QueryClientProvider client={client}><RouterProvider router={router} /></QueryClientProvider>);
+    await screen.findByTestId("settings-account-card");
+    await screen.findByTestId("account-partner-cheque");
+    expect(document.body.textContent).not.toContain("member@example.invalid");
+  } finally {
+    window.localStorage.removeItem("cloudroom.privacy-mode");
+  }
+});

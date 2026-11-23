@@ -38,6 +38,7 @@ import {
   allPluginContributionsQueryKeyPrefix,
   allPluginListQueryKeyPrefix,
   pluginSafeModeQueryKey,
+  humanClickRequestsQueryKey,
   oneClickScanStateQueryKey,
   allPluginSettingsQueryKeyPrefix,
   allPluginSettingsViewQueryKeyPrefix,
@@ -1384,6 +1385,7 @@ function dirtyPluginManagementQueries(): QueryKey[] {
     allPluginSourceQueryKeyPrefix(),
     allPluginCatalogSearchQueryKeyPrefix(),
     pluginSafeModeQueryKey(),
+    humanClickRequestsQueryKey(),
   ];
 }
 

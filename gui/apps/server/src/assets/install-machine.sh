@@ -401,18 +401,22 @@ if [ -z "$bootstrap_env" ] && [ ! -f "$data_dir/auth.json" ]; then
   fi
 fi
 mkdir -p "$HOME/.local/bin"
-if [ ! -e "$HOME/.local/bin/room-cli" ] && [ ! -L "$HOME/.local/bin/room-cli" ]; then
-  shim_file=$(mktemp "$HOME/.local/bin/.bb-machine.XXXXXX")
-  node_path_quoted=$(printf '%s' "${node_bin%/*}" | sed "s/'/'\\''/g")
-  printf '#!/bin/sh\nPATH=\047%s\047:"$PATH"\nexport PATH\n' "$node_path_quoted" > "$shim_file"
-  cli_path_quoted=$(printf '%s' "$data_dir/npm/bin/room-cli" | sed "s/'/'\\''/g")
-  cat >> "$shim_file" <<'BB_MACHINE_EXPLICIT_DATA'
+machine_cli=$HOME/.local/bin/room-cli
+# Line 2 marks the wrapper as this installer's (#2430). Released desktop apps take over
+# any wrapper whose line 2 starts with "# Managed by Cloudroom", so it must not.
+machine_cli_marker="# Cloudroom machine installer wrapper, rewritten on reinstall. Delete this line to keep your own edits."
+shim_file=$(mktemp "$HOME/.local/bin/.bb-machine.XXXXXX")
+node_path_quoted=$(printf '%s' "${node_bin%/*}" | sed "s/'/'\\''/g")
+printf '#!/bin/sh\n%s\nPATH=\047%s\047:"$PATH"\nexport PATH\n' "$machine_cli_marker" "$node_path_quoted" > "$shim_file"
+cli_path_quoted=$(printf '%s' "$data_dir/npm/bin/room-cli" | sed "s/'/'\\''/g")
+cli_exec_line=$(printf 'if [ -x \047%s\047 ]; then exec \047%s\047 "$@"; fi' "$cli_path_quoted" "$cli_path_quoted")
+cat >> "$shim_file" <<'BB_MACHINE_EXPLICIT_DATA'
 if [ -n "${ROOM_DATA_DIR:-}" ] && [ -x "$ROOM_DATA_DIR/npm/bin/room-cli" ]; then
   exec "$ROOM_DATA_DIR/npm/bin/room-cli" "$@"
 fi
 BB_MACHINE_EXPLICIT_DATA
-  printf 'if [ -x \047%s\047 ]; then exec \047%s\047 "$@"; fi\n' "$cli_path_quoted" "$cli_path_quoted" >> "$shim_file"
-  cat >> "$shim_file" <<'BB_MACHINE_CLI'
+printf '%s\n' "$cli_exec_line" >> "$shim_file"
+cat >> "$shim_file" <<'BB_MACHINE_CLI'
 unset ROOM_DATA_DIR
 for candidate in "$HOME"/.bb-machines/*/npm/bin/room-cli; do
   if [ -x "$candidate" ]; then exec "$candidate" "$@"; fi
@@ -421,16 +425,26 @@ if [ "${1:-}" = machine ] && [ "${2:-}" = uninstall ]; then exit 0; fi
 printf '%s\n' 'No installed Cloudroom machine CLI is available.' >&2
 exit 1
 BB_MACHINE_CLI
-  chmod 755 "$shim_file"
-  if ! ln "$shim_file" "$HOME/.local/bin/room-cli" 2>/dev/null; then
-    if [ ! -e "$HOME/.local/bin/room-cli" ] && [ ! -L "$HOME/.local/bin/room-cli" ]; then
-      rm -f "$shim_file"
-      fail_step "Could not publish the machine CLI shim."
-      exit 1
-    fi
-  fi
-  rm -f "$shim_file"
+chmod 755 "$shim_file"
+# A rerun refreshes only this enrollment's own wrapper: one with the marker, or an
+# unedited one from before it. Any other file or link is the user's and stays.
+own_shim=no
+if [ -f "$machine_cli" ] && [ ! -L "$machine_cli" ]; then
+  case $(sed -n 2p "$machine_cli") in
+    "# Cloudroom machine installer wrapper"*) grep -qxF "$cli_exec_line" "$machine_cli" && own_shim=yes ;;
+    PATH=*) [ "$(sed 1,2d "$machine_cli")" = "$(sed 1,3d "$shim_file")" ] && own_shim=yes ;;
+  esac
 fi
+if [ "$own_shim" = yes ]; then
+  mv -f "$shim_file" "$machine_cli"
+elif [ ! -e "$machine_cli" ] && [ ! -L "$machine_cli" ] && ! ln "$shim_file" "$machine_cli" 2>/dev/null; then
+  if [ ! -e "$machine_cli" ] && [ ! -L "$machine_cli" ]; then
+    rm -f "$shim_file"
+    fail_step "Could not publish the machine CLI shim."
+    exit 1
+  fi
+fi
+rm -f "$shim_file"
 
 mkdir -p "$data_dir"
 mkdir -p "$data_dir/logs"

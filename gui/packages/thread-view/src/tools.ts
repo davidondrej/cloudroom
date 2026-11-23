@@ -214,29 +214,95 @@ function setParent(
   }
 }
 
+function setJsonObjectProperty(
+  out: JsonObject,
+  key: string,
+  value: JsonValue,
+): void {
+  Object.defineProperty(out, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
 function toJsonValue(value: unknown): JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("Expected finite JSON number");
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map(toJsonValue);
-  }
-  if (typeof value === "object") {
-    const out: JsonObject = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      if (v !== undefined) out[k] = toJsonValue(v);
+  let result: JsonValue | undefined;
+  const pending: (
+    | { value: unknown; assign: (value: JsonValue) => void }
+    | { leave: object }
+  )[] = [
+    {
+      value,
+      assign: (parsed) => {
+        result = parsed;
+      },
+    },
+  ];
+  const active = new WeakSet<object>();
+
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if ("leave" in current) {
+      active.delete(current.leave);
+      continue;
     }
-    return out;
+    const input = current.value;
+    if (
+      input === null ||
+      typeof input === "string" ||
+      typeof input === "boolean"
+    ) {
+      current.assign(input);
+      continue;
+    }
+    if (typeof input === "number") {
+      if (!Number.isFinite(input))
+        throw new Error("Expected finite JSON number");
+      current.assign(input);
+      continue;
+    }
+    if (Array.isArray(input)) {
+      if (active.has(input)) throw new Error("Expected acyclic JSON value");
+      active.add(input);
+      pending.push({ leave: input });
+      const out: JsonValue[] = new Array(input.length);
+      current.assign(out);
+      for (let i = input.length - 1; i >= 0; i -= 1) {
+        if (!(i in input)) continue;
+        const index = i;
+        pending.push({
+          value: input[index],
+          assign: (parsed) => {
+            out[index] = parsed;
+          },
+        });
+      }
+      continue;
+    }
+    if (typeof input === "object") {
+      if (active.has(input)) throw new Error("Expected acyclic JSON value");
+      active.add(input);
+      pending.push({ leave: input });
+      const out: JsonObject = {};
+      current.assign(out);
+      const entries = Object.entries(input as Record<string, unknown>);
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const [key, child] = entries[i]!;
+        if (child === undefined) continue;
+        pending.push({
+          value: child,
+          assign: (parsed) => {
+            setJsonObjectProperty(out, key, parsed);
+          },
+        });
+      }
+      continue;
+    }
+    throw new Error(`Expected JSON value, got ${typeof input}`);
   }
-  throw new Error(`Expected JSON value, got ${typeof value}`);
+  return result!;
 }
 
 function parseToolArgs(
@@ -245,7 +311,7 @@ function parseToolArgs(
   if (!args) return null;
   const out: JsonObject = {};
   for (const [k, v] of Object.entries(args)) {
-    out[k] = toJsonValue(v);
+    setJsonObjectProperty(out, k, toJsonValue(v));
   }
   return out;
 }

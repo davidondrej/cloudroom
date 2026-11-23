@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import { z } from "zod";
 import { threadCreditMinutesSchema } from "./thread-credits.js";
 import type { WorkSessionDeps } from "../../types.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
+import { resolveBuiltinSkillsRootPath, resolveSharedBuiltinSkillsRootPath } from "../skills/builtin-skills-copy.js";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
 import { runProviderCliInstall } from "../system/provider-installations.js";
 import { macClaudeSignedIn } from "./claude-token.js";
@@ -79,14 +80,57 @@ const RECHECK_MS = 60_000;
 const DEEPAPI_RECHECK_MS = 30 * 60_000;
 const DEEPAPI_FOLDER = () => join(homedir(), ".deepapi");
 const DEEPAPI_MARK = "# Added by Cloudroom.";
+const DEEPAPI_CMD_MARK = ":: Added by Cloudroom.";
 /** The files DeepAPI's own installer writes, `env` for bash and zsh and `env.ps1` for PowerShell, marked with the
  *  Cloudroom account the key belongs to. */
 function deepapiFiles(userId: string): Record<string, (key: string) => string> {
   const mark = `${DEEPAPI_MARK} Account ${userId}. Settings → General → DeepAPI turns it off.`;
   return {
-    env: key => `${mark}\nexport DEEPAPI_API_BASE_URL="https://deepapi.co"\nexport DEEPAPI_API_KEY="${key}"\n`,
-    ...(process.platform === "win32" ? { "env.ps1": (key: string) => `${mark}\r\n$env:DEEPAPI_API_BASE_URL = 'https://deepapi.co'\r\n$env:DEEPAPI_API_KEY = '${key}'\r\n` } : {}),
+    env: key => `${mark}\nexport DEEPAPI_API_BASE_URL="https://deepapi.co"\nexport DEEPAPI_API_KEY="${key}"\nexport PATH="$HOME/.deepapi:$PATH"\n`,
+    ...(process.platform === "win32" ? { "env.ps1": (key: string) => `${mark}\r\n$env:DEEPAPI_API_BASE_URL = 'https://deepapi.co'\r\n$env:DEEPAPI_API_KEY = '${key}'\r\n$env:Path = "$HOME\\.deepapi;$env:Path"\r\n` } : {}),
   };
+}
+
+/** Installs or removes the bundled `deepapi` CLI next to `~/.deepapi/env`. Never overwrites a user's own CLI. */
+async function syncDeepapiCli(enabled: boolean): Promise<void> {
+  const folder = DEEPAPI_FOLDER();
+  const win = process.platform === "win32";
+  const targets = win
+    ? [{ name: "deepapi.ps1", mark: DEEPAPI_MARK, mode: 0o600 }, { name: "deepapi.cmd", mark: DEEPAPI_CMD_MARK, mode: 0o600 }]
+    : [{ name: "deepapi", mark: DEEPAPI_MARK, mode: 0o700 }];
+  if (!enabled) {
+    await Promise.all(targets.map(({ name, mark }) => readFile(join(folder, name), "utf8")
+      .then(text => text.includes(mark) ? rm(join(folder, name), { force: true }) : undefined, () => undefined)));
+    return;
+  }
+  const binDir = (() => {
+    try { return join(resolveSharedBuiltinSkillsRootPath(resolveBuiltinSkillsRootPath()), "deepapi", "bin"); }
+    catch { return null; }
+  })();
+  if (!binDir) return;
+  const payloads: Record<string, string | null> = win
+    ? {
+        "deepapi.ps1": await readFile(join(binDir, "deepapi.ps1"), "utf8").then(s => `${s.trimEnd()}\r\n${DEEPAPI_MARK}\r\n`, () => null),
+        "deepapi.cmd": `@echo off\r\n${DEEPAPI_CMD_MARK}\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deepapi.ps1" %*\r\n`,
+      }
+    : {
+        deepapi: await readFile(join(binDir, "deepapi"), "utf8").then(s => `${s.trimEnd()}\n${DEEPAPI_MARK}\n`, () => null),
+      };
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  for (const { name, mark, mode } of targets) {
+    const content = payloads[name];
+    if (!content) continue;
+    const file = join(folder, name);
+    const existing = await readFile(file, "utf8").catch(() => null);
+    if (existing === content) {
+      if (!win) await chmod(file, mode).catch(() => undefined);
+      continue;
+    }
+    if (existing !== null && !existing.includes(mark)) continue;
+    if (existing !== null) await rm(file, { force: true });
+    await writeFile(file, content, { mode, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    if (!win) await chmod(file, mode).catch(() => undefined);
+  }
 }
 // After "Run now": check the awake list every 2 s for 90 s, so the run's new thread shows within seconds.
 const SOON_MS = 2_000, SOON_FOR_MS = 90_000;
@@ -98,6 +142,10 @@ export type CloudQueue = { position: number; total: number; regionBlocked: boole
 /** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
  *  left in live packs (ADR 0317): 0 from older websites. */
 export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number };
+/** A thread family burning credits fast, shown under its top thread in the sidebar (docs/scopes/credit-burn.md): credits
+ *  in the last hour, and how many subagents used most of them (0: the thread itself did). */
+export type CreditBurn = { credits: number; subagents: number };
+const burningSchema = z.array(z.object({ thread: z.string(), credits: z.number(), hot: z.boolean(), subagents: z.number() })).catch([]);
 /** The switch in Settings → General → DeepAPI (ADR 20261115-235507). */
 export type DeepapiState = { enabled: boolean };
 const USAGE_LIMIT = "cloud_usage_limit";
@@ -541,7 +589,8 @@ export async function cursorKeyRejected(apiKey: string): Promise<boolean> {
 const output = async (command: string, args: string[]) => {
   try { return (await promisify(execFile)(command, args, { timeout: 10_000, windowsHide: true })).stdout.trim(); } catch { return ""; }
 };
-export const githubAccountSchema = z.object({ login: z.string(), name: z.string().nullable(), avatarUrl: z.string().nullable() });
+/** `reposUrl` comes with a login that reaches only the repos its owner picked: GitHub's page for changing them. */
+export const githubAccountSchema = z.object({ login: z.string(), name: z.string().nullable(), avatarUrl: z.string().nullable(), reposUrl: z.string().startsWith("https://github.com/").optional() });
 export type GithubAccount = z.infer<typeof githubAccountSchema>;
 /** This Mac's GitHub CLI token, or "" when `gh` is missing or signed out. */
 export const macGithubToken = () => output("gh", ["auth", "token", "--hostname", "github.com"]);
@@ -1160,6 +1209,10 @@ export class SandboxDirectory {
         const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
           extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0) }).safeParse(value);
         const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
+        // The website returns awake families above its low mark, and marks the hot ones. A line, once shown, stays
+        // until its family drops below that mark, so it never blinks on and off. Older websites send none.
+        const burning = burningSchema.parse((value as { burning?: unknown } | null)?.burning ?? []);
+        this.burning = new Map(burning.filter((row) => row.hot || this.burning.has(row.thread)).map((row) => [row.thread, { credits: row.credits, subagents: row.subagents }]));
         this.usage = {
           value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
             extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
@@ -1169,6 +1222,12 @@ export class SandboxDirectory {
     }
     // A plan change shows nothing until the next check, never the old plan's card.
     return this.usage?.value?.plan === this.plan ? this.usage.value : null;
+  }
+
+  private burning = new Map<string, CreditBurn>();
+  /** Thread families burning credits fast, by top thread; refreshed with planUsage(), empty when it shows nothing. */
+  creditBurn(): Record<string, CreditBurn> {
+    return this.planUsage(false) ? Object.fromEntries(this.burning) : {};
   }
 
   /** When the account's credits were used, hour by hour (Settings → Analytics). Asked only while that page is open. */
@@ -1362,21 +1421,22 @@ export class SandboxDirectory {
 
   /** Saves a login for every sandbox of this account (ADR 0145), skipping values already uploaded. */
   /** A `background` save (not one the user just asked for) is dropped while the login is disconnected (ADR 0327).
+   *  `chosen` marks a GitHub login the user just connected by hand: only that may replace a picked-repos login (#2084).
    *  Answers whether the website now holds the value. */
-  saveLogin(name: SandboxLogin, value: string, only?: AccountRequest, background = false): Promise<boolean> {
+  saveLogin(name: SandboxLogin, value: string, only?: AccountRequest, background = false, chosen = false): Promise<boolean> {
     const signal = this.session.signal;
     return this.withLogins(async () => {
       if (background && (await this.skipLogins()).has(name)) return false;
-      await this.putLogin(name, value, only ?? await this.bind(signal));
+      await this.putLogin(name, value, only ?? await this.bind(signal), chosen);
       return true;
     });
   }
 
-  private async putLogin(name: SandboxLogin, value: string, only: AccountRequest): Promise<void> {
+  private async putLogin(name: SandboxLogin, value: string, only: AccountRequest, chosen = false): Promise<void> {
     const digest = createHash("sha256").update(value).digest("hex");
     if (this.uploaded.get(name) === digest) return;
     const session = this.session.signal;
-    await this.call({ name, value }, "logins", only);
+    await this.call(chosen ? { name, value, chosen } : { name, value }, "logins", only);
     // A caller-bound save outlives a reset, but its digest never fills the next account's cache.
     if (!session.aborted) this.uploaded.set(name, digest);
   }
@@ -1758,21 +1818,29 @@ export class SandboxDirectory {
     this.deepapiNext = Date.now() + DEEPAPI_RECHECK_MS;
     if (theirs) return;
     const names = Object.keys(files), wanted = answer.key;
-    if (wanted && names.every((name, i) => found[i] === files[name]!(wanted))) return;
+    if (wanted && names.every((name, i) => found[i] === files[name]!(wanted))) {
+      await syncDeepapiCli(true);
+      return;
+    }
     // Our old files go first: no key (the switch is off), another account's key, or a new key.
     await Promise.all(names.map((name, i) => found[i] ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined));
-    if (!wanted) return;
+    if (!wanted) {
+      await syncDeepapiCli(false);
+      return;
+    }
     await mkdir(DEEPAPI_FOLDER(), { recursive: true, mode: 0o700 });
     // `wx` never replaces a key DeepAPI's own installer wrote meanwhile.
     for (const name of names) {
       await writeFile(join(DEEPAPI_FOLDER(), name), files[name]!(wanted), { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
     }
+    await syncDeepapiCli(true);
   }
 
   /** Signing out removes the key Cloudroom wrote, so the next person on this computer never spends this account's credits. */
   async removeDeepapiKey(): Promise<void> {
     await Promise.all(Object.keys(deepapiFiles("")).map(name => readFile(join(DEEPAPI_FOLDER(), name), "utf8")
       .then(text => text.startsWith(DEEPAPI_MARK) ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined, () => undefined)));
+    await syncDeepapiCli(false);
   }
 
   private async cloudLogin(name: "claude" | "codex" | "mcp", only?: AccountRequest): Promise<string | null> {

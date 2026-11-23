@@ -199,6 +199,8 @@ export function useSendThreadMessage() {
         executionInputSources,
         mode,
         ...(senderThreadId !== undefined ? { senderThreadId } : {}),
+        // Only the message boxes send through here; scripts and agents can still be held as repeats (#264).
+        fromComposer: true,
       });
       return recoverCloudDelivery && requestId ? recoverRemoteCloudSend(id, requestId, send) : send();
     },
@@ -279,6 +281,7 @@ export function useCreateThreadQueuedMessage() {
         executionInputSources,
         ...(senderThreadId !== undefined ? { senderThreadId } : {}),
         ...(hardQueue === true ? { hardQueue } : {}),
+        fromComposer: true,
       });
     },
     onMutate: async (variables): Promise<CreateQueuedMessageTransaction> =>

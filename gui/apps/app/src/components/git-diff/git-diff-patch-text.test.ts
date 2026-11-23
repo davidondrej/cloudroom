@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseGitDiffFiles } from "./git-diff-parsing";
-import {
-  buildDiffLineCopyText,
-  buildDiffLineSelectionText,
-} from "./git-diff-patch-text";
+import { parseGitDiffFiles } from "@/components/diff/patch-utils";
+import { buildDiffLineCopyText, buildDiffLineSelectionText } from "@/components/diff/patch-utils";
 
 const DIFF = [
   "diff --git a/src/value.ts b/src/value.ts",

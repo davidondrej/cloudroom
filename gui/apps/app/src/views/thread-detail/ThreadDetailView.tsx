@@ -57,7 +57,9 @@ import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { useThreadOpenTiming, watchPanelOpen } from "@/lib/perf";
-import type { ThreadSecondaryPanel as ThreadSecondaryPanelTab } from "@/lib/thread-secondary-panel";
+import type {
+  ThreadSecondaryPanel as ThreadSecondaryPanelTab,
+} from "@/components/right-panel/store/tab-model";
 import {
   PluginDetailPanelContext,
   usePluginDetailPanelState,
@@ -164,15 +166,19 @@ import {
   isRoutePath,
   type ThreadRoutePathArgs,
 } from "@/lib/route-paths";
-import { useGitDiffPanel } from "@/components/secondary-panel/git-diff/useGitDiffPanel";
+import {
+  useEnvironmentMergeBase,
+  useGitDiffPanel,
+} from "@/components/diff/diff-panel-hooks";
 import {
   createGitDiffFixedTabDestination,
   GIT_DIFF_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/git-diff/git-diff-fixed-tab-navigation";
+  resolveGitDiffTabStatus,
+} from "@/components/diff/diff-store";
 import {
   createThreadInfoFixedTabDestination,
   THREAD_INFO_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/thread-info-fixed-tab-navigation";
+} from "@/components/right-panel/tabs/thread-info";
 import { ThreadDetailHeader } from "./ThreadDetailHeader";
 import { SubagentBar } from "./SubagentBar";
 import {
@@ -197,9 +203,9 @@ import type { HostConnectionNotice } from "@/components/thread/timeline/ThreadTi
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
-} from "@/components/secondary-panel/useThreadStorageViewer";
-import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
-import { BrowserTabLifecycleObserver } from "@/components/secondary-panel/BrowserTabDeck";
+} from "@/components/right-panel/tabs/thread-storage";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
+import { BrowserTabLifecycleObserver } from "@/components/right-panel/tabs/browser-visibility";
 import {
   LazyBrowserTabDeck,
   LazyHostFilePreviewTabContent,
@@ -207,14 +213,14 @@ import {
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
   LazyWorkspaceFilePreviewTabContent,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { BrowserAddressFocusRequest } from "@/components/right-panel/tabs/browser-tab";
 import {
   SIDE_CHAT_PLUGIN_ID,
   SIDE_CHAT_PLUGIN_PANEL_ACTION_ID,
 } from "@/lib/side-chat-plugin";
-import { buildSecondaryPanelTabs } from "@/components/secondary-panel/buildSecondaryPanelTabs";
-import { WorkspaceFileTabIcon } from "@/components/secondary-panel/agent-file-edit";
+import { buildSecondaryPanelTabs } from "@/components/right-panel/shell/buildSecondaryPanelTabs";
+import { WorkspaceFileTabIcon } from "@/components/right-panel/tabs/agent-file-edit";
 import {
   PluginPanelTabContent,
   usePluginPanelActions,
@@ -262,16 +268,15 @@ import { getFilePreviewLineRangeStart } from "@cloudroom/client-core";
 import {
   useThreadStorageBrowser,
   type ThreadStoragePathSelectHandler,
-} from "@/components/secondary-panel/useThreadStorageBrowser";
+} from "@/components/right-panel/tabs/thread-storage";
 import {
   useThreadFileTabs,
   type FileSearchSelection,
-} from "@/components/secondary-panel/useThreadFileTabs";
-import { isSecondaryFileTab } from "@cloudroom/client-core";
-import { useThreadOpenFileSignal } from "@/components/secondary-panel/useThreadOpenFileSignal";
+} from "@/components/right-panel/store/use-panel-tabs";
+import { isSecondaryFileTab } from "@/components/right-panel/store/tab-ops";
+import { useThreadOpenFileSignal } from "@/components/right-panel/tabs/thread-storage";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
-import type { SecondaryPanelFixedTab } from "@/components/secondary-panel/ThreadSecondaryPanel";
-import { useEnvironmentMergeBase } from "@/components/secondary-panel/git-diff/useEnvironmentMergeBase";
+import type { SecondaryPanelFixedTab } from "@/components/right-panel/shell/panel-shell";
 import { useThreadGitActions } from "./useThreadGitActions";
 import { useSendSideChatMessageToMain } from "./useSendSideChatMessageToMain";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
@@ -281,7 +286,7 @@ import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
-} from "@/components/secondary-panel/terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import {
   buildOpenInEditorHandler,
   resolveEnvironmentOpenContext,
@@ -305,14 +310,13 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   createGitDiffFixedPanelTab,
   createNewTabFixedPanelTab,
   createThreadInfoFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
-import { resolveGitDiffTabStatus } from "@/components/secondary-panel/gitDiffTabEligibility";
+} from "@/components/right-panel/store/tab-model";
 import { isRootThread } from "./threadParentSelectorOptions";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {

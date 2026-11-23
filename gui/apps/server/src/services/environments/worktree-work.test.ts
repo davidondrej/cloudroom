@@ -192,10 +192,16 @@ describe("saveWorktreeWork and restoreWorktreeWork", () => {
       expect(git(repo, "rev-parse", "room/task")).toBe(saved);
     }));
 
-  it("keeps a detached HEAD's work on the given branch and stays on it", () =>
+  it.each([
+    ["a detached HEAD", false],
+    ["a branch another worktree holds (#2415)", true],
+  ])("keeps the work of %s on the given branch", (_name, shared) =>
     withRepo(async (base, repo) => {
       const tree = path.join(base, "tree");
-      git(repo, "worktree", "add", "-q", "--detach", tree);
+      const head = git(repo, "rev-parse", "HEAD");
+      const held = git(repo, "branch", "--show-current").trim();
+      const at = shared ? ["--force", tree, held] : ["--detach", tree];
+      git(repo, "worktree", "add", "-q", ...at);
       writeFileSync(path.join(tree, "draft.txt"), "draft");
 
       const branch = await saveWorktreeWork(
@@ -207,6 +213,8 @@ describe("saveWorktreeWork and restoreWorktreeWork", () => {
       expect(branch).toBe("cloudroom/saved-env");
       expect(git(repo, "show", `${branch}:draft.txt`)).toBe("draft");
       expect(git(tree, "branch", "--show-current").trim()).toBe(branch);
+      expect(git(repo, "rev-parse", "HEAD")).toBe(head);
+      expect(git(repo, "status", "--porcelain")).toBe("");
     }));
 
   it.each([

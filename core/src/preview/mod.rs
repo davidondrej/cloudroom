@@ -567,7 +567,9 @@ impl Previews {
         *checked_in = Some((device.device, Instant::now(), since));
         drop(checked_in);
         if setup.tunnel {
-            return Ok(json!({"tunnel":true}));
+            // Core counts page loads on every read of a tunnel, so a helper may keep one for a browser connection's next
+            // requests. Older Cores count only a tunnel's first request (#2428).
+            return Ok(json!({"tunnel":true,"reuse":true}));
         }
         let text = fs::read_to_string(&setup.host_key_file)?;
         let host_key = text
@@ -782,20 +784,29 @@ async fn tunnel(
     let previews = m.previews.clone();
     let task = tokio::spawn(async move {
         if let Ok(upgraded) = upgrade.await {
-            let mut mac = hyper_util::rt::TokioIo::new(upgraded);
-            // The Mac opens one tunnel per request, so its first bytes are the browser's request.
-            let mut head = vec![0; 8192];
-            let Ok(read) = mac.read(&mut head).await else {
-                return;
+            let (mut mac_read, mut mac_write) =
+                tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
+            let (mut app_read, mut app_write) = upstream.split();
+            // The Mac keeps a tunnel for its browser connection's next requests (#2428), so any read may start one.
+            let requests = async {
+                let mut chunk = vec![0; 8192];
+                while let Ok(read @ 1..) = mac_read.read(&mut chunk).await {
+                    if page_request(&chunk[..read]) {
+                        previews
+                            .active
+                            .store(crate::observability::now_ms(), Ordering::Relaxed);
+                    }
+                    if app_write.write_all(&chunk[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = app_write.shutdown().await;
             };
-            if page_request(&head[..read]) {
-                previews
-                    .active
-                    .store(crate::observability::now_ms(), Ordering::Relaxed);
-            }
-            if upstream.write_all(&head[..read]).await.is_ok() {
-                let _ = tokio::io::copy_bidirectional(&mut mac, &mut upstream).await;
-            }
+            let answers = async {
+                let _ = tokio::io::copy(&mut app_read, &mut mac_write).await;
+                let _ = mac_write.shutdown().await;
+            };
+            tokio::join!(requests, answers);
         }
     });
     let live = Live {

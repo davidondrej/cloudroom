@@ -44,7 +44,7 @@ import {
   ConfirmDeleteDialogContent,
 } from "@/components/dialogs/ConfirmDeleteDialog";
 import { useThreadArchive } from "./useThreadArchive";
-import { destroyPersistedBrowserViewsForThread } from "@/components/secondary-panel/browserViewVisibilityCoordinator";
+import { destroyPersistedBrowserViewsForThread } from "@/components/right-panel/tabs/browser-visibility";
 import { getThreadReadToggleAction } from "@cloudroom/client-core";
 import type { PaneContent } from "@/lib/split-layout";
 import { paneContentRoute, reconcileLayoutForContent, threadPaneContent } from "@/views/thread-detail/splitThreadNavigation";

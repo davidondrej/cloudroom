@@ -12,6 +12,7 @@ import {
 } from "@cloudroom/domain";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import {
+  BbHttpError,
   BbRequestTimeoutError,
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
 } from "@cloudroom/sdk/node";
@@ -646,9 +647,10 @@ export function registerSpawnCommand(
               thread = await sdk.threads.spawn(spawnArgs);
               break;
             } catch (error) {
-              // Only a timeout or a dropped connection leaves the outcome unknown.
+              // Only a timeout, a dropped connection or a lost answer leaves the outcome unknown.
               const timedOut = error instanceof BbRequestTimeoutError;
-              const unknown = timedOut || error instanceof TypeError;
+              const unknown =
+                timedOut || error instanceof TypeError || lostAnswer(error);
               const reason = timedOut
                 ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
                 : getErrorMessage(error);
@@ -710,6 +712,14 @@ export function registerSpawnCommand(
         printThread(thread);
       }),
     );
+}
+
+/** A gateway timeout, or a 502 with no Cloudroom error code (a proxy's, like Connect's relay): the spawn may have run (#2448). */
+function lostAnswer(error: unknown): boolean {
+  return (
+    error instanceof BbHttpError &&
+    (error.status === 504 || (error.status === 502 && error.code === null))
+  );
 }
 
 function printThread(thread: Thread): void {

@@ -1195,6 +1195,18 @@ impl Adapter for Protocol {
         {
             events.push(Event::Authentication { accepted: false });
         }
+        // Claude Code only emits `rate_limit_event` when rate-limit state changes and throttles repeat rejections
+        // for 30s, so a back-to-back limited turn reports the limit only on its assistant/result error frames.
+        if kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["isReplay"] != true
+            && value["api_error"] == "usage_limit_reached"
+            && let Some(limit) = limit_window(&value["api_error_params"]["rate_limit_info"])
+        {
+            self.limit = Some(limit);
+            self.overage = None;
+            self.plan_ok_sent = false;
+        }
         if kind == "assistant"
             && let Some(tokens) = prompt_tokens(&value["message"]["usage"])
             && tokens > 0
@@ -1282,8 +1294,11 @@ impl Adapter for Protocol {
         let account_wide = info["rateLimitType"]
             .as_str()
             .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
-        if kind == "rate_limit_event" && info["status"] == "rejected" && !overage {
-            self.limit = Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide));
+        if kind == "rate_limit_event"
+            && info["status"] == "rejected"
+            && let Some(limit) = limit_window(info)
+        {
+            self.limit = Some(limit);
             // The plan coming back after this limit is news again.
             self.overage = None;
             self.plan_ok_sent = false;
@@ -1337,6 +1352,8 @@ impl Adapter for Protocol {
             }
         }
         if kind == "result" {
+            // Clear any armed limit on every result so interrupted or unmatched turns never leak into the next turn.
+            let mut pending_limit = self.limit.take();
             // The next turn, prompted or Claude's own, hears about credits again.
             self.recheck = true;
             self.last_result_failed = value["is_error"] == true;
@@ -1408,8 +1425,13 @@ impl Adapter for Protocol {
                         result_error(value)
                     }
                 });
-                if let (Some((resets, account_wide)), Some(text)) = (self.limit.take(), &mut error)
+                if pending_limit.is_none()
+                    && error.is_some()
+                    && value["api_error"] == "usage_limit_reached"
                 {
+                    pending_limit = limit_window(&value["api_error_params"]["rate_limit_info"]);
+                }
+                if let (Some((resets, account_wide)), Some(text)) = (pending_limit, &mut error) {
                     let mut limited = super::plan_limited("claude-code", resets);
                     if let Event::Record { data, .. } = &mut limited
                         && !account_wide
@@ -1497,6 +1519,23 @@ impl Adapter for Protocol {
         // Claude preserves the last failed turn's exit code after an acknowledged shutdown.
         code == Some(0) || (self.close_confirmed && self.last_result_failed && code == Some(1))
     }
+}
+
+/// Read `resetsAt` and account-wide scope from a `rate_limit_info` payload, returning `None` when overage covers it.
+/// Only an account-wide window (`five_hour`, `seven_day`, `overage`, or none named) is the account's plan;
+/// a model's own window (such as `seven_day_fable` or `seven_day_opus`) is not.
+fn limit_window(info: &Value) -> Option<(Option<u64>, bool)> {
+    let overage = matches!(
+        info["overageStatus"].as_str(),
+        Some("allowed" | "allowed_warning")
+    );
+    if overage {
+        return None;
+    }
+    let account_wide = info["rateLimitType"]
+        .as_str()
+        .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
+    Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide))
 }
 
 /// Claude's own words for a failed turn, so receipts show the real cause (ADR 0123).
@@ -1752,6 +1791,98 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn only_a_real_usage_limit_marks_the_turn_plan_limited() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        // One failed turn: an optional assistant error frame, then its result. Returns (usage_limited, error).
+        fn turn(
+            claude: &mut Protocol,
+            assistant: Option<Value>,
+            result: Value,
+        ) -> (Option<Value>, String) {
+            claude.active = Some(("u".into(), "r".into()));
+            let mut state = Progress {
+                request: Some("r".into()),
+                ..Default::default()
+            };
+            let mut events = Vec::new();
+            for frame in assistant.into_iter().chain([result]) {
+                events.extend(
+                    claude
+                        .receive(&frame, frame.to_string(), &mut state)
+                        .unwrap(),
+                );
+            }
+            let limited = events.iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "usage_limited",
+                    data,
+                    ..
+                } => Some(data.clone()),
+                _ => None,
+            });
+            let error = events.iter().find_map(|event| match event {
+                Event::Finished { error, .. } => error.clone(),
+                _ => None,
+            });
+            (limited, error.unwrap_or_default())
+        }
+        let info = |extra: Value| {
+            let mut info = json!({"rateLimitType":"seven_day_fable","resetsAt":2_000_000_000u64});
+            info.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"rate_limit_info":info})
+        };
+        let assistant = |error: Value, params: Value, text: &str| json!({"type":"assistant","session_id":"s","parent_tool_use_id":null,"error":"rate_limit","api_error":error,"api_error_params":params,"message":{"content":[{"type":"text","text":text}]}});
+        let failed = |text: &str| json!({"type":"result","session_id":"s","subtype":"success","is_error":true,"result":text,"user_message_uuid":"u"});
+
+        // A repeat limit sends no rate_limit_event, only `api_error` on its frames; a model window stays model-only,
+        // even when `status` is missing.
+        for params in [info(json!({"status":"rejected"})), info(json!({}))] {
+            let (limited, error) = turn(
+                &mut claude,
+                Some(assistant(
+                    json!("usage_limit_reached"),
+                    params,
+                    "You've hit your Fable limit",
+                )),
+                failed("You've hit your Fable limit"),
+            );
+            let limited = limited.expect("a repeat limit is a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
+            assert!(error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // Temporary throttles share `error: "rate_limit"` but never send `api_error`: not a plan limit.
+        for text in [
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            "Opus is experiencing high load, please use /model to switch to Sonnet",
+        ] {
+            let (limited, error) = turn(
+                &mut claude,
+                Some(assistant(Value::Null, Value::Null, text)),
+                failed(text),
+            );
+            assert!(limited.is_none(), "{text}");
+            assert!(!error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // A limit armed before an unmatched (interrupted) result never labels the next unrelated failure.
+        claude.limit = Some((None, true));
+        let other = json!({"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"user_message_uuid":"other"});
+        claude
+            .receive(&other, other.to_string(), &mut Progress::default())
+            .unwrap();
+        let (limited, _) = turn(&mut claude, None, failed("boom"));
+        assert!(limited.is_none());
     }
 
     #[test]

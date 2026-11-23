@@ -30,7 +30,8 @@ const CLAUDE_NETWORK_ERROR =
  * may be a temporary capacity issue" (#2284). A plan limit names its reset, and a
  * subscription window comes as a rate_limit_event that stays a rate limit.
  */
-const CLAUDE_CAPACITY_ERROR = /capacity|overloaded|saturated/i;
+const CLAUDE_CAPACITY_ERROR =
+  /capacity|overloaded|saturated|temporarily limiting|high load|not your usage limit/i;
 
 function getProviderErrorCategoryFromHttpStatus(
   httpStatusCode: number,
@@ -151,8 +152,8 @@ export function buildClaudeProviderErrorInfo(
   const capacity =
     reported === "rate-limit" &&
     args.detail !== undefined &&
-    CLAUDE_CAPACITY_ERROR.test(args.detail) &&
-    !/reset/i.test(args.detail);
+    (/not your usage limit/i.test(args.detail) ||
+      (CLAUDE_CAPACITY_ERROR.test(args.detail) && !/reset/i.test(args.detail)));
   const category = capacity ? "overloaded" : reported;
   const providerCode = getClaudeProviderCode(args);
   if (

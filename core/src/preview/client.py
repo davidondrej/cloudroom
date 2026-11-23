@@ -356,22 +356,33 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
     def setup(self):
         super().setup()
+        # A browser connection keeps its tunnel for its next requests: a new tunnel per request cost every dev module its
+        # own HTTPS upgrade (#2428).
+        self.upstream = None
         with self.server.tunnel.connections_lock:
             self.server.tunnel.connections.add(self.connection)
 
     def finish(self):
+        if self.upstream:
+            self.upstream.close()
         with self.server.tunnel.connections_lock:
             self.server.tunnel.connections.discard(self.connection)
         super().finish()
 
     def handle_one_request(self):
         try:
+            # 15 s for the browser's next request. A kept tunnel the app closed meanwhile ends this connection too, so the
+            # browser's next request opens a new one.
+            kept = self.upstream and self.upstream.sock
+            if kept and self.connection not in select.select([self.connection, kept], [], [], 15)[0]:
+                self.close_connection = True
+                return
             super().handle_one_request()
         except (OSError, ValueError, http.client.HTTPException):
             self.close_connection = True
 
     def forward(self):
-        self.close_connection = True
+        keep, self.close_connection = not self.close_connection, True
         expected = self.server.authority
         origin = self.headers.get('Origin')
         if self.headers.get_all('Host') != [expected] or origin is not None and origin != 'http://' + expected:
@@ -397,7 +408,10 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         if websocket and origin != 'http://' + expected:
             self.send_error(403, 'WebSocket origin is required'); return
         connection_headers = {v.strip().lower() for v in self.headers.get('Connection', '').split(',')}
-        upstream = Upstream(self.server.tunnel.socket_path)
+        upstream, self.upstream = self.upstream or Upstream(self.server.tunnel.socket_path), None
+        reused = upstream.sock is not None
+        if reused:
+            upstream.sock.settimeout(upstream.timeout)
         if websocket:
             upstream.response_class = UpgradeResponse
         response = None
@@ -407,9 +421,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             for key, value in self.headers.items():
                 if key.lower() not in HOP | connection_headers:
                     upstream.putheader(key, value)
-            upstream.putheader('Connection', 'Upgrade' if websocket else 'close')
             if websocket:
-                upstream.putheader('Upgrade', 'websocket')
+                upstream.putheader('Connection', 'Upgrade'); upstream.putheader('Upgrade', 'websocket')
             upstream.endheaders()
             while length:
                 data = self.rfile.read(min(length, 64 * 1024))
@@ -425,7 +438,12 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                     self.send_header(key, value)
             self.send_header('X-Cloudroom-Preview', self.server.tunnel.generation)
             self.send_header('Content-Security-Policy', "frame-ancestors 'self'")
-            self.send_header('Connection', 'Upgrade' if response.status == 101 else 'close')
+            # A body whose end is known (a length, chunks, or none) lets the browser send its next request here.
+            chunks = response.chunked and response.length is None
+            keep = keep and response.status != 101 and (chunks or response.length is not None)
+            if chunks:
+                self.send_header('Transfer-Encoding', 'chunked')
+            self.send_header('Connection', 'Upgrade' if response.status == 101 else 'keep-alive' if keep else 'close')
             if response.status == 101:
                 self.send_header('Upgrade', 'websocket')
             self.end_headers()
@@ -443,9 +461,17 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                         (upstream.sock if source is self.connection else self.connection).sendall(data)
             else:
                 while data := response.read1(64 * 1024):
-                    self.wfile.write(data); self.wfile.flush()
-        except (OSError, ValueError, http.client.HTTPException):
-            if not sent_headers and not self.wfile.closed:
+                    self.wfile.write(b'%x\r\n%s\r\n' % (len(data), data) if chunks else data); self.wfile.flush()
+                if chunks:
+                    self.wfile.write(b'0\r\n\r\n'); self.wfile.flush()
+                keep = keep and not response.length  # A length left means the app ended early.
+                if keep and self.server.tunnel.reuse:
+                    self.upstream = upstream
+                self.close_connection = not keep
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            self.close_connection = True
+            # A kept tunnel the app just closed: the browser retries on a new connection, as after any keep-alive close.
+            if not sent_headers and not self.wfile.closed and not (reused and isinstance(error, ConnectionError)):
                 with contextlib.suppress(OSError):
                     if getattr(self.server.tunnel.process, 'down', False):
                         self.send_error(502, "Your app's server in the sandbox isn't running. A sleep stops every server: ask the agent to start it again")
@@ -454,7 +480,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         finally:
             if response is not None:
                 response.close()
-            upstream.close()
+            if upstream is not self.upstream:
+                upstream.close()
 
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = forward
 
@@ -479,6 +506,8 @@ class Server(http.server.ThreadingHTTPServer):
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(15)
+        # A head and its body go out as separate writes: Nagle would hold the body for the browser's ACK.
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return connection, address
 
 
@@ -604,6 +633,8 @@ class Tunnel:
         self.endpoint, self.core = metadata, core
         self.port, self.generation = port, generation
         self.relay = bool(metadata.get('tunnel'))
+        # A tunnel may carry a browser connection's next requests: SSH, or a Core that counts page loads on every read.
+        self.reuse = not self.relay or metadata.get('reuse') is True
         suffix = hashlib.sha256(core.url.encode()).hexdigest()[:8] if core.sandbox else ''
         self.socket_path = folder / f'p{port}{suffix}.sock'
         self.socket_path.unlink(missing_ok=True)

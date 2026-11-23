@@ -2,13 +2,13 @@
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { WorkspaceFile } from "@cloudroom/server-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useThreadStorageBrowser } from "./useThreadStorageBrowser";
+import { useThreadStorageBrowser } from "@/components/right-panel/tabs/thread-storage";
 
 const { treesModuleEvaluated } = vi.hoisted(() => ({
   treesModuleEvaluated: vi.fn<(specifier: string) => void>(),
 }));
-vi.mock("./ThreadStorageFileTree", async (importOriginal) => {
-  treesModuleEvaluated("./ThreadStorageFileTree");
+vi.mock("@/components/right-panel/tabs/ThreadStorageFileTree", async (importOriginal) => {
+  treesModuleEvaluated("@/components/right-panel/tabs/ThreadStorageFileTree");
   return importOriginal();
 });
 

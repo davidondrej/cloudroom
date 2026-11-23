@@ -261,4 +261,38 @@ describe("room-cli thread wait command output", () => {
       "Thread thread-t0 observed event turn/completed at seq 3.",
     );
   });
+
+  it("room-cli thread wait --event asks for less than Connect's 30 s and retries its 504 (#2446)", async () => {
+    const row = {
+      id: "e",
+      scope: { kind: "turn", turnId: "u" },
+      threadId: "t",
+      seq: 4,
+      createdAt: 1,
+      type: "turn/completed",
+      data: { providerThreadId: "p", turnId: "u", status: "completed" },
+    };
+    const waitGet = vi.fn(async (_args: { query: { waitMs: string } }) =>
+      Response.json(row),
+    );
+    waitGet.mockResolvedValueOnce(
+      new Response("cloudroom: timed out waiting for the tunnel client\n", {
+        status: 504,
+      }),
+    );
+    stubServerApi({ "v1.threads.:id.events.wait.$get": waitGet });
+
+    await runCommand(
+      ["thread", "wait", "t", "--event", "turn/completed", "--timeout", "55"],
+      register,
+    );
+
+    expect(waitGet.mock.calls.map(([args]) => args.query.waitMs)).toEqual([
+      "20000",
+      "20000",
+    ]);
+    expect(collectLogLines(vi.mocked(console.log))).toContain(
+      "Thread t observed event turn/completed at seq 4.",
+    );
+  });
 });

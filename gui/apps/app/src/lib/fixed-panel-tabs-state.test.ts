@@ -22,7 +22,7 @@ import {
   FIXED_PANEL_TABS_STATE_STORAGE_VERSION,
   type FixedPanelTabsState,
   type PluginPanelFixedPanelTab,
-} from "./fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 
 const NOW = 1_700_000_000_000;
 

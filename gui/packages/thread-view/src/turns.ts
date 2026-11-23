@@ -594,11 +594,11 @@ function convertPlanLimitReplies(rows: TimelineRow[]): TimelineRow[] {
   return changed ? next : rows;
 }
 
-function collectAuthFailureRowIds(rows: readonly TimelineRow[]): string[] {
+function collectEchoDropRowIds(rows: readonly TimelineRow[]): string[] {
   const ids: string[] = [];
   const walk = (list: readonly TimelineRow[]) => {
     for (const row of list) {
-      if (isAuthFailureRow(row)) ids.push(row.id);
+      if (isAuthFailureRow(row) || isPlanLimitRow(row)) ids.push(row.id);
       if (row.kind === "turn" && row.children) walk(row.children);
     }
   };
@@ -606,17 +606,49 @@ function collectAuthFailureRowIds(rows: readonly TimelineRow[]): string[] {
   return ids;
 }
 
+function matchesErrorEcho(replyText: string, error: TimelineRow): boolean {
+  if (error.kind !== "system") return false;
+  const text = replyText.trim();
+  if (text === "") return false;
+  const title = error.title.trim();
+  const detail = error.detail?.trim() ?? "";
+  if (text === title || text === detail) return true;
+  const saidIdx = detail.indexOf(" said: ");
+  return (
+    saidIdx !== -1 &&
+    detail.slice(saidIdx + " said: ".length).trim() === text
+  );
+}
+
+function collectCompletedTurnIds(
+  events: readonly ThreadEventWithMeta[],
+): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const { event } of events) {
+    if (event.type === "turn/completed" && event.status === "completed") {
+      ids.add(
+        requireThreadEventScopeTurnId({
+          type: event.type,
+          scope: event.scope,
+        }),
+      );
+    }
+  }
+  return ids;
+}
+
 function dropErrorEchoes(
   rows: TimelineRow[],
   targetIds: ReadonlySet<string>,
+  completedTurnIds: ReadonlySet<string>,
 ): TimelineRow[] {
   const gone = new Set<string>();
   const isEcho = (candidate: TimelineRow | undefined, error: TimelineRow) =>
     candidate?.kind === "conversation" &&
     candidate.role === "assistant" &&
-    candidate.text.trim() !== "" &&
-    error.kind === "system" &&
-    (error.detail ?? "").includes(candidate.text.trim());
+    (candidate.turnId === null || !completedTurnIds.has(candidate.turnId)) &&
+    (error.turnId === null || candidate.turnId === error.turnId) &&
+    matchesErrorEcho(candidate.text, error);
 
   const scan = (list: readonly TimelineRow[]) => {
     for (let i = 0; i < list.length; i += 1) {
@@ -629,16 +661,21 @@ function dropErrorEchoes(
       const nested = prev?.kind === "turn" ? prev.children?.at(-1) : undefined;
       if (nested && isEcho(nested, r)) gone.add(nested.id);
 
-      const turn = list.find((o) => o.kind === "turn" && o.turnId === r.turnId);
+      // Cloud system/error rows carry turnId = null; recover the turn from the echoed reply right before it.
+      const turnId =
+        r.turnId ?? (prev && gone.has(prev.id) ? prev.turnId : null);
+      const turn = turnId
+        ? list.find((o) => o.kind === "turn" && o.turnId === turnId)
+        : undefined;
       if (
         turn?.kind === "turn" &&
-        r.turnId &&
+        turnId &&
         (turn.children === null
           ? turn.summaryCount === 0
           : turn.children.every((c) => gone.has(c.id))) &&
         list.every(
           (o) =>
-            o.turnId !== r.turnId ||
+            o.turnId !== turnId ||
             o === turn ||
             o === r ||
             gone.has(o.id) ||
@@ -667,6 +704,7 @@ function markPlanLimitSwitches(
   rows: TimelineRow[],
   events: readonly ThreadEventWithMeta[],
 ): TimelineRow[] {
+  const completedTurnIds = collectCompletedTurnIds(events);
   const switches = events.filter(
     ({ event }) =>
       event.type === "system/operation" &&
@@ -674,8 +712,10 @@ function markPlanLimitSwitches(
         event.operation === THREAD_ACCOUNT_SWITCH_OPERATION),
   );
   if (switches.length === 0) {
-    const authIds = collectAuthFailureRowIds(rows);
-    return authIds.length === 0 ? rows : dropErrorEchoes(rows, new Set(authIds));
+    const echoIds = collectEchoDropRowIds(rows);
+    return echoIds.length === 0
+      ? rows
+      : dropErrorEchoes(rows, new Set(echoIds), completedTurnIds);
   }
 
   const flat: TimelineRow[] = [];
@@ -761,8 +801,10 @@ function markPlanLimitSwitches(
   }
 
   if (marks.size === 0 && accountMarks.size === 0) {
-    const authIds = collectAuthFailureRowIds(rows);
-    return authIds.length === 0 ? rows : dropErrorEchoes(rows, new Set(authIds));
+    const echoIds = collectEchoDropRowIds(rows);
+    return echoIds.length === 0
+      ? rows
+      : dropErrorEchoes(rows, new Set(echoIds), completedTurnIds);
   }
 
   const applyMarks = (list: TimelineRow[]): TimelineRow[] =>
@@ -787,8 +829,9 @@ function markPlanLimitSwitches(
     new Set([
       ...marks.keys(),
       ...accountMarks.keys(),
-      ...collectAuthFailureRowIds(marked),
+      ...collectEchoDropRowIds(marked),
     ]),
+    completedTurnIds,
   );
 }
 

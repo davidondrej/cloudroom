@@ -4,7 +4,7 @@ import {
   type ThreadEventWithMeta,
 } from "@cloudroom/thread-view";
 import { describe, expect, it } from "vitest";
-import { findActiveFileEdit } from "./agent-file-edit";
+import { findActiveFileEdit } from "@/components/right-panel/tabs/agent-file-edit";
 
 const ROOT = "/repo";
 let seq = 0;

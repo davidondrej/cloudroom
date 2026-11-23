@@ -583,6 +583,10 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
               (sum(1 for d in results if d.get("failed")), "advisories: their details failed to load"),
               (max(0, len(all_ids) - MAX_ADVISORIES), f"advisories past the first {MAX_ADVISORIES}"))
     unchecked = [f"{n} {text}" for n, text in counts if n] + ([projects_error] if projects_error else [])
+    remote = [r["name"] for r in repos if not r["path"]]  # no copy on this computer: no lockfiles to read (#2445)
+    if remote:
+        unchecked.append(f"{len(remote)} GitHub-only repos (no copy on this computer), so their packages were not checked: "
+                         + ", ".join(remote))
     unchecked += [f"{name}: failed to load" for name, ok in (("CISA's exploited list", recent["kev"]),
                                                               ("GitHub's critical advisories", recent["github_critical"])) if not ok]
     if sys.platform != "darwin":  # mac() reads macOS only: missing computer facts must not look clean
@@ -602,7 +606,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
             if key not in seen:
                 seen.add(key)
                 r["vulns"].append(v)
-        r["package_count"] = len(r.pop("packages"))
+        r["package_count"] = len(r.pop("packages")) if r["path"] else None  # None: not checked, unlike 0 packages
     computer["kev_matches"] = kev_matches(recent["kev"], computer.get("apps") or [])
     critical = sum(v["severity"] == "CRITICAL" for r in repos for v in r["vulns"])
     json.dump({"computer": computer, "repos": repos, "skipped_repos": skipped, "not_checked": unchecked, "threats": recent}, open(os.path.join(out, "findings.json"), "w"), indent=1)
@@ -633,8 +637,9 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
             lines.append(f"- {k}: {json.dumps(v) if isinstance(v, (dict, list)) else v}")
     lines += ["", f"## Repos active in the last {days} days ({len(repos)} checked, {skipped} more skipped)"]
     for r in repos:
+        count = "packages not checked" if r["package_count"] is None else f"{r['package_count']} packages"
         lines.append(f"### {r['name']}" + (f" ({r['path'].replace(HOME, '~')})" if r["path"] else " (GitHub only)")
-                     + f" · {r['package_count']} packages · last active {time.strftime('%Y-%m-%d', time.localtime(r['last']))}")
+                     + f" · {count} · last active {time.strftime('%Y-%m-%d', time.localtime(r['last']))}")
         for v in r["vulns"][:12]:
             lines.append(f"- {v['cve'] or v['id']} · {(str(v['score']) + ' ') if v['score'] else ''}{v['severity'] or '?'} · {v['package']} {v['version']}"
                          f" -> {v['fixed'] or 'see advisory'} · {v['summary']}")
@@ -646,7 +651,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     lines += ["GitHub critical advisories:"]
     lines += [f"- {a['id']} ({a['published']}) {', '.join(a['packages'])}: {a['summary']}" for a in recent["github_critical"]]
     open(os.path.join(out, "summary.md"), "w").write("\n".join(lines) + "\n")
-    print(f"{len(repos)} repos, {sum(r['package_count'] for r in repos)} packages, "
+    print(f"{len(repos)} repos, {sum(r['package_count'] or 0 for r in repos)} packages, "
           f"{sum(len(r['vulns']) for r in repos)} advisories ({critical} critical), "
           f"{sum(len(r['secrets']) for r in repos)} secret findings, {len(per_slice)} reader slices"
           + (f", not fully checked: {'; '.join(unchecked)}" if unchecked else ""))

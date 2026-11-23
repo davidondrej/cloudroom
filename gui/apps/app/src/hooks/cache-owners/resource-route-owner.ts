@@ -10,7 +10,7 @@ import type {
 import {
   destroyPersistedBrowserViewsForEnvironment,
   destroyPersistedBrowserViewsForThread,
-} from "@/components/secondary-panel/browserViewVisibilityCoordinator";
+} from "@/components/right-panel/tabs/browser-visibility";
 import { collapsedProjectIdsAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import { getRootComposeRoutePath } from "@/lib/route-paths";
 import { getDesktopBrowserApi } from "@/lib/room-desktop";

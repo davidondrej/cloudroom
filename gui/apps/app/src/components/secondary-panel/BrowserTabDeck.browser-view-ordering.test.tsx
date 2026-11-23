@@ -9,14 +9,14 @@ import type {
   RoomDesktopBrowserState,
 } from "@cloudroom/desktop-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import type { BrowserFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import {
   createRoomDesktopApi,
   createNoopDesktopBrowserApi,
 } from "@/test/room-desktop-test-utils";
 import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
-import { BrowserTabDeck, BrowserTabLifecycleObserver } from "./BrowserTabDeck";
-import { resetBrowserViewPersistence } from "./browserViewVisibilityCoordinator";
+import { BrowserTabDeck, BrowserTabLifecycleObserver } from "@/components/right-panel/tabs/browser-tab";
+import { resetBrowserViewPersistence } from "@/components/right-panel/tabs/browser-visibility";
 
 type BrowserCall =
   | { type: "attach"; request: RoomDesktopBrowserAttachRequest }

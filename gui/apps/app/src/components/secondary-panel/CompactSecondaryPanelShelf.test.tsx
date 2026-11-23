@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CompactSecondaryPanelShelf } from "./CompactSecondaryPanelShelf";
+import { CompactSecondaryPanelShelf } from "@/components/right-panel/shell/mobile-drawer";
 import { APP_OVERLAY_LAYER } from "@/components/ui/app-overlay-layers";
 import { getCompactSecondaryPanelPresentation } from "@/components/ui/secondary-panel-shelf-visibility";
 

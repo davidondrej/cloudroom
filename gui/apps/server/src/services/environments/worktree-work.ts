@@ -106,9 +106,10 @@ async function ownIgnoredFiles(folder: string): Promise<string[] | null> {
 /**
  * Commits unfinished work to the worktree's branch and copies its ignored
  * `private/` notes to `notesDir`, and its other own ignored files next to it.
- * Returns that branch, or null when the folder must stay. A detached HEAD
- * moves onto `detachedBranch`, which must be unique to this worktree:
- * rebuilding on a branch removes any clean worktree holding it.
+ * Returns that branch, or null when the folder must stay. A detached HEAD,
+ * or a branch another worktree has checked out, moves onto `detachedBranch`,
+ * which must be unique to this worktree: rebuilding on a branch removes any
+ * clean worktree holding it.
  * `onMassDeletion` hears how many tracked files are gone when that keeps it.
  * Own ignored files too big to keep are dropped, or keep the folder with
  * `mustKeepIgnored`.
@@ -134,6 +135,17 @@ export async function saveWorktreeWork(
     }
     // Copies first: if one fails, nothing was committed yet.
     await backUpNotes(folder, notesDir, own);
+    let branch = (await git(folder, ["branch", "--show-current"])).trim();
+    // A branch another worktree also has checked out would move under that
+    // worktree too, so the work goes to the unique branch instead (#2415).
+    const holders = (await git(folder, ["worktree", "list", "--porcelain"]))
+      .split("\n")
+      .filter((line) => line === `branch refs/heads/${branch}`).length;
+    if (branch === "" || holders > 1) {
+      branch = detachedBranch;
+      await git(folder, ["branch", "-f", branch, "HEAD"]);
+      await git(folder, ["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
+    }
     if (status !== "") {
       await git(folder, ["add", "-A"]);
       await git(folder, [
@@ -152,12 +164,6 @@ export async function saveWorktreeWork(
       committed = true;
     }
     if ((await git(folder, STATUS)) !== "") throw new Error("Still changing");
-    let branch = (await git(folder, ["branch", "--show-current"])).trim();
-    if (branch === "") {
-      branch = detachedBranch;
-      await git(folder, ["branch", "-f", branch, "HEAD"]);
-      await git(folder, ["symbolic-ref", "HEAD", `refs/heads/${branch}`]);
-    }
     return branch;
   } catch {
     // The folder stays, so only this save's commit is undone. Earlier copies

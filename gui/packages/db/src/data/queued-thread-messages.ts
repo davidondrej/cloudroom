@@ -344,6 +344,8 @@ export function createQueuedThreadMessageInTransaction(
       systemNotice:
         input.systemNotice === null ? null : JSON.stringify(input.systemNotice),
       payloadKind: input.payload.kind,
+      fromComposer:
+        input.payload.kind === "inline" && input.payload.fromComposer === true,
       retryOfTurnRequestId:
         input.payload.kind === "retry"
           ? input.payload.retryOfTurnRequestId

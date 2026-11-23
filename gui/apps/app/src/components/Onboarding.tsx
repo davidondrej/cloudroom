@@ -42,7 +42,7 @@ const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>(
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "gitlab" | "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual";
+type SetupDetail = "gitlab" | "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual" | "repos";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -693,12 +693,15 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // "Only share specific repos": the GitHub App's login, then the user picks repos on GitHub (#2084).
+  const [picking, setPicking] = useState(false);
   const refresh = () => client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
   const connect = useMutation({
-    mutationFn: async () => {
-      track("github", "started");
+    mutationFn: async (repos: boolean) => {
+      setPicking(repos);
+      track("github", "started", repos ? "repos" : null);
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current);
+      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
       if (result.state === "waiting" && result.verification_url && result.user_code) {
         if (new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
         setCopied(await copyTextToClipboard(result.user_code));
@@ -721,15 +724,26 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
   const code = state === "waiting" ? github.data?.user_code : null;
   const url = state === "waiting" ? github.data?.verification_url : null;
   const [left, setLeft] = useCountdown(Boolean(url), () => { if (url) openGithub(url); });
+  // After the code is approved, the same login waits with GitHub's page for picking repos and no code. It opens by
+  // itself once, right after the code screen, like the code's page did.
+  const pick = Boolean(url) && !code;
+  const hadCode = useRef(false);
+  useEffect(() => {
+    if (code) hadCode.current = true;
+    else if (pick && hadCode.current) { hadCode.current = false; setLeft(GITHUB_COUNTDOWN); }
+  }, [code, pick, setLeft]);
   const open = () => {
     setLeft(null);
     if (url) openGithub(url);
   };
+  // Someone whose account or organization already has the app skips the picking screen, so the repos may not be the
+  // ones they had in mind: the link opens GitHub's page for changing them.
+  const repos = useQuery({ queryKey: ["cloudroom-github-account"], enabled: connected && picking, retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal) }).data?.reposUrl;
   const copyAgain = async () => {
     if (code && await copyToClipboardWithToast(code, { successMessage: "Code copied." })) setCopied(true);
   };
   const detail = connected
-    ? "Cloud agents can use your repos."
+    ? picking ? "Cloud agents can use the repos Cloudroom has on GitHub." : "Cloud agents can use your repos."
     : onServer ? "Your Core uses the GitHub login set up on its server."
     : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on ${here}. You'll copy a code, then paste it on github.com.`;
   if (gitlab.state?.waiting || (!connected && gitlab.state?.login && !gitlab.state.expired)) {
@@ -772,6 +786,25 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
       </>
     );
   }
+  if (pick) {
+    return (
+      <>
+        <Heading lead="Pick your" mark="repos" />
+        <p className="mt-4 text-[15px] text-(--ob-muted)">GitHub is connected. Now choose which repos cloud agents may use.</p>
+        <div className="mt-8 flex items-center gap-5">
+          <Cta onClick={open}><Icon name="Github" aria-hidden />{left === null ? "Pick repos on GitHub" : `Opening GitHub in ${left}…`}</Cta>
+          <Note>
+            {left !== null && <><button type="button" className={LINK} onClick={open}>Open now</button> · </>}
+            <button type="button" className={LINK} onClick={() => cancel.mutate()}>Cancel</button>
+          </Note>
+        </div>
+        {left !== null && <CountdownBar seconds={GITHUB_COUNTDOWN} />}
+        <p className="mt-6 text-sm text-(--ob-muted)">
+          On GitHub: choose your account, pick <b className="text-(--ob-ink)">Only select repositories</b>, then click <b className="text-(--ob-ink)">Install</b>. This screen moves on by itself.
+        </p>
+      </>
+    );
+  }
   return (
     <>
       <Heading lead="Connect" mark="GitHub" />
@@ -780,12 +813,13 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
           {connected && <Connected />}
         </Card>
       </div>
+      {!connected && (state === "error" || state === "expired") && github.data?.message && <p role="alert" className="mt-3 text-sm text-(--ob-error)">{github.data.message}</p>}
       {offline && <CloudOffline />}
       <div className="mt-8 flex items-center gap-5">
         {connected || onServer ? (
-          <Cta onClick={() => { track("github", "done"); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
+          <Cta onClick={() => { track("github", "done", picking ? "repos" : null); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
         ) : (
-          <Cta disabled={!ready || connect.isPending} onClick={() => connect.mutate()}>
+          <Cta disabled={!ready || connect.isPending} onClick={() => connect.mutate(false)}>
             <Icon name={connect.isPending ? "Loading" : "Github"} className={cn(connect.isPending && "animate-spin")} aria-hidden />
             {connect.isPending ? "Getting your code…" : "Connect GitHub"}
           </Cta>
@@ -793,9 +827,11 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
         {!connected && !onServer && (
           <Note><button type="button" className={LINK} onClick={() => { track("github", "skipped"); next(); }}>Skip this step</button> if you only use public repos.</Note>
         )}
+        {connected && repos && <Note><button type="button" className={LINK} onClick={() => openGithub(repos)}>Change repos</button> on GitHub.</Note>}
       </div>
-      {!connected && !onServer && gitlab.state?.available && <div className="mt-3.5">
-        <button type="button" className={QUIET_LINK+" text-[12.5px] text-(--ob-muted)"} disabled={gitlab.busy || !ready} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button>
+      {!connected && !onServer && <div className="mt-3.5 text-[12.5px] text-(--ob-muted)">
+        <button type="button" className={QUIET_LINK} disabled={!ready || connect.isPending} onClick={() => connect.mutate(true)}>Only share specific repos</button>
+        {gitlab.state?.available && <> · <button type="button" className={QUIET_LINK} disabled={gitlab.busy || !ready} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button></>}
         {gitlab.error && <p role="alert" className="text-xs text-(--ob-error)">{gitlab.error}</p>}
       </div>}
     </>

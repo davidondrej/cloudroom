@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { ThreadRuntimeDisplayStatus } from "@cloudroom/domain";
 import type { TimelineRow } from "@cloudroom/server-contract";
 import { isRunningThreadRuntimeDisplayStatus } from "@cloudroom/client-core";
-import { IMAGE_FILE_EXTENSIONS } from "@/components/secondary-panel/ImageTabLightboxContext";
+import { IMAGE_FILE_EXTENSIONS } from "@/components/right-panel/tabs/image-lightbox";
 import {
   parseLocalFileHref,
   resolveRelativeLocalFileHref,
