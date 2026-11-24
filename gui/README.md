@@ -1,6 +1,6 @@
 # Build Cloudroom from source
 
-You need macOS on Apple Silicon, Git, Node.js 22.19+, pnpm 10.34.9, Python 3.11+, and Xcode Command Line Tools. Building needs no Cloudroom account.
+You need macOS on Apple Silicon, Git, Node.js 22.19+, Bun 1.4.4, pnpm 10.34.9, Python 3.11+, and Xcode Command Line Tools. Building needs no Cloudroom account.
 
 Run these from this folder:
 
