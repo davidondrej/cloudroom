@@ -114,7 +114,7 @@ export function PlanCard() {
         <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.floor(planLeft + extra).toLocaleString("en-US")}</span> Cloud Credits left</p>
         {extra > 0
           ? <CreditsBar className="h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-primary" edgeClassName="border-surface-raised-solid" />
-          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>}
+          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(planLeft, limit) * 100}%` }} /></div>}
       </div>
       <div className="mt-3 flex justify-end">
         <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Get more credits<Icon name="ArrowRight" aria-hidden /></Button>
@@ -143,7 +143,7 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
       {extra > 0
         ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName={calm ? "bg-primary" : "bg-warning"} edgeClassName="border-sidebar" />
         : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
+          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(planLeft, limit) * 100}%` }} />
         </div>}
     </div>
   );

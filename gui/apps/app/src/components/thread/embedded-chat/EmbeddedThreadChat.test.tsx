@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useEffect, useLayoutEffect, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ExecutionControlsProps } from "@/components/promptbox/ExecutionControls";
 import type { FollowUpComposerProps } from "@/components/promptbox/FollowUpPromptBox";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import { getPromptDraftAccessor } from "@/hooks/usePromptDraftStorage";
@@ -11,8 +13,24 @@ import { EmbeddedThreadChat } from "./EmbeddedThreadChat";
 const mocks = vi.hoisted(() => ({
   createQueuedMessageMutateAsync: vi.fn(),
   markThreadReadMutate: vi.fn(),
+  updateThreadMutate: vi.fn(),
+  setCloudReasoningMutate: vi.fn(),
+  setProviderModelReasoning: vi.fn(),
   onOpenLink: vi.fn(),
   onOpenLocalFileLink: vi.fn(),
+  executionTarget: "local" as "local" | "cloud",
+  threadProviderId: "provider-1" as string,
+  cloudThreadState: {
+    model: "claude-opus-4-6",
+    reasoning: "medium",
+    serviceTier: "default",
+    sessionId: null as string | null,
+  },
+  providerOptions: [
+    { value: "claude-code", label: "Claude Code" },
+    { value: "codex", label: "Codex" },
+  ] as Array<{ value: string; label: string }>,
+  latestExecution: null as ExecutionControlsProps | null,
   pendingInteractions: [] as
     | Array<{
         id: string;
@@ -68,6 +86,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
   return {
     FollowUpPromptBox: ({
       composer,
+      execution,
       pendingInteraction,
       stack,
       pluginComposerHost,
@@ -77,11 +96,18 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         FollowUpComposerProps,
         "message" | "onChangeMessage" | "onSubmit" | "submitMode"
       >;
+      execution?: ExecutionControlsProps;
       pendingInteraction?: ReactNode;
       stack: ReactNode;
       pluginComposerHost?: PluginComposerHost | null;
       contextWindowUsage?: { usedTokens: number } | null;
-    }) => (
+    }) => {
+      if (execution && !execution.disabled) {
+        mocks.latestExecution = execution;
+      } else if (execution) {
+        mocks.latestExecution = execution;
+      }
+      return (
       <div>
         {stack}
         {pendingInteraction}
@@ -105,7 +131,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         </button>
         <BottomHostDraftProbe host={pluginComposerHost ?? null} />
       </div>
-    ),
+      );
+    },
   };
 });
 
@@ -189,9 +216,10 @@ vi.mock("@/components/ui/app-toast", () => ({
 vi.mock("@/hooks/useThreadCreationOptions", () => ({
   useThreadCreationOptions: () => ({
     executionOptionsRouting: undefined,
-    selectedProviderId: "provider-1",
-    providerOptions: [],
-    hasMultipleProviders: false,
+    selectedProviderId: mocks.threadProviderId,
+    setProviderModelReasoning: mocks.setProviderModelReasoning,
+    providerOptions: mocks.providerOptions,
+    hasMultipleProviders: mocks.providerOptions.length > 1,
     selectedProviderDisplayName: "Provider",
     selectedProviderComposerActions: [],
     selectedModel: "gpt-5",
@@ -202,18 +230,41 @@ vi.mock("@/hooks/useThreadCreationOptions", () => ({
     setReasoningLevel: vi.fn(),
     permissionMode: "auto",
     setPermissionMode: vi.fn(),
-    activeModel: { model: "gpt-5" },
+    activeModel: { model: "gpt-5", supportedReasoningEfforts: [] },
     modelOptions: [],
     moreModelOptions: [],
+    modelCatalogIsVerified: true,
     modelLoadFailed: false,
     modelLoadError: null,
     reasoningOptions: [],
     permissionModeOptions: [],
     supportsPermissionModeSelection: true,
     supportsServiceTier: false,
+    supportsUltraFast: false,
     serviceTierSupportByProvider: {},
     isLoadingModels: false,
   }),
+}));
+
+vi.mock("@/hooks/queries/cloudroom-queries", () => ({
+  useCloudroomThread: (_threadId: string, enabled: boolean) => ({
+    data: enabled ? mocks.cloudThreadState : undefined,
+    isLoading: false,
+  }),
+  useCloudroomConnection: () => ({ data: undefined }),
+  useSetCloudReasoning: () => ({
+    mutate: mocks.setCloudReasoningMutate,
+    isPending: false,
+    variables: undefined,
+  }),
+  cloudCanRunHarness: (providerId: string) =>
+    ["claude-code", "codex"].includes(providerId),
+  cloudHarness: () => undefined,
+  cloudOpenCodeCatalog: () => null,
+  cloudReasoningLevels: () => ["low", "medium", "high"],
+  cloudServiceTierSupported: () => false,
+  cloudUltraFastSupported: () => false,
+  partitionCloudOpenCodeModelOptions: () => null,
 }));
 
 vi.mock("@/hooks/usePromptMentions", () => ({
@@ -244,6 +295,8 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
       threadId.length > 0
         ? {
             id: threadId,
+            executionTarget: mocks.executionTarget,
+            providerId: mocks.threadProviderId,
             status: "active",
             runtime: { displayStatus: mocks.threadRuntimeDisplayStatus },
             environmentId: null,
@@ -341,6 +394,11 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
 vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
   useSaveThreadModel: () => ({ save: vi.fn().mockResolvedValue(undefined), pendingModel: null }),
   useMarkThreadRead: () => ({ mutate: mocks.markThreadReadMutate }),
+  useUpdateThread: () => ({
+    mutate: mocks.updateThreadMutate,
+    isPending: false,
+    variables: undefined,
+  }),
 }));
 
 vi.mock("@/hooks/useThreadReadTracking", () => ({
@@ -356,6 +414,8 @@ vi.mock("@/hooks/mutations/project-mutations", () => ({
   }),
 }));
 
+let testQueryClient = new QueryClient();
+
 function buildEmbeddedChat({
   threadId = "thr_child",
   surfaceTone = "background",
@@ -366,30 +426,32 @@ function buildEmbeddedChat({
   pluginComposerBottomScope?: PluginComposerHost["scope"];
 } = {}) {
   return (
-    <EmbeddedThreadChat
-      variant="compact"
-      surfaceTone={surfaceTone}
-      threadId={threadId}
-      projectId="proj-1"
-      providerId="provider-1"
-      promptContextEnvironmentId={null}
-      onOpenLink={mocks.onOpenLink}
-      onOpenLocalFileLink={mocks.onOpenLocalFileLink}
-      resolveMentionLink={mocks.resolveMentionLink}
-      workspaceRootPath="/workspace"
-      composer={{
-        draftScope: {
-          kind: "thread",
-          projectId: "proj-1",
-          threadId,
-        },
-        executionDefaultsThreadId: threadId,
-        executionResetKey: "thr_parent",
-        permissionPolicy: "snapshot",
-        environmentSummary: null,
-        ...(pluginComposerBottomScope ? { pluginComposerBottomScope } : {}),
-      }}
-    />
+    <QueryClientProvider client={testQueryClient}>
+      <EmbeddedThreadChat
+        variant="compact"
+        surfaceTone={surfaceTone}
+        threadId={threadId}
+        projectId="proj-1"
+        providerId={mocks.threadProviderId}
+        promptContextEnvironmentId={null}
+        onOpenLink={mocks.onOpenLink}
+        onOpenLocalFileLink={mocks.onOpenLocalFileLink}
+        resolveMentionLink={mocks.resolveMentionLink}
+        workspaceRootPath="/workspace"
+        composer={{
+          draftScope: {
+            kind: "thread",
+            projectId: "proj-1",
+            threadId,
+          },
+          executionDefaultsThreadId: threadId,
+          executionResetKey: "thr_parent",
+          permissionPolicy: "snapshot",
+          environmentSummary: null,
+          ...(pluginComposerBottomScope ? { pluginComposerBottomScope } : {}),
+        }}
+      />
+    </QueryClientProvider>
   );
 }
 
@@ -401,12 +463,29 @@ function renderEmbeddedChat(
 
 describe("EmbeddedThreadChat", () => {
   beforeEach(() => {
+    testQueryClient = new QueryClient();
     window.localStorage.clear();
     mocks.createQueuedMessageMutateAsync.mockReset().mockResolvedValue({});
     mocks.sendThreadMessageMutateAsync.mockReset().mockResolvedValue({});
     mocks.markThreadReadMutate.mockReset();
+    mocks.updateThreadMutate.mockReset();
+    mocks.setCloudReasoningMutate.mockReset();
+    mocks.setProviderModelReasoning.mockReset();
     mocks.onOpenLink.mockReset();
     mocks.onOpenLocalFileLink.mockReset();
+    mocks.executionTarget = "local";
+    mocks.threadProviderId = "provider-1";
+    mocks.cloudThreadState = {
+      model: "claude-opus-4-6",
+      reasoning: "medium",
+      serviceTier: "default",
+      sessionId: null,
+    };
+    mocks.providerOptions = [
+      { value: "claude-code", label: "Claude Code" },
+      { value: "codex", label: "Codex" },
+    ];
+    mocks.latestExecution = null;
     mocks.pendingInteractions = [];
     mocks.pendingInteractionsIsError = false;
     mocks.pendingInteractionsIsFetching = false;
@@ -742,5 +821,65 @@ describe("EmbeddedThreadChat", () => {
       "alpha draft",
     );
     expect(hostDraftMocks.textAtNotify).toEqual(["beta draft", "alpha draft"]);
+  });
+
+  it("unlocks harness switching on Cloud side chats", () => {
+    mocks.executionTarget = "cloud";
+    mocks.threadProviderId = "claude-code";
+
+    renderEmbeddedChat({ threadId: "thr_cloud_side" });
+
+    expect(mocks.latestExecution?.lockModelSelection).toBeUndefined();
+    expect(mocks.latestExecution?.provider.hasMultiple).toBe(true);
+    expect(mocks.latestExecution?.provider.options?.map((o) => o.value)).toEqual([
+      "claude-code",
+      "codex",
+    ]);
+
+    mocks.latestExecution?.onSelectModel?.({
+      providerId: "codex",
+      model: "gpt-5.4",
+      reasoningLevel: "high",
+    });
+
+    expect(mocks.setProviderModelReasoning).toHaveBeenCalledWith({
+      providerId: "codex",
+      model: "gpt-5.4",
+      reasoningLevel: "high",
+    });
+    expect(mocks.updateThreadMutate).toHaveBeenCalledWith(
+      {
+        id: "thr_cloud_side",
+        providerId: "codex",
+        model: "gpt-5.4",
+        reasoningLevel: "high",
+      },
+      expect.any(Object),
+    );
+  });
+
+  it("switches harness on Local side chats via onSelectModel", () => {
+    mocks.executionTarget = "local";
+    mocks.threadProviderId = "claude-code";
+
+    renderEmbeddedChat({ threadId: "thr_local_side" });
+
+    expect(mocks.latestExecution?.provider.hasMultiple).toBe(true);
+
+    mocks.latestExecution?.onSelectModel?.({
+      providerId: "codex",
+      model: "gpt-5.4",
+      reasoningLevel: "high",
+    });
+
+    expect(mocks.updateThreadMutate).toHaveBeenCalledWith(
+      {
+        id: "thr_local_side",
+        providerId: "codex",
+        model: "gpt-5.4",
+        reasoningLevel: "high",
+      },
+      expect.any(Object),
+    );
   });
 });

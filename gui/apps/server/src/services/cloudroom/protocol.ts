@@ -144,6 +144,7 @@ export const capabilitiesSchema = z.object({
   fork: z.boolean().default(false),
   side_chat: z.boolean().default(false),
   side_chat_fresh: z.boolean().default(false),
+  side_chat_any_harness: z.boolean().default(false),
   attachments: z.boolean().default(false),
   upload_parts: z.boolean().default(false),
   compact: z.boolean().default(false),

@@ -35,7 +35,6 @@
     "@cloudroom/shared-ui": "workspace:*",
     "@cloudroom/tunnel-client": "workspace:*",
     "@cloudroom/tunnel-contract": "workspace:*",
-    "@radix-ui/react-slot": "^1.3.0",
     "ws": "^8.18.0",
     "zod": "^4.3.6"
   },

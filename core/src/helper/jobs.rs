@@ -30,6 +30,8 @@ pub(super) const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folder
 const NOT_APPROVED: &str =
     "The user did not approve this command on their Mac. Do not retry it unless they ask you to.";
 const CHANGED: &str = "The folder changed after it was approved, so this command did not run.";
+const UNWANTED: &str =
+    "The Mac stopped taking commands from this sandbox, so this command did not run.";
 
 /// The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..` never
 /// skips a missing part, and its real path must be that same folder. The error is the one starting there would give.
@@ -1620,6 +1622,10 @@ impl Jobs {
             Some(reason) => {
                 json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(reason.as_bytes()), "truncated": false})
             }
+            // Approved after its sandbox slept, a write command would change the Mac with nobody to read the result.
+            None if !self.wanted.lock().unwrap().contains(&core.key) => {
+                json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(UNWANTED.as_bytes()), "truncated": false})
+            }
             None => {
                 let sandbox = sandboxed.then_some(&core.key);
                 self.run(
@@ -1762,9 +1768,7 @@ impl Jobs {
                 )
             } else if sandbox.is_some_and(|key| !self.wanted.lock().unwrap().contains(key)) {
                 // end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
-                denied(
-                    "The Mac stopped taking commands from this sandbox, so this command did not run.",
-                )
+                denied(UNWANTED)
             } else {
                 let spawned = command(&argv[0])
                     .args(&argv[1..])

@@ -80,7 +80,7 @@ interface ShowAppToastParams {
 
 interface AppToastActionButtonProps {
   action: Action;
-  className?: string;
+  compact?: boolean;
   id?: number | string;
   priority: "primary" | "secondary";
 }
@@ -117,8 +117,9 @@ function dismissToast(id: number | string | undefined): void {
 
 function AppToastActionButton({
   action,
-  className,
+  compact = false,
   id,
+  priority,
 }: AppToastActionButtonProps) {
   const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
     action.onClick(event);
@@ -131,9 +132,15 @@ function AppToastActionButton({
   return (
     <Button
       type="button"
-      variant="ghost"
+      variant={compact || priority === "secondary" ? "ghost" : "secondary"}
       size="sm"
-      className={cn("h-6 shrink-0 px-2 text-xs font-medium", className)}
+      className={
+        compact
+          ? "h-7 shrink-0 px-2.5 text-[13px] font-medium text-primary-text hover:text-primary-text"
+          : priority === "primary"
+            ? "h-7 shrink-0 px-2.5 text-xs font-medium"
+            : "h-7 shrink-0 px-2 text-xs font-medium text-muted-foreground hover:text-foreground"
+      }
       onClick={handleClick}
     >
       {action.label}
@@ -208,22 +215,20 @@ export function AppToastContent({
   title,
   tone,
 }: AppToastContentProps) {
-  const hasExtraActions = (extraActions?.length ?? 0) > 0;
   const hasActions =
-    action !== undefined || cancel !== undefined || hasExtraActions;
+    action !== undefined ||
+    cancel !== undefined ||
+    (extraActions?.length ?? 0) > 0;
   const showNotification = () => {
     dismissToast(id);
     openNotificationCenter(notificationId);
   };
-  const actionClassName = compact
-    ? "h-7 px-2.5 text-[13px] text-primary-text hover:text-primary-text"
-    : undefined;
   const actions = hasActions ? (
     <>
       {action ? (
         <AppToastActionButton
           action={action}
-          className={actionClassName}
+          compact={compact}
           id={id}
           priority="primary"
         />
@@ -232,7 +237,7 @@ export function AppToastContent({
         <AppToastActionButton
           key={index}
           action={extraAction}
-          className={actionClassName}
+          compact={compact}
           id={id}
           priority="secondary"
         />
@@ -240,7 +245,7 @@ export function AppToastContent({
       {cancel ? (
         <AppToastActionButton
           action={cancel}
-          className={actionClassName}
+          compact={compact}
           id={id}
           priority="secondary"
         />
@@ -294,7 +299,7 @@ export function AppToastContent({
             testId="app-toast-title"
           />
           {description ? (
-            <div className="min-w-0 text-xs leading-4 text-muted-foreground">
+            <div className="mt-0.5 min-w-0 text-xs leading-4 text-muted-foreground">
               <AppToastOverflowText
                 content={description}
                 notificationId={notificationId}
@@ -303,21 +308,18 @@ export function AppToastContent({
               />
             </div>
           ) : null}
-          {hasActions && hasExtraActions ? (
-            <div className="mt-1.5 -ml-2 flex flex-wrap items-center gap-0.5">
+          {hasActions ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
               {actions}
             </div>
           ) : null}
         </div>
-        {hasActions && !hasExtraActions ? (
-          <div className="flex shrink-0 items-center">{actions}</div>
-        ) : null}
         {dismissible ? (
           <Button
             type="button"
             variant="ghost"
             size="icon"
-            className="size-6 shrink-0 text-muted-foreground"
+            className="-mt-0.5 size-6 shrink-0 text-muted-foreground"
             aria-label="Dismiss notification"
             onClick={() => (onDismiss ? onDismiss() : dismissToast(id))}
           >

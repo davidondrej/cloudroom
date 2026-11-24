@@ -90,6 +90,7 @@ import {
 } from "./PlanLimitRow.js";
 import { isBackgroundCommandTaskType } from "@cloudroom/domain";
 import { BackgroundCommandBubble } from "./BackgroundCommandBubble.js";
+import { LoopRunMarker, loopRun } from "./LoopRunMarker.js";
 import {
   CloudLoginRow,
   cloudLoginRowProvider,
@@ -1036,6 +1037,10 @@ const ConversationRowContent = memo(function ConversationRowContent({
     rowConsumerActions.length === 0
       ? rowSlotActions
       : [...(rowSlotActions ?? []), ...rowConsumerActions];
+  const loop = row.role === "user" ? loopRun(row.text) : null;
+  if (loop !== null) {
+    return <LoopRunMarker run={loop} createdAt={row.createdAt} />;
+  }
   if (row.role === "user") {
     const senderThreadMetadata =
       row.senderThreadId === null

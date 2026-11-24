@@ -2689,6 +2689,44 @@ describe("loop fallback", () => {
     vi.useRealTimers();
   });
 
+  it("sends Opus to Gemini 4 Neon in Antigravity, else GPT-6.2-Astra in Codex, both at xhigh (David, 2026-11-24)", async () => {
+    let antigravity = "ready";
+    const sdk = {
+      system: {
+        // Antigravity's usage can't be read on a Mac: unknown counts as free.
+        usageLimits: async ({ providerId }: { providerId: string }) => ({
+          [providerId]: providerId === "acp-antigravity"
+            ? { status: "unsupported" }
+            : { status: "ok", windows: [{ label: "Weekly limit", usedPercent: providerId === "claude-code" ? 100 : 40, resetsAt: null }] },
+        }),
+        providerStates: async ({ providerId }: { providerId: string }) => ({
+          providers: [{ providerId, status: providerId === "acp-antigravity" ? antigravity : "ready" }],
+        }),
+      },
+      threads: {},
+    } as unknown as FallbackSdk;
+    const automation = { lastRunStatus: "failed", lastRunThreadId: null } as unknown as Parameters<typeof loopAgent>[2];
+    const execution = {
+      mode: "agent",
+      providerId: "claude-code",
+      model: "claude-opus-5-5[1m]",
+      reasoningLevel: "max",
+      environment: { type: "host", hostId: "host-mac", workspace: { type: "personal" } },
+    } as unknown as Parameters<typeof loopAgent>[3];
+    const db = createTestDb();
+    expect(await loopAgent(sdk, db, automation, execution)).toEqual({
+      providerId: "acp-antigravity",
+      model: "gemini-4-neon",
+      reasoningLevel: "xhigh",
+    });
+    antigravity = "not_installed";
+    expect(await loopAgent(sdk, db, automation, execution)).toEqual({
+      providerId: "codex",
+      model: "gpt-6.2-astra",
+      reasoningLevel: "xhigh",
+    });
+  });
+
   it("gives each run the next of a loop's agents, past one at its plan limit or not ready", async () => {
     const fable = { providerId: "claude-code", model: "claude-fable-5-2", reasoningLevel: "xhigh" as const };
     const gemini = { providerId: "acp-cursor", model: "gemini-4-carbon", reasoningLevel: "high" as const };

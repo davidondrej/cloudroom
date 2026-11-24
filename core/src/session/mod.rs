@@ -1,5 +1,5 @@
 mod children;
-pub use children::{ForkFrom, Spawn};
+pub use children::{ForkFrom, ForkOptions, Spawn};
 mod outbox;
 pub mod teleport;
 pub use outbox::Journal;

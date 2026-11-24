@@ -303,5 +303,6 @@ command and does not change the server-side transcription model.
 Usage telemetry can be disabled in Settings → General → Privacy & diagnostics → Share usage data and setup errors,
 or with `room-cli settings general telemetryEnabled false`. The saved server-wide preference
 takes effect immediately and persists across restarts. SDK callers can use
-`system.updateGeneralSettings` with `telemetryEnabled`. `BB_TELEMETRY=false`
-always disables telemetry, even when the saved preference is enabled.
+`system.updateGeneralSettings` with `telemetryEnabled`. `CLOUDROOM_TELEMETRY=false`,
+`BB_TELEMETRY=false`, or `DO_NOT_TRACK=1` always disables telemetry, even when the saved
+preference is enabled. Details: https://cloudroom.dev/privacy.

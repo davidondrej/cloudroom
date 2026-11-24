@@ -221,4 +221,4 @@ Use `room-cli settings ui reset sidebar.hiddenFooterItems` to show everything ag
 
 Disable usage telemetry with `room-cli settings general telemetryEnabled false`
 or Settings → General → Privacy & diagnostics → Share usage data and setup errors. This server-wide preference
-applies immediately and persists across restarts. `BB_TELEMETRY=false` overrides it.
+applies immediately and persists across restarts. `CLOUDROOM_TELEMETRY=false`, `BB_TELEMETRY=false`, or `DO_NOT_TRACK=1` overrides it. Details: https://cloudroom.dev/privacy.

@@ -109,6 +109,7 @@ export function acpProviderDeclaration(
       ...(agent.minimumVersion === undefined
         ? {}
         : { acpMinimumVersion: agent.minimumVersion }),
+      ...(agent.custom === true ? { customAgent: true } : {}),
       acpLaunchSpec: { ...agent.launch },
     },
     // A project's opencode.json can hide providers, so OpenCode and its fork Kilo list models per project (#1236).

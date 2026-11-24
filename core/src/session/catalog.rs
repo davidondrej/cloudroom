@@ -41,7 +41,8 @@ impl Manager {
             "onboarding":{"localConnected":null,"offlineTaskVerified":null},
             "capabilities":{"settings":true,"updates":false},
             "sessionCount":sessions.len(),"agents":local.agent_counts(),"sessions":summaries,
-            "terminals":self.terminals.summary(),"previews":{"lastActivity":self.previews.last_activity()}})
+            "terminals":self.terminals.summary(),"previews":{"lastActivity":self.previews.last_activity()},
+            "mac":{"waiting":self.mac.waiting()}})
     }
 
     /// The latest 1,000 sessions, newest activity first. Prompts, receipts and records stay

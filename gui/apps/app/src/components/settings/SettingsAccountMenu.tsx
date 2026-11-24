@@ -174,15 +174,18 @@ export function SettingsAccountMenu() {
               </span>
             </span>
           </div>
-          {/* Paid plans see their credits and buy packs or upgrade on the billing page (ADR 0317). */}
-          {usage && usage.plan !== "free" && creditsLeft !== null && (
+          {/* Every plan sees its credits and can buy top-ups or upgrade on the billing page (ADR 20261112-235440). */}
+          {usage && creditsLeft !== null && (
             <div className="px-2 pb-2.5">
               <div className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="text-muted-foreground tabular-nums">
+                <span
+                  title={extra > 0 ? `${creditsLeft.toLocaleString("en-US")} Cloud Credits left` : `${creditsLeft.toLocaleString("en-US")} of ${usage.creditsLimit.toLocaleString("en-US")} Cloud Credits left`}
+                  className="min-w-0 truncate text-muted-foreground tabular-nums"
+                >
                   <span className="font-semibold text-foreground">
                     {creditsLeft.toLocaleString("en-US")}
                   </span>{" "}
-                  {extra > 0 ? "credits left" : `of ${usage.creditsLimit.toLocaleString("en-US")} credits left`}
+                  {extra > 0 ? "credits left" : `/ ${usage.creditsLimit.toLocaleString("en-US")} left`}
                 </span>
                 <button
                   type="button"

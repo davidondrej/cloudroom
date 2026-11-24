@@ -1,6 +1,6 @@
 import * as React from "react";
 import { flushSync } from "react-dom";
-import { Slot } from "@radix-ui/react-slot";
+import { Slot } from "@cloudroom/shared-ui/slot";
 
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";

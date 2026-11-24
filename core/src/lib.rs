@@ -70,6 +70,7 @@ pub const FEATURES: &[&str] = &[
     "fork",
     "side_chat",
     "side_chat_fresh",
+    "side_chat_any_harness",
     "attachments",
     "upload_parts",
     "compact",
@@ -99,14 +100,15 @@ pub const FEATURES: &[&str] = &[
 
 /// The harness binary Core starts, resolved once here. A wake can switch OpenCode 1 to 2, another package behind the
 /// same link, so OpenCode keeps its link (absolute, since agents start in the workspace) and each start follows it;
-/// else OpenCode 1 opens the database OpenCode 2 made and exits (#2267).
+/// else OpenCode 1 opens the database OpenCode 2 made and exits (#2267). So does a link to the image's launcher, which
+/// installs the agent its link names, then is replaced by it: resolved, it looked for an agent called "launch".
 #[cfg(unix)]
 fn launch_path(
     kind: runtime::Kind,
     binary: &std::path::Path,
 ) -> std::io::Result<std::path::PathBuf> {
     let resolved = binary.canonicalize()?;
-    if kind == runtime::Kind::OpenCode {
+    if kind == runtime::Kind::OpenCode || resolved == runtime::launcher() {
         return std::path::absolute(binary);
     }
     Ok(resolved)

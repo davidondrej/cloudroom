@@ -11,6 +11,9 @@ import { fetchWithAppSurface } from "@/lib/app-surface";
 import { createLastKnownCache } from "@/lib/last-known-cache";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { sdk } from "@/lib/sdk";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+
+const BILLING_URL = "https://www.cloudroom.dev/billing";
 
 // Settings → Analytics: when Cloud Credits were used, the first tab (design A, David 2026-11-08). The same wave as the
 // website's Usage tab on Plan & billing; the website builds the data (web/lib/credits.ts creditWave). Split by thread:
@@ -205,7 +208,19 @@ export function CreditsUsageSection() {
       <div className="space-y-5">
         <div className="flex gap-3">
           <Stat label={`Credits · ${range}`} value={n(points.reduce((sum, point) => sum + point.credits, 0))} />
-          <Stat label="Left" value={left === null ? "—" : n(left)} />
+          <div className="min-w-0 flex-1 border border-border px-3.5 py-3">
+            <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">Left</div>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className="truncate font-mono text-xl text-foreground tabular-nums">{left === null ? "—" : n(left)}</span>
+              <button
+                type="button"
+                onClick={() => openUrlInExternalBrowser(BILLING_URL)}
+                className="shrink-0 border border-primary/60 px-1.5 leading-5 text-xs text-primary-text hover:bg-primary/10"
+              >
+                + buy more
+              </button>
+            </div>
+          </div>
           <Stat label="Busiest day" value={busiest && busiest[1] > 0 ? busiest[0] : "—"} />
         </div>
         <CreditsWavePlot wave={wave} range={range} />

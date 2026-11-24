@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { cloudroomCommands, cloudroomThreads, type DbTransaction } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, reasoningLevelSchema, reconcileReasoningLevel, type ReasoningLevel, type Thread } from "@cloudroom/domain";
+import { defaultReasoningLevel, PERSONAL_PROJECT_ID, reasoningLevelSchema, reconcileReasoningLevel, type ReasoningLevel, type Thread } from "@cloudroom/domain";
 import type { CreateThreadRequest, ForkThreadRequest } from "@cloudroom/server-contract";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomConnectionError, CloudroomError } from "./client.js";
@@ -22,9 +22,11 @@ import {
   reasoningLevels,
   roomIds,
   ROOT_WORKSPACE,
+  takesNoEffort,
   validateReasoning,
   WEBSITE_CHILD,
   WORKING,
+  type Capabilities,
 } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
 import { SANDBOX_PREFIX, SandboxAsleep, sandboxThread } from "./sandboxes.js";
@@ -381,46 +383,44 @@ export class CloudLifecycle {
     return this.rt.host.getThread(thread.id)!;
   }
 
-  /** A side chat (ADR 0273): a fresh agent in a Cloud thread's sandbox and folder, like a Local one. It is only a
-   *  database row here; delivery starts its session in the background. Its quoted message waits as hidden context. */
+  /** A fresh side chat starts lazily on its first message so any harness or model can be picked first. */
   async sideChat(source: Thread, request: ForkThreadRequest): Promise<Thread> {
     const saved = binding(this.rt.host.db, source.id);
-    const providerId = source.providerId;
     if (!saved?.sessionId || source.archivedAt || source.deletedAt) throw new ApiError(409, "fork_source_unavailable", "Only a started, unarchived Cloud thread can have a side chat.");
+    if (!request.fresh) return this.copiedSideChat(source, request);
+    const providerId = request.providerId ?? source.providerId;
     if (!isCloudProvider(providerId)) throw new ApiError(400, "cloudroom_unsupported", "This agent can't run in Cloud.");
-    const known = sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities;
-    if (!request.fresh || !known?.side_chat_fresh) return this.copiedSideChat(source, request);
     await this.rt.requireOwnThread(saved);
+    const known = sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities;
+    const sameProvider = providerId === source.providerId;
+    const model = request.model ?? (sameProvider ? saved.model : (known ? harnessProfile(known, providerId)?.model : undefined) ?? "");
+    if (!model) throw new ApiError(400, "model_required", `Select a ${HARNESS_NAMES[providerId]} model.`);
+    const levels = known ? reasoningLevels(providerId, model, known) as ReasoningLevel[] | undefined : undefined;
+    const fallback = sameProvider ? saved.reasoning : (takesNoEffort(known, providerId, model) ? "none" : defaultReasoningLevel(undefined));
+    const reasoning = request.reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(fallback as ReasoningLevel, levels) : fallback);
     const thread = this.rt.host.db.transaction((tx) => {
-      const created = this.sideChatThread(tx, source, request);
-      tx.insert(cloudroomThreads).values({ threadId: created.id, coreUrl: saved.coreUrl, startRequestId: randomUUID(), model: saved.model, reasoning: saved.reasoning }).run();
+      const created = this.sideChatThread(tx, source, request, providerId, "idle");
+      tx.insert(cloudroomThreads).values({ threadId: created.id, coreUrl: saved.coreUrl, startRequestId: randomUUID(), model, reasoning }).run();
       tx.insert(cloudroomCommands).values({ id: `first_${created.id}`, threadId: created.id, command: "side_chat", state: "completed", input: JSON.stringify({ side_chat: saved.sessionId }), createdAt: Date.now() }).run();
       return created;
     });
-    this.seedSideChat(thread.id, source.id, request, saved);
+    this.seedSideChat(thread.id, source.id, request, model, reasoning);
     this.rt.notify(thread.id);
     this.hooks.start();
-    void this.hooks.deliver(thread.id).catch(() => {});
     return this.rt.host.getThread(thread.id)!;
   }
 
-  private sideChatThread(tx: DbTransaction, source: Thread, request: ForkThreadRequest) {
+  private sideChatThread(tx: DbTransaction, source: Thread, request: ForkThreadRequest, providerId = source.providerId, status: Thread["status"] = "starting") {
     return this.rt.host.createThread(tx, {
-      executionTarget: "cloud", projectId: source.projectId, providerId: source.providerId, status: "starting", originKind: "fork", sourceThreadId: source.id,
+      executionTarget: "cloud", projectId: source.projectId, providerId, status, originKind: "fork", sourceThreadId: source.id,
       title: request.title ?? null, titleFallback: source.title ?? source.titleFallback, visibility: request.visibility, originPluginId: request.originPluginId,
       pluginMetadata: request.pluginMetadata && request.originPluginId ? { pluginId: request.originPluginId, metadata: request.pluginMetadata } : null,
     });
   }
 
-  private seedSideChat(threadId: string, sourceId: string, request: ForkThreadRequest, saved: Binding): void {
+  private seedSideChat(threadId: string, sourceId: string, request: ForkThreadRequest, model: string, reasoning: string): void {
     if (request.agentContextSeed) {
-      this.rt.host.seedSideChatTurn({
-        threadId,
-        senderThreadId: sourceId,
-        input: request.agentContextSeed,
-        model: saved.model,
-        reasoningLevel: reasoningLevelSchema.parse(saved.reasoning),
-      });
+      this.rt.host.seedSideChatTurn({ threadId, senderThreadId: sourceId, input: request.agentContextSeed, model, reasoningLevel: reasoningLevelSchema.parse(reasoning) });
     }
   }
 
@@ -448,29 +448,89 @@ export class CloudLifecycle {
       return created;
     });
     this.rt.host.copyForkHistory(thread, source.id, end_sequence);
-    this.seedSideChat(thread.id, source.id, request, saved);
+    this.seedSideChat(thread.id, source.id, request, saved.model, saved.reasoning);
     this.hooks.follow(binding(this.rt.host.db, thread.id)!, client);
     return this.rt.host.getThread(thread.id)!;
   }
 
-  /** A fresh side chat's session; a Core that predates `fresh` rejects the field, and copies the conversation instead. */
-  async startSideChat(client: CloudroomClient, threadId: string, requestId: string, harness: CloudProvider, session: string) {
-    const accepted = await client.start(requestId, CLOUD_HARNESSES[harness], { fork: { session, fresh: true } }).catch(async (error: unknown) => {
-      const source = this.rt.host.getThread(this.rt.host.getThread(threadId)?.sourceThreadId ?? "");
-      if (!source || !(error instanceof CloudroomError && (error.status === 400 || error.status === 422))) throw error;
-      const { before, last_turn_id } = await cloudForkPoint(this.rt.host.deps, source, undefined);
-      return client.start(requestId, CLOUD_HARNESSES[harness], { fork: { session, before, last_turn_id } });
-    });
-    return { sessionId: accepted.session_id, transfer: `child_${requestId}`, code: null };
+  /** Starts a fresh side chat on any harness in its source's folder; falls back to direct `start` on older Cores. */
+  async startSideChat(client: CloudroomClient, threadId: string, saved: Binding, capabilities: Capabilities, harness: CloudProvider, sourceSessionId: string) {
+    if (!harnessProfile(capabilities, harness)) throw new ApiError(400, "cloudroom_unsupported", `${HARNESS_NAMES[harness]} isn't set up in Cloud yet.`);
+    const thread = this.rt.host.getThread(threadId);
+    const source = thread?.sourceThreadId ? this.rt.host.getThread(thread.sourceThreadId) : null;
+    const sourceSaved = source ? binding(this.rt.host.db, source.id) : null;
+    const liveSource = sourceSaved?.sessionId ?? sourceSessionId;
+    const { model, provider } = coreModel(harness, saved.model, capabilities);
+    const current = this.hooks.currentReasoning(threadId, saved);
+    const levels = reasoningLevels(harness, model, capabilities) as ReasoningLevel[] | undefined;
+    const reasoning = levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current;
+    const ids = roomIds(capabilities, threadId, thread?.projectId);
+    const direct = async () => {
+      const from = await client.session(liveSource).catch(() => liveSource !== sourceSessionId ? client.session(sourceSessionId).catch(() => null) : null);
+      const start = from ? Object.values(from.receipts).find((r) => r.command === "start") : undefined;
+      const startInput = start ? z.object({ command_guard_enabled: z.boolean().nullish(), strip_ai_co_authors: z.boolean().nullish(), system_prompt: z.string().nullish() }).passthrough().parse(start.input) : null;
+      const project = thread ? this.rt.host.getProject(thread.projectId) : null;
+      const workspace = start?.workspace
+        ? (start.workspace.id !== "legacy" ? { workspace: start.workspace.id } : start.workspace.path === capabilities.repository ? {} : { workspace: ROOT_WORKSPACE })
+        : project?.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : project ? { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) } : {};
+      return client.start(saved.startRequestId, CLOUD_HARNESSES[harness], {
+        model, reasoning, ...(provider ? { provider } : {}), ...workspace, ...ids,
+        ...(capabilities.command_guard && typeof startInput?.command_guard_enabled === "boolean" ? { command_guard_enabled: startInput.command_guard_enabled } : {}),
+        ...(capabilities.strip_ai_co_authors && typeof startInput?.strip_ai_co_authors === "boolean" ? { strip_ai_co_authors: startInput.strip_ai_co_authors } : {}),
+        ...(capabilities.system_prompt && startInput?.system_prompt ? { system_prompt: startInput.system_prompt } : {}),
+      });
+    };
+    const sameAsSource = source?.providerId === harness && sourceSaved?.model === saved.model && sourceSaved?.reasoning === reasoning;
+    const accepted = capabilities.side_chat_any_harness
+      ? await client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { fork: { session: liveSource, fresh: true }, model, reasoning, ...(provider ? { provider } : {}), ...ids })
+          .catch((error: unknown) => error instanceof CloudroomError && [400, 409, 422].includes(error.status ?? 0) ? direct() : Promise.reject(error))
+      : capabilities.side_chat_fresh && sameAsSource
+        ? await client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { fork: { session: liveSource, fresh: true } })
+            .catch((error: unknown) => error instanceof CloudroomError && [400, 409, 422].includes(error.status ?? 0) ? direct() : Promise.reject(error))
+        : await direct();
+    return { sessionId: accepted.session_id, transfer: `child_${saved.startRequestId}`, code: null };
   }
 
-  /** ADR 0211: a new Core session in the old session's folder. `prepare` runs once the old session is idle and caught up. */
+  /** ADR 0211: a new Core session in the old session's folder. Unstarted side chats switch right in SQLite. */
   async switchHarness(thread: Thread, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null }, prepare: (seed: boolean) => Promise<(tx: DbTransaction) => void>): Promise<void> {
+    const saved = binding(this.rt.host.db, thread.id);
+    const initial = command(this.rt.host.db, `first_${thread.id}`);
+    if (saved && !saved.sessionId && initial?.command === "side_chat") {
+      await this.switchUnstartedSideChat(thread, saved, initial, target);
+      return;
+    }
     await this.restartSession(thread, { ...target, refusal: "Agents started by another agent keep their agent." }, prepare, (tx, started) => {
       this.rt.host.updateThread(tx, thread.id, { providerId: target.providerId });
       saveBinding(tx, thread.id, { ...started, model: target.model, cursor: 0, nativeId: null, turnId: null, error: null });
       this.rt.host.setExecutionOverride({ threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoningLevelSchema.safeParse(started.reasoning).data ?? null }, tx);
     });
+  }
+
+  private async switchUnstartedSideChat(thread: Thread, saved: Binding, initial: Command, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null }): Promise<void> {
+    const entry = this.rt.state(thread.id);
+    if (entry.switching || entry.activeSends > 0) throw new ApiError(409, "thread_busy", "Wait until the message is sent, then switch.");
+    entry.switching = true;
+    try {
+      await this.rt.requireOwnThread(saved);
+      if (teleportBlocked(this.rt.host.db, thread.id)) throw new ApiError(409, "teleport_in_progress", "Wait for Teleport to finish, then switch.");
+      if (!isCloudProvider(target.providerId)) throw new ApiError(400, "cloudroom_unsupported", "This agent can't run in Cloud.");
+      const known = sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities;
+      const profile = known ? harnessProfile(known, target.providerId) : null;
+      if (known && !profile) throw new ApiError(400, "cloudroom_unsupported", `${HARNESS_NAMES[target.providerId]} isn't set up in Cloud yet.`);
+      const remote = known ? coreModel(target.providerId, target.model, known) : null;
+      const current = this.hooks.currentReasoning(thread.id, saved);
+      const levels = known && remote ? reasoningLevels(target.providerId, remote.model, known) as ReasoningLevel[] | undefined : undefined;
+      const reasoning = target.reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current);
+      if (known && remote && !(sandboxThread(saved.coreUrl) && (profile?.models === null || target.providerId === "acp-opencode"))) validateReasoning(target.providerId, remote.model, reasoning, known);
+      this.rt.host.db.transaction((tx) => {
+        if (binding(tx, thread.id)?.sessionId) throw new ApiError(409, "thread_busy", "The agent started while switching. Try again.");
+        this.rt.host.updateThread(tx, thread.id, { providerId: target.providerId });
+        saveBinding(tx, thread.id, { model: target.model, reasoning, error: null, ...(initial.state === "failed" ? { startRequestId: randomUUID() } : {}) });
+        if (initial.state === "failed") { saveCommandState(tx, thread.id, initial.id, "completed"); saveStatus(tx, thread.id, "idle"); }
+        this.rt.host.setExecutionOverride({ threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoningLevelSchema.safeParse(reasoning).data ?? null }, tx);
+      });
+      this.rt.notify(thread.id);
+    } finally { entry.switching = false; }
   }
 
   /** ADR 0281: a new Core session in the new project's folder, in the same sandbox. The old folder stays as it is. */
@@ -534,7 +594,8 @@ export class CloudLifecycle {
       const workspace = target.workspace ?? (start.workspace.id !== "legacy" ? { workspace: start.workspace.id } : start.workspace.path === capabilities.repository ? {} : { workspace: ROOT_WORKSPACE });
       if (target.providerId === "codex" && capabilities.codex_auth_import && !sandboxThread(saved.coreUrl)) await importCodexLogin(this.rt.host.deps);
       if (target.providerId === "pi") await this.hooks.copyPiSetup(client, Boolean(sandboxThread(saved.coreUrl)));
-      continues.value = feature(capabilities, "cloud_threads");
+      const sharedSandbox = Boolean(sandboxThread(saved.coreUrl) && sandboxThread(saved.coreUrl) !== thread.id);
+      continues.value = !sharedSandbox && feature(capabilities, "cloud_threads");
       const record = await prepare(!continues.value);
       // A child the website started stays one, so its Core alone reports its turns, as before the switch (#1579).
       const startRequestId = `${saved.startRequestId?.startsWith(WEBSITE_CHILD) ? WEBSITE_CHILD : ""}${randomUUID()}`;

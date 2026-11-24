@@ -605,6 +605,7 @@ class ReplayTests(unittest.TestCase):
         for key in ["workspace_available_bytes", "history_available_bytes", "workspace_total_bytes", "history_total_bytes", "sampled_at"]:
             self.assertIsNone(data["storage"][key])
         self.assertEqual(data["sessionCount"], 1001)
+        self.assertEqual(data["mac"], {"waiting": 0})  # No `mac run` is waiting on the user's Mac.
         self.assertEqual(len(data["sessions"]), 1000)
         self.assertEqual(data["sessions"][0]["id"], "session-1000")
         self.assertEqual(data["sessions"][0]["state"], "stopped")
@@ -1275,6 +1276,39 @@ class RecoveryTests(unittest.TestCase):
         self.wait(lambda: kid()["receipts"]["fixed"]["state"] == "completed", "tell after retry")
         relay("fixed")
         self.assertEqual((self.repo / (kid()["native_id"] + ".requests")).read_text().splitlines(), ["fixed"])
+
+    def test_an_agent_linked_to_the_images_launcher_installs_and_runs_on_its_first_start(self):
+        # Droid, Agent Zero and OpenClaw are links to the image's launcher, which installs the agent its link names. Core
+        # ran the launcher by its own path, so it looked for an agent called "launch" and the start failed (2026-11-24).
+        home, launcher = Path(self.env["CLOUDROOM_ACCOUNT_HOME"]), self.root / "agents" / "launch"
+        installs, ran = self.root / "installs", self.root / "droid-ran"
+        launcher.parent.mkdir()
+        # The real Droid, as far as Core's start needs it: ACP's initialize and session/new.
+        (self.root / "agents" / "droid.real").write_text(f"""#!{sys.executable}
+import json, sys
+open({str(ran)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n")
+for line in sys.stdin:
+    ask = json.loads(line)
+    if "id" not in ask: continue
+    result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}} if ask["method"] == "initialize" else \\
+        {{"sessionId": "0b8f3c3e-6d1a-4d44-9b56-2f4b1a7c9e10", "modes": {{"currentModeId": "auto-high"}}}} if ask["method"] == "session/new" else {{}}
+    print(json.dumps({{"jsonrpc": "2.0", "id": ask["id"], "result": result}}), flush=True)
+""")
+        # The image's launcher (web/sandbox-image.sh): it installs the agent named by $0, then runs it.
+        launcher.write_text(f'#!/bin/bash\nname=${{0##*/}}\nif [ "$0" -ef {launcher} ]; then\n  echo "$name" >> {installs}\n'
+                            f'  [ ! -f {launcher.parent}/$name.real ] || {{ cp {launcher.parent}/$name.real "$0.new" && chmod +x "$0.new" && mv -f "$0.new" "$0"; }}\n'
+                            f'  [ ! "$0" -ef {launcher} ] || {{ echo "Cloudroom could not install $name in this sandbox." >&2; exit 1; }}\nfi\nexec "$0" "$@"\n')
+        launcher.chmod(0o755)
+        (home / ".local" / "bin").mkdir(parents=True); (home / ".factory").mkdir()
+        (home / ".local" / "bin" / "droid").symlink_to(launcher)
+        self.env["CLOUDROOM_TEST_LAUNCH"] = str(launcher)
+        self.start()
+        self.service.request("POST", "/v1/sessions", {"request_id": "first", "harness": "droid"}, 202)
+        first = lambda: self.service.session("cr_first")
+        until(lambda: first()["state"] in ("idle", "failed"), "Droid's first start", 20)
+        self.assertEqual(first()["state"], "idle", first().get("failure"))
+        self.assertEqual(installs.read_text(), "droid\n", "the launcher installed Droid by its own name, once")
+        self.assertEqual(ran.read_text(), "exec --output-format acp\n", "the real Droid ran, in the same Core")
 
     def test_a_relayed_tell_keeps_the_sender_the_website_names(self):
         # #1369: a Cloud parent's tell to its own child showed as the user's message. Steered and queued alike.

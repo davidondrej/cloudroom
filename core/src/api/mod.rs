@@ -1063,26 +1063,42 @@ async fn start(
         return Ok((status, Json(answer)));
     }
     if let Some(fork) = body.fork {
-        if body.parent_session.is_some()
+        let disallowed_shared = body.parent_session.is_some()
             || body.prompt.is_some()
             || body.title.is_some()
-            || body.model.is_some()
-            || body.reasoning.is_some()
             || body.workspace.is_some()
             || body.workspace_name.is_some()
-            || body.provider.is_some()
             || body.command_guard_enabled.is_some()
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
-            || body.parent_thread.is_some()
-            || body.thread_id.is_some()
-            || body.project_id.is_some()
-        {
-            return Err(session::Error::Conflict(
-                "a side chat takes only harness and fork",
-            ));
+            || body.parent_thread.is_some();
+        let disallowed_copy = !fork.fresh
+            && (body.model.is_some()
+                || body.reasoning.is_some()
+                || body.provider.is_some()
+                || body.thread_id.is_some()
+                || body.project_id.is_some());
+        if disallowed_shared || disallowed_copy {
+            return Err(session::Error::Conflict(if fork.fresh {
+                "a fresh side chat inherits its source's folder and settings"
+            } else {
+                "a side chat takes only harness and fork"
+            }));
         }
-        let (id, receipt) = manager.fork(body.request_id, body.harness, fork).await?;
+        let (id, receipt) = manager
+            .fork(
+                body.request_id,
+                body.harness,
+                fork,
+                session::ForkOptions {
+                    model: body.model,
+                    reasoning: body.reasoning,
+                    provider: body.provider,
+                    thread_id: body.thread_id,
+                    project_id: body.project_id,
+                },
+            )
+            .await?;
         return Ok(accepted(&manager, &id, receipt));
     }
     if let Some(parent) = body.parent_session {

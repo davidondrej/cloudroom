@@ -167,6 +167,18 @@ export async function createThreadForkFromRequest(
   }
   const sourceEnvironment = requireSourceEnvironment(deps, sourceThread);
   const sourceExecution = getLastExecutionOptions(deps, sourceThread.id);
+  const providerId =
+    request.fresh && request.providerId
+      ? request.providerId
+      : sourceThread.providerId;
+  const sameProvider = providerId === sourceThread.providerId;
+  const model =
+    (request.fresh ? request.model : undefined) ??
+    (sameProvider ? sourceExecution?.model : undefined);
+  const reasoningLevel =
+    (request.fresh ? request.reasoningLevel : undefined) ??
+    (sameProvider ? sourceExecution?.reasoningLevel : undefined);
+  const serviceTier = sameProvider ? sourceExecution?.serviceTier : undefined;
   const visibleInput = request.input ?? [];
   const agentContextSeed = request.agentContextSeed ?? [];
   const input: PromptInput[] = [...agentContextSeed, ...visibleInput];
@@ -189,15 +201,11 @@ export async function createThreadForkFromRequest(
       permissionMode:
         request.permissionMode ??
         resolveExistingThreadPermissionMode(deps, sourceThread.id),
-      ...(sourceExecution?.model ? { model: sourceExecution.model } : {}),
-      ...(sourceExecution?.reasoningLevel
-        ? { reasoningLevel: sourceExecution.reasoningLevel }
-        : {}),
-      ...(sourceExecution?.serviceTier
-        ? { serviceTier: sourceExecution.serviceTier }
-        : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
       projectId: sourceThread.projectId,
-      providerId: sourceThread.providerId,
+      providerId,
       ...(request.sourceSeqEnd === undefined
         ? {}
         : { sourceSeqEnd: request.sourceSeqEnd }),

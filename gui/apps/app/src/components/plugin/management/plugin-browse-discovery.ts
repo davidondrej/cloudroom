@@ -24,13 +24,6 @@ export interface PluginListGroup {
   rows: PluginListRow[];
 }
 
-/** Cloudroom Agent isn't finished (docs/scopes/cloudroom-agent.md): only Dev builds list it, until we launch it. Anyone
- *  who already turned it on still sees it, to turn it off. */
-export const CLOUDROOM_AGENT_LIVE = import.meta.env.DEV;
-export function hiddenPlugin(pluginId: string, plugin: { enabled?: boolean } | null): boolean {
-  return !CLOUDROOM_AGENT_LIVE && pluginId === "provider-cloudroom-agent" && plugin?.enabled !== true;
-}
-
 const UNCATEGORIZED_GROUP = { key: "uncategorized", label: "More plugins" };
 const NOT_IN_CATALOG_GROUP = { key: "not-in-catalog", label: "Your plugins" };
 
@@ -65,7 +58,6 @@ export function pluginListRows(
     if (!entry.compatible) continue;
     const plugin = installedPluginForEntry(entry, plugins);
     if (plugin !== null) matchedPluginIds.add(plugin.id);
-    if (hiddenPlugin(entry.pluginId, plugin)) continue;
     rows.push({
       key: catalogEntryKey(entry),
       pluginId: entry.pluginId,
@@ -77,7 +69,7 @@ export function pluginListRows(
     });
   }
   const notInCatalog = plugins
-    .filter((plugin) => !matchedPluginIds.has(plugin.id) && !hiddenPlugin(plugin.id, plugin))
+    .filter((plugin) => !matchedPluginIds.has(plugin.id))
     .sort((left, right) =>
       (left.name ?? left.id).localeCompare(right.name ?? right.id),
     );

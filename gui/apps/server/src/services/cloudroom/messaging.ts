@@ -109,6 +109,7 @@ export class CloudMessaging {
     const input = latestPrompt ? effectivePrompt(this.rt.host.db, threadId, latestPrompt.id, false, allCommands) : transfer ? JSON.parse(transfer.input).manifest ?? {} : {};
     const serviceTier = serviceTierSchema.catch("default").parse(input.service_tier);
     const initial = prompts.find((item) => item.id === `first_${threadId}`);
+    const firstCommand = initial ?? allCommands.find((item) => item.id === `first_${threadId}`);
     const entry = this.rt.peek(threadId);
     const issues = Object.values(entry?.connectionIssues ?? {});
     const sandbox = sandboxThread(saved.coreUrl);
@@ -117,7 +118,7 @@ export class CloudMessaging {
       starting: !saved.queuePaused && Boolean(initial && ["sending", "accepted"].includes(initial.state)),
       sessionId: saved.sessionId,
       paused: saved.queuePaused,
-      failedStart: !saved.sessionId && initial?.state === "failed",
+      failedStart: !saved.sessionId && firstCommand?.state === "failed",
       model: saved.model,
       reasoning,
       serviceTier,
@@ -403,7 +404,8 @@ export class CloudMessaging {
         ? new ApiError(503, error.body.code, `${error.body.message} This message is already saved (${stored.state}). Retry with the same request ID; don't send it as a new message.`, { details: { requestId: id, state: stored.state } })
         : new ApiError(503, error.body.code, `${error.body.message} Your message was not sent. Send it again in a moment.`);
     });
-    const starting = !saved.sessionId && ["pending", "starting"].includes(thread.status);
+    const lazySideChat = !saved.sessionId && command(this.rt.host.db, `first_${thread.id}`)?.command === "side_chat";
+    const starting = lazySideChat || (!saved.sessionId && ["pending", "starting"].includes(thread.status));
     // A stopped thread uses the saved capabilities too, so its message is saved before any wake (#534).
     const fast = starting || (saved.sessionId && ["idle", "error", "active"].includes(thread.status));
     const known = fast ? (sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities) : null;

@@ -208,6 +208,9 @@ export const forkThreadRequestSchema = z
     sourceThreadId: z.string().min(1),
     sourceSeqEnd: z.number().int().nonnegative().optional(),
     fresh: z.literal(true).optional(),
+    providerId: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    reasoningLevel: reasoningLevelSchema.optional(),
     input: z.array(promptInputSchema).min(1).optional(),
     agentContextSeed: z.array(agentOnlyPromptInputSchema).min(1).optional(),
     title: z.string().min(1).optional(),
@@ -221,6 +224,25 @@ export const forkThreadRequestSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.fresh !== true &&
+      (value.providerId !== undefined ||
+        value.model !== undefined ||
+        value.reasoningLevel !== undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "providerId, model, and reasoningLevel require fresh: true when forking",
+        path: [
+          value.providerId !== undefined
+            ? "providerId"
+            : value.model !== undefined
+              ? "model"
+              : "reasoningLevel",
+        ],
+      });
+    }
     if (value.origin === "plugin" && value.originPluginId === undefined) {
       ctx.addIssue({
         code: "custom",

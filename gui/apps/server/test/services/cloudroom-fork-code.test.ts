@@ -4,7 +4,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cloudroomThreads, createThread, listEvents } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
+import { cloudroomCommands, cloudroomThreads, createThread, getThread, listEvents, threads } from "@cloudroom/db";
 import { CloudroomConnectionError, UPLOAD_PART, CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { GATHER_MS, cloudForkPoint, localCheckpoint, landForkCode, sourceCode, threadCode, uploadInParts } from "../../src/services/cloudroom/fork.js";
@@ -276,6 +277,168 @@ linux("forks the retained reply after a Cloud edit, or offers only a verified ch
     expect(await (await preview()).json()).toEqual({ exact: false, sequence: completion });
     writeFileSync(activeFile, transcript.toString().replace("prompt-replacement", "different-prompt"));
     expect(await (await preview()).json()).toEqual({ exact: false, sequence: null });
+  } finally {
+    cloudroom(harness.deps).stop();
+    vi.restoreAllMocks();
+    await harness.cleanup();
+  }
+});
+
+it("decouples Cloud side chats: lazy start, pre-send harness switch, direct start fallback on older Core, and mid-chat switch without continueSession", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const source = createThread(harness.db, harness.deps.hub, {
+      executionTarget: "cloud",
+      projectId: project.id,
+      providerId: "claude-code",
+      status: "idle",
+    });
+    harness.db.insert(cloudroomThreads).values({
+      threadId: source.id,
+      coreUrl: "https://core.invalid",
+      sessionId: "cr_source",
+      startRequestId: "start-source",
+      model: "claude-opus-4-6",
+      reasoning: "medium",
+    }).run();
+    writeFileSync(
+      join(harness.deps.config.dataDir, "cloudroom.json"),
+      JSON.stringify({ url: "https://core.invalid", token: "x".repeat(40) }),
+      { mode: 0o600 },
+    );
+    vi.spyOn(CloudroomClient.prototype, "health").mockResolvedValue({});
+    const capabilities = {
+      version: 1,
+      repository: "/test",
+      stop: true,
+      resume: true,
+      launch_settings: true,
+      direct_workspaces: true,
+      side_chat: true,
+      side_chat_fresh: true,
+      cloud_threads: true,
+      harnesses: [
+        { id: "claude-code", model: "claude-opus-4-6", reasoning_levels: ["low", "medium", "high"], set_model: true },
+        { id: "codex", model: "gpt-5.4", reasoning_levels: ["low", "medium", "high"] },
+      ],
+    };
+    vi.spyOn(CloudroomClient.prototype, "capabilities").mockResolvedValue(capabilities);
+    const startSpy = vi.spyOn(CloudroomClient.prototype, "start").mockImplementation(async (id) => ({
+      session_id: `cr_${id}`,
+      receipt: { request_id: id, command: "start", state: "accepted", input: {}, workspace: { id: "ws-1", path: "/code/ws-1" } },
+      saving: null,
+      pending: false,
+    }));
+    const continueSpy = vi.spyOn(CloudroomClient.prototype, "continueSession");
+    const promptSpy = vi.spyOn(CloudroomClient.prototype, "prompt").mockImplementation(async (sessionId, id) => ({
+      session_id: sessionId,
+      receipt: { request_id: id, command: "prompt", state: "accepted", input: {} },
+      saving: null,
+    }));
+    const sessionSpy = vi.spyOn(CloudroomClient.prototype, "session").mockImplementation(async (sessionId) => ({
+      session_id: sessionId,
+      harness: "claude-code",
+      state: "idle",
+      last_sequence: 0,
+      current_request: null,
+      queue: [],
+      receipts: {
+        start: {
+          request_id: "start",
+          command: "start",
+          state: "completed",
+          input: {},
+          workspace: { id: "ws-1", path: "/code/ws-1" },
+        },
+      },
+    } as never));
+    vi.spyOn(CloudroomClient.prototype, "close").mockResolvedValue({
+      receipt: { request_id: "close", command: "close", state: "accepted", input: {} },
+      saving: null,
+    } as never);
+    vi.spyOn(CloudroomClient.prototype, "stream").mockImplementation(async function* () {
+      await new Promise(() => {});
+    });
+
+    const service = cloudroom(harness.deps);
+    // 1. Create fresh side chat: lazy-starts idle without calling Core.start.
+    const created = await harness.app.request("/api/v1/threads/fork", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sourceThreadId: source.id,
+        fresh: true,
+        visibility: "hidden",
+        agentContextSeed: [
+          { type: "text", text: "Replying to:\n\nQuoted line", mentions: [], visibility: "agent-only" },
+        ],
+      }),
+    });
+    expect(created.status, await created.clone().text()).toBe(201);
+    const side = (await created.json()) as { id: string; providerId: string; status: string };
+    expect(side.providerId).toBe("claude-code");
+    expect(side.status).toBe("idle");
+    expect(startSpy).not.toHaveBeenCalled();
+
+    // 2. Switch harness BEFORE first message: updates SQLite immediately without calling Core.
+    const preSwitch = await harness.app.request(`/api/v1/threads/${side.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId: "codex", model: "gpt-5.4", reasoningLevel: "high" }),
+    });
+    expect(preSwitch.status, await preSwitch.clone().text()).toBe(200);
+    expect(getThread(harness.db, side.id)?.providerId).toBe("codex");
+    expect(startSpy).not.toHaveBeenCalled();
+
+    // 3. First message starts Core on Codex via direct start (since older Core lacks side_chat_any_harness) and includes the quoted seed.
+    const sent = await harness.app.request(`/api/v1/threads/${side.id}/send`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        mode: "queue-if-active",
+        input: [{ type: "text", text: "Explain this", mentions: [] }],
+      }),
+    });
+    expect(sent.status, await sent.clone().text()).toBe(200);
+    expect(await sent.json()).toMatchObject({ ok: true, delivery: "sent" });
+    await expect.poll(() => promptSpy.mock.calls.length, { timeout: 4000 }).toBe(1);
+    expect(startSpy).toHaveBeenCalledTimes(1);
+    expect(startSpy.mock.calls[0]?.[1]).toBe("codex");
+    expect(startSpy.mock.calls[0]?.[2]).toMatchObject({
+      model: "gpt-5.4",
+      reasoning: "high",
+      workspace: "ws-1",
+    });
+    expect(startSpy.mock.calls[0]?.[2]?.fork).toBeUndefined();
+    expect(promptSpy.mock.calls[0]?.[2]).toContain("Quoted line");
+    expect(promptSpy.mock.calls[0]?.[2]).toContain("Explain this");
+
+    // 4. Mid-chat harness switch on a shared-sandbox side chat skips continueSession and starts directly.
+    const row = harness.db.select().from(cloudroomThreads).all().find((r) => r.threadId === side.id)!;
+    const oldSessionId = row.sessionId!;
+    expect(oldSessionId).toBeTruthy();
+    harness.db.update(cloudroomCommands).set({ state: "completed" }).where(eq(cloudroomCommands.threadId, side.id)).run();
+    harness.db.update(threads).set({ status: "idle" }).where(eq(threads.id, side.id)).run();
+    harness.db.update(cloudroomThreads).set({ coreUrl: `sandbox:${source.id}`, cursor: 0 }).where(eq(cloudroomThreads.threadId, side.id)).run();
+    const closeSpy = vi.spyOn(CloudroomClient.prototype, "close");
+    vi.spyOn(service.sandboxes, "connection").mockResolvedValue({ url: "https://core.invalid", token: "x".repeat(40), gate: null } as never);
+    vi.spyOn(service.sandboxes, "automations").mockResolvedValue({ automations: [] } as never);
+    const midSwitch = await harness.app.request(`/api/v1/threads/${side.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId: "claude-code", model: "claude-opus-4-6", reasoningLevel: "medium" }),
+    });
+    expect(midSwitch.status, await midSwitch.clone().text()).toBe(200);
+    expect(getThread(harness.db, side.id)?.providerId).toBe("claude-code");
+    expect(continueSpy).not.toHaveBeenCalled();
+    expect(startSpy).toHaveBeenCalledTimes(2);
+    expect(startSpy.mock.calls[1]?.[1]).toBe("claude-code");
+    expect(startSpy.mock.calls[1]?.[2]).toMatchObject({ model: "claude-opus-4-6", workspace: "ws-1" });
+    expect(closeSpy).toHaveBeenCalledWith(oldSessionId, expect.any(String));
+    expect(sessionSpy).toHaveBeenCalled();
+    service.stop();
   } finally {
     cloudroom(harness.deps).stop();
     vi.restoreAllMocks();

@@ -159,6 +159,8 @@ export class CloudDelivery {
    *  since the last awake-list check, failed or not, and not woken here since. Everything else goes through deliver() as before. */
   private needsDelivery(row: OpenBinding): boolean {
     const entry = this.rt.peek(row.threadId);
+    // A fresh side chat stays unstarted until its first message so the user can pick any harness first.
+    if (!row.sessionId && row.status === "idle" && !row.sending) return false;
     if (!row.sessionId || row.sending || entry?.connectionIssues?.delivery) return true;
     const live = Boolean(entry?.stream);
     // A Cloud thread streams here only while it's open on a screen here, a turn this computer sent runs, or this
@@ -214,7 +216,8 @@ export class CloudDelivery {
     this.messaging.holdRejectedStart(threadId);
     let saved = binding(this.rt.host.db, threadId);
     if (!saved || this.rt.stopped || await this.rt.otherAccountThread(saved)) return;
-    if (!saved.sessionId && (commands(this.rt.host.db, threadId).some((item) => item.command === "teleport") || command(this.rt.host.db, `first_${threadId}`)?.state === "failed" || this.messaging.mustNotStart(threadId))) return;
+    const firstCommand = command(this.rt.host.db, `first_${threadId}`);
+    if (!saved.sessionId && (commands(this.rt.host.db, threadId).some((item) => item.command === "teleport") || firstCommand?.state === "failed" || (firstCommand?.command === "side_chat" && firstCommand.state === "completed" && !commands(this.rt.host.db, threadId, "sending").length) || this.messaging.mustNotStart(threadId))) return;
     const epoch = this.rt.epoch;
     // `step` is the step that failed, sent with a never-started prompt's failure (#1398).
     // `releaseCopy`: a new thread's project copy waits until its first message is sent or fails (ADR 0160).
@@ -302,7 +305,7 @@ export class CloudDelivery {
     const [planned, started] = await Promise.all([
       target ? planNewProjectCopy(this.rt.host.deps, client, threadId, target, plan).catch(failure) : null,
       sideChat
-        ? this.lifecycle.startSideChat(client, threadId, saved.startRequestId, harness, sideChat)
+        ? this.lifecycle.startSideChat(client, threadId, saved, capabilities, harness, sideChat)
         : fork
           ? startCloudFork(this.rt.host.deps, client, threadId, fork, {
               model, provider: provider ?? null, reasoning: saved.reasoning, service_tier: z.object({ service_tier: z.string().optional() }).parse(JSON.parse(initial!.input)).service_tier ?? null,
@@ -320,7 +323,7 @@ export class CloudDelivery {
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
             }),
     ]);
-    if (harness === "acp-antigravity" && !fork && !sideChat) {
+    if (harness === "acp-antigravity" && !fork) {
       const failure = await this.lifecycle.startFailure(client, started.sessionId, true);
       if (failure) {
         // Core stored a terminal receipt for this start. Retry with a fresh ID, preserving the first prompt.

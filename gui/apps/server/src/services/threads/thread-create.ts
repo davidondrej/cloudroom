@@ -869,7 +869,7 @@ export async function createThreadFromRequest(
   }
   if (rawRequestInput.executionTarget === "cloud" || cloudChild || cloudFork) {
     const thread = await cloudroom(deps).create({ ...(await withCloudDefaultReasoningLevel(deps, rawRequestInput)), origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
-    // Cloud threads count in the same anonymous usage events as local ones, tagged with where they run.
+    // Cloud threads count in the same usage events as local ones, tagged with where they run.
     const execution = cloudExecution(deps, thread.id);
     const isChildThread = thread.parentThreadId !== null;
     deps.telemetry.capture({ name: "thread_created", properties: { execution, is_child_thread: isChildThread, provider: thread.providerId } });

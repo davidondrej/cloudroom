@@ -17,7 +17,7 @@ const FLUSH_MS = 60 * 60_000;
 const SNAPSHOT_MS = 24 * 60 * 60_000;
 
 /**
- * Counts plugin use in memory and sends anonymous totals: one `plugin_usage`
+ * Counts plugin use in memory and sends totals: one `plugin_usage`
  * event per used plugin each hour, plus a daily `plugins_snapshot` of which
  * plugins are on. Plugins outside Cloudroom's own catalogs are reported as
  * "other", so private plugin names never leave the computer.

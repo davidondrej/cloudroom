@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, lte, ne, or, sql } from "drizzle-orm";
 import {
   appendStoredThreadEventsInTransaction,
   copyStoredThreadEventsInTransaction,
@@ -118,7 +118,9 @@ export function messageForkPoint(db: AppDeps["db"], source: Thread, sequence: nu
 }
 
 /** Turn-only readers may use a finished turn for its last reply. A progress message
- * followed by more work would silently give the fork more than the user selected. */
+ * followed by more work would silently give the fork more than the user selected.
+ * Trailing reasoning completions (flushed after the reply by older Cloud ACP/Pi turns)
+ * aren't later work, so ignore them. */
 export function checkTurnForkCutoff(
   db: AppDeps["db"], threadId: string, turnId: string, selected: number, completed: number,
 ): void {
@@ -131,6 +133,7 @@ export function checkTurnForkCutoff(
   const later = db.select({ id: events.id }).from(events).where(and(
     inTurn, gt(events.sequence, selected), lt(events.sequence, completed),
     inArray(events.type, ["item/started", "item/completed", "turn/input/accepted", "item/backgroundTask/completed"]),
+    or(ne(events.type, "item/completed"), isNull(events.itemKind), ne(events.itemKind, "reasoning")),
   )).limit(1).get();
   if (later) forkPointUnavailable("This message has no saved fork point. Choose a finished reply.");
 }

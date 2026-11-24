@@ -80,9 +80,10 @@ describe("scaffoldPlugin SDK dependency", () => {
     expect(components.registries["@bb"]).toBe(
       "https://raw.githubusercontent.com/get-bb/bb/desktop-v0.9.0/packages/plugin-registry/r/{name}.json",
     );
-    expect(pkg.dependencies["@radix-ui/react-slot"]).toBeDefined();
+    expect(pkg.dependencies["@radix-ui/react-slot"]).toBeUndefined();
     expect(pkg.dependencies["@radix-ui/react-checkbox"]).toBeUndefined();
     await access(join(targetDir, "components", "ui", "checkbox.tsx"));
+    await access(join(targetDir, "components", "ui", "slot.tsx"));
   });
 
   it("writes a store overview that follows the marketplace content rules", async () => {

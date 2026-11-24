@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Slot } from "@radix-ui/react-slot";
+import { Slot } from "./slot";
 
 // Same DOM and props as Radix AspectRatio: a full-width wrapper sized by the
 // padding-bottom trick, and an absolutely filled inner box for the content.

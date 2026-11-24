@@ -1737,8 +1737,9 @@ class MacJobs:
                     raise PermissionError('The agent stopped this command before it started, so it did not run.')
                 if self.stopping:
                     raise PermissionError('Cloudroom on the Mac is stopping, so this command did not run. Try again in a minute.')
-                # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
-                if sandboxed and core.key not in self.wanted:
+                # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on. A write
+                # command too: approved after its sandbox slept, it would change the Mac with nobody to read the result.
+                if core.key not in self.wanted:
                     raise PermissionError('The Mac stopped taking commands from this sandbox, so this command did not run.')
                 if WINDOWS:
                     process, process.job = windows_start(shell, cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,

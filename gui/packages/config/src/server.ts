@@ -13,6 +13,8 @@ import {
   resolveEnvLoader,
 } from "./env.js";
 import {
+  CLOUDROOM_TELEMETRY_ENV,
+  DO_NOT_TRACK_ENV,
   ROOM_APP_URL_ENV,
   ROOM_APP_SURFACE_ENV,
   ROOM_APP_VERSION_ENV,
@@ -162,12 +164,25 @@ export function loadServerConfig(
       definition: ROOM_SERVER_BIND_HOST_ENV,
       env: loader.env,
     }),
-    BB_TELEMETRY: readEnvVarWithDefault({
-      context: loader.context,
-      defaultValue: DEFAULT_ROOM_TELEMETRY,
-      definition: ROOM_TELEMETRY_ENV,
-      env: loader.env,
-    }),
+    BB_TELEMETRY:
+      readEnvVarWithDefault({
+        context: loader.context,
+        defaultValue: DEFAULT_ROOM_TELEMETRY,
+        definition: ROOM_TELEMETRY_ENV,
+        env: loader.env,
+      }) &&
+      readEnvVarWithDefault({
+        context: loader.context,
+        defaultValue: DEFAULT_ROOM_TELEMETRY,
+        definition: CLOUDROOM_TELEMETRY_ENV,
+        env: loader.env,
+      }) &&
+      !readEnvVarWithDefault({
+        context: loader.context,
+        defaultValue: false,
+        definition: DO_NOT_TRACK_ENV,
+        env: loader.env,
+      }),
     BB_TRANSCRIPTION: readEnvVarWithDefault({
       context: loader.context,
       defaultValue: DEFAULT_ROOM_TRANSCRIPTION,

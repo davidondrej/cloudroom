@@ -32,7 +32,6 @@ import {
   restartProviderModels,
   useProviderCliFix,
 } from "@/components/pickers/ModelUnavailable";
-import { CLOUDROOM_AGENT_LIVE } from "@/components/plugin/management/plugin-browse-discovery";
 import {
   CLOUDROOM_AGENT_ID,
   usePlanLimitAgents,
@@ -281,8 +280,7 @@ export function PlanLimitRow({
   const settingUp = setup === "running" || installing;
   const setupFailed = setup === "failed" && !installing && !cloudroomAgent;
   // Setup keeps the button while the agent is neither missing nor listed yet.
-  const offersAgent =
-    CLOUDROOM_AGENT_LIVE && (cloudroomAgent !== null || canInstall || setup !== null);
+  const offersAgent = cloudroomAgent !== null || canInstall || setup !== null;
 
   return (
     <div className={cn("flex flex-col gap-3 py-1", className)}>

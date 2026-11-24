@@ -428,8 +428,8 @@ impl Protocol {
     }
     fn finish_message(&mut self, state: &mut Progress, events: &mut Vec<Event>) {
         for (kind, text) in [
-            ("agentMessage", std::mem::take(&mut self.text)),
             ("reasoning", std::mem::take(&mut self.thinking)),
+            ("agentMessage", std::mem::take(&mut self.text)),
         ] {
             if !text.is_empty() {
                 if kind == "agentMessage" {

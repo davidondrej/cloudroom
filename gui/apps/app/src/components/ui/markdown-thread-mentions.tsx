@@ -1,6 +1,5 @@
 import type { ComponentType } from "react";
 import type { InlineCode, Nodes, Parent, PhrasingContent, Text } from "mdast";
-import type {} from "mdast-util-to-hast";
 import { visit } from "./markdown-visit.js";
 import {
   isRawThreadId,

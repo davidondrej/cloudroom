@@ -34,6 +34,14 @@ const OTHER_PROVIDER: Record<string, string> = {
   codex: "claude-code",
 };
 const CODEX_EFFORTS: ReasoningLevel[] = ["low", "medium", "high", "xhigh"];
+// Opus, or an unknown or default Claude model, falls back to Gemini 4 Neon in Antigravity first, then GPT-6.2-Astra in
+// Codex, both at xhigh (David, 2026-11-24). Cloud loops do the same (web/lib/automations.ts).
+const OPUS_FALLBACK: LoopAgent[] = [
+  { providerId: "acp-antigravity", model: "gemini-4-neon", reasoningLevel: "xhigh" },
+  { providerId: "codex", model: "gpt-6.2-astra", reasoningLevel: "xhigh" },
+];
+// Agents whose usage this Mac can't read: unknown counts as free, and being ready decides.
+const NO_USAGE = new Set(["acp-antigravity"]);
 const USAGE_CACHE_MS = 60_000;
 const LIMIT_SUSPECT_MS = 10 * 60_000;
 const SETTING_CACHE_MS = 10 * 60_000;
@@ -85,6 +93,16 @@ export function sameLevelAgent(execution: AgentExecution): LoopAgent {
       ? { reasoningLevel: execution.reasoningLevel }
       : {}),
   };
+}
+
+/** The agents a loop falls back to, in order: OPUS_FALLBACK for Opus (or an unknown or default Claude model), else the
+ *  other provider's model of the same level. */
+export function fallbackAgents(execution: AgentExecution): LoopAgent[] {
+  const model = execution.model.toLowerCase();
+  const level = MODEL_LEVELS.find((entry) => model.includes(entry.claude));
+  if (execution.providerId === "claude-code" && (!level || level.claude === "opus"))
+    return OPUS_FALLBACK;
+  return [sameLevelAgent(execution)];
 }
 
 async function atLimit(
@@ -248,14 +266,19 @@ export async function loopAgent(
           true))
   )
     return own;
-  const other = sameLevelAgent(execution);
-  // Local checks first: the setting is read only when the other provider could take over.
-  if (
-    (await atLimit(sdk, other.providerId, other.model, false)) !== false ||
-    !(await canRun(sdk, other.providerId, execution.environment)) ||
-    !(await fallbackOn(sdk))
-  )
-    return own;
+  // Local checks first: the setting is read only when another agent could take over. The first one free and ready wins.
+  let other: LoopAgent | undefined;
+  for (const agent of fallbackAgents(execution)) {
+    const limit = await atLimit(sdk, agent.providerId, agent.model, false);
+    if (
+      (NO_USAGE.has(agent.providerId) ? limit !== true : limit === false) &&
+      (await canRun(sdk, agent.providerId, execution.environment))
+    ) {
+      other = agent;
+      break;
+    }
+  }
+  if (!other || !(await fallbackOn(sdk))) return own;
   // A webhook run's retry carries its own events, which the website no longer has: it stays, as on Cloud loops.
   if (
     failed &&

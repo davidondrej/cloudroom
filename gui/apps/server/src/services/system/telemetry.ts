@@ -1,9 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import type { CustomProviderModel } from "@cloudroom/config/app-managed-config";
 import { DEFAULTS } from "@cloudroom/config/defaults";
+import { getInstalledPlugin, type DbConnection } from "@cloudroom/db";
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppSurface, RequestAppSurface } from "@cloudroom/config/app-surface";
 import type { ServerLogger } from "../../types.js";
+import { isPublicPlugin } from "../plugins/plugin-registration.js";
+import type { ProviderRegistryService } from "../providers/provider-registry.js";
+import { modelName } from "./usage-analytics.js";
 
 export const TELEMETRY_ID_FILE_NAME = "telemetry-id";
 /** Events wait in memory and reach our own server through the website in batches (ADR 20261102-201050). */
@@ -200,12 +205,86 @@ export type PluginTelemetryProperties = Record<string, TelemetryValue>;
 /** Where batches go. Signed-in apps add their login, so the website can save the verified account with the events. */
 export type TelemetryTarget = { website: string; authorization?: string };
 
+/** Masks custom model names and private/custom provider IDs before events leave this computer. */
+export interface TelemetryPrivacyFilter {
+  isPrivateModel(model: string): boolean;
+  isPrivateProvider(provider: string): boolean;
+}
+
+export function createTelemetryPrivacyFilter(args: {
+  db: DbConnection;
+  getCustomModels: () => readonly CustomProviderModel[];
+  providerRegistry: Pick<ProviderRegistryService, "get" | "list">;
+}): TelemetryPrivacyFilter {
+  return {
+    isPrivateModel(model: string): boolean {
+      const customModels = args.getCustomModels();
+      if (customModels.length === 0) return false;
+      const normalized = modelName(model);
+      return customModels.some(
+        (entry) =>
+          entry.model === model ||
+          entry.displayName === model ||
+          (normalized !== "Unknown" && modelName(entry.model) === normalized),
+      );
+    },
+    isPrivateProvider(provider: string): boolean {
+      if (!provider || provider === "none") return false;
+      const registration = args.providerRegistry.get(provider);
+      if (registration !== null) {
+        if (registration.bridgeOptions.customAgent === true) return true;
+        const plugin = getInstalledPlugin(args.db, registration.pluginId);
+        return (
+          plugin !== undefined &&
+          !isPublicPlugin(plugin.provenance, plugin.catalogMarketplaceName ?? undefined)
+        );
+      }
+      // Once ACP providers are loaded, every shipped ACP agent is registered; any other `acp-*` ID is a removed custom one.
+      if (
+        provider.startsWith("acp-") &&
+        args.providerRegistry.list().some((entry) => entry.info.family === "acp")
+      ) {
+        return true;
+      }
+      return false;
+    },
+  };
+}
+
+function sanitizeTelemetryProperties(
+  name: string,
+  eventProperties: Record<string, unknown>,
+  filter: TelemetryPrivacyFilter | null,
+): Record<string, unknown> {
+  if (!filter) return eventProperties;
+  let patched: Record<string, unknown> | null = null;
+  const set = (key: string, value: string): void => {
+    patched ??= { ...eventProperties };
+    patched[key] = value;
+  };
+  const providerKeys = name === "harness_switched" ? ["from", "to"] : ["provider", "default_agent"];
+  let privateProvider = false;
+  for (const key of providerKeys) {
+    const value = eventProperties[key];
+    if (typeof value === "string" && filter.isPrivateProvider(value)) {
+      set(key, "custom");
+      if (key === "provider") privateProvider = true;
+    }
+  }
+  const model = eventProperties.model;
+  if (typeof model === "string" && (privateProvider || filter.isPrivateModel(model))) {
+    set("model", "custom");
+  }
+  return patched ?? eventProperties;
+}
+
 export interface TelemetryService {
   capture(event: TelemetryEvent): void;
   capturePlugin(pluginId: string, name: string, properties: PluginTelemetryProperties): void;
   flush(): Promise<void>;
   setEnabled(enabled: boolean): void;
   setPlanSource(source: () => string | null): void;
+  setPrivacyFilter(filter: TelemetryPrivacyFilter): void;
   setTargetSource(source: () => Promise<TelemetryTarget>): void;
 }
 
@@ -226,6 +305,7 @@ const noopTelemetryService: TelemetryService = {
   flush: () => Promise.resolve(),
   setEnabled: () => {},
   setPlanSource: () => {},
+  setPrivacyFilter: () => {},
   setTargetSource: () => {},
 };
 
@@ -259,6 +339,7 @@ export async function createTelemetryService(
   });
   let telemetryEnabled = args.telemetryEnabled;
   let planSource: () => string | null = () => null;
+  let privacyFilter: TelemetryPrivacyFilter | null = null;
   let targetSource: (() => Promise<TelemetryTarget>) | null = null;
   const queue: { id: string; name: string; at: string; properties: object }[] = [];
   let flushing: Promise<void> | null = null;
@@ -295,13 +376,14 @@ export async function createTelemetryService(
     cloudroom_version: args.desktopVersion ?? null,
     platform: process.platform,
   };
-  const send = (name: string, eventProperties: object): void => {
+  const send = (name: string, eventProperties: Record<string, unknown>): void => {
     if (!telemetryEnabled) return;
     const appSurface = telemetryAppSurfaceStorage.getStore() ?? args.appSurface;
     const plan = planSource();
+    const sanitized = sanitizeTelemetryProperties(name, eventProperties, privacyFilter);
     const properties = {
       ...commonProperties,
-      ...eventProperties,
+      ...sanitized,
       app_surface: appSurface,
       plan: plan && PLANS.includes(plan) ? plan : null,
     };
@@ -321,6 +403,9 @@ export async function createTelemetryService(
     },
     setPlanSource(source): void {
       planSource = source;
+    },
+    setPrivacyFilter(filter): void {
+      privacyFilter = filter;
     },
     setTargetSource(source): void {
       targetSource = source;

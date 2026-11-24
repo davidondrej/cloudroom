@@ -1193,7 +1193,7 @@ export function PrivacySettingsSection({
 
         <SettingsWithControl
           label="Share usage data and setup errors"
-          description="Send app starts, thread and message counts, plugin installs, and short letters-only settings searches that find nothing to help improve Cloudroom. Failed agent connects and installs are saved with your account so we can fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
+          description="Send app starts, thread and message counts, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account so we can help fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
         >
           <Switch
             checked={telemetryEnabled}

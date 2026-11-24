@@ -12,7 +12,7 @@ import { sandboxThread, type SandboxTrigger } from "./sandboxes.js";
 import { reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
 import { bindings } from "./store.js";
 import { syncStatus } from "./sync.js";
-import { markMinutesSent, unsentMinutes } from "./time-in-app.js";
+import { clearUnsentMinutes, markMinutesSent, unsentMinutes } from "./time-in-app.js";
 
 export interface StatusPreviewHooks {
   syncLogins: () => Promise<void>;
@@ -77,16 +77,18 @@ export class CloudStatusPreviews {
     await this.warmSandbox(this.recentCloudProject() ?? PERSONAL_PROJECT_ID, "app_activity");
   }
 
-  /** Reports once per UTC day that this account sent a message, Local or Cloud, with past days' active minutes. Failures retry after 10 minutes. */
+  /** Reports once per UTC day that this account sent a message, Local or Cloud, with past days' active minutes when telemetry is on. Failures retry after 10 minutes. */
   noteActiveDay(): void {
     const day = new Date().toISOString().slice(0, 10);
     if (this.active.day === day || Date.now() - this.active.at < 600_000) return;
     this.active.at = Date.now();
     void (async () => {
-      const minutes = await unsentMinutes(this.rt.host.deps);
+      const shareMinutes = this.rt.host.config.telemetryAllowed !== false && this.rt.host.getAppSettings().telemetryEnabled;
+      const minutes = shareMinutes ? await unsentMinutes(this.rt.host.deps) : {};
       const saved = await this.rt.sandboxes.active(minutes);
       this.active.day = day;
-      await markMinutesSent(this.rt.host.deps, saved ? minutes : {});
+      if (shareMinutes) await markMinutesSent(this.rt.host.deps, saved ? minutes : {});
+      else await clearUnsentMinutes(this.rt.host.deps);
     })().catch(() => {});
   }
 

@@ -22,6 +22,8 @@ import {
   waitForQueuedCommand,
   waitForQueuedCommandAfter,
 } from "../helpers/commands.js";
+import { availableModelFixture } from "../helpers/available-models.js";
+import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
@@ -1205,5 +1207,107 @@ describe("thread creation child-thread boundary validation", () => {
         expect(persistedSideChat?.parentThreadId).toBeNull();
       },
     );
+  });
+
+  it("creates a fresh Local side chat on another harness and preserves its quoted seed across pre-send harness switches", async () => {
+    await withTestHarness(async (harness) => {
+      const path = "/tmp/decoupled-local-side-chat-project";
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-decoupled-local-side-chat",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path,
+      });
+      const sourceThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "codex",
+      });
+      const rpc = registerProviderHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        modelsByProviderId: {
+          "claude-code": {
+            models: [availableModelFixture({ model: "claude-opus-4-6" })],
+            selectedOnlyModels: [],
+          },
+          codex: {
+            models: [availableModelFixture({ model: "gpt-5.4" })],
+            selectedOnlyModels: [],
+          },
+        },
+      });
+      try {
+        const created = await harness.app.request("/api/v1/threads/fork", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            sourceThreadId: sourceThread.id,
+            fresh: true,
+            visibility: "hidden",
+            providerId: "claude-code",
+            model: "claude-opus-4-6",
+            reasoningLevel: "low",
+            agentContextSeed: [
+              {
+                type: "text",
+                text: "Replying to:\n\nCheck foo()",
+                mentions: [],
+                visibility: "agent-only",
+              },
+            ],
+          }),
+        });
+        expect(created.status, await created.clone().text()).toBe(201);
+        const sideChat = (await created.json()) as {
+          id: string;
+          providerId: string;
+          status: string;
+        };
+        expect(sideChat.providerId).toBe("claude-code");
+        await expect
+          .poll(() => getThread(harness.db, sideChat.id)?.status)
+          .toBe("idle");
+
+        const switched = await harness.app.request(
+          `/api/v1/threads/${sideChat.id}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              providerId: "codex",
+              model: "gpt-5.4",
+              reasoningLevel: "low",
+            }),
+          },
+        );
+        expect(switched.status, await switched.clone().text()).toBe(200);
+        expect(getThread(harness.db, sideChat.id)?.providerId).toBe("codex");
+        // No "Switched from ..." divider on an unstarted side chat, and the quoted seed stays intact.
+        expect(
+          listEvents(harness.db, { threadId: sideChat.id }).some(
+            (event) =>
+              event.type === "system/operation" &&
+              JSON.parse(event.data).operation === "harness_switch",
+          ),
+        ).toBe(false);
+        expect(threadStartTurnRequest(harness, sideChat.id).input).toEqual([
+          {
+            type: "text",
+            text: "Replying to:\n\nCheck foo()",
+            mentions: [],
+            visibility: "agent-only",
+          },
+        ]);
+      } finally {
+        rpc.unregister();
+      }
+    });
   });
 });

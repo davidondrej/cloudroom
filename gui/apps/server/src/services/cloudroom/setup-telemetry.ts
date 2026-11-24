@@ -3,6 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, homedir, release, totalmem } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { getAppSettings } from "@cloudroom/db";
+import { stripTextGitUrlCredentials } from "@cloudroom/domain";
 import { execPortableFile, findCliExecutable, type KnownCli } from "@cloudroom/process-utils";
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppDeps } from "../../types.js";
@@ -28,6 +29,8 @@ let appReadySeen = false;
 
 /** Seconds since this install's data folder was created, so every setup event lines up on one timeline. */
 export const secondsSinceFirstLaunch = () => Math.max(0, Math.round((Date.now() - firstLaunchAt) / 1000));
+const sharingEnabled = (current: Deps | null): current is Deps =>
+  Boolean(current?.telemetryAllowed && getAppSettings(current.db).telemetryEnabled);
 
 export function startSetupTelemetry(appDeps: Deps): void {
   deps = appDeps;
@@ -40,8 +43,9 @@ export function startSetupTelemetry(appDeps: Deps): void {
     void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
     if (process.platform === "win32") void reportWindowsInstall().catch(error => appDeps.logger.debug({ err: error }, "Install report failed"));
     void readFile(marker).then(() => {}, async () => {
-      await sendSnapshot("first_launch");
-      await writeFile(marker, JSON.stringify({ sentAt: Date.now() }), { mode: 0o600 });
+      if (await sendSnapshot("first_launch")) {
+        await writeFile(marker, JSON.stringify({ sentAt: Date.now() }), { mode: 0o600 });
+      }
     }).catch(error => appDeps.logger.debug({ err: error }, "Setup snapshot failed"));
   }, 5_000).unref();
 }
@@ -53,7 +57,7 @@ export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "f
     agent, outcome, code: details.code ?? null, message: scrub(details.message), ms: details.ms ?? null, cli_version: details.cliVersion ?? null, cli_place: details.cliPlace ?? null,
     link_after_ms: details.linkMs ?? null, ui_seen_ago_s: details.uiSeenAgoS ?? null,
   }));
-  if (outcome === "failed" && !failureSnapshotSent) {
+  if (outcome === "failed" && !failureSnapshotSent && sharingEnabled(deps)) {
     failureSnapshotSent = true;
     void sendSnapshot("connect_failed").catch(() => {});
   }
@@ -61,7 +65,7 @@ export function reportAgentConnect(agent: "claude" | "codex", outcome: "ok" | "f
 
 /** Cloud refused a thread's start. The first time each app run, a snapshot with a network check, saved with the account. */
 export function reportCloudFailure(): void {
-  if (cloudFailureSnapshotSent) return;
+  if (cloudFailureSnapshotSent || !sharingEnabled(deps)) return;
   cloudFailureSnapshotSent = true;
   void sendSnapshot("cloud_failed").catch(() => {});
 }
@@ -79,28 +83,49 @@ const PATH = /(?:~|(?<!\w)[A-Za-z]:|(?<![\w.:/\\~-]))[\\/](?:Program Files(?: \(
 const WORKTREE = /[\\/]worktrees(?:[\\/]|$)/i;
 /** Tool and system folders: they say which install ran and name nothing of the user's. Any other path may name a project. */
 const TOOL_PATH = /^(?:~[\\/](?:\.|AppData|Library)|[A-Za-z]:[\\/](?:Program Files|ProgramData|Windows)|\/(?:usr|opt|bin|sbin|etc|nix|snap|Applications|System|Library)(?:\/|$))/i;
+const PRIVATE_KEY = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
+const KNOWN_TOKEN = /\b(?:(?:gh[pousr]|github_pat|whsec|polar_oat|sbp)_[A-Za-z0-9_-]{8,}|(?:glpat|xox[baprs])-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,})\b/g;
+
+function scrubSecrets(text: string): string {
+  return stripTextGitUrlCredentials(text)
+    .replace(PRIVATE_KEY, "<private-key>")
+    .replace(/\bBearer\s+[^\s"',;]+|\bBasic\s+[A-Za-z0-9+/=]{8,}/g, match => `${match.split(/\s/)[0]} ***`)
+    .replace(/\b((?:api[_-]?)?key|(?:access[_-]?|refresh[_-]?)?token|(?:client[_-]?)?secret|password|passwd|authorization)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, "$1$2***")
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-***")
+    .replace(KNOWN_TOKEN, "***")
+    .replace(/\b(?:ey[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]+/g, "jwt-***")
+    .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "email-***")
+    .replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, "$1");
+}
+
+function scrubPaths(text: string): string {
+  return text
+    .replace(/file:\/\/\S+/gi, "<path>")
+    .replaceAll(homedir(), "~")
+    .replace(/(?<![\w.:/\\~-])\/(?:Users|home)\/[^/\s"'`<>|,;()]+/g, "~")
+    .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"':]+/gi, "~")
+    // One segment from the root is a slash command, like Claude's `/login`. A worktree under a dot folder
+    // (`~/.gui-cloudroom/.../worktrees/`, `~/.codex/worktrees/`) holds a project, so it is never a tool folder.
+    .replace(PATH, path => !WORKTREE.test(path) && (TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path)) ? path : "<path>");
+}
 
 /** Drops tokens, keys, credentials, emails, URL queries, long random strings, and every path outside tool and system
  *  folders (ADR 0198); keeps the last 300 characters. */
 export function scrub(text: string | null | undefined): string | null {
   if (!text) return null;
-  return text
-    .replace(/\bBearer\s+[^\s"',;]+|\bBasic\s+[A-Za-z0-9+/=]{8,}/g, match => `${match.split(/\s/)[0]} ***`)
-    .replace(/\b((?:api[_-]?)?key|(?:access[_-]?|refresh[_-]?)?token|(?:client[_-]?)?secret|password|passwd|authorization)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, "$1$2***")
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-***")
-    .replace(/\b(?:ey[A-Za-z0-9_-]{10,}\.){2}[A-Za-z0-9_-]+/g, "jwt-***")
-    .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "email-***")
-    .replace(/(https?:\/\/[^\s?#]+)[?#]\S*/g, "$1")
-    .replace(/[A-Za-z0-9_-]{30,}/g, "***")
-    .replaceAll(homedir(), "~")
-    .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"':]+/gi, "~")
-    .replace(/file:\/\/\S+/gi, "<path>")
-    // One segment from the root is a slash command, like Claude's `/login`. A worktree under a dot folder
-    // (`~/.gui-cloudroom/.../worktrees/`, `~/.codex/worktrees/`) holds a project, so it is never a tool folder.
-    .replace(PATH, path => !WORKTREE.test(path) && (TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path)) ? path : "<path>")
+  return scrubPaths(scrubSecrets(text).replace(/[A-Za-z0-9_-]{30,}/g, "***"))
     .replace(/\s+/g, " ")
     .trim()
     .slice(-300) || null;
+}
+
+/** Scrubs secrets, emails, URL queries, and private paths from longer agent feedback without dropping newlines or normal identifiers. */
+export function scrubFeedback(text: string): string {
+  return scrubPaths(
+    scrubSecrets(text)
+      .replace(/\b[0-9a-fA-F]{32,}\b/g, "***")
+      .replace(/\b(?=[A-Za-z0-9_-]{32,}\b)(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])[A-Za-z0-9_-]+\b/g, "***"),
+  ).trim();
 }
 
 /** Where a CLI lives, as a category. */
@@ -120,6 +145,7 @@ export function cliPlace(path: string | null | undefined): string | null {
  */
 /** Windows: the installer leaves how long it took next to Cloudroom.exe (build/installer.nsh). Sent once. */
 async function reportWindowsInstall(): Promise<void> {
+  if (!sharingEnabled(deps)) return;
   const file = join(dirname(process.execPath), "install-timing.json");
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
@@ -132,6 +158,7 @@ async function reportWindowsInstall(): Promise<void> {
 }
 
 async function reportUpdateAttempt(dataDir: string): Promise<void> {
+  if (!sharingEnabled(deps)) return;
   const attempt = await updateAttempt;
   if (attempt === null) return;
   await rm(join(dataDir, "update-attempt.json"), { force: true });
@@ -158,6 +185,7 @@ export function reportAppReady(): void {
 
 /** Crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. Every platform. */
 async function reportCrashes(dataDir: string): Promise<void> {
+  if (!sharingEnabled(deps)) return;
   const file = join(dataDir, "last-crash.json");
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
@@ -215,17 +243,18 @@ export function reportMacHelperDown(message: string): void {
 
 /** Telemetry must never break setup, so building or sending an event can't throw. `eventOnly` never reaches our database. */
 function capture(name: "setup_snapshot" | "agent_connect" | "cli_install" | "account_sign_in_failed" | "update_install" | "update_ready" | "app_crash" | "windows_install", properties: () => Record<string, TelemetryValue>, eventOnly: Record<string, TelemetryValue> = {}): void {
+  if (!sharingEnabled(deps)) return;
   try {
     const event: Record<string, TelemetryValue> = { ...properties(), seconds_since_first_launch: secondsSinceFirstLaunch() };
-    deps?.telemetry.capture({ name, properties: { ...event, ...eventOnly } });
+    deps.telemetry.capture({ name, properties: { ...event, ...eventOnly } });
     if (event.outcome === "failed" || event.reason === "connect_failed" || event.reason === "cloud_failed") void save(name, event);
   } catch (error) { deps?.logger.debug({ err: error, event: name }, "Setup telemetry failed"); }
 }
 
-/** Saves an event with the signed-in account through the website. Signed out, telemetry off, or BB_TELEMETRY=false: nothing is sent. */
+/** Saves an event with the signed-in account through the website. Signed out, telemetry off, or opted out via env var: nothing is sent. */
 function save(event: string, context: Record<string, TelemetryValue>): Promise<boolean> {
   return Promise.resolve().then(async () => {
-    if (!deps?.telemetryAllowed || !getAppSettings(deps.db).telemetryEnabled) return false;
+    if (!sharingEnabled(deps)) return false;
     const installId = await readOrCreateSecretFile({ bytes: 16, dataDir: deps.config.dataDir, encoding: "hex", fileName: TELEMETRY_ID_FILE_NAME });
     await deps.sandboxes.setupEvent(event, { ...context, install_id: installId });
     return true;
@@ -311,11 +340,11 @@ const proxySettings = () => process.platform === "darwin" ? run("/usr/sbin/scuti
   : process.platform === "win32" ? run(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "reg.exe"), ["query", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings"])
   : Promise.resolve("");
 
-async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_failed"): Promise<void> {
-  if (!deps) return;
+async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_failed"): Promise<boolean> {
+  if (!sharingEnabled(deps)) return false;
   const claude = claudeBinary() ?? null, codex = findCliExecutable("codex") ?? null;
-  // A failure's snapshot also checks the network, unless sharing is off: then nothing would be sent anyway.
-  const network = reason !== "first_launch" && deps.telemetryAllowed && getAppSettings(deps.db).telemetryEnabled ? networkCheck() : {};
+  // A failure's snapshot also checks the network.
+  const network = reason !== "first_launch" ? networkCheck() : {};
   const [osVersion, claudeVersion, codexVersion, claudeStatus, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access, reach] = await Promise.all([
     process.platform === "darwin" ? run("/usr/bin/sw_vers", ["-productVersion"]) : Promise.resolve(release()),
     claude ? run(claude, ["--version"]).then(version) : null,
@@ -363,4 +392,5 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_f
     mac_access: access,
     ...reach,
   }));
+  return true;
 }

@@ -1293,12 +1293,16 @@ describe("fork branch point and inherited history", () => {
           providerThreadId: HISTORY_PROVIDER_THREAD_ID, item: { type: "agentMessage", id: `old-${sequence}`, text: "Legacy reply" },
         } });
       }
-      seedEvent(harness.deps, { ...base, sequence: 19, type: "turn/completed", data: {
+      // Older Cloud ACP/Pi turns flushed reasoning completion after the final reply; that must not block forking it.
+      seedEvent(harness.deps, { ...base, sequence: 19, type: "item/completed", data: {
+        providerThreadId: HISTORY_PROVIDER_THREAD_ID, item: { type: "reasoning", id: "old-reasoning", summary: [], content: ["Thought"] },
+      } });
+      seedEvent(harness.deps, { ...base, sequence: 20, type: "turn/completed", data: {
         providerThreadId: HISTORY_PROVIDER_THREAD_ID, status: "completed", providerCheckpointId: "final",
       } });
       expect(await preview(15)).toEqual({ exact: true, sequence: 15 });
       expect(await preview(17)).toEqual({ exact: false, sequence: 11 });
-      expect(await preview(18)).toEqual({ exact: true, sequence: 19 });
+      expect(await preview(18)).toEqual({ exact: true, sequence: 20 });
       expect((await postFork(harness, { sourceThreadId: sourceThread.id, sourceSeqEnd: 17 })).status).toBe(400);
 
       const beforeFirstTurn = await postFork(harness, {

@@ -27,7 +27,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -193,6 +193,9 @@ pub struct Mac {
     /// The device that ran the last finished command here, or that held the pairing before it moved. A finished
     /// `mac run` names its Mac only when this changes (Marko, 2026-11-03).
     last_ran: Mutex<Option<String>>,
+    /// Commands an agent or terminal is waiting on the Mac for right now. They use no CPU here (an approval pop-up, a
+    /// long copy), so the dashboard and the drain count them, or the sandbox sleeps under them (feedback 0024).
+    waiting: AtomicUsize,
 }
 impl Default for Mac {
     fn default() -> Self {
@@ -213,10 +216,14 @@ impl Default for Mac {
             os: Mutex::default(),
             kept_out: Mutex::default(),
             last_ran: Mutex::default(),
+            waiting: AtomicUsize::default(),
         }
     }
 }
 impl Mac {
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Relaxed)
+    }
     /// A new thread or a dropped helper reopens the short wait for the Mac.
     pub(crate) fn expect(&self) {
         *self.since.lock().unwrap() = Instant::now();
@@ -452,6 +459,20 @@ impl Drop for Cancel {
                 .events
                 .try_send(Ok(Event::default().event("cancel").data(data)));
         }
+    }
+}
+
+/// Counts one command as waiting on the Mac until its `mac run` returns: done, refused, disconnected, or stopped.
+struct Waiting<'a>(&'a AtomicUsize);
+impl<'a> Waiting<'a> {
+    fn start(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self(count)
+    }
+}
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -764,6 +785,7 @@ async fn local_run(
         events,
         armed: true,
     };
+    let _waiting = Waiting::start(&mac.waiting);
     let slow = if fetch {
         0
     } else {
@@ -1298,6 +1320,21 @@ mod tests {
     fn agent_socket_routes_do_not_collide() {
         // A duplicate method and path panics when Core opens the socket, which would stop Core in every sandbox.
         let _ = super::agent_router();
+    }
+
+    #[test]
+    fn a_command_counts_as_waiting_until_its_run_returns() {
+        // The dashboard and the drain read this count, so a sandbox never sleeps under a Mac approval pop-up.
+        let mac = super::Mac::default();
+        let (first, second) = (
+            super::Waiting::start(&mac.waiting),
+            super::Waiting::start(&mac.waiting),
+        );
+        assert_eq!(mac.waiting(), 2);
+        drop(first);
+        assert_eq!(mac.waiting(), 1);
+        drop(second);
+        assert_eq!(mac.waiting(), 0);
     }
 
     #[test]

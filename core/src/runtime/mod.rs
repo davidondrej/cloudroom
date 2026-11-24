@@ -42,6 +42,18 @@ pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(4);
 // Cold Pi handshakes exceeded the ordinary 30s RPC deadline during VM recovery.
 const STARTUP_RPC_MULTIPLIER: u32 = 4;
 
+/// The image's launcher for the agents it leaves out (web/sandbox-image.sh). Droid's, Agent Zero's and OpenClaw's
+/// commands link to it, and it installs the agent its link names. Unprotected tests name their own.
+pub(crate) fn launcher() -> PathBuf {
+    let path = match std::env::var_os("CLOUDROOM_TEST_LAUNCH") {
+        Some(path) if std::env::var("CLOUDROOM_UNPROTECTED_TEST_MODE").as_deref() == Ok("1") => {
+            PathBuf::from(path)
+        }
+        _ => PathBuf::from("/usr/local/lib/cloudroom/agents/launch"),
+    };
+    path.canonicalize().unwrap_or(path)
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {

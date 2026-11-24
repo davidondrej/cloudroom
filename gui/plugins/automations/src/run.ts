@@ -97,11 +97,15 @@ function isProjectGoneError(error: unknown): boolean {
   return projectGoneErrorSchema.safeParse(error).success;
 }
 
+/** The header names the loop, so the chat shows it as a "Loop run" divider (LoopRunMarker.tsx). Keep the prefix:
+ *  the server finds loop runs by it. */
 function renderAutomationDueMessage(args: {
   automationId: string;
+  name: string;
   prompt: string;
 }): string {
-  return `[room-cli automation due:${args.automationId}]\n\n${args.prompt}`;
+  const name = args.name.replace(/["\]\s]+/g, " ").trim();
+  return `[room-cli automation due:${args.automationId}${name ? ` "${name}"` : ""}]\n\n${args.prompt}`;
 }
 
 /** The loop's prompt with its webhook events as data, as cloud loops send it (ADR 0262). */
@@ -396,6 +400,7 @@ async function reuseTargetThreadForRun(
         type: "text",
         text: renderAutomationDueMessage({
           automationId: args.automation.id,
+          name: args.automation.name,
           prompt: withEvents(args.execution.prompt + ask, args.events),
         }),
         mentions: [],

@@ -39,6 +39,8 @@ export interface ServerRuntimeConfig {
   openAiApiKey: string;
   serverPort: number;
   sharedSkillRoots: ProviderNativeSkillRoots;
+  /** False when opted out via BB_TELEMETRY=false, CLOUDROOM_TELEMETRY=false, or DO_NOT_TRACK=1. */
+  telemetryAllowed?: boolean;
   transcriptionModel: string;
   /** Cloudroom's own user skills folder, `~/.cloudroom/skills`. */
   userSkillsRootPath: string;

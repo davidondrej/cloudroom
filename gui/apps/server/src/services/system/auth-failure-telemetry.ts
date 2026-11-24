@@ -43,7 +43,8 @@ export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
     // first one each app run also sends a snapshot with a network check.
     const refused = execution === "cloud_sandbox" && !failed?.errorInfo && cloud?.category.startsWith("prompt-") === true;
     if (refused) reportCloudFailure();
-    const refusal = refused ? { cloud_code: cloud?.code ?? null, cloud_step: cloud?.step ?? null, local_logins: await localLogins(), default_agent: getAppSettings(current.db).defaultProviderId ?? "none" } : {};
+    const settings = getAppSettings(current.db);
+    const refusal = refused ? { cloud_code: cloud?.code ?? null, cloud_step: cloud?.step ?? null, ...(settings.telemetryEnabled ? { local_logins: await localLogins() } : {}), default_agent: settings.defaultProviderId ?? "none" } : {};
     // Core reports a Cloud plan limit only in its failure reason, so it counts as one with Local's category.
     const cloudCategory = cloud?.message?.includes(CORE_PLAN_LIMIT) ? "rate-limit" : cloud?.category;
     const category = failed?.errorInfo?.category ?? cloudCategory ?? "unknown";

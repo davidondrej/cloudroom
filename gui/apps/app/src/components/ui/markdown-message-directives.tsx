@@ -5,7 +5,6 @@ import {
   type ReactNode,
 } from "react";
 import type { Nodes, Parent, RootContent } from "mdast";
-import type {} from "mdast-util-to-hast";
 import type {
   BbNavigate,
   PluginMessageDirectiveProps,

@@ -51,7 +51,7 @@ export function cloudroom(deps: CloudHostDeps): CloudroomService {
   return service;
 }
 
-/** Where a cloud thread runs, for anonymous usage events: its own sandbox or the older shared VM. */
+/** Where a cloud thread runs, for usage events: its own sandbox or the older shared VM. */
 export function cloudExecution(deps: Pick<AppDeps, "db">, threadId: string): "cloud_sandbox" | "cloud_vm" {
   return sandboxThread(binding(deps.db, threadId)?.coreUrl ?? "") ? "cloud_sandbox" : "cloud_vm";
 }

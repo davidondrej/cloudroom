@@ -411,6 +411,15 @@ pub struct ForkFrom {
     pub last_turn_id: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct ForkOptions {
+    pub model: Option<String>,
+    pub reasoning: Option<String>,
+    pub provider: Option<String>,
+    pub thread_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
 /// The session a side chat was forked from.
 fn fork_of(session: &Session) -> Option<&str> {
     let start = session.receipts.values().find(|r| r.command == "start")?;
@@ -946,20 +955,28 @@ impl Manager {
         (model, provider)
     }
 
-    /// Starts a side chat: a new session on a copy of another session's conversation, in its folder,
-    /// with its harness, model and settings. The source keeps working and is only read.
+    /// Starts a side chat: a new session in another session's folder, inheriting its workspace and sandbox settings.
+    /// A `fresh` side chat copies no conversation and may pick any harness, model, and effort.
     pub async fn fork(
         self: &Arc<Self>,
         request: String,
         harness: Option<runtime::Kind>,
         fork: ForkFrom,
+        options: ForkOptions,
     ) -> Result<(String, Receipt)> {
+        let ForkOptions {
+            model: req_model,
+            reasoning: req_reasoning,
+            provider: req_provider,
+            thread_id: req_thread_id,
+            project_id: req_project_id,
+        } = options;
         let id = format!("cr_{request}");
         let invalid = |v: &Option<String>| {
             v.as_ref()
                 .is_some_and(|v| v.is_empty() || v.len() > 256 || v.chars().any(char::is_control))
         };
-        let (kind, input, model, provider, workspace) = {
+        let (kind, input, model, provider, reasoning, check_execution, workspace) = {
             let local = self.local.lock().unwrap();
             let s = local.sessions.get(&fork.session).ok_or(Error::Conflict(
                 "the side chat's source thread was not found",
@@ -978,11 +995,48 @@ impl Manager {
                 || invalid(&fork.before)
                 || invalid(&fork.through)
                 || invalid(&fork.last_turn_id)
-                || harness.is_some_and(|kind| kind != s.harness)
+                || (!fork.fresh && harness.is_some_and(|kind| kind != s.harness))
             {
                 return Err(Error::Conflict("invalid side chat request"));
             }
-            let mut input = json!({"harness":s.harness,"fork":fork,"reasoning":s.reasoning});
+            let kind = if fork.fresh {
+                harness.unwrap_or(s.harness)
+            } else {
+                s.harness
+            };
+            let same_harness = kind == s.harness;
+            if req_provider.is_some() && kind != runtime::Kind::Pi {
+                return Err(Error::Conflict("provider selection requires Pi"));
+            }
+            if let Some(thread) = &req_thread_id
+                && !super::relay::thread_id(thread)
+            {
+                return Err(Error::Conflict("invalid thread_id"));
+            }
+            if let Some(project) = &req_project_id {
+                crate::workspace::valid_id(project)
+                    .map_err(|_| Error::Conflict("invalid project_id"))?;
+            }
+            let model = req_model
+                .clone()
+                .or_else(|| same_harness.then(|| s.model.clone()).flatten());
+            let provider = req_provider.clone().or_else(|| {
+                (same_harness && req_model.is_none())
+                    .then(|| s.provider.clone())
+                    .flatten()
+            });
+            let reasoning = req_reasoning.clone().or_else(|| {
+                (same_harness && req_model.is_none())
+                    .then(|| s.reasoning.clone())
+                    .flatten()
+            });
+            let mut input = json!({"harness":kind,"fork":fork,"reasoning":reasoning});
+            if let Some(m) = &req_model {
+                input["model"] = json!(m);
+            }
+            if let Some(p) = &req_provider {
+                input["provider"] = json!(p);
+            }
             if !s.command_guard_enabled() {
                 input["command_guard_enabled"] = json!(false);
             }
@@ -992,7 +1046,10 @@ impl Manager {
             if let Some(system_prompt) = s.system_prompt() {
                 input["system_prompt"] = json!(system_prompt);
             }
-            if let Some(project) = s.project_id() {
+            if let Some(thread) = &req_thread_id {
+                input["thread_id"] = json!(thread);
+            }
+            if let Some(project) = req_project_id.as_deref().or_else(|| s.project_id()) {
                 input["project_id"] = json!(project);
             }
             if let Some(existing) = local.sessions.get(&id) {
@@ -1015,11 +1072,15 @@ impl Manager {
                     "the source agent is busy; fork from an earlier message or try again shortly",
                 ));
             }
+            let check_execution =
+                fork.fresh && (!same_harness || req_model.is_some() || req_reasoning.is_some());
             (
-                s.harness,
+                kind,
                 input,
-                s.model.clone(),
-                s.provider.clone(),
+                model,
+                provider,
+                reasoning,
+                check_execution,
                 s.workspace.clone(),
             )
         };
@@ -1030,13 +1091,17 @@ impl Manager {
             return Err(Error::Conflict("harness is not configured"));
         }
         self.harness_ready(kind).await?;
+        if check_execution && let Some(reasoning) = reasoning.as_deref() {
+            self.execution_supported(kind, model.as_ref(), reasoning)
+                .await?;
+        }
         let receipt = Receipt {
             request_id: request.clone(),
             command: "start".into(),
             input,
             state: "accepted".into(),
             model: Some(model.unwrap_or_else(|| self.config.harnesses[&kind].model.clone())),
-            provider,
+            provider: provider.or_else(|| self.config.harnesses[&kind].provider.clone()),
             workspace,
             error: None,
         };

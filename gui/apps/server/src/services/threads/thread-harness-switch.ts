@@ -5,6 +5,7 @@ import {
   getLatestCompletedThreadContextClearSequence,
   getThread,
   setThreadExecutionOverride,
+  threadHasProviderSession,
   updateThread,
   type DbTransaction,
 } from "@cloudroom/db";
@@ -123,6 +124,10 @@ async function switchThenResend(
     if (run.late) throw switchTimeout();
     const thread = requireSwitchableThread(deps, threadId);
     run.cloud = isCloudThread(thread);
+    const unstartedLocalFork =
+      !run.cloud &&
+      thread.originKind === "fork" &&
+      !threadHasProviderSession(deps.db, threadId);
     // A Core that switches the conversation itself builds the history (#237): no seed then.
     const prepare = async (seeded = true) => {
       const seed = !seeded ? [] : await historySeed(
@@ -130,6 +135,9 @@ async function switchThenResend(
         thread,
         `[Cloudroom] This conversation started with another agent (${thread.providerId}). You are now continuing it as ${target.providerId}.`,
       );
+      if (unstartedLocalFork && seed.length === 0) {
+        return () => {};
+      }
       return (tx: DbTransaction) => {
         appendThreadEventInTransaction(tx, {
           threadId,
@@ -165,15 +173,18 @@ async function switchThenResend(
       : null;
     // Release the old harness's process before the thread points at the new one,
     // even mid-turn: a failed turn can leave the host running one, which refuses the new agent (#856).
-    await stopThreadForCurrentState(deps, thread, environment ?? null, {
-      releaseMidTurn: true,
-    }).catch((error: unknown) => {
-      throw new ApiError(
-        error instanceof ApiError ? error.status : 502,
-        "harness_switch_stop_failed",
-        `Couldn't stop ${thread.providerId}, so the thread stays on it: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+    // An unstarted idle fresh side chat never launched a provider process, so it skips the stop round-trip.
+    if (!(unstartedLocalFork && thread.status === "idle")) {
+      await stopThreadForCurrentState(deps, thread, environment ?? null, {
+        releaseMidTurn: true,
+      }).catch((error: unknown) => {
+        throw new ApiError(
+          error instanceof ApiError ? error.status : 502,
+          "harness_switch_stop_failed",
+          `Couldn't stop ${thread.providerId}, so the thread stays on it: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
     const record = await prepare();
     if (run.late) throw switchTimeout();
     deps.db.transaction((tx) => {

@@ -1127,6 +1127,7 @@ export class SandboxDirectory {
       queue: z.object({ position: z.number(), total: z.number() }).nullable().default(null), region_blocked: z.boolean().default(false),
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
+    const usageChanged = Boolean((this.limit?.on && !value.limited) || (this.plan && value.plan !== this.plan));
     this.plan = value.plan;
     const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
     if (cleared(this.refused?.code)) this.refused = null;
@@ -1135,6 +1136,8 @@ export class SandboxDirectory {
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
     this.queue = value.queue || value.region_blocked ? { position: value.queue?.position ?? 0, total: value.queue?.total ?? 0, regionBlocked: value.region_blocked } : null;
+    // Limit cleared or plan changed (bought credits or upgraded): refresh credits now instead of waiting up to 10 minutes.
+    if (usageChanged && this.usage) { this.usage = { ...this.usage, next: 0 }; this.planUsage(true); }
     return value.sandboxes;
   }
 
@@ -1197,29 +1200,43 @@ export class SandboxDirectory {
   private plan: string | null = null;
   currentPlan(): string | null { return this.plan; }
   private usage: { value: PlanUsage | null; next: number } | null = null;
-  private checkingUsage = false;
+  private usageRefresh: Promise<void> | null = null;
+  private lastForcedUsageAt = 0;
+  private fetchUsage(): Promise<void> {
+    if (this.usageRefresh) return this.usageRefresh;
+    this.usageRefresh = this.call({ action: "usage" }).then((value) => {
+      // A website without credits (say, rolled back) shows no card rather than old units.
+      const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
+        extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0) }).safeParse(value);
+      const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
+      // The website returns awake families above its low mark, and marks the hot ones. A line, once shown, stays
+      // until its family drops below that mark, so it never blinks on and off. Older websites send none; `null` means
+      // the website couldn't read it, so the lines stay as they are.
+      const sent = (value as { burning?: unknown } | null)?.burning;
+      if (sent !== null) this.burning = new Map(burningSchema.parse(sent ?? []).filter((row) => row.hot || this.burning.has(row.thread)).map((row) => [row.thread, { credits: row.credits, subagents: row.subagents }]));
+      this.usage = {
+        value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
+          extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
+        next: Date.now() + Math.max(recheck, 60) * 1000,
+      };
+    }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.usageRefresh = null; });
+    return this.usageRefresh;
+  }
+  /** Refreshes plan, limit state, and Cloud Credits right away when returning from /billing, at most once per 15 s. */
+  async refreshUsageNow(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastForcedUsageAt < 15_000) return;
+    this.lastForcedUsageAt = now;
+    await this.checkMode().catch(() => {});
+    if (!this.plan || this.queue) return;
+    if (this.usage) this.usage = { ...this.usage, next: 0 };
+    await this.fetchUsage();
+  }
   /** The account's usage; null while billing is off, in the cloud queue, or before the website answers. Its plan is
    *  refreshed with forNewThreads(); the usage itself as often as the website says, unless `refresh` is false. */
   planUsage(refresh = true): PlanUsage | null {
     if (!this.plan || this.queue) return null;
-    if (refresh && !this.checkingUsage && Date.now() >= (this.usage?.next ?? 0)) {
-      this.checkingUsage = true;
-      void this.call({ action: "usage" }).then((value) => {
-        // A website without credits (say, rolled back) shows no card rather than old units.
-        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
-          extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0) }).safeParse(value);
-        const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
-        // The website returns awake families above its low mark, and marks the hot ones. A line, once shown, stays
-        // until its family drops below that mark, so it never blinks on and off. Older websites send none.
-        const burning = burningSchema.parse((value as { burning?: unknown } | null)?.burning ?? []);
-        this.burning = new Map(burning.filter((row) => row.hot || this.burning.has(row.thread)).map((row) => [row.thread, { credits: row.credits, subagents: row.subagents }]));
-        this.usage = {
-          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
-            extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
-          next: Date.now() + Math.max(recheck, 60) * 1000,
-        };
-      }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.checkingUsage = false; });
-    }
+    if (refresh && !this.usageRefresh && Date.now() >= (this.usage?.next ?? 0)) void this.fetchUsage();
     // A plan change shows nothing until the next check, never the old plan's card.
     return this.usage?.value?.plan === this.plan ? this.usage.value : null;
   }
@@ -1275,6 +1292,7 @@ export class SandboxDirectory {
     this.deepapiNext = 0;
     this.deepapi = null;
     this.views.clear();
+    this.burning.clear();
     this.awake = new Map();
     this.awakeNext = 0;
     this.awakeIssue = null;

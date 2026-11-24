@@ -401,7 +401,9 @@ class MacJobTests(unittest.TestCase):
                 core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
                                        config=preview.private_json(folder / 'config.json'),
                                        fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
-                preview.MacJobs(folder).execute(core, 'mac', {'id': 'job', 'command': 'printf %s "$ROOM_SERVER_URL"', 'write': True})
+                jobs = preview.MacJobs(folder)
+                jobs.wanted = {'vm'}
+                jobs.execute(core, 'mac', {'id': 'job', 'command': 'printf %s "$ROOM_SERVER_URL"', 'write': True})
             self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode(), 'http://127.0.0.1:41000')
 
     def test_sandbox_with_a_key_list_gets_no_mac_jobs(self):
@@ -423,6 +425,7 @@ class MacJobTests(unittest.TestCase):
                                        config={'connectionFile': str(folder / 'cloudroom.json')},
                                        connection={'account': {'id': '11111111-1111-4111-8111-111111111111'}, 'sandboxToken': 'a' * 64})
             jobs, downloads = preview.MacJobs(folder), []
+            jobs.wanted = {'run', 'next wake', 'vm'}
             def run(name, on):
                 jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}', 'stdin_bytes': 5})
                 return results[-1]['code'], bytes.fromhex(results[-1]['stderr']).decode()
@@ -724,7 +727,13 @@ class MacJobTests(unittest.TestCase):
             core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
                                    config=preview.private_json(folder / 'config.json'),
                                    fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
-            preview.MacJobs(folder).execute(core, 'mac', {'id': 'run', 'command': 'pwd', 'cwd': '~/code/../temp/b', 'write': True})
+            jobs, run = preview.MacJobs(folder), {'id': 'run', 'command': 'pwd', 'cwd': '~/code/../temp/b', 'write': True}
+            # Allow clicked after the sandbox slept: its write command no longer starts, as nobody would read the result
+            # (feedback 0024).
+            jobs.execute(core, 'mac', dict(run))
+            self.assertIn('stopped taking commands', bytes.fromhex(results[-1]['stderr']).decode())
+            jobs.wanted = {'vm'}
+            jobs.execute(core, 'mac', run)
         self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode().strip(), str(home / 'temp/b'))
         # A folder swapped after Allow no longer matches what was approved, so it does not start.
         (home / 'temp/b').rename(home / 'temp/old'); (home / 'temp/b').mkdir()
@@ -761,6 +770,7 @@ class MacJobTests(unittest.TestCase):
             (home / '.zshrc').write_text('mine')
             preview.save(folder / 'config.json', {'macAccess': 'full'})
             results, jobs = [], preview.MacJobs(folder)
+            jobs.wanted = {'vm'}
             core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
                                    config={'connectionFile': str(folder / 'cloudroom.json')},
                                    fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)

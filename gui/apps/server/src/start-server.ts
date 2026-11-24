@@ -48,7 +48,7 @@ import { installThreadPurpose } from "./services/threads/thread-purpose.js";
 import { installProjectSummaries } from "./services/cloudroom/project-nudge.js";
 import { installAuthFailureTelemetry } from "./services/system/auth-failure-telemetry.js";
 import { installPlanLimitTelemetry } from "./services/system/plan-limit-telemetry.js";
-import { createTelemetryService } from "./services/system/telemetry.js";
+import { createTelemetryPrivacyFilter, createTelemetryService } from "./services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "./lifecycle-dedupers.js";
 import type { ServerRuntimeConfig } from "./types.js";
@@ -115,6 +115,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     openAiApiKey: serverConfig.OPENAI_API_KEY,
     serverPort: serverConfig.BB_SERVER_PORT,
     sharedSkillRoots: { user: [], project: [] },
+    telemetryAllowed: serverConfig.BB_TELEMETRY,
     transcriptionModel: serverConfig.BB_TRANSCRIPTION,
     userSkillsRootPath: resolveUserSkillsRootPath(homedir()),
   };
@@ -248,6 +249,11 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   cloud.start();
   telemetry.setPlanSource(() => cloud.sandboxes.currentPlan());
+  telemetry.setPrivacyFilter(createTelemetryPrivacyFilter({
+    db,
+    getCustomModels: () => runtimeConfig.customModels,
+    providerRegistry,
+  }));
   telemetry.setTargetSource(async () => {
     const account = await cloud.sandboxes.account();
     return account

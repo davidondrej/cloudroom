@@ -8,13 +8,20 @@ import {
   setAppSettings,
 } from "@cloudroom/db";
 import { defaultAppSettings } from "@cloudroom/domain";
+import { seedEvent, seedThreadFixture } from "../helpers/seed.js";
 import { withTestHarness } from "../helpers/test-app.js";
 import { DEFAULTS } from "@cloudroom/config/defaults";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  installAuthFailureTelemetry,
+  noteTurnFailed,
+} from "../../src/services/system/auth-failure-telemetry.js";
+import {
+  createTelemetryPrivacyFilter,
   createTelemetryService,
   runWithTelemetryAppSurface,
 } from "../../src/services/system/telemetry.js";
+import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 
 function createTestLogger() {
   return {
@@ -142,6 +149,39 @@ describe("telemetry service", () => {
     const ids = (await batches(second)).map((batch) => batch.install_id);
     expect(ids).toHaveLength(2);
     expect(ids[0]).toBe(ids[1]);
+  });
+
+  it("removes HTTP URL credentials from failed-turn telemetry", async () => {
+    await withTestHarness({ seedFirstPartyProviders: false }, async (harness) => {
+      const { thread } = seedThreadFixture(harness, { thread: { status: "error" } });
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        sequence: 1,
+        type: "system/error",
+        scope: { kind: "thread" },
+        data: { message: "Could not reach https://fixture-user:fixture-pass@proxy:8443/api" },
+      });
+      const telemetry = await createTelemetryService({
+        appSurface: "desktop",
+        appVersion: "1.2.3",
+        dataDir,
+        enabled: true,
+        telemetryEnabled: true,
+        logger: harness.deps.logger,
+      });
+      const stop = installAuthFailureTelemetry({ db: harness.db, logger: harness.deps.logger, telemetry });
+      try {
+        noteTurnFailed(thread.id);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const [batch] = await batches(telemetry);
+        expect(batch?.events).toMatchObject([{
+          name: "turn_failed",
+          properties: { error_message: "Could not reach https://proxy:8443/api" },
+        }]);
+      } finally {
+        stop();
+      }
+    });
   });
 
   it.each([
@@ -291,5 +331,104 @@ describe("telemetry service", () => {
     telemetry.setTargetSource(async () => ({ website: "https://example.test" }));
     await telemetry.flush();
     expect(logger.debug).toHaveBeenCalledWith({ err: expect.any(Error) }, "Telemetry batch send failed");
+  });
+
+  it("masks custom models and custom ACP providers before queuing events", async () => {
+    const db = createConnection(":memory:");
+    migrate(db);
+    try {
+      const registry = createProviderRegistryService();
+      const registerProvider = (id: string, customAgent: boolean) => {
+        registry.register({
+          info: {
+            id,
+            pluginId: "provider-acp",
+            displayName: id,
+            family: "acp",
+            logoUrl: null,
+            completedTurnDisplay: "collapse",
+            available: true,
+            capabilities: {
+              supportsServiceTier: false,
+              supportsNativeUserQuestion: false,
+              supportsThreadArchive: false,
+              supportsThreadRename: false,
+              supportsFork: false,
+              supportsSessionRewind: false,
+              permissionModes: ["full"],
+              modelCatalogScope: "host",
+            },
+            composerActions: [],
+            maintenance: { health: false, usage: false, installation: false },
+          },
+          serverCapabilities: { reasoningLevels: ["medium"], fork: "none", supportsManualCompaction: false },
+          bridgeOptions: customAgent ? { customAgent: true } : {},
+          extensionKinds: {},
+          visibility: "always",
+          pluginId: "provider-acp",
+          fallbackModels: [],
+          envPassthrough: [],
+          nativeSkillRoots: { user: [], project: [] },
+          nativeCommandRoots: { user: [], project: [] },
+          resolvesNativeRoots: false,
+          deriveProviderOptions: () => ({}),
+          iconNames: new Set(),
+        });
+      };
+      registerProvider("acp-opencode", false);
+      registerProvider("acp-acme-internal", true);
+
+      const telemetry = await createTelemetryService({
+        appSurface: "desktop",
+        appVersion: "1.2.3",
+        dataDir,
+        telemetryEnabled: true,
+        enabled: true,
+        logger: createTestLogger(),
+      });
+      telemetry.setPrivacyFilter(createTelemetryPrivacyFilter({
+        db,
+        getCustomModels: () => [{ providerId: "claude-code", model: "internal-codename-7b", displayName: "Internal 7B" }],
+        providerRegistry: registry,
+      }));
+
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "claude-code", sandbox_woke: null, model: "internal-codename-7b" },
+      });
+      telemetry.capture({
+        name: "token_usage",
+        properties: { day: "2026-11-24", provider: "claude-code", model: "Internal Codename 7b", is_child_thread: false, input: 10, cached: 0, cache_write: 0, output: 5, turns: 1 },
+      });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "acp-acme-internal", sandbox_woke: null, model: "discovered-private-model" },
+      });
+      telemetry.capture({
+        name: "harness_switched",
+        properties: { execution: "local", from: "acp-acme-internal", to: "acp-opencode", resend: false },
+      });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "acp-opencode", sandbox_woke: null, model: "gpt-5.4" },
+      });
+
+      const [batch] = await batches(telemetry);
+      expect(batch!.events.map((event) => ({
+        name: event.name,
+        provider: event.properties.provider,
+        model: event.properties.model,
+        from: event.properties.from,
+        to: event.properties.to,
+      }))).toEqual([
+        { name: "first_response", provider: "claude-code", model: "custom", from: undefined, to: undefined },
+        { name: "token_usage", provider: "claude-code", model: "custom", from: undefined, to: undefined },
+        { name: "first_response", provider: "custom", model: "custom", from: undefined, to: undefined },
+        { name: "harness_switched", provider: undefined, model: undefined, from: "custom", to: "acp-opencode" },
+        { name: "first_response", provider: "acp-opencode", model: "gpt-5.4", from: undefined, to: undefined },
+      ]);
+    } finally {
+      db.$client.close();
+    }
   });
 });

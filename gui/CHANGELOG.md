@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 166
+
+Side chats pick their own agent (2026-11-24)
+
+### Changes
+
+- Side chats can use any agent and model: pick one in the side chat, or switch mid-chat.
+- In Local threads, when Claude Code or Codex hits its plan limit, the new Cloudroom Agent plugin keeps you going in one click on frontier open source models.
+- Loop runs show as a clear divider with the loop name and time, instead of looking like your own message.
+- Forking from an agent's reply in Cloud threads works again, and Droid, Agent Zero and OpenClaw now start on their first use in Cloud.
+- Security fixes.
+
 ## 165
 
 Cloud agents reach Windows PCs (2026-11-24)

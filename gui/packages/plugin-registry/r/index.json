@@ -198,6 +198,10 @@
       "type": "registry:ui"
     },
     {
+      "name": "slot",
+      "type": "registry:ui"
+    },
+    {
       "name": "switch",
       "type": "registry:ui"
     },

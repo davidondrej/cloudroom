@@ -174,9 +174,10 @@ export function projectFollowUp(tx: DbTransaction, threadId: string, id: string)
   const saved = binding(tx, threadId);
   const request = command(tx, id);
   const status = getThread(tx, threadId)?.status;
-  if (!saved?.sessionId || saved.queuePaused || request?.command !== "prompt" || (status !== "idle" && status !== "error") || queuedPrompts(tx, threadId).length) return false;
+  const lazySideChat = Boolean(saved && !saved.sessionId && command(tx, `first_${threadId}`)?.command === "side_chat");
+  if (!saved || (!saved.sessionId && !lazySideChat) || saved.queuePaused || request?.command !== "prompt" || (status !== "idle" && status !== "error") || queuedPrompts(tx, threadId).length) return false;
   saveBinding(tx, threadId, { turnId: id, error: null });
-  saveStatus(tx, threadId, "active");
+  saveStatus(tx, threadId, lazySideChat ? "starting" : "active");
   appendPrompt(tx, saved, request);
   return true;
 }
@@ -516,9 +517,9 @@ export function projectRecords(
         const id = latestMessage();
         if (!id) throw new CloudroomError("Pi message completion has no recorded message start");
         const message = object.parse(frame.message);
-        emit({ ...base, type: "item/completed", item: { type: "agentMessage", id, text: contentText(message) } });
         const thinking = Array.isArray(message.content) ? message.content.map(part => object.parse(part)).filter(part => part.type === "thinking" && typeof part.thinking === "string").map(part => part.thinking) : [];
         if (thinking.length) emit({ ...base, type: "item/completed", item: { type: "reasoning", id: `${id}:thinking`, summary: [], content: thinking } });
+        emit({ ...base, type: "item/completed", item: { type: "agentMessage", id, text: contentText(message) } });
         if (typeof message.errorMessage === "string") emit({ type: "system/error", scope: threadScope(), threadId, message: message.errorMessage });
       } else if (frame.customType === "cloudroom_subagent" || (frame.type === "custom" && frame.customType === "cloudroom_subagent")) {
         let payload: { id?: string; state?: string; result?: string } = {};

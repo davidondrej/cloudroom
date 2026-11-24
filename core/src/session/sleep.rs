@@ -271,6 +271,10 @@ impl Manager {
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});
         }
+        // So does a command waiting on the user's Mac, also one started from a terminal.
+        if self.mac.waiting() > 0 {
+            return json!({"drained":false,"reason":"mac_command"});
+        }
         // A RepoSync check finishes its Git work before the GitHub login is wiped and the sandbox stops.
         if self.repo_sync.running() {
             return json!({"drained":false,"reason":"repo_sync"});
