@@ -2,7 +2,7 @@
 //! (ADR 0113, 0186). A Rust port of `src/preview/client.py` for macOS. While both ship, they read and write the
 //! same files under the same LaunchAgent label, so the app can switch between them, and they must behave the same.
 
-mod jobs;
+pub(crate) mod jobs;
 mod net;
 #[cfg(test)]
 mod tests;
@@ -914,6 +914,8 @@ impl Previews {
                 let error = match () {
                     _ if ready => None,
                     _ if !alive => Some(if info.relay { "Tunnel unavailable" } else { "SSH connection unavailable" }),
+                    // Nothing came back through the tunnel, so this says nothing about the app (#1798, #2016).
+                    _ if info.refused() => Some("Tunnel unavailable"),
                     _ if info.reachable() => Some("Cloud HTTP server unavailable"),
                     _ => None,
                 };

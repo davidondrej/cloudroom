@@ -62,6 +62,11 @@ export const sideChatRpcContract = defineRpcContract({
       .object({
         sourceThreadId: z.string().trim().min(1),
         anchorText: z.string(),
+        providerId: z.string().trim().min(1).optional(),
+        model: z.string().trim().min(1).optional(),
+        reasoningLevel: z
+          .enum(["none", "low", "medium", "high", "xhigh", "max", "ultra", "ultracode"])
+          .optional(),
       })
       .strict(),
     output: z.object({ threadId: z.string() }).strict(),
@@ -80,12 +85,21 @@ export const sideChatRpcContract = defineRpcContract({
 
 export default async function plugin(room: BbPluginApi) {
   room.rpc.register(sideChatRpcContract, {
-    async createSideChat({ sourceThreadId, anchorText }) {
+    async createSideChat({
+      sourceThreadId,
+      anchorText,
+      providerId,
+      model,
+      reasoningLevel,
+    }) {
       const seedText = resolveReplySeedText(anchorText);
       const fork = await room.sdk.threads.fork({
         sourceThreadId,
         fresh: true,
         visibility: "hidden",
+        ...(providerId !== undefined ? { providerId } : {}),
+        ...(model !== undefined ? { model } : {}),
+        ...(reasoningLevel !== undefined ? { reasoningLevel } : {}),
         ...(seedText !== null
           ? {
               agentContextSeed: [

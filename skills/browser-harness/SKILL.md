@@ -23,6 +23,7 @@ Before your first browser task, read the full guide: `browser-harness skill`. It
   - Work in your own tabs. Never close or reuse the user's tabs.
   - `browser-harness` not found? A shell profile can reset PATH: run `"$ROOM_DATA_DIR/bin/browser-harness"` instead. If that file is missing too, tell the user.
   - First use may need the user once: tick "Allow remote debugging for this browser instance" at `chrome://inspect/#remote-debugging`, then click Allow on the browser's popup. Tell them exactly that.
+  - A command waiting on that Allow popup gives up after 90 s with `permission-blocked`. The popup stays: once the user clicks Allow, retry.
 - **Cloud threads:** Chromium on the sandbox's virtual screen, with no logins. `room-cli computer-use` sees the same window, so use it for native dialogs and browser menus.
   - The side-panel browser runs on the user's computer. You can't use it or its logins.
   - If a site needs the user's login, say so. Ask before using their computer's browser.

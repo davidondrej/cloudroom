@@ -4,7 +4,6 @@ import type { TaskThread, TaskThreadLiveStatus } from "../db";
 import { createSystemComment, publishThreadsChanged } from "../delegate";
 import { errorMessage } from "../shared/errors";
 
-const TERMINAL_LIVE_STATUSES = new Set<TaskThreadLiveStatus>(["completed"]);
 export const THREAD_STATUS_RECONCILE_INTERVAL_MS = 5 * 60_000;
 export const THREAD_STATUS_IDLE_INTERVAL_MS = 60_000;
 
@@ -24,16 +23,6 @@ function liveStatusFromThread(thread: SdkThread): TaskThreadLiveStatus {
     case "idle":
       return "idle";
   }
-}
-
-function trackedThreads(store: TasksApiStore): TaskThread[] {
-  const tracked: TaskThread[] = [];
-  for (const task of store.tasks.listTasks()) {
-    for (const thread of store.tasks.listTaskThreads(task.id)) {
-      tracked.push(thread);
-    }
-  }
-  return tracked;
 }
 
 function statusCommentBody(
@@ -58,10 +47,7 @@ function transitionThread(
   thread: TaskThread,
   liveStatus: TaskThreadLiveStatus,
 ): void {
-  if (
-    thread.liveStatus === liveStatus ||
-    TERMINAL_LIVE_STATUSES.has(thread.liveStatus)
-  ) {
+  if (thread.liveStatus === liveStatus || thread.liveStatus === "completed") {
     return;
   }
 
@@ -119,19 +105,9 @@ async function reconcileTrackedThreads(
   room: BbPluginApi,
   store: TasksApiStore,
 ): Promise<void> {
-  const nonTerminalThreads = trackedThreads(store).filter(
-    (thread) => !TERMINAL_LIVE_STATUSES.has(thread.liveStatus),
-  );
-
-  for (const trackedThread of nonTerminalThreads) {
+  for (const trackedThread of store.tasks.listUnfinishedTaskThreads()) {
     await reconcileTrackedThread(room, store, trackedThread);
   }
-}
-
-function hasNonTerminalTrackedThreads(store: TasksApiStore): boolean {
-  return trackedThreads(store).some(
-    (thread) => !TERMINAL_LIVE_STATUSES.has(thread.liveStatus),
-  );
 }
 
 function waitForNextReconciliation(
@@ -175,7 +151,7 @@ export async function registerLifecycle(
   room.background.service("thread-status-reconcile", {
     async start(signal) {
       while (!signal.aborted) {
-        if (!hasNonTerminalTrackedThreads(store)) {
+        if (!store.tasks.hasUnfinishedTaskThreads()) {
           await waitForNextReconciliation(
             signal,
             THREAD_STATUS_IDLE_INTERVAL_MS,

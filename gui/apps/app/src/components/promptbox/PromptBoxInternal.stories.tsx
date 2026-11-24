@@ -1,5 +1,8 @@
 import { useState } from "react";
-import type { PromptMentionResource, PromptTextMention } from "@cloudroom/domain";
+import type {
+  PromptMentionResource,
+  PromptTextMention,
+} from "@cloudroom/domain";
 import type { UploadedPromptAttachment } from "@cloudroom/server-contract";
 import { ExecutionControls } from "@/components/promptbox/ExecutionControls";
 import type {
@@ -24,6 +27,7 @@ import {
   makeTypeaheadConfig as makeTypeahead,
 } from "../../../.ladle/story-fixtures";
 import { orderPromptMentionSuggestions } from "@/hooks/promptMentionCandidates";
+import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 
 export default {
   title: "promptbox/Prompt Box Internal",
@@ -983,6 +987,42 @@ export function AllPromptPills() {
         <PromptBoxStoryInstance fixture={projectCommandArgumentHintFixture} />
       </StoryRow>
     </StoryCard>
+  );
+}
+
+const replyContexts = [
+  {
+    label: "[message #11 - 9 words]",
+    text: "The deploy fails because the env file is missing.",
+  },
+  {
+    label: "[message #14 - 4 words]",
+    text: "Run npm install first.",
+  },
+];
+
+export function ReplyChips() {
+  return (
+    <PromptDraftContextsContext.Provider value={replyContexts}>
+      <StoryCard>
+        <StoryRow label="one reply" hint="hover the chip to read the message">
+          <PromptBoxStoryInstance
+            fixture={{
+              text: "<context> [message #11 - 9 words] </context> this makes no sense",
+              mentions: [],
+            }}
+          />
+        </StoryRow>
+        <StoryRow label="two replies" hint="chips sit inline with the text">
+          <PromptBoxStoryInstance
+            fixture={{
+              text: "<context> [message #11 - 9 words] </context> this makes no sense, and <context> [message #14 - 4 words] </context> already did that",
+              mentions: [],
+            }}
+          />
+        </StoryRow>
+      </StoryCard>
+    </PromptDraftContextsContext.Provider>
   );
 }
 

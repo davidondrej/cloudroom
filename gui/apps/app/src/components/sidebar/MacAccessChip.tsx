@@ -1,12 +1,16 @@
+import { useState } from "react";
 import { COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import type { MacAccessLevel } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { Popover, PopoverAnchor, PopoverContent } from "@cloudroom/shared-ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { SidebarMenuItem } from "@/components/ui/sidebar";
+import { SidebarMenuItem, useSidebar } from "@/components/ui/sidebar";
+import { useOnboardingOpen } from "@/components/Onboarding";
 import { appToast } from "@/components/ui/app-toast";
+import { usePopupSlot } from "@/lib/popups";
 import { useIsMutating } from "@tanstack/react-query";
 import { MAC_ACCESS_MUTATION_KEY, useCloudroomAccount, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 
@@ -34,9 +38,9 @@ export function useMacAccessLevel() {
   return { current, select, saving };
 }
 
-export function MacAccessMenu() {
+export function MacAccessMenu({ open, onOpenChange }: { open?: boolean; onOpenChange?: (open: boolean) => void } = {}) {
   const { current, select, saving } = useMacAccessLevel();
-  return <DropdownMenu>
+  return <DropdownMenu open={open} onOpenChange={onOpenChange}>
     <Tooltip>
       <TooltipTrigger asChild>
         <DropdownMenuTrigger asChild>
@@ -56,24 +60,50 @@ export function MacAccessMenu() {
 }
 
 export function MacAccessMenuItems({ current, select }: Pick<ReturnType<typeof useMacAccessLevel>, "current" | "select">) {
-  // The computer says which levels it supports: Read and Ask need macOS.
+  // The computer says which levels it supports: Read and Ask need macOS, so other systems list only Off and Full (#958).
   const supported = useCloudroomAccount().data?.macAccessLevels;
-  return MAC_ACCESS_LEVELS.map((level) => {
+  return MAC_ACCESS_LEVELS.filter((level) => !supported || supported.includes(level.id)).map((level) => {
     const selected = level === current;
-    const disabled = !!supported && !supported.includes(level.id);
-    return <DropdownMenuItem key={level.id} role="menuitemradio" aria-checked={selected} disabled={disabled} className={cn("items-start gap-2.5 py-2", selected && "bg-state-hover")} onSelect={() => select(level)}>
+    return <DropdownMenuItem key={level.id} role="menuitemradio" aria-checked={selected} className={cn("items-start gap-2.5 py-2", selected && "bg-state-hover")} onSelect={() => select(level)}>
       <Icon name={level.icon} className="mt-0.5 text-muted-foreground" aria-hidden />
       <span className="min-w-0 flex-1">
         <span className="block text-sm text-foreground">{level.label}</span>
-        <span className="block text-xs text-muted-foreground">{disabled ? "Needs macOS." : level.description}</span>
+        <span className="block text-xs text-muted-foreground">{level.description}</span>
       </span>
       {selected && <Icon name="Check" className="mt-0.5 text-foreground" aria-hidden />}
     </DropdownMenuItem>;
   });
 }
 
-export function MacAccessChip() {
+export function MacAccessChip({ hidden = false }: { hidden?: boolean } = {}) {
   const status = useCloudroomAccount();
+  const onboardingOpen = useOnboardingOpen();
+  const { isCompactViewport, state, openMobile } = useSidebar();
+  const sidebarVisible = !hidden && (isCompactViewport ? openMobile : state === "expanded");
+  // Windows (#958): new there, so until the user picks, a card above the chip asks while the sidebar is visible.
+  const wants = Boolean(
+    status.data?.account && status.data.macAccessSupported !== false && status.data.computerOs === "windows"
+    && status.data.macAccessLevel == null && !status.data.signingIn && !onboardingOpen && sidebarVisible,
+  );
+  const ask = usePopupSlot("computer-access", wants);
   if (!status.data?.account || status.data.macAccessSupported === false) return null;
-  return <SidebarMenuItem data-footer-item="mac-access"><MacAccessMenu /></SidebarMenuItem>;
+  return <SidebarMenuItem data-footer-item="mac-access">{ask ? <NewComputerAccess /> : <MacAccessMenu />}</SidebarMenuItem>;
+}
+
+function NewComputerAccess() {
+  const choose = useSetMacAccess(saved);
+  const [menuOpen, setMenuOpen] = useState(false);
+  return <Popover open={!menuOpen}>
+    <PopoverAnchor asChild><span className="inline-flex"><MacAccessMenu open={menuOpen} onOpenChange={setMenuOpen} /></span></PopoverAnchor>
+    <PopoverContent side="top" align="end" sideOffset={8} className="w-72 p-3" onOpenAutoFocus={(event) => event.preventDefault()}>
+      <p className="text-sm font-medium text-foreground">New: let Cloud agents use this PC</p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Cloud threads can then run commands and copy files here, as you. Turn it off anytime from this chip.
+      </p>
+      <div className="mt-3 flex justify-end gap-2">
+        <Button size="sm" variant="ghost" disabled={choose.isPending} onClick={() => choose.mutate("off")}>Not now</Button>
+        <Button size="sm" disabled={choose.isPending} onClick={() => choose.mutate("full")}>Turn on</Button>
+      </div>
+    </PopoverContent>
+  </Popover>;
 }

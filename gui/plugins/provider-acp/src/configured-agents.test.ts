@@ -108,6 +108,7 @@ describe("resolveConfiguredAcpAgents", () => {
 
     expect(resolved.agents.map((agent) => agent.id)).toEqual(["acp-opencode"]);
     expect(resolved.warnings).toEqual([]);
+    expect(resolved.agents[0]?.permissionModes).toEqual(["full"]);
   });
 
   it("keeps a legacy entry's native skill roots and declares them", () => {

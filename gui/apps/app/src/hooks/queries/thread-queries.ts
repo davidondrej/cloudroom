@@ -1,3 +1,5 @@
+import { useAtomValue } from "jotai";
+import { pendingArchiveIdsAtom } from "../cache-owners/thread-archive-cache";
 import { prependOlderTimelineRows } from "@cloudroom/client-core";
 import {
   useInfiniteQuery,
@@ -431,6 +433,11 @@ interface UseChildThreadsResult {
   isLoading: boolean;
 }
 
+function useVisibleThreadRows(rows: ThreadListResponse | undefined) {
+  const hidden = useAtomValue(pendingArchiveIdsAtom);
+  return useMemo(() => hidden.size ? rows?.filter(row => !hidden.has(row.id)) : rows, [hidden, rows]);
+}
+
 export function useChildThreads({
   enabled: enabledOption,
   parentThreadId,
@@ -466,9 +473,10 @@ export function useChildThreads({
     staleTime: THREAD_LIST_STALE_TIME_MS,
   });
   const derivedChildren = enabled ? sidebarChildren : undefined;
+  const visible = useVisibleThreadRows(derivedChildren ?? fallbackQuery.data);
   if (derivedChildren !== undefined) {
     return {
-      data: derivedChildren,
+      data: visible,
       isError: false,
       isFetching: false,
       isLoading: false,
@@ -476,7 +484,7 @@ export function useChildThreads({
   }
   const waitingForBootstrap = enabled && isBootstrapPending;
   return {
-    data: fallbackQuery.data,
+    data: visible,
     isError: fallbackQuery.isError,
     isFetching: fallbackQuery.isFetching || waitingForBootstrap,
     isLoading: fallbackQuery.isLoading || waitingForBootstrap,
@@ -586,9 +594,10 @@ export function useThreadMentionCandidates({
   });
   const derivedCandidates = enabled ? sidebarCandidates : undefined;
 
+  const visible = useVisibleThreadRows(derivedCandidates ?? threadsQuery.data);
   if (derivedCandidates !== undefined) {
     return {
-      data: derivedCandidates,
+      data: visible,
       isError: false,
       isFetching: false,
       isLoading: false,
@@ -596,7 +605,7 @@ export function useThreadMentionCandidates({
   }
   const waitingForBootstrap = enabled && isBootstrapPending;
   return {
-    data: threadsQuery.data,
+    data: visible,
     isError: threadsQuery.isError,
     isFetching: threadsQuery.isFetching || waitingForBootstrap,
     isLoading: threadsQuery.isLoading || waitingForBootstrap,

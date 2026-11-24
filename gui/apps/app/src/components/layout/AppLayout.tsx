@@ -1,9 +1,13 @@
-import { type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { atom, useAtom, useAtomValue, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
-import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
+import { Link, matchPath, useLocation, useNavigate } from "react-router";
 import type { ProjectResponse } from "@cloudroom/server-contract";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
@@ -13,6 +17,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
   useCloseMobileSidebar,
+  useIsSidebarShowing,
 } from "@/components/ui/sidebar.js";
 import { SidebarHistoryNavigationControls } from "@/components/sidebar/SidebarHistoryNavigationControls";
 import {
@@ -29,9 +34,14 @@ import {
   resolveToolsBreadcrumbs,
 } from "@/components/tools/tools-navigation";
 import { AppBreadcrumbs } from "./AppBreadcrumbs";
-import { DesktopUpdateBanner, GitForWindowsBanner } from "./DesktopUpdateBanner";
+import {
+  DesktopUpdateBanner,
+  GitForWindowsBanner,
+} from "./DesktopUpdateBanner";
 import { LowDiskBanner } from "./LowDiskBanner";
 import { CloudLoginBanner } from "./CloudLoginBanner";
+import { ProviderLoginListener } from "@/components/settings/ProviderLoginButton";
+import { CloudPausedBanner } from "./CloudPausedBanner";
 import { OtherMacStatus } from "./OtherMacStatus";
 import { resourceRouteLabelAtom } from "./resourceRouteLabelAtom";
 import { AppPageHeader, HEADER_ICON_BUTTON_CLASS } from "./AppPageHeader";
@@ -109,6 +119,10 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
+  getMediaQuerySnapshot,
+  REDUCED_MOTION_QUERY,
+} from "@cloudroom/shared-ui/hooks/use-media-query";
+import {
   isFirefoxAndroid,
   shouldRestoreIOSViewportOnKeyboardDismissal,
   useMobileVisualViewportHeight,
@@ -162,21 +176,50 @@ const sidebarOpenAtom = atomWithStorage<boolean>(
 interface SidebarStateBridgeProps {
   children: ReactNode;
   minWidth?: string;
+  mainRef: RefObject<HTMLElement | null>;
 }
 
 type SidebarResizeMouseEvent = ReactMouseEvent<HTMLDivElement>;
 type SidebarOpenChangeHandler = (open: boolean) => void;
 
-function SidebarStateBridge({ children, minWidth }: SidebarStateBridgeProps) {
+// Opening or closing the sidebar re-centers the page in the free space. The
+// layout snaps once (animating it re-wrapped every chat on every frame), then
+// the page slides from its old center to the new one, in step with the card.
+let sidebarSlide: Animation | undefined;
+
+function slideWithSidebar(main: HTMLElement | null, change: () => void) {
+  // Mid-slide this is where the page looks right now, so a quick second toggle starts from there.
+  const before = main?.getBoundingClientRect();
+  sidebarSlide?.cancel();
+  change();
+  if (!main || !before || getMediaQuerySnapshot(REDUCED_MOTION_QUERY)) return;
+  const after = main.getBoundingClientRect();
+  const dx = before.left + before.width / 2 - (after.left + after.width / 2);
+  if (Math.abs(dx) < 1) return;
+  sidebarSlide = main.animate(
+    [{ translate: `${dx}px 0` }, { translate: "0 0" }],
+    { duration: 220, easing: "cubic-bezier(0.32,0.72,0,1)" },
+  );
+  // The in-app browser is a native view placed from the page's on-screen spot: place it again where the page stops.
+  sidebarSlide.onfinish = dispatchBrowserViewBoundsSync;
+}
+
+function SidebarStateBridge({
+  children,
+  minWidth,
+  mainRef,
+}: SidebarStateBridgeProps) {
   const [open, setOpen] = useAtom(sidebarOpenAtom);
   const sidebarWidth = useAtomValue(sidebarWidthAtom);
   const sidebarLiveWidth = useAtomValue(sidebarLiveWidthAtom);
   const handleOpenChange = useCallback<SidebarOpenChangeHandler>(
     (nextOpen) => {
-      setOpen(nextOpen);
+      slideWithSidebar(mainRef.current, () =>
+        flushSync(() => setOpen(nextOpen)),
+      );
       window.requestAnimationFrame(dispatchBrowserViewBoundsSync);
     },
-    [setOpen],
+    [mainRef, setOpen],
   );
   useAppCommandHandler("sidebar.toggle", () => {
     handleOpenChange(!open);
@@ -205,8 +248,14 @@ function SidebarTriggerOverlay({
   usesDesktopChrome,
 }: SidebarTriggerOverlayProps) {
   const isCompactViewport = useIsCompactViewport();
+  const isSidebarShowing = useIsSidebarShowing();
   const closeOnMobile = useCloseMobileSidebar();
   const shortcut = useAppCommandShortcut("sidebar.toggle");
+  // While the floating card shows, the toggle rides its top row: move with the card's 8px inset.
+  const onCardClass = cn(
+    "transition-[translate] duration-[220ms] ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none",
+    isSidebarShowing && !isCompactViewport && "translate-2",
+  );
   const triggerProps = {
     "aria-label": shortcut
       ? `Toggle sidebar (${shortcut.label})`
@@ -263,6 +312,7 @@ function SidebarTriggerOverlay({
           CHROME_ROW_CLASS,
           BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
           MACOS_WINDOW_DRAG_CLASS,
+          onCardClass,
         )}
       >
         <SidebarTrigger
@@ -291,6 +341,7 @@ function SidebarTriggerOverlay({
         "fixed top-[env(safe-area-inset-top)] left-[env(safe-area-inset-left)]",
         CHROME_ROW_CLASS,
         BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
+        onCardClass,
       )}
     >
       <SidebarTrigger {...triggerProps} />
@@ -551,6 +602,7 @@ export function AppLayout({ children }: AppLayoutProps) {
   const hasThreadDetailBootstrapSettled =
     threadDetailBootstrapQuery.isSuccess || threadDetailBootstrapQuery.isError;
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
   const liveWidthRef = useRef(0);
@@ -798,9 +850,13 @@ export function AppLayout({ children }: AppLayoutProps) {
         <ThreadTitleMentionResourcesProvider {...titleMentionResources}>
           <ThreadActionsProvider>
             <SidebarStateBridge
+              // The floating card is 14px narrower than its slot; keep the window capsule on it.
               minWidth={
-                reserveMacosTrafficLights ? MACOS_SIDEBAR_MIN_WIDTH : undefined
+                reserveMacosTrafficLights
+                  ? `calc(${MACOS_SIDEBAR_MIN_WIDTH} + 14px)`
+                  : undefined
               }
+              mainRef={mainRef}
             >
               {backToAppRoutePath !== null && !isSidebarResizing ? (
                 <BackToAppCommandHandler routePath={backToAppRoutePath} />
@@ -834,11 +890,18 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <GitForWindowsBanner />
                   <DesktopUpdateBanner />
                   <LowDiskBanner />
+                  <CloudPausedBanner />
                   <CloudLoginBanner
                     threadId={threadId ?? null}
-                    onLoops={pluginPanelMatch?.params.pluginId === "automations"}
+                    onLoops={
+                      pluginPanelMatch?.params.pluginId === "automations"
+                    }
                   />
-                  <main className="flex min-h-0 flex-1 flex-col p-4 md:p-5">
+                  <ProviderLoginListener />
+                  <main
+                    ref={mainRef}
+                    className="flex min-h-0 flex-1 flex-col p-4 md:p-5"
+                  >
                     {children}
                   </main>
                 </div>

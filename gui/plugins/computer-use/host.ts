@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   rename,
   rm,
@@ -13,7 +14,7 @@ import {
 } from "node:fs/promises";
 import { connect } from "node:net";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -91,6 +92,17 @@ async function download(url: string, archive: string, signal: AbortSignal, delay
   );
 }
 
+export async function pruneOldVersions(dir: string) {
+  const parent = dirname(dir);
+  const current = basename(dir);
+  const entries = await readdir(parent).catch(() => []);
+  await Promise.all(
+    entries
+      .filter((name) => name !== current && !name.startsWith(".install-"))
+      .map((name) => rm(join(parent, name), { recursive: true, force: true }).catch(() => {})),
+  );
+}
+
 export async function install(dir: string, signal: AbortSignal, delays = [2_000, 5_000, 15_000]) {
   const asset = assetFor(process.platform, process.arch);
   if (!asset) throw new Error(`Computer use is not available on ${process.platform}-${process.arch}`);
@@ -117,6 +129,7 @@ export async function install(dir: string, signal: AbortSignal, delays = [2_000,
     await writeFile(join(stage, "verified.json"), JSON.stringify({ sha256: await sha256(binary) }));
     await rm(dir, { recursive: true, force: true });
     await rename(stage, dir);
+    await pruneOldVersions(dir);
   } finally {
     await rm(stage, { recursive: true, force: true });
   }
@@ -130,7 +143,7 @@ async function osascript(script: string, env?: NodeJS.ProcessEnv) {
   return stdout.trim();
 }
 
-// Cua Driver 0.35.2 finds a launch_app name only as <name>.app in these folders (apps/mod.rs
+// Cua Driver finds a launch_app name only as <name>.app in these folders (apps/mod.rs
 // locate_by_name; its other two are under its private HOME). A bundle_id goes to LaunchServices.
 const APP_ROOTS = [
   "/Applications",
@@ -171,7 +184,7 @@ async function withBundleId(args: Record<string, unknown>) {
   if (app) args.bundle_id = app.key;
 }
 
-// Cua Driver 0.35.2's own cold launch (platform-macos apps/nsworkspace.rs, tools/launch_app.rs):
+// Cua Driver's own cold launch (platform-macos apps/nsworkspace.rs, tools/launch_app.rs):
 // NSWorkspace in the background with an `oapp` event so the app opens its window, then the
 // prior frontmost app gets focus back whenever the new app takes it (registered + 1.5 s).
 function launchScript(app: string, byName: boolean) {
@@ -302,6 +315,8 @@ export function createHostEntry() {
   let lease: ExperimentalHostWorkerLease | null = null;
   let paths: Paths | null = null;
   const sessions = new Set<string>();
+  // Sessions ended at a turn's end while another thread kept the driver running.
+  const ended = new Set<string>();
 
   const dir = () => join(paths!.dataDir, "cua-driver", DRIVER.version);
   const binary = () => join(dir(), "cua-driver");
@@ -367,6 +382,7 @@ export function createHostEntry() {
       if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     }, 3_000).unref();
     sessions.clear();
+    ended.clear();
     daemon = null;
     socket = null;
     void lease?.dispose();
@@ -449,6 +465,13 @@ export function createHostEntry() {
         paths = context.experimental_paths;
         sessions.add(input.session);
         const path = await ensureDaemon(context);
+        // A running driver keeps an ended label, and only start_session revives it (#1597).
+        if (ended.delete(input.session)) {
+          const start = JSON.stringify({ session: input.session });
+          const argv = ["call", "--socket", path, "start_session", start];
+          const env = driverEnv(home());
+          await run(binary(), argv, { env, timeout: 10_000 }).catch(() => {});
+        }
         const args: Record<string, unknown> = { ...input.args };
         if (SESSION_TOOLS.has(input.tool) && args.session === undefined) args.session = input.session;
         // On failure the driver launches the app as before.
@@ -478,11 +501,13 @@ export function createHostEntry() {
       async release({ session }) {
         if (!sessions.delete(session) || !daemon || !socket) return null;
         if (sessions.size === 0) stopDaemon();
-        else
+        else {
+          ended.add(session);
           await run(binary(), ["call", "--socket", socket, "end_session", JSON.stringify({ session })], {
             env: driverEnv(home()),
             timeout: 10_000,
           }).catch(() => {});
+        }
         return null;
       },
       async describe(input, context) {

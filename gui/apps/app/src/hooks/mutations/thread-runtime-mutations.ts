@@ -9,6 +9,7 @@ import type {
 } from "@cloudroom/server-contract";
 import type { AppCreateThreadRequest } from "@cloudroom/client-core";
 import { BbHttpError, sdk } from "@/lib/sdk";
+import { recoverRemoteCloudSend } from "@/cloud/remote-cloud-send";
 import { retryTransient } from "@/lib/retry-transient";
 import { wsManager } from "@/lib/ws";
 import type { QueuedMessageReorderRequest } from "@/lib/queued-message-reorder";
@@ -16,7 +17,10 @@ import type {
   EditMessageMutationRequest,
   SendThreadMessageMutationRequest,
 } from "./mutation-request-types";
-import { waitForThreadReasoningSave } from "./thread-state-mutations";
+import {
+  THREAD_STOP_MUTATION_KEY,
+  waitForThreadExecutionSave,
+} from "./thread-state-mutations";
 import {
   applyCreateThreadResult,
   applyQueuedMessageCreateResult,
@@ -128,7 +132,7 @@ export function useCreateThread() {
         () =>
           sdk.threads.spawn({
             ...request,
-            origin: request.origin ?? "app",
+            origin: "app",
             originKind: request.originKind ?? null,
             startedOnBehalfOf: request.startedOnBehalfOf ?? null,
           }),
@@ -168,6 +172,7 @@ export function useSendThreadMessage() {
     mutationFn: async ({
       id,
       requestId,
+      recoverCloudDelivery,
       input,
       model,
       serviceTier,
@@ -179,8 +184,8 @@ export function useSendThreadMessage() {
       pluginSubmission,
       executionInputSources,
     }: SendThreadMessageMutationRequest) => {
-      await waitForThreadReasoningSave(queryClient, id);
-      return await sdk.threads.send({
+      await waitForThreadExecutionSave(queryClient, id);
+      const send = () => sdk.threads.send({
         threadId: id,
         ...(requestId ? { requestId } : {}),
         input,
@@ -193,7 +198,10 @@ export function useSendThreadMessage() {
         executionInputSources,
         mode,
         ...(senderThreadId !== undefined ? { senderThreadId } : {}),
+        // Only the message boxes send through here; scripts and agents can still be held as repeats (#264).
+        fromComposer: true,
       });
+      return recoverCloudDelivery && requestId ? recoverRemoteCloudSend(id, requestId, send) : send();
     },
     onMutate: async (variables): Promise<SendThreadMessageTransaction> =>
       beginSendThreadMessageTransaction({
@@ -261,7 +269,7 @@ export function useCreateThreadQueuedMessage() {
       executionInputSources,
       hardQueue,
     }: CreateThreadQueuedMessageMutationRequest): Promise<ThreadQueuedMessage> => {
-      await waitForThreadReasoningSave(queryClient, id);
+      await waitForThreadExecutionSave(queryClient, id);
       return sdk.threads.queuedMessages.create({
         threadId: id,
         input,
@@ -272,6 +280,7 @@ export function useCreateThreadQueuedMessage() {
         executionInputSources,
         ...(senderThreadId !== undefined ? { senderThreadId } : {}),
         ...(hardQueue === true ? { hardQueue } : {}),
+        fromComposer: true,
       });
     },
     onMutate: async (variables): Promise<CreateQueuedMessageTransaction> =>
@@ -455,6 +464,7 @@ export function useStopThread() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    mutationKey: THREAD_STOP_MUTATION_KEY,
     meta: {
       errorMessage: "Failed to stop thread.",
       lifecycleOperation: "stop_thread",
@@ -478,6 +488,14 @@ export function useStopThread() {
     onSettled: (_data, _error, threadId) => {
       settleStopThreadTransaction({ queryClient, threadId });
     },
+  });
+}
+
+/** Compacts now, or right after the turn a busy agent is on. */
+export function useCompactThread() {
+  return useMutation({
+    meta: { errorMessage: "Failed to compact the thread." },
+    mutationFn: (threadId: string) => sdk.threads.compact({ threadId }),
   });
 }
 

@@ -12,7 +12,13 @@ use tokio::process::Command;
 
 /// How long a selected skill waits for a new thread's project copy before the agent is told to look for it.
 const SKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+/// 20261117-113618). Never on commits. Local uses the same line: `PR_FOOTER` in the Claude Code plugin's bridge.
+const PR_FOOTER: &str = "Built with [Cloudroom](https://cloudroom.dev)";
 const INSTRUCTIONS: &str = "Cloudroom owns this cloud session. Ask clarifying questions in ordinary chat, not interactive tools. Start child threads with `room-cli thread spawn` (any harness and model; see `room-cli thread --help`); each gets its own sandbox with a copy of your code (add `--shared-sandbox` to run it in yours), shows under this thread, and Cloudroom messages you when it finishes. Do not use native subagents, workflows, or agent teams. Fast mode is unavailable. Rewinding changes conversation history only, never files.";
+
+/// User settings only and no MCP servers but Cloudroom's, as in `claude_login`.
+const PROBE_SOURCES: [&str; 3] = ["--setting-sources", "user", "--strict-mcp-config"];
 
 pub(super) fn uuid() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -44,9 +50,10 @@ pub(super) fn command(
         None => uuid()?,
     };
     // Claude keeps only the last `--settings`, so every setting goes in one, the Command Guard's hooks included.
-    let mut settings = json!({"fastMode": false, "enableWorkflows": false});
+    // `/loop` and `/schedule` run on Claude's own timers, which are blocked below.
+    let mut settings = json!({"fastMode": false, "enableWorkflows": false, "skillOverrides": {"loop": "off", "schedule": "off"}});
     if strip_ai_co_authors {
-        settings["attribution"] = json!({"commit": "", "pr": ""});
+        settings["attribution"] = json!({"commit": "", "pr": PR_FOOTER});
     }
     // A model-list probe runs no turn, so the user's SessionStart/SessionEnd hooks must not see it (#1014).
     if probe {
@@ -61,6 +68,10 @@ pub(super) fn command(
         command
     };
     profile_env(&mut command, config, profile, false);
+    // A probe ignores the folder's own Claude settings and MCP servers: its env, helpers and hooks (#1958).
+    if probe {
+        command.args(PROBE_SOURCES);
+    }
     command
         .args([
             "-p",
@@ -86,7 +97,8 @@ pub(super) fn command(
         ])
         .args([
             "--disallowedTools",
-            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage",
+            // The last five are Claude's own timers: `room-cli wake` and loops replace them.
+            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage,ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger",
         ])
         .args([
             "--mcp-config",
@@ -249,6 +261,7 @@ pub(super) async fn probe(config: &Config, model: &str, reasoning: Option<&str>)
         "--settings",
         r#"{"disableAllHooks":true}"#,
     ];
+    args.extend(PROBE_SOURCES);
     if let Some(effort) = reasoning.filter(|effort| *effort != "none") {
         args.extend(["--effort", effort]);
     }
@@ -352,6 +365,7 @@ pub(super) fn model_catalog(value: &Value) -> io::Result<Vec<super::Model>> {
                 models.push(super::Model {
                     model: name.into(),
                     reasoning_levels: levels.clone(),
+                    service_tiers: Vec::new(),
                 });
             }
         }
@@ -616,23 +630,30 @@ pub(super) fn fork_source(handle: &Handle, before: &str) -> io::Result<(Resume, 
     let id = handle.native()?;
     let path = transcript(&handle.profile, &id)?;
     let saved = resume(handle, id, path);
-    let parent = checkpoint_parent(&handle.profile, &saved, before, handle.file_identity)?;
+    let parent = fork_checkpoint(&handle.profile, &saved, before, handle.file_identity, false)?;
     Ok((saved, parent))
 }
 
-/// The message a fork of `saved` resumes at: the saved parent of user message `before`.
-pub(super) fn checkpoint_parent(
+/// Resolve an inclusive assistant message or the parent of a user rewind point.
+pub(super) fn fork_checkpoint(
     profile: &HarnessConfig,
     saved: &Resume,
-    before: &str,
+    checkpoint: &str,
     identity: files::Identity,
+    inclusive: bool,
 ) -> io::Result<String> {
     let file = validate(profile, &saved.path, &saved.id, identity)?;
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0))?;
     while let Some(raw) = next_line(&mut reader)? {
         let value: Value = serde_json::from_str(&raw)?;
-        if value["uuid"] == before && value["type"] == "user" && value["isMeta"] != true {
+        if value["uuid"] != checkpoint {
+            continue;
+        }
+        if inclusive && value["type"] == "assistant" && value["isSidechain"] != true {
+            return Ok(checkpoint.to_owned());
+        }
+        if !inclusive && value["type"] == "user" && value["isMeta"] != true {
             let parent = value["parentUuid"].as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -672,6 +693,8 @@ pub(super) struct Protocol {
     compacted: bool,
     bootstrapped: bool,
     close_confirmed: bool,
+    // Core asked Claude to stop (`close`): a turn this cuts ends with Claude's opaque `[ede_diagnostic]` (#1967).
+    closing: bool,
     last_result_failed: bool,
     // Claude's plan limit rejected this turn: when it resets, if Claude said (ms), and whether it is the account's
     // (not one model's own window).
@@ -715,6 +738,7 @@ impl Protocol {
             compacted: false,
             bootstrapped: false,
             close_confirmed: false,
+            closing: false,
             last_result_failed: false,
             limit: None,
             credits: None,
@@ -1054,6 +1078,30 @@ impl Adapter for Protocol {
                 native: None,
             });
         }
+        // Claude sends the transcript UUID on the assistant frame, adjacent to the streamed
+        // block's stop. Only a whole, root text message is an independent fork point.
+        let checkpoint = (kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["error"].is_null()
+            && value["isReplay"] != true)
+            .then(|| value["uuid"].as_str())
+            .flatten()
+            .filter(|id| !id.is_empty());
+        if let Some(uuid) = checkpoint
+            && value["message"]["id"] == self.message_id
+            && let Some([block]) = value["message"]["content"].as_array().map(Vec::as_slice)
+            && block["type"] == "text"
+        {
+            let mut candidates = self
+                .blocks
+                .values_mut()
+                .filter(|item| item["item_type"] == "text" && item["text"] == block["text"]);
+            if let Some(item) = candidates.next()
+                && candidates.next().is_none()
+            {
+                item["provider_checkpoint_id"] = json!(uuid);
+            }
+        }
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
@@ -1147,6 +1195,19 @@ impl Adapter for Protocol {
         {
             events.push(Event::Authentication { accepted: false });
         }
+        // Claude Code only emits `rate_limit_event` when rate-limit state changes and throttles repeat rejections
+        // for 30s, so a back-to-back limited turn reports the limit only on its assistant/result error frames.
+        if kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["isReplay"] != true
+            && value["api_error"] == "usage_limit_reached"
+        {
+            self.limit = merge_limit(self.limit, &value["api_error_params"]["rate_limit_info"]);
+            if self.limit.is_some() {
+                self.overage = None;
+                self.plan_ok_sent = false;
+            }
+        }
         if kind == "assistant"
             && let Some(tokens) = prompt_tokens(&value["message"]["usage"])
             && tokens > 0
@@ -1178,13 +1239,19 @@ impl Adapter for Protocol {
                     if let Some(name) = block["name"].as_str() {
                         self.track(&id, name);
                     }
-                    let part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
+                    let mut part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
                     events.push(Event::Record {
                         kind: "item_started",
                         data: part.clone(),
                         native: None,
                     });
                     if block["type"] != "tool_use" {
+                        if block["type"] == "text"
+                            && content.len() == 1
+                            && let Some(uuid) = checkpoint
+                        {
+                            part["provider_checkpoint_id"] = json!(uuid);
+                        }
                         events.push(Event::Record {
                             kind: "item_completed",
                             data: part,
@@ -1228,8 +1295,11 @@ impl Adapter for Protocol {
         let account_wide = info["rateLimitType"]
             .as_str()
             .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
-        if kind == "rate_limit_event" && info["status"] == "rejected" && !overage {
-            self.limit = Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide));
+        if kind == "rate_limit_event"
+            && info["status"] == "rejected"
+            && let Some(limit) = limit_window(info)
+        {
+            self.limit = Some(limit);
             // The plan coming back after this limit is news again.
             self.overage = None;
             self.plan_ok_sent = false;
@@ -1283,6 +1353,8 @@ impl Adapter for Protocol {
             }
         }
         if kind == "result" {
+            // Clear any armed limit on every result so interrupted or unmatched turns never leak into the next turn.
+            let mut pending_limit = self.limit.take();
             // The next turn, prompted or Claude's own, hears about credits again.
             self.recheck = true;
             self.last_result_failed = value["is_error"] == true;
@@ -1344,9 +1416,21 @@ impl Adapter for Protocol {
                 {
                     events.push(Event::Authentication { accepted: true });
                 }
-                let mut error = (status == "failed").then(|| result_error(value));
-                if let (Some((resets, account_wide)), Some(text)) = (self.limit.take(), &mut error)
-                {
+                // Claude's other errors stay its own; its raw result stays in history either way.
+                let cut = self.closing && value["subtype"] == "error_during_execution";
+                let mut error = (status == "failed").then(|| {
+                    if cut {
+                        "Cloudroom stopped Claude mid-turn, for example to restart its sandbox"
+                            .into()
+                    } else {
+                        result_error(value)
+                    }
+                });
+                if error.is_some() && value["api_error"] == "usage_limit_reached" {
+                    pending_limit =
+                        merge_limit(pending_limit, &value["api_error_params"]["rate_limit_info"]);
+                }
+                if let (Some((resets, account_wide)), Some(text)) = (pending_limit, &mut error) {
                     let mut limited = super::plan_limited("claude-code", resets);
                     if let Event::Record { data, .. } = &mut limited
                         && !account_wide
@@ -1419,6 +1503,7 @@ impl Adapter for Protocol {
         self.capture.more
     }
     fn close(&mut self) -> Vec<Value> {
+        self.closing = true;
         vec![
             json!({"type":"control_request","request_id":"close","request":{"subtype":"interrupt","cancel_queued":true}}),
         ]
@@ -1433,6 +1518,39 @@ impl Adapter for Protocol {
         // Claude preserves the last failed turn's exit code after an acknowledged shutdown.
         code == Some(0) || (self.close_confirmed && self.last_result_failed && code == Some(1))
     }
+}
+
+/// Read `resetsAt` and account-wide scope from a `rate_limit_info` payload, returning `None` when overage covers it.
+/// Only an account-wide window (`five_hour`, `seven_day`, `overage`, or none named) is the account's plan;
+/// a model's own window (such as `seven_day_fable` or `seven_day_opus`) is not.
+fn limit_window(info: &Value) -> Option<(Option<u64>, bool)> {
+    let overage = matches!(
+        info["overageStatus"].as_str(),
+        Some("allowed" | "allowed_warning")
+    );
+    if overage {
+        return None;
+    }
+    let account_wide = info["rateLimitType"]
+        .as_str()
+        .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
+    Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide))
+}
+
+/// Add one limit frame to what this turn already knows. A frame that names no window keeps the known scope, and one
+/// without a reset keeps the known reset, so a sparse repeat never widens a model's limit to the whole account.
+fn merge_limit(known: Option<(Option<u64>, bool)>, info: &Value) -> Option<(Option<u64>, bool)> {
+    let Some((resets, account_wide)) = limit_window(info) else {
+        return known;
+    };
+    let Some((known_resets, known_wide)) = known else {
+        return Some((resets, account_wide));
+    };
+    let named = info["rateLimitType"].is_string();
+    Some((
+        resets.or(known_resets),
+        if named { account_wide } else { known_wide },
+    ))
 }
 
 /// Claude's own words for a failed turn, so receipts show the real cause (ADR 0123).
@@ -1586,6 +1704,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_probe_skips_the_folders_own_claude_settings() {
+        let home = std::env::temp_dir().join("cloudroom-test-1958");
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: home.clone(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: "t".repeat(32),
+            state_dir: home.clone(),
+            repository: home.clone(),
+            api_url: None,
+            store: "test".into(),
+            instance: None,
+            account_home: home,
+            default_harness: super::super::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(1),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+            previous_exit_wait: std::time::Duration::ZERO,
+        };
+        let args = |probe| {
+            let (command, _) =
+                command(&config, &profile, None, None, (false, false), None, probe).unwrap();
+            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_owned()).collect();
+            args.windows(3).any(|w| w == PROBE_SOURCES)
+        };
+        assert!(args(true));
+        assert!(!args(false));
+    }
+
+    #[test]
     fn a_forked_skill_subagent_runs_but_other_subagents_still_fail() {
         let profile = HarnessConfig {
             binary: "claude".into(),
@@ -1653,6 +1806,117 @@ mod tests {
                 notice.map(|d| json!([d["fallback_model"], d["message"]])),
                 expected
             );
+        }
+    }
+
+    #[test]
+    fn only_a_real_usage_limit_marks_the_turn_plan_limited() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        // One failed turn's frames, ending with its result. Returns (usage_limited, error).
+        fn turn(claude: &mut Protocol, frames: Vec<Value>) -> (Option<Value>, String) {
+            claude.active = Some(("u".into(), "r".into()));
+            let mut state = Progress {
+                request: Some("r".into()),
+                ..Default::default()
+            };
+            let mut events = Vec::new();
+            for frame in frames {
+                events.extend(
+                    claude
+                        .receive(&frame, frame.to_string(), &mut state)
+                        .unwrap(),
+                );
+            }
+            let limited = events.iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "usage_limited",
+                    data,
+                    ..
+                } => Some(data.clone()),
+                _ => None,
+            });
+            let error = events.iter().find_map(|event| match event {
+                Event::Finished { error, .. } => error.clone(),
+                _ => None,
+            });
+            (limited, error.unwrap_or_default())
+        }
+        let info = |extra: Value| {
+            let mut info = json!({"rateLimitType":"seven_day_fable","resetsAt":2_000_000_000u64});
+            info.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"rate_limit_info":info})
+        };
+        let assistant = |error: Value, params: Value, text: &str| json!({"type":"assistant","session_id":"s","parent_tool_use_id":null,"error":"rate_limit","api_error":error,"api_error_params":params,"message":{"content":[{"type":"text","text":text}]}});
+        let failed = |text: &str| json!({"type":"result","session_id":"s","subtype":"success","is_error":true,"result":text,"user_message_uuid":"u"});
+
+        // A repeat limit sends no rate_limit_event, only `api_error` on its frames; a model window stays model-only,
+        // even when `status` is missing.
+        for params in [info(json!({"status":"rejected"})), info(json!({}))] {
+            let (limited, error) = turn(
+                &mut claude,
+                vec![
+                    assistant(
+                        json!("usage_limit_reached"),
+                        params,
+                        "You've hit your Fable limit",
+                    ),
+                    failed("You've hit your Fable limit"),
+                ],
+            );
+            let limited = limited.expect("a repeat limit is a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
+            assert!(error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // Temporary throttles share `error: "rate_limit"` but never send `api_error`: not a plan limit.
+        for text in [
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            "Opus is experiencing high load, please use /model to switch to Sonnet",
+        ] {
+            let (limited, error) = turn(
+                &mut claude,
+                vec![assistant(Value::Null, Value::Null, text), failed(text)],
+            );
+            assert!(limited.is_none(), "{text}");
+            assert!(!error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // A limit armed before an unmatched (interrupted) result never labels the next unrelated failure.
+        claude.limit = Some((None, true));
+        let other = json!({"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"user_message_uuid":"other"});
+        claude
+            .receive(&other, other.to_string(), &mut Progress::default())
+            .unwrap();
+        let (limited, _) = turn(&mut claude, vec![failed("boom")]);
+        assert!(limited.is_none());
+        // A sparse frame never widens a known Fable limit or drops its reset, whichever comes first.
+        let limit = json!("usage_limit_reached");
+        let fable = info(json!({"status":"rejected"}));
+        let mut detailed_result = failed("You've hit your Fable limit");
+        detailed_result["api_error"] = limit.clone();
+        detailed_result["api_error_params"] = fable.clone();
+        for frames in [
+            vec![
+                json!({"type":"rate_limit_event","rate_limit_info":fable["rate_limit_info"]}),
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                failed("You've hit your Fable limit"),
+            ],
+            vec![
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                detailed_result,
+            ],
+        ] {
+            let (limited, _) = turn(&mut claude, frames);
+            let limited = limited.expect("still a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
         }
     }
 

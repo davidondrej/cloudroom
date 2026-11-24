@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAppCommandHandler } from "@/components/commands/AppCommandProvider";
 
 export function BackToAppCommandHandler({ routePath }: { routePath: string }) {

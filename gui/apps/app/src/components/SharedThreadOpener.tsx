@@ -1,6 +1,6 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { appToast } from "@/components/ui/app-toast";
 import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import { getThreadRoutePath } from "@/lib/route-paths";

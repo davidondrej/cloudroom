@@ -13,7 +13,10 @@ export interface SelectionAnchor {
 }
 
 export interface MessageProseSelection {
+  /** Trimmed text, plus any context, for Reply and other chat actions. */
   text: string;
+  /** Exactly what the user selected, for Copy. Falls back to `text`. */
+  copyText?: string;
   rect: DOMRect;
   anchorPoint?: SelectionAnchorPoint;
   anchorSide?: SelectionAnchorSide;
@@ -96,15 +99,18 @@ function isSelectionBoundarySpillWithinNode(
 
 function toMessageProseSelection({
   anchor,
+  copyText,
   rect,
   text,
 }: {
   anchor: SelectionAnchor | null;
+  copyText?: string;
   rect: DOMRect | null;
   text: string;
 }): MessageProseSelection | null {
   if (text.length === 0 || rect === null) return null;
   const selection: MessageProseSelection = { text, rect };
+  if (copyText !== undefined) selection.copyText = copyText;
   if (anchor !== null) {
     selection.anchorPoint = anchor.point;
     selection.anchorSide = anchor.side;
@@ -176,9 +182,14 @@ function readSelectionWithinNode(
     commonAncestorContainer: range.commonAncestorContainer,
   });
   if (accepted) {
-    const text = selection.toString().trim();
+    const copyText = selection.toString();
     const rect = firstClientRect(range);
-    return toMessageProseSelection({ anchor, rect, text });
+    return toMessageProseSelection({
+      anchor,
+      copyText,
+      rect,
+      text: copyText.trim(),
+    });
   }
 
   const text = selection.toString().trim();

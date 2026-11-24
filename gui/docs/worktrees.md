@@ -30,9 +30,10 @@ branch. Under the hood it's `git worktree add` plus some bookkeeping:
   `jsconfig.json`, or with `--no-tsconfig`, `--incremental`, or `--tsgo`.
   Upgrade to `svelte-check` 4.7.0 or later
   ([upstream fix](https://github.com/sveltejs/language-tools/issues/3034)).
-- Once every thread using it is archived, Cloudroom saves its work to its
-  branch and removes the folder. Unarchiving a thread or sending it a message
-  brings the folder back at the same path. See Cleanup.
+- Once every thread using it is archived, or nobody has used it for a while,
+  Cloudroom saves its work to its branch and removes the folder. Unarchiving
+  a thread or sending it a message brings the folder back at the same path.
+  See Cleanup.
 
 Worktrees are created by bb's built-in **Worktree** plugin, which is enabled by
 default. Disabling it in Settings → Plugins leaves existing worktrees alone
@@ -61,10 +62,16 @@ Omit `--base-branch` for bb's smart default. Explicit values are exact:
 `room-cli thread worktree` moves a Local thread out of the project checkout
 into a new managed worktree, starting from its current commit. It keeps its ID
 and chat; the move happens when its current turn ends, and messages wait until
-it finishes. Uncommitted files stay behind unless the agent names them with
+it finishes. When a running agent moves itself, Cloudroom resumes it in the new
+worktree automatically once the move completes (unless you stopped the thread or
+queued a message). Uncommitted files stay behind unless the agent names them with
 `--carry`, since other agents may share the checkout. Carried files land before
-`.bb-env-setup.sh` runs. Claude Code and Codex threads only for now: Pi resumes
-in its old folder. To fork into a new thread instead, use
+`.bb-env-setup.sh` runs, so it can read them. The hooks themselves come from
+where the thread branched off its base branch, not from its commits or carried
+files (see below). It works for every agent. Claude Code and Codex keep their
+native session. Any other agent starts a fresh session in the worktree and gets
+the chat as hidden context, without tool output; a provider opts out of that
+with `resumesInNewFolder`. To fork into a new thread instead, use
 `room-cli thread fork --new-environment worktree`.
 
 ## Copy local files with `.worktreeinclude`
@@ -107,12 +114,31 @@ Contract:
 
 ## Run setup with `.bb-env-setup.sh`
 
-Drop a file named `.bb-env-setup.sh` at the root of your project. If bb finds
-one after an environment provider creates a path it owns (`ownsPath: true`), bb
-runs the script inside that path before handing the thread to the agent. Core
-owns this policy for every provider. Attaching a project checkout or personal
-workspace (`ownsPath: false`) does not run either hook. Provider-specific
-preparation, including `.worktreeinclude` copying, finishes before setup starts.
+Commit a file named `.bb-env-setup.sh` at the root of your project. After an
+environment provider creates a path it owns (`ownsPath: true`), bb runs it there
+before handing the thread to the agent. Core owns this policy for every
+provider. Attaching a project checkout (`ownsPath: false`) or a personal
+workspace does not run either hook. Provider-specific preparation, including
+`.worktreeinclude` copying, finishes before setup starts.
+
+Hooks run outside every sandbox, and a sandboxed agent can change any file in
+its folder. So bb never runs the copy in the folder:
+
+- At the environment's first setup, before any agent runs there, bb reads
+  `.bb-env-setup.sh` and `.bb-env-teardown.sh` from Git, as committed where the
+  environment branched off its base branch, and saves both in its data folder.
+  Only these copies ever run.
+- For a new worktree that is its start commit. For a fork or a move it is where
+  the source branched off its base branch, so the source's uncommitted files,
+  its agent's commits, carried files and `.worktreeinclude` copies never count.
+  A base that names no branch here falls back to the default branch.
+- So a hook added or edited only in a thread's worktree, or committed only on
+  its branch, does not run. Commit it to the base branch. An edit made after an
+  environment was set up applies to new environments, not that one; the
+  provisioning transcript says when the folder's copy differs.
+- This protects which script runs. A hook that runs other files from the folder
+  (`./scripts/setup.sh`, `source`, `pnpm install` reading `package.json`
+  scripts) runs whatever is there, so keep teardown self-contained.
 
 Use it for anything the agent will need in a fresh checkout — install
 dependencies, sync local state, generate tokens, etc. To bring local files in
@@ -127,7 +153,10 @@ pnpm install
 
 Contract:
 
-- The script runs with `env bash`, working directory set to the new worktree.
+- The script runs like `bash ./.bb-env-setup.sh` from the root of the new
+  worktree: the working directory is that root, and `$0` and `BASH_SOURCE` are
+  `./.bb-env-setup.sh`, so `dirname "$0"` gives the root until the script
+  changes directory. Save `$PWD` at the top if you need the root later.
 - stdin is closed. stdout and stderr stream into the thread's provisioning
   transcript in the app.
 - A non-zero exit, a signal, or a timeout (15 minutes) fails provisioning and
@@ -148,13 +177,31 @@ worktree it made and removes the ones nothing is using:
   checked again every hour.
 - Unarchiving the thread or sending it a message rebuilds the worktree at the
   same path from that branch. Saved changes come back uncommitted, `private/`
-  comes back, and `.worktreeinclude` files are copied again. Dependencies and
-  build output are not kept, so reinstall them.
+  comes back, and `.worktreeinclude` files are copied again. Other ignored
+  files of the worktree's own, like a `.env` you made there, come back too, up
+  to 200 MB. Dependencies and build output are not kept (`node_modules`,
+  `.venv`, `.next`, `.turbo`, and folders a tool tagged as a cache, like Rust's
+  `target`), so reinstall them. The setup script does not run again; the agent
+  is told its folder was rebuilt.
+  Unarchiving while the folder is still being removed waits for that
+  (up to 20 s), then rebuilds it. If the removal failed, unarchive waits
+  for its retry a minute later.
+- A worktree nobody uses is parked the same way while its threads stay open
+  ([ADR](../../docs/adr/20261121-215228-park-unused-worktrees-under-open-threads.md)).
+  Below 30 GB free, that is one unused for a day, longest unused first, until
+  50 GB is free. Unused means no thread in it ran or was changed, nothing
+  sent it a message, opened a terminal in it, forked it or Teleported it, no
+  terminal is open in it, and no process runs in it. Only looking at a thread
+  doesn't count. A pinned thread keeps its worktree, and so does a worktree
+  with a teardown script or with more than 200 MB of its own ignored files.
+  Not on Windows, which can't see what runs in a folder. The thread shows
+  "Parked"; its next message, a terminal, a fork or a Teleport brings the
+  folder back.
 - Deleting the last thread removes the worktree for good. The branch stays.
-  A thread can't be restored while its worktree is being removed.
 - Worktrees on other machines ("Run threads here") are removed 3 days after
   their last thread is archived, without saving first.
 - Settings shows how much disk worktrees use. Below 10 GB free, the app warns.
+  Below 30 GB free, no spare worktrees are prebuilt.
 - Teleporting the last thread to Cloud removes the local worktree after 2 days.
 
 Removal runs `.bb-env-teardown.sh` inside the worktree first, then stops
@@ -172,7 +219,9 @@ move your own shells out of the worktree first if you want to keep them.
 
 Commit a file named `.bb-env-teardown.sh` at the project root when setup
 creates resources outside the worktree. For example, the script can remove a
-database, a proxy registration, a container, or a port reservation.
+database, a proxy registration, a container, or a port reservation. bb runs the
+copy it saved at the environment's first setup (see above), never the one in
+the worktree.
 
 ```bash
 #!/usr/bin/env bash
@@ -185,8 +234,11 @@ Contract:
 
 - bb runs the script before calling a provider to remove a path it owns,
   including cleanup after failed setup. Attached paths do not run it.
-- bb runs `env bash .bb-env-teardown.sh` from the worktree before it removes
-  the worktree, so the script can read tracked and generated files.
+- bb runs the saved script like `bash ./.bb-env-teardown.sh` from the
+  worktree root before it removes the worktree, so the script can read tracked
+  and generated files.
+- An environment set up before bb saved hooks from Git has no saved copy: its
+  teardown is skipped, and the server log says so.
 - stdin is closed. bb records stdout and stderr in the server lifecycle logs.
 - The script gets a separate 15-minute timeout.
 - A non-zero exit, a signal, or a timeout reports a failure. It never stops bb
@@ -212,8 +264,9 @@ A few quick checks:
    invalid base branch, conflicting branch name) show up there with the exact
    git error.
 2. If `.bb-env-setup.sh` doesn't seem to run, make sure it's committed to
-   the branch you're working from. A file that exists only in the working
-   copy of your main checkout won't appear in the new worktree.
+   the base branch the worktree starts from. A file that exists only in the
+   working copy of your main checkout, or only on a thread's branch, doesn't
+   run. The provisioning transcript says when it skipped or replaced one.
 3. If your setup script hangs, remember stdin is closed. Anything that
    prompts for input will time out at 15 minutes.
 4. Run `bash .bb-env-setup.sh` manually in a clean clone to verify it works
@@ -225,7 +278,8 @@ A few quick checks:
 
 Core applies the same setup and teardown policy when a project checkout is freshly
 cloned onto a new machine and the environment provider reports that it owns the
-checkout. `.bb-env-setup.sh` must succeed before the environment is ready.
+checkout. The hooks come from Git where the checkout's HEAD meets its default
+branch. `.bb-env-setup.sh` must succeed before the environment is ready.
 `.bb-env-teardown.sh` runs before removal with its own 15-minute timeout; a failure
 is reported but does not prevent removal. A user-maintained checkout attached to
 BB remains unowned and runs neither hook.

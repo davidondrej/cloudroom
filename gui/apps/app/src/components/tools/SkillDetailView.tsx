@@ -17,7 +17,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@cloudroom/shared-ui/tooltip";
-import { FilePreview } from "@/components/secondary-panel/FilePreview.js";
+import { FilePreview } from "@/components/right-panel/tabs/file-preview";
 import { ProvenancePill } from "@/components/tools/ProvenancePill";
 import { useClipboardCopy } from "@/lib/clipboard";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing";

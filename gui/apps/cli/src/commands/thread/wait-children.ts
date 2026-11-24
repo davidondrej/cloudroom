@@ -1,4 +1,5 @@
 import type { ThreadListEntry } from "@cloudroom/domain";
+import { retryConnectionReset } from "@cloudroom/sdk";
 import { CliExitError } from "../../action.js";
 import type { createCliRoomSdk } from "../../client.js";
 import { truncateCell } from "../../table.js";
@@ -46,11 +47,14 @@ export async function waitForChildren(
   const deadline = Date.now() + args.timeoutMs;
   const queuedSince = new Map<string, number>();
   for (;;) {
-    const threads = await args.sdk.threads.list({
-      parentThreadId,
-      archived: false,
-      includeHidden: true,
-    });
+    // A brief connection reset must not end the wait while children run (#2283).
+    const threads = await retryConnectionReset(deadline, () =>
+      args.sdk.threads.list({
+        parentThreadId,
+        archived: false,
+        includeHidden: true,
+      }),
+    );
     const children = threads.map((child) => ({
       id: child.id,
       state: childState(child),
@@ -102,9 +106,9 @@ export async function waitForChildren(
         }
         if (child.state !== "needs input") continue;
         // Name the exact next command: a blocked child otherwise waits for hours.
-        const interactions = await args.sdk.threads.interactions.list({
-          threadId: child.id,
-        });
+        const interactions = await retryConnectionReset(deadline, () =>
+          args.sdk.threads.interactions.list({ threadId: child.id }),
+        );
         for (const interaction of interactions) {
           if (interaction.status !== "pending") continue;
           console.log(

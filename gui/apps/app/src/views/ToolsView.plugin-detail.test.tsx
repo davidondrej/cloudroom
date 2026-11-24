@@ -18,7 +18,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
-} from "react-router-dom";
+} from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EMPTY_PLUGIN_UPDATE_STATE,

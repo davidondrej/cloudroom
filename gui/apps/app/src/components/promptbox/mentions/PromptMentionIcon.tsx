@@ -15,7 +15,7 @@ export function ThreadLocationIcon({
   return (
     <Icon
       name={isCloud ? "Cloud" : "Laptop"}
-      className={cn(className, isCloud && "text-primary [&_path]:stroke-[1.9]")}
+      className={cn(className, isCloud && "cloud-icon")}
       aria-hidden
     />
   );

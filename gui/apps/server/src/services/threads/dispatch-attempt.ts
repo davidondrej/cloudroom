@@ -20,6 +20,7 @@ import {
 } from "@cloudroom/db";
 import {
   promptInputSchema,
+  type ClientTurnRequestId,
   type PromptInput,
   type QueuedMessagePayload,
   type QueuedMessageWaitingOn,
@@ -59,6 +60,7 @@ import {
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
+  holdUnconfirmedQueuedMessage,
   recordQueuedMessageWait,
   settleQueueRowDispatched,
   type QueuedDispatchMessage,
@@ -97,6 +99,7 @@ import { restoreInterruptedThreadStartupRequest } from "./thread-provisioning.js
 import { isHardQueueHeld } from "./thread-parent.js";
 import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { checkRepeatedMessage } from "./repeated-message-guard.js";
+import { failureHold } from "./turn-failed.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 
@@ -517,6 +520,17 @@ async function runDispatchAttempt(
       return;
     }
 
+    // A message from another thread waits out a failed login instead of
+    // starting a turn that fails the same way and wakes the parent (#2019).
+    if (
+      !sendNow &&
+      senderThreadId !== null &&
+      failureHold(deps.db, thread) === "sign-in"
+    ) {
+      continued.outcome = waitOn({ kind: "thread-busy" }, null);
+      return;
+    }
+
     if (thread.status === "stopping") {
       // A Stop caught this older row; it must not gain permission to resume.
       continued.outcome = waitOn(
@@ -625,7 +639,8 @@ async function runDispatchAttempt(
       !sendNow &&
       !firstDispatch &&
       attempt === "start-turn" &&
-      args.queuePayload.kind === "inline"
+      args.queuePayload.kind === "inline" &&
+      !args.queuePayload.fromComposer
     ) {
       const repeat = checkRepeatedMessage(deps.db, {
         input: payload.input,
@@ -763,17 +778,34 @@ async function runDispatchAttempt(
     return reattempt(afterWait);
   }
   let saving = false;
+  let savedRequestId: ClientTurnRequestId | undefined;
   try {
     await sendThreadMessage(deps, {
       environment,
       payload: resolvedPayload,
       thread,
       trigger: args.trigger,
-      onStartSettled: args.onStartSettled,
+      onStartSettled: (error) => {
+        args.onStartSettled?.(error);
+        // The computer dropped after the turn was sent: it may still have it,
+        // so the consumed row comes back held, never sent by itself (#2279).
+        if (
+          claimed !== null &&
+          savedRequestId !== undefined &&
+          isHostUnavailableApiError(error)
+        ) {
+          holdUnconfirmedQueuedMessage(deps, {
+            claimed,
+            requestId: savedRequestId,
+            retryOf: args.retryOf,
+          });
+        }
+      },
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
       ...(claimed !== null && !sendNow ? { queueDelivered: claimed.id } : {}),
       beforeAppendInTransaction: ({ tx, requestId }) => {
         saving = true;
+        savedRequestId = requestId;
         args.beforeDispatch?.(requestId);
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();

@@ -725,13 +725,17 @@ export function prepareRuntimeShellEnv(
     shellEnv[POWERSHELL_EXECUTION_POLICY_VARIABLE] =
       options.powershellExecutionPolicy;
   }
+  const windows = (options.platform ?? process.platform) === "win32";
   // PowerShell can't run the extensionless ROOM_CLI; this launcher can (#1052).
   const roomCliCmd = `${roomExecutablePath}.cmd`;
-  if (
-    (options.platform ?? process.platform) === "win32" &&
-    existsSync(roomCliCmd)
-  ) {
+  if (windows && existsSync(roomCliCmd)) {
     shellEnv.ROOM_CLI_CMD = roomCliCmd;
   }
+  // The app's own Python, for skill scripts: Windows' `python3` is often the Store alias (#2358).
+  const python = resolve(
+    options.bbExecutableDirectory,
+    "../../server/dist/assets/python/python.exe",
+  );
+  if (windows && existsSync(python)) shellEnv.ROOM_PYTHON = python;
   return shellEnv;
 }

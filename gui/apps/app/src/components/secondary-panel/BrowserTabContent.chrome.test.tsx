@@ -18,7 +18,7 @@ import {
   createNoopDesktopBrowserApi,
 } from "@/test/room-desktop-test-utils";
 import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
-import { BrowserTabContent } from "./BrowserTabContent";
+import { BrowserTabContent } from "@/components/right-panel/tabs/browser-tab";
 
 function NativeBrowserProbe() {
   return (

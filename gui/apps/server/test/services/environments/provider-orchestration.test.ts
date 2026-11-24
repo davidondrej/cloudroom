@@ -443,6 +443,7 @@ describe("core environment orchestration", () => {
     async (ownsPath) =>
       withTestHarness(async (harness) => {
         const order: string[] = [];
+        const hookEnvironmentIds: string[] = [];
         const fixture = setup(harness, {
           policy: { retireGraceMs: 0 },
           create: async () => {
@@ -461,6 +462,7 @@ describe("core environment orchestration", () => {
             expect(command.timeoutMs).toBe(15 * 60 * 1000);
             expect(command.path).toBe("/tmp/hooks");
             order.push(command.kind);
+            hookEnvironmentIds.push(command.environmentId);
           },
         });
         fixture.ask();
@@ -474,8 +476,37 @@ describe("core environment orchestration", () => {
         expect(order).toEqual(
           ownsPath ? ["create", "teardown", "remove"] : ["create", "remove"],
         );
+        // The daemon runs only the hooks it saved for this environment.
+        expect(hookEnvironmentIds).toEqual(ownsPath ? [environmentId] : []);
       }),
   );
+
+  it("runs no teardown hook for a personal workspace, which has no repository to read hooks from", async () =>
+    withTestHarness(async (harness) => {
+      const hooks = vi.fn(async () => {});
+      const remove = vi.fn(async () => ({ status: "removed" as const }));
+      const fixture = setup(harness, {
+        id: "personal-workspace",
+        policy: { retireGraceMs: 0 },
+        create: async () => ({
+          status: "created",
+          path: "/tmp/personal",
+          ownsPath: true,
+        }),
+        remove,
+      });
+      registerTestHostRpcCapture(harness.deps, {
+        hostId: fixture.host.id,
+        sessionId: fixture.session.id,
+        onEnvironmentHook: hooks,
+      });
+      fixture.ask();
+      await fixture.settled();
+      const environmentId = fixture.attach();
+      await sweepProviderEnvironment(harness.deps, environmentId);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(hooks).not.toHaveBeenCalled();
+    }));
 
   it("reports teardown transport failure and still removes the environment", async () =>
     withTestHarness(async (harness) => {
@@ -1206,6 +1237,76 @@ describe("core environment orchestration", () => {
         target.id,
       );
     }));
+
+  it.each(["alone", "with an archived thread still stopping"])(
+    "keeps a personal workspace's files when its thread moves to an existing checkout, %s (#1955)",
+    async (sharing) =>
+    withTestHarness(async (harness) => {
+      const remove = vi.fn(async () => ({ status: "removed" as const }));
+      const fixture = setup(harness, {
+        id: "personal-workspace",
+        policy: { retireGraceMs: 0 },
+        remove,
+      });
+      fixture.ask();
+      await fixture.settled();
+      const currentId = fixture.attach();
+      updateThread(harness.db, harness.hub, fixture.thread.id, {
+        environmentId: currentId,
+      });
+      const stopping =
+        sharing === "alone"
+          ? null
+          : seedThread(harness.deps, {
+              projectId: fixture.context.project.id,
+              environmentId: currentId,
+            });
+      const setStopping = (status: "stopping" | "idle") =>
+        stopping !== null &&
+        harness.db
+          .update(threads)
+          .set({ archivedAt: Date.now(), status })
+          .where(eq(threads.id, stopping.id))
+          .run();
+      setStopping("stopping");
+      const checkout = createEnvironment(harness.db, harness.hub, {
+        projectId: fixture.context.project.id,
+        hostId: fixture.host.id,
+        path: "/tmp/existing-checkout",
+        status: "ready",
+        providerOwnsPath: false,
+        environmentProvider: null,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: currentId,
+        providerThreadId: "provider_personal_move",
+        sequence: 1,
+        threadId: fixture.thread.id,
+        turnId: "turn_personal_move",
+      });
+      const result = await handleUpdateEnvironmentDirectoryToolCall(
+        harness.deps,
+        {
+          currentEnvironment: getEnvironment(harness.db, currentId)!,
+          thread: { ...fixture.thread, environmentId: currentId },
+          turnId: "turn_personal_move",
+          input: { path: checkout.path! },
+        },
+      );
+      expect(result.success).toBe(true);
+      expect(getThread(harness.db, fixture.thread.id)?.environmentId).toBe(
+        checkout.id,
+      );
+      await sweepProviderLifecycles(harness.deps);
+      setStopping("idle");
+      await sweepProviderLifecycles(harness.deps);
+      expect(remove).not.toHaveBeenCalled();
+      expect(getEnvironment(harness.db, currentId)).toMatchObject({
+        status: "ready",
+        teardownStatus: null,
+      });
+    }),
+  );
 
   it.each(["removal", "cancellation"])(
     "queues same-host %s cleanup and waits for the bounded batch",

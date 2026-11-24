@@ -1,0 +1,1 @@
+ALTER TABLE `queued_thread_messages` ADD `from_composer` integer DEFAULT false NOT NULL;

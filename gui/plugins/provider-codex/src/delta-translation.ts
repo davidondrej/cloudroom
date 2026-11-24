@@ -80,6 +80,8 @@ interface CodexShownTerminalError {
 
 interface CodexEventTranslationState {
   rateLimitsByLimitId: Map<string, CodexRateLimitSnapshot>;
+  /** Codex sent account/rateLimits/updated; a later startup read is stale. */
+  codexSentRateLimits: boolean;
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
   lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
@@ -89,6 +91,7 @@ interface CodexEventTranslationState {
 export function createCodexEventTranslationState(): CodexEventTranslationState {
   return {
     rateLimitsByLimitId: new Map(),
+    codexSentRateLimits: false,
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
     lastTerminalErrorByThreadId: new Map(),
@@ -286,6 +289,25 @@ type CodexRateLimitCandidate = {
   nonResettableBlock: boolean;
   rateLimits: ProviderRateLimitState;
 };
+
+/** The usual rate-limit event for the current state, worst bucket first. */
+export function codexRateLimitsDelta(
+  state: CodexEventTranslationState,
+): ThreadDelta[] {
+  let worst: ProviderRateLimitState | undefined;
+  for (const limitId of state.rateLimitsByLimitId.keys()) {
+    const rateLimits = normalizeCodexRateLimits(state, limitId);
+    if (
+      worst === undefined ||
+      rateLimitStatusRank(rateLimits.status) > rateLimitStatusRank(worst.status)
+    ) {
+      worst = rateLimits;
+    }
+  }
+  return worst === undefined
+    ? []
+    : [{ kind: "provider.rateLimits", rateLimits: worst }];
+}
 
 function normalizeCodexRateLimits(
   state: CodexEventTranslationState,
@@ -577,6 +599,25 @@ const BARE_BAD_REQUEST_PATTERN =
 const BAD_REQUEST_RECOVERY =
   "Send a message to try again. If it keeps failing, start a new thread.";
 const BARE_BAD_REQUEST_NOTE = `The model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID. ${BAD_REQUEST_RECOVERY}`;
+/**
+ * The account can't use the thread's model (anymore), as when a ChatGPT plan
+ * drops one. Codex tags it `other`, `badRequest`, or nothing, so one code lets
+ * the server reload the agent's models (#2009).
+ */
+const UNSUPPORTED_MODEL_PATTERN =
+  /model is not supported when using Codex with a ChatGPT account/iu;
+const UNSUPPORTED_MODEL_NOTE =
+  "This account can't use this model now. Pick another one in the model picker (or `room-cli thread update <thread> --model <model>`), then send again. A loop that starts new threads keeps its own model: change it in the loop's Agent setting (or `room-cli loop update <loop> --project <project> --model <model>`).";
+/**
+ * Before each model request, Codex asks chatgpt.com which workspace backend to
+ * use. Each thread's Codex keeps the answer in memory, so one thread can work
+ * while a restarted one can't get an answer (#2426). The 401 variant is handled
+ * separately (#2206).
+ */
+const ROUTING_DISCOVERY_PATTERN =
+  /\bworkspace routing discovery (?:timed out|failed)\b/iu;
+const ROUTING_DISCOVERY_NOTE =
+  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree. The chat is kept: send again to retry. If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
 
 function codexProviderErrorDelta(
   state: CodexEventTranslationState,
@@ -595,6 +636,17 @@ function codexProviderErrorDelta(
       httpStatusCode: null,
     };
   }
+  const unsupportedModel =
+    willRetry !== true &&
+    (errorInfo?.providerCode === "modelNotFound" ||
+      UNSUPPORTED_MODEL_PATTERN.test(error.message));
+  if (unsupportedModel) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: "modelNotFound",
+      httpStatusCode: errorInfo?.httpStatusCode ?? null,
+    };
+  }
   return {
     kind: "provider.error",
     message: "Provider error",
@@ -605,6 +657,13 @@ function codexProviderErrorDelta(
         ? error.additionalDetails
           ? BAD_REQUEST_RECOVERY
           : BARE_BAD_REQUEST_NOTE
+        : null,
+      unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
+      willRetry !== true &&
+      ROUTING_DISCOVERY_PATTERN.test(
+        `${error.message}\n${error.additionalDetails ?? ""}`,
+      )
+        ? ROUTING_DISCOVERY_NOTE
         : null,
     ]
       .filter(Boolean)
@@ -916,7 +975,13 @@ function summarizeCollabAgentsStates(
   agentsStates: Record<string, unknown>,
 ): string | undefined {
   const lines = Object.entries(agentsStates).map(([agentThreadId, state]) => {
-    const rendered = typeof state === "string" ? state : JSON.stringify(state);
+    let rendered: string | undefined;
+    try {
+      rendered = typeof state === "string" ? state : JSON.stringify(state);
+    } catch {
+      // Provider JSON can nest beyond JSON.stringify's stack limit.
+      rendered = "[state too deeply nested]";
+    }
     return `${agentThreadId}: ${rendered}`;
   });
   return lines.length > 0 ? lines.join("\n") : undefined;
@@ -1311,6 +1376,7 @@ export function translateCodexEventToDeltas(
   const handledEvent: CodexHandledEvent = parsed.data;
   switch (handledEvent.method) {
     case "account/rateLimits/updated": {
+      state.codexSentRateLimits = true;
       const rateLimits = applyCodexRateLimitUpdate(
         state,
         handledEvent.params.rateLimits,

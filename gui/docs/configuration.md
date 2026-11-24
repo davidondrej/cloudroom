@@ -98,6 +98,7 @@ signals it, so a stale file left by a crash cannot stop an unrelated process.
 | `BB_TRANSCRIPTION`             | `config.json`                                      | Optional                | Voice transcription model in `<service>/<model>` format: a plugin-registered AI service (`codex` with the codex plugin; audio up to 5MB) or `openai/<model>` with `OPENAI_API_KEY`. Defaults to `codex/gpt-transcribe`.                                                                                                                                                                                        |
 | `BB_MARKETPLACE_URL`           | `env.json`, or environment                         | Startup-only testing    | Manifest URL of the reserved `bb-community` plugin marketplace. It defaults to `https://getbb.app/marketplace/v2/marketplace.json`. If the default v2 request returns 404, the server requests v1. Set another URL to test catalog refreshes. The server requests that URL without fallback. It changes only `bb-community`. Add other marketplaces with `bb marketplace add`. Restart the app after a change. |
 | `BB_SERVER_URL`                | `config.json`                                      | Remote CLI/host use     | Server URL for standalone `bb` CLI and `host-daemon` commands on the current machine. The CLI defaults to `http://127.0.0.1:38886` when unset.                                                                                                                                                                                                                                                                 |
+| `BB_ALLOW_INSECURE_SERVER_URL` | `env.json`, or environment                         | Compatibility only      | Set to `1` to allow a non-loopback `http://` server URL: on the server, for machine install commands; on a machine, for enrollment and its host daemon. Keys and session traffic then travel unencrypted, so use it only on a trusted network. Without it they refuse. |
 | `BB_SERVER_BIND_HOST`          | `env.json`, environment, or `--server-bind-host`   | Startup-only            | Server listener host. Defaults to `127.0.0.1`; accepts only `127.0.0.1` or `0.0.0.0`. A full launcher or desktop app restart is required; until then, a previous `0.0.0.0` listener remains exposed.                                                                                                                                                                        |
 | `BB_SERVER_PORT`               | `env.json`, environment, or `--server-port`        | Startup-only            | HTTP listener port. Defaults to `38886`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                                   |
 | `BB_HOST_DAEMON_PORT`          | `env.json`, environment, or `--host-daemon-port`   | Startup-only            | Local host-daemon API port. Defaults to `38887`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                           |
@@ -137,7 +138,8 @@ level picker and an all-or-selected host picker. Levels:
 - `working` (default): while a Local thread runs on a host, and for 10 minutes
   after, macOS runs `/usr/bin/caffeinate -i -s -w <worker-pid>`. The screen can
   still turn off. The plugin checks running threads on every thread status
-  change and once a minute.
+  change and once a minute. A thread waiting over an hour on a question or
+  approval stops counting. If the check fails, awake hosts stay awake.
 - `always`: `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while Cloudroom runs,
   so the screen stays on too.
 
@@ -159,7 +161,9 @@ room-cli keep-awake hosts <host-id>...
 The **Remove AI co-authors** toggle in Settings → Defaults defaults to on. Cloudroom
 adds a Git config hook to every process it starts, so commits drop agent
 `Co-authored-by` lines (Claude, Cursor, Codex, Copilot, Gemini, and similar) and
-keep human ones. It also turns off Claude Code's own commit and PR attribution.
+keep human ones. It also turns off Claude Code's own commit attribution, and
+ends the pull requests Claude Code opens with `Built with [Cloudroom](https://cloudroom.dev)`
+in place of Claude's own line ([ADR](../../docs/adr/20261117-113618-built-with-cloudroom-pr-footer.md)).
 The hook needs Git 2.54 or newer; older Git ignores it. When it removes a line,
 it prints one line to stderr naming the setting below. In Cloud it only touches
 real repositories: the session's own (any worktree or submodule), `/repos/<name>`,
@@ -227,22 +231,24 @@ Archiving a thread saves its worktree's work to its branch and removes the
 folder; unarchiving the thread or sending it a message brings it back. There
 is no setting. See [Worktrees](worktrees.md#cleanup).
 
-Settings → Agents → Harness lists every registered agent provider in picker order.
-Move a provider up or down to change the order and choose the default for new
-threads. Both are persisted preferences: `providerOrder` is the list of ids
-that lead the picker (ids not listed follow in plugin install order, and an id
-that names no registered provider is ignored) and `defaultProviderId` is the
-provider new threads use when neither the caller nor the project chose one
-(`null` means the first available provider in picker order). Set them with
-`bb settings general providerOrder '["claude-code","codex"]'` and
-`bb settings general defaultProviderId claude-code` (or `null`).
+Settings → Agents → Harness lists every registered agent provider in picker order:
+the default first, then the providers you started the most threads with in the
+last 72 hours, then the rest in plugin install order. Drag a row to set your own
+order instead (`customProviderOrder`; Picker order → Most used, or `[]`, goes
+back). `defaultProviderId` is the provider new threads use when neither the
+caller nor the project chose one (`null` means the first available provider in
+picker order). Set it with `bb settings general defaultProviderId claude-code`
+(or `null`).
 
 Each provider row also shows its login on this Mac and in the Cloud (Log in or
 Connect when missing), its CLI version, the Auto-update switch
-(`providerAutoUpdate`), and its update status (Update, Retry, or a check).
-With Auto-update on, Cloudroom checks every 10 minutes and updates at once,
-even while threads run; a failed update retries after an hour. Native Claude
-Code installs compare against Claude's own release channel, not npm.
+(`providerAutoUpdate`), and its update status.
+With Auto-update on, Cloudroom checks connected machines on startup, on
+reconnect, and every two minutes. It installs updates as soon as it finds them,
+even while threads run. Settings shows progress. A failed update retries
+on the first check at least two minutes later. After two failures, the sidebar
+offers Retry and automatic checks retry that version hourly. Standalone Codex and native Claude Code use their
+own release channels.
 The switch is off by default and shows for agents whose newest version
 Cloudroom can read: npm CLIs and Cursor (from its install script).
 Agents that can be installed but are not appear under "Not installed" with an
@@ -347,7 +353,7 @@ delayed shortcut badges without disabling any shortcuts.
 | --------- | ----------------------------------------- | --------------------------------- | ------------------------ |
 | Palette   | Quick palette                             | `Mod+Shift+P`                     | All clients              |
 | Threads   | New thread                                | `Mod+N` / `Mod+Shift+O`           | Desktop / web            |
-| Threads   | Search threads                            | `Mod+K`                           | All clients              |
+| Threads   | Search threads                            | `Mod+K` / `Mod+F`                 | All clients              |
 | Threads   | Rename focused thread                     | Unassigned                        | Thread view              |
 | Threads   | Archive focused thread                    | `Mod+W`                           | Thread view              |
 | Threads   | Previous / next thread                    | Surface defaults above            | Desktop / web            |
@@ -427,7 +433,7 @@ CLI is on PATH and can be launched as `grok agent stdio`, and
 Devin's `devin` CLI is on PATH, `acp-droid` when Factory's `droid` CLI is on PATH
 (launched as `droid exec --output-format acp`), `acp-kilo` when Kilo Code's `kilo` CLI is on PATH
 (launched as `kilo acp`), `acp-cline` when the `cline` CLI is on PATH (launched as
-`cline --acp`), and `acp-kimi` when Kimi Code's `kimi` CLI is on PATH (launched as `kimi acp`). `acp-cursor` is always listed.
+`cline --acp`), `acp-kimi` when Kimi Code's `kimi` CLI is on PATH (launched as `kimi acp`), and `acp-agent-zero` when Agent Zero's `a0` CLI is on PATH (launched as `a0 acp`; it bridges to your Agent Zero server). `acp-cursor` is always listed.
 
 Add your own agent through the ACP providers plugin's `customAgents` setting,
 which holds a JSON array. In the app it is the multi-line editor on the
@@ -443,7 +449,7 @@ Each entry needs `id` (lowercase letters, digits and dashes), `displayName`,
 and `command`. bb derives the provider id `acp-<id>`; it never changes once a
 thread has used it. An id bb always lists (`cursor`) is reserved; an id bb
 lists only where the agent is installed (`opencode`, `omp`, `grok`,
-`hermes-agent`, `devin`, `droid`, `kilo`, `cline`, `kimi`) is not, so an entry with that id REPLACES the shipped agent.
+`hermes-agent`, `devin`, `droid`, `kilo`, `cline`, `kimi`, `agent-zero`) is not, so an entry with that id REPLACES the shipped agent.
 A replacing entry keeps the shipped agent's `nativeSkillRoots` unless it sets
 its own, and bb still lists the roots that agent's host config names (its
 config directory, compat trees, configured paths, plugins) either way.
@@ -685,7 +691,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
-| `defaults.startingMachine`        | `last` (default: where the project's last new thread started) or `cloud` |
+| `defaults.startingMachine`        | `last` (default: Cloud, except a project where Local was picked in the last 24 hours) or `cloud` |
 | `defaults.showUltraEfforts`       | `true` adds Claude Ultracode and Codex Ultra to the effort menu (default `false`) |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no
@@ -797,15 +803,16 @@ persistently restores undimmed splits.
 
 ## Accounts
 
-The builtin Accounts plugin is always on (ADR 0194). Connect up to 10 Claude
-Code and 10 Codex subscriptions at the top of Settings → Agents → Claude Code
+The builtin Accounts plugin is always on (ADR 0194). Connect up to 30 Claude
+Code and 30 Codex subscriptions at the top of Settings → Agents → Claude Code
 or Codex. The machine's own CLI login is the first entry and is never copied, so
 the CLI and Cloudroom never refresh the same token.
 
 Every Local and Cloud thread, old and new, uses the selected account from its
 next turn (ADR 0197). **Use** selects another; nothing switches automatically. A
 turn that hits a subscription limit marks the account "Limit hit". The mark goes
-at the reset time, or as soon as a new turn on that account ends fine. The sidebar
+at the reset time or when that limit lifts. Reload checks Claude again after a
+plan upgrade. A new successful turn also clears a general account limit. The sidebar
 usage box shows each provider's in-use account in a chip; with several accounts,
 the chip's dropdown switches between them.
 
@@ -1108,7 +1115,10 @@ Dependency resolution and bundling run on install and update-apply only —
 never on an update check, which reads the manifest and stops. An omitted npm
 spec tracks the newest compatible stable release, ranges track within the
 range, dist-tags track the tag, and exact versions are pinned. A bare HTTP(S)
-Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`; an
+Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`. Git
+URLs must not embed a username, password, or token; private repositories sign
+in through Git's credential helper. A marketplace listing's Git URL login is
+dropped. An
 omitted ref tracks the repository's default branch, explicit branches track
 their head, and tags and commits are pinned. A semver range
 (`git:<url>@^1.2.0`, or `@semver:<range>` to state the intent explicitly)
@@ -1284,7 +1294,11 @@ agent configuration is next assembled, not retroactively to existing text.
 
 Machines settings expose **Server URL reachable by machines** (`machineServerUrl`)
 and **Default machine access** (`defaultMachineAccess`). The URL must be HTTP
-or HTTPS without embedded credentials. An unset URL falls back to
+or HTTPS without embedded credentials. A non-loopback `http://` URL would send
+machine keys unencrypted, so adding a machine fails unless the server's
+`env.json` sets `BB_ALLOW_INSECURE_SERVER_URL=1` (trusted networks only). Its
+install commands then pass the opt-in on, and the machine saves it in its own
+`env.json`. An unset URL falls back to
 `BB_EXTERNAL_URL`. The URL input appears when Manual is selected. An unset access provider selects
 bb connect, even when unpaired; Machines settings links to its setup. Choose
 Manual (`direct`) explicitly to use your own URL. An explicit provider must
@@ -1393,7 +1407,8 @@ while no builds are running. See [build performance](build-performance.md) for
 its identity, portability, and verification contract.
 
 Usage telemetry can be disabled in Settings → General → Privacy & diagnostics → Share usage data and setup errors,
-or with `bb settings general telemetryEnabled false`. The saved server-wide preference
+or with `room-cli settings general telemetryEnabled false`. The saved server-wide preference
 takes effect immediately and persists across restarts. SDK callers can use
-`system.updateGeneralSettings` with `telemetryEnabled`. `BB_TELEMETRY=false`
-always disables telemetry, even when the saved preference is enabled.
+`system.updateGeneralSettings` with `telemetryEnabled`. `CLOUDROOM_TELEMETRY=false`,
+`BB_TELEMETRY=false`, or `DO_NOT_TRACK=1` always disables telemetry, even when the saved
+preference is enabled. Details: https://cloudroom.dev/privacy.

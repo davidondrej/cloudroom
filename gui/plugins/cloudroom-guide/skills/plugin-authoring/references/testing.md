@@ -99,8 +99,9 @@ available to the configure driver.
 `createFakePluginHost` also accepts `appUrl`, `dataDir`, `loopbackBaseUrl`,
 saved settings, SDK method overrides, manifest skill ids, shared-tunnel
 identities, host-entry presence, declared icon names, and a host-RPC driver. Inspect
-provider and AI-service registrations, host RPC calls, signals, and shared-port
-declarations through the harness.
+provider registrations, host RPC calls, signals, and shared-port declarations
+through the harness. The npm fake host checks BB's AI-service design, not
+Cloudroom's (backend-cli-agents.md).
 
 `createFakeSdk` is available separately. Pass a nested `overrides` object.
 Inspect all calls or calls to one dot-separated method path. Use `stub` to add

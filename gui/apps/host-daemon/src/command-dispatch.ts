@@ -47,17 +47,15 @@ import {
   checkHostPathsExist,
   listHostFiles,
   listHostPaths,
+  mkdirHostPath,
+  moveHostPath,
   readHostFile,
   readHostFileMetadata,
   readHostRelativeFile,
-} from "./command-handlers/host-files.js";
-import { writeHostFile } from "./command-handlers/file-write.js";
-import { claudeSetupToken } from "./command-handlers/claude-setup-token.js";
-import {
-  mkdirHostPath,
-  moveHostPath,
   removeHostPath,
-} from "./command-handlers/path-mutations.js";
+  writeHostFile,
+} from "./command-handlers/files.js";
+import { claudeSetupToken } from "./command-handlers/claude-setup-token.js";
 import { resolveInteractiveRequest } from "./command-handlers/interactive.js";
 import { pickHostFolder } from "./command-handlers/native-folder-picker.js";
 import {

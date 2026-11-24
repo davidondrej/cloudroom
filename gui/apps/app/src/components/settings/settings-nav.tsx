@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { matchPath, useLocation } from "react-router-dom";
+import { matchPath, useLocation } from "react-router";
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { usePluginSlots, type PluginFileOpenerSlot } from "@/lib/plugin-slots";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";

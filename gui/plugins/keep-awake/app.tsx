@@ -112,7 +112,7 @@ function KeepAwakeSettings() {
           <Option
             value="working"
             label="While agents work"
-            hint="Stays awake while a Local thread runs, and for 10 minutes after. The screen can still turn off."
+            hint="Stays awake while a Local thread runs, and for 10 minutes after. The screen can still turn off on Mac and Windows."
           />
           <Option value="always" label="Always" hint="Stays awake, screen on, while Cloudroom is open." />
         </RadioGroup>

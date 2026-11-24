@@ -1218,6 +1218,44 @@ describe("codex item translation", () => {
     );
   });
 
+  it("survives deeply nested collab agent state", () => {
+    const harness = createHarness();
+    let state: unknown = null;
+    for (let depth = 0; depth < 5_000; depth++) state = { x: state };
+
+    const events = harness.translate({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-deep-1",
+          tool: "spawnAgent",
+          status: "completed",
+          senderThreadId: "t1",
+          receiverThreadIds: ["sub-thread-1"],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: { "sub-thread-1": state },
+        },
+      },
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "item/completed",
+        item: expect.objectContaining({
+          type: "delegation",
+          childRef: "sub-thread-1",
+          summary: "sub-thread-1: [state too deeply nested]",
+        }),
+      }),
+    );
+  });
+
   it("keeps a collabAgentToolCall without a receiver a generic tool call", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1942,6 +1980,23 @@ describe("codex error and warning translation", () => {
     ]);
   });
 
+  it("explains a failed workspace routing lookup, not its 401 (#2426)", () => {
+    const final = (message: string) =>
+      createHarness().translate(
+        codexEvent("error", {
+          threadId: "t1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: { message, codexErrorInfo: "other", additionalDetails: null },
+        }),
+      )[0];
+    expect(final("workspace routing discovery timed out")).toMatchObject({
+      detail: expect.stringContaining("not this thread or its worktree"),
+    });
+    const unauthorized = "workspace routing discovery unauthorized (401)";
+    expect(final(unauthorized)).toMatchObject({ detail: unauthorized });
+  });
+
   it("says plainly when Codex sends only a bare Bad Request", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1964,6 +2019,33 @@ describe("codex error and warning translation", () => {
         errorInfo: {
           category: "bad-request",
           providerCode: "other",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+
+  it("tags a model the ChatGPT account can't use and says how to pick another (#2009)", () => {
+    const harness = createHarness();
+    const events = harness.translate(
+      codexEvent("error", {
+        threadId: "t1",
+        turnId: "turn-1",
+        error: {
+          message:
+            '{"detail":"The \'gpt-6.1-sol\' model is not supported when using Codex with a ChatGPT account."}',
+          codexErrorInfo: "other",
+          additionalDetails: null,
+        },
+        willRetry: false,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining("Pick another one in the model picker"),
+        errorInfo: {
+          category: "bad-request",
+          providerCode: "modelNotFound",
           httpStatusCode: null,
         },
       }),
@@ -2675,6 +2757,40 @@ describe("codex account rate-limit translation", () => {
         reachedReason: "rate_limit_reached",
       },
     });
+  });
+
+  it.each([
+    ["applies and announces a late seed when Codex sent nothing yet", false],
+    ["ignores a late seed once Codex sent its own update", true],
+  ] as const)("%s (#1816)", (_name, codexUpdatedFirst) => {
+    const harness = createHarness();
+    const [rateLimitRead] = harness.translator.buildPostInitializeRequests();
+    const update = () =>
+      harness.translate({
+        jsonrpc: "2.0",
+        method: "account/rateLimits/updated",
+        params: { rateLimits: { primary: { usedPercent: 25, resetsAt: 1 } } },
+      });
+    if (codexUpdatedFirst) update();
+    rateLimitRead?.onResult({
+      rateLimits: {
+        limitId: "codex",
+        secondary: {
+          usedPercent: 100,
+          windowDurationMins: 10_080,
+          resetsAt: 2,
+        },
+      },
+    });
+    const late = harness.translator.takeLateSeedDeltas();
+    if (codexUpdatedFirst) {
+      expect(late).toEqual([]);
+      expect(update()[0]).toMatchObject({ rateLimits: { status: "allowed" } });
+    } else {
+      expect(late).toMatchObject([
+        { kind: "provider.rateLimits", rateLimits: { status: "blocked" } },
+      ]);
+    }
   });
 
   it("hydrates Codex rate limits before merging truly sparse rolling updates", () => {

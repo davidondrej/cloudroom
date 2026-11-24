@@ -53,10 +53,17 @@ room-cli thread archive CHILD_A CHILD_B
 room-cli thread tell THREAD "Continue with this task"
 room-cli thread tell THREAD --message-file notes.md   # a long message
 room-cli thread stop THREAD
-room-cli thread queue list THREAD                     # messages still waiting
+room-cli thread queue list THREAD                     # messages still waiting (app CLI only)
 ```
 
 A Local message steers the running turn. A Cloud message queues. `thread wait --status idle` only checks a status. Queued work may still be waiting. Check the queue and correlate the requested task with its actual output; after compaction, verify a follow-up completes, and after an attachment upload, verify the agent can read its content.
+
+`thread queue` runs only in the Cloudroom app's `room-cli`. Inside a Cloud thread it exits 2. There, check a child instead:
+
+- `room-cli thread show CHILD`: `status: active` means it is still working.
+- `room-cli thread output CHILD` or `thread log CHILD`: what it did.
+
+These can't confirm whether your message is waiting, was received, or was lost. Unchanged output is no reason to resend: an active child may still get it. Cloudroom messages you when the child finishes. Resend only once it is idle and its reply shows the task was never done.
 
 ### Unblock a thread that needs input
 

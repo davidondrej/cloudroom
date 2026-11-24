@@ -212,10 +212,13 @@ impl Local {
     /// Opens the journal and rebuilds the sessions: from a usable snapshot, then the records after it.
     /// A missing, unreadable, older or too-new snapshot means a full replay.
     pub(super) fn open(directory: &std::path::Path) -> io::Result<Self> {
-        let snapshot = Journal::read_snapshot(directory)
-            .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
-            .filter(|s| s.version == SNAPSHOT_VERSION);
-        let journal = Journal::open_from(directory, snapshot.as_ref().map_or(0, |s| s.sequence))?;
+        let mut snapshot = None;
+        let journal = Journal::open_from(directory, || {
+            snapshot = Journal::read_snapshot(directory)
+                .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
+                .filter(|s| s.version == SNAPSHOT_VERSION);
+            snapshot.as_ref().map_or(0, |s| s.sequence)
+        })?;
         let (changed, _) = watch::channel(journal.last());
         let mut local = Local {
             loud: journal.last(),
@@ -359,6 +362,10 @@ impl Local {
     /// Fail queued prompts, keeping the cause on each receipt (ADR 0123).
     pub(super) fn fail_pending_because(&mut self, id: &str, cause: Option<&str>) -> Result<()> {
         for request in self.sessions[id].queue.clone() {
+            self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
+        }
+        // A compaction waiting for an agent that won't come back never holds the session.
+        if let Some(request) = self.sessions[id].compact_request.clone() {
             self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
         }
         Ok(())
@@ -544,7 +551,12 @@ impl Local {
                     if receipt.state == "accepted"
                         && !session.receipts.contains_key(&receipt.request_id)
                     {
-                        session.queue.push(receipt.request_id.clone());
+                        // A compaction's follow-up (`first`) runs right after it, before older messages.
+                        if receipt.input["first"] == true {
+                            session.queue.insert(0, receipt.request_id.clone());
+                        } else {
+                            session.queue.push(receipt.request_id.clone());
+                        }
                         session.recovery_attempted = false; // A new user request permits one recovery.
                         session.usage_limited = false;
                         session.usage_resets_ms = None;
@@ -636,10 +648,14 @@ impl Local {
                 let id = record.data["id"]
                     .as_str()
                     .ok_or_else(|| io::Error::other("missing native identity"))?;
-                if session.native_id.as_deref().is_some_and(|old| old != id)
-                    && record.data["replaced"] != true
-                {
+                // Before its first turn there is no chat to lose: a fresh start replaces it (Manager::relaunch).
+                let changed = session.native_id.as_deref().is_some_and(|old| old != id);
+                if changed && record.data["replaced"] != true && session.has_dispatched {
                     return Err(io::Error::other("native identity changed"));
+                }
+                if changed {
+                    session.native_cursor = Value::Null;
+                    session.native_offset = 0;
                 }
                 session.native_id = Some(id.into());
                 if let Some(capabilities) = record.data.get("capabilities") {
@@ -691,7 +707,11 @@ impl Local {
                         None => reason.into(),
                     }
                 });
-                if session.state == SessionState::Resuming && record.data["recovery"] == true {
+                if matches!(
+                    session.state,
+                    SessionState::Resuming | SessionState::Suspended
+                ) && record.data["recovery"] == true
+                {
                     session.recovery_attempted = true;
                 }
                 if let Some(error) = record.data["startup_error"].as_str() {
@@ -789,6 +809,10 @@ impl Local {
                 session.title = record.data["title"].as_str().map(str::to_owned);
                 session.owe("title", &record.data, record.sequence);
             }
+            "pin" => {
+                session.pinned = true;
+                session.owe("pinned", &record.data, record.sequence);
+            }
             "thread_report" => session
                 .thread_reports
                 .retain(|report| report["seq"] != record.data["seq"]),
@@ -818,15 +842,17 @@ impl Local {
                         Some(at) => session.child_archived_at.insert(child.to_owned(), at),
                         None => session.child_archived_at.remove(child),
                     };
-                    let late = record.data["late"].as_array().into_iter().flatten();
-                    let late: std::collections::BTreeSet<String> = late
-                        .filter_map(|id| Some(id.as_str()?.to_owned()))
-                        .collect();
-                    if late.is_empty() {
-                        session.late_reports.remove(child);
-                    } else {
-                        session.late_reports.insert(child.to_owned(), late);
-                    }
+                    // An archive its child's Core took names the reports it may still send, maybe none; a queued
+                    // one can't, so it keeps no list (relay.rs `holds_archive`).
+                    match record.data["late"].as_array() {
+                        Some(late) => {
+                            let late = late.iter().filter_map(|id| Some(id.as_str()?.to_owned()));
+                            session
+                                .late_reports
+                                .insert(child.to_owned(), late.collect())
+                        }
+                        None => session.late_reports.remove(child),
+                    };
                 }
             }
             "child_start" => {

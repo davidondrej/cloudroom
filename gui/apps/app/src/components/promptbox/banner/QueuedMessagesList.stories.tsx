@@ -325,7 +325,7 @@ interface StaticQueuedMessagesListProps {
   sendDisabled?: boolean;
   actionDisabled?: boolean;
   processingMessageId?: string;
-  processingAction?: "send" | "edit" | "delete";
+  processingAction?: "send" | "edit";
 }
 
 function StaticQueuedMessagesList({
@@ -607,18 +607,6 @@ export function InFlightStates() {
             queuedMessages={inFlight}
             processingMessageId={inFlightMessage.id}
             processingAction="send"
-          />
-        </ResponsivePromptStage>
-      </StoryRow>
-      <StoryRow
-        label="deleting"
-        hint="the same line, labelled for the action in flight"
-      >
-        <ResponsivePromptStage>
-          <StaticQueuedMessagesList
-            queuedMessages={inFlight}
-            processingMessageId={inFlightMessage.id}
-            processingAction="delete"
           />
         </ResponsivePromptStage>
       </StoryRow>

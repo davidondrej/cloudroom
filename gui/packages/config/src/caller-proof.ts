@@ -228,6 +228,9 @@ function nextTcpTables(): Promise<TcpTables> {
 
 const LSOF = "/usr/sbin/lsof";
 const LSOF_TIMEOUT_MS = 5_000;
+const LSOF_KILL_GRACE_MS = 1_000;
+const LSOF_ABANDON_MS = 30_000;
+let warnedAbandonedLsof = false;
 const LSOF_MAX_BYTES = 8 * 1024 * 1024;
 
 // One form for an address however it is written: `[::1]`, `::ffff:127.0.0.1`.
@@ -271,34 +274,76 @@ export function lsofListsCaller(peer: CallerPeer, listing: string): boolean {
 
 interface LsofQueue {
   running: boolean;
-  waiting: Array<(listing: string) => void>;
+  stuck: boolean;
+  waiting: Array<(listing: string | null) => void>;
 }
 
 const lsofQueues = new Map<number, LsofQueue>();
 
+// A listing, or null when lsof didn't run to its own exit (killed at the
+// timeout, stuck, failed to start): no answer for this connection, so the
+// read is refused and the next one on it checks again (#2203).
 function runLsof(port: number, uid: number, queue: LsofQueue): void {
-  const waiters = queue.waiting;
+  let waiters = queue.waiting;
   queue.waiting = [];
-  execFile(
+  const answer = (listing: string | null) => {
+    for (const waiter of waiters) waiter(listing);
+    waiters = [];
+  };
+  // execFile only calls back once lsof exits, and one stuck in the kernel
+  // outlives its kill. Until it exits, reads are refused instead of waiting.
+  const overdue = setTimeout(() => {
+    queue.stuck = true;
+    answer(null);
+    for (const waiter of queue.waiting.splice(0)) waiter(null);
+  }, LSOF_TIMEOUT_MS + LSOF_KILL_GRACE_MS);
+  const child = execFile(
     LSOF,
     ["-nP", "-a", "-u", String(uid), `-iTCP:${port}`, "-Fn"],
-    { maxBuffer: LSOF_MAX_BYTES, timeout: LSOF_TIMEOUT_MS },
-    // lsof exits 1 when it lists nothing. Its output is the answer either way:
-    // a failed or cut-short run lists no caller, so the caller is refused.
-    (_error, stdout) => {
-      for (const waiter of waiters) waiter(stdout);
-      if (queue.waiting.length > 0) runLsof(port, uid, queue);
-      else queue.running = false;
+    {
+      killSignal: "SIGKILL",
+      maxBuffer: LSOF_MAX_BYTES,
+      timeout: LSOF_TIMEOUT_MS,
     },
+    // lsof exits 1 when it lists nothing; any exit code is its answer.
+    (error, stdout) =>
+      answer(error === null || typeof error.code === "number" ? stdout : null),
   );
+  // The slot stays taken until lsof is really gone, so a failed kill can't
+  // start a second one on this port. One still alive 30 s after its kill
+  // gives the slot up anyway, so a fresh lookup can try again.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(overdue);
+    clearTimeout(abandon);
+    queue.stuck = false;
+    answer(null);
+    if (queue.waiting.length > 0) runLsof(port, uid, queue);
+    else queue.running = false;
+  };
+  const abandon = setTimeout(() => {
+    if (!warnedAbandonedLsof) {
+      warnedAbandonedLsof = true;
+      console.warn("Cloudroom caller check: lsof did not exit after its kill");
+    }
+    release();
+  }, LSOF_TIMEOUT_MS + LSOF_ABANDON_MS);
+  child.once("close", release);
 }
 
 // One lsof at a time per port (about 70 ms on a busy Mac), shared by every
 // lookup that was waiting when it started. A run that started before a
 // connection opened can't vouch for it, so later lookups wait for the next.
-function nextLsofListing(port: number, uid: number): Promise<string> {
-  const queue = lsofQueues.get(port) ?? { running: false, waiting: [] };
+function nextLsofListing(port: number, uid: number): Promise<string | null> {
+  const queue = lsofQueues.get(port) ?? {
+    running: false,
+    stuck: false,
+    waiting: [],
+  };
   lsofQueues.set(port, queue);
+  if (queue.stuck) return Promise.resolve(null);
   return new Promise((resolve) => {
     queue.waiting.push(resolve);
     if (queue.running) return;
@@ -329,9 +374,11 @@ function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
           )
         : peer.localPort === undefined
           ? Promise.resolve(false)
-          : nextLsofListing(peer.localPort, uid).then((listing) =>
-              lsofListsCaller(peer, listing),
-            );
+          : nextLsofListing(peer.localPort, uid).then((listing) => {
+              if (listing !== null) return lsofListsCaller(peer, listing);
+              peerUserChecks.delete(peer);
+              return false;
+            });
     peerUserChecks.set(peer, check);
   }
   return check;
@@ -368,6 +415,8 @@ export interface CallerProofIssuer {
   start(): StartedCallerProof;
   finish(id: string, claim: string): Promise<string | null>;
   verify(token: string | undefined): boolean;
+  /** True for a token this process issued to its own code, like the phone relay. */
+  isInternal(token: string | undefined): boolean;
   issueInternal(): string;
 }
 
@@ -514,6 +563,13 @@ export async function createCallerProofIssuer(
       if (now() - lastUsedAt > TOKEN_IDLE_MS) return false;
       tokens.set(key, now());
       return true;
+    },
+    isInternal(token) {
+      return (
+        token !== undefined &&
+        token.length <= MAX_TOKEN_LENGTH &&
+        internalTokens.has(sha256(token))
+      );
     },
     issueInternal() {
       const token = randomBytes(32).toString("base64url");

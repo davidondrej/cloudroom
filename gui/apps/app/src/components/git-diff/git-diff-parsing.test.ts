@@ -7,7 +7,7 @@ import {
   getOpenableGitDiffPath,
   parseGitDiffFiles,
   summarizeGitDiffFile,
-} from "./git-diff-parsing";
+} from "@/components/diff/patch-utils";
 
 const SAMPLE_DIFF = [
   "diff --git a/src/old.ts b/src/new.ts",

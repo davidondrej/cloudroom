@@ -5,6 +5,7 @@ import {
   pluginCatalogCategory,
   pluginMarketplaceCategorySchema,
   pluginMarketplaceCollectionSchema,
+  stripGitUrlCredentials,
   type PluginMarketplaceCategory,
   type PluginMarketplaceCollection,
 } from "@cloudroom/domain";
@@ -432,6 +433,20 @@ function parseMarketplaceManifestWithBundledPolicy(
     throw new Error(
       `invalid ${location}: bundled source on entry "${bundled.id}" is reserved for the built-in "${BUNDLED_MARKETPLACE_NAME}" marketplace and is not allowed in fetched or third-party documents`,
     );
+  }
+  // #1935: a listed Git URL can carry a token. Drop it so it never reaches
+  // search, install plans, or git argv; private repos use Git's credential helper.
+  // The shared regex reads userinfo the way git does (backslashes, bad ports);
+  // the URL parser then catches V1 forms without `//` like `https:u:tok@host`.
+  for (const entry of parsed.data.plugins) {
+    if (!("git" in entry.source)) continue;
+    entry.source.git.url = stripGitUrlCredentials(entry.source.git.url);
+    if (!URL.canParse(entry.source.git.url)) continue;
+    const url = new URL(entry.source.git.url);
+    if (url.username === "" && url.password === "") continue;
+    url.username = "";
+    url.password = "";
+    entry.source.git.url = url.href;
   }
   if (parsed.data.schemaVersion === 1) return parsed.data;
   const plugins = parsed.data.plugins.filter((entry) => {

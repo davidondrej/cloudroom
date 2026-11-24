@@ -75,8 +75,13 @@ import {
   type GroupedPrompt,
   type PromptWithGroups,
 } from "./deferred-first-turn-context.js";
+import { takesInstructions } from "./custom-instructions.js";
 import { firstAgentTag } from "../system/first-agent.js";
 import { noteMessageSent } from "../system/first-response-telemetry.js";
+import {
+  worktreeRebuiltNote,
+  worktreeRebuiltNoteSent,
+} from "../environments/environment-engine.js";
 import type { TelemetryEvent } from "../system/telemetry.js";
 
 type SendThreadMessageMode = SendMessageRequest["mode"];
@@ -99,6 +104,8 @@ interface SendThreadMessageArgs {
   environment: EnvironmentRow;
   historyReplacement?: {
     forkSourceProviderThreadId: string | null;
+    /** The native session the edit replaces, whose Goal it keeps (#857). */
+    replacesProviderThreadId?: string | null;
     onCommandSettled?: () => void | Promise<void>;
   };
   /** Hears once whether the host started the new turn (null) or refused it. */
@@ -554,15 +561,27 @@ async function sendThreadMessageWithoutContextClear(
     input,
     ...(inputGroups !== undefined ? { inputGroups } : {}),
   }));
+  const isCommand = !takesInstructions(input);
   const deferredFirstTurnContext = resolveDeferredFirstTurnContext(
     deps.db,
     thread,
     args.retryOf?.requestId,
+    isCommand,
   );
   ({ input, inputGroups } = prependDeferredFirstTurnContext(
     { input, ...(inputGroups !== undefined ? { inputGroups } : {}) },
     deferredFirstTurnContext,
   ));
+  // A rebuilt worktree lost its dependencies: the next real message says so.
+  const rebuiltNote = isCommand ? null : worktreeRebuiltNote(environment.id);
+  if (rebuiltNote !== null) {
+    input = [...input, rebuiltNote];
+    if (inputGroups !== undefined)
+      inputGroups = [
+        ...inputGroups.slice(0, -1),
+        [...(inputGroups.at(-1) ?? []), rebuiltNote],
+      ];
+  }
   const beforeAppendInTransaction: SendThreadMessageTransactionPreflight = ({
     tx,
     requestId,
@@ -570,11 +589,14 @@ async function sendThreadMessageWithoutContextClear(
     args.beforeAppendInTransaction?.({ tx, requestId });
     if (deferredFirstTurnContext) {
       requireDeferredFirstTurnContextCurrent(tx, {
+        command: isCommand,
         requestSequence: deferredFirstTurnContext.requestSequence,
         retryOfRequestId: args.retryOf?.requestId,
         thread,
       });
     }
+    // Last, so a message refused above keeps the note for the next one.
+    if (rebuiltNote !== null) worktreeRebuiltNoteSent(environment.id);
   };
   await validatePromptAttachmentReferences({
     dataDir: deps.config.dataDir,
@@ -700,16 +722,24 @@ async function sendThreadMessageWithoutContextClear(
     };
     const command = args.historyReplacement
       ? {
-          command: await buildThreadStartCommand(deps, {
-            ...commandArgs,
-            fork:
-              args.historyReplacement.forkSourceProviderThreadId === null
-                ? null
-                : {
-                    sourceProviderThreadId:
-                      args.historyReplacement.forkSourceProviderThreadId,
-                  },
-          }),
+          command: {
+            ...(await buildThreadStartCommand(deps, {
+              ...commandArgs,
+              fork:
+                args.historyReplacement.forkSourceProviderThreadId === null
+                  ? null
+                  : {
+                      sourceProviderThreadId:
+                        args.historyReplacement.forkSourceProviderThreadId,
+                    },
+            })),
+            ...(args.historyReplacement.replacesProviderThreadId
+              ? {
+                  replacesProviderThreadId:
+                    args.historyReplacement.replacesProviderThreadId,
+                }
+              : {}),
+          },
           mode: "thread.start" as const,
         }
       : await prepareReadyThreadTurnCommand(deps, commandArgs);

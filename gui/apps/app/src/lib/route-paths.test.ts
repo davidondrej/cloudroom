@@ -215,6 +215,15 @@ describe("route path helpers", () => {
     ).toBeNull();
   });
 
+  it("rejects absolute URLs whose paths become protocol-relative", () => {
+    expect(
+      resolveRouteHref({
+        currentOrigin: "https://bb.local",
+        href: "https://bb.local//",
+      }),
+    ).toBeNull();
+  });
+
   it("rejects fragment-only and query-only hrefs", () => {
     expect(
       resolveRouteHref({

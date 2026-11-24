@@ -1,11 +1,12 @@
 import { createContext, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { cloudLoginName, cloudLoginProvider, cloudLoginTitle, type CloudLoginProvider } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { useCloudroomThread } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomThread, useRetryCloudStart } from "@/hooks/queries/cloudroom-queries";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
+import { ClaudeInlineSignIn, useClaudeConnection } from "@/components/ClaudeConnection";
 import { connectCursorKey, reconnectCloud, useCloudReconnect } from "@/lib/cloud-reconnect";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { getProviderIconInfo, getProviderIconTintStyle } from "@/lib/provider-icon";
@@ -38,10 +39,12 @@ export function findLatestCloudLoginRowId(rows: readonly ThreadTimelineViewRow[]
  *  While the start retries it says so; once the thread started, it is one quiet line. Older refusals show nothing. */
 export function CloudLoginRow({ row, provider, latest, className }: { row: ThreadTimelineViewRow; provider: CloudLoginProvider; latest: boolean; className?: string }) {
   const status = useCloudroomThread(row.threadId, latest).data;
+  const retryCloudStart = useRetryCloudStart(row.threadId);
   const state = useCloudReconnect(provider);
   const navigate = useNavigate();
   const agent = useSystemProviders().data?.find((entry) => entry.id === provider) ?? null;
   const Logo = getProviderIconInfo("agent", provider, agent).icon;
+  const claudeAuth = useClaudeConnection({ target: "cloud" }, latest && provider === "claude-code" && !status?.sessionId);
   if (!latest || !status) return null;
   if (status.sessionId) {
     return (
@@ -52,16 +55,35 @@ export function CloudLoginRow({ row, provider, latest, className }: { row: Threa
     );
   }
   const busy = state.waiting ? `Waiting for ${provider === "codex" ? "ChatGPT" : cloudLoginName(provider)} sign-in` : status.authRequired ? null : `Starting ${cloudLoginName(provider)}`;
+  const claudeConnected = provider === "claude-code" && claudeAuth.data?.state === "connected";
   return (
     <div className={cn("flex flex-col gap-3 py-1", className)}>
-      <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
+      <p className="flex flex-wrap items-center gap-2.5 text-base font-semibold text-foreground">
         <span className="inline-flex shrink-0" style={agent ? getProviderIconTintStyle(agent) : undefined}>
           <Logo className="size-[18px] text-muted-foreground" />
         </span>
-        {cloudLoginTitle(provider)}
+        <span>{cloudLoginTitle(provider)}</span>
+        {claudeConnected && !busy ? (
+          <span className="inline-flex items-center gap-1 text-sm font-normal text-muted-foreground">
+            <Icon name="Check" className="size-3.5 text-success" aria-hidden />
+            Connected
+          </span>
+        ) : null}
       </p>
-      {/* Claude Code signs in with its own card above the composer. */}
-      {provider === "claude-code" && !busy ? null : (
+      {provider === "claude-code" && !busy ? (
+        <div className="pl-7">
+          <ClaudeInlineSignIn
+            target={{ target: "cloud" }}
+            onContinue={() => retryCloudStart.mutate()}
+            continuing={retryCloudStart.isPending}
+          />
+          {retryCloudStart.error ? (
+            <p role="alert" className="mt-2 text-xs text-destructive">
+              {retryCloudStart.error.message}
+            </p>
+          ) : null}
+        </div>
+      ) : (
         <div className="flex flex-wrap items-center gap-2 pl-7">
           {busy ? (
             <Button type="button" size="sm" variant="outline" disabled>

@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -1226,6 +1227,8 @@ export interface CountThreadsOptions {
   archivedOnly?: boolean;
   /** Hidden rows are excluded unless this is true. */
   includeHidden?: boolean;
+  /** Only threads created at or after this time (ms since epoch). */
+  createdAfter?: number;
 }
 
 export interface ThreadCountGroupRow {
@@ -1282,6 +1285,9 @@ export function countThreads(
           : eq(threads.parentThreadId, options.parent.parentThreadId),
     options.hostId !== undefined
       ? eq(environments.hostId, options.hostId)
+      : undefined,
+    options.createdAfter !== undefined
+      ? gte(threads.createdAt, options.createdAfter)
       : undefined,
   ].filter((value) => value !== undefined);
 
@@ -1495,6 +1501,7 @@ export function listUnarchivedAssignedChildThreads(
   );
 }
 
+/** A thread's open side chats. One with a parent of its own belongs to that parent instead, even after a move (#2136). */
 export function listUnarchivedHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1504,11 +1511,12 @@ export function listUnarchivedHiddenSourceThreads(
     liveThreads(
       eq(threads.sourceThreadId, args.sourceThreadId),
       eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
     ),
   );
 }
 
-/** A thread's side chats, archived or not. */
+/** A thread's side chats, archived or not, without a parent of their own. */
 export function listHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1518,6 +1526,7 @@ export function listHiddenSourceThreads(
     nonDeletedThreads(
       eq(threads.sourceThreadId, args.sourceThreadId),
       eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
     ),
   );
 }

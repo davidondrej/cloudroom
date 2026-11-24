@@ -109,7 +109,7 @@ export function registerForkCommand(
     .option("--title <title>", "Thread title")
     .option(
       "--source-seq-end <seq>",
-      "Fork after the source turn containing this event sequence",
+      "Fork at a saved Claude message or a finished turn",
     )
     .option(
       "--machine <target>",

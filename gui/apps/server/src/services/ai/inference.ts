@@ -64,6 +64,7 @@ export const INFERENCE_POLICY = {
   threadPurpose: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 90_000 },
   // A suggestion that arrives late is useless.
   promptSuggestion: { maxAttempts: 1, retryDelayMs: 0, timeoutMs: 8_000 },
+  skillSuggestion: { maxAttempts: 1, retryDelayMs: 0, timeoutMs: 30_000 },
   // Voice: the base timeout; voice-transcription.ts adds time per MB of audio.
   voiceTranscription: { maxAttempts: 2, retryDelayMs: 250, timeoutMs: 10_000 },
 } as const;

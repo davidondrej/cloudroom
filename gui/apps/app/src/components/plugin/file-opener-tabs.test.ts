@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { threadTabsSchema } from "@cloudroom/server-contract";
 import type { PluginFileOpenerSlot } from "@/lib/plugin-slots";
-import type { OpenSecondaryPanelTabRequest } from "@/components/secondary-panel/useThreadFileTabs";
+import type { OpenSecondaryPanelTabRequest } from "@/components/right-panel/store/use-panel-tabs";
 import {
   buildFileOpenerPanelTab,
   createFileOpenerOriginalTab,
@@ -228,5 +228,67 @@ describe("createFileOpenerOriginalTab", () => {
       path: "persisted/plan.mdx",
       threadId: "thr_opened",
     });
+  });
+});
+
+describe("createFileOpenerTabForRequest HTML default", () => {
+  it.each([
+    [
+      "thread with environment (preview renders)",
+      "thr_docs",
+      "env_docs",
+      false,
+    ],
+    ["no thread: plugin panel (no HTML URL)", null, "env_docs", true],
+    ["no environment: project files (no HTML URL)", "thr_docs", null, true],
+  ] as const)("%s", (_label, threadId, resolvedEnvironmentId, opensEditor) => {
+    const tab = createFileOpenerTabForRequest({
+      fileOpeners: [{ ...MARKDOWN_OPENER, extensions: ["html"] }],
+      preference: {},
+      projectId: "proj_docs",
+      request: {
+        kind: "workspace-file-preview",
+        tab: {
+          lineRange: null,
+          path: "out/report.html",
+          source: { kind: "working-tree" },
+          statusLabel: null,
+        },
+      },
+      resolvedEnvironmentId,
+      threadId,
+    });
+    expect(tab !== null).toBe(opensEditor);
+  });
+});
+
+describe("createFileOpenerTabForRequest HTML in standalone plugin panels", () => {
+  it.each([
+    [
+      "host file",
+      {
+        kind: "host-file-preview",
+        hostId: "host_docs",
+        tab: { lineRange: null, path: "/Users/dev/report.html" },
+      },
+    ],
+    [
+      "thread-storage file",
+      {
+        kind: "thread-storage-file-preview",
+        threadId: "thr_docs",
+        tab: { lineRange: null, path: "report.html" },
+      },
+    ],
+  ] as const)("keeps the File Editor for a %s", (_label, request) => {
+    const tab = createFileOpenerTabForRequest({
+      fileOpeners: [{ ...MARKDOWN_OPENER, extensions: ["html"] }],
+      preference: {},
+      projectId: null,
+      request,
+      resolvedEnvironmentId: null,
+      threadId: null,
+    });
+    expect(tab).not.toBeNull();
   });
 });

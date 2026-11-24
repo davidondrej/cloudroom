@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { createReadStream, existsSync } from "node:fs";
-import { open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { constants, createReadStream, existsSync } from "node:fs";
+import { copyFile, mkdir, open, readdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, sep } from "node:path";
 import { promisify } from "node:util";
@@ -9,7 +9,9 @@ import { pipeline } from "node:stream";
 import { createZstdDecompress } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { isNotNull } from "drizzle-orm";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { events, findOrCreateProjectByLocalPathSource, getThread, listProjectSourcesByProjectIds, listPublicProjects, type StoredEventRow } from "@cloudroom/db";
+import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { fillProjectGitRemote } from "../projects/project-source-setup.js";
@@ -41,8 +43,8 @@ type CodexFormat = "event" | "response";
 interface CodexLine { at: number; model?: string; user: string | null; reply: string | null }
 let queue: Promise<unknown> = Promise.resolve();
 
-export async function listNativeSessions(deps: AppDeps): Promise<NativeSession[]> {
-  return (await findSessions(deps)).map(({ path: _path, native: _native, project: _project, projectName: _projectName, ...session }) => session);
+export async function listNativeSessions(deps: AppDeps, claudeDir?: string): Promise<NativeSession[]> {
+  return (await findSessions(deps, await claudeSource(claudeDir))).map(({ path: _path, native: _native, project: _project, projectName: _projectName, ...session }) => session);
 }
 
 function oneAtATime(task: () => Promise<SessionImportResult>): Promise<SessionImportResult> {
@@ -51,8 +53,35 @@ function oneAtATime(task: () => Promise<SessionImportResult>): Promise<SessionIm
   return result;
 }
 
-export function importNativeSessions(deps: AppDeps, hostId: string, wanted: { harness: SessionHarness; id: string }[]): Promise<SessionImportResult> {
-  return oneAtATime(() => run(deps, hostId, wanted, () => findSessions(deps)));
+export function importNativeSessions(deps: AppDeps, hostId: string, wanted: { harness: SessionHarness; id: string }[], claudeDir?: string): Promise<SessionImportResult> {
+  return oneAtATime(() => run(deps, hostId, wanted, async () => findSessions(deps, await claudeSource(claudeDir))));
+}
+
+// `room-cli import claude-code --config-dir`: another Claude Code config folder (a CLAUDE_CONFIG_DIR) on this computer.
+async function claudeSource(dir: string | undefined): Promise<string> {
+  if (dir === undefined) return claudeHome();
+  if (isAbsolute(dir) && (await stat(join(dir, "projects")).catch(() => null))?.isDirectory()) return dir;
+  throw new ApiError(400, "claude_config_dir", `No Claude Code chats in ${dir}. Pass the folder set as CLAUDE_CONFIG_DIR, the one with a "projects" folder inside.`);
+}
+
+// Claude Code forks a session only from its own config folder, so a chat from another one is copied there. The original stays.
+// Claude looks for the session in every project folder there, so a different copy in any of them would be forked instead,
+// losing turns. That chat is skipped and no file is changed.
+async function stageClaudeSession(path: string): Promise<string | undefined> {
+  const root = join(claudeHome(), "projects"), target = join(root, basename(dirname(path)), basename(path));
+  if (target === path) return;
+  const source = await readFile(path);
+  let found = false;
+  for (const folder of await readdir(root).catch(() => [] as string[])) {
+    const copy = join(root, folder, basename(path));
+    const existing = await readFile(copy).catch(() => null);
+    if (!existing) continue;
+    if (!existing.equals(source)) return `A different copy of this chat is already in ${copy}. Remove or update that copy, then import again.`;
+    if (copy === target) found = true;
+  }
+  if (found) return;
+  await mkdir(dirname(target), { recursive: true, mode: 0o700 });
+  await copyFile(path, target, constants.COPYFILE_EXCL);
 }
 
 export async function listConductorExport(deps: AppDeps, path: string): Promise<NativeSession[]> {
@@ -94,6 +123,8 @@ async function run(deps: AppDeps, hostId: string, wanted: { harness: SessionHarn
     try {
       const turns = harness === "claude-code" ? await claudeTurns(session.path) : harness === "codex" ? await codexTurns(session.path) : await moreTurns(session);
       if (!turns.length) { skip(harness === "codex" ? "This Codex chat has no text messages Cloudroom can read, for example only images or shell commands." : "No messages to bring over."); continue; }
+      const conflict = harness === "claude-code" ? await stageClaudeSession(session.path) : undefined;
+      if (conflict) { skip(conflict); continue; }
       const thread = await createImportedThread(deps, hostId, session, turns);
       map[key] = thread.id;
       if (session.native?.id) map[`${session.native.harness}:${session.native.id}`] = thread.id;
@@ -107,8 +138,8 @@ async function run(deps: AppDeps, hostId: string, wanted: { harness: SessionHarn
   return result;
 }
 
-async function findSessions(deps: AppDeps): Promise<Found[]> {
-  const [claude, codex] = await Promise.all([claudeFiles(), codexFiles()]);
+async function findSessions(deps: AppDeps, claudeDir: string): Promise<Found[]> {
+  const [claude, codex] = await Promise.all([claudeFiles(claudeDir), codexFiles()]);
   const files = new Map<string, string>([
     ...claude.map((path) => [`claude-code:${basename(path, ".jsonl")}`, path] as const),
     ...codex.map((path) => [`codex:${basename(path.replace(/\.zst$/, ""), ".jsonl").slice(-36)}`, path] as const),
@@ -138,8 +169,8 @@ async function unimported(deps: AppDeps, sessions: Found[]): Promise<Found[]> {
   return sessions.filter((session) => !known.has(session.id) && !imported(session) && !(session.native?.id && imported(session.native)));
 }
 
-async function claudeFiles(): Promise<string[]> {
-  const root = join(claudeHome(), "projects");
+async function claudeFiles(home: string): Promise<string[]> {
+  const root = join(home, "projects");
   const folders = await readdir(root).catch(() => [] as string[]);
   return (await Promise.all(folders.map(async (folder) =>
     (await readdir(join(root, folder)).catch(() => [] as string[])).filter((file) => file.endsWith(".jsonl") && !file.startsWith("agent-")).map((file) => join(root, folder, file)))))
@@ -206,7 +237,7 @@ async function claudeTurns(path: string): Promise<Turn[]> {
     if (typeof line.message.model === "string" && !line.message.model.startsWith("<")) model = line.message.model;
     const last = turns.at(-1);
     if (last?.replies.length === 0) last.model = model;
-    const text = line.message.content.filter((block: Line) => block.type === "text").map((block: Line) => block.text).join("\n").trim();
+    const text = line.message.content.filter((block: Line) => block?.type === "text").map((block: Line) => block.text).join("\n").trim();
     if (text) turns.at(-1)?.replies.push({ at, text });
   }
   return turns;
@@ -268,11 +299,29 @@ async function lastMessageAt(path: string, isMessage: (line: Line) => boolean): 
   return (await stat(path)).mtimeMs;
 }
 
+// Scan complete pairs once. A regex retries from every opening tag when the closing tag is missing.
+function withoutSystemReminders(text: string): string {
+  const open = "<system-reminder>", close = "</system-reminder>";
+  const parts: string[] = [];
+  let at = 0;
+  while (at < text.length) {
+    const start = text.indexOf(open, at);
+    if (start < 0) break;
+    const end = text.indexOf(close, start + open.length);
+    if (end < 0) break;
+    parts.push(text.slice(at, start));
+    at = end + close.length;
+  }
+  parts.push(text.slice(at));
+  return parts.join("");
+}
+
+// An approved plan opens its "clear context" session as an auto-continuation; Claude Code counts it as the user's turn.
 function claudeUserText(line: Line): string | null {
-  if (line.type !== "user" || line.isMeta || line.isCompactSummary || (line.origin?.kind && line.origin.kind !== "human")) return null;
+  if (line.type !== "user" || line.isMeta || line.isCompactSummary || (line.origin?.kind && !["human", "auto-continuation"].includes(line.origin.kind))) return null;
   const content = line.message?.content;
-  const raw = typeof content === "string" ? content : Array.isArray(content) ? content.filter((block: Line) => block.type === "text").map((block: Line) => block.text).join("\n") : "";
-  const text = raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+  const raw = typeof content === "string" ? content : Array.isArray(content) ? content.filter((block: Line) => block?.type === "text").map((block: Line) => block.text).join("\n") : "";
+  const text = withoutSystemReminders(raw).trim();
   return text && !/^<(command-|local-command)/.test(text) ? text : null;
 }
 
@@ -283,7 +332,7 @@ function codexMessage(line: Line, type: "UserMessage" | "AgentMessage", format: 
     : line.type === "event_msg" && line.payload?.type === "item_completed" && line.payload.item?.type === type ? line.payload.item : null;
   if (!Array.isArray(item?.content)) return null;
   const context = (text: string) => response && type === "UserMessage" && CODEX_CONTEXT.test(text.trim());
-  const text = item.content.map((part: Line) => typeof part.text === "string" && !context(part.text) ? part.text : "").join("\n").trim();
+  const text = item.content.map((part: Line) => typeof part?.text === "string" && !context(part.text) ? part.text : "").join("\n").trim();
   // Plan mode wraps the whole plan reply in one tag pair.
   return (type === "AgentMessage" ? text.replace(/^<proposed_plan>((?:(?!<\/?proposed_plan>)[\s\S])*)<\/proposed_plan>$/, "$1").trim() : text) || null;
 }
@@ -318,7 +367,7 @@ async function createImportedThread(deps: AppDeps, hostId: string, session: Foun
 // project. An existing project for a subfolder of that repo still wins for chats inside it.
 async function projectFolder(deps: AppDeps, hostId: string, session: Found): Promise<string> {
   const start = session.project ?? session.cwd;
-  const lines = await execFileAsync("git", ["-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], { timeout: 10_000 })
+  const lines = await execFileAsync("git", [...gitSafetyArgs(), "-C", start, "rev-parse", "--path-format=absolute", "--git-common-dir", "--show-toplevel"], { timeout: 10_000, windowsHide: true })
     .then(({ stdout }) => stdout.trim().split("\n").map((line) => normalize(line.trim())), () => []);
   const [common, top] = lines;
   const repo = lines.length === 2 && isAbsolute(common!) && isAbsolute(top!) ? (basename(common!) === ".git" ? dirname(common!) : top!) : start;

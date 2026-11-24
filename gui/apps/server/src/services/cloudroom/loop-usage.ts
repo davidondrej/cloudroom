@@ -15,9 +15,31 @@ export function weightedTokens(tokens: { input: number | null; cacheRead: number
   return fresh + 0.1 * read + 1.25 * (tokens.cacheWrite ?? 0) + 5 * (tokens.output ?? 0);
 }
 
+/** A Cloud loop run as the website saved it: `input` is new input only, whatever the harness. */
+export type CloudRun = { thread: string; at: number; harness: string; input: number; output: number; cacheRead: number; cacheWrite: number };
+export const weightedRun = (run: Pick<CloudRun, "input" | "output" | "cacheRead" | "cacheWrite">): number =>
+  run.input + 0.1 * run.cacheRead + 1.25 * run.cacheWrite + 5 * run.output;
+
+let cloudRuns: { account: string; at: number; runs: Promise<CloudRun[]> } | null = null;
+/** The signed-in account's Cloud loop runs of the last 8 days with what each used, read at most every 10 minutes and
+ *  only when someone looks at an estimate. None when signed out, from an older website, or after a failed read, which
+ *  the next look tries again. */
+export function recentCloudRuns(account: string | null, ask: () => Promise<unknown>, now = Date.now()): Promise<CloudRun[]> {
+  if (!account) return Promise.resolve([]);
+  if (cloudRuns?.account === account && now - cloudRuns.at <= 10 * 60_000) return cloudRuns.runs;
+  const entry: NonNullable<typeof cloudRuns> = { account, at: now, runs: Promise.resolve([]) };
+  entry.runs = ask().then(
+    (answer) => ((answer as { tokens?: CloudRun[] } | null)?.tokens ?? []).filter((run) => typeof run?.thread === "string" && Number.isFinite(run.at) && Number.isFinite(weightedRun(run))),
+    () => { if (cloudRuns === entry) cloudRuns = null; return []; },
+  );
+  cloudRuns = entry;
+  return entry.runs;
+}
+
 /** Weighted tokens each listed thread used since `threadsSince`, and all of the provider's threads since `totalSince`.
- *  A thread's totals only grow, so its use since a time is its highest total minus its highest total before then. */
-export function tokenUsageSince(db: DbQueryConnection, input: { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number }) {
+ *  A thread's totals only grow, so its use since a time is its highest total minus its highest total before then.
+ *  A Cloud loop run this computer never opened has no events here: `cloud` says what it used, so it still counts. */
+export function tokenUsageSince(db: DbQueryConnection, input: { providerId: string; threadIds: string[]; threadsSince: number; totalSince: number }, cloud: readonly CloudRun[] = []) {
   // Through the thread index: scanning every event by type takes about a second on a big history.
   const read = (threadIds: ReturnType<typeof inArray>) => db
     .select({ threadId: events.threadId, at: events.createdAt, input: total("inputTokens"), cacheRead: total("cacheReadInputTokens"), cached: total("cachedInputTokens"), cacheWrite: total("cacheWriteInputTokens"), output: total("outputTokens") })
@@ -36,5 +58,14 @@ export function tokenUsageSince(db: DbQueryConnection, input: { providerId: stri
   const listed = input.threadIds.length ? totals(read(inArray(events.threadId, input.threadIds))) : new Map<string, { at: number; tokens: number }[]>();
   let sum = 0;
   for (const rows of provider.values()) sum += usedSince(rows, input.totalSince);
-  return { total: sum, threads: Object.fromEntries(input.threadIds.map((id) => [id, usedSince(listed.get(id), input.threadsSince)])) };
+  // A Cloud run counts when it started after its thread's last reading here: earlier runs, this computer already
+  // counted. A same-thread loop runs many times in one thread, so a thread keeps all of its runs.
+  const runs = new Map<string, CloudRun[]>();
+  for (const run of cloud) if (run.harness === input.providerId) runs.set(run.thread, [...(runs.get(run.thread) ?? []), run]);
+  const unseen = (id: string, rows: { at: number }[] = [], since: number) => {
+    const last = Math.max(-Infinity, ...rows.map((row) => row.at));
+    return (runs.get(id) ?? []).reduce((used, run) => used + (run.at >= since && run.at > last ? weightedRun(run) : 0), 0);
+  };
+  for (const id of runs.keys()) sum += unseen(id, provider.get(id), input.totalSince);
+  return { total: sum, threads: Object.fromEntries(input.threadIds.map((id) => [id, usedSince(listed.get(id), input.threadsSince) + unseen(id, listed.get(id), input.threadsSince)])) };
 }

@@ -270,6 +270,62 @@ describe("thread runtime config", () => {
     );
   });
 
+  it("starts an agent run with this computer's own binary only on this computer (#1884)", async () => {
+    await withTestHarness(
+      {
+        extraProviders: [
+          await configuredAcpProvider({
+            id: "shim",
+            displayName: "Devin",
+            command: process.execPath,
+            args: ["/Users/me/shim.mjs"],
+          }),
+        ],
+      },
+      async (harness) => {
+        const start = (hostId: string) => {
+          const { project } = seedProjectWithSource(harness.deps, { hostId });
+          const environment = seedEnvironment(harness.deps, {
+            hostId,
+            projectId: project.id,
+          });
+          return buildThreadStartCommand(harness.deps, {
+            environment,
+            execution: {
+              model: "acp-default",
+              permissionMode: "full",
+              reasoningLevel: "medium",
+              serviceTier: "default",
+              source: "client/turn/requested",
+            },
+            fork: null,
+            permissionEscalation: "ask",
+            input: textInput("hello"),
+            projectId: project.id,
+            providerId: "acp-shim",
+            requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
+            syncGeneratedTitle: false,
+            thread: seedThread(harness.deps, {
+              projectId: project.id,
+              environmentId: environment.id,
+              providerId: "acp-shim",
+            }),
+          });
+        };
+        const { host } = seedHostSession(harness.deps, { id: "host-mac" });
+        seedPrimaryHost(harness.deps, host.id);
+        seedHostSession(harness.deps, { id: "host-linux", name: "linux-box" });
+
+        expect(
+          (await start("host-mac")).bridgeLaunch.providerOptions,
+        ).toMatchObject({ acpLaunchSpec: { command: process.execPath } });
+        await expect(start("host-linux")).rejects.toThrow(
+          `can't start on linux-box: its plugin (provider-acp) runs the agent with this computer's Cloudroom app (${process.execPath}), which only exists here. Use provider "acp-devin" there instead.`,
+        );
+      },
+    );
+  });
+
   it.each([
     {
       expectedSpec: {
@@ -798,7 +854,7 @@ describe("thread runtime config", () => {
         entryPath: "SKILL.md",
       });
       expect(command.injectedSkillSources).toEqual([
-        ...["adr-verbatim", "browser-harness", "decisions", "file-tree"].map(
+        ...["adr-verbatim", "browser-harness", "create-loop", "decisions", "deepapi", "file-tree"].map(
           sharedSkill,
         ),
         {

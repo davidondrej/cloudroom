@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import type { IconSvgElement } from "@hugeicons/react";
+import type { IconSvgElement } from "./hugeicons-icon";
 
 export const EXTENDED_ICON_NAMES = [
   "AiBrain01",

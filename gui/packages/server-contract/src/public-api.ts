@@ -103,6 +103,7 @@ import type {
   DeleteThreadRequest,
   ThreadArchiveAllQuery,
   ThreadStopQuery,
+  ThreadCompactRequest,
   ThreadUnarchiveQuery,
   ThreadUnarchiveResponse,
   EnvironmentActionApiError,
@@ -215,6 +216,8 @@ import type {
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionForm,
+  SystemVoiceTranscriptionJobResponse,
+  SystemVoiceTranscriptionJobStartResponse,
   SystemVoiceTranscriptionResponse,
   TerminalListResponse,
   ThemeCatalogResponse,
@@ -314,6 +317,7 @@ import {
   deleteThreadRequestSchema,
   threadArchiveAllQuerySchema,
   threadStopQuerySchema,
+  threadCompactRequestSchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -1355,7 +1359,9 @@ export const publicApiRoutes = {
     compact: defineRoute({
       path: "/threads/:id/compact",
       method: "post",
-      request: noRequest<PathId>(),
+      request: jsonRequest<PathId, ThreadCompactRequest>(
+        threadCompactRequestSchema,
+      ),
       response: jsonResponse<{ ok: true }>(),
     }),
     clearContext: defineRoute({
@@ -1561,6 +1567,12 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadEventRow | null>(),
     }),
+    messageForkPoint: defineRoute({
+      path: "/threads/:id/fork-point/:sequence",
+      method: "get",
+      request: noRequest<{ param: { id: string; sequence: string } }>(),
+      response: jsonResponse<{ exact: boolean; sequence: number | null }>(),
+    }),
     defaultExecutionOptions: defineRoute({
       path: "/threads/:id/default-execution-options",
       method: "get",
@@ -1687,7 +1699,10 @@ export const publicApiRoutes = {
         appSettingsUpdateSchema,
       ),
       response: jsonResponse<
-        AppSettings & { showUnhandledProviderEvents?: boolean }
+        AppSettings & {
+          showUnhandledProviderEvents?: boolean;
+          providerOrder?: string[];
+        }
       >(),
     }),
     keyboardSettings: defineRoute({
@@ -1876,6 +1891,20 @@ export const publicApiRoutes = {
       method: "post",
       request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
       response: jsonResponse<SystemVoiceTranscriptionResponse>(),
+    }),
+    startVoiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs",
+      method: "post",
+      request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobStartResponse, 202>({
+        status: 202,
+      }),
+    }),
+    voiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs/:id",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobResponse>(),
     }),
     version: defineRoute({
       path: "/system/version",

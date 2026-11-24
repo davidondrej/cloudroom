@@ -2,7 +2,7 @@
 
 import { createElement, type ComponentProps } from "react";
 import { cleanup, render } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { conversationRow } from "@/test/fixtures/thread-timeline-rows";

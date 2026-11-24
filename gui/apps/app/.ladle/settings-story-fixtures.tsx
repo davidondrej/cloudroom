@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { PERSONAL_PROJECT_ID, type ProviderInfo } from "@cloudroom/domain";
 import { UPDATE_ACTION_ICON } from "@cloudroom/domain/update-state";

@@ -15,6 +15,10 @@ import {
   type ThreadRetryResult,
   type ThreadSendResult,
 } from "@cloudroom/sdk";
+import {
+  BbRequestTimeoutError,
+  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+} from "@cloudroom/sdk/node";
 import type { QueuedMessageWaitingOn } from "@cloudroom/domain";
 import {
   collectOption,
@@ -104,6 +108,13 @@ interface ThreadTellCommandOptions {
 interface ThreadActionOptions {
   self?: boolean;
   json?: boolean;
+}
+
+/** `room-cli thread compact`'s follow-up unless `--then` or `--no-then`. Cloud's CLI (core/src/session/thread.rs) sends the same. */
+const COMPACT_THEN = "Keep going with your task. If it's done, say what we should do next.";
+
+interface ThreadCompactCommandOptions extends ThreadActionOptions {
+  then?: string | false;
 }
 
 interface ThreadRetryCommandOptions {
@@ -700,18 +711,42 @@ export function registerActionsCommands(
       ),
     );
 
+  parent
+    .command("compact [id]")
+    .description(
+      "Compact a thread's context now, or once its running turn ends, then send a follow-up so the agent keeps going",
+    )
+    .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
+    .option("--then <text>", "Follow-up message after compaction (default: keep going)")
+    .option("--no-then", "Send no follow-up message")
+    .option("--json", "Print machine-readable JSON output")
+    .action(
+      action(async (id: string | undefined, opts: ThreadCompactCommandOptions, command: Command) => {
+        let root = command;
+        while (root.parent) root = root.parent;
+        const raw = (root as Command & { rawArgs?: string[] }).rawArgs ?? [];
+        if (raw.includes("--no-then") && raw.some((word) => word === "--then" || word.startsWith("--then="))) {
+          throw new Error("Choose only one of --then and --no-then.");
+        }
+        if (typeof opts.then === "string" && !opts.then.trim()) {
+          throw new Error("--then needs a message. To send none, use --no-then.");
+        }
+        const threadId = requireThreadIdOrSelf(id, opts);
+        const then = opts.then === false ? undefined : (opts.then ?? COMPACT_THEN);
+        await createCliRoomSdk(getUrl()).threads.compact({ threadId, ...(then ? { then } : {}) });
+        if (outputJson(opts, { ok: true, threadId })) return;
+        console.log(
+          `Thread ${threadId} compacts now, or once its running turn ends${then ? ". Then it gets the follow-up, saying whether compaction worked" : ""}. If it is your own thread, end your turn now.`,
+        );
+      }),
+    );
+
   for (const { name, description, method, done } of [
     {
       name: "stop",
       description: "Stop work and release the loaded agent runtime",
       method: "stop",
       done: "stopped",
-    },
-    {
-      name: "compact",
-      description: "Request compaction of an idle or errored thread's context",
-      method: "compact",
-      done: "context compaction requested",
     },
     {
       name: "clear",
@@ -819,7 +854,8 @@ export async function postThreadMessage(
   args: PostThreadMessageArgs,
 ): Promise<PostThreadMessageResult> {
   requirePromptContent(args);
-  const sdk = createCliRoomSdk(args.getUrl());
+  // Bounded like spawn's send, so a server that never answers can't hang the caller (#1832).
+  const sdk = createCliRoomSdk(args.getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
   // A retry's lookup decides whether it may send, so a hung server can't hang it.
   const thread =
     args.mode === undefined || args.requestId !== undefined
@@ -849,7 +885,8 @@ export async function postThreadMessage(
     resolveProjectId: async () =>
       (thread ?? (await sdk.threads.get({ threadId: args.threadId })))
         .projectId,
-    sdk,
+    // Uploads keep no deadline: a large file may take longer.
+    sdk: createCliRoomSdk(args.getUrl()),
   });
   const sending = sdk.threads.send({
     threadId: args.threadId,
@@ -931,10 +968,17 @@ async function describeFailedSend(
     error instanceof BbHttpError
       ? (error.body as { errorId?: unknown } | null)?.errorId
       : undefined;
-  const reason = `${getErrorMessage(error)}${typeof errorId === "string" ? `, error ID ${errorId}` : ""}`;
+  const timedOut = error instanceof BbRequestTimeoutError;
+  const reason = timedOut
+    ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
+    : `${getErrorMessage(error)}${typeof errorId === "string" ? `, error ID ${errorId}` : ""}`;
+  // The server may still be working on it, so the log and queue can lag (#1832).
+  const lag = timedOut
+    ? " The server may still be handling it, so an empty log and queue don't prove it wasn't sent: wait a minute and check again before resending."
+    : "";
   // A sent message shows in the log, a queued one in the queue; `thread show` lists neither.
   return new UnconfirmedSendError(
-    `Cloudroom did not confirm the message, so it may already have been sent (${reason}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${retry}`,
+    `Cloudroom did not confirm the message, so it may already have been sent (${reason}). Check \`room-cli thread log ${threadId}\` and \`room-cli thread queue list ${threadId}\` before sending it again.${lag}${retry}`,
     requestId,
   );
 }

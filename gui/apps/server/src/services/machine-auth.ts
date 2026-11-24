@@ -144,6 +144,9 @@ export async function createMachineAuthService(
       provider: "sqlite",
       schema: machineAuthSchema,
     }),
+    // Machine auth only uses the user and apikey tables. better-auth 1.7's
+    // schema check also demands session, account and verification tables.
+    advanced: { database: { validateSchema: false } },
     plugins: [
       apiKey([
         {

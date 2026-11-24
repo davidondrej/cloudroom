@@ -11,7 +11,7 @@ import ReactMarkdown, {
   type UrlTransform,
 } from "react-markdown";
 import type { Nodes, Root } from "mdast";
-import { EXIT, visit } from "unist-util-visit";
+import { EXIT, visit } from "./markdown-visit.js";
 import {
   EMPTY_MOUNTED_MESSAGE_DIRECTIVES,
   MESSAGE_DIRECTIVE_MOUNT_LIMIT,

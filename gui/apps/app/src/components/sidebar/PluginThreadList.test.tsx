@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { BbNavigate, PluginThreadListProps } from "@get-bb/plugin-sdk";
 import {
@@ -23,7 +23,7 @@ import {
 } from "@/lib/plugin-slots";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { serializePluginPanelParams } from "@/lib/plugin-json-value";
-import { useThreadFileTabs } from "@/components/secondary-panel/useThreadFileTabs";
+import { useThreadFileTabs } from "@/components/right-panel/store/use-panel-tabs";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 import { PluginThreadList } from "./PluginThreadList";
 

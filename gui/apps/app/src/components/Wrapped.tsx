@@ -5,16 +5,16 @@ import { Button } from "@cloudroom/shared-ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import cloudUrl from "../../../../assets/room-cloud.png";
-import { checklistShownAtom, useCornerTop } from "@/components/ActivationChecklist";
-import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getLocalStorage } from "@/lib/browser-storage";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { drawWrappedCard, wrappedMidMonth, wrappedMonthName, WRAPPED_CARD, type Wrapped as Month } from "@/lib/wrapped-card";
 
 // Monthly Wrapped (docs/scopes/wrapped.md): from the 1st, a small card at the top right says last month is wrapped.
+// The corner module decides when that card may show (docs/scopes/corner-cards.md).
 // A click opens the Story, a three-panel card to save, copy or share on X. Settings → Analytics opens it again.
 
 const PATH = "/api/v1/cloudroom/wrapped";
@@ -130,9 +130,6 @@ function Story({ wrapped, onClose }: { wrapped: Month; onClose: () => void }) {
 
 export function Wrapped() {
   const compact = useIsCompactViewport();
-  const nativeBrowserShown = useIsNativeBrowserViewShown();
-  const checklistShown = useAtomValue(checklistShownAtom);
-  const top = useCornerTop();
   const [month, setMonth] = useState(lastMonth);
   const answered = useAtomValue(answeredAtom);
   const answer = useSetAtom(answerAtom);
@@ -174,7 +171,8 @@ export function Wrapped() {
   const wrapped = data ?? stored;
   const worth = wrapped !== null && wrapped.agents >= MIN_AGENTS ? wrapped : null;
   useEffect(() => { setWrapped(worth); }, [setWrapped, worth]);
-  const card = pending && worth !== null && !open && !nativeBrowserShown && !checklistShown;
+  const corner = useCorner("wrapped", pending && worth !== null && !open ? month : null);
+  const card = corner !== null;
   useEffect(() => {
     if (!card || viewed === month) return;
     viewed = month;
@@ -183,9 +181,9 @@ export function Wrapped() {
   const name = wrappedMonthName(month);
   return (
     <>
-      {card ? (
-        <div data-testid="wrapped-card" className={cn("fixed right-3 z-30 h-[176px] w-[340px] overflow-hidden rounded-[10px] bg-[#BFFF00] text-[#0a0a0a] shadow-[0_18px_50px_rgba(0,0,0,.65),0_2px_8px_rgba(0,0,0,.5)] duration-300 animate-in fade-in-0 slide-in-from-right-4", top)}>
-          <button type="button" onClick={() => { report(month, "opened"); answer({ month, open: true }); }}
+      {corner ? (
+        <div data-testid="wrapped-card" style={corner.style} className={cn(corner.className, "h-[176px] w-[340px] overflow-hidden rounded-[10px] bg-[#BFFF00] text-[#0a0a0a] shadow-[0_18px_50px_rgba(0,0,0,.65),0_2px_8px_rgba(0,0,0,.5)]")}>
+          <button type="button" onClick={() => { report(month, "opened"); corner.answer("opened"); answer({ month, open: true }); }}
             className="absolute inset-0 flex cursor-pointer flex-col px-4 pt-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-[#0a0a0a] focus-visible:ring-inset">
             <span className="flex gap-[3px]">
               {[0, 1, 2].map((step) => <span key={step} className={step === 0 ? "h-[3px] flex-1 bg-[#0a0a0a]" : "h-[3px] flex-1 bg-[#0a0a0a]/20"} />)}
@@ -197,7 +195,7 @@ export function Wrapped() {
             </span>
             <img src={cloudUrl} alt="" aria-hidden="true" className="absolute -right-[30px] -bottom-[34px] w-[150px] max-w-none -rotate-[14deg]" />
           </button>
-          <button type="button" aria-label="Dismiss" onClick={() => { report(month, "closed"); answer({ month, open: false }); }}
+          <button type="button" aria-label="Dismiss" onClick={() => { report(month, "closed"); corner.answer("closed"); answer({ month, open: false }); }}
             className="absolute top-[22px] right-3 flex size-6 cursor-pointer items-center justify-center rounded hover:bg-[#0a0a0a]/10">
             <Icon name="X" className="size-3.5" aria-hidden="true" />
           </button>

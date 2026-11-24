@@ -221,6 +221,7 @@ Inspecting:
     --work-status                          Include git working-tree status
     --git-diff                             Include git diff
     --no-pr                                Skip the GitHub pull request lookup
+    --credits                              Include Cloud Credits, last 7 days (one website read)
     --diff-target <type>                   Diff scope: uncommitted, branch_committed, all, commit
     --diff-sha <sha>                       Commit SHA (for --diff-target commit)
     --diff-merge-base <branch>             Override merge-base branch for diff
@@ -326,7 +327,9 @@ Messaging:
   `input` to `threads.spawn` or `threads.send`.
 
   room-cli thread stop [id]                      Stop work and release the agent runtime
-  room-cli thread compact [id]                   Request compaction of an idle or errored thread's context
+  room-cli thread compact [id]                   Compact context now, or once the running turn ends
+    --then <text>                                Follow-up message after compaction (default: keep going)
+    --no-then                                    Send no follow-up
   room-cli thread clear [id]                     Clear model context for an idle or failed thread
   room-cli thread cancel-plan [id]               Exit the provider's active Plan mode
   room-cli thread clear-goal [id]                Clear the provider's Goal
@@ -336,8 +339,10 @@ Messaging:
                                                  (Goal commands: Codex threads only)
     --self                                 Target current thread
 
-  `thread compact` enqueues the same structured /compact turn used by the
-  composer. Follow the thread timeline for the eventual compaction result.
+  `thread compact` sends the same structured /compact turn as the composer. On a
+  busy thread it waits for the turn to end, so an agent can compact itself with
+  `--self` and then end its turn. The follow-up runs next, starting with whether
+  compaction worked; a stop drops it.
   `thread clear` keeps the Cloudroom thread, workspace, durable event history, and
   sticky execution settings. Its active timeline starts at one visible
   `Context cleared` boundary, and its next prompt starts a fresh provider

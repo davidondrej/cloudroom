@@ -1,5 +1,8 @@
 import { z } from "zod";
-import type { PluginProviderReasoningLevel } from "@get-bb/plugin-sdk";
+import type {
+  PluginProviderCapabilities,
+  PluginProviderReasoningLevel,
+} from "@get-bb/plugin-sdk";
 import { experimental_acpLaunchSpecSchema } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import type { AcpLaunchSpec } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import type { AcpNativeRootsResolver } from "./native-roots/resolver.js";
@@ -28,13 +31,19 @@ export interface AcpAgentDefinition {
   supportsManualCompaction?: boolean;
   fork?: "none" | "tip";
   reasoningLevels?: readonly PluginProviderReasoningLevel[];
+  /** Only the modes the agent itself enforces. Omitted = Manual and Full access. */
+  permissionModes?: PluginProviderCapabilities["permissionModes"];
   providerUsage?: boolean;
   providerInstallation?: boolean;
+  /** False hides the Standard/Fast toggle: the agent has no fast mode. */
+  supportsServiceTier?: boolean;
   installer?:
     | { scriptUrl: string; powershellUrl?: string; args?: readonly string[] }
     | { npmPackage: string };
   /** Older versions cannot run the ACP launch; thread start asks for an update. */
   minimumVersion?: string;
+  /** True for user-configured ACP agents not shipped by Cloudroom, so telemetry masks their names. */
+  custom?: boolean;
   nativeRootsResolver?: AcpNativeRootsResolver;
 }
 
@@ -100,9 +109,13 @@ export function customAcpAgentDefinition(
     ...(shipped?.nativeRootsResolver === undefined
       ? {}
       : { nativeRootsResolver: shipped.nativeRootsResolver }),
+    ...(shipped?.permissionModes === undefined
+      ? {}
+      : { permissionModes: shipped.permissionModes }),
     visibility: "always",
     fork: "none",
     supportsManualCompaction: agent.supportsManualCompaction,
+    ...(shipped === undefined ? { custom: true } : {}),
   };
 }
 

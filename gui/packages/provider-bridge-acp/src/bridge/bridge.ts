@@ -125,6 +125,7 @@ import {
 } from "../wire.js";
 import {
   AcpAgentResponseError,
+  agentErrorHttpStatus,
   createAcpAgentConnection,
   requestAcpInitialize,
   type AcpAgentConnection,
@@ -156,6 +157,8 @@ import {
   runAcpDynamicToolMcpServer,
   type AcpMcpServerConfig,
 } from "./tool-proxy-mcp.js";
+import { createAcpWake } from "./wake.js";
+import type { AcpWake } from "./wake.js";
 import { isPathInsideRoots } from "./workspace-path.js";
 
 interface AcpSessionPolicy {
@@ -180,9 +183,11 @@ interface AcpThreadSession {
   construction: AcpSessionParams;
   providerThreadId: string;
   cwd: string;
+  env: Readonly<Record<string, string | undefined>>;
   dialect: AcpDialect;
   translator: AcpDeltaTranslator;
   contextEstimate: AcpContextEstimate | undefined;
+  lastExactContextWindow: number | undefined;
   model: string | undefined;
   connection: AcpAgentConnection;
   supportsImageInput: boolean;
@@ -192,6 +197,7 @@ interface AcpThreadSession {
   policy: AcpSessionPolicy;
   pendingInstructions: string | undefined;
   activePromptKind: "turn" | "compaction" | null;
+  wake: AcpWake;
   compactionAgentMessage: string;
   queuedInputs: AcpPendingTurnInput[];
   promptRequestPending: boolean;
@@ -201,6 +207,8 @@ interface AcpThreadSession {
   /** The live agent lost this session (#889); rebuild it before the next turn. */
   sessionLost: boolean;
   loading: boolean;
+  /** A thread/resume the daemon retries, as no message is sent yet: Stop may end it, and an outage fails it. */
+  retryableResume: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
   stopping: boolean;
@@ -325,7 +333,36 @@ function emitForSession(
   );
 }
 
+function emitStoredContextUsage(session: AcpThreadSession): boolean {
+  if (session.providerThreadId === "") {
+    return false;
+  }
+  const reading = session.dialect.readContextUsage?.({
+    sessionId: session.providerThreadId,
+    model: session.model,
+    env: session.env,
+  });
+  if (reading === undefined) {
+    return false;
+  }
+  session.lastExactContextWindow = reading.size;
+  sendThreadDeltas(session.bbThreadId, [
+    {
+      kind: "contextWindow",
+      used: reading.used,
+      size: reading.size,
+      estimated: reading.estimated,
+      ...(reading.snapshot ? { snapshot: reading.snapshot } : {}),
+      attach: "open",
+    },
+  ]);
+  return true;
+}
+
 function emitContextEstimate(session: AcpThreadSession): void {
+  if (emitStoredContextUsage(session)) {
+    return;
+  }
   const estimate = session.contextEstimate;
   if (estimate === undefined) {
     return;
@@ -334,19 +371,20 @@ function emitContextEstimate(session: AcpThreadSession): void {
     {
       kind: "contextWindow",
       used: estimate.used(),
-      size: estimate.windowSize(session.model),
+      size: session.lastExactContextWindow ?? estimate.windowSize(session.model),
       estimated: true,
       attach: "open",
     },
   ]);
 }
 
-function emitSessionError(session: AcpThreadSession, message: string): void {
+function emitSessionError(session: AcpThreadSession, message: string, httpStatus?: number): void {
   for (const controller of session.pendingToolCalls) controller.abort();
   if (session.activePromptKind !== null) {
     emitForSession(session, "error", {
       threadId: session.bbThreadId,
       message,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
     });
   }
   sendNotification(BRIDGE_NOTIFICATION_METHODS.error, {
@@ -759,6 +797,7 @@ interface AcpDynamicToolBridge {
 let cachedModelCatalog: { key: string; catalog: AgentModelCatalog } | null =
   null;
 const SESSION_MODEL_DISCOVERY_TTL_MS = 60_000;
+const DISCOVERY_SESSION_DELETE_TIMEOUT_MS = 5_000;
 let cachedSessionDiscoveredModels: {
   key: string;
   models: AvailableModel[];
@@ -858,6 +897,7 @@ async function loadSessionDiscoveredModels(
   agent: AcpAgentCommandParam,
   reasoningProbePriorityModelIds: readonly string[],
   parameterizedModelPicker: boolean,
+  deleteSessionArgs: AcpDialect["deleteSessionArgs"],
 ): Promise<AvailableModel[] | null> {
   const key = JSON.stringify({
     agent,
@@ -890,6 +930,7 @@ async function loadSessionDiscoveredModels(
   });
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let probeSessionId: string | undefined;
   const timeoutReached = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
       connection.kill();
@@ -921,6 +962,7 @@ async function loadSessionDiscoveredModels(
       })(),
       timeoutReached,
     ]);
+    probeSessionId = newSession.sessionId;
     if (timeout !== undefined) {
       clearTimeout(timeout);
       timeout = undefined;
@@ -959,6 +1001,14 @@ async function loadSessionDiscoveredModels(
     };
     return models;
   } catch (error) {
+    // A signed-out agent (agy answers session/new with -32000) must show Sign in, not a fake "Agent default" model.
+    if (error instanceof AcpAuthRequiredError || isAcpAuthRequiredResponse(error)) {
+      throw new AcpModelListAuthRequiredError();
+    }
+    // A missing CLI must show Install, not "Agent default" (the list-command path does the same).
+    if (error instanceof Error && isMissingExecutableError(error.cause)) {
+      throw error.cause;
+    }
     process.stderr.write(
       `acp bridge: ACP-native model discovery for "${agent.command}" failed: ${
         error instanceof Error ? error.message : String(error)
@@ -969,7 +1019,24 @@ async function loadSessionDiscoveredModels(
     if (timeout !== undefined) {
       clearTimeout(timeout);
     }
-    connection.kill();
+    const exited = connection.kill();
+    const deleteArgs =
+      probeSessionId === undefined
+        ? undefined
+        : deleteSessionArgs?.(agent.args, probeSessionId);
+    if (deleteArgs !== undefined) {
+      // Best effort, in the background once the agent is gone: a delete never fails or slows the list.
+      void exited
+        .then(() =>
+          execPortableFile(agent.command, deleteArgs, {
+            cwd: agent.cwd ?? process.cwd(),
+            env: childEnv,
+            timeoutMs: DISCOVERY_SESSION_DELETE_TIMEOUT_MS,
+          }),
+        )
+        // Not logged: the error quotes the whole command, which can carry a key (`env OPENAI_API_KEY=… opencode`).
+        .catch(() => undefined);
+    }
   }
 }
 
@@ -1111,6 +1178,14 @@ function isAcpAuthRequiredResponse(error: unknown): boolean {
   );
 }
 
+/** omp answers an unknown method with -32603 "Unknown ACP ext method: ...". */
+function isAcpMethodNotFound(error: unknown): boolean {
+  return (
+    error instanceof AcpAgentResponseError &&
+    (error.code === -32601 || /unknown acp ext method/i.test(error.message))
+  );
+}
+
 function withAcpAuthRequiredRecovery(error: unknown): unknown {
   if (error instanceof AcpAuthRequiredError) return error;
   if (
@@ -1209,6 +1284,7 @@ async function selectAcpNativeModel(args: {
   if (shouldSetModel) {
     let configState: AcpConfigStateResult | null = null;
     let setModel = true;
+    let configError: unknown;
     if (modelOption) {
       try {
         configState = await args.connection.request({
@@ -1221,8 +1297,8 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
         setModel = false;
-      } catch {
-        setModel = true;
+      } catch (error) {
+        configError = error;
       }
     }
     if (setModel) {
@@ -1233,15 +1309,21 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
       } catch (error) {
+        // An agent without set_model (OpenCode, omp) already gave the real reason (#711).
+        const reason =
+          configError instanceof AcpAgentResponseError &&
+          isAcpMethodNotFound(error)
+            ? configError
+            : error;
         if (
-          !(error instanceof AcpAgentResponseError) ||
-          isAcpAuthRequiredResponse(error)
+          !(reason instanceof AcpAgentResponseError) ||
+          isAcpAuthRequiredResponse(reason)
         ) {
-          throw error;
+          throw reason;
         }
         throw new AcpAgentResponseError(
-          `Model "${selection.modelId}" rejected: ${error.message}`,
-          error.code,
+          `Model "${selection.modelId}" rejected: ${reason.message}`,
+          reason.code,
         );
       }
     }
@@ -1542,6 +1624,12 @@ function handlePermissionRequest(
     options: parsed.data.options,
     cwd: session.cwd,
     classifyToolCall: session.dialect.classifyToolCall,
+    // Only the agent's own call, bound by its exact ID, before any output.
+    streamedArgsTitle:
+      bound?.event?.toolCallId === toolCall?.toolCallId &&
+      toolCall?.rawOutput === undefined
+        ? session.dialect.streamedArgsTitle
+        : undefined,
   });
   void sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
     providerThreadId: session.providerThreadId,
@@ -1553,6 +1641,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       const resolution = pendingInteractionResolutionSchema.safeParse(result);
       const response = resolution.success
         ? resolveAcpPermissionDecision({
@@ -1566,6 +1655,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       respondPermission(pending, null);
     });
 }
@@ -1585,12 +1675,29 @@ function sliceFileContent(
 }
 
 async function handleFsReadTextFile(
+  session: AcpThreadSession,
   params: unknown,
   responder: AcpAgentRequestResponder,
 ): Promise<void> {
   const parsed = acpReadTextFileParamsSchema.safeParse(params);
   if (!parsed.success) {
     responder.error(-32602, "Invalid fs/read_text_file params");
+    return;
+  }
+  // Skill folders stay readable: session instructions point at their SKILL.md.
+  if (
+    session.policy.permissionMode === "accept-edits" &&
+    !(await isPathInsideRoots(parsed.data.path, [
+      ...session.policy.workspaceWriteRoots,
+      ...(configuredSkillRoots ?? []).map(
+        (root) => root.skillDirectoryRootPath,
+      ),
+    ]))
+  ) {
+    responder.error(
+      -32000,
+      `File reads outside the workspace are denied by Cloudroom's accept-edits permission mode: ${parsed.data.path}`,
+    );
     return;
   }
   try {
@@ -1648,7 +1755,9 @@ async function handleFsWriteTextFile(
       ...(oldText === undefined ? {} : { oldText }),
       content: parsed.data.content,
     });
-    responder.result(null);
+    // An object, not null: Rust ACP agents such as Devin read null as a Parse
+    // error after the write succeeded, and retry it (#2061).
+    responder.result({});
   } catch (error) {
     responder.error(
       -32603,
@@ -1668,6 +1777,7 @@ function liveSessionForThread(
 }
 
 function removeSession(session: AcpThreadSession): void {
+  session.wake.end();
   for (const controller of session.pendingToolCalls) controller.abort();
   if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
     sessionsByRoomThreadId.delete(session.bbThreadId);
@@ -1712,6 +1822,8 @@ type AcpSessionStartRequest =
       kind: "resume";
       params: AcpSessionParams;
       resumeProviderThreadId: string;
+      /** A thread/resume, which comes before any message. */
+      beforeTurn?: true;
       /** Restart after a lost session (#889) or closed stream (#890): aborts on Stop; `reloadOnly` never starts fresh. */
       recovery?: { signal: AbortSignal; reloadOnly: boolean };
     }
@@ -1811,12 +1923,14 @@ async function startAgentSession(
     construction: params,
     providerThreadId: "",
     cwd: params.cwd,
+    env: childEnv,
     dialect,
     translator,
     contextEstimate:
       dialect.contextEstimate === undefined
         ? undefined
         : createAcpContextEstimate(dialect.contextEstimate),
+    lastExactContextWindow: undefined,
     model: undefined,
     connection,
     supportsImageInput: false,
@@ -1827,8 +1941,22 @@ async function startAgentSession(
       permissionMode: params.permissionMode,
       workspaceWriteRoots: params.workspaceWriteRoots,
     },
-    pendingInstructions: params.instructions,
+    pendingInstructions: [params.instructions, dialect.workspaceInstructions?.(params.cwd)].filter(Boolean).join("\n\n") || undefined,
     activePromptKind: null,
+    wake: createAcpWake({
+      isIdle: () => session.activePromptKind === null,
+      isHeld: () =>
+        session.pendingPermissions.size > 0 ||
+        session.pendingToolCalls.size > 0,
+      isNotice: dialect.isNotice,
+      openTurn: () => {
+        session.activePromptKind = "turn";
+        emitForSession(session, ACP_TURN_STARTED_METHOD, {
+          threadId: roomThreadId,
+        });
+      },
+      closeTurn: () => finishTurn(session, "end_turn"),
+    }),
     compactionAgentMessage: "",
     queuedInputs: [],
     promptRequestPending: false,
@@ -1836,6 +1964,10 @@ async function startAgentSession(
     providerStreamClosed: false,
     sessionLost: false,
     loading: false,
+    retryableResume:
+      request.kind === "resume" &&
+      request.beforeTurn === true &&
+      dialect.unreachableError !== undefined,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
     stopping: false,
@@ -1984,6 +2116,16 @@ async function startAgentSession(
         loadedModels = configState?.models;
         sessionId = request.resumeProviderThreadId;
       } catch (error) {
+        if (
+          session.retryableResume &&
+          error instanceof AcpAgentResponseError &&
+          error.message.includes(dialect.unreachableError!)
+        ) {
+          throw Object.assign(
+            new Error(`The agent couldn't reach its servers: ${error.message}`, { cause: error }),
+            { code: "agent_unreachable" },
+          );
+        }
         // Resume failed, so a fresh session starts below; log why so the lost context is traceable.
         console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
         sessionId = undefined;
@@ -2000,6 +2142,8 @@ async function startAgentSession(
     ) {
       throw new Error(`ACP agent "${agentLabel}" could not reload the session`);
     }
+    let loadedSession = false;
+    let emittedLoadUsage = false;
     if (sessionId === undefined) {
       session.loading = false;
       session.loadingSessionId = undefined;
@@ -2038,6 +2182,7 @@ async function startAgentSession(
         });
       }
     } else {
+      loadedSession = true;
       session.model = await selectAcpNativeModel({
         connection,
         sessionId,
@@ -2051,6 +2196,7 @@ async function startAgentSession(
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
       if (loadUsageUpdate) {
+        emittedLoadUsage = true;
         emitStartNotification(ACP_UPDATE_METHOD, {
           threadId: session.bbThreadId,
           update: loadUsageUpdate,
@@ -2082,6 +2228,9 @@ async function startAgentSession(
       emitForSession(session, deferred.method, deferred.params);
     }
     deferredEmits.length = 0;
+    if (loadedSession && !emittedLoadUsage) {
+      emitStoredContextUsage(session);
+    }
     return session;
   } catch (error) {
     session.stopping = true;
@@ -2168,7 +2317,9 @@ async function stopSession(
   }
   settleInterruptedPrompt(session);
 
-  const exited = session.connection.kill(killOptions);
+  const exited = session.connection.kill(
+    session.dialect.stopEndsCommands ? { ...killOptions, descendants: true } : killOptions,
+  );
   removeSession(session);
   await Promise.all([exited, releaseCursorMcpApproval(session)]);
 }
@@ -2196,6 +2347,10 @@ async function releaseSession(session: AcpThreadSession): Promise<void> {
     "ACP session released before the steer was sent",
   );
   cancelPendingPermissions(session);
+  // A turn the agent started itself has no prompt to end it.
+  if (session.wake.active) {
+    finishTurn(session, "cancelled");
+  }
   const exited = session.connection.kill();
   removeSession(session);
   await Promise.all([exited, releaseCursorMcpApproval(session)]);
@@ -2274,6 +2429,7 @@ function sessionSystemPrompt(
 
 function requestSteerCancel(session: AcpThreadSession): void {
   if (
+    session.dialect.steerWaits === true ||
     session.stopping ||
     session.cancelRequested ||
     !session.promptRequestPending ||
@@ -2329,6 +2485,7 @@ function finishTurn(
   if (session.activePromptKind !== "turn") {
     return;
   }
+  endWake(session);
   for (const controller of session.pendingToolCalls) controller.abort();
   session.activePromptKind = null;
   dropQueuedTurnInputs(session, "ACP turn ended before the steer was sent");
@@ -2347,16 +2504,31 @@ const TURN_OUTPUT_UPDATES: ReadonlySet<string> = new Set([
   "tool_call",
 ]);
 
+/** Ends a turn the agent started itself, whether it is over or a prompt takes it over. */
+function endWake(session: AcpThreadSession): void {
+  if (!session.wake.active) {
+    return;
+  }
+  session.wake.end();
+  cancelPendingPermissions(session);
+}
+
 function runTurn(
   session: AcpThreadSession,
   firstInput: AcpPendingTurnInput,
 ): void {
   session.activePromptKind = "turn";
-  session.turnOutput = false;
   emitForSession(session, ACP_TURN_STARTED_METHOD, {
     threadId: session.bbThreadId,
   });
+  runPrompts(session, firstInput);
+}
 
+/** Sends the input, then each steer queued behind it, and ends the turn. */
+function runPrompts(
+  session: AcpThreadSession,
+  firstInput: AcpPendingTurnInput,
+): void {
   session.turnSettled = (async () => {
     let pending = firstInput;
     for (;;) {
@@ -2368,6 +2540,9 @@ function runTurn(
 
       let stopReason: z.infer<typeof acpStopReasonSchema>;
       session.cancelRequested = false;
+      // Only this prompt's output counts: a follow-up sent after a steer's
+      // cancel must not borrow the earlier reply's (#1721).
+      session.turnOutput = false;
       try {
         session.promptRequestPending = true;
         const prompt = buildPromptContentBlocks(session, pending.input);
@@ -2382,6 +2557,9 @@ function runTurn(
           requestSteerCancel(session);
         }
         const result = await promptResult;
+        session.wake.promptEnded();
+        const lateText = session.dialect.lateTextMs;
+        if (lateText !== undefined) await new Promise((resolve) => setTimeout(resolve, lateText));
         stopReason = result.stopReason;
         for (
           let joined = session.joinedSteers.shift();
@@ -2391,6 +2569,7 @@ function runTurn(
           stopReason = (await joined) ?? stopReason;
         }
       } catch (error) {
+        session.wake.promptEnded();
         session.promptRequestPending = false;
         dropTurnInput(pending, "ACP turn failed before the prompt was sent");
         dropQueuedTurnInputs(
@@ -2431,6 +2610,7 @@ function runTurn(
               : session.sessionLost
                 ? `${message}. The agent lost this session; your next message restarts it.`
                 : message,
+            agentErrorHttpStatus(data),
           );
         }
         session.activePromptKind = null;
@@ -2541,7 +2721,7 @@ function handleAgentRequest(
       handlePermissionRequest(session, params, responder);
       return;
     case "fs/read_text_file":
-      void handleFsReadTextFile(params, responder);
+      void handleFsReadTextFile(session, params, responder);
       return;
     case "fs/write_text_file":
       void handleFsWriteTextFile(session, params, responder);
@@ -2616,6 +2796,7 @@ function handleAgentNotification(
     return;
   }
   session.contextEstimate?.addUpdate(parsed.data.update);
+  session.wake.note(parsed.data.update);
   if (TURN_OUTPUT_UPDATES.has(parsed.data.update.sessionUpdate)) {
     session.turnOutput = true;
   }
@@ -2683,14 +2864,27 @@ async function handleModelList(
   params: AcpModelListParams,
   dialectId: string | undefined,
 ): Promise<void> {
+  const defaultLevel = resolveAcpDialect({
+    ...(dialectId === undefined ? {} : { dialectId }),
+    command: params.listCommand?.command ?? params.agent?.command ?? "",
+  }).defaultReasoningLevel;
   function sendModels(models: readonly AvailableModel[]): void {
+    const configured = applyConfiguredReasoningToModels(models, {
+      reasoningCli: params.reasoningCli,
+      nativeReasoning: params.nativeReasoning,
+    });
     sendResult(
       id,
       splitPrimaryModels(
-        applyConfiguredReasoningToModels(models, {
-          reasoningCli: params.reasoningCli,
-          nativeReasoning: params.nativeReasoning,
-        }),
+        defaultLevel === undefined
+          ? configured
+          : configured.map((model) =>
+              model.supportedReasoningEfforts.some(
+                (effort) => effort.reasoningEffort === defaultLevel,
+              )
+                ? { ...model, defaultReasoningEffort: defaultLevel }
+                : model,
+            ),
         params.primaryModels,
       ),
     );
@@ -2718,6 +2912,10 @@ async function handleModelList(
           params.agent,
           params.reasoningProbePriorityModelIds,
           params.parameterizedModelPicker,
+          resolveAcpDialect({
+            ...(dialectId === undefined ? {} : { dialectId }),
+            command: params.agent.command,
+          }).deleteSessionArgs,
         )
       : null;
   if (sessionDiscoveredModels) {
@@ -2861,10 +3059,15 @@ async function handleRequest(
       const modelPicker = decodeAcpModelPickerOptions(
         request.params.providerOptions,
       );
+      const launchSpec = decodeLaunchSpec(request.params.providerOptions);
+      const { cwd } = request.params;
       await handleModelList(
         request.id,
         buildAcpModelListParams(
-          decodeLaunchSpec(request.params.providerOptions),
+          // Like thread start: list in the project, where its agent config applies (#1236).
+          launchSpec !== null && launchSpec.cwd === undefined && cwd
+            ? { ...launchSpec, cwd }
+            : launchSpec,
           modelPicker,
         ),
         decodeDialectId(request.params.providerOptions),
@@ -2958,6 +3161,7 @@ async function handleRequest(
               kind: "resume",
               params: sessionParams,
               resumeProviderThreadId: request.params.providerThreadId,
+              beforeTurn: true,
             }
           : request.method === "thread/fork"
             ? {
@@ -2981,7 +3185,7 @@ async function handleRequest(
         sendError(request.id, -32000, "No active ACP session");
         return;
       }
-      if (session.activePromptKind !== null) {
+      if (session.activePromptKind !== null && !session.wake.active) {
         sendError(request.id, -32000, "A turn is already active");
         return;
       }
@@ -2990,6 +3194,17 @@ async function handleRequest(
         decodeLaunchSpec(params.options.providerOptions),
         params.options,
       );
+      // A message that compacts, or needs a new session, first ends a turn the agent started itself.
+      if (
+        session.wake.active &&
+        (isStandaloneBuiltinCompactCommand(params.input) ||
+          session.providerStreamClosed ||
+          session.sessionLost ||
+          (!switchesPermissionModeInPlace(session, construction) &&
+            !isDeepStrictEqual(construction, session.construction)))
+      ) {
+        finishTurn(session, "end_turn");
+      }
       if (session.providerStreamClosed || session.sessionLost) {
         const closed = session.providerStreamClosed;
         const previousProviderThreadId = session.providerThreadId;
@@ -3032,6 +3247,10 @@ async function handleRequest(
       };
       if (isStandaloneBuiltinCompactCommand(params.input)) {
         startCompaction(session, pending);
+      } else if (session.wake.active) {
+        // The message becomes the prompt of the turn the agent started itself.
+        endWake(session);
+        runPrompts(session, pending);
       } else {
         runTurn(session, pending);
       }
@@ -3075,6 +3294,13 @@ async function handleRequest(
         input: params.input,
         requestId: null,
       };
+      // A turn the agent started itself has no prompt to steer: this one becomes its prompt.
+      if (session.wake.active) {
+        endWake(session);
+        sendResult(request.id, { threadId: params.threadId });
+        runPrompts(session, pending);
+        return;
+      }
       const steerMeta = session.dialect.steerMeta;
       if (
         session.joinsSteering &&
@@ -3133,7 +3359,11 @@ const threadStopRequestedSchema = z.object({
 function handleParsedMessage(parsed: unknown): void {
   const stopRequested = threadStopRequestedSchema.safeParse(parsed);
   if (stopRequested.success) {
-    sessionRecoveries.get(stopRequested.data.params.threadId)?.abort();
+    const { threadId } = stopRequested.data.params;
+    sessionRecoveries.get(threadId)?.abort();
+    const opening = sessionsByRoomThreadId.get(threadId);
+    // Cut off from its servers, Cursor never answers session/load, so Stop ends it.
+    if (opening?.retryableResume && opening.loading) void opening.connection.kill();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);

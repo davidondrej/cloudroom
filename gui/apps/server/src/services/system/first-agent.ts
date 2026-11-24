@@ -1,15 +1,10 @@
 import { appSettingsValues, type DbConnection } from "@cloudroom/db";
 import { eq } from "drizzle-orm";
 
-// The first agent (ADR 20261111-220912): the one thread Cloudroom starts by itself when first-run setup ends. No thread
-// saves how it was started, so its ID is kept as one settings row, to tag that thread's reply, failure, and follow-up
-// messages with `first_agent` in the usage events.
+// The first agent: a thread Cloudroom started by itself when first-run setup ended, in apps from v151. Removed
+// (ADR 20261121-193244), so nothing saves an ID here any more. Installs that got one keep its ID in this settings row:
+// the checklist and thread counters still skip that thread, and its usage events still carry `first_agent`.
 const KEY = "cloudroom_first_agent_thread";
-
-export function rememberFirstAgent(db: DbConnection, threadId: string): void {
-  const row = { value: threadId, updatedAt: Date.now() };
-  db.insert(appSettingsValues).values({ key: KEY, ...row }).onConflictDoUpdate({ target: appSettingsValues.key, set: row }).run();
-}
 
 /** The first agent's thread, or null on an install that never got one. */
 export const firstAgentThreadId = (db: DbConnection): string | null =>

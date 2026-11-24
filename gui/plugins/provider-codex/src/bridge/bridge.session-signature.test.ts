@@ -174,6 +174,23 @@ it.each(["start", "resume", "fork"] as const)(
   30_000,
 );
 
+// The runtime gives thread/resume 30 s; an unanswered optional rate-limit read
+// (slow chatgpt.com) used to hold it for 60 s, so every retry failed (#1816).
+it("resumes when Codex never answers the optional rate-limit read", async () => {
+  writeFileSync(
+    join(workspaceDir, "script.json"),
+    JSON.stringify({ requestLogPath, rateLimits: "hang" }),
+  );
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: "provider-saved",
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(1)).error).toBeUndefined();
+}, 30_000);
+
 const SOL_NEEDS_AUTO_REVIEW = {
   autoReview: { requiredOnModels: ["gpt-6.1-sol"] },
 };

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router";
 import { z } from "zod";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { COLORS, REST, RangeToggle, Stat, sum } from "@/components/settings/UsageSection";
@@ -11,6 +11,9 @@ import { fetchWithAppSurface } from "@/lib/app-surface";
 import { createLastKnownCache } from "@/lib/last-known-cache";
 import { getThreadRoutePath } from "@/lib/route-paths";
 import { sdk } from "@/lib/sdk";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+
+const BILLING_URL = "https://www.cloudroom.dev/billing";
 
 // Settings → Analytics: when Cloud Credits were used, the first tab (design A, David 2026-11-08). The same wave as the
 // website's Usage tab on Plan & billing; the website builds the data (web/lib/credits.ts creditWave). Split by thread:
@@ -44,6 +47,21 @@ async function loadWave(signal?: AbortSignal): Promise<CreditsWave | null> {
   if (!response.ok) throw new Error(`Cloud Credits wave: ${response.status}`);
   return z.object({ wave: waveSchema.nullable() }).parse(await response.json()).wave;
 }
+
+/** One account's wave: its last saved copy at once, then a refresh. Analytics preloads it, the tab shows it. */
+export const creditsWaveQuery = (accountId: string) => queryOptions({
+  queryKey: creditsWaveKey(accountId),
+  queryFn: async ({ signal }) => {
+    const wave = await loadWave(signal);
+    if (wave) waveCache.write(waveCache.key(accountId), wave);
+    return wave;
+  },
+  enabled: accountId !== "",
+  initialData: () => (accountId ? waveCache.read(waveCache.key(accountId)) ?? undefined : undefined),
+  // Saved data counts as stale, so every first visit refetches.
+  initialDataUpdatedAt: 0,
+  staleTime: 60_000,
+});
 
 type Range = "24h" | "7d" | "30d";
 const RANGES: { id: Range; hours: number; long: string }[] = [
@@ -84,7 +102,7 @@ export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Ran
   return (
     <WavePlot
       points={points.map((point, i) => ({ value: point.credits, top: layers
-        ? layers.map((layer) => ({ name: layer.name, value: layer.values[i]!, color: layer.color })).filter((layer) => layer.value > 0)
+        ? layers.map((layer) => ({ name: layer.name, value: layer.values[i]!, color: layer.color })).filter((layer) => Math.round(layer.value) > 0)
         : point.top.map((thread) => ({ name: thread.name, value: thread.credits })) }))}
       sigma={range === "7d" ? 1.6 : range === "24h" ? 1 : 0.8}
       format={n}
@@ -165,20 +183,7 @@ export function CreditBlocks({ split, from }: { split: CreditSplit; from: number
 export function CreditsUsageSection() {
   const account = useCloudroomAccount().data, accountId = account?.account?.id ?? "";
   const [range, setRange] = useState<Range>("30d");
-  const cacheKey = waveCache.key(accountId);
-  const query = useQuery({
-    queryKey: creditsWaveKey(accountId),
-    queryFn: async ({ signal }) => {
-      const wave = await loadWave(signal);
-      if (wave) waveCache.write(cacheKey, wave);
-      return wave;
-    },
-    enabled: accountId !== "",
-    initialData: () => (accountId ? waveCache.read(cacheKey) ?? undefined : undefined),
-    // Saved data counts as stale, so every first visit refetches.
-    initialDataUpdatedAt: 0,
-    staleTime: 60_000,
-  });
+  const query = useQuery(creditsWaveQuery(accountId));
   const wave = query.data;
   if (!accountId) return null;
   if (!wave) return <p className="text-sm text-muted-foreground">{query.isPending ? "Loading…" : query.isError ? "Couldn't load Cloud Credits." : "No Cloud Credits data yet."}</p>;
@@ -203,7 +208,19 @@ export function CreditsUsageSection() {
       <div className="space-y-5">
         <div className="flex gap-3">
           <Stat label={`Credits · ${range}`} value={n(points.reduce((sum, point) => sum + point.credits, 0))} />
-          <Stat label="Left" value={left === null ? "—" : n(left)} />
+          <div className="min-w-0 flex-1 border border-border px-3.5 py-3">
+            <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">Left</div>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className="truncate font-mono text-xl text-foreground tabular-nums">{left === null ? "—" : n(left)}</span>
+              <button
+                type="button"
+                onClick={() => openUrlInExternalBrowser(BILLING_URL)}
+                className="shrink-0 border border-primary/60 px-1.5 leading-5 text-xs text-primary-text hover:bg-primary/10"
+              >
+                + buy more
+              </button>
+            </div>
+          </div>
           <Stat label="Busiest day" value={busiest && busiest[1] > 0 ? busiest[0] : "—"} />
         </div>
         <CreditsWavePlot wave={wave} range={range} />

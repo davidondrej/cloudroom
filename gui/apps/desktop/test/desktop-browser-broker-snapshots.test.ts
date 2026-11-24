@@ -30,7 +30,7 @@ function nativeTab(tabId: string, threadId: string): DesktopBrowserNativeTab {
     canGoForward: false,
     errorText: null,
     generation: "tab-generation",
-    profile: { kind: "personal" },
+    profile: { kind: "automation", id: "agent" },
     presentation: "reveal",
   };
 }
@@ -153,6 +153,11 @@ describe("desktop browser broker cleanup of gone resources", () => {
     ["release_control", "mine", { ok: true }],
     ["close_tab", "mine", { ok: true }],
     ["close_tab", "theirs", "Browser tab is outside the requested thread"],
+    [
+      "reveal_tab",
+      "mine",
+      "Browser tab was closed or does not exist (a page can close its own tab)",
+    ],
   ] as const)("%s %s", async (action, id, expected) => {
     let tabs = [nativeTab("mine", THREAD_ID), nativeTab("theirs", "thr_other")];
     const subscribeAutomationTabs = vi.fn((_: () => void) => () => undefined);

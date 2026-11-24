@@ -154,6 +154,11 @@ function deleteMachineProjectSources(
 
 type MachineHostRow = NonNullable<ReturnType<typeof getHost>>;
 
+// A daemon session marks its host seen, so no lastSeenAt means it never connected.
+function neverConnected(deps: Deps, row: MachineHostRow): boolean {
+  return row.lastSeenAt === null && !deps.hub.hasDaemonForHost(row.id);
+}
+
 function createOwns(
   current: ReturnType<typeof getHost>,
   owner: MachineHostRow,
@@ -1189,6 +1194,8 @@ async function removeMachine(deps: Deps, hostId: string): Promise<void> {
   const record = getMachineProvider(row.machineProviderId);
   if (record === undefined) return;
   const resource = row.resource;
+  const retireEnvironments =
+    row.type === "ephemeral" || neverConnected(deps, row);
   const operationId = `${record.pluginId}:${randomUUID()}`;
   const attempt = row.teardownAttempt + 1;
   const creationFailureMessage =
@@ -1228,7 +1235,7 @@ async function removeMachine(deps: Deps, hostId: string): Promise<void> {
           !lifecycleOwns(current, record.provider.id, operationId, "removing")
         )
           return;
-        if (current.type === "ephemeral") {
+        if (retireEnvironments) {
           markHostEnvironmentsDestroyed(deps.db, deps.hub, hostId);
         }
         await deps.machineAuth.revokeHostEnrollKeys({ hostId });
@@ -1349,7 +1356,9 @@ export async function sweepProviderMachine(
       environment.status !== "destroyed" ||
       environment.teardownStatus !== "removed",
   );
-  if (row.type === "persistent") {
+  // A machine whose daemon never connected holds no environments to remove;
+  // removeMachine retires their rows locally (#1065).
+  if (row.type === "persistent" && !neverConnected(deps, row)) {
     if (
       environments.some((environment) => environment.providerOwnsPath) &&
       row.suspendedAt !== null

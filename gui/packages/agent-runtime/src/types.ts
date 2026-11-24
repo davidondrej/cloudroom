@@ -143,6 +143,8 @@ export interface StartThreadArgs {
     sourceProviderThreadId: string;
     sourceProviderCheckpointId?: string;
   };
+  /** A message edit replaces this native session and keeps its Goal (#857). */
+  replacesProviderThreadId?: string;
 }
 
 export interface StartThreadResult {

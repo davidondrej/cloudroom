@@ -1,19 +1,12 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { useEffect, useState, useSyncExternalStore } from "react";
 import { appToast } from "@/components/ui/app-toast";
-import {
-  LONG_GONE_MS,
-  otherMacLostAt,
-  viewingOtherMac,
-} from "@/cloud/other-mac";
+import { LONG_GONE_MS } from "@/cloud/other-mac";
+import { otherMacLostAt, onMacConnectionChange, viewingOtherMac } from "@/cloud/mac-connection";
 import { useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
-import { wsManager } from "@/lib/ws";
 
 // Most drops are over in a second or two. Only a longer one is worth a note.
 const SHOW_AFTER_MS = 2_000;
-
-const onConnectionChange = (listener: () => void) =>
-  wsManager.onConnectionStateChange(listener);
 
 /**
  * The desktop app showing another of your Macs. When that Mac drops, the app stays on it: this note says
@@ -22,7 +15,8 @@ const onConnectionChange = (listener: () => void) =>
  */
 export function OtherMacStatus() {
   const { desktopApi, desktopInfo } = useDesktopUpdateInfo();
-  const fallback = desktopInfo?.computers?.fallback ?? null;
+  const computers = desktopInfo?.computers;
+  const fallback = computers?.fallback ?? null;
   const backHandle = fallback?.back === true ? fallback.handle : null;
   const backName = fallback?.back === true ? fallback.name : null;
   const openComputer = desktopApi?.openComputer;
@@ -41,7 +35,7 @@ export function OtherMacStatus() {
   }, [backHandle, backName, openComputer]);
 
   const viewing = viewingOtherMac();
-  const lostAt = useSyncExternalStore(onConnectionChange, otherMacLostAt);
+  const lostAt = useSyncExternalStore(onMacConnectionChange, otherMacLostAt);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
     if (!viewing || lostAt === null) return;
@@ -58,6 +52,7 @@ export function OtherMacStatus() {
     (openComputer ? () => openComputer(null) : undefined);
   return (
     <ReconnectingNote
+      name={computers?.list.find(mac => mac.handle === computers.viewing)?.name}
       onUseThisMac={now - lostAt >= LONG_GONE_MS ? showThisMac : undefined}
     />
   );
@@ -65,8 +60,10 @@ export function OtherMacStatus() {
 
 /** The small note under the header, top right. It never covers the page. */
 export function ReconnectingNote({
+  name,
   onUseThisMac,
 }: {
+  name?: string;
   onUseThisMac?: () => Promise<void>;
 }) {
   return (
@@ -76,7 +73,7 @@ export function ReconnectingNote({
           aria-hidden
           className="size-1.5 shrink-0 rounded-full bg-warning"
         />
-        <span role="status">Reconnecting…</span>
+        <span role="status">Connection to {name || `the other ${COMPUTER}`} lost. Reconnecting…</span>
         {onUseThisMac ? (
           <>
             <span aria-hidden>·</span>

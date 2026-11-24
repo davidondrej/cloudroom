@@ -24,12 +24,14 @@ import {
   getRunRequired,
   incrementRepairAttempts,
   listCallsForRun,
+  listRunningWorkersForRun,
   listCallsForRunPage,
   listExpiredTerminalRuns,
   listActiveRunsForOriginThread,
   listRuns,
   listPendingNotificationRuns,
   listRunningCalls,
+  listSupersededCalls,
   listTimedOutRuns,
   markCallReplayedSameRun,
   markNotificationSent,
@@ -43,6 +45,7 @@ import {
   storeStructuredResult,
   updateRunPhase,
   type Db,
+  type SupersededCallRow,
   type WorkflowCallCounts,
   type WorkflowCallRow,
   type WorkflowRunRow,
@@ -374,10 +377,17 @@ export interface WorkflowService {
     afterCallIndex: number,
     limit: number,
   ): WorkflowRunInspectionPage | null;
+  /** Earlier failed or cancelled attempts of calls in this index range. */
+  supersededCalls(
+    runId: string,
+    firstCallIndex: number,
+    lastCallIndex: number,
+  ): SupersededCallRow[];
   inspectLatestForThread(threadId: string): WorkflowRunInspection | null;
   inspectActiveForThread(threadId: string): WorkflowRunInspection[];
   list(projectId: string, limit: number): WorkflowRunRow[];
   queueStatus(run: WorkflowRunRow): WorkflowQueueStatus | null;
+  runningWorkers(runId: string): Array<{ callIndex: number; threadId: string }>;
   stop(runId: string): Promise<boolean>;
   updateSettings(settings: WorkflowSettings): void;
   runWorker(signal: AbortSignal): Promise<void>;
@@ -1706,10 +1716,13 @@ export function createWorkflowService(
     get: (runId) => getRun(db, runId),
     inspect,
     inspectPage,
+    supersededCalls: (runId, firstCallIndex, lastCallIndex) =>
+      listSupersededCalls(db, { runId, firstCallIndex, lastCallIndex }),
     inspectLatestForThread,
     inspectActiveForThread,
     list: (projectId, limit) => listRuns(db, { projectId, limit }),
     queueStatus,
+    runningWorkers: (runId) => listRunningWorkersForRun(db, runId, 50),
     stop,
     updateSettings(settings) {
       currentSettings = settings;

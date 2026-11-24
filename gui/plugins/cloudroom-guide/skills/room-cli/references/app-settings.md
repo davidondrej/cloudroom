@@ -62,7 +62,8 @@ keep human ones, and print one stderr line when they remove something. Cloud
 touches only real repositories (the session's own, `/repos/<name>`, and
 `/code/<name>` in Personal threads), never test fixtures; Local touches every
 repository. Cloud OpenClaw always strips, even with the setting off.
-It needs Git 2.54 or newer.
+It needs Git 2.54 or newer. While it is on, pull requests Claude Code opens end
+with `Built with [Cloudroom](https://cloudroom.dev)`; off, Claude Code writes its own line.
 
 ## Command Guard
 
@@ -130,7 +131,8 @@ This blocks common catastrophic shell commands; it is not a sandbox.
 
 ## Provider order and default
 
-- `providerOrder` defaults to `[]`. Set it to a JSON array of provider IDs.
+- Harness order is automatic: the default first, then the most used in the
+  last 30 days.
 - `defaultProviderId` defaults to `null`. Set a provider ID or use `null` to
   clear it.
 
@@ -219,4 +221,4 @@ Use `room-cli settings ui reset sidebar.hiddenFooterItems` to show everything ag
 
 Disable usage telemetry with `room-cli settings general telemetryEnabled false`
 or Settings → General → Privacy & diagnostics → Share usage data and setup errors. This server-wide preference
-applies immediately and persists across restarts. `BB_TELEMETRY=false` overrides it.
+applies immediately and persists across restarts. `CLOUDROOM_TELEMETRY=false`, `BB_TELEMETRY=false`, or `DO_NOT_TRACK=1` overrides it. Details: https://cloudroom.dev/privacy.

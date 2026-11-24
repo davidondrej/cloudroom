@@ -29,8 +29,8 @@ conversation history stays unchanged. Cloud messages capture the setting when
 submitted, so queued messages and retries keep that copy. Control commands such
 as `/compact` stay unchanged. A thread whose copy may be lost (a cancelled or failed message, a new agent session) gets it again.
 
-The builtin Accounts plugin is always on. It lets one user connect up to 10
-Claude Code and up to 10 Codex subscriptions. Add them at the top of Settings →
+The builtin Accounts plugin is always on. It lets one user connect up to 30
+Claude Code and up to 30 Codex subscriptions. Add them at the top of Settings →
 Agents → Claude Code or Codex; the machine's own CLI login is the first entry
 and is never copied. Every Local and Cloud thread uses the account in use, and
 **Use** picks another; nothing switches automatically. Adding an account never
@@ -475,8 +475,8 @@ polling never resolves a dependency tree or builds. A candidate that fails to
 build is reported as available and fails when you apply it.
 
 cloudroom ships no build toolchain. The first time a git or path plugin is built on
-a machine, cloudroom downloads a pinned esbuild + Tailwind set into
-`<dataDir>/plugins/toolchain-<versions>/` and reuses it afterwards. Installing
+a machine, cloudroom downloads a locked esbuild + Tailwind set into
+`<dataDir>/plugins/toolchain-<versions>-<lock hash>/` and reuses it afterwards. Installing
 a prebuilt npm plugin never triggers that download.
 
 To build a plugin yourself, run `room-cli plugin build` with Cloudroom

@@ -17,10 +17,11 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -99,7 +100,7 @@ fn desktop_env(command: &mut Command) -> &mut Command {
         .env_remove("NO_AT_BRIDGE")
 }
 
-fn detach(program: &str, args: &[&str], log: &str) -> Result<u32, Error> {
+fn detach(program: &str, args: &[&str], log: &str) -> Result<Child, Error> {
     let log = std::fs::File::create(format!("{STATE}/{log}.log"))?;
     let child = desktop_env(&mut Command::new(program))
         .args(args)
@@ -109,18 +110,60 @@ fn detach(program: &str, args: &[&str], log: &str) -> Result<u32, Error> {
         .process_group(0)
         .spawn()
         .map_err(|error| format!("could not start {program}: {error}"))?;
-    Ok(child.id())
+    Ok(child)
 }
 
-fn wait_for(what: &str, ready: impl Fn() -> bool) -> Result<(), Error> {
+/// Waits up to 10 s for `ready`, and fails at once when `child` exits first. The error names the cause: the exit
+/// status, or that it still runs, and the last lines of its own log (#2021).
+fn wait_for(
+    what: &str,
+    mut child: Child,
+    log: &str,
+    ready: impl Fn() -> bool,
+) -> Result<(), Error> {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(10) {
+    // Readiness comes first, so a machine that stalls past the deadline still gets one last look.
+    let cause = loop {
         if ready() {
             return Ok(());
         }
+        if let Some(status) = child.try_wait()? {
+            break format!("exited ({status}) before it was ready");
+        }
+        if start.elapsed() >= Duration::from_secs(10) {
+            break format!("still isn't ready after 10 s (pid {})", child.id());
+        }
         std::thread::sleep(Duration::from_millis(100));
+    };
+    let path = format!("{STATE}/{log}.log");
+    Err(format!("{what} {cause}. Last lines of {path}:\n{}", tail(&path)).into())
+}
+
+/// The end of a log: its last 5 lines within 1000 bytes, without color codes or other control characters.
+fn tail(path: &str) -> String {
+    let mut bytes = Vec::new();
+    if let Ok(mut file) = std::fs::File::open(path) {
+        // A shorter file fails this seek and is read from the start.
+        let _ = file.seek(SeekFrom::End(-1000));
+        let _ = file.read_to_end(&mut bytes);
     }
-    Err(format!("{what} did not start; see {STATE}/*.log").into())
+    let (mut text, mut escape) = (String::new(), false);
+    for c in String::from_utf8_lossy(&bytes).chars() {
+        if escape {
+            escape = !c.is_ascii_alphabetic();
+        } else if c == '\x1b' {
+            escape = true;
+        } else if c == '\n' || !c.is_control() {
+            text.push(c);
+        }
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let text = lines[lines.len().saturating_sub(5)..].join("\n");
+    if text.is_empty() {
+        "(empty)".into()
+    } else {
+        text
+    }
 }
 
 fn listening(path: &str) -> bool {
@@ -153,17 +196,19 @@ fn ensure_desktop() -> Result<String, Error> {
             let _ = std::fs::remove_file(X_LOCK);
             let _ = std::fs::remove_file(X_SOCKET);
         }
-        detach(
+        let screen = detach(
             "Xvfb",
             &[DISPLAY, "-screen", "0", "1440x900x24", "-nolisten", "tcp"],
             "xvfb",
         )?;
-        wait_for("The virtual screen (Xvfb)", || listening(X_SOCKET))?;
+        wait_for("The virtual screen (Xvfb)", screen, "xvfb", || {
+            listening(X_SOCKET)
+        })?;
     }
     let bus_socket = format!("{STATE}/bus");
     if !listening(&bus_socket) {
         let address = bus();
-        detach(
+        let daemon = detach(
             "dbus-daemon",
             &[
                 "--session",
@@ -173,24 +218,24 @@ fn ensure_desktop() -> Result<String, Error> {
             ],
             "dbus",
         )?;
-        wait_for("The session bus", || listening(&bus_socket))?;
+        wait_for("The session bus", daemon, "dbus", || listening(&bus_socket))?;
     }
     // A window manager gives windows focus, so keyboard input reaches them (web/computer-use.sh installs it).
     let wm = format!("{STATE}/wm.pid");
     if Path::new("/usr/bin/openbox").exists() && !alive(&wm, "openbox") {
-        std::fs::write(&wm, detach("openbox", &[], "wm")?.to_string())?;
+        std::fs::write(&wm, detach("openbox", &[], "wm")?.id().to_string())?;
     }
     let atspi = format!("{STATE}/atspi.pid");
     let launcher = "/usr/libexec/at-spi-bus-launcher";
     if !alive(&atspi, launcher) {
-        let pid = detach(launcher, &["--launch-immediately"], "atspi")?;
+        let pid = detach(launcher, &["--launch-immediately"], "atspi")?.id();
         std::fs::write(&atspi, pid.to_string())?;
     }
     let socket = format!("{STATE}/driver.sock");
     if !listening(&socket) {
         let _ = std::fs::remove_file(&socket);
-        detach(DRIVER, &["serve", "--socket", &socket], "driver")?;
-        wait_for("Cua Driver", || listening(&socket))?;
+        let driver = detach(DRIVER, &["serve", "--socket", &socket], "driver")?;
+        wait_for("Cua Driver", driver, "driver", || listening(&socket))?;
     }
     Ok(socket)
 }
@@ -396,7 +441,7 @@ pub async fn cli(args: &[String]) -> Result<i32, Error> {
             let program = args.get(1).ok_or(USAGE)?;
             ensure_desktop()?;
             let rest: Vec<&str> = args[2..].iter().map(String::as_str).collect();
-            let pid = detach(program, &rest, "launch")?;
+            let pid = detach(program, &rest, "launch")?.id();
             println!("{}", serde_json::json!({ "pid": pid, "display": DISPLAY }));
             Ok(0)
         }

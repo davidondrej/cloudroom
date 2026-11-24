@@ -455,7 +455,8 @@ it:
    notification fails a pending start at once. `thread retry` resends it.
    A started turn with no event for 10 minutes, and no running command, tool
    call, pending request, or background work, gets one `provider_turn_silent`
-   warning per silence; the turn stays open (#977).
+   warning per silence; the turn stays open (#977). `willRetry` errors count
+   as silence, and the warning names how many came and the last (#1853).
 5. `thread/stop` semantics follow its `intent`: `interrupt` settles the
    active turn as interrupted (the bridge emits the settling deltas —
    `turn.boundary { interrupted }` plus explicit closes for provider-owned
@@ -538,7 +539,10 @@ carries the whole item, so refusing it would lose real content.
 4. Fork: absent `sourceProviderCheckpointId` means fork at the tip. A
    `fork: "tip"` bridge rejects checkpoint forks with
    `FORK_CHECKPOINT_UNSUPPORTED` rather than cloning history the bb timeline
-   does not show.
+   does not show. A Codex message edit's `thread/fork`, or its
+   `thread/start` when the first message is edited, also names
+   `replacesProviderThreadId`, the thread's current session, whose Goal it
+   keeps.
 5. Open work is what the timeline says it is. A `backgroundTask` item and a
    `delegation` item that are still pending are live provider work, and the
    runtime will not reap the session while one is open. Model a native

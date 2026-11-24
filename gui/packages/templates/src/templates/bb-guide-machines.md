@@ -237,7 +237,7 @@ The CLI refuses another host or server identity in the selected machine director
 
 The manual copy command fetches `/install.sh` using a short-lived `X-BB-Enrollment` header. The server supplies the bootstrap only for a pending, unexpired, uncancelled manual enrollment whose credential has not been consumed; downloaded responses are not cached. The command contains no bootstrap JSON or access-provider credentials.
 
-The installer accepts `--bootstrap-env <NAME>`, takes the bundle out of its environment before starting any other program, and pipes it to the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli` without replacing an existing path. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
+The installer accepts `--bootstrap-env <NAME>`, takes the bundle out of its environment before starting any other program, and pipes it to the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli`, replacing only its own wrapper for the same machine directory, never another file or link. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
 
 Machine bootstrap v2 supplies optional server request headers. `room-cli machine enroll`
 persists them privately as `serverHeaders`; the daemon reads them from that config

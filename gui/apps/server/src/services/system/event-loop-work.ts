@@ -125,6 +125,25 @@ export function hasCompletedEventLoopWorkForTests(label: string): boolean {
   );
 }
 
+/**
+ * Counts a synchronous step timed elsewhere (a slow SQLite query) as blocking
+ * work in this window, under the work that ran it. Without this, a slow query
+ * inside an async request or sweep never shows on the stall line.
+ */
+export function noteBlockingEventLoopWork(
+  label: string,
+  durationMs: number,
+): void {
+  const parentId = currentFrameId.getStore();
+  const parent =
+    parentId === undefined ? undefined : activeFrames.get(parentId);
+  completedInWindow.push({
+    blocksEventLoop: true,
+    durationMs,
+    label: parent === undefined ? label : `${parent.label} > ${label}`,
+  });
+}
+
 export function runEventLoopWorkSync<T>(label: string, work: () => T): T {
   const id = enterEventLoopWork(label, true);
   return currentFrameId.run(id, () => {

@@ -191,12 +191,21 @@ type FakePermissionRequestHandler = (
   webContents: unknown,
   permission: string,
   callback: (granted: boolean) => void,
+  details?: FakeFileDetails,
 ) => void;
 
 type FakePermissionCheckHandler = (
   webContents: unknown,
   permission: string,
+  origin?: string,
+  details?: FakeFileDetails,
 ) => boolean;
+
+interface FakeFileDetails {
+  fileAccessType?: "readable" | "writable";
+  filePath?: string;
+  requestingUrl?: string;
+}
 
 interface FakeWindowOpenDetails {
   disposition: "foreground-tab" | "new-window";
@@ -637,6 +646,7 @@ const electronMock = vi.hoisted(() => {
 
   class FakeWebContentsView {
     public readonly boundsCalls: RoomDesktopBrowserViewBounds[] = [];
+    public readonly visibleCalls: boolean[] = [];
     public readonly webContents: FakeWebContents;
     public visible = false;
 
@@ -652,7 +662,23 @@ const electronMock = vi.hoisted(() => {
     }
 
     setVisible(visible: boolean): void {
+      this.visibleCalls.push(visible);
       this.visible = visible;
+    }
+  }
+
+  const baseWindows: FakeBaseWindow[] = [];
+  class FakeBaseWindow {
+    public readonly added: FakeWebContentsView[] = [];
+    public readonly contentView = {
+      addChildView: (view: FakeWebContentsView) => this.added.push(view),
+    };
+    public destroyed = false;
+    constructor(public readonly options: unknown) {
+      baseWindows.push(this);
+    }
+    destroy(): void {
+      this.destroyed = true;
     }
   }
 
@@ -706,6 +732,13 @@ const electronMock = vi.hoisted(() => {
 
   class FakeSession {
     public readonly willDownloadListeners: FakeSessionListener[] = [];
+    public restrictedListener:
+      | ((
+          event: unknown,
+          details: unknown,
+          callback: (action: string) => void,
+        ) => void)
+      | null = null;
     public permissionCheckHandler: FakePermissionCheckHandler | null = null;
     public permissionRequestHandler: FakePermissionRequestHandler | null = null;
     public clears = 0;
@@ -715,8 +748,12 @@ const electronMock = vi.hoisted(() => {
     async clearStorageData(): Promise<void> {
       this.clears += 1;
     }
-    on(eventName: "will-download", listener: FakeSessionListener): void {
-      this.willDownloadListeners.push(listener);
+    on(eventName: string, listener: never): void {
+      if (eventName === "file-system-access-restricted") {
+        this.restrictedListener = listener;
+      } else {
+        this.willDownloadListeners.push(listener);
+      }
     }
 
     setPermissionCheckHandler(handler: FakePermissionCheckHandler): void {
@@ -733,6 +770,8 @@ const electronMock = vi.hoisted(() => {
   const fakeWindows: FakeBrowserWindow[] = [];
 
   return {
+    baseWindows,
+    FakeBaseWindow,
     fakeCapturedImage,
     fakeSessions,
     fakeViews,
@@ -765,6 +804,7 @@ const electronMock = vi.hoisted(() => {
 });
 
 vi.mock("electron", () => ({
+  BaseWindow: electronMock.FakeBaseWindow,
   BrowserWindow: electronMock.FakeBrowserWindow,
   WebContentsView: electronMock.FakeWebContentsView,
   session: electronMock.session,
@@ -834,6 +874,7 @@ beforeEach(() => {
   electronMock.fakeSessions.length = 0;
   electronMock.fakeViews.length = 0;
   electronMock.fakeWindows.length = 0;
+  electronMock.baseWindows.length = 0;
 });
 
 async function settlePendingCaptures(
@@ -904,6 +945,8 @@ function requireFakeView(
 function createRendererRecoveryFixture(
   webContentsId: number,
   threadId = "thread-1",
+  // Agents can only lease automation tabs; personal tabs are user-attached.
+  profile: "personal" | "automation" = "personal",
 ) {
   const manager = createDesktopBrowserViewManager({
     partition: "persist:test",
@@ -912,13 +955,19 @@ function createRendererRecoveryFixture(
     contentBounds: { width: 700, height: 450 },
     webContentsId,
   });
-  attachBrowserTab({
-    manager,
-    hostWindow,
+  const tab = {
     threadId,
     tabId: "browser:a",
     url: "https://example.com/original",
-  });
+  };
+  if (profile === "automation")
+    manager.createTab({
+      hostWindow,
+      ...tab,
+      profile: { kind: "automation", id: "agent" },
+      viewport: { width: 500, height: 350 },
+    });
+  else attachBrowserTab({ manager, hostWindow, ...tab });
   return { manager, hostWindow, view: requireFakeView(0) };
 }
 
@@ -1427,6 +1476,7 @@ describe("DesktopBrowserViewManager", () => {
       const { manager, hostWindow } = createRendererRecoveryFixture(
         91,
         threadId,
+        "automation",
       );
       const broker = createDesktopBrowserBroker({
         manager,
@@ -1712,6 +1762,15 @@ describe("DesktopBrowserViewManager", () => {
       expect(broker.getControl(91, created!.tabId)?.control?.leaseId).toBe(
         "lease",
       );
+      // The server still sends the acquired tab set after CDP adds a page (#1978).
+      await expect(
+        broker.execute({
+          type: "desktop.browser.open_connection",
+          ...scope,
+          leaseId: "lease",
+          tabIds: ["automation"],
+        }),
+      ).resolves.toEqual(connection);
     } finally {
       socket?.terminate();
       broker.dispose();
@@ -1720,7 +1779,11 @@ describe("DesktopBrowserViewManager", () => {
   });
 
   it("revokes native debugger control synchronously on takeover and fences reconnect generations", async () => {
-    const { manager, hostWindow, view } = createRendererRecoveryFixture(91);
+    const { manager, hostWindow, view } = createRendererRecoveryFixture(
+      91,
+      "thread-1",
+      "automation",
+    );
     const broker = createDesktopBrowserBroker({
       manager,
       product: "Chrome/test",
@@ -1824,6 +1887,9 @@ describe("DesktopBrowserViewManager", () => {
     expect(automated.webContents.focusCalls).toBe(0);
     expect(automated.options.webPreferences.partition).not.toBe(
       personal.options.webPreferences.partition,
+    );
+    expect(automated.options.webPreferences.partition).toMatch(
+      /^persist:bb-browser-automation-[0-9a-f]{16}$/,
     );
     expect(requireFakeView(2).options.webPreferences.partition).toBe(
       automated.options.webPreferences.partition,
@@ -1994,6 +2060,63 @@ describe("DesktopBrowserViewManager", () => {
     await settlePendingCaptures(view);
     await rejected;
   });
+
+  it.each([
+    { platform: "win32", minimized: true, visible: true, staged: true },
+    { platform: "win32", minimized: false, visible: false, staged: false },
+    { platform: "win32", minimized: false, visible: true, staged: false },
+    { platform: "darwin", minimized: true, visible: false, staged: false },
+  ])(
+    "shows a tab created in a minimized window once in a never-shown window on Windows only (#1771): %o",
+    ({ platform, minimized, visible, staged }) => {
+      const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+      Object.defineProperty(process, "platform", { value: platform });
+      try {
+        const manager = createDesktopBrowserViewManager();
+        const hostWindow = Object.assign(
+          new FakeHostWindow({
+            contentBounds: { width: 0, height: 0 },
+            webContentsId: 91,
+          }),
+          { isMinimized: () => minimized, isVisible: () => visible },
+        );
+        manager.createTab({
+          hostWindow,
+          tabId: "automation:a",
+          threadId: "thread-1",
+          url: "about:blank",
+          profile: { kind: "automation", id: "profile-1" },
+          viewport: { width: 640, height: 400 },
+        });
+        const view = requireFakeView(0);
+        expect(
+          electronMock.baseWindows.map((stage) => ({
+            options: stage.options,
+            added: stage.added,
+            destroyed: stage.destroyed,
+          })),
+        ).toEqual(
+          staged
+            ? [{ options: { show: false }, added: [view], destroyed: true }]
+            : [],
+        );
+        expect(view.visibleCalls.slice(0, 2)).toEqual(
+          staged ? [true, false] : [false],
+        );
+        expect(view.boundsCalls[0]).toEqual({
+          x: 0,
+          y: 0,
+          width: staged ? 640 : 0,
+          height: staged ? 400 : 0,
+        });
+        expect(hostWindow.contentView.addedViews).toEqual([view]);
+        expect(view.visible).toBe(false);
+      } finally {
+        if (realPlatform)
+          Object.defineProperty(process, "platform", realPlatform);
+      }
+    },
+  );
 
   it("initiates a new blank page load before announcing the automation target", () => {
     const manager = createDesktopBrowserViewManager();
@@ -3489,7 +3612,7 @@ describe("DesktopBrowserViewManager", () => {
     expect(reloadingView.visible).toBe(true);
   });
 
-  it("allows clipboard-sanitized-write but denies clipboard-read and device permissions", () => {
+  it("allows clipboard-sanitized-write and reading folders picked this run, denies the rest", () => {
     expect(isAllowedBrowserPermission("clipboard-sanitized-write")).toBe(true);
     expect(isAllowedBrowserPermission("clipboard-read")).toBe(false);
     expect(isAllowedBrowserPermission("media")).toBe(false);
@@ -3538,5 +3661,35 @@ describe("DesktopBrowserViewManager", () => {
       requestGrants.push(granted);
     });
     expect(requestGrants).toEqual([true, false, false]);
+
+    // #2367: a folder is readable only after a fresh pick this run, on that origin.
+    const site = "https://example.com/";
+    const read = { fileAccessType: "readable", filePath: "/picked" } as const;
+    const write = { ...read, fileAccessType: "writable" } as const;
+    expect(checkHandler(null, "fileSystem", site, read)).toBe(false);
+    for (const details of [read, write]) {
+      requestHandler(
+        null,
+        "fileSystem",
+        (granted) => requestGrants.push(granted),
+        { ...details, requestingUrl: `${site}app` },
+      );
+    }
+    expect(requestGrants.slice(3)).toEqual([true, false]);
+    expect(checkHandler(null, "fileSystem", site, read)).toBe(true);
+    const inside = { ...read, filePath: "/picked/sub" };
+    expect(checkHandler(null, "fileSystem", site, inside)).toBe(true);
+    const sibling = { ...read, filePath: "/picked-other" };
+    expect(checkHandler(null, "fileSystem", site, sibling)).toBe(false);
+    const other = "https://other.example/";
+    expect(checkHandler(null, "fileSystem", other, read)).toBe(false);
+    expect(checkHandler(null, "fileSystem", site, write)).toBe(false);
+
+    // Chromium-blocked folders are denied instead of leaving the picker hanging.
+    const restrictedActions: string[] = [];
+    fakeSession.restrictedListener?.(null, {}, (action) =>
+      restrictedActions.push(action),
+    );
+    expect(restrictedActions).toEqual(["deny"]);
   });
 });

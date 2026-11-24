@@ -114,9 +114,9 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
       plugin("provider-claude-code", "Claude Code"),
       plugin("provider-codex", "Codex"),
       plugin("provider-acp", "ACP"),
-      plugin("provider-usage", "Usage"),
       plugin("provider-retry", "Retry"),
       plugin("internet-watch", "Internet"),
+      plugin("director", "Director"),
     ],
   },
   {
@@ -134,7 +134,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     icon: "Cloud",
     id: "cloud",
     label: "Cloud",
-    members: [section("cloud-environment"), section("auto-delete")],
+    members: [section("cloud-environment"), plugin("repo-sync", "RepoSync"), section("auto-delete")],
   },
   {
     icon: "Laptop",

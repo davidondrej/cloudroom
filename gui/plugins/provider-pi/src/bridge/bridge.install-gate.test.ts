@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { PI_BRIDGE_ARGS_ENV, PI_BRIDGE_COMMAND_ENV } from "./rpc-child.js";
@@ -79,7 +79,32 @@ it("reports not_installed when the launch command is missing", async () => {
   });
   expect(models.error).toMatchObject({
     message: expect.stringContaining("Could not find the pi CLI"),
+    data: { reason: "missing_executable" },
   });
+});
+
+it("does not call pi missing when only its `which` lookup fails", async () => {
+  // PATH holds node but no `which`, so only a real launch can find pi.
+  const bin = join(harness.workspaceDir, "bin");
+  mkdirSync(bin);
+  symlinkSync(process.execPath, join(bin, "node"));
+  vi.stubEnv("PATH", bin);
+  vi.stubEnv(PI_BRIDGE_COMMAND_ENV, "node");
+  const models = await harness.request(nextRequestId(), "model/list", {
+    cwd: harness.workspaceDir,
+  });
+  expect(models.error).toMatchObject({ code: -32000 });
+  expect(models.error).not.toHaveProperty("data");
+});
+
+it("does not call a relative pi command missing", async () => {
+  vi.stubEnv(PI_BRIDGE_COMMAND_ENV, join("node_modules", ".bin", "no-such-pi"));
+  vi.stubEnv(PI_BRIDGE_ARGS_ENV, "[]");
+  const models = await harness.request(nextRequestId(), "model/list", {
+    cwd: harness.workspaceDir,
+  });
+  expect(models.error).toMatchObject({ code: -32000 });
+  expect(models.error).not.toHaveProperty("data");
 });
 
 it("fails closed when pi cannot report its version, with install guidance", async () => {

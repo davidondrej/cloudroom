@@ -39,7 +39,7 @@ function fakeProgram(path: string, name: string) {
 }
 
 // The Windows app's layout, as Git Bash sees it: <app>/resources/app.asar.unpacked/.../dist/room-cli.
-function runShim(withApp: boolean) {
+function runShim(withApp: boolean, withCygpath = false, bare = false) {
   const root = mkdtempSync(join(tmpdir(), "room-cli-shim-"));
   roots.push(root);
   const dist = join(
@@ -59,7 +59,19 @@ function runShim(withApp: boolean) {
   const bin = join(root, "bin");
   mkdirSync(bin);
   fakeProgram(join(bin, "node"), "node");
+  if (withCygpath) {
+    // Stands in for Git Bash's cygpath -m, which turns /c/... into C:/...
+    writeFileSync(join(dist, "room-cli.win"), "");
+    writeFileSync(join(bin, "cygpath"), '#!/bin/sh\necho "$2.win"\n');
+    chmodSync(join(bin, "cygpath"), 0o755);
+  }
   if (!shell) throw new Error("no sh");
+  if (bare)
+    // Like Git's usr/bin/bash.exe started directly: no /usr/bin on PATH, room-cli found by name.
+    return execFileSync(shell.command, ["-c", "room-cli thread list"], {
+      encoding: "utf8",
+      env: { ...shell.env, MSYS_NO_PATHCONV: "1", PATH: `${dist};${bin}` },
+    });
   return execFileSync(
     shell.command,
     [join(dist, "room-cli"), "thread", "list", "--title", "fix(parser)"],
@@ -81,6 +93,24 @@ describe("room-cli launchers", () => {
       const out = runShim(true);
       expect(out).toMatch(
         /^app RUN_AS_NODE=1 .*room-cli thread list --title fix\(parser\)/,
+      );
+    },
+  );
+
+  it.skipIf(!shell)(
+    "hands the app cygpath's Windows path, which MSYS_NO_PATHCONV=1 leaves unconverted",
+    () => {
+      expect(runShim(true, true)).toMatch(
+        /^app RUN_AS_NODE=1 .*room-cli\.win thread list/,
+      );
+    },
+  );
+
+  it.runIf(process.platform === "win32" && shell)(
+    "finds /usr/bin/cygpath when Git's shell has no /usr/bin on PATH",
+    () => {
+      expect(runShim(true, false, true)).toMatch(
+        /^app RUN_AS_NODE=1 [A-Za-z]:\/.*room-cli thread list/,
       );
     },
   );

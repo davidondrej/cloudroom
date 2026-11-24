@@ -65,6 +65,7 @@ const HOP_HEADERS = new Set([
   TUNNEL_TARGET_HEADER,
   TUNNEL_SESSION_HEADER,
   TUNNEL_MACHINE_HEADER,
+  TUNNEL_VPS_HEADER,
 ]);
 
 function forwardableHeaders(headers: Headers): HeaderPair[] {
@@ -620,6 +621,7 @@ export class TunnelDO {
           frame.status === 205 ||
           frame.status === 304
         ) {
+          this.pendingHttp.delete(frame.streamId);
           entry.resolve(new Response(null, { status: frame.status, headers }));
           return;
         }

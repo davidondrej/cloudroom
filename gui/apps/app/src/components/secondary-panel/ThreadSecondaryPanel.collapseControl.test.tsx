@@ -11,18 +11,18 @@ import {
   createThreadInfoFixedPanelTab,
   createWorkspaceFilePreviewFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   createSidebarSplitState,
   moveSidebarTab,
   serializeSidebarSplitState,
   sidebarSplitStorageKey,
-} from "./sidebarSplitLayout";
+} from "@/components/right-panel/store/split-state";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import {
   ThreadSecondaryPanel,
   type SecondaryPanelRenderableTab,
-} from "./ThreadSecondaryPanel";
+} from "@/components/right-panel/shell/panel-shell";
 
 afterEach(() => {
   cleanup();

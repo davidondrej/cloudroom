@@ -87,19 +87,20 @@ function makeParentThread(
 
 describe("resolveCreateThreadExecutionDefaults", () => {
   it("uses the picker's first provider without pinning a model", () => {
-    expect(registry.list()[0]?.info.id).toBe("codex");
+    expect(registry.list()[0]?.info.id).toBe("claude-code");
 
     expect(
       resolveCreateThreadExecutionDefaults(registry, {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: "codex",
+      providerId: "claude-code",
       executionDefaults: null,
       providerFallbackCandidates: [
-        "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
         "acp-omp",
         "acp-grok",
@@ -111,13 +112,17 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
+        "acp-agent-zero",
       ],
     });
   });
 
-  it("honors the user's default provider and picker order", async () => {
+  it("honors the user's default provider, then the most used", async () => {
     const preferences = {
-      providerOrder: ["pi", "claude-code"],
+      usage: new Map([
+        ["pi", 2],
+        ["claude-code", 1],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: null as string | null,
     };
     const userRegistry = createProviderRegistryService({
@@ -129,6 +134,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "pi",
       "claude-code",
       "codex",
+      "acp-antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -141,6 +147,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
+      "acp-agent-zero",
     ]);
     expect(
       resolveCreateThreadExecutionDefaults(userRegistry, {
@@ -164,7 +171,10 @@ describe("resolveCreateThreadExecutionDefaults", () => {
 
   it("orders fallback candidates behind the chosen default, preferred provider first", async () => {
     const preferences = {
-      providerOrder: ["pi", "claude-code"],
+      usage: new Map([
+        ["pi", 2],
+        ["claude-code", 1],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: "codex" as string | null,
     };
     const userRegistry = createProviderRegistryService({
@@ -179,6 +189,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
     ).toEqual([
       "pi",
       "claude-code",
+      "acp-antigravity",
       "acp-cursor",
       "acp-opencode",
       "acp-omp",
@@ -191,6 +202,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
       "acp-kilo",
       "acp-cline",
       "acp-kimi",
+      "acp-agent-zero",
     ]);
   });
 
@@ -247,7 +259,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
   it("skips unavailable providers when choosing the product default", async () => {
     const degradedRegistry = createProviderRegistryService();
     await registerFirstPartyProviders(degradedRegistry, {
-      unavailablePluginIds: ["provider-codex"],
+      unavailablePluginIds: ["provider-claude-code"],
     });
 
     expect(
@@ -255,11 +267,12 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: "claude-code",
+      providerId: "codex",
       executionDefaults: null,
       providerFallbackCandidates: [
-        "pi",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
         "acp-omp",
         "acp-grok",
@@ -271,6 +284,7 @@ describe("resolveCreateThreadExecutionDefaults", () => {
         "acp-kilo",
         "acp-cline",
         "acp-kimi",
+        "acp-agent-zero",
       ],
     });
   });

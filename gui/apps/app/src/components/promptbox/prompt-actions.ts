@@ -84,11 +84,19 @@ export function textBeforeCursor(editor: Editor): string {
   return doc.textBetween(0, selection.from, "\n", "\n");
 }
 
-/** True when the caret already sits right after this action's text. */
+/** True when picking this action again would add nothing: its pill is already in the draft, or its text sits at the caret. */
 export function isPromptActionAtCursor(
   editor: Editor,
   action: PromptBoxAction,
 ): boolean {
+  if (action.command) {
+    let found = false;
+    editor.state.doc.descendants((node) => {
+      found ||= isActionCommandPill(node, [action]);
+      return !found;
+    });
+    return found;
+  }
   return (
     editor.state.selection.empty &&
     textBeforeCursor(editor).endsWith(action.text)
@@ -174,6 +182,20 @@ export function promptActionInsertionRange({
 
   const previous = previousActionRange(editor, actions);
   if (previous) return previous;
+
+  // A standalone plain `/plan ` (typed, or a same-name user command) becomes the action's pill.
+  const typedFrom = selection.from - action.text.length;
+  const blockStart = selection.$from.start();
+  const { doc } = editor.state;
+  if (
+    action.command &&
+    typedFrom >= blockStart &&
+    doc.textBetween(typedFrom, selection.from) === action.text &&
+    (typedFrom === blockStart ||
+      /\s/u.test(doc.textBetween(typedFrom - 1, typedFrom)))
+  ) {
+    return { from: typedFrom, to: selection.from };
+  }
 
   const typed = findActiveTrigger(editor, triggers);
   const typedCommand =

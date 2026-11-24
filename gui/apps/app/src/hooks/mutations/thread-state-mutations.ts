@@ -11,6 +11,7 @@ import type {
   ThreadResponse,
   UpdateThreadRequest,
 } from "@cloudroom/server-contract";
+import { useCommittedRef } from "@/hooks/useLatestRef";
 import { sdk } from "@/lib/sdk";
 import type { LifecycleErrorOperation } from "@/lib/lifecycle-errors";
 import {
@@ -44,6 +45,7 @@ import {
   type PinThreadPosition,
   type ThreadListMutationTransaction,
 } from "../cache-owners/thread-state-cache-owner";
+import { applyArchivedThreadIds } from "../cache-owners/thread-archive-cache";
 import { threadReasoningSaveKey } from "../queries/query-keys";
 
 interface ThreadMutationRequest {
@@ -72,23 +74,72 @@ interface UpdateThreadMutationOptions {
   reasoning?: boolean;
 }
 
-export function waitForThreadReasoningSave(
+export const THREAD_STOP_MUTATION_KEY = ["thread-stop"];
+
+/**
+ * A send waits for the thread's pending reasoning, model, or agent save, so a pick never blocks the composer.
+ * It fails when a model or agent switch it waited for failed (the message would go to the wrong model),
+ * or when the user pressed Stop meanwhile: the message shows as running, so Stop must drop it.
+ */
+export function waitForThreadExecutionSave(
   queryClient: QueryClient,
   threadId: string,
 ): Promise<void> {
-  const filters = { mutationKey: threadReasoningSaveKey(threadId) };
-  return new Promise((resolve) => {
-    if (queryClient.isMutating(filters) === 0) return resolve();
-    const unsubscribe = queryClient.getMutationCache().subscribe(() => {
-      if (queryClient.isMutating(filters) > 0) return;
+  const keys = [threadReasoningSaveKey(threadId), threadUpdateKey(threadId)];
+  const cache = queryClient.getMutationCache();
+  const watched = keys.flatMap((mutationKey) =>
+    cache.findAll({ mutationKey, exact: true, status: "pending" }),
+  );
+  if (watched.length === 0) return Promise.resolve();
+  const waitingSince = Date.now();
+  const stopped = () =>
+    cache
+      .findAll({ mutationKey: THREAD_STOP_MUTATION_KEY, exact: true })
+      .some(
+        (mutation) =>
+          mutation.state.variables === threadId &&
+          mutation.state.submittedAt >= waitingSince,
+      );
+  return new Promise((resolve, reject) => {
+    let unsubscribe = () => {};
+    const settle = () => {
+      if (stopped()) {
+        unsubscribe();
+        reject(new Error("Stopped before it was sent."));
+        return;
+      }
+      if (watched.some((mutation) => mutation.state.status === "pending"))
+        return;
       unsubscribe();
-      resolve();
-    });
+      const switchFailed = watched.some((mutation) => {
+        const variables = mutation.state.variables as
+          | UpdateThreadRequest
+          | undefined;
+        return (
+          mutation.state.status === "error" &&
+          (variables?.model !== undefined ||
+            variables?.providerId !== undefined)
+        );
+      });
+      if (switchFailed) {
+        reject(new Error("The model switch failed, so this message wasn't sent."));
+      } else {
+        resolve();
+      }
+    };
+    unsubscribe = cache.subscribe(settle);
+    settle();
   });
+}
+
+function threadUpdateKey(threadId: string | undefined) {
+  return ["thread-update", threadId];
 }
 
 interface ArchiveThreadAndChildrenMutationRequest {
   id: string;
+  /** Default true: running children are stopped and archived too. False keeps them open. */
+  includeLive?: boolean;
 }
 
 interface DeleteThreadMutationRequest {
@@ -99,6 +150,22 @@ interface DeleteThreadMutationRequest {
 interface ThreadReadMutationInput {
   signal?: AbortSignal;
   threadId: string;
+}
+
+/** A Local picker or a same-session shortcut saves through the queue that follow-up sends already wait for. */
+export function useSaveThreadModel(threadId: string, onSaved: (model: string) => void) {
+  const { mutateAsync, isPending, variables } = useUpdateThread({
+    threadId,
+    errorMessage: "Failed to save the thread model.",
+  });
+  const currentThread = useCommittedRef(threadId);
+  const save = useCallback(async (model: string, shortcutProvider?: string) => {
+    await mutateAsync(
+      { id: threadId, model, ...(shortcutProvider ? { providerId: shortcutProvider, idleSessionOnly: true } : {}) },
+      { onSuccess: () => { if (currentThread.current === threadId) onSaved(model); } },
+    );
+  }, [currentThread, mutateAsync, onSaved, threadId]);
+  return { save, pendingModel: isPending && variables.id === threadId ? variables.model : null };
 }
 
 export function useUpdateThread(options?: UpdateThreadMutationOptions) {
@@ -113,7 +180,7 @@ export function useUpdateThread(options?: UpdateThreadMutationOptions) {
     mutationKey:
       options?.reasoning && options.threadId
         ? threadReasoningSaveKey(options.threadId)
-        : ["thread-update", options?.threadId],
+        : threadUpdateKey(options?.threadId),
     ...(options?.threadId
       ? { scope: { id: `thread-update:${options.threadId}` } }
       : {}),
@@ -344,7 +411,9 @@ export function useReorderPinnedThread() {
   });
 }
 
-export function useArchiveThreadAndChildren() {
+export function useArchiveThreadAndChildren({
+  sidebarAlreadyHidden = false,
+} = {}) {
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -355,15 +424,24 @@ export function useArchiveThreadAndChildren() {
     },
     mutationFn: ({
       id,
+      includeLive = true,
     }: ArchiveThreadAndChildrenMutationRequest): Promise<ThreadArchiveAllResponse> =>
-      sdk.threads.archiveAll({ threadId: id, includeLive: true }),
-    onMutate: async ({ id }): Promise<ArchiveThreadsTransaction> =>
-      beginArchiveThreadAndChildrenTransaction({
+      sdk.threads.archiveAll({ threadId: id, includeLive }),
+    onMutate: async ({ id, includeLive }): Promise<ArchiveThreadsTransaction | undefined> => {
+      // The sidebar hides each pending family separately. Its rollback only removes that family's filter.
+      if (sidebarAlreadyHidden) return;
+      return beginArchiveThreadAndChildrenTransaction({
         queryClient,
         threadId: id,
-      }),
+        includeLive,
+      });
+    },
     onError: (_error, _variables, context) => {
       rollbackArchiveThreadsTransaction({ queryClient, transaction: context });
+    },
+    onSuccess: ({ archivedThreadIds }) => {
+      if (!sidebarAlreadyHidden) return;
+      applyArchivedThreadIds({ queryClient, threadIds: archivedThreadIds });
     },
     onSettled: (data, _error, _variables, context) => {
       settleArchiveThreadsTransaction({

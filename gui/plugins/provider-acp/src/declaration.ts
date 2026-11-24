@@ -23,10 +23,15 @@ const ACP_SERVICE_TIERS = [
 
 const DEFAULT_FORK = "none" as const;
 
-// Grok reports a signed-out CLI as auth_required (#1160): the picker offers its
-// login, then restarts discovery once the user signed in.
+// Grok (#1160), Cursor and Antigravity report a signed-out CLI as auth_required:
+// the picker offers its login, then restarts discovery once the user signed in.
+const SIGN_IN_DIALECTS = new Set(["grok", "cursor", "antigravity"]);
 function offersSignIn(agent: AcpAgentDefinition): boolean {
-  return agent.dialect === "grok" && agent.signInCommand !== undefined;
+  return (
+    agent.dialect !== undefined &&
+    SIGN_IN_DIALECTS.has(agent.dialect) &&
+    agent.signInCommand !== undefined
+  );
 }
 
 function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {
@@ -55,7 +60,9 @@ export function acpProviderDeclaration(
     family: ACP_FAMILY,
     ...(agent.icon === undefined ? {} : { icon: agent.icon }),
     strings: acpStrings(agent),
-    serviceTiers: [...ACP_SERVICE_TIERS],
+    ...(agent.supportsServiceTier === false
+      ? {}
+      : { serviceTiers: [...ACP_SERVICE_TIERS] }),
     ...(agent.visibility === undefined
       ? {}
       : { experimental_visibility: agent.visibility }),
@@ -102,12 +109,14 @@ export function acpProviderDeclaration(
       ...(agent.minimumVersion === undefined
         ? {}
         : { acpMinimumVersion: agent.minimumVersion }),
+      ...(agent.custom === true ? { customAgent: true } : {}),
       acpLaunchSpec: { ...agent.launch },
     },
-    models: { scope: "host" },
-    ...(agent.dialect === "cursor" || offersSignIn(agent)
-      ? { experimental_modelDiscoveryRestart: true }
-      : {}),
+    // A project's opencode.json can hide providers, so OpenCode and its fork Kilo list models per project (#1236).
+    models: { scope: agent.dialect === "opencode" ? "workspace" : "host" },
+    // Every ACP bridge caches its agent's models, so `--restart` is how a
+    // signed-in agent or an edited agent config (opencode.json) shows (#1236).
+    experimental_modelDiscoveryRestart: true,
     maintenance: {
       health: true,
       usage: agent.providerUsage === true,
@@ -116,8 +125,11 @@ export function acpProviderDeclaration(
     },
     capabilities: {
       ...ACP_BASE_CAPABILITIES,
+      supportsServiceTier: agent.supportsServiceTier ?? true,
       fork: agent.fork ?? DEFAULT_FORK,
-      permissionModes: [...ACP_BASE_CAPABILITIES.permissionModes],
+      permissionModes: [
+        ...(agent.permissionModes ?? ACP_BASE_CAPABILITIES.permissionModes),
+      ],
       ...(agent.supportsManualCompaction === true
         ? { supportsManualCompaction: true }
         : {}),

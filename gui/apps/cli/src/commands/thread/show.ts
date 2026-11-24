@@ -16,7 +16,12 @@ import {
   type ThreadTimelinePendingTodos,
   type WorkspaceStatus,
 } from "@cloudroom/domain";
-import { BbHttpError, BbRequestTimeoutError, type BbSdk } from "@cloudroom/sdk";
+import {
+  BbHttpError,
+  BbRequestTimeoutError,
+  type BbSdk,
+  type CloudroomThreadCredits,
+} from "@cloudroom/sdk";
 import type {
   EnvironmentDiffQuery,
   ThreadTimelineResponse,
@@ -46,6 +51,7 @@ interface ThreadShowCommandOptions {
   diffMergeBase?: string;
   json?: boolean;
   pr?: boolean;
+  credits?: boolean;
 }
 
 interface ThreadLogCommandOptions {
@@ -59,6 +65,7 @@ interface ThreadLogCommandOptions {
 
 const THREAD_LOG_DEFAULT_EVENT_LIMIT = 100;
 const THREAD_SHOW_INTERRUPTION_TIMEOUT_MS = 3_000;
+const THREAD_SHOW_CREDITS_TIMEOUT_MS = 30_000;
 const THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX = 100;
 
 interface ThreadOutputCommandOptions {
@@ -87,6 +94,8 @@ interface ThreadShowJsonPayload extends ThreadStatusPayload {
   lastError?: string | null;
   /** The recorded stop, when the last turn was interrupted (#1159). */
   lastInterruption?: SystemThreadInterruptedEventData;
+  /** With --credits only. */
+  credits?: FetchedCredits;
 }
 
 interface ThreadShowPullRequestPayload {
@@ -104,6 +113,10 @@ type FetchedGitDiff =
   | { available: false; message: string };
 
 type FetchedPullRequest = ThreadShowPullRequestPayload;
+
+type FetchedCredits =
+  | ({ status: "available" } & CloudroomThreadCredits & { credits: number })
+  | { status: "unavailable"; message: string };
 
 const SKIPPED_PULL_REQUEST: FetchedPullRequest = {
   status: "skipped",
@@ -127,6 +140,29 @@ async function fetchExecution(sdk: BbSdk, thread: Thread): Promise<{ execution: 
   } catch (error) {
     if (error instanceof BbRequestTimeoutError) throw error;
     return { execution: null, cloud: null };
+  }
+}
+
+/** The thread's Cloud Credits, last 7 days, for a coordinator checking its children (#2223). Never 0 when unknown. */
+async function fetchCredits(
+  sdk: BbSdk,
+  threadId: string,
+): Promise<FetchedCredits> {
+  try {
+    // The thread was just read, so a failure here is the website's: show the rest anyway.
+    const found = await sdk.cloudroom.threadCredits(
+      threadId,
+      AbortSignal.timeout(THREAD_SHOW_CREDITS_TIMEOUT_MS),
+    );
+    return found.credits === null
+      ? {
+          status: "unavailable",
+          message:
+            "Not available yet. Check room-cli cloud status, then try again.",
+        }
+      : { status: "available", ...found, credits: found.credits };
+  } catch (error) {
+    return { status: "unavailable", message: getErrorMessage(error) };
   }
 }
 
@@ -231,6 +267,10 @@ export function registerShowCommand(
     .option("--git-diff", "Include git diff in output")
     .option("--no-pr", "Skip the GitHub pull request lookup")
     .option(
+      "--credits",
+      "Include the thread's Cloud Credits from the last 7 days (billed each minute; a --shared-sandbox child's count under the thread whose sandbox it shares)",
+    )
+    .option(
       "--diff-target <type>",
       "Diff target: uncommitted, branch_committed, all, or commit (used with --git-diff)",
       "all",
@@ -332,7 +372,7 @@ export function registerShowCommand(
         }
 
         const environmentId = thread.environmentId;
-        const [fetchedPullRequest, environmentInfo, pendingTodos, { execution, cloud }, idleOutput] =
+        const [fetchedPullRequest, environmentInfo, pendingTodos, { execution, cloud }, idleOutput, credits] =
           await Promise.all([
             !environmentId
               ? null
@@ -348,19 +388,23 @@ export function registerShowCommand(
                   .output({ threadId, signal: AbortSignal.timeout(THREAD_SHOW_INTERRUPTION_TIMEOUT_MS) })
                   .catch(() => null)
               : null,
+            // One website read, so only when asked: coordinators run `show` often.
+            opts.credits ? fetchCredits(sdk, threadId) : null,
           ]);
-        // An active thread's error is a stall warning (#977); if that lookup fails, show still prints.
+        // Why a thread failed, or an active thread's stall warning (#977); if that lookup fails, show still prints (#2446).
         const output =
-          thread.status === "error"
-            ? await sdk.threads.output({ threadId })
-            : thread.status === "active"
-              ? await sdk.threads.output({ threadId }).catch(() => null)
-              : idleOutput;
+          thread.status === "error" || thread.status === "active"
+            ? await sdk.threads.output({ threadId }).catch(() => null)
+            : idleOutput;
         const lastError = thread.status === "idle" ? null : (output?.error ?? null);
         const lastInterruption = thread.status === "active" ? null : (output?.interruption ?? null);
 
         if (opts.json) {
-          const environment = await getEnvironment();
+          // The thread is known: a failed environment read leaves it out instead of failing show (#2446).
+          const environment = await getEnvironment().catch((error: unknown) => {
+            if (error instanceof BbRequestTimeoutError) throw error;
+            return null;
+          });
           const jsonPayload: ThreadShowJsonPayload = {
             ...statusPayload,
             execution,
@@ -372,6 +416,7 @@ export function registerShowCommand(
             pendingTodos,
             ...(thread.status === "error" || lastError ? { lastError } : {}),
             ...(lastInterruption ? { lastInterruption } : {}),
+            ...(credits ? { credits } : {}),
           };
           if (fetchedWorkStatus !== undefined) {
             jsonPayload.workStatus = fetchedWorkStatus.available
@@ -387,9 +432,18 @@ export function registerShowCommand(
           return;
         }
 
-        // An errored thread prints its own error below.
-        const cloudNote = cloudIssueText(cloud && thread.status === "error" ? { ...cloud, error: null } : cloud);
+        // An errored thread prints its own error below; without one, the Cloud error is the only reason (#2513).
+        const cloudNote = cloudIssueText(cloud && thread.status === "error" && lastError ? { ...cloud, error: null } : cloud);
         printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest, cloudNote);
+        if (credits?.status === "unavailable")
+          console.log(`  Cloud Credits: unavailable (${credits.message})`);
+        else if (credits) {
+          console.log(
+            `  Cloud Credits: ${credits.credits} in the last 7 days${credits.pending ? " (breakdown not ready yet)" : ""}`,
+          );
+          for (const row of credits.rows)
+            console.log(`    ${String(row.credits).padStart(6)}  ${row.name}`);
+        }
         if (lastError) console.log(`  ${thread.status === "error" ? "Error" : "Warning"}: ${lastError}`);
         if (lastInterruption) console.log(`  Interrupted: ${describeThreadInterruption(lastInterruption)}`);
 

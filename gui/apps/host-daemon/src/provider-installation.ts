@@ -15,6 +15,7 @@ import {
 } from "@cloudroom/host-daemon-contract";
 import { spawn as spawnPty } from "node-pty";
 import type { HostDaemonLogger } from "./logger.js";
+import { corePtyAdapter } from "./terminals/core-pty.js";
 import { ensureNodePtySpawnHelperExecutable } from "./terminals/terminal-manager.js";
 
 const nodePtyLogger: HostDaemonLogger = {
@@ -114,6 +115,11 @@ export async function withPrivateInstallTemp<T>(
   }
 }
 
+function spawnNodePty(command: string, args: string[] | string, cwd: string, env: NodeJS.ProcessEnv) {
+  ensureNodePtySpawnHelperExecutable(nodePtyLogger);
+  return spawnPty(command, args, { cols: 120, cwd, env, name: "xterm-256color", rows: 30 });
+}
+
 function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProcessSpawner {
   return {
     spawn(args) {
@@ -125,14 +131,8 @@ function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProc
         process.platform === "win32"
           ? windowsPtyLaunch(args.command, args.args, cwd, env)
           : { command: args.command, args: args.args, env };
-      ensureNodePtySpawnHelperExecutable(nodePtyLogger);
-      const pty = spawnPty(launch.command, launch.args, {
-        cols: 120,
-        cwd,
-        env: launch.env,
-        name: "xterm-256color",
-        rows: 30,
-      });
+      const pty = corePtyAdapter()?.spawn({ file: launch.command, args: launch.args, cols: 120, rows: 30, cwd, env: launch.env, logger: nodePtyLogger })
+        ?? spawnNodePty(launch.command, launch.args, cwd, launch.env);
       pty.onData((data) => stdout.write(data));
       pty.onExit(() => {
         stdout.end();

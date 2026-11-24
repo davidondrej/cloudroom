@@ -6,7 +6,7 @@ import { getAppSettings, getProject } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
-import { envRefusal, githubRepository, localFiles, localProjectPath, pack, workspaceId, workspaceName } from "./project-copy.js";
+import { envRefusal, cloudRepository, localFiles, localProjectPath, pack, workspaceId, workspaceName } from "./project-copy.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // The web's limit for a loop's packed .env files (web/lib/cloud-start.ts ENV_LIMIT).
@@ -35,8 +35,8 @@ async function packedEnv(root: string | undefined, repository: string | null): P
 export async function projectLoopSettings(deps: Deps, projectId: string, vps: boolean): Promise<Record<string, unknown>> {
   const project = getProject(deps.db, projectId);
   if (!project) throw new ApiError(404, "cloud_automation", "Project not found.");
-  const repository = githubRepository(project.gitRemoteUrl);
-  if (!repository) throw new ApiError(400, "cloud_automation", "This project is not on GitHub. Create its Cloud loop from a Cloud thread in it instead.");
+  const repository = cloudRepository(project.gitRemoteUrl);
+  if (!repository) throw new ApiError(400, "cloud_automation", "This project needs a GitHub or GitLab.com remote. Create its Cloud loop from a Cloud thread in it instead.");
   const settings = getAppSettings(deps.db), systemPrompt = cloudroomSystemPrompt(deps.db, "cloud", { vps });
   const env = await packedEnv(localProjectPath(deps, project.id), repository);
   return {
@@ -54,7 +54,7 @@ export function syncLoopEnv(deps: Deps, sandboxes: { automations(body: Record<st
   void (async () => {
     const root = localProjectPath(deps, projectId);
     if (!root) return;
-    const env = await packedEnv(root, githubRepository(getProject(deps.db, projectId)?.gitRemoteUrl ?? null));
+    const env = await packedEnv(root, cloudRepository(getProject(deps.db, projectId)?.gitRemoteUrl ?? null));
     if (env === null) return;
     const hash = createHash("sha256").update(env).digest("hex");
     if (sentEnv.get(projectId) === hash) return;

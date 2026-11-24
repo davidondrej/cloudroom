@@ -25,6 +25,7 @@ import { requireAuthenticatedDaemonSession } from "./session-state.js";
 interface RequestChildThreadNeedsAttentionNotificationArgs {
   blockerSummary: string | null;
   childThreadId: string;
+  interactionId: string;
 }
 
 const CHILD_THREAD_BLOCKER_SUMMARY_MAX_LINES = 4;
@@ -138,6 +139,7 @@ function requestChildThreadNeedsAttentionNotification(
       queueChildThreadNeedsAttentionNotificationBestEffort(deps, {
         blockerSummary: args.blockerSummary,
         childThread,
+        interactionId: args.interactionId,
         parentThreadId,
       }),
   });
@@ -211,6 +213,7 @@ export function registerInternalInteractiveRequestRoutes(
             registered.interaction,
           ),
           childThreadId: registered.interaction.threadId,
+          interactionId: registered.interaction.id,
         });
       }
 

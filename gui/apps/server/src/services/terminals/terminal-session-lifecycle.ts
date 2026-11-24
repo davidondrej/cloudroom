@@ -50,6 +50,7 @@ import {
   throwThreadEnvironmentUnavailable,
 } from "../lib/lifecycle-api-errors.js";
 import { requireWorkspaceCommandTarget } from "../environments/workspace-command-target.js";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import {
   type PendingRpcKey,
   PendingRpcRegistry,
@@ -678,6 +679,12 @@ export class TerminalSessionLifecycle {
   private async createTerminalForTarget(
     args: CreateTerminalForTargetArgs,
   ): Promise<TerminalSession> {
+    if (args.threadId !== null && args.target.kind === "environment")
+      await restoreParkedWorktree(
+        this.options,
+        args.threadId,
+        args.target.environmentId,
+      );
     const launchTarget = await this.resolveTerminalLaunchTarget(args.target);
     const daemonSession = this.requireTerminalHostSession(launchTarget.hostId);
     const start = args.payload.start ?? DEFAULT_TERMINAL_START;

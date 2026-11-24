@@ -1,12 +1,15 @@
-import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
-import { mkdtemp, rm } from "node:fs/promises";
+import {
+  createFakePluginHost,
+  makeThreadResponse,
+} from "@get-bb/plugin-sdk/testing";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { assetFor } from "./driver.js";
-import { install } from "./host.js";
-import computerUsePlugin, { acceptFocusedWindow, decideGate } from "./server.js";
+import { install, pruneOldVersions } from "./host.js";
+import computerUsePlugin, { acceptFocusedWindow, decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
 vi.mock("node:fs", async (actual) => {
@@ -27,6 +30,8 @@ describe("decideGate", () => {
       name: "com.apple.TextEdit",
     });
     expect(decideGate({ tool: "get_desktop_state", input: {} })).toEqual({ kind: "screen" });
+    for (const tool of ["clipboard_read", "clipboard_write"])
+      expect(decideGate({ tool, input: { pid: 42 } }).kind).toBe("clipboard");
     expect(decideGate({ tool: "set_config", input: {} }).kind).toBe("error");
   });
 });
@@ -97,6 +102,34 @@ it("keeps an approval saved with the bundle ID in another case", async () => {
     session: expect.any(String),
     shotsKey: "thr_1",
   });
+});
+
+// #1960: an approved clipboard read needs no Accessibility and no app lock.
+it("lets approved threads read the clipboard without Accessibility", async () => {
+  const status = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: false, screenRecording: true },
+  };
+  const replies: Record<string, unknown> = {
+    prepare: { ...status, installMs: null },
+    status,
+    call: { exitCode: 0, stdout: "", stderr: "", driverExits: 0 },
+  };
+  const fake = createFakePluginHost({
+    sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+    experimental_callHostRpc: ({ method }) => replies[method],
+  });
+  const clipboard = { key: "clipboard", name: "the clipboard" };
+  await fake.bb.storage.kv.set("always-allowed", [clipboard]);
+  await computerUsePlugin(fake.bb);
+  const read = ["call", "clipboard_read", "{}"];
+  for (const threadId of ["thr_1", "thr_2"])
+    expect((await fake.harness.runCli(read, { threadId })).exitCode).toBe(0);
 });
 
 // Cua Driver 0.35.2's exact_result for #1506: focused, but a 41 px Chrome helper is front in-process.
@@ -179,6 +212,203 @@ it.runIf(assetFor(process.platform, process.arch))("install retries GitHub's tra
   } finally {
     disk.full = false;
     vi.unstubAllGlobals();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+describe("active computer-use indicator state", () => {
+  const readyStatus = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: true, screenRecording: true },
+  };
+
+  it("publishes active-changed signals and returns active threads via getActive", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      appForName: { key: "com.brave.Browser", name: "Brave" },
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+      release: null,
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await fake.bb.storage.kv.set("always-allowed", [
+      { key: "com.brave.browser", name: "Brave" },
+    ]);
+    await computerUsePlugin(fake.bb);
+
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+
+    // Free tool starts an active session with appName: null.
+    expect(
+      (await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: null }],
+    });
+
+    // Targeting an app fills in appName.
+    expect(
+      (
+        await fake.harness.runCli(
+          ["call", "launch_app", '{"name":"Brave"}'],
+          { threadId: "thr_1" },
+        )
+      ).exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: "Brave" }],
+    });
+
+    // Subsequent free tool call keeps the known appName.
+    expect(
+      (await fake.harness.runCli(["call", "list_windows", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_1", appName: "Brave" }],
+    });
+
+    // end_session clears the active indicator immediately.
+    expect(
+      (await fake.harness.runCli(["call", "end_session", "{}"], { threadId: "thr_1" }))
+        .exitCode,
+    ).toBe(0);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+
+    const activeSignals = fake.harness.realtimeSignals
+      .filter((s) => s.channel === "active-changed")
+      .map((s) => s.payload);
+    expect(activeSignals).toEqual([
+      { active: [{ threadId: "thr_1", appName: null }] },
+      { active: [{ threadId: "thr_1", appName: "Brave" }] },
+      { active: [] },
+    ]);
+  });
+
+  it("clears active state when a thread becomes idle or its host restarts", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+      release: null,
+      restart: readyStatus,
+    };
+    const hosts: Record<string, string> = { thr_1: "mac-1", thr_2: "mac-2" };
+    const fake = createFakePluginHost({
+      sdk: {
+        threads: {
+          get: async ({ threadId }: { threadId: string }) => ({
+            host: { id: hosts[threadId] ?? "mac-1" },
+          }),
+        },
+        hosts: {
+          list: async () => [{ id: "mac-2", status: "connected" }],
+        },
+      },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await computerUsePlugin(fake.bb);
+
+    await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_1" });
+    await fake.harness.runCli(["call", "list_apps", "{}"], { threadId: "thr_2" });
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [
+        { threadId: "thr_1", appName: null },
+        { threadId: "thr_2", appName: null },
+      ],
+    });
+
+    await fake.harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_1", projectId: "proj_1" }),
+      lastAssistantText: "Done",
+    });
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [{ threadId: "thr_2", appName: null }],
+    });
+
+    await fake.harness.callRpc("restart", null);
+    expect(await fake.harness.callRpc("getActive", null)).toEqual({
+      active: [],
+    });
+  });
+});
+
+describe("foreground focus gate", () => {
+  const readyStatus = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0.55.0",
+    installed: true,
+    running: true,
+    permissions: { accessibility: true, screenRecording: true },
+  };
+
+  it("identifies foreground calls", () => {
+    expect(takesForeground("bring_to_front", { pid: 1 })).toBe(true);
+    expect(takesForeground("move_cursor", { x: 1, y: 2 })).toBe(true);
+    expect(takesForeground("click", { pid: 1, delivery_mode: "foreground" })).toBe(true);
+    expect(takesForeground("click", { pid: 1 })).toBe(false);
+    expect(takesForeground("drag", { pid: 1 })).toBe(false);
+  });
+
+  it("asks once for foreground calls even on always-allowed apps and blocks on deny", async () => {
+    const replies: Record<string, unknown> = {
+      prepare: { ...readyStatus, installMs: null },
+      status: readyStatus,
+      appForPid: { key: "com.brave.Browser", name: "Brave" },
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await fake.bb.storage.kv.set("always-allowed", [{ key: "com.brave.Browser", name: "Brave" }]);
+    await computerUsePlugin(fake.bb);
+
+    const deniedCall = fake.harness.runCli(
+      ["call", "click", '{"pid":42,"delivery_mode":"foreground"}'],
+      { threadId: "thr_1" },
+    );
+    await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+    expect(fake.harness.pendingInteractions[0]?.payload).toMatchObject({ foreground: true });
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "deny" });
+    const denied = await deniedCall;
+    expect(denied.exitCode).toBe(1);
+    expect(JSON.parse(denied.stdout ?? "").error).toBe("foreground_denied");
+
+    // Allow once succeeds, and a second foreground call still asks again.
+    for (let i = 0; i < 2; i++) {
+      const allowedCall = fake.harness.runCli(["call", "bring_to_front", '{"pid":42}'], { threadId: "thr_1" });
+      await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+      fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "thread" });
+      expect((await allowedCall).exitCode).toBe(0);
+    }
+  });
+});
+
+it("pruneOldVersions removes sibling driver versions and keeps the active one and staging dirs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cua-prune-"));
+  try {
+    await mkdir(join(root, "0.35.2"));
+    await mkdir(join(root, "0.55.0"));
+    await mkdir(join(root, ".install-abc"));
+    await pruneOldVersions(join(root, "0.55.0"));
+    expect((await readdir(root)).sort()).toEqual([".install-abc", "0.55.0"]);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

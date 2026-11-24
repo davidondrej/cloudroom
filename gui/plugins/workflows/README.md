@@ -209,9 +209,12 @@ The final `page` record reports `hasMore` and `nextCursor`. Fetch the next page
 with that cursor and append it to the same file. A full `run` record appears on
 the first page, later pages include a small `run-reference`, and every call
 record includes requested options, resolved provider/model/reasoning/permission,
-cache/live state, child thread ID, repairs, result, and error. Pages are
-snapshots; while a run is active, rewrite the file from cursor `0` when a fresh
-detailed view is needed.
+cache/live state, child thread ID, repairs, result, and error. When a restart
+reruns a failed or cancelled call, that earlier attempt stays: a metadata-only
+record (status, error, times, child thread ID) with the same `callIndex` and
+`superseded: true` comes right before the call, and status counts include it.
+Pages are snapshots; while a run is active, rewrite the file from cursor `0`
+when a fresh detailed view is needed.
 
 This redirection intentionally happens in the invoking agent's shell. The
 canonical state remains in the plugin's server-side SQLite database, while the

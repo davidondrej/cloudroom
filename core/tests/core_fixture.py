@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic Rust HTTP/Codex-protocol checks; no inference or database required."""
+import fcntl
 import json
 import os
 import re
@@ -78,6 +79,9 @@ def codex():
                     {"model": "basic", "supportedReasoningEfforts": [{"reasoningEffort": "high"}]},
                 ], "nextCursor": None}
             elif method == "thread/start":
+                if params["model"] == "start-fails":
+                    send({"id": message["id"], "error": {"code": -32602, "message": "model start-fails is unavailable\nsign in again"}})
+                    continue
                 with path.open("a") as file:
                     file.write(json.dumps({"fixture": "launch", "reasoning": params.get("config", {}).get("model_reasoning_effort")}) + "\n")
                 slow_exit = params["model"] == "slow-exit"
@@ -91,9 +95,13 @@ def codex():
                 if Path("reject-resume").exists():
                     send({"id": message["id"], "error": {"code": -32602, "message": "resume rejected"}})
                     continue
-                # Reattach to the caller's existing rollout and append to the same file.
+                # Reattach to the caller's existing rollout and append to the same file. Real Codex writes it on the
+                # first turn, so a thread that never ran one has none to resume.
                 native = params["threadId"]
                 path = Path(os.environ["CODEX_HOME"]) / "sessions" / (native + ".jsonl")
+                if not path.exists():
+                    send({"id": message["id"], "error": {"code": -32600, "message": f"no rollout found for thread id {native}"}})
+                    continue
                 result = {"thread": {"id": native, "path": str(path)}, "model": params["model"]}
             elif method == "turn/start":
                 with path.open("a") as file:
@@ -119,7 +127,7 @@ def codex():
                 if text == "no-reply":
                     Path("no-reply").touch()
                     continue
-                if text in ("delay", "limit-delay"):
+                if text in ("delay", "limit-delay") or text.startswith("delay "):
                     while not Path("release").exists():
                         time.sleep(.02)
                 turn = str(uuid.uuid4())
@@ -143,6 +151,8 @@ def codex():
                     continue
                 if text != "reply-first":
                     send(reply)
+                if text == "hold-turn":
+                    continue
                 if text == "hold":
                     job = f"from pathlib import Path; import time\nfor n in range(300):\n Path('{native}.ticks').write_text(str(n)); time.sleep(.1)\n"
                     child = subprocess.Popen([sys.executable, "-c", job], start_new_session=True,
@@ -157,6 +167,11 @@ def codex():
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                 else:
                     event("item/agentMessage/delta", turnId=turn, itemId="text", delta="hello")
+                    if text.endswith("spend"):
+                        # Codex's running totals, which grow each turn: its input counts the cache reads.
+                        n = sum(1 for line in path.open() if "spend" in line)
+                        total = {"inputTokens": 1000 * n, "cachedInputTokens": 400 * n, "outputTokens": 50 * n, "totalTokens": 1050 * n}
+                        event("thread/tokenUsage/updated", tokenUsage={"total": total, "last": total, "modelContextWindow": 200000})
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                 if text == "goal":
                     # Codex continues an active goal on its own: a turn nobody requested.
@@ -195,6 +210,8 @@ def codex():
                     event("turn/completed", turn={"id": turn, "status": "completed"})
                     time.sleep(.3)
             elif method == "thread/compact/start":
+                with Path(native + ".requests").open("a") as audit:
+                    audit.write("/compact\n")
                 mode = Path('compact-mode').read_text() if Path('compact-mode').exists() else 'legacy'
                 if mode == 'reject':
                     send({'id': message['id'], 'error': {'code': -32602, 'message': 'compact rejected'}})
@@ -588,6 +605,7 @@ class ReplayTests(unittest.TestCase):
         for key in ["workspace_available_bytes", "history_available_bytes", "workspace_total_bytes", "history_total_bytes", "sampled_at"]:
             self.assertIsNone(data["storage"][key])
         self.assertEqual(data["sessionCount"], 1001)
+        self.assertEqual(data["mac"], {"waiting": 0})  # No `mac run` is waiting on the user's Mac.
         self.assertEqual(len(data["sessions"]), 1000)
         self.assertEqual(data["sessions"][0]["id"], "session-1000")
         self.assertEqual(data["sessions"][0]["state"], "stopped")
@@ -706,7 +724,8 @@ class RecoveryTests(unittest.TestCase):
             self.service.request("POST", "/v1/sessions/cr_seed/close", {"request_id": "c1", "freeze": "move2"}, 409)
             self.service.request("POST", "/v1/sessions/cr_seed/freeze", {"request_id": "move1", "release": True})
             # The switch: the website takes it, the old session closes, the new one has the history and its note.
-            answer = self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex"}, 202)
+            # The app names the thread's IDs, here for a session that started without them (#199).
+            answer = self.service.request("POST", "/v1/sessions", {"request_id": "next", "continue_from": "cr_seed", "harness": "codex", "thread_id": "thr_fixture", "project_id": "proj_a"}, 202)
             self.assertEqual((answer["session_id"], answer["pending"]), ("cr_next", False))
             self.assertEqual([t["continue"]["session"] for t in api.threads if "continue" in t], ["cr_next"])
             self.wait(lambda: self.status()["state"] == "closed", "old session closed")
@@ -737,12 +756,19 @@ class RecoveryTests(unittest.TestCase):
             self.service.request("POST", "/v1/sessions", {"request_id": "copyfail", "continue_from": "cr_next", "harness": "codex"}, 409)
             self.wait(lambda: self.service.session("cr_copyfail")["state"] == "closed", "candidate closed after a failed copy")
             self.assertIsNone(self.service.session("cr_next").get("continuing"))
+            # An agent that fails to start says why, as one line; the thread stays as it was (#1802).
+            refused = self.service.request("POST", "/v1/sessions", {"request_id": "startfail", "continue_from": "cr_next", "harness": "codex", "model": "start-fails"}, 409)
+            self.assertRegex(refused["error"], r"^the new agent couldn't start in Cloud, so this thread wasn't changed: Harness initialization failed\b.*start-fails is unavailable sign in again")
+            self.assertIsNone(self.service.session("cr_next").get("continuing"))
             # Two switches in a row: the note's inline tail stays within its 8 KB, the file keeps the long message.
             self.service.request("POST", "/v1/sessions/cr_next/prompts", {"request_id": "app_0123456789ab_long", "text": "y" * 12000}, 202)
             self.wait(lambda: self.service.session("cr_next")["receipts"]["app_0123456789ab_long"]["state"] == "completed", "long turn")
-            for source, target in [("cr_next", "tail1"), ("cr_tail1", "tail2")]:
+            # An agent switch keeps the thread's IDs; a project move takes the destination project's (#199).
+            for source, target, move in [("cr_next", "tail1", {}), ("cr_tail1", "tail2", {"workspace": "proj_b", "project_id": "proj_b"})]:
                 api.row_session = source
-                self.service.request("POST", "/v1/sessions", {"request_id": target, "continue_from": source, "harness": "codex"}, 202)
+                self.service.request("POST", "/v1/sessions", {"request_id": target, "continue_from": source, "harness": "codex", **move}, 202)
+            ids = lambda s: [self.service.session("cr_" + s)["receipts"][s]["input"].get(k) for k in ("thread_id", "project_id")]
+            self.assertEqual([ids("next"), ids("tail1"), ids("tail2")], [["thr_fixture", "proj_a"], ["thr_fixture", "proj_a"], ["thr_fixture", "proj_b"]])
             note = (self.state / "notes" / "cr_tail2").read_text()
             self.assertLess(len(note), 8000 + 1000)
             self.assertIn("y" * 12000, Path(self.service.session("cr_tail2")["continued"]["history"]).read_text())
@@ -787,6 +813,39 @@ class RecoveryTests(unittest.TestCase):
             records = self.service.records("cr_next")
             self.assertEqual(records[-1]["kind"], "unarchive")
             self.assertFalse(any(r["kind"] == "archive" for r in records))
+        finally:
+            api.close()
+
+    def test_a_loop_run_sends_what_its_own_turn_used(self):
+        # ADR 20261111-222523: only a loop run's own turn, and nothing when unsure.
+        from fake_api import FakeApi
+        api = FakeApi(self.env["CLOUDROOM_TOKEN"], self.env["CLOUDROOM_STORE"])
+        try:
+            self.env.pop("CLOUDROOM_LOCAL_HISTORY", None); self.env.update(api.env())
+            self.seed(); self.start(); self.ready()
+            sent = lambda: [a for a in api.automations if a.get("action") == "tokens"]
+            done = lambda key: self.wait(lambda: self.status()["receipts"][key]["state"] == "completed", key + " completed")
+            run = lambda n: "auto_" + "ab" * 16 + f"_{n}"
+            # A person's turn reports nothing; the loop run after it reports only its own turn.
+            self.prompt("p1", "spend"); done("p1")
+            self.prompt(run(1), "spend"); done(run(1))
+            self.wait(lambda: len(sent()) == 1, "tokens sent")
+            self.assertEqual(sent()[0], {"action": "tokens", "request": run(1), "session": "cr_seed", "tokens": {
+                "harness": "codex", "model": sent()[0]["tokens"]["model"], "completed": True, "input": 600, "output": 50, "cacheRead": 400, "cacheWrite": 0}})
+            # A fresh thread's prompt adds _p. A run that spent nothing, or a name that only looks like a run, sends nothing.
+            self.prompt(run(2) + "_p", "spend"); done(run(2) + "_p")
+            self.wait(lambda: len(sent()) == 2, "second tokens sent")
+            self.assertEqual(sent()[1]["request"], run(2) + "_p")
+            self.prompt(run(3), "hello"); done(run(3))
+            self.prompt("auto_nothex_4", "spend"); done("auto_nothex_4")
+            # A prompt queued behind a loop run starts at once, so that run sends nothing rather than a blurred count.
+            (self.repo / "release").unlink(missing_ok=True)
+            self.prompt(run(5), "delay spend")
+            self.wait(lambda: self.status()["current_request"] == run(5), "loop run running")
+            self.prompt("p6", "spend")
+            (self.repo / "release").touch()
+            done(run(5)); done("p6"); time.sleep(.5)
+            self.assertEqual(len(sent()), 2)
         finally:
             api.close()
 
@@ -848,14 +907,21 @@ class RecoveryTests(unittest.TestCase):
 
     def test_occupied_port_does_not_change_saved_recovery_state(self):
         self.seed([('receipt',{'request_id':'queued','command':'prompt','input':{'text':'hello'},'state':'accepted'})])
-        before = {p.name:p.read_bytes() for p in self.state.glob('*.record')}
-        with socket.socket() as occupied:
-            occupied.bind(('127.0.0.1',0)); occupied.listen()
-            env = {**self.env,'CLOUDROOM_LISTEN':'127.0.0.1:'+str(occupied.getsockname()[1])}
-            failed = subprocess.run([str(BINARY)],env=env,capture_output=True,timeout=8)
-            self.assertNotEqual(failed.returncode,0)
-            self.assertEqual(before,{p.name:p.read_bytes() for p in self.state.glob('*.record')})
+        records = lambda: {p.name:p.read_bytes() for p in self.state.glob('*.record')}
+        before = records()
+        occupied = socket.socket(); occupied.bind(('127.0.0.1',0)); occupied.listen()
+        self.env['CLOUDROOM_LISTEN'] = '127.0.0.1:'+str(occupied.getsockname()[1])
+        # A port still taken after the wait (3 s in tests) fails the start.
+        failed = subprocess.run([str(BINARY)],env=self.env,capture_output=True,timeout=8)
+        self.assertNotEqual(failed.returncode,0)
+        self.assertEqual(before,records())
+        # #1968: a restart's new Core waits while the old one still holds the port, then its state lock, rather than exit 1.
+        lock = open(self.state/'lock','a'); fcntl.flock(lock,fcntl.LOCK_EX)
+        def release():
+            time.sleep(.5); occupied.close(); time.sleep(.5); unchanged.append(before == records()); lock.close()
+        unchanged = []; threading.Thread(target=release).start()
         self.start()
+        self.assertEqual(unchanged,[True])
         self.wait(lambda:self.status()['receipts']['queued']['state']=='completed','queued work preserved')
         self.assertEqual(self.status()['native_id'],self.native)
 
@@ -1011,6 +1077,62 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()["state"], "closed")
         self.assertEqual(self.status()["queue"], [])
 
+    def test_a_tell_waking_a_thread_survives_a_killed_core_once(self):
+        # #1927: Core killed while a tell wakes an established thread; the restart wakes it again and sends it once.
+        self.seed(self.ran_a_turn + [("state", {"state": "sleeping"})])
+        (self.repo / "hold-resume").touch(); self.start()
+        self.wait(lambda: self.status()["state"] == "sleeping", "asleep")
+        self.prompt("tell", "hello")
+        self.wait(lambda: (self.repo / "resume-ready").exists(), "waking")
+        self.service.stop(crash=True); (self.repo / "release-resume").touch(); self.start()
+        self.wait(lambda: self.status()["receipts"]["tell"]["state"] == "completed", "tell after the restart")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["tell"])
+
+    ran_a_turn = [("receipt", {"request_id": "old", "command": "prompt", "input": {"text": "hello"}, "state": "accepted"}),
+                  ("state", {"state": "starting_turn", "request_id": "old"}),
+                  ("receipt", {"request_id": "old", "command": "prompt", "input": {"text": "hello"}, "state": "completed"})]
+
+    def cut_off_wake(self, end):
+        # #1927: Core killed after an archive or close was saved, mid-wake: its queued tell fails unsent, as before.
+        self.seed(self.ran_a_turn + [("state", {"state": "resuming"}),
+                                     ("receipt", {"request_id": "tell", "command": "prompt", "input": {"text": "hello"}, "state": "accepted"}), end])
+        self.start(); time.sleep(1)
+        self.assertEqual(self.status()["receipts"]["tell"]["state"], "failed")
+        self.assertFalse((self.repo / (self.native + ".requests")).exists())
+
+    def test_a_cut_off_wake_never_sends_to_an_archived_thread(self):
+        self.cut_off_wake(("archive", {"archived": True}))
+
+    def test_a_cut_off_wake_never_sends_to_a_closing_thread(self):
+        self.cut_off_wake(("receipt", {"request_id": "close", "command": "close", "input": {}, "state": "accepted"}))
+
+    def test_a_turn_a_killed_core_cut_off_says_why(self):
+        # #1763: the supervisor passes the killed run's exit status; without one the reason stays neutral.
+        self.seed(); self.start(); self.ready()
+        for key, status, why in [("plain", None, "Cloudroom restarted while"), ("killed", "137", "Cloudroom restarted after signal 9 while"),
+                                 ("exited", "1", "Cloudroom restarted after exit status 1 while"), ("junk", "x", "Cloudroom restarted while")]:
+            self.prompt(key, "no-reply")
+            self.wait(lambda: (self.repo / "no-reply").exists(), key)
+            (self.repo / "no-reply").unlink()
+            # An Accounts switch's sleep still waiting is done by the restart, never an error (#1985).
+            self.service.request("POST", "/v1/sessions/cr_seed/sleep", {"request_id": key + "_sleep"}, 202)
+            self.service.stop(crash=True)
+            self.env.pop("CLOUDROOM_PREVIOUS_EXIT", None)
+            if status: self.env["CLOUDROOM_PREVIOUS_EXIT"] = status
+            self.start(); self.ready()
+            receipt = self.status()["receipts"][key]
+            self.assertEqual(receipt["state"], "unknown_after_restart")
+            self.assertEqual(receipt.get("error"), why + " this ran; its result is unknown.")
+            sleep = self.status()["receipts"][key + "_sleep"]
+            self.assertEqual((sleep["state"], sleep.get("error")), ("completed", None))
+        # A child's cut-off turn keeps main's receipt (no error), so its parent's notice stays neutral.
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_session": "cr_seed", "prompt": "hold"}, 202)
+        child = lambda: self.service.session("cr_child_kid")
+        self.wait(lambda: child()["state"] == "running", "running child")
+        self.service.stop(crash=True); self.env["CLOUDROOM_PREVIOUS_EXIT"] = "137"; self.start(); self.ready()
+        self.wait(lambda: child()["receipts"]["task_kid"]["state"] == "unknown_after_restart", "cut child turn")
+        self.assertNotIn("error", child()["receipts"]["task_kid"])
+
     def test_manual_stop_keeps_queue_paused_across_restart_until_resume(self):
         self.seed(); self.start(); self.ready()
         self.prompt("running", "hold")
@@ -1030,6 +1152,49 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(self.status()["queue_paused"])
         self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": "resume"}, 202)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "queued"])
+
+    def compact(self, text="keep going"):
+        body = {"request_id": "relay_compact", "action": "compact", "text": text}
+        return self.service.request("POST", "/v1/sessions/cr_seed/relay", body)
+
+    def turns(self):
+        rollout = Path(self.env["CLOUDROOM_CODEX_HOME"]) / "sessions" / (self.native + ".jsonl")
+        return [json.loads(line)["text"] for line in rollout.read_text().splitlines() if '"fixture": "turn"' in line]
+
+    def test_a_compaction_asked_for_mid_turn_runs_after_it_then_its_follow_up(self):
+        # `room-cli thread compact --self`: once the turn ends it compacts, then its follow-up goes before older messages.
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "delay")
+        self.wait(lambda: self.status()["current_request"] == "running", "running turn")
+        self.prompt("queued", "hello")
+        self.assertEqual(self.compact()["state"], "accepted")
+        (self.repo / "release").touch()
+        self.wait(lambda: self.status()["receipts"]["queued"]["state"] == "completed", "queue after compaction")
+        self.assertEqual(self.status()["receipts"]["relay_compact"]["state"], "completed")
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(),
+                         ["running", "/compact", "relay_compact_then", "queued"])
+        self.assertEqual(self.turns()[-2], "Your context was compacted.\n\nkeep going")
+
+    def test_a_failed_compaction_still_sends_an_honest_follow_up(self):
+        self.seed(); self.start(); self.ready()
+        (self.repo / "compact-mode").write_text("reject")
+        self.compact()
+        self.wait(lambda: self.status()["receipts"].get("relay_compact_then", {}).get("state") == "completed", "follow-up")
+        self.assertIn(self.status()["receipts"]["relay_compact"]["state"], ["failed", "unknown"])
+        self.assertTrue(self.turns()[-1].startswith("Context compaction failed: "), self.turns()[-1])
+        self.assertTrue(self.turns()[-1].endswith("Your context is unchanged.\n\nkeep going"))
+
+    def test_a_stop_drops_a_waiting_compaction_and_its_follow_up(self):
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        self.compact()
+        self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "stop"}, 202)
+        self.wait(lambda: self.status()["receipts"]["relay_compact"]["state"] == "interrupted", "cancelled compaction")
+        self.ready()
+        self.assertNotIn("relay_compact_then", self.status()["receipts"])
+        self.assertEqual(self.status()["queue"], [])
+        self.assertNotIn("/compact", (self.repo / (self.native + ".requests")).read_text().splitlines())
 
     def test_a_tell_during_a_stop_waits_paused_once(self):
         # #982: a child's tell while its parent's Stop was landing was refused, so the report was lost.
@@ -1057,8 +1222,8 @@ class RecoveryTests(unittest.TestCase):
                 n = len(pids()); os.kill(pids()[-1], signal.SIGKILL)
                 self.wait(lambda: self.status()["state"] == "process_lost" or (len(pids()) > n and self.status()["state"] == "idle"), "lost or recovered")
         relay = lambda key, text="hello", expected=200: self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": "tell", "text": text}, expected)
-        # A tell steered into a running turn, then the agent is lost: its retry never restarts it.
-        self.prompt("running", "hold")
+        # Kill the agent during a running turn. This recovery case needs no detached tool process.
+        self.prompt("running", "hold-turn")
         self.wait(lambda: self.status()["state"] == "running", "running turn")
         relay("steered")
         self.wait(lambda: self.status()["receipts"]["steered_steer"]["state"] == "completed", "steered tell")
@@ -1087,6 +1252,63 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(len(pids()), launched + restarts, key)
         self.assertEqual(self.status()["native_id"], self.native)
         self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "parent_tell"])
+
+    def test_a_parent_tell_retries_a_child_whose_agent_never_started(self):
+        # #2036: a child whose agent failed to start before any turn refused every tell, which the website called busy.
+        codex = self.root / "codex"; codex.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{Path(__file__).resolve()}" "$@"\n')
+        self.env["CLOUDROOM_CODEX_BINARY"] = str(codex)
+        codex.chmod(0o755); self.start()
+        self.service.request("POST", "/v1/sessions", {"request_id": "warm"}, 202)  # Its login check stays cached.
+        codex.chmod(0o644)  # The agent can't be spawned, like a sandbox out of processes.
+        self.service.request("POST", "/v1/sessions", {"request_id": "kid", "parent_thread": "thr_up"}, 202)
+        kid = lambda: self.service.session("cr_kid")
+        self.wait(lambda: kid()["state"] == "failed", "failed start")
+        relay = lambda key, expected=200: self.service.request("POST", "/v1/sessions/cr_kid/relay", {"request_id": key, "action": "tell", "text": "hello"}, expected)
+        # Still failing: the tell starts it again once and fails with the real cause; nothing ran.
+        relay("still")
+        self.wait(lambda: kid()["receipts"]["still"]["state"] == "failed", "failed retry")
+        self.assertTrue(kid()["receipts"]["still"]["error"])
+        pids = lambda: [r["data"]["pid"] for r in self.service.records("cr_kid") if r["kind"] == "harness"]
+        self.wait(lambda: pids()[-1] is None, "failed agent gone")
+        # Recovered: the next tell starts the agent and runs once, also when the relay is retried.
+        codex.chmod(0o755)
+        relay("fixed")
+        self.wait(lambda: kid()["receipts"]["fixed"]["state"] == "completed", "tell after retry")
+        relay("fixed")
+        self.assertEqual((self.repo / (kid()["native_id"] + ".requests")).read_text().splitlines(), ["fixed"])
+
+    def test_an_agent_linked_to_the_images_launcher_installs_and_runs_on_its_first_start(self):
+        # Droid, Agent Zero and OpenClaw are links to the image's launcher, which installs the agent its link names. Core
+        # ran the launcher by its own path, so it looked for an agent called "launch" and the start failed (2026-11-24).
+        home, launcher = Path(self.env["CLOUDROOM_ACCOUNT_HOME"]), self.root / "agents" / "launch"
+        installs, ran = self.root / "installs", self.root / "droid-ran"
+        launcher.parent.mkdir()
+        # The real Droid, as far as Core's start needs it: ACP's initialize and session/new.
+        (self.root / "agents" / "droid.real").write_text(f"""#!{sys.executable}
+import json, sys
+open({str(ran)!r}, "a").write(" ".join(sys.argv[1:]) + "\\n")
+for line in sys.stdin:
+    ask = json.loads(line)
+    if "id" not in ask: continue
+    result = {{"protocolVersion": 1, "agentCapabilities": {{"loadSession": True}}}} if ask["method"] == "initialize" else \\
+        {{"sessionId": "0b8f3c3e-6d1a-4d44-9b56-2f4b1a7c9e10", "modes": {{"currentModeId": "auto-high"}}}} if ask["method"] == "session/new" else {{}}
+    print(json.dumps({{"jsonrpc": "2.0", "id": ask["id"], "result": result}}), flush=True)
+""")
+        # The image's launcher (web/sandbox-image.sh): it installs the agent named by $0, then runs it.
+        launcher.write_text(f'#!/bin/bash\nname=${{0##*/}}\nif [ "$0" -ef {launcher} ]; then\n  echo "$name" >> {installs}\n'
+                            f'  [ ! -f {launcher.parent}/$name.real ] || {{ cp {launcher.parent}/$name.real "$0.new" && chmod +x "$0.new" && mv -f "$0.new" "$0"; }}\n'
+                            f'  [ ! "$0" -ef {launcher} ] || {{ echo "Cloudroom could not install $name in this sandbox." >&2; exit 1; }}\nfi\nexec "$0" "$@"\n')
+        launcher.chmod(0o755)
+        (home / ".local" / "bin").mkdir(parents=True); (home / ".factory").mkdir()
+        (home / ".local" / "bin" / "droid").symlink_to(launcher)
+        self.env["CLOUDROOM_TEST_LAUNCH"] = str(launcher)
+        self.start()
+        self.service.request("POST", "/v1/sessions", {"request_id": "first", "harness": "droid"}, 202)
+        first = lambda: self.service.session("cr_first")
+        until(lambda: first()["state"] in ("idle", "failed"), "Droid's first start", 20)
+        self.assertEqual(first()["state"], "idle", first().get("failure"))
+        self.assertEqual(installs.read_text(), "droid\n", "the launcher installed Droid by its own name, once")
+        self.assertEqual(ran.read_text(), "exec --output-format acp\n", "the real Droid ran, in the same Core")
 
     def test_a_relayed_tell_keeps_the_sender_the_website_names(self):
         # #1369: a Cloud parent's tell to its own child showed as the user's message. Steered and queued alike.
@@ -1256,6 +1478,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(self.status()['native_id'],self.native)
         self.assertFalse(path.exists())
         self.assertTrue(self.service.records('cr_seed'))
+
+    def test_an_agent_asleep_before_its_first_turn_starts_fresh(self):
+        # A switch or project move starts an agent with no turn; Codex saves no chat until one runs. After its idle
+        # sleep the next message started a fresh agent, not "process unavailable" forever.
+        self.seed([("state", {"state": "sleeping"})]); Path(self.env["CLOUDROOM_CODEX_HOME"], "sessions", self.native + ".jsonl").unlink()
+        self.start()
+        self.wait(lambda: self.status()["state"] == "sleeping", "asleep before its first turn")
+        self.prompt("first", "hello")
+        self.wait(lambda: self.status()["receipts"]["first"]["state"] == "completed", "first turn on a fresh agent")
+        self.assertNotEqual(self.status()["native_id"], self.native)
+        self.service.stop(); self.start()
+        self.prompt("second", "again")
+        self.wait(lambda: self.status()["receipts"]["second"]["state"] == "completed", "the fresh agent resumes")
 
     def test_repeated_crash_does_not_loop(self):
         self.seed(); self.start(); self.ready()

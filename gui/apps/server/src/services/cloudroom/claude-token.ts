@@ -26,7 +26,7 @@ let installing: Promise<string> | null = null;
 function installClaude(): Promise<string> {
   const started = Date.now();
   installing ??= new Promise<string>((resolve, reject) => {
-    execFile(INSTALL.command, INSTALL.args, { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+    execFile(INSTALL.command, INSTALL.args, { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (error, _stdout, stderr) => {
       const binary = claudeBinary();
       const reason = stderr.trim().split("\n").at(-1) || (error?.killed ? "the download took longer than 10 minutes" : error?.message);
       reportCliInstall("claude", "claude_connect", binary ? "ok" : "failed", Date.now() - started, binary ? null : reason);
@@ -241,6 +241,8 @@ async function startClaudeToken(id: string, save: (token: string) => Promise<unk
   const run = tokenRun;
   for (let waited = 0; !run.url && !run.done && waited < 15_000; waited += 250) await new Promise(resolve => setTimeout(resolve, 250));
 }
+
+export const ACCOUNT_CHANGED = "The Cloudroom account changed during Claude sign-in. Sign in again.";
 
 interface InstallWait { id: string; since: number; error: string | null }
 let installWait: InstallWait | null = null;

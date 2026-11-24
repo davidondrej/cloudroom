@@ -137,8 +137,14 @@ describe("turn-start watchdog", () => {
   });
 
   it.each([
-    { prompt: "hold_turn", warnings: 1 },
-    { prompt: "bg_task hold_turn", warnings: 0 },
+    { prompt: "hold_turn", warnings: 1, says: "has sent nothing" },
+    { prompt: "bg_task hold_turn", warnings: 0, says: "" },
+    // Transport retries are not progress (#1853).
+    {
+      prompt: "retry_turn",
+      warnings: 1,
+      says: "retries (last: Reconnecting...",
+    },
   ])("warns once when an open turn goes silent: $prompt", async (row) => {
     const events: ThreadEvent[] = [];
     runtime = createScriptedEchoRuntime({
@@ -164,13 +170,14 @@ describe("turn-start watchdog", () => {
     });
 
     await wait(400);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "system/error" &&
-          event.code === "provider_turn_silent",
-      ),
-    ).toHaveLength(row.warnings);
+    const warnings = events.filter(
+      (event) =>
+        event.type === "system/error" && event.code === "provider_turn_silent",
+    );
+    expect(warnings).toHaveLength(row.warnings);
+    if (warnings[0]?.type === "system/error") {
+      expect(warnings[0].message).toContain(row.says);
+    }
     // The warning never ends the turn: a slow provider may still answer.
     expect(runtime.getActiveTurnId("t1")).not.toBeNull();
   });

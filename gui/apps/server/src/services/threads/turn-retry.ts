@@ -104,7 +104,9 @@ export interface RetryFailedTurnArgs {
   request: RetryTurnRequest;
 }
 
-const CONTINUE_ACCEPTED_TURN_TEXT = "Please continue.";
+// Tagged like the other Cloudroom notices, so the provider transcript doesn't read it as the user typing (#2219).
+const CONTINUE_ACCEPTED_TURN_TEXT =
+  "[Cloudroom] Automatic retry: your last turn stopped with an error before it finished. This is not a message from the user. Continue the task that was in progress.";
 
 /**
  * What the re-attempt sends, decided by the provider's own acceptance record.
@@ -218,15 +220,18 @@ function retryExecution(
  */
 const retriesInFlight = new Set<string>();
 
-const explicitStops = new Map<string, { sequence: number }>();
+const explicitStops = new Map<string, { sequence: number; chosen: boolean }>();
 
+/** `chosen: false` for a stop nobody asked for as a Stop, like a harness switch's. */
 export function cancelRetriesForExplicitStop(
   deps: Pick<TurnRetryDeps, "db" | "hub">,
   threadId: string,
+  options: { chosen?: false } = {},
 ): number {
   explicitStops.delete(threadId);
   explicitStops.set(threadId, {
     sequence: getLatestThreadSequence(deps.db, { threadId }),
+    chosen: options.chosen !== false,
   });
   if (explicitStops.size > 1_000) {
     explicitStops.delete(explicitStops.keys().next().value ?? threadId);
@@ -236,6 +241,12 @@ export function cancelRetriesForExplicitStop(
     emitPluginMessageCancelled(toThreadQueuedMessage(row));
   }
   return cancelled.length;
+}
+
+/** The thread's latest sequence at its last Stop someone chose, if this server saw it (#2137). */
+export function chosenStopSequence(threadId: string): number | null {
+  const stop = explicitStops.get(threadId);
+  return stop?.chosen ? stop.sequence : null;
 }
 
 function stoppedWhileScheduling(threadId: string): ApiError {

@@ -16,6 +16,7 @@ import type { HostDaemonCommand } from "@cloudroom/host-daemon-contract";
 import {
   GENERATED_ID_ALPHABET,
   GENERATED_ID_SUFFIX_LENGTH,
+  isValidGitBranchName,
   type LocalPathProjectSource,
   type PromptInput,
   type Thread,
@@ -87,6 +88,8 @@ interface EnvironmentProvisionCommandArgs {
   initiator: EnvironmentProvisionCommandInitiator;
   path: string;
   setupScriptTimeoutMs: number | null;
+  /** The branch the environment started from: its hooks are read from Git there (null: the default branch). */
+  hookBaseBranch?: string | null;
 }
 
 export function buildEnvironmentProvisionCommand(
@@ -99,6 +102,11 @@ export function buildEnvironmentProvisionCommand(
     initiator: args.initiator,
     path: args.path,
     setupScriptTimeoutMs: args.setupScriptTimeoutMs,
+    // A provider may record a base the daemon's branch-name check refuses; the default branch is then used.
+    hookBaseBranch:
+      args.hookBaseBranch && isValidGitBranchName(args.hookBaseBranch)
+        ? args.hookBaseBranch
+        : null,
   };
 }
 

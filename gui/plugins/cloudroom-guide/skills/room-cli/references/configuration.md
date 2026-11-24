@@ -9,6 +9,10 @@
   file at the repo root to list untracked files, such as `.env`, that cloudroom must
   copy from the source checkout. It uses gitignore pattern syntax. cloudroom copies
   the matches before it runs `.bb-env-setup.sh`.
+- Hooks run as committed on the environment's base branch, read from Git at its
+  first setup. cloudroom never runs the copy in the folder, so editing or
+  adding a hook in a worktree changes nothing until it is committed to the base
+  branch, and then only for new environments.
 
 - Hooks require ownership confirmed by successful provider creation. Attached
   checkout and personal-workspace paths skip both hooks. Server restart resumes

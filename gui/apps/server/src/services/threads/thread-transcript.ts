@@ -55,6 +55,10 @@ export function threadMessages(
     )
     .orderBy(asc(events.sequence))
     .all();
+  return messagesFromRows(rows);
+}
+
+export function messagesFromRows(rows: readonly { type: string; data: string }[]): ThreadMessage[] {
   return rows.flatMap((row): ThreadMessage[] => {
     const data = JSON.parse(row.data) as {
       input?: unknown;
@@ -98,7 +102,7 @@ export const transcriptMarkdown = (
     )
     .join("\n\n");
 
-const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema) });
+const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema), carried: z.literal(true).optional() });
 
 /**
  * After a harness switch (ADR 0211) or a text-only chat import, the first turn carries the earlier conversation as
@@ -107,7 +111,7 @@ const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema) });
 export function pendingHarnessSwitchSeed(
   db: DbQueryConnection,
   threadId: string,
-): { input: PromptInput[]; requestSequence: number } | null {
+): { input: PromptInput[]; requestSequence: number; carried?: true } | null {
   const seed = latestOperationSeed(db, threadId, [
     THREAD_HARNESS_SWITCH_OPERATION,
     THREAD_IMPORT_OPERATION,
@@ -127,7 +131,7 @@ export function latestOperationSeed(
   db: DbQueryConnection,
   threadId: string,
   operations: readonly string[],
-): { input: PromptInput[]; requestSequence: number } | null {
+): { input: PromptInput[]; requestSequence: number; carried?: true } | null {
   const row = db
     .select({ sequence: events.sequence, data: events.data })
     .from(events)
@@ -148,6 +152,6 @@ export function latestOperationSeed(
     (JSON.parse(row.data) as { metadata?: unknown }).metadata,
   );
   return parsed.success && parsed.data.seed.length > 0
-    ? { input: parsed.data.seed, requestSequence: row.sequence }
+    ? { input: parsed.data.seed, requestSequence: row.sequence, ...(parsed.data.carried ? { carried: true as const } : {}) }
     : null;
 }

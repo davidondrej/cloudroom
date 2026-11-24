@@ -1,19 +1,23 @@
-import { useEffect, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
-import { matchPath, useLocation, useNavigate } from "react-router-dom";
-import { HoverCard, HoverCardContent, HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
+import { useState, useSyncExternalStore, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useAtom, useAtomValue } from "jotai";
+import { matchPath, useLocation, useNavigate } from "react-router";
+import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Switch } from "@cloudroom/shared-ui/switch";
+import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
+import { appToast } from "@/components/ui/app-toast";
 import { SettingsWithControl } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
+import { oneClickScanStateQueryKey } from "@/hooks/queries/query-keys";
 import { createBooleanPreferenceAtom } from "@/lib/browser-storage";
 import { useChecklistHides, useHiddenUntil } from "@/lib/popups";
-import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface } from "@/lib/app-surface";
-import { getPluginConfigurationRoutePath, getRootComposeRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
+import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
+import { getPluginConfigurationRoutePath, getRootComposeRoutePath, getThreadRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
+import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 
 type Step = "cloud" | "subagents" | "second" | "phone" | "loop";
@@ -46,114 +50,168 @@ function useActivation() {
   return enabled ? data : undefined;
 }
 
-const REPOS = "my 3 newest repos on my computer (`room-cli mac run`) or GitHub (`gh`)";
-const SUBAGENTS = "Split the work across 4-7 sub-agents with `--reasoning-level high`, on `--provider claude-code --model claude-haiku-5-5` or `--provider codex --model gpt-6.1-terra` (whichever you are).";
-const STARTERS = [
-  {
-    id: "security", title: "Find security holes", about: "4-7 agents check your newest repos, on this Mac or GitHub, for security holes. One list, worst first.",
-    prompt: `Find security holes in ${REPOS}. ${SUBAGENTS} Read only; give me one list, worst first.`,
-  },
-  {
-    id: "keys", title: "Check for leaked keys", about: "4-7 agents search your newest repos and their git history for leaked API keys and passwords.",
-    prompt: `Find leaked API keys and passwords in ${REPOS}, including git history. ${SUBAGENTS} Read only; never print a full secret, just tell me what to rotate.`,
-  },
-  {
-    id: "packages", title: "Check my packages", about: "4-7 agents check your newest repos for packages with known security problems or hacked versions.",
-    prompt: `Check ${REPOS} for vulnerable or hacked packages. ${SUBAGENTS} Read only; list only real problems, with the fix.`,
-  },
-  {
-    id: "mac", title: "Scan my Mac", about: "4-7 agents check your Mac's firewall, disk encryption, updates, open ports, and login items.",
-    prompt: `Security-check my Mac with \`room-cli mac run\`: firewall, FileVault, updates, open ports, and login items. ${SUBAGENTS} Read only; give me a short list of what to fix.`,
-  },
-] as const;
+// One-click scans (docs/scopes/onboarding.md): two doors under the new-thread box, one per scan in the Loops
+// plugin. A click starts the scan; it ends with loops made for that user. They replaced the one-click prompts.
+type ScanKind = "workflow" | "cyber";
+type ScanAgent = { id: string; name: string; sessions: number; days: number[] };
+/** Per kind: the last scan's thread on this computer (if it still exists), and whether one ever started here. */
+type ScanState = Record<ScanKind, { thread: string | null; used: boolean }>;
+const CELL_OFF = "color-mix(in srgb, currentColor 7%, transparent)";
+const BLUE = "#4F9BFF", GREEN = "#34D399", YELLOW = "#F6C945", ORANGE = "#F5873A", RED = "#EF4444";
+/** A fixed scatter, so each square keeps its color between renders. */
+const scatter = (week: number, day: number) => (week * 37 + day * 53 + week * day * 11) % 17;
+/** Workflow squares: each day is blue or green; how bright says how busy it was. */
+const workColor = (week: number, day: number) => scatter(week + 3, day + 1) % 2 ? BLUE : GREEN;
+/** The Cyber door's grid is a picture, not data: nothing is scanned before the click. Mostly red, more of them to the right. */
+const RISK = Array.from({ length: 9 }, (_, week) => Array.from({ length: 7 }, (_, day) => {
+  const n = scatter(week, day);
+  return n < week * 1.7 - 3 ? [YELLOW, ORANGE, RED, RED, RED][n % 5] : null;
+}));
+const SCANS_PLUGIN = "automations";
 
-const alwaysShowStartersAtom = createBooleanPreferenceAtom("cloudroom.starterPrompts.alwaysShow", false);
-export const STARTER_PROMPTS_SETTING_LABEL = "Always show one-click prompts";
+const alwaysShowScansAtom = createBooleanPreferenceAtom("cloudroom.oneClickScans.alwaysShow", false);
+export const ONE_CLICK_SCANS_SETTING_LABEL = "Always show one-click scans";
 
-export function StarterPromptsSetting() {
-  const [always, setAlways] = useAtom(alwaysShowStartersAtom);
+export function OneClickScansSetting() {
+  const [always, setAlways] = useAtom(alwaysShowScansAtom);
   return (
-    <SettingsWithControl label={STARTER_PROMPTS_SETTING_LABEL} description="Keep them under the new-thread box, even after 10 threads. Off: new users only.">
-      <Switch checked={always} onCheckedChange={setAlways} aria-label={STARTER_PROMPTS_SETTING_LABEL} />
+    <SettingsWithControl label={ONE_CLICK_SCANS_SETTING_LABEL} description="Keep them under the new-thread box, even after 10 threads. Off: new users only.">
+      <Switch checked={always} onCheckedChange={setAlways} aria-label={ONE_CLICK_SCANS_SETTING_LABEL} />
     </SettingsWithControl>
   );
 }
 
-function useStartersShown(data: Activation | undefined) {
-  const always = useAtomValue(alwaysShowStartersAtom);
-  return data !== undefined && (always || data.started <= 10);
+const SCAN_RETRY = { retry: 4, retryDelay: (attempt: number) => 1000 * 2 ** attempt };
+/** The agents with chats on this computer, most sessions first. The Loops plugin counts file names, never chat text.
+ *  Each call logs a scan view, so no refetch on focus. Retries (1+2+4+8 s) ride out the plugin still starting at launch. */
+function useScanAgents(enabled: boolean) {
+  return useQuery({
+    queryKey: ["one-click-scans", "agents"], enabled, staleTime: 10 * 60_000, refetchOnWindowFocus: false, refetchOnReconnect: false, ...SCAN_RETRY,
+    queryFn: async () => ((await callPluginRpc(fetch, SCANS_PLUGIN, "scans_agent_sessions", { source: "new_thread" })) as { agents: ScanAgent[] }).agents,
+  });
+}
+function useScanState(enabled: boolean) {
+  return useQuery({ queryKey: oneClickScanStateQueryKey(), enabled, ...SCAN_RETRY, queryFn: async () => (await callPluginRpc(fetch, SCANS_PLUGIN, "scans_state", null)) as ScanState });
 }
 
-/** The one-click prompts, or `fallback` once they're gone. Never both, and nothing while loading, so nothing flashes. */
-export function StarterPrompts({ onPick, fallback }: { onPick: (prompt: string) => void; fallback?: ReactNode }) {
-  const data = useActivation();
-  if (!useStartersShown(data)) return data === undefined ? null : fallback;
-  const pick = (starter: (typeof STARTERS)[number]) => {
-    void fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ starter: starter.id }) }).catch(() => {});
-    onPick(starter.prompt);
-  };
+/** `plan` is null until the website answers, up to 10 s after launch: no doors before it, so no one sees the
+ *  wrong buttons. `onScreen`: the scan call runs only where the doors can show. */
+function useScansShown(data: Activation | undefined, onScreen = true) {
+  const always = useAtomValue(alwaysShowScansAtom);
+  const plan = useCloudroomAccount().data?.plan;
+  const wanted = data !== undefined && plan != null && (always || data.started <= 10);
+  const agents = useScanAgents(wanted && onScreen);
+  const state = useScanState(wanted && onScreen);
+  return { wanted, plan, agents: wanted ? agents.data : undefined, state: wanted ? state.data : undefined, failed: wanted && (agents.isError || state.isError) };
+}
+
+function ScanDoor({ kind, label, title, cta, color, onClick, disabled, children }: { kind: ScanKind; label: string; title: ReactNode; cta: string; color: string; onClick: () => void; disabled: boolean; children: ReactNode }) {
   return (
-    <section aria-label="One-click prompts" className="mt-8 px-3.5 max-md:hidden">
-      <div className="flex items-center gap-3.5 text-xs text-muted-foreground/80">
-        <span className="h-px flex-1 bg-foreground/10" />One-click prompts<span className="h-px flex-1 bg-foreground/10" />
+    <button type="button" disabled={disabled} onClick={onClick}
+      className="relative flex h-[176px] cursor-pointer flex-col items-start overflow-hidden rounded-[10px] bg-[#0c0c0c] px-4 pt-[24px] text-left text-[#F5F0E1] ring-1 ring-[#F5F0E1]/15 outline-none ring-inset hover:ring-[#F5F0E1]/30 focus-visible:ring-2 focus-visible:ring-[#F5F0E1]/60 disabled:cursor-default">
+      <span aria-hidden className="pointer-events-none absolute -right-[30px] -bottom-[22px] flex origin-bottom-right -rotate-[14deg] gap-[3px]">{children}</span>
+      <span className="relative block font-mono text-[10px] tracking-[0.16em] uppercase" style={{ color }}>{label}</span>
+      <span className="relative mt-2 block text-[27px] leading-[1.05] font-extrabold tracking-[-0.045em]">{title}</span>
+      <span className={cn("absolute bottom-4 left-4 flex h-8 items-center gap-[7px] rounded-[7px] px-3.5 text-[13px] font-semibold text-[#0a0a0a]", kind === "workflow" ? "bg-[#8C8C8C]" : "bg-[#BFFF00]")}>
+        {cta}<Icon name="ArrowRight" className="size-3.5" aria-hidden />
+      </span>
+    </button>
+  );
+}
+
+/** The one-click scans, or `fallback` once they're gone. Never both, and nothing while loading, so nothing flashes.
+ *  Free plans get the first scan of each kind free; after a scan, its door opens that scan (David, 2026-11-19). */
+export function OneClickScans({ fallback }: { fallback?: ReactNode }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const data = useActivation();
+  const { wanted, plan, agents, state, failed } = useScansShown(data);
+  const [starting, setStarting] = useState<ScanKind | null>(null);
+  const free = plan === "free";
+  const shown = wanted && agents !== undefined && state !== undefined;
+  // The Workflow scan reads past chats, so with none on this computer only the Cyber scan shows.
+  const top = agents?.[0];
+  const kinds: ScanKind[] = top ? ["workflow", "cyber"] : ["cyber"];
+  const upgrade = (kind: ScanKind) => free && state !== undefined && state[kind].used && !state[kind].thread;
+  useUpgradePromptViewed(shown && kinds.some(upgrade) ? "one_click_scan" : null);
+  if (!shown) return data === undefined || (wanted && !failed) ? null : fallback;
+  const open = (threadId: string) => void navigate(getThreadRoutePath({ projectId: PERSONAL_PROJECT_ID, threadId }));
+  const start = (kind: ScanKind) => {
+    setStarting(kind);
+    callPluginRpc(fetch, SCANS_PLUGIN, "scans_start", { kind, source: "new_thread" }).then(
+      (result) => {
+        const { threadId } = result as { threadId: string };
+        queryClient.setQueryData<ScanState>(oneClickScanStateQueryKey(), (old) => old && { ...old, [kind]: { thread: threadId, used: true } });
+        open(threadId);
+      },
+      (error: unknown) => { setStarting(null); appToast.error(error instanceof Error ? error.message : "The scan could not start."); },
+    );
+  };
+  const door = (kind: ScanKind, label: string) => {
+    const thread = state[kind].thread;
+    if (thread) return { cta: "Open your scan", onClick: () => open(thread) };
+    if (upgrade(kind)) return { cta: "Upgrade to scan", onClick: () => openUpgrade("one_click_scan") };
+    return { cta: starting === kind ? "Starting…" : label, onClick: () => start(kind) };
+  };
+  const days = top?.days.slice(-63) ?? [], max = Math.max(...(top?.days ?? []), 1);
+  return (
+    <section aria-label="One-click scans" className="mt-8 px-3.5 max-md:hidden">
+      <div className={cn("grid gap-3", top ? "grid-cols-2" : "grid-cols-1")}>
+        {top ? (
+          <ScanDoor kind="workflow" label="Workflow · Scan" title={<>See how you<br />actually work.</>} {...door("workflow", "Scan my workflow")} color={BLUE} disabled={starting !== null}>
+            {Array.from({ length: Math.ceil(days.length / 7) }, (_, week) => (
+              <span key={week} className="flex flex-col gap-[3px]">
+                {days.slice(week * 7, week * 7 + 7).map((count, day) => (
+                  <span key={day} className="size-[15px] rounded-[2.5px]" style={count === 0 ? { background: CELL_OFF } : { background: workColor(week, day), opacity: 0.4 + 0.6 * Math.sqrt(count / max) }} />
+                ))}
+              </span>
+            ))}
+          </ScanDoor>
+        ) : null}
+        <ScanDoor kind="cyber" label="Cyber · Scan" title={<>Find what's<br />exposed.</>} {...door("cyber", "Cyber scan")} color={RED} disabled={starting !== null}>
+          {RISK.map((week, index) => (
+            <span key={index} className="flex flex-col gap-[3px]">
+              {week.map((color, day) => <span key={day} className="size-[15px] rounded-[2.5px]" style={color ? { background: color, opacity: 0.6 + 0.05 * index } : { background: CELL_OFF }} />)}
+            </span>
+          ))}
+        </ScanDoor>
       </div>
-      <div className="mt-4 flex flex-wrap justify-center gap-2">
-        {STARTERS.map((starter) => (
-          <HoverCard key={starter.id} openDelay={250} closeDelay={100}>
-            <HoverCardTrigger asChild>
-              <button type="button" onClick={() => pick(starter)} className="rounded-full bg-foreground/[0.06] px-3.5 py-1.5 text-[13px] text-foreground/75 hover:bg-foreground/10 hover:text-foreground">
-                {starter.title}
-              </button>
-            </HoverCardTrigger>
-            <HoverCardContent align="start" sideOffset={8} className="w-[340px] space-y-1.5 border-foreground/10 px-3.5 py-3">
-              <p className="text-[13px] font-medium text-foreground">{starter.title}</p>
-              <p className="text-[12.5px] leading-relaxed text-muted-foreground">{starter.about}</p>
-              <p className="flex gap-3 pt-1 text-[11.5px] text-muted-foreground/70">
-                <span className="flex items-center gap-1"><Icon name="Cloud" className="size-3" aria-hidden />Cloud</span>
-                <span className="flex items-center gap-1"><Icon name="Eye" className="size-3" aria-hidden />Read only</span>
-                <span className="flex items-center gap-1"><Icon name="Clock" className="size-3" aria-hidden />~5 min</span>
-              </p>
-            </HoverCardContent>
-          </HoverCard>
-        ))}
-      </div>
+      <p className="mt-3 text-center text-xs text-muted-foreground/70">{free && kinds.some((kind) => !state[kind].used) ? "Your first scan of each kind is free." : "Read only. Each scan ends with loops made for you."}</p>
     </section>
   );
 }
 
-/** True while the checklist is on screen, so the Wrapped card, which uses the same corner, waits its turn. */
-export const checklistShownAtom = atom(false);
-function Shown() {
-  const set = useSetAtom(checklistShownAtom);
-  useEffect(() => { set(true); return () => set(false); }, [set]);
-  return null;
-}
+const onResize = (notify: () => void) => { window.addEventListener("resize", notify); return () => window.removeEventListener("resize", notify); };
 
-/** Where a card in the top right corner starts: under the header, or below the new-thread composer so it never covers it. */
-export function useCornerTop(): string {
+/** Where a card in the top right corner starts, in pixels: under the header, or below the new-thread composer so it
+ *  never covers it. Below the one-click scans too, unless the window is too short for the tallest card (the
+ *  checklist, about 265px) to fit under them: then it moves up over the doors' right edge and stays whole. */
+export function useCornerTop(): number {
   const { pathname } = useLocation();
   const composing = pathname === getRootComposeRoutePath() || matchPath(LEGACY_PROJECT_COMPOSE_ROUTE_PATH, pathname) !== null;
-  const startersShown = useStartersShown(useActivation());
-  return !composing ? "top-[52px]" : startersShown ? "top-[350px]" : "top-[260px]";
+  const { wanted, failed } = useScansShown(useActivation(), composing);
+  const height = useSyncExternalStore(onResize, () => window.innerHeight);
+  return !composing ? 52 : wanted && !failed ? Math.max(260, Math.min(475, height - 285)) : 260;
 }
 
 export function ActivationChecklist() {
   const navigate = useNavigate();
   const hidden = useHiddenUntil(HIDDEN_KEY);
-  const nativeBrowserShown = useIsNativeBrowserViewShown();
-  const top = useCornerTop();
   const data = useActivation();
   const plan = useCloudroomAccount().data?.plan;
   const paid = Boolean(plan && plan !== "free");
   const [hides, saveHides] = useChecklistHides();
-  if (!data || hidden.hidden || nativeBrowserShown || data.started >= RETIRED_AT || (paid && (hides === null || hides >= 2))) return null;
+  const next = data && STEPS.find((step) => !data.steps[step.id]);
+  const wanted = data !== undefined && next !== undefined && !hidden.hidden && data.started < RETIRED_AT && !(paid && (hides === null || hides >= 2));
+  // The corner module (docs/scopes/corner-cards.md) decides whether it shows: it comes before the promo cards.
+  const corner = useCorner("checklist", wanted ? "" : null);
+  if (!data || !next || !corner) return null;
   const done = STEPS.filter((step) => data.steps[step.id]).length;
-  const next = STEPS.find((step) => !data.steps[step.id]);
-  if (!next) return null;
   const report = (step: Step, action: "clicked" | "hidden") =>
     fetchWithAppSurface("/api/v1/cloudroom/activation", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ step, action }) })
       .then((response) => response.json() as Promise<{ hides?: number | null }>).catch(() => ({ hides: null }));
   const hide = () => {
+    corner.answer("closed");
     hidden.hideFor((paid ? HIDES[0] : hideFor(hides)).ms);
     void report(next.id, "hidden").then(({ hides: saved }) => { if (typeof saved === "number") saveHides(saved); });
   };
@@ -162,12 +220,11 @@ export function ActivationChecklist() {
     if (!step.prompt) return navigate(getPluginConfigurationRoutePath({ pluginId: "connect" }));
     selectCloudForNewThreads();
     void navigate(getRootComposeRoutePath(), {
-      state: { focusPrompt: true, initialPrompt: step.prompt(data.second === "codex" ? "Codex" : "Claude Code"), replaceInitialPrompt: true },
+      state: { focusPrompt: true, initialPrompt: step.prompt(data.second === "codex" ? "Codex" : "Claude Code"), replaceInitialPrompt: true, executionTarget: "cloud" },
     });
   };
   return (
-    <section aria-label="Get started" className={cn("fixed right-5 z-40", top, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)] max-md:hidden")}>
-      <Shown />
+    <section aria-label="Get started" style={corner.style} className={cn(corner.className, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)]")}>
       <div className="px-4 pt-4 pb-3">
         <div className="flex items-baseline">
           <p className="text-sm font-semibold text-foreground">Get started</p>

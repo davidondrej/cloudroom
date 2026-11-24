@@ -9,7 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { PluginContext } from "@/components/plugin/plugin-context";
 import { SidebarHistoryNavigationControls } from "@/components/sidebar/SidebarHistoryNavigationControls";
 import { useRoomNavigate } from "./plugin-sdk-hooks";

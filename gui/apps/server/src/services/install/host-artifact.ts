@@ -23,8 +23,6 @@ const HOST_DEPENDENCIES = [
   "@parcel/watcher",
   "fs-native-extensions",
   "node-pty",
-  "pino",
-  "pino-pretty",
   "pino-roll",
 ] as const;
 const HOST_DAEMON_FILES = [
@@ -88,6 +86,7 @@ async function defaultCommandRunner(
   const result = await execFileAsync(command, [...args], {
     cwd,
     maxBuffer: 10 * 1024 * 1024,
+    windowsHide: true,
   });
   return result.stdout;
 }
@@ -213,6 +212,15 @@ async function materializePackagedHostPackage(
     join(hostDaemonTarget, "room-cli-chunks"),
     { recursive: true },
   );
+  // Core's binary for the Git panel (`cloudroom git`), when this app bundles one, in a folder named for this
+  // computer's OS and CPU: only joined machines with the same ones use it.
+  await cp(
+    join(packageRoot, "server", "dist", "assets", "cloudroom-core"),
+    join(hostPackageRoot, "host-daemon", "cloudroom-core", `${process.platform}-${process.arch}`),
+    { recursive: true },
+  ).catch((error: unknown) => {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  });
   try {
     await copyFile(
       join(packageRoot, "README.md"),

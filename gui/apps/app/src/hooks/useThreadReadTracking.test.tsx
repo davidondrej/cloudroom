@@ -296,4 +296,43 @@ describe("useThreadReadTracking", () => {
       expect.objectContaining({ threadId: "thr_first" }),
     );
   });
+
+  // The Windows app turns off occlusion tracking (#1944): a covered window stays "visible".
+  describe("on the Windows desktop", () => {
+    const unread = { id: "thr_win", lastReadAt: 10, latestAttentionAt: 20 };
+    let setNativeFocus: (state: { isFocused?: boolean }) => void = () => {};
+    const desktop = (platform: string) => {
+      (window as { bbDesktop?: unknown }).bbDesktop = {
+        platform,
+        getWindowState: () => new Promise(() => {}),
+        onWindowStateChange: (listener: typeof setNativeFocus) => {
+          setNativeFocus = listener;
+          return () => {};
+        },
+      };
+    };
+    afterEach(() => {
+      delete (window as { bbDesktop?: unknown }).bbDesktop;
+      vi.restoreAllMocks();
+    });
+
+    it("macOS still marks a visible, unfocused window read", () => {
+      desktop("macos");
+      vi.spyOn(document, "hasFocus").mockReturnValue(false);
+      const markThreadRead = makeMarkThreadRead();
+      renderHook(() => useThreadReadTracking({ markThreadRead, thread: unread }));
+      expect(markThreadRead.mutateAsync).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for window focus, and native focus counts (in-app browser)", () => {
+      desktop("windows");
+      vi.spyOn(document, "hasFocus").mockReturnValue(false);
+      const markThreadRead = makeMarkThreadRead();
+      renderHook(() => useThreadReadTracking({ markThreadRead, thread: unread }));
+      expect(markThreadRead.mutateAsync).not.toHaveBeenCalled();
+
+      act(() => setNativeFocus({ isFocused: true }));
+      expect(markThreadRead.mutateAsync).toHaveBeenCalledTimes(1);
+    });
+  });
 });

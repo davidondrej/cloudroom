@@ -40,6 +40,8 @@ interface ControlLease {
   threadId: string;
   metadata: DesktopBrowserLease;
   tabs: Map<string, string>;
+  /** Tabs granted at acquire; CDP pages never join it, so the server's set still matches (#1978). */
+  granted: Set<string>;
   /** Pages this lease opened through CDP `Target.createTarget` (#1383). */
   created: Set<string>;
   timer: ReturnType<typeof setTimeout>;
@@ -201,7 +203,22 @@ export function createDesktopBrowserBroker(args: {
     tabId: string,
   ): DesktopBrowserNativeTab {
     const tab = tabsFor(instance, threadId).find((tab) => tab.tabId === tabId);
-    if (!tab) throw new Error("Browser tab is outside the requested thread");
+    if (tab) return tab;
+    // A page's window.close() destroys its tab: say so, not "wrong thread" (#2151).
+    const exists = args.manager
+      .listTabs({ hostWebContentsId: instance.webContentsId, threadId: null })
+      .some((tab) => tab.tabId === tabId);
+    throw new Error(
+      exists
+        ? "Browser tab is outside the requested thread"
+        : "Browser tab was closed or does not exist (a page can close its own tab)",
+    );
+  }
+
+  /** Personal tabs carry the user's logins: agents may never capture or control them. */
+  function requireAutomationTab(tab: DesktopBrowserNativeTab) {
+    if (tab.profile.kind !== "automation")
+      throw new Error("Agents cannot capture or control personal browser tabs");
     return tab;
   }
 
@@ -420,6 +437,9 @@ export function createDesktopBrowserBroker(args: {
       if (command.type === "desktop.browser.import_cookies") {
         if (!args.browserImport)
           throw new Error("Browser cookie import is unavailable");
+        // An agent-owned profile must never receive the user's logins.
+        if (command.profile.kind !== "personal")
+          throw new Error("Cookies can only be imported into the personal browser");
         return args.browserImport.importCookies(
           {
             sourceId: command.sourceId,
@@ -466,7 +486,9 @@ export function createDesktopBrowserBroker(args: {
           return { ok: true };
         }
         case "desktop.browser.capture_tab": {
-          const tab = requireTab(instance, command.threadId, command.tabId);
+          const tab = requireAutomationTab(
+            requireTab(instance, command.threadId, command.tabId),
+          );
           const capture = await args.manager.captureTab({
             ...scope,
             tabId: tab.tabId,
@@ -492,7 +514,9 @@ export function createDesktopBrowserBroker(args: {
             throw new Error("Browser lease must expire within one hour");
           const tabs = new Map<string, string>();
           for (const tabId of command.tabIds) {
-            const tab = requireTab(instance, command.threadId, tabId);
+            const tab = requireAutomationTab(
+              requireTab(instance, command.threadId, tabId),
+            );
             if (controlFor(instance, tabId))
               throw new Error("Browser tab already has a controller");
             tabs.set(tabId, tab.generation);
@@ -512,6 +536,7 @@ export function createDesktopBrowserBroker(args: {
             threadId: command.threadId,
             metadata,
             tabs,
+            granted: new Set(tabs.keys()),
             created: new Set(),
             timer,
             bridge: null,
@@ -538,8 +563,8 @@ export function createDesktopBrowserBroker(args: {
             return { ok: true };
           }
           if (
-            command.tabIds.length !== lease.tabs.size ||
-            command.tabIds.some((id) => !lease.tabs.has(id))
+            command.tabIds.length !== lease.granted.size ||
+            command.tabIds.some((id) => !lease.granted.has(id))
           )
             throw new Error("Connection tab set does not match the lease");
           return openConnection(lease);

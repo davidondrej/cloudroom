@@ -214,36 +214,77 @@ the options). The server reserves `openai` and every direct inference provider
 id in its current provider registry. This includes `anthropic`, `google`,
 `openrouter`, and their regional or gateway variants. Registration rejects
 every reserved id. An id from another loaded plugin also fails your plugin
-load:
+load.
+
+Cloudroom serves `kinds` plus a `bb.host` entry, not BB's 0.6 design. The npm
+`@get-bb/plugin-sdk` that `room-cli plugin new` pins is BB's: its types lack
+`kinds`, it has no `/ai-services` subpath, and its fake host accepts only
+`complete`/`transcribe` functions, which Cloudroom rejects at install. Write the
+service like this; it typechecks and builds against that package:
 
 ```ts
-// server.ts
-bb.experimental_aiServices.register({
+// server.ts: declared first, because the npm types predate `kinds`
+const acme = {
   id: "acme",
   displayName: "Acme AI",
-  kinds: ["inference", "voice"],
-});
+  kinds: ["inference"] as const,
+};
+bb.experimental_aiServices.register(acme);
 ```
 
 ```ts
-// host.ts
-import { experimental_aiServicesHostContract } from "@get-bb/plugin-sdk/ai-services";
+// host.ts: Cloudroom's host contract, defined here
+import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
+import { z } from "zod";
+
+const json = z.record(z.string(), z.unknown());
+const failure = z.object({
+  ok: z.literal(false),
+  code: z.enum([
+    "timeout",
+    "rate_limited",
+    "service_unavailable",
+    "auth_required",
+    "request_failed",
+    "invalid_response",
+  ]),
+  message: z.string(),
+});
 
 export default experimental_defineHostEntry({
-  contract: experimental_aiServicesHostContract,
+  contract: defineRpcContract({
+    "ai.inference.complete": {
+      input: z.object({
+        serviceId: z.string(),
+        model: z.string(),
+        reasoningEffort: z.string(),
+        prompt: z.string(),
+        outputSchema: json,
+        timeoutMs: z.number(),
+        folder: z.string().optional(),
+        env: z.record(z.string(), z.string()).optional(),
+      }),
+      output: z.union([
+        z.object({ ok: z.literal(true), model: z.string(), value: json }),
+        failure,
+      ]),
+    },
+  }),
   handlers: {
-    "ai.inference.complete": async (input) => {
-      const value = await completeStructured(input);
-      return { ok: true, model: input.model, value };
-    },
-    "ai.voice.transcribe": async (input) => {
-      // input.audioBase64, input.mimeType, input.filename, input.prompt
-      return { ok: true, model: input.model, text: await transcribe(input) };
-    },
+    "ai.inference.complete": async (input) => ({
+      ok: true as const,
+      model: input.model,
+      value: await completeStructured(input),
+    }),
   },
 });
 ```
+
+The `voice` kind adds `ai.voice.transcribe`, which returns
+`{ ok: true, model, text }` or the same failure. Leave AI services out of
+fake-host tests; after `room-cli plugin install .`,
+`room-cli settings ai-services` lists the registered service.
 
 Report failures in the result, not by throwing: `{ ok: false, code, message }`
 with `code` one of `timeout`, `rate_limited`, `service_unavailable`,
@@ -260,8 +301,9 @@ time.
 Inference input includes `serviceId`, `model`, `reasoningEffort: "none"`,
 `prompt`, `outputSchema`, and `timeoutMs`. An optional `env` holds the login
 that the provider with the service's id runs its threads on; pass it to the
-CLI you start. Plugin-served voice input has a
-5 MiB limit. The server rejects a larger file before a host call. Voice input
-includes `serviceId`, `model`, `audioBase64`, `mimeType`, `filename`, `prompt`,
-and `timeoutMs`. The inference success value must be a JSON object. Voice
-`prompt` can be `null`.
+CLI you start. Plugin-served voice input accepts up to 25 MB: clips up to 5 MB
+arrive inline in `audioBase64`, while larger clips (5–25 MB) arrive as a
+single-use internal pull URL in `audioUrl` (resolved against `ROOM_SERVER_URL`
+or `BB_SERVER_URL`). Voice input includes `serviceId`, `model`, `audioBase64`
+or `audioUrl`, `mimeType`, `filename`, `prompt`, and `timeoutMs`. The inference
+success value must be a JSON object. Voice `prompt` can be `null`.

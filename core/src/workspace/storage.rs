@@ -5,7 +5,10 @@ use std::{
     fs, io,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::process::Command;
@@ -209,6 +212,11 @@ impl Snapshot {
     }
 }
 
+/// The file in the history folder that keeps space for history (`Guard::reserve`), and its size: twice the largest
+/// record a harness can send (16 MiB lines).
+pub(crate) const RESERVE: &str = "reserve";
+const RESERVE_BYTES: u64 = 32 << 20;
+
 /// How long a guard-loop measurement stays valid.
 pub(crate) const FRESH: Duration = Duration::from_secs(5);
 
@@ -220,6 +228,10 @@ pub struct Guard {
     floor: Mutex<Option<u64>>,
     /// The last real reading's level. Normal at boot: the blocked placeholder is no reading (#1188).
     last: Mutex<Level>,
+    /// Space history is owed: a missing reserve (`reserve`). Readings count it as used.
+    owed: AtomicU64,
+    /// The filesystem can't preallocate a reserve, so it keeps none.
+    no_reserve: AtomicBool,
 }
 impl Guard {
     pub fn new(config: &Config) -> io::Result<Self> {
@@ -232,6 +244,8 @@ impl Guard {
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
             last: Mutex::new(Level::Normal),
+            owed: AtomicU64::new(0),
+            no_reserve: AtomicBool::new(false),
             value: Mutex::new((
                 Snapshot::unavailable(config.storage.is_some()),
                 Instant::now(),
@@ -251,8 +265,11 @@ impl Guard {
         let Some((p, d)) = measured else {
             return Snapshot::unavailable(true);
         };
+        let available = d
+            .available_bytes
+            .saturating_sub(self.owed.load(Ordering::Relaxed));
         Snapshot {
-            level: p.level(d.available_bytes, value.level, *self.floor.lock().unwrap()),
+            level: p.level(available, value.level, *self.floor.lock().unwrap()),
             workspace_available_bytes: Some(d.available_bytes),
             history_available_bytes: Some(d.available_bytes),
             sampled_at: Some(now_ms()),
@@ -273,18 +290,27 @@ impl Guard {
         ) else {
             return String::new();
         };
-        let free = w.min(h);
-        // A pause lasts until space passes the resume line, and a warning until a fifth above its line (`level`).
+        let (free, owed) = (w.min(h), self.owed.load(Ordering::Relaxed));
+        // A pause lasts until space passes the resume line, and a warning until a fifth above its line (`level`). Space
+        // owed to history (`reserve`) raises a pause line.
         let (name, line) = match (s.level, *self.floor.lock().unwrap()) {
-            (Level::Blocked, Some(floor)) => ("pause line", floor),
-            (Level::Blocked, None) if free < p.pause_bytes => ("pause line", p.pause_bytes),
-            (Level::Blocked, None) => ("resumes above", p.resume_bytes),
+            (Level::Blocked, Some(floor)) => ("pause line", floor + owed),
+            (Level::Blocked, None) if free < p.pause_bytes + owed => {
+                ("pause line", p.pause_bytes + owed)
+            }
+            (Level::Blocked, None) => ("resumes above", p.resume_bytes + owed),
             _ if free <= p.warning_bytes => ("warning line", p.warning_bytes),
             _ => ("warning ends above", p.warning_bytes / 5 * 6),
         };
+        let owed = match (s.level, owed >> 20) {
+            (Level::Blocked, mib) if mib > 0 => {
+                format!(", counting {mib} MiB kept for chat history")
+            }
+            _ => String::new(),
+        };
         let (gib, secs) = (|n: u64| n as f64 / (1u64 << 30) as f64, at / 1000 % 86_400);
         format!(
-            " Measured {:02}:{:02}:{:02} UTC: {:.2} GiB free on {}, {name} {:.2} GiB.",
+            " Measured {:02}:{:02}:{:02} UTC: {:.2} GiB free on {}, {name} {:.2} GiB{owed}.",
             secs / 3600,
             secs / 60 % 60,
             secs % 60,
@@ -298,22 +324,67 @@ impl Guard {
     /// The pause line never drops below an eighth of `pause_bytes` (250 MB on a 20 GB box), so agents can't fill
     /// the space Core needs to save history. Returns false at that line: work stays paused until space is freed.
     pub fn rescue(&self) -> bool {
-        let (snapshot, _) = &*self.value.lock().unwrap();
-        let (Some(workspace), Some(history)) = (
-            snapshot.workspace_available_bytes,
-            snapshot.history_available_bytes,
-        ) else {
+        let Some((available, minimum)) = self.lowest() else {
             return false;
         };
-        let (available, minimum) = (
-            workspace.min(history),
-            self.policy.as_ref().map_or(0, |p| p.pause_bytes / 8),
-        );
         if available <= minimum {
             return false;
         }
         *self.floor.lock().unwrap() = Some((available / 2).max(minimum));
         true
+    }
+    /// At or under the lowest pause line, where no rescue wins space: only freed space resumes work (#606).
+    pub fn stuck(&self) -> bool {
+        self.lowest()
+            .is_some_and(|(available, minimum)| available <= minimum)
+    }
+    /// Keeps RESERVE_BYTES of the disk for history in a file of its own, which a history write refused for space deletes
+    /// before it tries again (`Journal::append`), so the reserve holds whatever agents write. Made again once it fits
+    /// above the lowest pause line. Until then readings count it as used, so every agent stays paused (#606).
+    pub fn reserve(&self) {
+        let Some(p) = &self.policy else {
+            return;
+        };
+        let path = self.history.join(RESERVE);
+        let missing = !self.no_reserve.load(Ordering::Relaxed)
+            && !fs::metadata(&path).is_ok_and(|m| m.len() >= RESERVE_BYTES)
+            && (!disk(&self.history)
+                .is_ok_and(|d| d.available_bytes >= p.pause_bytes / 8 + RESERVE_BYTES)
+                || !self.make_reserve(&path));
+        self.owed
+            .store(if missing { RESERVE_BYTES } else { 0 }, Ordering::Relaxed);
+    }
+    /// False if the disk refused it for space. Any other failure means this filesystem can't keep one.
+    fn make_reserve(&self, path: &Path) -> bool {
+        use std::os::unix::fs::OpenOptionsExt;
+        let made = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .and_then(|file| allocate(&file, RESERVE_BYTES));
+        let Err(error) = made else {
+            return true;
+        };
+        let _ = fs::remove_file(path);
+        if matches!(
+            error.kind(),
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded
+        ) {
+            return false;
+        }
+        self.no_reserve.store(true, Ordering::Relaxed);
+        true
+    }
+    /// The last reading's free space, less what history is owed (`reserve`), and the lowest pause line.
+    fn lowest(&self) -> Option<(u64, u64)> {
+        let (s, _) = &*self.value.lock().unwrap();
+        Some((
+            (s.workspace_available_bytes?.min(s.history_available_bytes?))
+                .saturating_sub(self.owed.load(Ordering::Relaxed)),
+            self.policy.as_ref().map_or(0, |p| p.pause_bytes / 8),
+        ))
     }
     pub(crate) fn spawn_writer(
         &self,
@@ -388,7 +459,8 @@ impl Guard {
             p.check_filesystems(config)?;
             workspaces.check_filesystems()?;
             let (workspace, history) = (disk(workspaces.root())?, disk(&config.state_dir)?);
-            let available = workspace.available_bytes.min(history.available_bytes);
+            let available = (workspace.available_bytes.min(history.available_bytes))
+                .saturating_sub(self.owed.load(Ordering::Relaxed));
             let level = {
                 let mut floor = self.floor.lock().unwrap();
                 if available > p.resume_bytes {
@@ -474,6 +546,22 @@ pub(crate) fn disk(path: &Path) -> io::Result<Disk> {
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn disk(_: &Path) -> io::Result<Disk> {
     Err(io::Error::other("disk measurement requires Linux"))
+}
+/// Allocated blocks, not a sparse file: deleting it must free real space.
+#[cfg(target_os = "linux")]
+fn allocate(file: &fs::File, bytes: u64) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn fallocate(fd: i32, mode: i32, offset: i64, len: i64) -> i32;
+    }
+    if unsafe { fallocate(file.as_raw_fd(), 0, 0, bytes as i64) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    file.sync_all()
+}
+#[cfg(not(target_os = "linux"))]
+fn allocate(_: &fs::File, _: u64) -> io::Result<()> {
+    Err(io::Error::other("a reserve requires Linux"))
 }
 
 /// Runs only as the agent account, while workloads are frozen or absent. Never traverses
@@ -685,6 +773,8 @@ mod tests {
                 writers: Mutex::new(Vec::new()),
                 floor: Mutex::new(None),
                 last: Mutex::new(Level::Normal),
+                owed: AtomicU64::new(0),
+                no_reserve: AtomicBool::new(false),
                 value: Mutex::new((
                     Snapshot {
                         enabled: true,
@@ -726,6 +816,8 @@ mod tests {
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
             last: Mutex::new(Level::Normal),
+            owed: AtomicU64::new(0),
+            no_reserve: AtomicBool::new(false),
             value: Mutex::new((
                 Snapshot {
                     enabled: true,
@@ -773,6 +865,8 @@ mod tests {
             guard.value.lock().unwrap().0.history_available_bytes = Some(available);
             assert_eq!(guard.rescue(), rescued, "{available} bytes");
             assert_eq!(*guard.floor.lock().unwrap(), floor);
+            // Only there does a prompt to a paused agent wait instead of being refused (#606).
+            assert_eq!(guard.stuck(), !rescued, "{available} bytes");
         }
     }
 
@@ -784,6 +878,8 @@ mod tests {
             writers: Mutex::new(Vec::new()),
             floor: Mutex::new(None),
             last: Mutex::new(Level::Normal),
+            owed: AtomicU64::new(0),
+            no_reserve: AtomicBool::new(false),
             value: Mutex::new((Snapshot::unavailable(true), Instant::now())),
         };
         assert!(guard.blocks());

@@ -15,7 +15,7 @@ import { moveThreadDetailBootstrap } from "@/hooks/cache-owners/thread-detail-ca
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
 import { useSystemProviderInfo } from "@/hooks/queries/system-queries";
 import { useCloudroomConnection, cloudFeatureSupported, useOpenCloudFile, useCloudroomThread, useCloudroomThreadWorkspace } from "@/hooks/queries/cloudroom-queries";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAtom, useSetAtom } from "jotai";
 import { findPane, replacePaneContent } from "@/lib/split-layout";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
@@ -40,6 +40,7 @@ import { ThreadProviderContext } from "@/components/thread/thread-provider-conte
 import {
   cloudGitEnvironmentId,
   defaultAppSettings,
+  isBackgroundCommandTaskType,
   isStopHeldReport,
   resolveEnvironmentMergeBaseBranch,
   type PromptInput,
@@ -56,7 +57,9 @@ import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { useThreadOpenTiming, watchPanelOpen } from "@/lib/perf";
-import type { ThreadSecondaryPanel as ThreadSecondaryPanelTab } from "@/lib/thread-secondary-panel";
+import type {
+  ThreadSecondaryPanel as ThreadSecondaryPanelTab,
+} from "@/components/right-panel/store/tab-model";
 import {
   PluginDetailPanelContext,
   usePluginDetailPanelState,
@@ -125,7 +128,6 @@ import {
   useCreateThreadTerminal,
   useThreadTerminals,
 } from "@/hooks/queries/thread-terminal-queries";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 import {
   findEnvironmentDisplayProvider,
   getEnvironmentSummaryChrome,
@@ -164,16 +166,21 @@ import {
   isRoutePath,
   type ThreadRoutePathArgs,
 } from "@/lib/route-paths";
-import { useGitDiffPanel } from "@/components/secondary-panel/git-diff/useGitDiffPanel";
+import {
+  useEnvironmentMergeBase,
+  useGitDiffPanel,
+} from "@/components/diff/diff-panel-hooks";
 import {
   createGitDiffFixedTabDestination,
   GIT_DIFF_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/git-diff/git-diff-fixed-tab-navigation";
+  resolveGitDiffTabStatus,
+} from "@/components/diff/diff-store";
 import {
   createThreadInfoFixedTabDestination,
   THREAD_INFO_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/thread-info-fixed-tab-navigation";
+} from "@/components/right-panel/tabs/thread-info";
 import { ThreadDetailHeader } from "./ThreadDetailHeader";
+import { SubagentBar } from "./SubagentBar";
 import {
   ThreadDetailPromptArea,
   type ThreadDetailSentMessageEdit,
@@ -196,9 +203,9 @@ import type { HostConnectionNotice } from "@/components/thread/timeline/ThreadTi
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
-} from "@/components/secondary-panel/useThreadStorageViewer";
-import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
-import { BrowserTabLifecycleObserver } from "@/components/secondary-panel/BrowserTabDeck";
+} from "@/components/right-panel/tabs/thread-storage";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
+import { BrowserTabLifecycleObserver } from "@/components/right-panel/tabs/browser-visibility";
 import {
   LazyBrowserTabDeck,
   LazyHostFilePreviewTabContent,
@@ -206,15 +213,14 @@ import {
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
   LazyWorkspaceFilePreviewTabContent,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { BrowserAddressFocusRequest } from "@/components/right-panel/tabs/browser-tab";
 import {
   SIDE_CHAT_PLUGIN_ID,
   SIDE_CHAT_PLUGIN_PANEL_ACTION_ID,
 } from "@/lib/side-chat-plugin";
-import { RightPanelFileTabIcon } from "@/components/secondary-panel/RightPanelFileTabIcon";
-import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
-import { PluginIcon } from "@/components/plugin/PluginIcon";
+import { buildSecondaryPanelTabs } from "@/components/right-panel/shell/buildSecondaryPanelTabs";
+import { WorkspaceFileTabIcon } from "@/components/right-panel/tabs/agent-file-edit";
 import {
   PluginPanelTabContent,
   usePluginPanelActions,
@@ -228,6 +234,10 @@ import { ThreadTimelineNavigationProvider } from "@/components/thread/timeline/T
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getFileExtension, isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
+import { PendingClaudeSignInRow } from "@/components/thread/timeline/AuthFailureRow";
+import { BackgroundCommandBubbles } from "@/components/thread/timeline/BackgroundCommandBubble";
+import { findLatestCloudLoginRowId } from "@/components/thread/timeline/CloudLoginRow";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -255,23 +265,18 @@ import {
   toFilePreviewLineRange,
 } from "@/lib/live-file-navigation";
 import { getFilePreviewLineRangeStart } from "@cloudroom/client-core";
-import { getBrowserUrlHost } from "@/lib/browser-url";
 import {
   useThreadStorageBrowser,
   type ThreadStoragePathSelectHandler,
-} from "@/components/secondary-panel/useThreadStorageBrowser";
+} from "@/components/right-panel/tabs/thread-storage";
 import {
   useThreadFileTabs,
   type FileSearchSelection,
-} from "@/components/secondary-panel/useThreadFileTabs";
-import { isSecondaryFileTab } from "@cloudroom/client-core";
-import { useThreadOpenFileSignal } from "@/components/secondary-panel/useThreadOpenFileSignal";
+} from "@/components/right-panel/store/use-panel-tabs";
+import { isSecondaryFileTab } from "@/components/right-panel/store/tab-ops";
+import { useThreadOpenFileSignal } from "@/components/right-panel/tabs/thread-storage";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
-import type {
-  SecondaryPanelFixedTab,
-  SecondaryPanelRenderableTab,
-} from "@/components/secondary-panel/ThreadSecondaryPanel";
-import { useEnvironmentMergeBase } from "@/components/secondary-panel/git-diff/useEnvironmentMergeBase";
+import type { SecondaryPanelFixedTab } from "@/components/right-panel/shell/panel-shell";
 import { useThreadGitActions } from "./useThreadGitActions";
 import { useSendSideChatMessageToMain } from "./useSendSideChatMessageToMain";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
@@ -281,7 +286,7 @@ import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
-} from "@/components/secondary-panel/terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import {
   buildOpenInEditorHandler,
   resolveEnvironmentOpenContext,
@@ -305,14 +310,13 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   createGitDiffFixedPanelTab,
   createNewTabFixedPanelTab,
   createThreadInfoFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
-import { resolveGitDiffTabStatus } from "@/components/secondary-panel/gitDiffTabEligibility";
+} from "@/components/right-panel/store/tab-model";
 import { isRootThread } from "./threadParentSelectorOptions";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
@@ -1077,10 +1081,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     }),
     [thread?.providerId, threadProviderPluginId],
   );
-  const isForkAvailable = isThreadForkable(
-    thread ?? null,
-    threadProviderInfo?.capabilities.supportsFork ?? false,
-  );
+  const isForkAvailable = isThreadForkable(thread ?? null);
   const pluginPanelActions = usePluginPanelActions({
     forkAvailable: isForkAvailable,
     openPluginPanel,
@@ -1192,6 +1193,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     (thread.executionTarget === "cloud"
       ? queuedMessagesForEditEligibility.length === 0
       : queuedMessagesForEditEligibility.every(isStopHeldReport));
+  const waitingCommands = activeBackgroundCommands.filter((row) =>
+    isBackgroundCommandTaskType(row.taskType),
+  );
   const sentMessageEditWaitsForBackgroundWork =
     activeWorkflows.length > 0 ||
     (thread?.activeBackgroundAgentCount ?? 0) > 0 ||
@@ -1853,7 +1857,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         threadId,
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        ...takeTerminalStartRequest(),
       })
       .then((session) => {
         closeTab(newTab.id);
@@ -2396,7 +2399,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     ],
   );
   const handleAutoOpenImage = useCallback(
-    (link: ThreadTimelineLocalFileLink) => {
+    (link: ThreadTimelineLocalFileLink): boolean => {
       const { kind } = resolveThreadLocalFileLink({
         hostFileLinksAvailable,
         link,
@@ -2408,8 +2411,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         kind === "open-thread-storage-path" ||
         kind === "open-host-path"
       ) {
-        handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
+        return handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
       }
+      return false;
     },
     [
       handleOpenTimelineLocalFileLink,
@@ -2420,13 +2424,16 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   );
   useAutoOpenGeneratedImages({
     enabled: isFocused && !renderSecondaryPanelAsDrawer,
-    isTurnRunning:
-      thread !== undefined &&
-      isRunningThreadRuntimeDisplayStatus(thread.runtime.displayStatus),
+    isThreadStatusFresh:
+      hasThreadDetailBootstrapSettled &&
+      !threadDetailBootstrapQuery.isFetching &&
+      !isFetching &&
+      !isPlaceholderData,
     openImage: handleAutoOpenImage,
     rows: timelineLoading ? null : timelineRows,
     threadId,
-    workspaceRootPath: workspacePreviewRootPath,
+    threadStatus: thread?.runtime.displayStatus ?? null,
+    workspaceRootPath: timelineWorkspaceRootPath ?? null,
   });
   const handleOpenTimelineLink = useCallback<ThreadTimelineLinkHandler>(
     ({ href }) => handleOpenUrlByPreference(href),
@@ -2777,6 +2784,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     error: workspaceStatusError,
     workspaceUnavailable,
     workspaceDeleted: isWorkspaceDeleted,
+    workspaceParked: environment?.lifecycle.phase === "parked",
   });
   const threadTitle = getThreadDisplayTitle(thread);
   const workspaceOpenActions: ThreadActionsMenuResponsiveAction[] =
@@ -3093,118 +3101,19 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       }
     }
   };
-  const filenameOfPanelTab = (path: string) => path.split("/").at(-1) ?? path;
-  const panelTabs: readonly SecondaryPanelRenderableTab[] =
-    syncedOrderedSecondaryFileTabs.map((tab): SecondaryPanelRenderableTab => {
-      const pluginAction =
-        tab.kind === "plugin-panel"
-          ? pluginThreadPanelActions.find(
-              (action) =>
-                action.pluginId === tab.pluginId && action.id === tab.actionId,
-            )
-          : undefined;
-      const shared = {
-        contentFillsRegion:
-          tab.kind === "plugin-panel" &&
-          (tab.fileOpenerOwner !== undefined ||
-            pluginAction?.layout === "flush"),
-        onClose: () => closeTab(tab.id),
-        renderContent: () => renderSecondaryTabContent(tab),
-        tab,
-      };
-      switch (tab.kind) {
-        case "browser": {
-          const browserLabel =
-            tab.title ?? (tab.url.length > 0 ? getBrowserUrlHost(tab.url) : "");
-          return {
-            ...shared,
-            label: browserLabel.length > 0 ? browserLabel : "Browser",
-            leadingVisual: (
-              <Icon
-                name="Globe"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        }
-        case "terminal": {
-          const session = terminalsById.get(tab.terminalId);
-          return {
-            ...shared,
-            label: session?.title ?? "Terminal",
-            leadingVisual: (
-              <Icon
-                name="Terminal"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel:
-              session === undefined || session.status === "running"
-                ? null
-                : session.status,
-            onSelect: () => handleActivateTerminalTab(tab.terminalId),
-            onClose: () => handleCloseTerminalTab(tab.terminalId),
-          };
-        }
-        case "workspace-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: tab.statusLabel,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "host-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "thread-storage-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            isPinned: tab.isPinned,
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "new-tab":
-          return {
-            ...shared,
-            label: "New tab",
-            leadingVisual: (
-              <Icon
-                name="NewTab"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "plugin-panel":
-          return {
-            ...shared,
-            label: tab.title,
-            leadingVisual: (
-              <PluginIcon
-                pluginId={tab.pluginId}
-                icon={pluginAction?.icon ?? null}
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-      }
-    });
+  const panelTabs = buildSecondaryPanelTabs({
+    tabs: syncedOrderedSecondaryFileTabs,
+    pluginActions: pluginThreadPanelActions,
+    terminalsById,
+    activateTab: handleActivateFileTab,
+    closeTab,
+    activateTerminal: handleActivateTerminalTab,
+    closeTerminal: handleCloseTerminalTab,
+    renderContent: renderSecondaryTabContent,
+    renderWorkspaceFileIcon: (path) => (
+      <WorkspaceFileTabIcon path={path} threadId={threadId} />
+    ),
+  });
   const threadDetailContent = (
     <MarkdownLocalFileContextMenuContext.Provider
       value={getLocalFileContextMenuItems}
@@ -3221,7 +3130,15 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         <AppNavigationHostProvider capabilities={appNavigationCapabilities}>
           <ThreadDetailSecondaryContent
             footer={composerFooter}
-            header={timelineHeader}
+            header={
+              <>
+                {timelineHeader}
+                <SubagentBar
+                  childThreads={childThreadSubsetQuery.data ?? []}
+                  reserveRight={!isSideChatThread && sideChatAction != null}
+                />
+              </>
+            }
             isMetadataLoading={environmentQuery.isLoading}
             isSecondaryPanelOpen={isSecondaryPanelOpen}
             isConversationCollapsed={isConversationCollapsed}
@@ -3322,13 +3239,50 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                 <ThreadOriginMarker origin={threadOrigin} />
               ) : undefined,
               trailingContent:
-                chatCardInteraction ? (
-                  <div className="pt-2">
-                    <ThreadPendingInteractionBanner
-                      interaction={chatCardInteraction}
-                      threadId={thread.id}
-                    />
-                  </div>
+                waitingCommands.length > 0 ||
+                chatCardInteraction ||
+                cloudThreadState.data?.usageLimit ||
+                (thread.providerId === "claude-code" &&
+                  thread.archivedAt === null &&
+                  ((!isCloudThread && thread.status === "pending") ||
+                    (isCloudThread &&
+                      cloudThreadState.data?.authRequired === true &&
+                      !providerAuthFailed &&
+                      !findLatestCloudLoginRowId(displayedTimelineRows)))) ? (
+                  <>
+                    {/* Running background commands: the agent continues by itself when each ends. */}
+                    <BackgroundCommandBubbles rows={waitingCommands} />
+                    {/* Out of Cloud Credits: a row where the work stopped (ADR 20261118-214337). */}
+                    {cloudThreadState.data?.usageLimit && (
+                      <CloudUsageLimitNotice
+                        launchCap={cloudThreadState.data.launchCap}
+                        className="mt-1 px-2"
+                      />
+                    )}
+                    {thread.providerId === "claude-code" &&
+                      thread.archivedAt === null &&
+                      ((!isCloudThread && thread.status === "pending") ||
+                        (isCloudThread &&
+                          cloudThreadState.data?.authRequired === true &&
+                          !providerAuthFailed &&
+                          !findLatestCloudLoginRowId(displayedTimelineRows))) && (
+                        <PendingClaudeSignInRow
+                          threadId={thread.id}
+                          isCloud={isCloudThread}
+                          hostId={environment?.hostId}
+                          environmentId={thread.environmentId}
+                          className="mt-1 px-2"
+                        />
+                      )}
+                    {chatCardInteraction && (
+                      <div className="pt-2">
+                        <ThreadPendingInteractionBanner
+                          interaction={chatCardInteraction}
+                          threadId={thread.id}
+                        />
+                      </div>
+                    )}
+                  </>
                 ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,

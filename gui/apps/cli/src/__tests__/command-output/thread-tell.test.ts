@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { BbRequestTimeoutError } from "@cloudroom/sdk/node";
 import * as fixtures from "../helpers/command-output-fixtures.js";
 import {
   setupCommandOutputTestEnvironment,
@@ -127,6 +128,11 @@ describe("room-cli thread tell command output", () => {
       "may already have been sent",
       () => Promise.reject(new TypeError("fetch failed")),
       "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again.",
+    ],
+    [
+      "may already have been sent when Cloudroom never answers (#1832)",
+      () => Promise.reject(new BbRequestTimeoutError(75_000)),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (no answer within 75 seconds; it may be busy). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again. The server may still be handling it, so an empty log and queue don't prove it wasn't sent: wait a minute and check again before resending.",
     ],
     [
       "may already have been sent after a tunnel timeout (#1513)",

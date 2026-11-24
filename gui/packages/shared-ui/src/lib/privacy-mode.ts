@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 
-// Privacy mode hides emails on screen, for recordings. It is saved in the app's own storage, so it survives a restart.
+// Privacy mode hides emails on screen, for recordings: on the Accounts page, in the usage box, in the sidebar account menu
+// and on the Account page. It is saved in the app's own storage, so it survives a restart.
 // Plugins are bundled apart, so every part of the app follows one window event instead of shared state.
 const KEY = "cloudroom.privacy-mode";
 const CHANGED = "cloudroom:privacy-mode";

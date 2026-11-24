@@ -15,7 +15,7 @@ import {
   SidebarSplitContainer,
   type SidebarSplitPaneRenderArgs,
   type SidebarSplitTabDescriptor,
-} from "./SidebarSplitContainer";
+} from "@/components/right-panel/shell/split-container";
 import {
   createSidebarSplitState,
   focusSidebarPane,
@@ -24,8 +24,8 @@ import {
   serializeSidebarSplitState,
   sidebarSplitStorageKey,
   type SidebarSplitState,
-} from "./sidebarSplitLayout";
-import { getFixedPanelTabsStateStorageKey } from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/split-state";
+import { getFixedPanelTabsStateStorageKey } from "@/components/right-panel/store/tab-model";
 
 const TABS: readonly SidebarSplitTabDescriptor[] = [
   { id: "tab-a", label: "A", restoresPlacementAfterRemoval: true },

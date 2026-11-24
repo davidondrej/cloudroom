@@ -62,7 +62,7 @@ export function OsTile({ os, className }: { os: OsKind | "cloud" | null; classNa
 // The new-thread environment picker's options, as a still label: where a machine shows up in that picker.
 const PLACES = {
   local: { icon: "Laptop", label: "Local", iconClass: "text-muted-foreground" },
-  cloud: { icon: "Cloud", label: "Cloud", iconClass: "text-primary" },
+  cloud: { icon: "Cloud", label: "Cloud", iconClass: "cloud-icon" },
   vps: { icon: "Server", label: "VPS", iconClass: "text-muted-foreground" },
 } as const;
 

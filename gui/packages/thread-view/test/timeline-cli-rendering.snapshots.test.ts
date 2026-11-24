@@ -4,7 +4,7 @@ import {
   messageKinds,
   renderTimelineFixture,
 } from "./timeline-test-harness.js";
-import { formatThreadTimelineText } from "../src/format-timeline-text.js";
+import { formatThreadTimelineText } from "../src/index.js";
 import type { TimelineRow } from "@cloudroom/server-contract";
 import type { TimelineEventFactory } from "./timeline-test-harness.js";
 

@@ -11,6 +11,7 @@ import {
   getAutomationForProject,
   getAutomationRun,
   listWebhookAttempts,
+  countWaitingWakes,
   isAutomationSpawnedThread,
   listAllAutomations,
   listAutomationRuns,
@@ -173,13 +174,28 @@ function computeNextRunAt(
   });
 }
 
+const MAX_WAITING_WAKES = 5;
+
+/** A thread a loop started can't make loops, or its runs could start threads without end. A wake is the exception:
+ *  a one-time re-prompt of that same thread starts no thread. A few at a time, so a run can't flood itself. */
 function assertNotRecursiveCreation(
   db: Db,
-  createdByThreadId: string | undefined,
+  payload: Pick<
+    ResolvedCreateAutomationInput,
+    "createdByThreadId" | "trigger" | "execution"
+  >,
 ): void {
-  if (createdByThreadId === undefined) return;
-  if (isAutomationSpawnedThread(db, createdByThreadId)) {
-    throw new Error("Loop-spawned threads cannot create loops");
+  const threadId = payload.createdByThreadId;
+  if (threadId === undefined || !isAutomationSpawnedThread(db, threadId)) return;
+  const wake =
+    payload.trigger.triggerType === "once" &&
+    payload.execution.mode === "agent" &&
+    payload.execution.targetThreadId === threadId;
+  if (!wake) throw new Error("Loop-spawned threads cannot create loops");
+  if (countWaitingWakes(db, threadId) >= MAX_WAITING_WAKES) {
+    throw new Error(
+      `This thread already has ${MAX_WAITING_WAKES} wakes waiting. Wait for one to fire, or delete one with room-cli loop delete.`,
+    );
   }
 }
 
@@ -439,6 +455,21 @@ function encodeRunCursor(startedAt: number, id: string): string {
   return Buffer.from(`${startedAt}:${id}`, "utf8").toString("base64url");
 }
 
+/** Each agent of a loop that takes turns must be available where the loop runs, with the loop's permission mode and
+ *  its own reasoning level. */
+async function checkLoopAgents(
+  bb: Parameters<typeof resolvePermissionMode>[0],
+  execution: AutomationExecution,
+): Promise<void> {
+  if (execution.mode !== "agent") return;
+  const routing = providerRoutingForEnvironment(execution.environment);
+  for (const agent of execution.agents ?? []) {
+    await resolvePermissionMode(bb, agent.providerId, execution.permissionMode, routing);
+    if (agent.reasoningLevel !== undefined)
+      await requireReasoningLevel(bb, agent.providerId, agent.reasoningLevel, routing);
+  }
+}
+
 function applyAgentExecutionUpdate(
   execution: AutomationExecution,
   update: AgentExecutionUpdate,
@@ -468,6 +499,22 @@ function applyAgentExecutionUpdate(
   } else if (update.serviceTier !== undefined) {
     next.serviceTier = update.serviceTier;
   }
+  // A new list starts with its first agent; one agent, or a change to the agent alone, ends the turns.
+  const [first, ...rest] = update.agents ?? [];
+  if (first !== undefined) {
+    Object.assign(next, { providerId: first.providerId, model: first.model, reasoningLevel: first.reasoningLevel ?? "medium" });
+    if (first.serviceTier === undefined) delete next.serviceTier;
+    else next.serviceTier = first.serviceTier;
+  }
+  if (rest.length > 0) next.agents = update.agents;
+  else if (
+    first !== undefined ||
+    update.providerId !== undefined ||
+    update.model !== undefined ||
+    update.reasoningLevel !== undefined ||
+    update.serviceTier !== undefined
+  )
+    delete next.agents;
   if (update.target === undefined) return next;
   if (update.target.type === "target-thread") {
     return { ...next, targetThreadId: update.target.threadId };
@@ -694,7 +741,8 @@ export function createAutomationService(args: {
       assertLoopWorkspace(project, payload.execution);
       const now = Date.now();
       validateTrigger(payload.trigger, now);
-      assertNotRecursiveCreation(db, payload.createdByThreadId);
+      assertNotRecursiveCreation(db, payload);
+      await checkLoopAgents(bb, payload.execution);
       if (payload.execution.mode === "agent") {
         await resolvePermissionMode(
           bb,
@@ -807,6 +855,7 @@ export function createAutomationService(args: {
           : null;
       }
       if (input.execution !== undefined) {
+        await checkLoopAgents(bb, input.execution);
         if (input.execution.mode === "agent") {
           await resolvePermissionMode(
             bb,
@@ -862,6 +911,8 @@ export function createAutomationService(args: {
             providerRoutingForEnvironment(updatedExecution.environment),
           );
         }
+        if (input.agent.agents !== undefined)
+          await checkLoopAgents(bb, { ...updatedExecution, agents: input.agent.agents });
         patch.execution = updatedExecution;
       }
       if (patch.execution !== undefined)

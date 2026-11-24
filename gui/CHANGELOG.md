@@ -2,6 +2,164 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 166
+
+Side chats pick their own agent (2026-11-24)
+
+### Changes
+
+- Side chats can use any agent and model: pick one in the side chat, or switch mid-chat.
+- In Local threads, when Claude Code or Codex hits its plan limit, the new Cloudroom Agent plugin keeps you going in one click on frontier open source models.
+- Loop runs show as a clear divider with the loop name and time, instead of looking like your own message.
+- Forking from an agent's reply in Cloud threads works again, and Droid, Agent Zero and OpenClaw now start on their first use in Cloud.
+- Security fixes.
+
+## 165
+
+Cloud agents reach Windows PCs (2026-11-24)
+
+### Changes
+
+- Cloud agents can now run commands and move files on your paired Windows computer.
+- Windows updates now stage in the background for quick restarts, and npm-installed Claude Code signs in cleanly.
+- Back-to-back Claude plan limits in Cloud threads each get a plan-limit card, and restarted Cloud threads no longer report a fake exit status 1.
+- Background command markers are now minimal hairline dividers, Claude plan changes sync to Cloud, and Workflow and Cyber scans keep going past unreadable files.
+- Security fixes.
+
+## 164
+
+Share only the repos you pick (2026-11-23)
+
+### Changes
+
+- Connect GitHub can now share only the repos you pick with cloud agents.
+- Hitting a Claude plan limit in a Cloud thread shows the plan-limit card, not a raw error.
+- Cloud previews of dev servers load right away instead of stalling.
+- Image attachments show small thumbnails in the message box, and privacy mode hides your email.
+- Security fixes.
+
+## 163
+
+Live bubbles for background commands (2026-11-22)
+
+### Changes
+
+- Background commands show as live bubbles in the chat, so you always see why an agent replied on its own.
+- Long threads open and update faster, thanks to a rebuilt chat timeline.
+- Images in Local chats keep showing, even after the original file is deleted.
+- Claude Code sign-in goes straight to login, and Kimi approvals show the real command.
+- Pick Electric lime or Crisp white for the Cloud icon in Appearance.
+- Security fixes.
+
+## 162
+
+GitLab projects in the cloud (2026-11-21)
+
+### Changes
+
+- Cloud threads now work with GitLab.com projects, not just GitHub.
+- Unused worktrees park themselves to free disk, and threads keep running after a worktree move.
+- The app starts faster, and sleeping threads open their history at once.
+- A subagent bar under the thread title shows every child thread at a glance.
+- Signed-out accounts show a one-click Sign in again button right in the chat.
+- Security fixes.
+
+## 161
+
+The Antigravity Update (2026-11-21)
+
+### Changes
+
+- Antigravity is a full agent now: one-click Google sign-in, High thinking by default, and it shows even before you install it.
+- Antigravity runs in Cloud threads too, and its plan and quota show in the usage box and Settings.
+- Fork and Move to worktree work for every agent, not just Claude Code and Codex.
+- Long voice recordings are never lost, on your phone or your computer.
+- Computer use no longer steals focus from the chat input while you type.
+- Archiving a Cloud thread is instant, and Undo works in split panes.
+- Cursor's context meter shows real usage, and large local images open in previews.
+- Security fixes.
+
+## 160
+
+One-click scans on new threads (2026-11-19)
+
+### Changes
+
+- The new-thread screen offers one-click Workflow and Cyber scans of your work.
+- Custom instructions can now apply to just one agent or one model.
+- Included context shows as a collapsible chip in sent messages, and survives edits.
+- The sidebar shows which thread is using an app on your computer.
+- Security fixes.
+
+## 159
+
+A new Ultra Fast speed (2026-11-19)
+
+### Changes
+
+- Codex has a third speed: pick Standard, Fast, or Ultra Fast in the model picker, or type /ultrafast.
+- With the sidebar open, the chat is now centered in the free space.
+- A short connection drop to a remote computer no longer interrupts threads still running on it.
+- A Codex thread stuck on "already has an active writer" recovers on your next message.
+- On Windows, Claude skills load without admin rights, and Cursor sign-in works when its CLI is off PATH.
+- Security fixes.
+
+## 158
+
+Floating sidebar and snippets (2026-11-18)
+
+### Changes
+
+- The sidebar is now a floating, rounded card with a soft shadow.
+- Snippets: save text you reuse, expand it in any message, and keep it synced across your computers.
+- Fork a Claude thread from any reply, even after edits or agent switches.
+- Switch models with a shortcut in an idle thread and keep the same session.
+- Replies show the quoted message as a chip with a hover preview.
+- Security fixes.
+
+## 157
+
+Animated grid while agents work (2026-11-17)
+
+### Changes
+
+- A small animated grid now shows next to "Working" and "Thinking", so you can see an agent is busy.
+- Sending a voice prompt on your phone leaves the message box empty.
+- Deleting a queued message in a Cloud thread is instant, and the deleted message is never sent.
+- Cloud Codex threads no longer lose replies that come after a follow-up message.
+- Messages to a thread whose agent login failed now wait, and switching its agent sends them again.
+- Loop templates have a compact repo picker, one line per repo.
+- On Windows, Cloudroom no longer flashes console windows during Git work and chat imports.
+- Security fixes.
+
+## 156
+
+Start fresh when context fills up (2026-11-16)
+
+### Changes
+
+- A new context card shows how full a thread is, with Compact and Fresh thread buttons.
+- The Git panel runs on a new engine, the same for Local and Cloud threads.
+- Loops can take turns between agents, and switch to your other agent when one hits its limit.
+- When Cloud is down, a clear "Cloud is paused" banner shows, and Local threads keep working.
+- The app works without an account: setup has a "Use without an account" button.
+- An agent whose login expired gets a one-click Sign in button in the usage popup.
+- Security fixes.
+
+## 155
+
+Copy from any selection (2026-11-16)
+
+### Changes
+
+- Selecting text shows a simpler menu with Reply, Side chat, and Copy, in chats and drafts.
+- Copy keeps exactly what you selected, whitespace included.
+- Cmd+F opens search, same as Cmd+K.
+- Cursor has a Sign in button in the model picker, and Reload really checks again.
+- After a Cloud sandbox restarts, your next message no longer gets stuck.
+- Restoring a thread right after archiving it now works.
+- A new scroll-to-bottom button with a smooth hover.
+
 ## 154
 
 Archived threads restore cleanly (2026-11-15)

@@ -16,7 +16,7 @@ export type LoopUsage = { limit: string; percents: Record<string, number> } | nu
 export type TemplateUsage = Record<string, { limit: string; percent: number }>;
 
 /** How many times a cron fires from `from` to `to`; 0 for a cron that can't be read. */
-function runsBetween(cron: string, timezone: string, from: number, to: number): number {
+export function runsBetween(cron: string, timezone: string, from: number, to: number): number {
   try {
     const expression = CronExpressionParser.parse(cron, { currentDate: new Date(from), endDate: new Date(to), tz: timezone });
     let count = 0;
@@ -46,7 +46,7 @@ async function weeklyLimit(sdk: Sdk, providerId: string): Promise<Week | null> {
 
 async function estimate(
   sdk: Sdk,
-  loop: { providerId: string | null; createdAt: number; cron: string | null; timezone: string; runThreadIds: string[] },
+  loop: { providerId: string | null; createdAt: number; cron: string | null; timezone: string; runThreadIds: string[]; agents?: { providerId: string | null }[] },
   crons: string[],
 ): Promise<LoopUsage> {
   const limit = loop.providerId ? LIMIT_NAMES[loop.providerId] : undefined;
@@ -67,7 +67,9 @@ async function estimate(
   const known = loop.runThreadIds.filter((id) => (usage.threads[id] ?? 0) > 0);
   if (!known.length || usage.total <= 0) return null;
   const tokens = [...new Set(known)].reduce((sum, id) => sum + (usage.threads[id] ?? 0), 0) * (loop.runThreadIds.length / known.length);
-  const perRun = ((tokens / ticks) * week.usedPercent) / usage.total;
+  // Agents that take turns: this provider runs only its share of the turns (the tokens above count every run as its).
+  const share = loop.agents?.length ? loop.agents.filter((agent) => agent.providerId === loop.providerId).length / loop.agents.length : 1;
+  const perRun = ((tokens / ticks) * week.usedPercent * share) / usage.total;
   return { limit, percents: Object.fromEntries(crons.map((cron) => [cron, perRun * runsBetween(cron, loop.timezone, now, now + WEEK_MS)])) };
 }
 
@@ -75,7 +77,7 @@ export async function localLoopUsage(sdk: Sdk, db: Db, automationId: string, cro
   const automation = getAutomation(db, automationId);
   if (!automation || automation.triggerType !== "schedule") return null;
   const trigger = JSON.parse(automation.triggerConfig) as { cron?: string; timezone?: string };
-  const execution = JSON.parse(automation.execution) as { mode?: string; providerId?: string };
+  const execution = JSON.parse(automation.execution) as { mode?: string; providerId?: string; agents?: { providerId: string }[] };
   if (execution.mode !== "agent") return null;
   const rows = db
     .prepare("SELECT thread_id AS threadId FROM automation_runs WHERE automation_id = ? AND thread_id IS NOT NULL AND started_at >= ?")
@@ -86,26 +88,29 @@ export async function localLoopUsage(sdk: Sdk, db: Db, automationId: string, cro
     cron: trigger.cron ?? null,
     timezone: trigger.timezone ?? "UTC",
     runThreadIds: rows.map((row) => row.threadId),
+    ...(execution.agents ? { agents: execution.agents } : {}),
   }, crons);
 }
 
 export async function cloudLoopUsage(sdk: Sdk, id: string, crons: string[]): Promise<LoopUsage> {
   const { automations = [] } = await sdk.cloudroom.automations({ action: "list" });
   const loop = automations.find((automation) => automation.id === id) as
-    | { thread_id: string; cron: string | null; timezone: string; created_at?: string; new_thread?: boolean; agent?: { providerId?: string | null } | null }
+    | { thread_id: string; cron: string | null; timezone: string; created_at?: string; new_thread?: boolean; agent?: { provider?: string | null } | null; agents?: { provider: string }[] }
     | undefined;
   if (!loop?.cron) return null;
   // A same-thread loop's runs all land in its own thread; a fresh-thread loop's are listed by the website.
   const runThreadIds = loop.new_thread
     ? ((await sdk.cloudroom.automations({ action: "runs", id }).catch(() => null))?.runs ?? [])
     : [loop.thread_id];
-  const providerId = loop.agent?.providerId ?? (await sdk.threads.get({ threadId: loop.thread_id }).catch(() => null))?.providerId ?? null;
+  // The website's own words: `provider` is the app's provider ID.
+  const providerId = loop.agent?.provider ?? (await sdk.threads.get({ threadId: loop.thread_id }).catch(() => null))?.providerId ?? null;
   return estimate(sdk, {
     providerId,
     createdAt: loop.created_at ? Date.parse(loop.created_at) : 0,
     cron: loop.cron,
     timezone: loop.timezone,
     runThreadIds,
+    ...(loop.agents ? { agents: loop.agents.map((agent) => ({ providerId: agent.provider })) } : {}),
   }, crons);
 }
 
@@ -113,16 +118,22 @@ export async function cloudLoopUsage(sdk: Sdk, id: string, crons: string[]): Pro
 const MIN_WEEK_PERCENT = 3;
 const templateUsages = { at: 0, usage: {} as TemplateUsage };
 
-/** Each template's rough share of the weekly limit on its own schedule: its measured tokens per run, at what a token
- *  costs this account (the weekly % over the provider's tokens since the reset). Templates it can't price are left out. */
+/** Each template's rough share of the weekly limit on its own schedule: the tokens a run of it usually uses, at what a
+ *  token costs this account (the weekly % over the provider's tokens since the reset). A run's tokens come from every
+ *  account's runs of the template, which the website averages, else from our own measured `tokensPerRun`. Templates it
+ *  can't price are left out. */
 export async function templateUsage(sdk: Sdk): Promise<TemplateUsage> {
   const now = Date.now();
   if (now - templateUsages.at < 10 * 60_000) return templateUsages.usage;
+  // A failed read isn't kept: the next look asks again, so an estimate from a website that came back is never 10 minutes late.
+  const answer = await sdk.cloudroom.automations({ action: "averages" }).catch(() => null);
+  const averages = answer?.averages ?? [];
   const percentPerToken = new Map<string, number | null>();
   const usage: TemplateUsage = {};
   for (const template of LOOP_TEMPLATES) {
     const limit = LIMIT_NAMES[template.providerId];
-    if (!limit || !template.tokensPerRun) continue;
+    const tokensPerRun = averages.find((average) => average.name === template.name && average.harness === template.providerId)?.tokens ?? template.tokensPerRun;
+    if (!limit || !tokensPerRun) continue;
     if (!percentPerToken.has(template.providerId)) {
       const week = await weeklyLimit(sdk, template.providerId);
       const total =
@@ -133,9 +144,9 @@ export async function templateUsage(sdk: Sdk): Promise<TemplateUsage> {
     }
     const rate = percentPerToken.get(template.providerId);
     if (rate == null) continue;
-    usage[template.id] = { limit, percent: template.tokensPerRun * runsBetween(template.cron, "UTC", now, now + WEEK_MS) * rate };
+    usage[template.id] = { limit, percent: tokensPerRun * runsBetween(template.cron, "UTC", now, now + WEEK_MS) * rate };
   }
-  templateUsages.at = now;
+  if (answer) templateUsages.at = now;
   templateUsages.usage = usage;
   return usage;
 }

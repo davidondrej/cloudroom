@@ -11,9 +11,9 @@ import {
 import { createStore, Provider as JotaiProvider } from "jotai";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetFixedPanelTabsStateForTest } from "@/lib/fixed-panel-tabs";
+import { resetFixedPanelTabsStateForTest } from "@/components/right-panel/store/panel-atoms";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
 import {
   createEmptyFixedPanelTabsState,
@@ -21,7 +21,7 @@ import {
   createTerminalFixedPanelTab,
   getFixedPanelTabsStateStorageKey,
   serializeFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import { PluginPanelRightPanelHost } from "./PluginPanelRightPanelHost";
 import { openPluginDetailsInWorkspace } from "./plugin-detail-opener";
 import { getPluginPagePanelStateId } from "./plugin-page-panel-state";
@@ -298,7 +298,7 @@ vi.mock("react-resizable-panels", async (importOriginal) => ({
   ),
 }));
 
-vi.mock("@/components/secondary-panel/SecondaryPanelLayout", () => ({
+vi.mock("@/components/right-panel/shell/responsive-panel-host", () => ({
   SecondaryPanelLayout: ({
     collapse,
     main,
@@ -332,7 +332,7 @@ vi.mock("@/components/secondary-panel/SecondaryPanelLayout", () => ({
   },
 }));
 
-vi.mock("@/components/secondary-panel/ThreadSecondaryPanel", () => ({
+vi.mock("@/components/right-panel/shell/panel-shell", () => ({
   ThreadSecondaryPanel: ({
     activeTab,
     tabs,
@@ -438,7 +438,7 @@ vi.mock("@/components/secondary-panel/ThreadSecondaryPanel", () => ({
   },
 }));
 
-vi.mock("@/components/secondary-panel/NewTabPage", () => ({
+vi.mock("@/components/right-panel/tabs/new-tab", () => ({
   NewTabPage: ({
     onOpenBrowser,
     onStartTerminal,
@@ -472,7 +472,7 @@ vi.mock("@/components/secondary-panel/NewTabPage", () => ({
   ),
 }));
 
-vi.mock("@/components/secondary-panel/BrowserTabDeck", () => ({
+vi.mock("@/components/right-panel/tabs/browser-tab", () => ({
   BrowserTabDeck: ({
     activeBrowserTabId,
   }: {
@@ -505,7 +505,7 @@ vi.mock("@/components/thread/terminal/ThreadTerminalPanel", async () => {
   };
 });
 
-vi.mock("@/components/secondary-panel/ThreadSecondaryPanelTabContent", () => ({
+vi.mock("@/components/right-panel/shell/file-preview-tabs", () => ({
   WorkspaceFilePreviewTabContent: ({
     activePath,
     environmentId,

@@ -494,10 +494,17 @@ describe("machine retirement", () => {
         phase: "active",
         resource: { allocation: "persistent" },
       });
+      const seen = (lastSeenAt: number | null) =>
+        harness.db
+          .update(hosts)
+          .set({ lastSeenAt })
+          .where(eq(hosts.id, host.id))
+          .run();
+      seen(1);
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
       });
-      seedEnvironment(harness.deps, {
+      const environment = seedEnvironment(harness.deps, {
         hostId: host.id,
         projectId: project.id,
         providerOwnsPath: true,
@@ -513,6 +520,15 @@ describe("machine retirement", () => {
       });
       await retryMachineCleanup(harness.deps, host.id);
       expect(remove).not.toHaveBeenCalled();
+
+      // A machine that never connected has nothing on it to clean up (#1065).
+      seen(null);
+      await retryMachineCleanup(harness.deps, host.id);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(getHost(harness.db, host.id)?.phase).toBe("destroyed");
+      expect(getEnvironment(harness.db, environment.id)?.status).toBe(
+        "destroyed",
+      );
     }));
 
   it("waits for in-flight cleanup before a second sweep completes", async () =>

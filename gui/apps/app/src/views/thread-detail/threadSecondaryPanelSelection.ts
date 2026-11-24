@@ -4,12 +4,12 @@ import {
   useFixedPanelTabsState,
   useOpenFixedSecondaryPanel,
   useSetFixedSecondaryPanelTab,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import type {
   FixedPanelTabsState,
   SecondaryFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
-import type { ThreadSecondaryPanel } from "@/lib/thread-secondary-panel";
+} from "@/components/right-panel/store/tab-model";
+import type { ThreadSecondaryPanel } from "@/components/right-panel/store/tab-model";
 
 type ThreadSecondaryPanelThreadId = string | null | undefined;
 type ActiveFixedSecondaryTab = SecondaryFixedPanelTab | null;

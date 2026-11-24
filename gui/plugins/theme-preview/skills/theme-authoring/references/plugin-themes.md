@@ -8,5 +8,5 @@ A plugin can contribute themes via its manifest instead of the theme dir:
 
 bb lists it as `plugin:<pluginId>:mine`. Theme Preview resolves the CSS through
 the manifest, so chips and live reload work the same way. Install with
-`room-cli plugin install path:<dir> --yes`, reload with `room-cli plugin reload <pluginId>`
-after CSS edits.
+`room-cli plugin install path:<dir> --yes` (the user approves it in the Cloudroom app; the
+command waits for their click), reload with `room-cli plugin reload <pluginId>` after CSS edits.

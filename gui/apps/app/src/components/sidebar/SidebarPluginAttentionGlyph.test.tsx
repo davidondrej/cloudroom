@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Provider } from "jotai";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar.js";
 import type { PluginListItem } from "@/hooks/queries/plugin-settings-queries";

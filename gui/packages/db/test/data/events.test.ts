@@ -1365,6 +1365,42 @@ describe("events", () => {
       parentToolCallId: null,
       type: "item/completed",
     });
+
+    // An empty reply hides the turn's reply only after a tool step (#1670, #1834).
+    insertEvents(
+      db,
+      noopNotifier,
+      (
+        [
+          [5, "turn-2", "final reply"],
+          [6, "turn-2", ""],
+          [7, "turn-1", ""],
+        ] as const
+      ).map(([sequence, turnId, text]) => ({
+        threadId: thread.id,
+        sequence,
+        type: "item/completed" as const,
+        scope: turnScope(turnId),
+        itemId: `msg_${sequence}`,
+        itemKind: "agentMessage" as const,
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: { id: `msg_${sequence}`, type: "agentMessage", text },
+        }),
+      })),
+    );
+    for (const [turnId, sequence] of [
+      ["turn-1", 7],
+      ["turn-2", 5],
+    ] as const) {
+      expect(
+        getLatestThreadOutputEventRow(db, {
+          threadId: thread.id,
+          turnId,
+          includeEmpty: true,
+        }),
+      ).toMatchObject({ sequence });
+    }
   });
 
   it("skips empty assistant output when a manager user message is the latest visible output", () => {

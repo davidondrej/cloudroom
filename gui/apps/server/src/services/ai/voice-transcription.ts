@@ -11,6 +11,7 @@ import { cloudroom } from "../cloudroom/commands.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { AiServiceCallError } from "./ai-service-call.js";
 import type { AiServiceRegistration } from "./ai-service-registry.js";
+import { issueVoiceAudioToken } from "./voice-audio-store.js";
 import {
   INFERENCE_POLICY,
   inferenceCompleteWithFallback,
@@ -28,8 +29,9 @@ type OptionalJsonValue = JsonValue | null | undefined;
 
 const OPENAI_TRANSCRIPTION_PROVIDER = "openai";
 const VOICE_TRANSCRIPTION_MAX_BYTES = 25 * 1024 * 1024;
-const AI_SERVICE_VOICE_MAX_BYTES = 5 * 1024 * 1024;
-const BACKUP_VOICE_MAX_BYTES = 4 * 1024 * 1024;
+// Above 5 MB, base64-encoded JSON nears the 8 MiB host RPC cap, so larger clips pull over a one-time internal URL.
+const AI_SERVICE_INLINE_AUDIO_MAX_BYTES = 5 * 1024 * 1024;
+const BACKUP_VOICE_MAX_BYTES = VOICE_TRANSCRIPTION_MAX_BYTES;
 // Per attempt: 10 s plus 30 s per MB, at most 3 minutes. A 7-minute (3.7 MB) recording gets about 2 minutes (#1338).
 // Relayed requests keep 10 s per attempt, as before, so a fast backup still answers inside the relay's 30 s.
 const VOICE_TIMEOUT_MS_PER_MB = 30_000;
@@ -143,17 +145,14 @@ async function transcribeWithAiService(
   modelInfo: ProviderModelInfo,
   args: TranscribeVoiceInputArgs,
 ): Promise<string> {
-  if (args.file.size > AI_SERVICE_VOICE_MAX_BYTES) {
-    throw new ApiError(
-      400,
-      "invalid_request",
-      `Audio file exceeds the ${AI_SERVICE_VOICE_MAX_BYTES / (1024 * 1024)}MB limit for plugin-served transcription`,
-    );
-  }
   const hostId = requireConnectedPrimaryHostId(deps);
-  const audioBase64 = Buffer.from(await args.file.arrayBuffer()).toString(
-    "base64",
-  );
+  const audioBytes = Buffer.from(await args.file.arrayBuffer());
+  const mimeType = args.file.type || "application/octet-stream";
+  const filename = args.file.name || "voice-input";
+  const inlineBase64 =
+    audioBytes.byteLength <= AI_SERVICE_INLINE_AUDIO_MAX_BYTES
+      ? audioBytes.toString("base64")
+      : null;
   const prompt = trimPrompt(args.prompt) ?? "";
   const transcriptionModel = `${modelInfo.provider}/${modelInfo.modelId}`;
   const transcription = await inferenceCompleteWithFallback(deps, {
@@ -161,22 +160,37 @@ async function transcribeWithAiService(
     timeoutMs: voiceTimeoutMs(args),
     complete: async (model, attemptPrompt, timeoutMs) => {
       const attemptModel = parseTranscriptionModel(model);
-      const result = await service.transcribeVoice(
-        {
-          serviceId: service.id,
-          model: attemptModel.modelId,
-          audioBase64,
-          mimeType: args.file.type || "application/octet-stream",
-          filename: args.file.name || "voice-input",
-          prompt: trimPrompt(attemptPrompt),
-          timeoutMs,
-        },
-        { hostId, timeoutMs: timeoutMs + INFERENCE_POLICY.hostRpcGraceMs },
-      );
-      if (!result.ok) {
-        throw new AiServiceCallError(service.id, result.code, result.message);
+      const rpcTimeoutMs = timeoutMs + INFERENCE_POLICY.hostRpcGraceMs;
+      const audioLease =
+        inlineBase64 === null
+          ? issueVoiceAudioToken(deps.aiServices, {
+              bytes: audioBytes,
+              mimeType,
+              ttlMs: rpcTimeoutMs,
+            })
+          : null;
+      try {
+        const result = await service.transcribeVoice(
+          {
+            serviceId: service.id,
+            model: attemptModel.modelId,
+            ...(inlineBase64 !== null
+              ? { audioBase64: inlineBase64 }
+              : { audioUrl: audioLease!.path }),
+            mimeType,
+            filename,
+            prompt: trimPrompt(attemptPrompt),
+            timeoutMs,
+          },
+          { hostId, timeoutMs: rpcTimeoutMs },
+        );
+        if (!result.ok) {
+          throw new AiServiceCallError(service.id, result.code, result.message);
+        }
+        return { text: result.text };
+      } finally {
+        audioLease?.revoke();
       }
-      return { text: result.text };
     },
     fallbackModel: transcriptionModel,
     label: "Voice transcription",
@@ -277,16 +291,20 @@ async function transcribeWithOpenAi(
   return text;
 }
 
+export function assertValidVoiceAudioFile(file: File): void {
+  if (file.size === 0) {
+    throw new ApiError(400, "invalid_request", "Audio file must not be empty");
+  }
+  if (file.size > VOICE_TRANSCRIPTION_MAX_BYTES) {
+    throw new ApiError(400, "invalid_request", "Audio file exceeds 25MB limit");
+  }
+}
+
 export async function transcribeVoiceInput(
   deps: LoggedWorkSessionDeps,
   args: TranscribeVoiceInputArgs,
 ): Promise<string> {
-  if (args.file.size === 0) {
-    throw new ApiError(400, "invalid_request", "Audio file must not be empty");
-  }
-  if (args.file.size > VOICE_TRANSCRIPTION_MAX_BYTES) {
-    throw new ApiError(400, "invalid_request", "Audio file exceeds 25MB limit");
-  }
+  assertValidVoiceAudioFile(args.file);
 
   try {
     const text = await transcribeWithConfiguredModel(deps, args);

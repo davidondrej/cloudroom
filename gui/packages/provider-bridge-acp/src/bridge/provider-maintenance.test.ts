@@ -159,6 +159,36 @@ describe("ACP provider maintenance", () => {
     },
   );
 
+  // #1823: cmux ships a `grok` wrapper that only forwards to the real CLI.
+  it.skipIf(process.platform === "win32")(
+    "treats a wrapper whose CLI is missing as not installed",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-grok-"));
+      try {
+        const command = path.join(dir, "grok");
+        await writeFile(
+          command,
+          `#!/bin/sh\necho "Error: grok not found in PATH" >&2\nexit 127\n`,
+        );
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: () => ({ command: "sh", args: [], displayCommand: "" }),
+          command,
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: "not_installed" },
+        });
+        expect(await getAcpProviderInstallationStatus(target)).toMatchObject({
+          installed: false,
+          installAction: { kind: "install" },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.skipIf(process.platform === "win32")(
     "checks Hermes without running its update-checking --version",
     async () => {
@@ -202,5 +232,25 @@ describe("ACP provider maintenance", () => {
     // Its failure path asks "Press Enter to exit"; nobody answers.
     expect(windows.args).toContain("-NonInteractive");
     expect(acpInstallerCommand(installer, "linux").command).toBe("sh");
+  });
+
+  it("runs Cursor's PowerShell installer on Windows, not the Unix script (#1897)", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      expect(CURSOR_ACP_MAINTENANCE.installer(null)).toMatchObject({
+        command: "powershell.exe",
+        displayCommand: "irm https://cursor.com/install?win32=true | iex",
+      });
+      // The script deletes the install, running versions included: update in
+      // place, with CI set so `update` can't switch cursor-agent to Grok.
+      expect(
+        CURSOR_ACP_MAINTENANCE.installer("C:\\O'N\\ca.cmd").args,
+      ).toContain(
+        "$env:CI = '1'; & 'C:\\O''N\\ca.cmd' update; exit $LASTEXITCODE",
+      );
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 });

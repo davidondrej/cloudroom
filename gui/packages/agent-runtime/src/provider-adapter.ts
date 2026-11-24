@@ -56,6 +56,7 @@ export type AdapterCommand =
       type: "thread/start";
       threadId: string;
       cwd: string;
+      replacesProviderThreadId?: string;
       options: ProviderExecutionContext;
       dynamicTools?: DynamicTool[];
       disallowedTools?: readonly string[];
@@ -77,6 +78,7 @@ export type AdapterCommand =
       cwd: string;
       sourceProviderThreadId: string;
       sourceProviderCheckpointId?: string;
+      replacesProviderThreadId?: string;
       options: ProviderExecutionContext;
       dynamicTools?: DynamicTool[];
       disallowedTools?: readonly string[];

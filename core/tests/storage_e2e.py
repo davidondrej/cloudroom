@@ -39,9 +39,16 @@ def fixture():
             result = {'account': {'type': 'chatgpt', 'email': 'fixture@example.invalid', 'planType': 'plus'}, 'requiresOpenaiAuth': True}
         elif method == 'account/rateLimits/read':
             result = {'rateLimits': {'primary': {'usedPercent': 0}, 'secondary': None}}
+        if method == 'turn/steer' and p['input'][0]['text'].startswith('write '):
+            # A tool command that writes 40 MiB to a real disk (tmpfs writes count nothing in /proc/<pid>/io), then stays.
+            subprocess.Popen([sys.executable, '-c', "import os,sys,time\nf=open(sys.argv[1],'wb')\nfor _ in range(40):f.write(b'x'*1048576)\nf.flush();os.fsync(f.fileno());open(sys.argv[1]+'.pid','w').write(str(os.getpid()))\ntime.sleep(3600)", p['input'][0]['text'][6:]],
+                start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if method == 'thread/inject_items':
             if (Path.cwd() / 'hold-cache').exists():
                 held.append(open((Path.cwd() / 'hold-cache').read_text(), 'rb'))
+        if method == 'thread/resume':
+            # Like Codex: the saved thread again, never a new one.
+            native, rollout = p['threadId'], Path(p['path'])
         if method in ('thread/start', 'thread/resume'):
             result = {'thread': {'id': native, 'path': str(rollout)}, 'model': p['model']}
         elif method == 'turn/start':
@@ -100,6 +107,8 @@ def main():
     for name in ('tmp', 'var-tmp'):
         (base / name).mkdir(); (base / name).chmod(0o1777)
     work = base / 'work'; home = base / 'home'; cache = base / 'cache'; state = base / 'state'
+    # A folder on the real disk outside the small one, where a tool command's writes are counted.
+    disk = base.with_name(unit + '-disk'); disk.mkdir(mode=0o700); os.chown(disk, agent.pw_uid, agent.pw_gid)
     for p in (work, home, cache, base / 'code'):
         p.mkdir(mode=0o700); os.chown(p, agent.pw_uid, agent.pw_gid)
     state.mkdir(mode=0o700); os.chown(state, service.pw_uid, service.pw_gid)
@@ -143,6 +152,9 @@ def main():
     def write_as_agent(path, size):
         run('runuser','-u',agent.pw_name,'--','python3','-c',
             "from pathlib import Path\np=Path("+repr(str(path))+ ");p.parent.mkdir(parents=True,exist_ok=True)\nwith p.open('wb') as f:\n for _ in range("+str(size)+"):f.write(b'x'*1048576)")
+    def dead(pid):
+        try:return Path(f'/proc/{pid}/stat').read_text().rsplit(')',1)[1].split()[0]=='Z'
+        except FileNotFoundError:return True
     checks=[]
     def passed(text):checks.append(text);print('PASS:',text,flush=True)
     try:
@@ -315,13 +327,51 @@ def main():
         request('POST','/v1/sessions',{'request_id':'missing-disk'},409)
         missing.rename(work); wait(ready,'filesystem measurements recover')
         passed('failed filesystem measurements pause work; restored measurements permit recovery')
-        # Frozen work never frees space, so a pause that cannot recover stops the writer and resumes work.
+        # Frozen work never frees space, so a pause that cannot recover stops the biggest writer and resumes work: a real
+        # 40 MiB tool command, its counters read as the agent (#606).
+        request('POST','/v1/sessions/'+ids[0]+'/steer',{'request_id':'writer','text':'write '+str(disk/'writer'),'target_request_id':'job-a'},202)
+        writer=wait(lambda:(disk/'writer.pid').exists() and int((disk/'writer.pid').read_text()),'a 40 MiB writer runs')
         write_as_agent(work/'rescue-output',shutil.disk_usage(base).free//1048576-75)
         wait(lambda:all(session(s)['storage_paused'] for s in ids),'pause before rescue')
         wait(lambda:all(not session(s)['storage_paused'] for s in ids),'rescue resumes work',60)
+        assert dead(writer)
+        assert any(r['kind']=='storage_warning' and r['data'].get('reason')=='rescue' and 'stopped `' in r['data']['text'] for r in events(ids[0]))
         for sid in ids:assert any(r['kind']=='storage_warning' and r['data'].get('reason')=='rescue' for r in events(sid))
         (work/'rescue-output').unlink()
-        passed('a pause that cannot recover stops the writing command and resumes work')
+        passed('a pause that cannot recover stops the 40 MiB command writing and resumes work')
+        # At the lowest pause line stopping commands wins nothing, so every agent stays paused until space is freed (#606).
+        request('POST','/v1/sessions/'+ids[0]+'/cancel',{'request_id':'cancel-warning-input','target_request_id':'warning-input'},202)
+        rescues=lambda:sum(r['kind']=='storage_warning' and r['data'].get('reason')=='rescue' for s in ids for r in events(s))
+        before=rescues()
+        write_as_agent(work/'floor-output',shutil.disk_usage(base).free//1048576-9)
+        wait(lambda:all(session(s)['storage_paused'] for s in ids),'pause at the lowest line')
+        time.sleep(35)
+        assert all(session(s)['storage_paused'] for s in ids) and rescues()==before
+        # A tell from another thread is refused plainly, so its sender hears the disk is full (#309).
+        refused=request('POST','/v1/sessions/'+ids[0]+'/relay',{'action':'tell','text':'hi','request_id':'tell-full'},409)
+        assert refused['error'].startswith('storage unsafe'),refused
+        # The user's message waits in the queue instead of being refused.
+        request('POST','/v1/sessions/'+ids[0]+'/prompts',{'request_id':'floor-input','text':'hold'},202)
+        # Stop settles within seconds: an agent that answers settles it itself, one that doesn't is ended and sleeps.
+        request('POST','/v1/sessions/'+ids[1]+'/stop',{'request_id':'stop-full'},202)
+        wait(lambda:session(ids[1])['receipts']['stop-full']['state']=='completed','a stop on a full disk settles',15)
+        request('POST','/v1/sessions/'+ids[0]+'/interrupt',{'request_id':'interrupt-full','target_request_id':'job-a'},202)
+        wait(lambda:session(ids[0])['receipts']['interrupt-full']['state']=='completed','an interrupt on a full disk settles',15)
+        assert session(ids[0])['receipts']['floor-input']['state']=='accepted'
+        # History's reserve: a disk filled from outside to zero still takes Core's records.
+        subprocess.run(['dd','if=/dev/zero','of='+str(work/'zero-output'),'bs=1M'],capture_output=True)
+        request('POST','/v1/sessions/'+ids[0]+'/title',{'request_id':'at-zero','title':'at zero'})
+        assert not (state/'reserve').exists() and any(r['kind']=='title' and r['data'].get('title')=='at zero' for r in events(ids[0]))
+        # Past the reserve a write fails as before: never acknowledged, never kept in memory.
+        subprocess.run(['dd','if=/dev/zero','of='+str(work/'zero-more-output'),'bs=1M'],capture_output=True)
+        request('POST','/v1/sessions/'+ids[0]+'/title',{'request_id':'past-zero','title':'past zero'},503)
+        assert not any(r['kind']=='title' and r['data'].get('title')=='past zero' for r in events(ids[0]))
+        for name in ('floor','zero','zero-more'):(work/(name+'-output')).unlink()
+        wait(ready,'freed space resumes work',45)
+        wait(lambda:(state/'reserve').exists(),'the reserve comes back')
+        wait(lambda:session(ids[0])['receipts']['floor-input']['state']=='delivered','the waiting message runs',60)
+        for sid in ids:assert not any(r['kind']=='state' and r['data'].get('state')=='process_lost' for r in events(sid))
+        passed('at the lowest pause line every agent stays paused, a tell is refused plainly, a message waits and runs once space is freed, Stop settles within seconds, and history keeps a 32 MiB reserve')
     except Exception:
         subprocess.run(['journalctl','--unit='+unit,'--no-pager','--lines=80'],check=False)
         try: print('Core health:',json.dumps(request('GET','/v1/health')),flush=True)
@@ -337,7 +387,7 @@ def main():
         # Keep logs/history for investigation; discard only this test's large filler files.
         for p in work.glob('*output'):p.unlink(missing_ok=True)
         shutil.copytree(state,evidence.parent/(unit+'-history'))
-        run('umount',str(base));base.rmdir();shutil.rmtree(tools)
+        run('umount',str(base));base.rmdir();shutil.rmtree(tools);shutil.rmtree(disk,ignore_errors=True)
     print('Storage checks:',len(checks))
 
 if __name__=='__main__':

@@ -2,11 +2,12 @@ import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { wsManager } from "@/lib/ws";
 
 const PLUGIN = "accounts";
-const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor"]);
+const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor", "acp-antigravity"]);
 const QUERY_KEY = "plan-limit-accounts";
 
 const accountsSchema = z.array(
@@ -80,7 +81,7 @@ export function usePlanLimitAccounts(providerId: string) {
       }
     });
   }, [enabled, queryClient]);
-  const { data } = useQuery({
+  const { data, isFetched } = useQuery({
     queryKey: [QUERY_KEY, providerId],
     queryFn: async () =>
       accountsSchema.parse(
@@ -109,7 +110,23 @@ export function usePlanLimitAccounts(providerId: string) {
   return {
     inUse: accounts.find((account) => account.inUse) ?? null,
     others: accounts.filter((account) => !account.inUse),
+    loaded: !enabled || isFetched,
   };
+}
+
+/** The card showed (`limit_card` telemetry). The server sends it once per limit row per app run. */
+export function reportLimitCardViewed(card: {
+  key: string;
+  provider: string;
+  execution: "local" | "cloud_sandbox";
+  can_switch_account: boolean;
+  other_agents: number;
+}): void {
+  void fetchWithAppSurface("/api/v1/cloudroom/limit-card", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(card),
+  }).catch(() => {});
 }
 
 /**
@@ -125,6 +142,7 @@ export async function switchAccount(args: {
   await callPluginRpc(fetch, PLUGIN, "accounts.use", {
     provider: args.providerId,
     id: args.accountId,
+    where: "limit_card",
     cloud: args.isCloud,
     ...(args.isCloud ? {} : { threadId: args.threadId }),
   });

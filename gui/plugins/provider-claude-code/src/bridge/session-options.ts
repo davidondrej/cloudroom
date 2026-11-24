@@ -1,6 +1,7 @@
 import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
+  experimental_privateDataPaths as privateDataPaths,
   type InstructionMode,
   type ReasoningLevel,
   type RuntimePermissionScope,
@@ -49,6 +50,15 @@ const SUMMARIZED_ADAPTIVE_THINKING = {
   display: "summarized",
 } satisfies Exclude<Options["thinking"], undefined>;
 const CLAUDE_CODE_EXECUTABLE_ENV = "BB_CLAUDE_CODE_EXECUTABLE";
+// Claude's own timers and schedules. Cloudroom can't see them, so a reply they wake can get lost: `room-cli wake` and
+// loops replace them. The `/loop` and `/schedule` skills run on these tools, so they go too.
+const CLAUDE_TIMER_TOOLS = [
+  "ScheduleWakeup",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "RemoteTrigger",
+];
 
 export function toSdkEffort(
   reasoningLevel: ReasoningLevel,
@@ -59,13 +69,30 @@ export function toSdkEffort(
   return reasoningLevel;
 }
 
-function buildFlagSettings(params: BuildSessionOptionsArgs): Settings {
+function buildFlagSettings(
+  params: BuildSessionOptionsArgs,
+  env: NodeJS.ProcessEnv,
+): Settings {
+  const deny = privateDataReadDenyRules(env);
   return {
     autoMemoryEnabled: params.memoryEnabled ?? true,
     disableClaudeAiConnectors: params.claudeAiConnectorsEnabled !== true,
     enableWorkflows: params.workflowsEnabled,
     ultracode: params.reasoningLevel === "ultracode",
+    skillOverrides: { loop: "off", schedule: "off" },
+    ...(deny.length > 0 ? { permissions: { deny } } : {}),
   };
+}
+
+/**
+ * `Read(//path)` deny rules for Cloudroom's credential files (#2191). Claude
+ * applies them to its Read, Grep, and Glob tools in every mode, and adds them
+ * to the sandbox's denyRead, so sandboxed shell commands can't read them.
+ */
+export function privateDataReadDenyRules(env: NodeJS.ProcessEnv): string[] {
+  return privateDataPaths(env.ROOM_DATA_DIR)
+    .filter((path) => path.startsWith("/"))
+    .map((path) => `Read(/${path})`);
 }
 
 export function buildChromeExtraArgs(
@@ -292,7 +319,7 @@ export function buildSessionOptions(
         };
   const model = params.model;
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutable({ env });
-  const flagSettings = buildFlagSettings(params);
+  const flagSettings = buildFlagSettings(params, env);
   const extraArgs = buildChromeExtraArgs(params.chromeEnabled);
 
   return {
@@ -311,8 +338,6 @@ export function buildSessionOptions(
     ...(extraArgs ? { extraArgs } : {}),
     ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
     ...(params.plugins ? { plugins: params.plugins } : {}),
-    ...(params.disallowedTools && params.disallowedTools.length > 0
-      ? { disallowedTools: [...params.disallowedTools] }
-      : {}),
+    disallowedTools: [...(params.disallowedTools ?? []), ...CLAUDE_TIMER_TOOLS],
   };
 }

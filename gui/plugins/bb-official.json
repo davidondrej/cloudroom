@@ -18,6 +18,10 @@
     "category": "cloud-and-remote",
     "screenshots": []
   },
+  "director": {
+    "category": "tasks-and-workflows",
+    "screenshots": []
+  },
   "custom-instructions": {
     "category": "memory-and-context",
     "screenshots": []
@@ -50,12 +54,20 @@
     "category": "agents-and-providers",
     "screenshots": []
   },
+  "provider-cloudroom-agent": {
+    "category": "agents-and-providers",
+    "screenshots": []
+  },
   "provider-acp": {
     "category": "agents-and-providers",
     "screenshots": []
   },
   "keep-awake": {
     "category": "utilities",
+    "screenshots": []
+  },
+  "repo-sync": {
+    "category": "cloud-and-remote",
     "screenshots": []
   },
   "computer-use": {
@@ -94,6 +106,10 @@
     "category": "cloud-and-remote",
     "screenshots": []
   },
+  "shared-projects": {
+    "category": "cloud-and-remote",
+    "screenshots": []
+  },
   "time-in-cloudroom": {
     "category": "utilities",
     "screenshots": []
@@ -104,6 +120,10 @@
   },
   "secrets": {
     "category": "security",
+    "screenshots": []
+  },
+  "snippets": {
+    "category": "thread-content",
     "screenshots": []
   },
   "scheduled-send": {

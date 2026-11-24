@@ -290,6 +290,20 @@ export type AppKeybindingOverrides = z.infer<
   typeof appKeybindingOverridesSchema
 >;
 
+export function areAppShortcutsEqual(
+  left: AppShortcut,
+  right: AppShortcut,
+): boolean {
+  return (
+    left.key.toLowerCase() === right.key.toLowerCase() &&
+    left.mod === right.mod &&
+    left.meta === right.meta &&
+    left.control === right.control &&
+    left.alt === right.alt &&
+    left.shift === right.shift
+  );
+}
+
 export function applyAppKeybindingOverrides(
   defaults: AppDefaultKeybindings,
   overrides: AppKeybindingOverrides,
@@ -300,6 +314,15 @@ export function applyAppKeybindingOverrides(
     );
     const shortcut =
       override === undefined ? binding.shortcut : override.shortcut;
-    return shortcut === null ? [] : [{ ...binding, shortcut }];
+    if (shortcut === null) return [];
+    // A shortcut the user gave another command beats this default.
+    const taken =
+      override === undefined &&
+      overrides.some(
+        (other) =>
+          other.shortcut !== null &&
+          areAppShortcutsEqual(other.shortcut, shortcut),
+      );
+    return taken ? [] : [{ ...binding, shortcut }];
   });
 }

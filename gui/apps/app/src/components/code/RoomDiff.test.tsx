@@ -4,7 +4,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultResolvedCodeTheme } from "@cloudroom/domain";
 import { applyResolvedCodeTheme } from "@/lib/code-theme";
-import { parseGitDiffFiles } from "@/components/git-diff/git-diff-parsing";
+import { parseGitDiffFiles } from "@/components/diff/patch-utils";
 import RoomDiff from "./RoomDiff";
 
 interface RenderedOptions {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { z } from "zod";
 import { isProcessRunning } from "./verified-process-stop.js";
@@ -30,6 +30,19 @@ export function formatRoomAppRuntimeFilePath(dataDir: string): string {
   return join(dataDir, ROOM_APP_RUNTIME_FILE_NAME);
 }
 
+// Thread history and credentials live here, so other accounts on this computer
+// must not read it (#2537). Runs at every start, so old 0755 folders are fixed.
+// Windows has no mode bits: the folder is in the user's profile.
+async function makeDataDirOwnerOnly(dataDir: string): Promise<void> {
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  if (process.platform === "win32") return;
+  const info = await stat(dataDir);
+  if (info.uid !== process.getuid?.()) {
+    throw new Error(`${dataDir} must be owned by this account`);
+  }
+  if ((info.mode & 0o077) !== 0) await chmod(dataDir, 0o700);
+}
+
 export async function writeRoomAppRuntimeFile(
   args: WriteRoomAppRuntimeFileArgs,
 ): Promise<void> {
@@ -41,7 +54,7 @@ export async function writeRoomAppRuntimeFile(
     surface: args.surface,
     version: args.version,
   };
-  await mkdir(args.dataDir, { recursive: true });
+  await makeDataDirOwnerOnly(args.dataDir);
   await writeFile(
     formatRoomAppRuntimeFilePath(args.dataDir),
     `${JSON.stringify(runtimeFile, null, 2)}\n`,
@@ -53,6 +66,8 @@ export async function claimRoomAppRuntimeFile(
   args: WriteRoomAppRuntimeFileArgs & { isRunning?: (pid: number) => boolean },
 ): Promise<boolean> {
   const isRunning = args.isRunning ?? isProcessRunning;
+  // The app starts even when it loses the claim, so lock the folder first.
+  await makeDataDirOwnerOnly(args.dataDir);
   const existing = await readRoomAppRuntimeFile(args.dataDir);
   if (
     existing !== null &&

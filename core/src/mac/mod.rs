@@ -20,12 +20,14 @@ use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    fs, io,
+    fs,
+    hash::{BuildHasher, RandomState},
+    io,
     os::unix::{fs::FileTypeExt, fs::PermissionsExt, net::UnixStream as StdUnixStream},
     process::Stdio,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -60,8 +62,15 @@ const NOT_RESPONDING: &str = "Mac not responding: the paired Mac is connected bu
 const STALE: &str = "Mac not responding: the paired Mac is connected but didn't answer in time. It may be asleep, very busy, or on a slow connection. Continue cloud work and try again later.";
 /// The Mac's helper process restarted while running this command, so its result never arrives (#569).
 const LOST: &str = "The Mac app restarted while this command was running, so its output is lost. It may have finished: check its effects before running it again.";
+/// Core keeps jobs in memory, so a Core restart (update, crash, sandbox wake) forgets them (#1952).
+const RESTARTED: &str = "Cloudroom restarted in this sandbox after this command started, so its result is lost. It may have run, fully or in part: check its effects before running it again.";
 /// The helper connection changed while this command waited for it to confirm the command.
 const RECONNECTED: &str = "Mac unavailable: the connection to the Mac restarted while this command was starting. Run it again.";
+/// How long room-cli waits for a read Core answers from what it knows (`status`): under Codex's 10 s command
+/// default, so the agent sees why instead of a killed command (#1977).
+pub(crate) const QUICK: Duration = Duration::from_secs(8);
+/// The same for a read that may ask the website, whose calls end within 30 s (history.rs).
+pub(crate) const READ: Duration = Duration::from_secs(45);
 /// The Mac app resends its report every minute, so an older one may describe a Mac that has since slept.
 const REPORTED: Duration = Duration::from_secs(150);
 pub const SKILL: &str = include_str!("cloud-mac/SKILL.md");
@@ -117,6 +126,8 @@ pub struct Device {
     fetch: bool,
     /// The Mac's computer name, so `mac run` and `mac status` say which Mac runs commands (#608). Older helpers send none.
     name: Option<String>,
+    /// The computer's system, `macos`, `linux`, or `windows`, for `mac status` (#958). Older helpers send none.
+    os: Option<String>,
 }
 /// What the user's Mac app sees of Mac access (#109). The app reaches this sandbox even when the Mac's helper can't,
 /// so agents learn why the Mac is unavailable. `problem` is the short reason Settings shows, never technical detail.
@@ -124,7 +135,7 @@ pub struct Device {
 pub struct AppReport {
     access: String,
     problem: Option<String>,
-    /// The app runs where Mac access is hidden (Windows, #871); older apps send none.
+    /// An older Windows app, which hid Mac access (#871); newer ones send none.
     #[serde(default)]
     unsupported: bool,
 }
@@ -156,6 +167,9 @@ pub struct Mac {
     helper: Mutex<Option<Helper>>,
     changed: watch::Sender<u64>,
     next: AtomicU64,
+    /// Random per Core run and the start of each job ID, so `mac result` can tell a job from before a restart (#1952).
+    /// A process ID can repeat after a sandbox wakes.
+    run: u32,
     since: Mutex<Instant>,
     /// When the helper last disconnected; None if it hasn't connected since Core started.
     left: Mutex<Option<Instant>>,
@@ -171,12 +185,17 @@ pub struct Mac {
     using: Mutex<Option<String>>,
     /// The last helper that connected, and its computer name if it sent one.
     named: Mutex<Option<(String, Option<String>)>>,
+    /// The device whose helper last streamed, and the system it said it runs (#958).
+    os: Mutex<Option<(String, String)>>,
     /// When a Mac with access on last asked for jobs but the pairing stayed with an away Mac, because that Mac's app
     /// isn't the one using this sandbox (no prompt from it: loops, phones, website wakes). Cleared on attach.
     kept_out: Mutex<Option<Instant>>,
     /// The device that ran the last finished command here, or that held the pairing before it moved. A finished
     /// `mac run` names its Mac only when this changes (Marko, 2026-11-03).
     last_ran: Mutex<Option<String>>,
+    /// Commands an agent or terminal is waiting on the Mac for right now. They use no CPU here (an approval pop-up, a
+    /// long copy), so the dashboard and the drain count them, or the sandbox sleeps under them (feedback 0024).
+    waiting: AtomicUsize,
 }
 impl Default for Mac {
     fn default() -> Self {
@@ -185,6 +204,7 @@ impl Default for Mac {
             helper: Mutex::default(),
             changed: watch::channel(0).0,
             next: AtomicU64::new(0),
+            run: RandomState::new().hash_one(std::process::id()) as u32,
             since: Mutex::new(Instant::now()),
             left: Mutex::default(),
             report: Mutex::default(),
@@ -193,12 +213,17 @@ impl Default for Mac {
             check: AtomicBool::default(),
             using: Mutex::default(),
             named: Mutex::default(),
+            os: Mutex::default(),
             kept_out: Mutex::default(),
             last_ran: Mutex::default(),
+            waiting: AtomicUsize::default(),
         }
     }
 }
 impl Mac {
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiting.load(Ordering::Relaxed)
+    }
     /// A new thread or a dropped helper reopens the short wait for the Mac.
     pub(crate) fn expect(&self) {
         *self.since.lock().unwrap() = Instant::now();
@@ -218,6 +243,9 @@ impl Mac {
                 job.at = Instant::now();
             }
         }
+    }
+    fn job_id(&self) -> String {
+        format!("{}-{}", self.run, self.next.fetch_add(1, Ordering::Relaxed))
     }
     fn touch(&self) {
         self.changed.send_modify(|n| *n += 1);
@@ -351,7 +379,7 @@ impl Mac {
         let after = |at: &Instant| left.is_none_or(|left| *at > left);
         let reported = self.report.lock().unwrap();
         match reported.as_ref().filter(|(_, at)| at.elapsed() < REPORTED) {
-            Some((AppReport { unsupported: true, .. }, _)) => ("unsupported", "Mac unavailable: the user's Cloudroom app runs on Windows, where cloud agents can't use their computer yet. There is no setting to turn on, so don't ask them to; continue cloud work.".into()),
+            Some((AppReport { unsupported: true, .. }, _)) => ("unsupported", "Mac unavailable: the user's Cloudroom app on Windows is too old to let cloud agents use their computer. If you need it, ask them to update Cloudroom, then pick Computer access in its sidebar; otherwise continue cloud work.".into()),
             Some((report, _)) if report.access == "off" => ("access_off", "Mac unavailable: the user turned Mac access off. If you need their Mac, ask them to turn it on in Cloudroom; otherwise continue cloud work.".into()),
             Some((AppReport { problem: Some(problem), .. }, at)) if after(at) => ("mac_problem", format!("Mac unavailable: the user's Mac is online, but Mac access can't connect to Cloudroom{since}. Cloudroom shows them why in Settings → Machines, with a Check now link: {problem} Continue cloud work; mention it only if you need their Mac.")),
             Some((_, at)) if after(at) && kept_out => ("paired_away", format!("Mac unavailable: this sandbox is paired with another of the user's Macs, which is away (asleep or offline){since}. It moves to the Mac the user is on once they send this thread a message from Cloudroom there. Continue cloud work meanwhile.")),
@@ -434,6 +462,20 @@ impl Drop for Cancel {
     }
 }
 
+/// Counts one command as waiting on the Mac until its `mac run` returns: done, refused, disconnected, or stopped.
+struct Waiting<'a>(&'a AtomicUsize);
+impl<'a> Waiting<'a> {
+    fn start(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        Self(count)
+    }
+}
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 pub fn routes() -> Router<Arc<Manager>> {
     Router::new()
         .route("/v1/mac/jobs", get(stream))
@@ -487,6 +529,11 @@ async fn stream(
     let attached = m.previews.while_paired(&device, || {
         *m.mac.kept_out.lock().unwrap() = None;
         *m.mac.named.lock().unwrap() = Some((device.clone(), name.map(str::to_owned)));
+        *m.mac.os.lock().unwrap() = input
+            .os
+            .as_deref()
+            .filter(|os| matches!(*os, "macos" | "linux" | "windows"))
+            .map(|os| (device.clone(), os.to_owned()));
         *m.mac.helper.lock().unwrap() = Some(Helper {
             generation,
             device: device.clone(),
@@ -698,11 +745,7 @@ async fn local_run(
     let Some((generation, device, boot, fetch, events)) = attach(mac).await else {
         return Err(refused(&m, started));
     };
-    let id = format!(
-        "{}-{}",
-        std::process::id(),
-        mac.next.fetch_add(1, Ordering::Relaxed)
-    );
+    let id = mac.job_id();
     {
         let mut jobs = mac.jobs.lock().unwrap();
         jobs.retain(|_, j| j.at.elapsed() < if j.result.is_some() { KEEP } else { 24 * KEEP });
@@ -742,6 +785,7 @@ async fn local_run(
         events,
         armed: true,
     };
+    let _waiting = Waiting::start(&mac.waiting);
     let slow = if fetch {
         0
     } else {
@@ -805,10 +849,19 @@ async fn local_result(
 ) -> Result<Json<Value>> {
     local_auth(&m, peer)?;
     let jobs = m.mac.jobs.lock().unwrap();
-    let job = jobs.get(&id).ok_or(Failure(
-        StatusCode::NOT_FOUND,
-        "Unknown or expired Mac job".into(),
-    ))?;
+    let Some(job) = jobs.get(&id) else {
+        // Only confirmed jobs reach the agent, so one from an earlier Core run may have run (#1952).
+        if id
+            .split_once('-')
+            .is_some_and(|(run, _)| run != m.mac.run.to_string())
+        {
+            return Ok(Json(json!({"job":id,"state":"lost","message":RESTARTED})));
+        }
+        return Err(Failure(
+            StatusCode::NOT_FOUND,
+            "Unknown or expired Mac job".into(),
+        ));
+    };
     let mut result = job.result.clone().unwrap_or(json!({"state":"running"}));
     result["job"] = json!(id);
     Ok(Json(result))
@@ -841,11 +894,7 @@ async fn local_status(
     let connected = match attach(mac).await {
         Some((generation, _, _, true, events)) => {
             let asked = Instant::now();
-            let id = format!(
-                "{}-{}",
-                std::process::id(),
-                mac.next.fetch_add(1, Ordering::Relaxed)
-            );
+            let id = mac.job_id();
             let data = json!({"id":id,"command":"true","write":false}).to_string();
             // try_send: a full stream means the helper stopped reading, which is no answer either.
             let sent = events
@@ -883,11 +932,18 @@ async fn local_status(
         None => false,
     };
     let name = paired_name(&m);
-    Ok(Json(if connected {
+    let mut status = if connected {
         json!({"connected":true,"mac":name})
     } else {
         json!({"connected":false,"reason":naming(&m, mac.unavailable()),"mac":name})
-    }))
+    };
+    // Which system the paired computer's helper said it runs: Windows runs commands in Git Bash, with only Off and
+    // Full access (#958). Omitted while unknown, or for a computer that is no longer paired.
+    let os = mac.os.lock().unwrap().clone();
+    if let Some((_, os)) = os.filter(|(device, _)| m.previews.paired(device)) {
+        status["os"] = json!(os);
+    }
+    Ok(Json(status))
 }
 
 /// Every route on the agent socket. Two modules using the same method and path panic here, which a test catches.
@@ -899,6 +955,8 @@ fn agent_router() -> Router<Arc<Manager>> {
         .merge(crate::secrets::agent_routes())
         .merge(crate::session::thread::agent_routes())
         .merge(crate::session::report::agent_routes())
+        .merge(crate::session::snippets::agent_routes())
+        .merge(crate::session::team::agent_routes())
         .merge(crate::session::automation::agent_routes())
         .merge(crate::computer_use::agent_routes())
         .merge(crate::gpu::agent_routes())
@@ -943,10 +1001,34 @@ async fn capped(mut reader: impl AsyncRead + Unpin, kept: Arc<Mutex<(Vec<u8>, bo
     }
 }
 
+/// `?keep=true`: the command outlives its request, for up to 15 minutes (#1970). A proxy that drops a long request
+/// (Cloudflare's 524 after 100 s) then loses only the answer: the app's GitHub clone goes on, and the app checks back.
+/// Older Cores ignore the query and end the command with its request, as before.
+#[derive(Deserialize)]
+struct Keep {
+    #[serde(default)]
+    keep: bool,
+}
+const KEPT: Duration = Duration::from_secs(15 * 60);
+const LATE: &str = "VM command did not finish in 15 minutes";
+
 /// The paired Mac runs a shell command as the VM agent account.
-async fn vm_run(State(m): State<Arc<Manager>>, Json(run): Json<Run>) -> Result<Json<Value>> {
+async fn vm_run(
+    State(m): State<Arc<Manager>>,
+    Query(keep): Query<Keep>,
+    Json(run): Json<Run>,
+) -> Result<Json<Value>> {
     let stdin = validate(&run)?;
-    execute(&m, run, stdin, false).await
+    if !keep.keep {
+        return execute(&m, run, stdin, false).await;
+    }
+    // Its own task, which a dropped request doesn't cancel; past the limit, it ends like a dropped request did.
+    let task = tokio::spawn(async move {
+        let ran = tokio::time::timeout(KEPT, execute(&m, run, stdin, false)).await;
+        ran.unwrap_or_else(|_| Err(Failure(StatusCode::GATEWAY_TIMEOUT, LATE.into())))
+    });
+    task.await
+        .map_err(|error| Failure(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?
 }
 
 /// Like `vm_run`, with the command in the query and stdin as the raw body: half the bytes of hex.
@@ -1041,20 +1123,50 @@ pub(crate) async fn request(
     path: &str,
     body: Option<Value>,
 ) -> io::Result<Value> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|error| {
-        io::Error::other(format!(
-            "Cloudroom agent access is not installed on this VM ({socket}: {error})"
-        ))
-    })?;
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
-    let head = format!(
-        "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body.as_bytes()).await?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await?;
+    request_within(socket, method, path, body, None).await
+}
+
+/// `request` that gives up after `limit`, saying which step Core stalled at, so a Core that is busy or restarting
+/// never leaves room-cli silent (#1977). A Unix socket takes the connection even while Core's accept loop is stuck.
+pub(crate) async fn request_within(
+    socket: &str,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+    limit: Option<Duration>,
+) -> io::Result<Value> {
+    let sent = AtomicBool::new(false);
+    let exchange = async {
+        let mut stream = UnixStream::connect(socket).await.map_err(|error| {
+            io::Error::other(format!(
+                "Cloudroom agent access is not installed on this VM ({socket}: {error})"
+            ))
+        })?;
+        let body = body.map(|b| b.to_string()).unwrap_or_default();
+        let head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(body.as_bytes()).await?;
+        sent.store(true, Ordering::Relaxed);
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await?;
+        Ok::<_, io::Error>(response)
+    };
+    let response = match limit {
+        None => exchange.await?,
+        Some(limit) => tokio::time::timeout(limit, exchange).await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "Cloudroom Core did not {} this request within {} s: it is busy or restarting. Continue other work and try again in a minute.",
+                    if sent.load(Ordering::Relaxed) { "answer" } else { "take" },
+                    limit.as_secs_f64().round()
+                ),
+            )
+        })??,
+    };
     let split = response
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -1142,7 +1254,15 @@ else under that new name, which must not exist yet.";
             Ok(0)
         }
         ("result", [job]) if job.bytes().all(|b| b.is_ascii_digit() || b == b'-') => {
-            print_result(request(&socket, "GET", &format!("/jobs/{job}"), None).await?).await
+            let path = format!("/jobs/{job}");
+            let value = request_within(&socket, "GET", &path, None, Some(QUICK)).await?;
+            let stdout = value["stdout"].as_str().and_then(unhex);
+            if stdout.is_some_and(|stdout| transfer::archive(&stdout)) {
+                return Err(io::Error::other(format!(
+                    "Mac job {job} was part of a room-cli mac pull. Its output is copy data only that pull could use, so it isn't printed. Nothing was copied to the VM: run the pull again."
+                )));
+            }
+            print_result(value).await
         }
         ("status", []) => {
             println!("{}", request(&socket, "GET", "/status", None).await?);
@@ -1168,19 +1288,28 @@ else under that new name, which must not exist yet.";
 
 async fn print_result(value: Value) -> io::Result<i32> {
     let mac = value["mac"].as_str().map(str::to_owned);
+    // #1817: cut output must not pass `&&` or `set -e` as complete. A failed command keeps its own code.
+    let cut = value["truncated"] == true;
     let (code, stdout, stderr) = finished(value)?;
     use std::io::Write;
     std::io::stdout().write_all(&stdout)?;
     std::io::stdout().flush()?;
     std::io::stderr().write_all(&stderr)?;
+    let gap = if stderr.is_empty() || stderr.ends_with(b"\n") {
+        ""
+    } else {
+        "\n"
+    };
     // Only after the Mac changed; stderr, so piped output and `mac pull` archives stay unchanged (#608).
-    if let Some(mac) = mac {
-        let gap = if stderr.is_empty() || stderr.ends_with(b"\n") {
-            ""
-        } else {
-            "\n"
-        };
+    if let Some(mac) = &mac {
         eprintln!("{gap}Ran on the Mac \"{mac}\".");
+    }
+    if cut && code == Some(0) {
+        let gap = if mac.is_some() { "" } else { gap };
+        eprintln!(
+            "{gap}The command exited 0, but its output passed 16 MiB and was cut, so this exits 1. Do not rerun it as is: write the output to a file on the Mac and copy it with `room-cli mac pull`."
+        );
+        return Ok(1);
     }
     Ok(code.unwrap_or(1))
 }
@@ -1191,6 +1320,21 @@ mod tests {
     fn agent_socket_routes_do_not_collide() {
         // A duplicate method and path panics when Core opens the socket, which would stop Core in every sandbox.
         let _ = super::agent_router();
+    }
+
+    #[test]
+    fn a_command_counts_as_waiting_until_its_run_returns() {
+        // The dashboard and the drain read this count, so a sandbox never sleeps under a Mac approval pop-up.
+        let mac = super::Mac::default();
+        let (first, second) = (
+            super::Waiting::start(&mac.waiting),
+            super::Waiting::start(&mac.waiting),
+        );
+        assert_eq!(mac.waiting(), 2);
+        drop(first);
+        assert_eq!(mac.waiting(), 1);
+        drop(second);
+        assert_eq!(mac.waiting(), 0);
     }
 
     #[test]
@@ -1205,7 +1349,7 @@ mod tests {
 
     #[test]
     fn mac_status_says_why_from_the_app_report() {
-        // #871: Windows apps send "off" with `unsupported`, so agents must not ask the user to turn on a hidden setting.
+        // #871: older Windows apps send "off" with `unsupported`, so agents ask for an update, not a hidden setting.
         for (extra, reason) in [
             ("", "access_off"),
             (r#","unsupported":true"#, "unsupported"),
@@ -1220,6 +1364,19 @@ mod tests {
             let old = now.checked_sub(super::REPORTED).unwrap();
             mac.report.lock().unwrap().as_mut().unwrap().1 = old;
             assert!(!mac.unsupported(), "{report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cut_output_fails_a_successful_command_but_keeps_a_failed_ones_code() {
+        // #1817: a shell check must not take output cut at 16 MiB as complete.
+        for (code, truncated, want) in [(0, true, 1), (3, true, 3), (0, false, 0)] {
+            let value = serde_json::json!({"state":"done","code":code,"stdout":"","stderr":"","truncated":truncated});
+            assert_eq!(
+                super::print_result(value).await.unwrap(),
+                want,
+                "{code} {truncated}"
+            );
         }
     }
 
@@ -1248,5 +1405,15 @@ mod tests {
         assert!(error.starts_with("VM path /nonexistent/x: "), "{error}");
         let error = cli("push Cargo.toml/").await.unwrap_err().to_string();
         assert!(error.contains("not installed"), "{error}");
+        // #1977: a Core that takes a request and never answers says so instead of leaving room-cli silent.
+        let socket =
+            std::env::temp_dir().join(format!("cloudroom-silent-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&socket);
+        let _silent = tokio::net::UnixListener::bind(&socket).unwrap();
+        let limit = Some(std::time::Duration::from_millis(200));
+        let answer = super::request_within(socket.to_str().unwrap(), "GET", "/thread", None, limit);
+        let error = answer.await.unwrap_err();
+        let _ = std::fs::remove_file(&socket);
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
     }
 }

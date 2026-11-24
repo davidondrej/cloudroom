@@ -426,6 +426,16 @@ exec '${process.execPath}' "$@"
     writeServerInstallTools(fixture, 200);
     writeExecutable(join(fixture.binDir, "npm"), "#!/bin/sh\nexit 19\n");
     runScript(JOIN_ARGS, fixture, { BB_INSTALL_SKIP_SERVICE: "1" });
+    const shim = join(fixture.homeDir, ".local", "bin", "room-cli");
+    // A rerun adds the marker line to an older wrapper (#2430).
+    const marked = readFileSync(shim, "utf8");
+    expect(marked.split("\n")[1]).toMatch(/^# Cloudroom machine installer /u);
+    writeExecutable(
+      shim,
+      marked.replace(/\n# Cloudroom machine installer.*/u, ""),
+    );
+    runScript(JOIN_ARGS, fixture, { BB_INSTALL_SKIP_SERVICE: "1" });
+    expect(readFileSync(shim, "utf8")).toBe(marked);
     const olderCli = join(
       fixture.homeDir,
       ".bb-machines",
@@ -439,7 +449,6 @@ exec '${process.execPath}' "$@"
     const installedCli = join(fixture.dataDir, "npm", "bin", "room-cli");
     mkdirSync(dirname(installedCli), { recursive: true });
     writeExecutable(installedCli, '#!/bin/sh\nprintf "%s" "$ROOM_DATA_DIR"\n');
-    const shim = join(fixture.homeDir, ".local", "bin", "room-cli");
     const explicit = spawnSync(
       shim,
       ["machine", "uninstall", "--host-id", "host-test"],

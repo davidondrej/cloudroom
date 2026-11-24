@@ -1,11 +1,12 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getAppSettings } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 
 // Minutes the user actively spends in Cloudroom: an app window reports each focused minute with recent input.
 // Local days feed the Time in Cloudroom plugin's heatmap. Finished UTC days ride along with the next day's
-// active-day ping to the website (0056), so counting adds no website calls.
-type Deps = Pick<AppDeps, "config">;
+// active-day ping to the website (0056) when usage telemetry is on, so counting adds no website calls.
+type Deps = Pick<AppDeps, "config"> & Partial<Pick<AppDeps, "db">>;
 const file = (deps: Deps) => join(deps.config.dataDir, "cloudroom-time-in-app.json");
 const localDay = (at: Date) => at.toLocaleDateString("en-CA");
 const utcDay = (at: Date) => at.toISOString().slice(0, 10);
@@ -44,8 +45,11 @@ export async function noteActiveMinute(deps: Deps): Promise<void> {
     for (const key of Object.keys(state.days)) if (key < oldest) delete state.days[key];
   }
   state.days[day] = Math.min(1440, (state.days[day] ?? 0) + 1);
-  const utc = utcDay(now);
-  state.unsent[utc] = Math.min(1440, (state.unsent[utc] ?? 0) + 1);
+  const shareMinutes = deps.config.telemetryAllowed !== false && (deps.db ? getAppSettings(deps.db).telemetryEnabled : true);
+  if (shareMinutes) {
+    const utc = utcDay(now);
+    state.unsent[utc] = Math.min(1440, (state.unsent[utc] ?? 0) + 1);
+  }
   await save(deps, state);
 }
 
@@ -61,5 +65,13 @@ export async function markMinutesSent(deps: Deps, sent: Record<string, number>):
   const state = await load(deps);
   const oldest = utcDay(new Date(Date.now() - 7 * 864e5));
   for (const day of Object.keys(state.unsent)) if (day in sent || day < oldest) delete state.unsent[day];
+  await save(deps, state);
+}
+
+/** Drops queued unsent days when telemetry is turned off so opting out sends no prior minutes. */
+export async function clearUnsentMinutes(deps: Deps): Promise<void> {
+  const state = await load(deps);
+  if (Object.keys(state.unsent).length === 0) return;
+  state.unsent = {};
   await save(deps, state);
 }

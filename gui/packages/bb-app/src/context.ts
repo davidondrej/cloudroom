@@ -10,6 +10,7 @@ import {
   APP_SURFACE_WEB,
   parseAppSurface,
 } from "@cloudroom/config/app-surface";
+import { HUMAN_CLICK_PUBLIC_KEY_ENV } from "@cloudroom/config/human-click";
 import {
   roomAppManagedEnvFileSchema,
   formatRoomAppConfigPath,
@@ -281,7 +282,9 @@ export async function resolveRuntime(args: {
   if (packagedDesktop) applyPolicy(optionsEnv);
   const { dataDir, serverUrl: defaultServerUrl } = resolveContext(args.entrypointUrl, optionsEnv, args.homeDir);
   const { config, envFile } = await readSavedSettings(dataDir);
-  const saved = { ...config.config, ...envFile.env };
+  const saved: NodeJS.ProcessEnv = { ...config.config, ...envFile.env };
+  // Only the desktop app that starts this launcher picks the human-click key, never a saved setting.
+  delete saved[HUMAN_CLICK_PUBLIC_KEY_ENV];
   const env = applyPolicy({ ...optionsEnv, ...saved });
   const serverEnv = stripThreadContextEnv(applyPolicy({
     ...optionsEnv,
@@ -360,7 +363,9 @@ export function createDaemonEnv(context: AppContext, env: NodeJS.ProcessEnv, ser
     BB_SERVER_URL: serverUrl,
     NODE_ENV: "production",
   };
-  // The server's own credentials never reach the daemon.
+  // The server's own credentials never reach the daemon. Neither does the human-click key:
+  // a Cloudroom started from an agent's shell would refuse its own app's clicks.
+  delete next[HUMAN_CLICK_PUBLIC_KEY_ENV];
   delete next.BB_SERVER_HEADERS;
   delete next.BB_CONNECT_MACHINE_CREDENTIAL;
   return next;

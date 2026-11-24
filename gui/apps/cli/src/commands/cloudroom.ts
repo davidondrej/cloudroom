@@ -30,6 +30,7 @@ const TAR = process.platform === "win32" ? `${process.env.SystemRoot ?? "C:\\Win
 export const WINDOWS_PULL_ARCHIVE = `ls -d -- "$n" >/dev/null && { l=$(find -H "$n" -type l | wc -l); [ "$l" = 0 ] || printf 'Skipped %s symlink(s): Windows tar cannot create them.\\n' "$l" >&2; find -H "$n" ! -type l -print0 | tar -h --null --no-recursion -czf - -T -; }`;
 
 const THIS_COMPUTER = process.platform === "win32" ? "this PC" : "this Mac";
+const COMPUTER_TITLE = process.platform === "darwin" ? "Mac" : "Computer";
 
 function endsWithSeparator(path: string): boolean {
   return path.endsWith("/") || (process.platform === "win32" && path.endsWith("\\"));
@@ -146,7 +147,7 @@ export async function placePull(archive: Buffer, source: string, target: string,
 
 export function registerVmCommands(program: Command, getUrl: () => string): void {
   const vm = program.command("vm").description("Run commands and copy files on your cloud VM or a Cloud thread's sandbox, as its agent account");
-  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code.")
+  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code, except 1 when it succeeded but its output passed 16 MiB and was cut (it still ran; redirect output there if only the status matters).")
     .option(...THREAD_OPTION)
     .option("--cwd <dir>", "Folder, relative to the agent home")
     .option("--stdin", "Forward standard input")
@@ -156,7 +157,10 @@ export function registerVmCommands(program: Command, getUrl: () => string): void
       process.stdout.write(Buffer.from(result.stdout, "hex"));
       process.stderr.write(Buffer.from(result.stderr, "hex"));
       if (result.truncated) process.stderr.write("Output exceeded 16 MiB and was truncated.\n");
-      process.exitCode = result.code ?? 1;
+      // #1817: cut output must not pass `&&` or `set -e` as complete. A failed command keeps its own code.
+      const cut = result.truncated && result.code === 0;
+      if (cut) process.stderr.write("The command exited 0, but its output was cut, so this exits 1. Write it to a file and copy it with `room-cli vm pull`.\n");
+      process.exitCode = cut ? 1 : result.code ?? 1;
     }));
   vm.command("pull <vm-path> [local-path]").description(`Copy a VM or sandbox file or folder to ${THIS_COMPUTER}, like cp: into an existing folder or a path ending in / (default: current folder), else under that new name, which must not exist yet.`)
     .option(...THREAD_OPTION)
@@ -211,12 +215,13 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
       if (!result.imported.length && !result.skipped.length) console.log("No open BB threads found.");
     }));
   for (const [command, harness, app] of [["claude-code", "claude-code", "Claude Code"], ["codex", "codex", "Codex"], ["pi", "pi", "Pi"], ["hermes", "acp-hermes-agent", "Hermes Agent"], ["t3code", "t3code", "T3 Code"], ["conductor", "conductor", "Conductor"]] as const) {
-    const sub = group.command(command).description(`Copy recent ${app} chats from this Mac into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" || harness === "conductor" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""}${harness === "conductor" ? " --path imports every chat in a Conductor Cloud export (its unzipped folder or the .zip)." : ""} Sends no prompts; ${app} is never changed.`)
+    const sub = group.command(command).description(`Copy recent ${app} chats from ${THIS_COMPUTER} into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" || harness === "conductor" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""}${harness === "conductor" ? " --path imports every chat in a Conductor Cloud export (its unzipped folder or the .zip)." : ""} Sends no prompts; ${app} is never changed.`)
       .option("--days <days>", "Only chats active in the last N days", "30")
       .option("--dry-run", "List the chats without importing them")
       .option("--json", "Print JSON");
     if (harness === "conductor") sub.option("--path <path>", "A Conductor Cloud export: its unzipped folder or the .zip");
-    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string }) => {
+    if (harness === "claude-code") sub.option("--config-dir <folder>", "Read chats from another Claude Code config folder (a CLAUDE_CONFIG_DIR). Each imported chat is copied into the default one; the original stays");
+    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string; configDir?: string }) => {
         if (harness === "conductor" || !options.dryRun) {
           (await import("../plugin-cli-proxy.js")).allowLongRequests();
         }
@@ -237,7 +242,8 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
           return;
         }
         const since = Date.now() - Number(options.days) * 86_400_000;
-        const sessions = (await sdk.nativeSessions()).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
+        const configDir = options.configDir === undefined ? undefined : resolve(options.configDir);
+        const sessions = (await sdk.nativeSessions(undefined, configDir)).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
         if (options.dryRun || !sessions.length) {
           if (outputJson(options, { sessions })) return;
           for (const session of sessions) console.log(`${session.title}  (${session.cwd})`);
@@ -248,7 +254,7 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
         const hostId = await resolveLocalHostId();
         const result: Awaited<ReturnType<typeof sdk.importSessions>> = { imported: [], skipped: [] };
         for (let index = 0; index < sessions.length; index += 20) {
-          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })));
+          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })), configDir);
           result.imported.push(...batch.imported);
           result.skipped.push(...batch.skipped);
           if (options.json) continue;
@@ -282,9 +288,9 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
       createCliRoomSdk(getUrl()).cloudroom.status(),
       createCliRoomSdk(getUrl(), VPS_HINT_TIMEOUT_MS).cloudroom.vps().then((found) => (found.connected ? found : null), () => null),
     ]);
-    if (!outputJson(options, { ...status, vps })) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\nMac access and previews can't connect: ${status.previews.message}` : ""}${vps ? `\n${vpsDiskLine(vps)}` : ""}`);
+    if (!outputJson(options, { ...status, vps })) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\n${COMPUTER_TITLE} access and previews can't connect: ${status.previews.message}` : ""}${vps ? `\n${vpsDiskLine(vps)}` : ""}`);
   }));
-  group.command("check").description("Make Mac access and previews check their connection to Cloudroom now").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
+  group.command("check").description(`Make ${COMPUTER_TITLE} access and previews check their connection to Cloudroom now`).option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     await createCliRoomSdk(getUrl()).cloudroom.checkPreviews();
     if (!outputJson(options, { ok: true })) console.log("Checking now. Run room-cli cloud status in a few seconds for the result.");
   }));
@@ -301,14 +307,27 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     const result = await createCliRoomSdk(getUrl()).cloudroom.cancelCodexLogin(id);
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
+  const gitlab = group.command("gitlab").description("Connect GitLab.com for Cloud projects");
+  gitlab.command("add <url>").description("Add a GitLab.com project").option("--json", "Print JSON").action(action(async (url:string,options:JsonOutputOptions)=>{
+    const project=await createCliRoomSdk(getUrl()).cloudroom.addGitlabRepo({repo:url});
+    if(!outputJson(options,project)) console.log(project.projectId);
+  }));
+  for (const command of ["status","login","cancel","disconnect"] as const) {
+    gitlab.command(command).option("--json","Print JSON").action(action(async (options:JsonOutputOptions)=>{
+      const state=await createCliRoomSdk(getUrl()).cloudroom.gitlabConnection(command==="login"?"start":command);
+      if (!outputJson(options,state)) console.log(state.waiting ? "Open "+state.url : state.expired ? "Reconnect GitLab" : state.login ? "Connected as @"+state.login : "GitLab disconnected");
+    }));
+  }
   const github = group.command("github").description("Connect GitHub for cloud sandboxes");
+  // With --repos, the code's page comes first, then GitHub's page for picking repos, with no code.
+  const githubNext = (result: { verification_url: string | null; user_code: string | null }) => `Open ${result.verification_url}\n${result.user_code ? `Enter code: ${result.user_code}` : "Pick your repos there."}`;
   github.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     const result = await createCliRoomSdk(getUrl()).cloudroom.githubAuth();
-    if (!outputJson(options, result)) console.log(`${result.state}${result.message ? `\n${result.message}` : ""}`);
+    if (!outputJson(options, result)) console.log(`${result.state}${result.state === "waiting" ? `\n${githubNext(result)}` : ""}${result.message ? `\n${result.message}` : ""}`);
   }));
-  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string }) => {
-    const result = await createCliRoomSdk(getUrl()).cloudroom.githubLogin(options.requestId);
-    if (!outputJson(options, result)) console.log(result.state === "waiting" ? `Open ${result.verification_url}\nEnter code: ${result.user_code}\nRun room-cli cloud github status to verify.` : result.message ?? result.state);
+  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--repos", "Give Cloud only the repos you then pick on GitHub").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string; repos?: boolean }) => {
+    const result = await createCliRoomSdk(getUrl()).cloudroom.githubLogin(options.requestId, options.repos);
+    if (!outputJson(options, result)) console.log(result.state === "waiting" ? `${githubNext(result)}\nRun room-cli cloud github status to verify.` : result.message ?? result.state);
   }));
   github.command("cancel <request-id>").option("--json", "Print JSON").action(action(async (id: string, options: JsonOutputOptions) => {
     const result = await createCliRoomSdk(getUrl()).cloudroom.cancelGithubLogin(id);

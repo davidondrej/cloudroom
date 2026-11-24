@@ -64,6 +64,7 @@ import { applyThreadExecutionOverride } from "../../services/threads/thread-exec
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { binding } from "../../services/cloudroom/store.js";
 import {
+  requireSwitchableThread,
   switchThreadHarness,
   type HarnessSwitchResend,
 } from "../../services/threads/thread-harness-switch.js";
@@ -425,6 +426,13 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     // Another harness, or a Cloud model change its Core can't make in the session, moves the thread in place (ADR 0211).
     // Cloud Claude changes models in the same session, as Local does: the pick is saved now and rides the next prompt.
     const switchTo = payload.providerId ?? thread.providerId;
+    const checkIdleSession = payload.idleSessionOnly ? () => {
+      const current = requireSwitchableThread(deps, thread.id);
+      if (current.providerId !== switchTo || current.executionTarget !== thread.executionTarget) {
+        throw new ApiError(409, "thread_changed", "The thread changed. Choose a model from its current harness.");
+      }
+    } : undefined;
+    checkIdleSession?.();
     let resend: HarnessSwitchResend | null = null;
     const model = typeof payload.model === "string" ? payload.model : null;
     const cloudModel =
@@ -434,13 +442,17 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       model !== binding(deps.db, thread.id)?.model;
     const inSession =
       model !== null &&
-      cloudModel &&
+      (cloudModel || (checkIdleSession && isCloudThread(thread))) &&
       payload.resend !== true &&
       (await cloudroom(deps).changeModel(
         thread,
         model,
         payload.reasoningLevel ?? null,
+        checkIdleSession,
       ));
+    if (checkIdleSession && isCloudThread(thread) && !inSession) {
+      throw new ApiError(409, "cloudroom_unsupported", "This Cloud session cannot switch to that model in place.");
+    }
     if (inSession) {
       deps.hub.notifyThread(thread.id, ["execution-options-changed"], {
         projectId: thread.projectId,
@@ -470,6 +482,8 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       } else {
         await applyThreadExecutionOverride(deps, {
           thread,
+          beforeSave: checkIdleSession,
+          recordModelSelection: typeof payload.model === "string",
           patch: {
             ...("model" in payload ? { model: payload.model } : {}),
             ...("reasoningLevel" in payload
@@ -506,6 +520,8 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if ("visibility" in payload) {
       metadataUpdate.visibility = payload.visibility;
     }
+    // The parent as committed now: `thread` predates the awaits above (#2281).
+    const previous = getThread(deps.db, thread.id) ?? thread;
     const updated =
       Object.keys(metadataUpdate).length > 0
         ? updateThread(deps.db, deps.hub, thread.id, metadataUpdate)
@@ -538,12 +554,9 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       }
     }
 
-    if (
-      "parentThreadId" in payload &&
-      payload.parentThreadId !== thread.parentThreadId
-    ) {
+    if ("parentThreadId" in payload) {
       await handleThreadOwnershipChange(deps, {
-        previousThread: thread,
+        previousThread: previous,
         updatedThread: updated,
       });
     }

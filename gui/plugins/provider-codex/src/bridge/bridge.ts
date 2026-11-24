@@ -2,6 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { mkdtempSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -80,6 +81,7 @@ import {
   toCodexDynamicTools,
   toCodexPermissionSettings,
   toCodexServiceTier,
+  usesPrivateDataDenyProfile,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
   type RoomThreadForkParams,
@@ -324,6 +326,9 @@ const CHILD_REQUEST_TIMEOUT_MS = 60_000;
 // error, which names the step that hung, beat the runtime's generic timeout.
 const THREAD_CREATION_BUDGET_MS = 110_000;
 const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
+// Optional startup reads (rate limits) go to the network. When it is slow they
+// must not hold thread/resume past the runtime's 30 s timeout (#1816).
+const OPTIONAL_POST_INITIALIZE_WAIT_MS = 5_000;
 // A broken MCP server slows each retry, so retry it at most once a minute.
 const MCP_RELOAD_INTERVAL_MS = 60_000;
 // Before 0.146.0, config/mcpServer/reload sent Op::RefreshMcpServers, which
@@ -333,7 +338,7 @@ const MCP_RELOAD_INTERVAL_MS = 60_000;
 const CODEX_MCP_RELOAD_MINIMUM_VERSION = "0.147.0";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
-  /\b(?:session|thread)\s+\S+\s+is archived\b/i;
+  /\b(?:session|thread)\s+(\S+)\s+is archived\b/i;
 const CODEX_ALREADY_ARCHIVED_ERROR_PATTERN =
   /\bno rollout found for thread id\b/i;
 const CODEX_NOT_ARCHIVED_ERROR_PATTERN =
@@ -379,10 +384,16 @@ function classifyTerminalAccountError(
   return null;
 }
 
+/** Codex thread ids Codex refused as archived; unarchive repairs them (#1808). */
+const codexArchivedRefusals = new Set<string>();
+
 function archivedSessionHint(message: string): ProviderRecoveryHint | null {
-  return CODEX_ARCHIVED_SESSION_ERROR_PATTERN.test(message)
-    ? { kind: "sessionArchived", message, retryable: true }
-    : null;
+  const archived = CODEX_ARCHIVED_SESSION_ERROR_PATTERN.exec(message);
+  if (archived?.[1] === undefined) {
+    return null;
+  }
+  codexArchivedRefusals.add(archived[1]);
+  return { kind: "sessionArchived", message, retryable: true };
 }
 
 /**
@@ -945,14 +956,24 @@ function spawnChildConnection(callbacks: {
     responder: CodexAppServerRequestResponder,
   ) => void;
   onExit: (info: CodexAppServerExitInfo) => void;
+  /** The thread's env; its identity tags mark this Codex as the thread's own. */
+  threadEnv?: Readonly<Record<string, string>> | undefined;
 }): CodexAppServerConnection {
+  const { threadEnv, ...connectionCallbacks } = callbacks;
   const launch = resolveAppServerLaunch();
+  // Tagged like the thread's commands, so Stop and the daemon's stale-writer
+  // recovery can find a Codex Cloudroom lost track of (#607, #1717).
+  const tags: Record<string, string> = {};
+  for (const key of ["ROOM_THREAD_ID", "ROOM_SERVER_URL"]) {
+    const value = threadEnv?.[key];
+    if (value !== undefined) tags[key] = value;
+  }
   return createCodexAppServerConnection({
     command: launch.command,
     args: launch.args,
     cwd: process.cwd(),
-    env: buildAppServerEnv(),
-    ...callbacks,
+    env: { ...buildAppServerEnv(), ...tags },
+    ...connectionCallbacks,
   });
 }
 
@@ -962,6 +983,7 @@ const ignoredChildResultSchema = z.unknown();
 async function initializeChild(
   connection: CodexAppServerConnection,
   postInitializeRequests?: readonly ProviderPostInitializeRequest[],
+  onLateResult?: () => void,
 ): Promise<string | null> {
   const initialized = await connection.request({
     method: "initialize",
@@ -970,21 +992,34 @@ async function initializeChild(
     timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
   });
   for (const request of postInitializeRequests ?? []) {
-    try {
-      const result = await connection.request({
+    let late = false;
+    const applied = connection
+      .request({
         method: request.plan.method,
         ...("params" in request.plan && request.plan.params !== undefined
           ? { params: request.plan.params }
           : {}),
         resultSchema: ignoredChildResultSchema,
         timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+      })
+      .then((result) => {
+        request.onResult(result);
+        if (late) onLateResult?.();
       });
-      request.onResult(result);
-    } catch (error) {
-      if (request.required) {
-        throw error;
-      }
+    if (request.required) {
+      await applied;
+      continue;
     }
+    // Stop waiting, not reading: a later reply still applies (#1816).
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      applied.catch(() => undefined),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, OPTIONAL_POST_INITIALIZE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    late = true;
   }
   if (configuredSkillExtraRoots !== null) {
     await connection.request({
@@ -1000,8 +1035,65 @@ async function initializeChild(
 }
 
 const codexThreadIdentityResultSchema = z
-  .object({ thread: z.object({ id: z.string().min(1) }).passthrough() })
+  .object({
+    thread: z
+      .object({
+        id: z.string().min(1),
+        path: z.string().nullish().catch(null),
+      })
+      .passthrough(),
+  })
   .passthrough();
+
+const codexRolloutMetaSchema = z.object({
+  type: z.literal("session_meta"),
+  payload: z.object({
+    dynamic_tools: z.array(z.object({ name: z.string() })).nullish(),
+  }),
+});
+
+// Cloudroom's built-in tools (RESERVED_AGENT_TOOL_NAMES in the plugin SDK's
+// host-policy). Core starts Cloud threads without them, so a Teleported thread
+// never has them; only plugin tools are worth a notice.
+const CLOUDROOM_BUILT_IN_TOOL_NAMES = new Set(["update_environment_directory"]);
+
+// Last notice per native thread, so a rebuild doesn't repeat it.
+const missingToolNotices = new Map<string, string>();
+
+// Codex keeps the tools thread/start gave a thread: resume and fork ignore
+// new ones, and no request adds them (#2097). The rollout's first line lists
+// the kept ones; Core drops that list when it uploads a Cloud thread.
+async function toolsMissingFromCodexThread(
+  rolloutPath: string | null | undefined,
+  dynamicTools: readonly DynamicTool[] | undefined,
+): Promise<string[]> {
+  const wanted = (dynamicTools ?? [])
+    .map((tool) => tool.name)
+    .filter((name) => !CLOUDROOM_BUILT_IN_TOOL_NAMES.has(name));
+  if (!rolloutPath || wanted.length === 0) return [];
+  try {
+    const file = await open(rolloutPath, "r");
+    try {
+      const { buffer, bytesRead } = await file.read({
+        buffer: Buffer.alloc(1024 * 1024),
+        position: 0,
+      });
+      const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n", 1)[0];
+      const meta = codexRolloutMetaSchema.safeParse(
+        JSON.parse(firstLine ?? ""),
+      );
+      if (!meta.success) return [];
+      const kept = new Set(
+        (meta.data.payload.dynamic_tools ?? []).map((tool) => tool.name),
+      );
+      return wanted.filter((name) => !kept.has(name));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return [];
+  }
+}
 
 const codexConfigReadResultSchema = z
   .object({
@@ -1049,12 +1141,13 @@ const codexConfigRequirementsReadResultSchema = z
 
 
 type CodexSessionConstructionRequest =
-  | { kind: "start" }
+  | { kind: "start"; replacesProviderThreadId?: string }
   | { kind: "resume"; providerThreadId: string }
   | {
       kind: "fork";
       sourceProviderThreadId: string;
       sourceProviderCheckpointId?: string;
+      replacesProviderThreadId?: string;
     };
 
 interface ConstructThreadSessionArgs {
@@ -1145,6 +1238,7 @@ async function constructThreadSession(
   try {
     const connection = spawnChildConnection({
       recordThreadId: args.threadId,
+      threadEnv: decoded.sessionOptions.envVars,
       onNotification: (method, params) =>
         handleChildNotification(args.threadId, serial, method, params),
       onRequest: (method, params, responder) =>
@@ -1157,6 +1251,10 @@ async function constructThreadSession(
     const codexVersion = await initializeChild(
       connection,
       translator.buildPostInitializeRequests(),
+      () => {
+        if (currentSession(args.threadId, serial) !== session) return;
+        sendThreadDeltas(session, translator.takeLateSeedDeltas());
+      },
     );
     if (
       codexVersion === null ||
@@ -1230,7 +1328,10 @@ async function constructThreadSession(
     const sharedConstructionParams = {
       approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       approvalsReviewer: preparedGitRoots.permissionSettings.approvalsReviewer,
-      sandbox: preparedGitRoots.permissionSettings.sandbox,
+      // Each turn sets the sandbox; a thread-level mode would drop the deny profile.
+      ...(usesPrivateDataDenyProfile(preparedGitRoots.config)
+        ? {}
+        : { sandbox: preparedGitRoots.permissionSettings.sandbox }),
       cwd: args.cwd,
       ...instructionOverrides,
       model: decoded.sessionOptions.model ?? undefined,
@@ -1314,6 +1415,37 @@ async function constructThreadSession(
     );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
+    if (args.request.kind !== "start") {
+      const missing = await toolsMissingFromCodexThread(
+        result.thread.path,
+        args.dynamicTools,
+      );
+      const summary = `This Codex thread started without ${missing.join(", ")}, and Codex can't add tools to an existing thread. Start a new thread to use ${missing.length === 1 ? "it" : "them"}.`;
+      if (
+        missing.length > 0 &&
+        missingToolNotices.get(codexThreadId) !== summary
+      ) {
+        missingToolNotices.set(codexThreadId, summary);
+        sendThreadDeltas(session, [
+          { kind: "provider.warning", category: "general", summary },
+        ]);
+      }
+    }
+    // A message edit's start or fork replaces the thread's current native
+    // session and keeps its Goal. A fork into a new Cloudroom thread starts
+    // without one.
+    if (
+      args.request.kind !== "resume" &&
+      args.request.replacesProviderThreadId !== undefined
+    ) {
+      const replaced = args.request.replacesProviderThreadId;
+      if (await carryGoalIntoEdit(connection, replaced, codexThreadId)) {
+        // Drops a Goal the kept history still shows.
+        handleChildNotification(args.threadId, serial, "thread/goal/cleared", {
+          threadId: codexThreadId,
+        });
+      }
+    }
     translator.activateThreadGitWritableRoots({
       providerThreadId: codexThreadId,
       threadId: args.threadId,
@@ -1912,6 +2044,19 @@ const goalClearResultSchema = z.object({ cleared: z.boolean() }).passthrough();
 const goalGetResultSchema = z
   .object({ goal: z.object({ status: z.string() }).passthrough().nullable() })
   .passthrough();
+const carriedGoalResultSchema = z
+  .object({
+    goal: z
+      .object({
+        status: z.string(),
+        objective: z.string(),
+        tokenBudget: z.number().nullish(),
+        tokensUsed: z.number(),
+      })
+      .passthrough()
+      .nullable(),
+  })
+  .passthrough();
 
 /** User goal changes carry `origin: "user"` so Codex treats them as the user's instruction. */
 async function handleThreadGoal(
@@ -1974,6 +2119,48 @@ async function pauseActiveGoal(
   } catch (error) {
     process.stderr.write(`could not pause the Goal before Stop: ${String(error)}\n`);
   }
+}
+
+/**
+ * Codex keeps a Goal per native thread, and a message edit forks a new one
+ * (#857). Never active, or it would start a Goal turn at once. Codex cannot
+ * set the usage counters, so the budget becomes what was left (at least 1,
+ * Codex's minimum). Resolves true when the replaced session has no Goal.
+ */
+async function carryGoalIntoEdit(
+  connection: CodexAppServerConnection,
+  replacedCodexThreadId: string,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    const { goal } = await connection.request({
+      method: "thread/goal/get",
+      params: { threadId: replacedCodexThreadId },
+      resultSchema: carriedGoalResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+    if (goal === null) return true;
+    await connection.request({
+      method: "thread/goal/set",
+      params: {
+        threadId: codexThreadId,
+        objective: goal.objective,
+        status: goal.status === "active" ? "paused" : goal.status,
+        tokenBudget:
+          goal.tokenBudget == null
+            ? null
+            : Math.max(1, goal.tokenBudget - goal.tokensUsed),
+        origin: "user",
+      },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `could not carry the Goal into the edit: ${String(error)}\n`,
+    );
+  }
+  return false;
 }
 
 /** Resolves false on timeout, or at once when `signal` aborts. */
@@ -2070,13 +2257,34 @@ async function sendMaintenanceRequestWithRetries(
   connection: CodexAppServerConnection,
   request: { method: string; params: Record<string, unknown> },
 ): Promise<void> {
-  const sendOnce = (): Promise<unknown> =>
+  const sendOnce = (method = request.method): Promise<unknown> =>
     connection.request({
-      method: request.method,
+      method,
       params: request.params,
       resultSchema: ignoredChildResultSchema,
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
+  if (request.method === "thread/unarchive") {
+    const threadId = String(request.params.threadId);
+    try {
+      await sendOnce();
+    } catch (error) {
+      // Codex refused this thread as archived, yet finds no archived rollout:
+      // its state DB still marks the active rollout archived, so even
+      // `codex unarchive` fails (#1808). Archiving it first puts both in step.
+      if (
+        !codexArchivedRefusals.has(threadId) ||
+        !(error instanceof Error) ||
+        !CODEX_NOT_ARCHIVED_ERROR_PATTERN.test(error.message)
+      ) {
+        throw error;
+      }
+      await sendOnce("thread/archive");
+      await sendOnce();
+    }
+    codexArchivedRefusals.delete(threadId);
+    return;
+  }
   if (request.method !== "thread/name/set") {
     await sendOnce();
     return;
@@ -2151,6 +2359,11 @@ async function handleRequest(
     case "thread/start":
       await handleThreadConstruction(request.id, request.params, {
         kind: "start",
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
+            }
+          : {}),
       });
       break;
     case "thread/resume":
@@ -2167,6 +2380,11 @@ async function handleRequest(
           ? {
               sourceProviderCheckpointId:
                 request.params.sourceProviderCheckpointId,
+            }
+          : {}),
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
             }
           : {}),
       });

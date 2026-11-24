@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { getToolsOwnedCollectionRoutePath } from "@/components/tools/tools-navigation";

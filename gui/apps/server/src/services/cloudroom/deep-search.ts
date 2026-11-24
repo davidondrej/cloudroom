@@ -80,7 +80,7 @@ async function claudeEnv(deps: AppDeps): Promise<NodeJS.ProcessEnv> {
 /** Runs Claude with the prompt on stdin (closed at once, or Claude waits ~3 s for more), killed on abort or timeout. */
 function runClaude(claude: string, input: string, cwd: string, env: NodeJS.ProcessEnv, signal: AbortSignal) {
   return new Promise<{ code: number | null; result: ClaudeResult | null; stderr: string }>((resolve) => {
-    const child = spawn(claude, ARGS, { cwd, env, stdio: "pipe" });
+    const child = spawn(claude, ARGS, { cwd, env, stdio: "pipe", windowsHide: true });
     let stdout = "";
     let stderr = "";
     let timedOut = false;

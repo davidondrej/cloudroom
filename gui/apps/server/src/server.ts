@@ -4,7 +4,7 @@ import { getMachineEnrollmentService } from "./services/machines/machine-service
 import { withManualMachineProvider } from "./services/machines/manual-provider.js";
 import { registerDesktopBrowserRoutes } from "./routes/desktop-browsers.js";
 import { INSTALL_MACHINE_SCRIPT_PATH } from "./install-machine-asset.js";
-import { createNodeWebSocket } from "@hono/node-ws";
+import { createNodeWebSocket } from "./node-websocket.js";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
@@ -56,6 +56,7 @@ import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
 import { registerInternalThreadMemoryLimitRoutes } from "./internal/thread-memory-limit.js";
 import { registerInternalPluginHostArtifactRoutes } from "./internal/plugin-host-artifacts.js";
+import { registerInternalVoiceAudioRoutes } from "./services/ai/voice-audio-store.js";
 import { registerInternalSessionRoutes } from "./internal/session.js";
 import { registerInternalSkillRoutes } from "./internal/skills.js";
 import { registerInternalToolCallRoutes } from "./internal/tool-calls.js";
@@ -104,6 +105,7 @@ import {
   allowedAppOrigins,
   browserRequestProblem,
 } from "./browser-request-guard.js";
+import { installHumanClick } from "./human-click.js";
 import {
   arrivedOverLoopback,
   assertTrustedCaller,
@@ -151,6 +153,8 @@ function unauthorizedResponse(): Response {
     },
   );
 }
+
+const VOICE_AUDIO_INTERNAL_PATH = /^\/internal\/voice-audio\/[a-f0-9]{64}$/u;
 
 function normalizeInternalAuthPath(path: string): string {
   if (path === "/") {
@@ -607,10 +611,22 @@ export function createApp(
     return next();
   });
   app.use("/internal/*", async (context, next) => {
+    const normalizedPath = normalizeInternalAuthPath(context.req.path);
+    if (
+      context.req.method === "GET" &&
+      VOICE_AUDIO_INTERNAL_PATH.test(normalizedPath)
+    ) {
+      if (
+        context.req.header("origin") !== undefined ||
+        context.req.header("sec-fetch-site") !== undefined
+      ) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return next();
+    }
     if (!isTrustedCaller(context) && arrivedOverLoopback(context)) {
       return callerProofRequiredResponse(context);
     }
-    const normalizedPath = normalizeInternalAuthPath(context.req.path);
     if (normalizedPath === "/internal/hosts/enroll-key") {
       return next();
     }
@@ -731,6 +747,10 @@ export function createApp(
     notifyCatalogChanged: () => deps.hub.notifySystem(["plugins-changed"]),
     warn: (message) => deps.logger.warn(message),
   });
+  installHumanClick(app, deps, {
+    catalog: pluginCatalogService,
+    plugins: pluginService,
+  });
   registerCallerProofRoutes(publicApi, deps.callerProofs);
   registerProjectRoutes(publicApi, deps);
   registerThreadSectionRoutes(publicApi, deps);
@@ -758,6 +778,7 @@ export function createApp(
   registerInternalSessionRoutes(internalApi, deps, pluginService);
   registerInternalSkillRoutes(internalApi, deps);
   registerInternalPluginHostArtifactRoutes(internalApi, deps);
+  registerInternalVoiceAudioRoutes(internalApi, deps);
   registerInternalEventRoutes(internalApi, deps);
   registerInternalToolCallRoutes(internalApi, deps);
   registerInternalInteractiveRequestRoutes(internalApi, deps);
@@ -797,6 +818,9 @@ export function createApp(
     upgradeWebSocket((context) => {
       assertBrowserWebSocketAllowed(context);
       const terminalId = context.req.param("terminalId");
+      if (terminalId === undefined) {
+        throw new ApiError(404, "terminal_not_found", "missing terminal id");
+      }
       const query = terminalWebSocketQuerySchema.safeParse({
         sinceSeq: context.req.query("sinceSeq"),
       });

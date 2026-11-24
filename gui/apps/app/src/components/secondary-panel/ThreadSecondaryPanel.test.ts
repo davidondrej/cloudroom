@@ -3,13 +3,13 @@ import {
   getSecondaryPanelChromeStackClassName,
   isSecondaryPanelLayoutTransition,
   resolveCollapsedPanelTrafficLightReserveClassName,
-} from "./ThreadSecondaryPanel";
+} from "@/components/right-panel/shell/panel-shell";
 import {
   CHROME_ROW_CLASS,
   CHROME_ROW_HEIGHT_CLASS,
   MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS,
 } from "@/lib/room-desktop";
-import { SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS } from "./panelChromeClasses";
+import { SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS } from "@/components/right-panel/shell/panel-tokens";
 
 describe("secondary panel surface tone", () => {
   it("uses the same sidebar background token as the primary sidebar", () => {

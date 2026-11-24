@@ -1,6 +1,6 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
 import { flushSync } from "react-dom";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useStore } from "jotai";
 import { setPluginEnabled } from "@/hooks/queries/plugin-settings-queries";
 import { maximizedPaneIdAtom, splitLayoutAtom } from "@/lib/split-layout/atoms";

@@ -1,6 +1,7 @@
 import {
   deleteQueuedThreadMessage,
   getThread,
+  hostDaemonSessions,
   listQueuedThreadMessages,
 } from "@cloudroom/db";
 import type { PromptInput } from "@cloudroom/domain";
@@ -107,6 +108,9 @@ it("holds after a run, joins only exact copies, until the card is gone", async (
 
     // A held same-text card keeps holding past the window, until deleted.
     vi.spyOn(Date, "now").mockReturnValue(Date.now() + WINDOW + 1);
+    // A live daemon heartbeats through the jump (#2171).
+    const leaseExpiresAt = Date.now() + 30_000;
+    h.db.update(hostDaemonSessions).set({ leaseExpiresAt }).run();
     expect(await tell(h, id)).toEqual([HELD]);
     expect(cards(h, id)).toHaveLength(3);
     for (const row of cards(h, id)) {
@@ -170,5 +174,24 @@ it("does not hold after other input, outside the window, or for Loops", async ()
 
     const loop = { input: textInput("[room-cli automation due:a1] Check CI") };
     expect(await tell(h, id, LIMIT + 1, loop)).toEqual(sent(LIMIT + 1));
+  });
+});
+
+it("never holds what a person typed in the app, even after it queued", async () => {
+  await withTestHarness(async (h) => {
+    const id = seedIdleThread(h);
+    const typed = { fromComposer: true as const };
+    expect(await tell(h, id, LIMIT + 1, typed)).toEqual(sent(LIMIT + 1));
+
+    await send(h, id, typed);
+    expect(outcome(await send(h, id, typed))).toBe("thread-busy");
+    finish(h, id);
+    await drain(h.deps, { threadId: id });
+    expect(thread(h, id).status).toBe("active");
+    expect(cards(h, id)).toEqual([]);
+
+    // A script's copy of the same text is still held.
+    finish(h, id);
+    expect(await tell(h, id)).toEqual([HELD]);
   });
 });

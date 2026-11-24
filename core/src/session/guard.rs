@@ -1,15 +1,20 @@
-//! Background loops: the disk safety guard and the history uploader.
+//! Background loops: the disk safety guard, the shared-children memory note and the history uploader.
 use super::*;
 use crate::workspace::storage::FRESH;
+use std::collections::HashMap;
 
 /// How long work stays frozen before Cloudroom stops the command filling the disk.
 const RESCUE_AFTER: Duration = Duration::from_secs(30);
+/// A stop on a full disk its agent hasn't settled by then ends the agent (`end_for_stop`, #606).
+const STOP_SETTLES: Duration = Duration::from_secs(5);
 /// A command that wrote less than this is not filling the disk, so it is never stopped.
 const RESCUE_MIN_BYTES: u64 = 32_000_000;
 /// History uploads wait this long for more records, so a busy session sends one file per half minute.
 const UPLOAD_AFTER: Duration = Duration::from_secs(30);
 /// ...unless this many records wait already.
 const UPLOAD_RECORDS: u64 = 1024;
+/// How often the parent of shared-sandbox children may hear that the kernel kills processes for memory (#1619).
+const MEMORY_NOTE_EVERY: Duration = Duration::from_secs(10 * 60);
 /// Folds saved history into gzip segments (#280). Off for one release: Core before it can't open a compacted journal,
 /// so a rollback must find none. Follow-up: turn it on once every Core reads segments.
 const COMPACT_HISTORY: bool = false;
@@ -37,8 +42,10 @@ impl Manager {
             let mut last_cleanup = Instant::now() - Duration::from_secs(60);
             let mut was_blocked = manager.storage.blocks();
             let mut blocked_since: Option<Instant> = None;
+            let mut stops: HashMap<String, Instant> = HashMap::new();
             let mut measured = Instant::now();
             while !manager.is_stopping() {
+                manager.storage.reserve();
                 let snapshot = manager.check_storage().await;
                 if measured.elapsed() > FRESH {
                     let gap_ms = elapsed_ms(measured);
@@ -69,6 +76,8 @@ impl Manager {
                         for id in ids {
                             let text = if snapshot.reason == "measurement_unavailable" {
                                 "Cloudroom: disk space could not be measured. Work is paused until storage can be verified. Your files and history are preserved."
+                            } else if snapshot.level == Level::Blocked && manager.storage.stuck() {
+                                "Cloudroom: the disk is full, so work is paused until space is freed; Clear caches & builds frees space. Your files and history are preserved."
                             } else if snapshot.level == Level::Blocked {
                                 "Cloudroom: the disk is almost full, so work is paused. If space does not recover within 30 seconds, Cloudroom stops the command filling it. Your files and history are preserved."
                             } else {
@@ -115,16 +124,31 @@ impl Manager {
                     }
                 }
                 if snapshot.level == Level::Blocked {
-                    let handles: Vec<_> = manager
-                        .local
-                        .lock()
-                        .unwrap()
-                        .sessions
-                        .values()
-                        .filter_map(|s| s.handle.clone().map(|h| (s.session_id.clone(), h)))
+                    let handles: Vec<_> = (manager.local.lock().unwrap().sessions.values())
+                        .filter_map(|s| {
+                            let handle = s.handle.clone()?;
+                            Some((s.session_id.clone(), handle, s.interrupt_pending()))
+                        })
                         .collect();
                     let mut all_paused = manager.storage.pause_writers(true).await.is_ok();
-                    for (id, handle) in handles {
+                    stops.retain(|id, _| {
+                        handles.iter().any(|(s, _, stopping)| s == id && *stopping)
+                    });
+                    for (id, handle, stopping) in handles {
+                        // A stop always settles (#606): every command its agent runs ends first, so only the agent
+                        // wakes, until the stop settles, then it pauses again. One its agent hasn't settled within
+                        // STOP_SETTLES ends the agent. Only on a measured full disk: an unmeasured one thaws nothing.
+                        if stopping && snapshot.reason == "disk_capacity" {
+                            let since = *stops.entry(id.clone()).or_insert_with(|| {
+                                let _ = handle.stop_commands();
+                                Instant::now()
+                            });
+                            let _ = handle.pause(false).await;
+                            if since.elapsed() >= STOP_SETTLES {
+                                manager.end_for_stop(&id, &handle).await;
+                            }
+                            continue;
+                        }
                         if handle.pause(true).await.is_ok() {
                             let mut local = manager.local.lock().unwrap();
                             if !local.sessions[&id].storage_paused {
@@ -133,6 +157,9 @@ impl Manager {
                                         "storage_pause",
                                         json!({"paused":true,"reason":snapshot.reason,"text":format!("{}{reading}", if snapshot.reason == "measurement_unavailable" {
                                             "Cloudroom: disk space could not be measured. Work is paused until storage can be verified."
+                                        } else if manager.storage.stuck() {
+                                            // At the lowest line no rescue runs (`Guard::rescue`).
+                                            "Cloudroom: work paused because the disk is full. It stays paused until space is freed; Clear caches & builds frees space."
                                         } else {
                                             "Cloudroom: work paused because the disk is almost full. If space does not recover within 30 seconds, Cloudroom stops the command filling it."
                                         })}),
@@ -159,6 +186,7 @@ impl Manager {
                 } else if was_blocked
                     || (snapshot.level == Level::Normal && manager.has_storage_warning())
                 {
+                    stops.clear();
                     let writers_resumed = manager.storage.pause_writers(false).await.is_ok();
                     let handles: Vec<_> = manager
                         .local
@@ -252,6 +280,86 @@ impl Manager {
                 });
             }
         }
+    }
+
+    /// A stop on a full disk its agent didn't settle within STOP_SETTLES (#606): its turn ends as interrupted, the stop
+    /// completes, and the agent ends with everything it runs, then sleeps (`slept`). Its history stays, and its next
+    /// message resumes it.
+    async fn end_for_stop(self: &Arc<Self>, id: &str, handle: &runtime::Handle) {
+        // Frozen first, so the shutdown ends it at once (`Process::request_shutdown`).
+        let _ = handle.pause(true).await;
+        let mut local = self.local.lock().unwrap();
+        let session = &local.sessions[id];
+        // A stop that settled meanwhile leaves it paused like the rest.
+        if session.releasing
+            || !session.interrupt_pending()
+            || !(session.handle.as_ref()).is_some_and(|h| h.same_process(handle))
+        {
+            return;
+        }
+        let turn = session.current_request.clone();
+        let stops: Vec<_> = (session.receipts.values())
+            .filter(|r| {
+                matches!(r.command.as_str(), "interrupt" | "stop")
+                    && matches!(r.state.as_str(), "accepted" | "delivered")
+            })
+            .map(|r| r.request_id.clone())
+            .collect();
+        self.release(&mut local, id);
+        if let Some(turn) = turn {
+            let _ = local.finish_receipt(id, &turn, "interrupted");
+        }
+        for stop in stops {
+            let _ = local.finish_receipt(id, &stop, "completed");
+        }
+        let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
+    }
+
+    /// Shared-sandbox children share their parent's memory, and the kernel kills their tools first (exit 137), so they
+    /// can retry for an hour while nobody tells the agent that started them (#1619). While any works and the kill
+    /// count grows, its parent gets one note as context, at most every 10 minutes (Marko, 2026-11-17).
+    pub fn start_memory_guard(self: &Arc<Self>) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            // The kill count when shared children started working or the last note went out, and when.
+            let (mut since, mut noted) = (None, None::<Instant>);
+            while !manager.is_stopping() {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let parents: Vec<_> = {
+                    let local = manager.local.lock().unwrap();
+                    let mut working = BTreeMap::<&str, usize>::new();
+                    for child in local.sessions.values().filter(|s| s.busy()) {
+                        if let Some(parent) = &child.parent_session {
+                            *working.entry(parent).or_default() += 1;
+                        }
+                    }
+                    (working.into_iter())
+                        .filter_map(|(id, n)| Some((local.sessions.get(id)?.handle.clone()?, n)))
+                        .collect()
+                };
+                if parents.is_empty() {
+                    since = None;
+                    continue;
+                }
+                let Some(kills) = oom_kills() else { continue };
+                let (before, at) = *since.get_or_insert((kills, Instant::now()));
+                if kills <= before || noted.is_some_and(|at| at.elapsed() < MEMORY_NOTE_EVERY) {
+                    continue;
+                }
+                let (killed, minutes) =
+                    (kills - before, at.elapsed().as_secs().div_ceil(60).max(1));
+                let plural = if killed == 1 { "" } else { "es" };
+                for (handle, children) in parents {
+                    let text = format!(
+                        "<cloudroom_custom_instructions>\n[Cloudroom] This sandbox ran out of memory: in the last {minutes} min the kernel killed {killed} process{plural} (exit 137) while {children} of your shared-sandbox children worked, so their dev servers, browsers and checks keep dying and retries won't help. Stop some of them (`room-cli thread stop`), or start heavy work in its own sandbox: spawn without --shared-sandbox.\n</cloudroom_custom_instructions>"
+                    );
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(2), handle.system_message(&text))
+                            .await;
+                }
+                (since, noted) = (Some((kills, Instant::now())), Some(Instant::now()));
+            }
+        });
     }
 
     /// Saves history in batches (ADR 0232): when the oldest unsaved record is 30 s old, 1,024 records wait, the

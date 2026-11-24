@@ -12,7 +12,7 @@ import {
 } from "@/lib/split-layout";
 import { decideThreadDrop, type SplitZone } from "@/lib/split-drag";
 import type { PaneContent, SplitLayout } from "@/lib/split-layout";
-import { matchPath } from "react-router-dom";
+import { matchPath } from "react-router";
 import {
   APP_ROOT_ROUTE_PATH,
   getPluginDetailRoutePath,

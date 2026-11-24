@@ -1,4 +1,9 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import {
+  forwardRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from "react";
 import type {
   EnvironmentStatus,
   GitBranchRefClassification,
@@ -27,6 +32,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import {
   getPullRequestAttentionDisplay,
+  getPullRequestFix,
   getPullRequestGithubCheckStatus,
   PULL_REQUEST_STATE_DISPLAY,
 } from "@/lib/pull-request-display";
@@ -34,7 +40,6 @@ import { PullRequestStatusPill } from "@/components/pull-request/PullRequestStat
 import { AnimatedBody } from "@/components/promptbox/banner/AnimatedBody";
 import {
   BannerActionSlot,
-  PROMPT_BANNER_ACTION_FILL_CLASS,
   PROMPT_BANNER_ACTION_SEGMENT_CLASS,
   PromptBannerActionButton,
 } from "@/components/promptbox/banner/prompt-banner-actions";
@@ -71,6 +76,8 @@ export interface ThreadPromptPullRequestSection {
     onMarkReady?: () => void;
     onMerge?: (method: PullRequestMergeMethod) => void;
     onConvertToDraft?: () => void;
+    /** Sends `prompt` to the thread's agent, for "Fix checks" and "Address review". */
+    onFix?: (prompt: string) => Promise<void> | void;
     selectedMergeMethod?: PullRequestMergeMethod;
   };
 }
@@ -125,8 +132,8 @@ const SECTION_IDS = {
 
 const SEGMENT_SHRINK_CLASS = "min-w-0 overflow-hidden";
 const CONTEXT_BANNER_CARD_CLASS = cn(
-  "relative z-10 ml-auto mr-3 w-fit overflow-hidden sm:mr-4",
-  "[[data-app-composer]_&:last-child]:-mb-5 [[data-app-composer]_&:last-child]:rounded-b-none [[data-app-composer]_&:last-child]:border-b-0 [[data-app-composer]_&:last-child]:pb-3",
+  "relative z-10 ml-auto mr-3 w-fit overflow-hidden rounded-xl border-0 bg-composer p-0.5 sm:mr-4",
+  "[[data-app-composer]_&:last-child]:-mb-5 [[data-app-composer]_&:last-child]:rounded-b-none [[data-app-composer]_&:last-child]:pb-3",
 );
 const CONTEXT_BANNER_ROW_CLASS =
   "flex items-center gap-0.5 p-0.5 text-xs text-muted-foreground";
@@ -216,14 +223,7 @@ function shouldShowPullRequestAttentionLabel(
 }
 
 const PromptBannerActionGroup = ({ children }: { children: ReactNode }) => (
-  <div
-    className={cn(
-      "inline-flex overflow-hidden rounded border border-border",
-      PROMPT_BANNER_ACTION_FILL_CLASS,
-    )}
-  >
-    {children}
-  </div>
+  <div className="inline-flex overflow-hidden rounded">{children}</div>
 );
 
 const PromptBannerActionSegmentButton = forwardRef<
@@ -259,9 +259,37 @@ function PendingBannerActionButton({
   onClick: () => void;
 }) {
   return (
-    <PromptBannerActionButton onClick={onClick} disabled={pending}>
+    <PromptBannerActionButton
+      onClick={onClick}
+      disabled={pending}
+      className="border-transparent bg-transparent shadow-none"
+    >
       {pending ? pendingLabel : label}
     </PromptBannerActionButton>
+  );
+}
+
+/** The one solid control in the banner: sends the agent a prompt to fix what blocks the pull request. */
+function PullRequestFixButton({
+  label,
+  onFix,
+}: {
+  label: string;
+  onFix: () => Promise<void> | void;
+}) {
+  const [sending, setSending] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={sending}
+      onClick={() => {
+        setSending(true);
+        void Promise.resolve(onFix()).finally(() => setSending(false));
+      }}
+      className="cursor-pointer whitespace-nowrap rounded-full bg-foreground px-2.5 py-0.5 text-xs font-medium text-background transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -302,7 +330,7 @@ function PullRequestMergeSplitButton({
           <PromptBannerActionSegmentButton
             disabled={Boolean(disabled)}
             className={cn(
-              "inline-flex items-center border-l border-border px-1 data-[state=open]:bg-state-active data-[state=open]:text-foreground",
+              "inline-flex items-center px-1 data-[state=open]:bg-state-active data-[state=open]:text-foreground",
             )}
             aria-label="Choose pull request merge method"
           >
@@ -610,29 +638,41 @@ export function ThreadPromptContextBanner({
   const showPullRequestLabel =
     hasSingleVisibleSegment || isPullRequestAndGitOnly;
   const pullRequestActions = pullRequestSection?.actions;
-  const pullRequestAction =
+  const pullRequestFix = pullRequest ? getPullRequestFix(pullRequest) : null;
+  const onPullRequestFix = pullRequestActions?.onFix;
+  const pullRequestFixButton =
+    pullRequestFix && onPullRequestFix ? (
+      <PullRequestFixButton
+        label={pullRequestFix.label}
+        onFix={() => onPullRequestFix(pullRequestFix.prompt)}
+      />
+    ) : null;
+  const pullRequestStateButton =
     pullRequest && pullRequestActions ? (
       pullRequest.state === "draft" && pullRequestActions.onMarkReady ? (
-        <BannerActionSlot>
-          <PendingBannerActionButton
-            pending={Boolean(pullRequestActions.isPending)}
-            label="Mark ready"
-            pendingLabel="Marking..."
-            onClick={pullRequestActions.onMarkReady}
-          />
-        </BannerActionSlot>
+        <PendingBannerActionButton
+          pending={Boolean(pullRequestActions.isPending)}
+          label="Mark ready"
+          pendingLabel="Marking..."
+          onClick={pullRequestActions.onMarkReady}
+        />
       ) : pullRequest.state === "open" &&
         pullRequest.mergeability.state === "mergeable" &&
         pullRequestActions.onMerge ? (
-        <BannerActionSlot>
-          <PullRequestMergeSplitButton
-            disabled={pullRequestActions.isPending}
-            onConvertToDraft={pullRequestActions.onConvertToDraft}
-            onMerge={pullRequestActions.onMerge}
-            selectedMethod={pullRequestActions.selectedMergeMethod ?? "merge"}
-          />
-        </BannerActionSlot>
+        <PullRequestMergeSplitButton
+          disabled={pullRequestActions.isPending}
+          onConvertToDraft={pullRequestActions.onConvertToDraft}
+          onMerge={pullRequestActions.onMerge}
+          selectedMethod={pullRequestActions.selectedMergeMethod ?? "merge"}
+        />
       ) : null
+    ) : null;
+  const pullRequestAction =
+    pullRequestFixButton || pullRequestStateButton ? (
+      <BannerActionSlot>
+        {pullRequestFixButton}
+        {pullRequestStateButton}
+      </BannerActionSlot>
     ) : null;
 
   const compactContextBanner =

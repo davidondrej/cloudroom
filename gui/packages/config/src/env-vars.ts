@@ -237,11 +237,40 @@ export const OPENAI_API_KEY_ENV = defineEnvVar<string>({
   parse: parseStringEnvValue,
 });
 
+function parseDoNotTrackEnvValue(args: EnvVarParseArgs): boolean {
+  const normalizedValue = args.value.trim().toLowerCase();
+  if (
+    normalizedValue === "" ||
+    normalizedValue === "false" ||
+    normalizedValue === "0" ||
+    normalizedValue === "no" ||
+    normalizedValue === "n"
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 export const ROOM_TELEMETRY_ENV = defineEnvVar<boolean>({
   description:
-    "Anonymous usage telemetry (app starts, thread creation counts, user message counts, and plugin installs). Set to false to opt out.",
+    "Usage telemetry and setup diagnostics (app starts, thread and message counts, Local token totals, active minutes, plugin installs, and scrubbed errors). Set to false to opt out (or use CLOUDROOM_TELEMETRY=false or DO_NOT_TRACK=1).",
   name: "BB_TELEMETRY",
   parse: parseBooleanEnvValue,
+});
+
+export const CLOUDROOM_TELEMETRY_ENV = defineEnvVar<boolean>({
+  description:
+    "Alias for BB_TELEMETRY. Set to false to opt out of usage telemetry and setup diagnostics.",
+  name: "CLOUDROOM_TELEMETRY",
+  parse: parseBooleanEnvValue,
+});
+
+export const DO_NOT_TRACK_ENV = defineEnvVar<boolean>({
+  description:
+    "Standard Do Not Track flag (https://consoledonottrack.com). Set to 1 or true to opt out of usage telemetry and setup diagnostics.",
+  name: "DO_NOT_TRACK",
+  parse: parseDoNotTrackEnvValue,
 });
 
 export const ROOM_FF_PLACEHOLDER_ENV = defineEnvVar<boolean>({

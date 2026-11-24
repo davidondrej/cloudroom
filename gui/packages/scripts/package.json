@@ -23,8 +23,8 @@
   ],
   "scripts": {
     "build": "node ../../scripts/build-package.mjs",
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "cli": "node dist/commands/run-cli.js",
     "dev:host-daemon": "node dist/commands/run-host-daemon.js --auto-join",
@@ -39,14 +39,12 @@
     "@cloudroom/db": "workspace:*",
     "@cloudroom/domain": "workspace:*",
     "@cloudroom/host-daemon-contract": "workspace:*",
-    "@cloudroom/process-utils": "workspace:*",
-    "picocolors": "^1.1.1"
+    "@cloudroom/process-utils": "workspace:*"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

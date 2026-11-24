@@ -34,7 +34,7 @@ className?, leadingContent?, messageActions? }` —
 - `experimental_ProviderModelPicker` — Cloudroom's controlled provider, model, and
   reasoning picker. Props:
   `{ value: { providerId, model, reasoningLevel, serviceTier? }, onChange,
-routing?, allowProviderChange?, align?, disabled?, className? }`, where `routing` is
+routing?, allowProviderChange?, extraChoice?, align?, disabled?, className? }`, where `routing` is
   `{ kind: "host", hostId }` or `{ kind: "environment", environmentId }`.
   It uses the same live catalog, defaults, capability
   reconciliation, retired-model handling, search, and provider branding as
@@ -60,6 +60,9 @@ routing?, allowProviderChange?, align?, disabled?, className? }`, where `routing
   `allowProviderChange={false}` hides the provider tabs while leaving model,
   reasoning, and service-tier controls available for the fixed `providerId`.
   This is independent of routing: one environment can run several providers.
+  `extraChoice={{ label, icon, onSelect }}` adds one more tab after the
+  providers, for a choice that is not an agent. Picking it closes the picker
+  and calls `onSelect`; `value` stays as it is, and you render the choice.
   `align` optionally sets the popover to `"start"`, `"center"`, or `"end"`;
   it defaults to `"start"`.
 

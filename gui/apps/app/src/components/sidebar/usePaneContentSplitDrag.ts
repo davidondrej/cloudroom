@@ -4,7 +4,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { useStore } from "jotai";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
   getPluginPanelRoutePath,

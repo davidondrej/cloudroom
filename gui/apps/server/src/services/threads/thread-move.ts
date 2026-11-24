@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
   createEventId,
   environmentHasLiveThreads,
@@ -26,10 +27,12 @@ import type { AppDeps } from "../../types.js";
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { macAccess } from "../cloudroom/previews.js";
 import { teleportBlocked } from "../cloudroom/store.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
+  detachEnvironmentWithoutOpenThreads,
   provisionUnmanagedEnvironmentForPath,
   reuseEnvironmentForPath,
 } from "./thread-environment-directory.js";
@@ -54,7 +57,7 @@ export interface ThreadMoveResult {
 export type MoveRequester = "local" | "cloud-agent";
 
 const AGENT_MOVE_REFUSED =
-  "The agent asked to move this thread to another project. Cloudroom didn't move it because Mac access isn't Full. Move it from the thread menu.";
+  `The agent asked to move this thread to another project. Cloudroom didn't move it because ${COMPUTER_TITLE} access isn't Full. Move it from the thread menu.`;
 const AGENT_MOVE_LIMITED =
   "The agent asked to move this thread to another project. Cloudroom didn't move it because this sandbox has only the API keys picked for its Cloud loop. Move it from the thread menu.";
 const AGENT_MOVE_UNCHECKED =
@@ -302,6 +305,11 @@ async function moveLocalThread(
       environmentId: target.id,
     });
     record(tx);
+    if (
+      current?.environmentProviderId ===
+      DEFAULT_ENVIRONMENT_PROVIDER_ID.personalWorkspace
+    )
+      detachEnvironmentWithoutOpenThreads(tx, current.id);
   });
   if (
     current?.environmentProviderId &&

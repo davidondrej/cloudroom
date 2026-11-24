@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "standalone:start": "tsx src/standalone/start.ts",
     "standalone:stop": "tsx src/standalone/stop.ts",
@@ -21,10 +21,8 @@
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "rimraf": "^6.1.0",
     "tsx": "^4.23.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

@@ -10,6 +10,7 @@ import {
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createServer } from "node:net";
+import { isSecureOrLoopbackUrl } from "@cloudroom/config/loopback";
 import { mutateManagedJsonFile } from "@cloudroom/config/managed-json-file";
 import { z } from "zod";
 
@@ -191,6 +192,11 @@ export async function enrollMachine(
     await prepareRuntime();
     return { hostId: auth.hostId };
   }
+  const insecure = !isSecureOrLoopbackUrl(serverUrl);
+  if (insecure && env.BB_ALLOW_INSECURE_SERVER_URL !== "1")
+    throw new Error(
+      `Refusing to send this machine's enrollment credential to ${serverUrl} over plain HTTP. Use an https:// server address, or, on a network you trust, set BB_ALLOW_INSECURE_SERVER_URL=1.`,
+    );
   if (bootstrap.expiresAt <= Date.now())
     throw new Error("Machine enrollment bootstrap has expired");
   const fetchFn = runtime.fetchFn ?? fetch;
@@ -207,6 +213,18 @@ export async function enrollMachine(
       return { ...current, serverUrl, serverHeaders: bootstrap.headers };
     },
   });
+  if (insecure) {
+    // The installed service reads env.json, so its daemon keeps the opt-in.
+    const envPath = join(dataDir, "env.json");
+    await mutateManagedJsonFile<{ env?: Record<string, string> }>({
+      path: envPath,
+      read: async () => JSON.parse((await readOptional(envPath)) ?? "{}"),
+      mutate: (current) => ({
+        ...current,
+        env: { ...current.env, BB_ALLOW_INSECURE_SERVER_URL: "1" },
+      }),
+    });
+  }
   await atomicWrite(join(dataDir, "host-id"), `${bootstrap.hostId}\n`);
   await prepareRuntime();
   // Name only safe facts: status, a code our enroll route returns, or a system
@@ -234,6 +252,7 @@ export async function enrollMachine(
           hostId: bootstrap.hostId,
           hostName: hostname(),
         }),
+        redirect: "error",
         signal,
       },
     );

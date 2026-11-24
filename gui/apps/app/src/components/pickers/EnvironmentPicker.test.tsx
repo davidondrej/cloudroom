@@ -7,7 +7,7 @@ import {
   screen,
 } from "@testing-library/react";
 import type { ReactElement } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { Host, ProjectSource } from "@cloudroom/domain";
 import { makeHost } from "@cloudroom/test-helpers/domain-fixtures";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";

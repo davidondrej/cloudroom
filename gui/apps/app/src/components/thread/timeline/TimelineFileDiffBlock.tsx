@@ -6,7 +6,7 @@ import {
   getRenderablePatchText,
   type RenderablePatchText,
 } from "@cloudroom/client-core";
-import { GitDiffCard } from "../../git-diff/GitDiffCard.js";
+import { GitDiffCard } from "@/components/diff/diff-card";
 import { EventCodeBlock } from "../../ui/event-code-block.js";
 import type { DiffPresentation } from "@/components/code/code-rendering";
 import { TimelineDetailScroll } from "./TimelineDetailScroll.js";

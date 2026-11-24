@@ -21,6 +21,28 @@ describe("NotificationHub", () => {
     vi.useRealTimers();
   });
 
+  it("fires a host disconnect deadline once per outage until a socket registers", async () => {
+    vi.useFakeTimers();
+    const hub = new NotificationHub();
+    const fired = vi.fn();
+    const schedule = () =>
+      hub.scheduleHostDisconnectDeadline("host-1", "setup", 30_000, fired);
+
+    schedule();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fired).toHaveBeenCalledTimes(1);
+
+    // An HTTP-only reopen later in the same outage starts nothing (#1956).
+    schedule();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fired).toHaveBeenCalledTimes(1);
+
+    hub.registerDaemon("session-2", "host-1", createMockHubSocket());
+    schedule();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fired).toHaveBeenCalledTimes(2);
+  });
+
   it("subscribes clients and delivers thread notifications", () => {
     const hub = new NotificationHub();
     const socket = createMockHubSocket();

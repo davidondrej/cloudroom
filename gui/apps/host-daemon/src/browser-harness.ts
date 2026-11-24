@@ -241,6 +241,25 @@ old='retry the browser command and run .* when the prompt appears'
 if grep -qs "$old" "$mac"; then
   sed "s|$old|the Allow sheet was not found here: it can be on another Space or desktop, in another language, or in a browser other than Google Chrome. Do not run mac-approve again. Ask the user to switch to the browser and click Allow; the waiting browser command then continues. If they see no prompt, retry the browser command once|" "$mac" > "$mac.$$" 2>/dev/null && mv -f "$mac.$$" "$mac" 2>/dev/null || rm -f "$mac.$$"
 fi
+# Chrome rejects a connection at once, with no popup, while it has no open window (a Mac keeps Chrome running after its
+# last window closes), so every retry failed with 0.1.13's bare "ended before approval" (#1702). Name the fix. Swapped in
+# by rename like run.py; skips itself once a release changes the line.
+old='^                    "browser-harness did not retry or create another connection[.]"$'
+new='                    "browser-harness did not retry or create another connection. Chrome rejects the connection at once, with no popup, when it has no open browser window. Ask the user to open a Chrome window and confirm, then retry once; they click Allow on the popup that appears. Do not retry before they confirm."'
+if grep -qs "$old" "$admin"; then
+  sed "s|$old|$new|" "$admin" > "$admin.$$" 2>/dev/null && mv -f "$admin.$$" "$admin" 2>/dev/null || rm -f "$admin.$$"
+fi
+# 0.1.13 waits with no time limit while Chrome's Allow popup is open, so an unattended run hung until something killed it
+# (#2521). Give up after 90 s, under agents' usual 2-minute command limit: upstream's permission-blocked error then fires
+# and the pending daemon keeps the popup up, so a later click still connects. Swapped in by rename like run.py; skips
+# itself once a release changes the line.
+old='^    approval_wait = None if local and not explicit_wait else startup_wait$'
+new='    approval_wait = 90.0 if local and not explicit_wait else startup_wait'
+old_msg='^                "Approve that exact popup; browser-harness did not retry or create another connection[.]"$'
+new_msg='                "Approve that exact popup; browser-harness did not retry or create another connection. In an unattended run, stop and tell the user to click Allow in Chrome."'
+if grep -qs "$old" "$admin"; then
+  sed -e "s|$old|$new|" -e "s|$old_msg|$new_msg|" "$admin" > "$admin.$$" 2>/dev/null && mv -f "$admin.$$" "$admin" 2>/dev/null || rm -f "$admin.$$"
+fi
 
 # 0.1.13 reads BU_CDP_URL as an HTTP address and polls its /json/version, so a WebSocket address there, such as a
 # built-in browser lease's endpoint, failed after 30 s (#1335). Pass a ws:// or wss:// one on as BU_CDP_WS.
