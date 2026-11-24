@@ -1,7 +1,6 @@
 import {
   AutomationScriptContent,
   ScriptAutomationDefinition,
-  RunRow,
 } from "bb-plugin-automations/detail-view";
 import {
   CloudAutomationRow,
@@ -10,7 +9,6 @@ import {
 import type { CloudAutomation } from "bb-plugin-automations/cloud-view";
 import type {
   AutomationResponse,
-  AutomationRunResponse,
   AutomationsOverviewResponse,
 } from "bb-plugin-automations/rpc-types";
 import { ResourceListState } from "@cloudroom/shared-ui/resource-list";
@@ -110,57 +108,9 @@ const OVERVIEW_ENTRIES: AutomationsOverviewResponse["automations"] = [
   },
 ];
 
-const DETAIL_AUTOMATION = automation("nightly-digest", "Nightly digest", {
-  trigger: {
-    triggerType: "schedule",
-    cron: "0 9 * * 1-5",
-    timezone: "UTC",
-  },
-  execution: {
-    mode: "agent",
-    prompt: "Summarize yesterday's commits and open pull requests.",
-    providerId: "claude-code",
-    model: "claude-fable-5",
-    reasoningLevel: "medium",
-    permissionMode: "auto",
-    environment: { type: "host", workspace: { type: "personal" } },
-  },
-  nextRunAt: now,
-  lastRunAt: null,
-  runCount: 0,
-  lastRunStatus: null,
-});
-
-const PROJECT_AUTOMATION: AutomationResponse = {
-  ...DETAIL_AUTOMATION,
-  projectId: "proj_bb",
-  lastRunAt: now,
-  runCount: 3,
-  lastRunStatus: "running",
-  execution: {
-    mode: "agent",
-    prompt: "Summarize yesterday's commits and open pull requests.",
-    providerId: "claude-code",
-    model: "claude-fable-5",
-    reasoningLevel: "medium",
-    permissionMode: "auto",
-    environment: {
-      type: "host",
-
-      workspace: {
-        type: "unmanaged",
-        path: "/Users/you/Code/bb",
-        branch: { kind: "existing", name: "agent/tools-hub-schedules" },
-      },
-    },
-  },
-};
-
-const SCRIPT_AUTOMATION: AutomationResponse = {
-  ...DETAIL_AUTOMATION,
-  id: "sync-reports",
-  name: "Sync reports",
+const SCRIPT_AUTOMATION = automation("sync-reports", "Sync reports", {
   trigger: { triggerType: "once", runAt: now },
+  nextRunAt: now,
   lastRunAt: now - 3_600_000,
   runCount: 1,
   lastRunStatus: "succeeded",
@@ -202,47 +152,7 @@ echo "Reports written to $output_dir"`,
       GH_HOST: "github.com",
     },
   },
-};
-
-function runsFor(
-  value: AutomationResponse,
-  statuses: readonly AutomationRunResponse["status"][],
-): AutomationRunResponse[] {
-  const script = value.execution.mode === "script";
-  const latestStartedAt = value.lastRunAt ?? now;
-  return statuses.map((status, index) => {
-    const startedAt = latestStartedAt - index * 3_600_000;
-    return {
-      id: `${value.id}_run_${index}`,
-      automationId: value.id,
-      runMode: value.execution.mode,
-      threadId: script ? null : `thr_${value.id}_${index}`,
-      status,
-      trigger:
-        value.trigger.triggerType === "once" && !value.enabled
-          ? "schedule"
-          : index === 0
-            ? "manual"
-            : "schedule",
-      skipReason: script && status === "skipped" ? "empty output" : null,
-      error:
-        status === "failed"
-          ? script
-            ? "Script exited with code 1"
-            : "Provider timed out"
-          : null,
-      output:
-        script && status === "succeeded"
-          ? "Reports written to ./reports"
-          : null,
-      exitCode:
-        script && status !== "running" ? (status === "failed" ? 1 : 0) : null,
-      scheduledFor: startedAt,
-      startedAt,
-      finishedAt: status === "running" ? null : startedAt + 42_000,
-    };
-  });
-}
+});
 
 export function OverviewRows() {
   const descriptions: Record<string, { label: string; hint: string }> = {
@@ -409,24 +319,6 @@ export function DetailStates() {
           />
         </div>
       </StoryRow>
-    </StoryCard>
-  );
-}
-
-export function RunStates() {
-  return (
-    <StoryCard>
-      {[PROJECT_AUTOMATION, SCRIPT_AUTOMATION].flatMap((value) =>
-        runsFor(value, ["running", "succeeded", "failed", "skipped"]).map(
-          (run) => (
-            <StoryRow key={run.id} label={`${run.runMode} · ${run.status}`}>
-              <div className="w-full max-w-2xl">
-                <RunRow run={run} onOpenThread={noop} />
-              </div>
-            </StoryRow>
-          ),
-        ),
-      )}
     </StoryCard>
   );
 }

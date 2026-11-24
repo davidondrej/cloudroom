@@ -60,7 +60,7 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     await startupReady;
     record("state", { state: "starting_turn", request_id: body.request_id });
     record("native_event", { harness: "pi", type: "message_start" }, { type: "message_start", message: { role: "assistant", content: [], timestamp: 10 } });
-    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Cloud Pi result" } });
+    for (const delta of ["Cloud ", "Pi ", "result"]) record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta } });
     record("item_started", { harness: "pi" }, { type: "tool_execution_start", toolCallId: "tool", toolName: "bash", args: { command: "pwd" } });
     for (const output of ["/code", "/code/test"]) record("tool_snapshot", { harness: "pi" }, { type: "tool_execution_update", toolCallId: "tool", toolName: "bash", partialResult: { content: [{ type: "text", text: output }] } });
     record("item_completed", { harness: "pi" }, { type: "tool_execution_end", toolCallId: "tool", toolName: "bash", result: { content: [{ type: "text", text: "/code/test" }] }, isError: false });
@@ -92,6 +92,8 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     expect(getThread(app.db, thread.id)?.environmentId).toBeNull();
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "turn/completed").length).toBe(1);
     const projected = app.db.select().from(events).all().map(e => JSON.parse(e.data));
+    // Streamed tokens wait to save together, as one event, but never after the record that follows them (#1248).
+    expect(projected.filter(e => e.type === "item/started" || e.type === "item/agentMessage/delta").map(e => e.item?.type ?? e.type)).toEqual(["agentMessage", "item/agentMessage/delta", "toolCall"]);
     expect(projected.filter(e => e.type === "turn/started")).toHaveLength(1);
     expect(projected.find(e => e.type === "client/turn/requested").execution).toMatchObject({ model, reasoningLevel: "high" });
     expect(projected.find(e => e.type === "thread/contextWindowUsage/updated").contextWindowUsage).toEqual({ usedTokens: 128, modelContextWindow: 100000, estimated: true });
@@ -128,15 +130,27 @@ it.each([false, true])("routes Pi through the core and replays messages without 
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "item/delegation/completed").map(e => JSON.parse(e.data).item)).toEqual([expect.objectContaining({ childRef: childId, status: "completed", summary: "Child result" })]);
     record("usage", { contextUsage: { tokens: null, contextWindow: 100000 } });
     await expect.poll(() => app.db.select().from(events).all().filter(e => e.type === "thread/contextWindowUsage/updated").map(e => JSON.parse(e.data).contextWindowUsage).at(-1)).toEqual({ usedTokens: null, modelContextWindow: 100000, estimated: true });
+    // A record that cannot be saved does not take the records that waited with it: they are saved, and the cursor
+    // stops before the bad one, as if each had come alone (#1248).
+    const deltas = () => app.db.select().from(events).all().filter(e => e.type === "item/agentMessage/delta").map(e => JSON.parse(e.data).delta);
+    const before = deltas().length;
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "kept " } });
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "text" } });
+    record("text_delta", { harness: "pi" }, { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: 5 } });
+    await expect.poll(() => deltas().slice(before).join("")).toBe("kept text");
+    await expect.poll(() => JSON.stringify(service.threadStatus(thread.id))).toContain("Cloudroom history could not be restored");
+    expect(app.db.select().from(cloudroomThreads).all().find(row => row.threadId === thread.id)?.cursor).toBe(records.length - 1);
+    expect(deltas().slice(before).join("")).toBe("kept text");
   } finally { finishStartup(); service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await app.cleanup(); }
 }, 15000);
 
-it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-ups without enabling other mentions", async (providerId) => {
+it.each(["pi", "codex"])("sends selected skills, folder and project tags in Cloud %s, but no other mentions", async (providerId) => {
   const app = await createTestAppHarness();
   const { host } = seedHostSession(app.deps);
   const { project } = seedProjectWithSource(app.deps, { hostId: host.id });
   const service = cloudroom(app.deps);
   const prompts: string[] = [];
+  const starts: { reasoning?: string }[] = [];
   const sid = "cr_skill-test";
   const core = createServer(async (req, res) => {
     const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
@@ -148,6 +162,7 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
     const body = JSON.parse(text);
     const command = req.url === "/v1/sessions" ? "start" : "prompt";
     if (command === "prompt") prompts.push(body.text);
+    else starts.push(body);
     json({ session_id: sid, receipt: { request_id: body.request_id, command, state: "accepted", input: {} }, saving: {} }, 202);
   });
   core.listen(0, "127.0.0.1"); await once(core, "listening");
@@ -157,22 +172,30 @@ it.each(["pi", "codex"])("sends selected skills in Cloud %s starts and follow-up
   const request = (path: string, body: unknown) => app.app.request(`/api/v1${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   try {
     await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
-    const body = { executionTarget: "cloud", requestId: "skill-test", projectId: project.id, providerId, origin: "app", model: providerId === "pi" ? "fixture/test-model" : "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, input: [tagged] };
+    const body = { executionTarget: "cloud", requestId: "skill-test", projectId: project.id, providerId, origin: "app", model: providerId === "pi" ? "fixture/test-model" : "test-model", environment: { type: "project-default" }, input: [tagged] };
     const created = await request("/threads", body);
     expect(created.status, await created.clone().text()).toBe(201);
     const thread = await created.json();
     await expect.poll(() => prompts).toEqual([providerId === "pi" ? "/skill:file-tree show  please" : tagged.text]);
     expect((await request("/threads", body)).status).toBe(201);
     expect(prompts).toHaveLength(1);
+    expect(starts.map(start => start.reasoning)).toEqual([providerId === "pi" ? undefined : "medium"]);
     const follow = await request(`/threads/${thread.id}/send`, { requestId: "skill-follow", mode: "auto", input: [{ type: "text", text: "again", mentions: [] }, { type: "text", text: "/file-tree", mentions: [{ start: 0, end: 10, resource }] }] });
     expect(follow.status, await follow.clone().text()).toBe(200);
     await expect.poll(() => prompts.at(-1)).toBe(providerId === "pi" ? "/skill:file-tree again\n" : "again\n/file-tree");
+    // Folder and project tags reach the agent as plain text, like local threads (#1253).
+    const folder = { kind: "path", source: "workspace", entryKind: "directory", path: "src", label: "src" };
+    const projectTag = { kind: "project", projectId: project.id, label: "Test-Project" };
+    const plain = { type: "text", text: `see @src/ and @project:${project.id}`, mentions: [{ start: 4, end: 9, resource: folder }, { start: 14, end: 23 + project.id.length, resource: projectTag }] };
+    const tags = await request(`/threads/${thread.id}/send`, { requestId: "tag-follow", mode: "auto", input: [plain] });
+    expect(tags.status, await tags.clone().text()).toBe(200);
+    await expect.poll(() => prompts.at(-1)).toBe(plain.text);
     for (const input of [
       [{ ...tagged, mentions: [{ start: 0, end: 10, resource }] }],
       [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { ...resource, source: "command" } }] }],
-      [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { kind: "path", source: "workspace", entryKind: "file", path: "secret.txt", label: "secret.txt" } }] }],
+      [{ ...tagged, mentions: [{ start: 5, end: 15, resource: { kind: "path", source: "thread-storage", entryKind: "file", path: "secret.txt", label: "secret.txt" } }] }],
       [{ type: "localFile", path: "/tmp/secret.txt" }],
     ]) expect((await request(`/threads/${thread.id}/send`, { mode: "auto", input })).status).toBe(400);
-    expect(prompts).toHaveLength(2);
+    expect(prompts).toHaveLength(3);
   } finally { service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await app.cleanup(); }
 });

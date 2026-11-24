@@ -90,7 +90,7 @@ describe("scanTree (pure)", () => {
   it("excludes provider plugins, tests, and fixtures", () => {
     write("plugins/provider-codex/server.ts", 'register("codex");\n'); // provider plugin
     write(
-      "plugins/environment-modal-sandbox/server.ts",
+      "plugins/environment-git-worktree/server.ts",
       'const providerId = "codex";\n',
     );
     write("packages/core/a.test.ts", 'expect("codex").toBe("codex");\n'); // test

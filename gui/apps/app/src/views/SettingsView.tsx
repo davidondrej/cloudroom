@@ -9,7 +9,7 @@ import {
   useNavigate,
   useLocation,
   matchPath,
-} from "react-router-dom";
+} from "react-router";
 import "@cloudroom/shared-ui/icon-extended";
 import {
   builtInThemes,
@@ -19,7 +19,6 @@ import {
   experimentKeys,
   managedBranchPrefixSchema,
   type AppTheme,
-  type WorktreeRetention,
   type ExperimentKey,
   type Experiments,
   type FaviconColorPreference,
@@ -56,6 +55,11 @@ import {
 } from "@/hooks/useTheme";
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
+import { useBrandMark } from "@/hooks/useBrandMark";
+import {
+  useCloudIconStyle,
+  type CloudIconStyle,
+} from "@/hooks/useCloudIconStyle";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -67,7 +71,7 @@ import { SidebarThreadListSetting } from "@/components/settings/SidebarThreadLis
 import { SidebarFooterSettings } from "@/components/settings/SidebarFooterSettings";
 import { SidebarNavigationSetting } from "@/components/settings/SidebarNavigationSetting";
 import { SplitDimmingSetting } from "@/components/settings/SplitDimmingSetting";
-import { StarterPromptsSetting } from "@/components/ActivationChecklist";
+import { OneClickScansSetting } from "@/components/ActivationChecklist";
 import { HarnessIconsSetting } from "@/components/settings/HarnessIconsSetting";
 import { useSettingsNavState } from "@/components/settings/settings-nav";
 import { useRevealSettingsTarget } from "@/components/settings/settings-search";
@@ -84,7 +88,12 @@ import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSectio
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
+  FeaturePromptsSettingsSection,
   ProjectNudgeSettingsSection,
+  DeepapiSettingsSection,
+  SmartSearchSettingsSection,
+  PromptSuggestionsSetting,
+  SkillSuggestionsSetting,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -100,6 +109,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
+import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
@@ -107,8 +117,9 @@ import {
   useUpdateExperiments,
 } from "@/hooks/mutations/settings-mutations";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
+import { WorktreeDiskUse } from "@/components/layout/LowDiskBanner";
 import { useWorkspaceOpenTargets } from "@/hooks/useWorkspaceOpenTargets";
-import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import {
   FAVICON_COLOR_VALUES,
   getFaviconGlyphHref,
@@ -118,6 +129,7 @@ import { useRewriteLocalhostLinksPreference } from "@/lib/localhost-link-rewrite
 import { useRichTextEditingPreference } from "@/lib/rich-text-editing-preference";
 import {
   SETTINGS_ROUTE_PATH,
+  getPluginDetailRoutePath,
   getRootComposeRoutePath,
 } from "@/lib/route-paths";
 import { useNavigateToThreadAfterCreatePreference } from "@/lib/root-compose-create-preference";
@@ -202,12 +214,11 @@ interface GeneralSettingsSectionProps {
   onRewriteLocalhostLinksChange: (enabled: boolean) => void;
   onRichTextEditingChange: (enabled: boolean) => void;
   onSteerActiveThreadOnEnterChange: (enabled: boolean) => void;
-  onWorktreeRetentionChange: (retention: WorktreeRetention) => void;
   openLinksInAppBrowser: boolean;
   rewriteLocalhostLinks: boolean;
   richTextEditing: boolean;
   steerActiveThreadOnEnter: boolean;
-  worktreeRetention: WorktreeRetention;
+  worktreeDiskUse?: ReactNode;
 }
 
 interface PrivacySettingsSectionProps {
@@ -443,6 +454,102 @@ function CornersSetting() {
   );
 }
 
+const CLOUD_ICON_OPTIONS: ReadonlyArray<{
+  iconClassName: string;
+  label: string;
+  value: CloudIconStyle;
+}> = [
+  {
+    iconClassName: "text-primary [&_path]:stroke-[1.9]",
+    label: "Electric lime",
+    value: "electric-lime",
+  },
+  {
+    iconClassName: "text-neutral-950 dark:text-white [&_path]:stroke-[2]",
+    label: "Crisp white",
+    value: "crisp-white",
+  },
+];
+
+function CloudIconSetting() {
+  const [cloudIcon, setCloudIcon] = useCloudIconStyle();
+  const active =
+    CLOUD_ICON_OPTIONS.find((option) => option.value === cloudIcon) ??
+    CLOUD_ICON_OPTIONS[0]!;
+  return (
+    <SettingsWithControl
+      label="Cloud icon"
+      description="Color of the Cloud icon in the composer and sidebar."
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
+            aria-label="Cloud icon"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", active.iconClassName)}
+                aria-hidden
+              />
+              <span className="min-w-0 truncate">{active.label}</span>
+            </span>
+            <Icon
+              name="ChevronDown"
+              className="size-3.5 text-muted-foreground"
+            />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className={SETTINGS_DROPDOWN_CONTENT_CLASS}
+        >
+          {CLOUD_ICON_OPTIONS.map((option) => (
+            <DropdownMenuItem
+              key={option.value}
+              onSelect={() => setCloudIcon(option.value)}
+            >
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", option.iconClassName)}
+                aria-hidden
+              />
+              {option.label}
+              <Icon
+                name="Check"
+                className={cn(
+                  "ml-auto",
+                  cloudIcon !== option.value && "opacity-0",
+                  COARSE_POINTER_ICON_SIZE_CLASS,
+                )}
+              />
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </SettingsWithControl>
+  );
+}
+
+function BrandMarkSetting() {
+  const [showBrandMark, setShowBrandMark] = useBrandMark();
+  return (
+    <SettingsWithControl
+      label="Show Cloudroom name"
+      description="The Cloudroom logo and name at the top of the window."
+    >
+      <Switch
+        checked={showBrandMark}
+        onCheckedChange={setShowBrandMark}
+        aria-label="Show Cloudroom name"
+      />
+    </SettingsWithControl>
+  );
+}
+
 const DIRECTORY_TARGET_PREFERENCE: LocalOpenTargetPreferenceDefinition = {
   capability: "openDirectory",
   emptyDescription: "No local app can open directories.",
@@ -659,16 +766,6 @@ const FOLLOW_UP_BEHAVIOR_OPTIONS = [
 const STREAMER_MODE_SETTING_LABEL = "Streamer mode";
 const MANAGED_BRANCH_PREFIX_SETTING_LABEL = "New branch prefix";
 const MANAGED_BRANCH_PREFIX_EXAMPLE_SLUG = "fix-login-flow-thr_ab12cd34ef";
-const WORKTREE_RETENTION_SETTING_LABEL = "Delete archived worktrees after";
-const WORKTREE_RETENTION_LABELS: Record<WorktreeRetention, string> = {
-  "5m": "5 minutes",
-  "1h": "1 hour",
-  "1d": "1 day",
-  "7d": "7 days",
-  "21d": "21 days",
-  "30d": "30 days",
-  never: "Never",
-};
 
 interface ManagedBranchPrefixSettingProps {
   disabled: boolean;
@@ -814,6 +911,7 @@ export function AppearanceSettingsSection({
           </DropdownMenu>
         </SettingsWithControl>
         <CornersSetting />
+        <BrandMarkSetting />
 
         <SettingsWithControl
           label="Palette"
@@ -904,6 +1002,7 @@ export function AppearanceSettingsSection({
           faviconColor={faviconColor}
           onFaviconColorChange={onFaviconColorChange}
         />
+        <CloudIconSetting />
         <SplitDimmingSetting />
         <SidebarFooterSettings />
         <SettingsWithControl
@@ -917,7 +1016,8 @@ export function AppearanceSettingsSection({
             aria-label="Question cards"
           />
         </SettingsWithControl>
-        <StarterPromptsSetting />
+        <OneClickScansSetting />
+        <PluginSettingsSections pluginId="wallpaper" />
       </div>
     </SettingsSection>
   );
@@ -934,12 +1034,11 @@ export function GeneralSettingsSection({
   onRewriteLocalhostLinksChange,
   onRichTextEditingChange,
   onSteerActiveThreadOnEnterChange,
-  onWorktreeRetentionChange,
   openLinksInAppBrowser,
   rewriteLocalhostLinks,
   richTextEditing,
   steerActiveThreadOnEnter,
-  worktreeRetention,
+  worktreeDiskUse,
 }: GeneralSettingsSectionProps) {
   return (
     <>
@@ -963,6 +1062,9 @@ export function GeneralSettingsSection({
               aria-label={RICH_TEXT_EDITING_SETTING_LABEL}
             />
           </SettingsWithControl>
+
+          <PromptSuggestionsSetting />
+          <SkillSuggestionsSetting />
 
           <SettingsWithControl
             label={FOLLOW_UP_BEHAVIOR_SETTING_LABEL}
@@ -1052,55 +1154,11 @@ export function GeneralSettingsSection({
             disabled={generalSettingsDisabled}
             onChange={onManagedBranchPrefixChange}
           />
-          <SettingsWithControl
-            label={WORKTREE_RETENTION_SETTING_LABEL}
-            description="Removes the worktree folder once its last thread is archived or deleted. The branch stays, but uncommitted changes are lost."
-          >
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
-                  disabled={generalSettingsDisabled}
-                  aria-label={WORKTREE_RETENTION_SETTING_LABEL}
-                >
-                  {WORKTREE_RETENTION_LABELS[worktreeRetention]}
-                  <Icon
-                    name="ChevronDown"
-                    className="size-3.5 text-muted-foreground"
-                  />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align="end"
-                className={SETTINGS_DROPDOWN_CONTENT_CLASS}
-              >
-                {Object.entries(WORKTREE_RETENTION_LABELS).map(
-                  ([retention, label]) => (
-                    <DropdownMenuItem
-                      key={retention}
-                      onSelect={() =>
-                        onWorktreeRetentionChange(
-                          retention as WorktreeRetention,
-                        )
-                      }
-                    >
-                      {label}
-                      <Icon
-                        name="Check"
-                        className={cn(
-                          "ml-auto",
-                          retention !== worktreeRetention && "opacity-0",
-                          COARSE_POINTER_ICON_SIZE_CLASS,
-                        )}
-                      />
-                    </DropdownMenuItem>
-                  ),
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </SettingsWithControl>
+          <p className="text-xs leading-snug text-subtle-foreground/75">
+            Archiving a thread saves its work to its branch and removes its
+            worktree folder. Unarchiving the thread or sending it a message
+            brings the folder back. {worktreeDiskUse}
+          </p>
         </div>
       </SettingsSection>
     </>
@@ -1135,7 +1193,7 @@ export function PrivacySettingsSection({
 
         <SettingsWithControl
           label="Share usage data and setup errors"
-          description="Send app starts, thread and message counts, plugin installs, and short letters-only settings searches that find nothing to help improve Cloudroom. Failed agent connects and installs are saved with your account so we can fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
+          description="Send app starts, thread and message counts, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account so we can help fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
         >
           <Switch
             checked={telemetryEnabled}
@@ -1181,6 +1239,11 @@ const EXPERIMENT_DEFINITIONS: Record<
     label: "Changelog preview",
     description:
       "Show the latest release notes as a compact preview on the Updates page.",
+  },
+  hideLaptopHints: {
+    label: "Hide Cloud suggestions",
+    description:
+      "Stop suggesting Cloud when your Mac is low on battery, memory, or disk, or the internet is patchy.",
   },
   multiMachinePicker: {
     label: "Multi-machine picker",
@@ -1236,6 +1299,32 @@ export function ExperimentsSettingsSection({
 
 const SETTINGS_CONTENT_ID = "settings-content";
 
+export function SettingsPluginsContent() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const pluginId = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)
+    ?.params.pluginId;
+  if (pluginId) {
+    return <PluginDetailPaneView key={pluginId} pluginId={pluginId} />;
+  }
+  const pluginAuthorKey = new URLSearchParams(location.search).get("author");
+  return (
+    <div className="flex min-h-0 flex-1 flex-col pt-4 md:pt-5">
+      <PluginsOverview
+        mode={pluginAuthorKey === null ? "installed" : "browse"}
+        onOpenPlugin={(nextPluginId) =>
+          navigate(
+            getPluginDetailRoutePath({
+              pluginId: nextPluginId,
+              view: "installed",
+            }),
+          )
+        }
+      />
+    </div>
+  );
+}
+
 export function SettingsView() {
   const navigate = useNavigate();
   const themePreference = useThemePreference();
@@ -1265,7 +1354,6 @@ export function SettingsView() {
   const appearance = systemConfigQuery.data?.appearance ?? defaultAppTheme;
   const updateAppearanceMutation = useUpdateAppearance();
   const appThemePreview = useAppThemePreview();
-  const location = useLocation();
   const navigation = useSettingsNavState();
   const { activePluginId, activeSection, hasUnknownSection } = navigation;
   const searchTargetKey = useRevealSettingsTarget(SETTINGS_CONTENT_ID);
@@ -1274,6 +1362,8 @@ export function SettingsView() {
   }
   const groupTabs = (
     <SettingsGroupTabs
+      // Analytics draws its own row of pages right under these, and that row carries the line.
+      nested={activeSection === "analytics"}
       links={getSettingsGroupLinks(
         findSettingsNavGroup(activeSection, activePluginId),
         navigation,
@@ -1282,8 +1372,6 @@ export function SettingsView() {
   );
 
   if (activeSection === "plugins") {
-    const pluginId = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)
-      ?.params.pluginId;
     return (
       <div
         key={searchTargetKey}
@@ -1291,13 +1379,7 @@ export function SettingsView() {
         className="-mx-4 -mt-4 flex min-h-0 flex-1 flex-col overflow-hidden md:-mx-5 md:-mt-5"
       >
         <div className="shrink-0 px-4 pt-4 md:px-5 md:pt-5">{groupTabs}</div>
-        {pluginId ? (
-          <PluginDetailPaneView pluginId={pluginId} />
-        ) : (
-          <div className="flex min-h-0 flex-1 flex-col pt-4 md:pt-5">
-            <PluginsOverview mode="installed" />
-          </div>
-        )}
+        <SettingsPluginsContent />
       </div>
     );
   }
@@ -1414,6 +1496,8 @@ export function SettingsView() {
     content = <ProjectsSettingsSection />;
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
+  } else if (activeSection === "analytics") {
+    content = <AnalyticsTabs />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1463,6 +1547,8 @@ export function SettingsView() {
         {updateGeneralSettingsMutation.error && <p role="alert">{updateGeneralSettingsMutation.error.message}</p>}
       </SettingsSection>
     );
+  } else if (activeSection === "feature-prompts") {
+    content = <FeaturePromptsSettingsSection />;
   } else if (activeSection === "marketplaces") {
     content = <MarketplacesSettingsSection />;
   } else if (activeSection === "community") {
@@ -1505,18 +1591,14 @@ export function SettingsView() {
               steerActiveThreadOnEnter: enabled,
             })
           }
-          worktreeRetention={generalSettings.worktreeRetention}
-          onWorktreeRetentionChange={(retention) =>
-            updateGeneralSettingsMutation.mutate({
-              ...generalSettings,
-              worktreeRetention: retention,
-            })
-          }
+          worktreeDiskUse={<WorktreeDiskUse />}
         />
         <CliSkillsSettingsSection />
         <ThreadNamingSettingsSection />
         <ThreadPurposeSettingsSection />
         <ProjectNudgeSettingsSection />
+        <SmartSearchSettingsSection />
+        <DeepapiSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
           telemetryEnabled={generalSettings.telemetryEnabled}
@@ -1571,7 +1653,7 @@ export function SettingsView() {
 export function MachinesSettingsPage() {
   const location = useLocation();
   return (
-    <div className="space-y-6">
+    <div className="space-y-14">
       <MachinesSettingsSection />
       <div className={SETTINGS_CARD_CLASS}>
         <details
@@ -1606,12 +1688,12 @@ export function MachinesSettingsPage() {
   );
 }
 
-function SettingsGroupTabs({ links }: { links: readonly SettingsNavLink[] }) {
+function SettingsGroupTabs({ links, nested = false }: { links: readonly SettingsNavLink[]; nested?: boolean }) {
   if (links.length < 2) return null;
   return (
     <nav
       aria-label="Settings pages"
-      className="mb-6 flex flex-wrap gap-1 border-b border-border pb-2"
+      className={cn("flex flex-wrap gap-1", nested ? "mb-4" : "mb-6 border-b border-border pb-2")}
     >
       {links.map((link) => (
         <Link

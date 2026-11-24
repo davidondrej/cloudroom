@@ -6,7 +6,7 @@ import {
   getMessageStartedAt,
   messageId,
   plural,
-} from "../src/format-helpers.js";
+} from "../src/utils.js";
 
 describe("durationToCompactString", () => {
   it("returns undefined for undefined input", () => {

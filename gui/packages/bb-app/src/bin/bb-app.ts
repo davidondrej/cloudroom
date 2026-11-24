@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runBbApp, runLauncherEntry } from "../launcher.js";
+import { runApp, runLauncherEntry } from "../start.js";
 
-runLauncherEntry(runBbApp);
+runLauncherEntry(runApp);

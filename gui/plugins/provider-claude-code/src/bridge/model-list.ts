@@ -1,6 +1,18 @@
-import { type AvailableModel } from "@get-bb/plugin-sdk/provider-bridge";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import {
+  experimental_compareVersions as compareVersions,
+  experimental_readCliVersion as readCliVersion,
+  type AvailableModel,
+} from "@get-bb/plugin-sdk/provider-bridge";
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
-import { buildClaudeCodeModels } from "../model-list.js";
+import { CLAUDE_CODE_ACTIVE_CATALOG } from "../model-catalog.js";
+import {
+  applyClaudeEffortSettings,
+  buildClaudeCodeModels,
+  type ClaudeEffortSettings,
+} from "../model-list.js";
 import { translateMissingClaudeCliError } from "./missing-cli-error.js";
 import { claudeSpawnOptions } from "./sdk-session.js";
 import { resolveClaudeCodeExecutable } from "./session-options.js";
@@ -23,6 +35,17 @@ function buildModelProbeOptions(env: NodeJS.ProcessEnv): Options {
   };
 }
 
+async function readClaudeEffortSettings(
+  env: NodeJS.ProcessEnv,
+): Promise<ClaudeEffortSettings> {
+  const dir = env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
+  try {
+    return JSON.parse(await readFile(join(dir, "settings.json"), "utf8")) ?? {};
+  } catch {
+    return {};
+  }
+}
+
 export async function listClaudeCodeBridgeModels(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<{
@@ -41,12 +64,38 @@ export async function listClaudeCodeBridgeModels(
 
   try {
     const initialization = await session.initializationResult();
-    return buildClaudeCodeModels(initialization.models);
+    return applyClaudeEffortSettings(
+      buildClaudeCodeModels(initialization.models),
+      await readClaudeEffortSettings(env),
+      initialization.models,
+    );
   } catch (error) {
     throw translateMissingClaudeCliError(error);
   } finally {
     session.close();
   }
+}
+
+// Executables already new enough for a minimum. A failed check isn't kept, so an update unblocks the next turn.
+const newEnoughClaudeClis = new Set<string>();
+
+/** Why this computer's Claude Code is too old for `model`, or null. Only Local threads run here, and a
+ *  model stays listed because Cloud picks from this list too (#2235). Unknown version: null. */
+export async function claudeModelCliVersionError(
+  model: string | undefined,
+  executable: string | undefined,
+): Promise<string | null> {
+  const entry = CLAUDE_CODE_ACTIVE_CATALOG.find((e) => e.model === model);
+  const minimum = entry?.minimumCliVersion;
+  if (!entry || !minimum || !executable) return null;
+  const key = `${executable}\n${minimum}`;
+  if (newEnoughClaudeClis.has(key)) return null;
+  const version = await readCliVersion(executable);
+  if (version === null || compareVersions(version, minimum) >= 0) {
+    if (version !== null) newEnoughClaudeClis.add(key);
+    return null;
+  }
+  return `${entry.displayName} needs Claude Code ${minimum} or newer; this computer has ${version}. Update Claude Code, or run this thread in Cloud.`;
 }
 
 interface ClaudeCodeBridgeModelListMemoOptions {

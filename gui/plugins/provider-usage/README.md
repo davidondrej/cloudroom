@@ -13,10 +13,6 @@ Failed refreshes retain the last available measurements with a retry notice.
 Account authentication failures and plans without reported limits have separate
 states; unavailable usage is never represented as zero consumption.
 
-Settings → Agents → Usage shows the same card at a larger size, between the
-Cloudroom plan meters and a "what uses credits" price list: only agents actively
-running use credits, and 18 other things are free.
-
 Use `bb plugin rpc list --method provider-usage.v1.listResources --json` to find sources
 and `bb plugin rpc inspect <plugin-id> provider-usage.v1.listResources --json`
 to inspect their published contracts. RPC calls accept JSON through
@@ -29,14 +25,13 @@ Codex, Claude Code, and ACP provider plugins explicitly implement the usage cont
 for their own providers. Account Pooler implements it for shared accounts. The
 contract is owned here and copied into each source; no additional adapter plugin,
 provider-kit helper, or core runtime convention is required. Other providers must
-explicitly implement the contract to appear in these displays.
+explicitly implement the contract to appear in the sidebar.
 
 Known provider-issued account identities are deduplicated within the selected
 location. Unknown identities are never merged by email. Structured plan and quota
-window metadata give both displays consistent labels.
+window metadata supply the card labels.
 
 Provider Usage is enabled by default for newly registered installations. Existing
 explicit enable/disable choices are preserved. Right-click the footer shortcut and
 choose **Hide** to move it into **More**. Settings → Appearance → Sidebar footer
-controls order and visibility for every footer action. The usage settings page
-remains available. These preferences belong to BB, not the plugin.
+controls order and visibility for every footer action. These are app preferences.

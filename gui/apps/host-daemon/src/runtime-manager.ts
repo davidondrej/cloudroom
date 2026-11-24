@@ -1,6 +1,8 @@
+import { readlinkSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  FNM_SHELL_LINK,
   createAgentRuntime,
   type AgentRuntime,
   type AgentRuntimeOptions,
@@ -45,6 +47,7 @@ import {
 } from "./provider-installation-gate.js";
 import type { FetchSkillTree } from "./skill-trees.js";
 import { userExecutableProcessOptions } from "./user-executable-env.js";
+import { captureEnvironmentHookScripts } from "./environment-hook-scripts.js";
 import { runSetupScript } from "./environment-lifecycle-script.js";
 import { runInSerialLane } from "./serial-lane.js";
 
@@ -107,10 +110,30 @@ function formatProviderProcessExitStatus(
   return "unknown status";
 }
 
+const KILL_SIGNALS = new Set([
+  "SIGKILL",
+  "SIGTERM",
+  "SIGINT",
+  "SIGHUP",
+  "SIGQUIT",
+]);
+
+// One process serves every thread of an environment on a provider, so a signal
+// exit names it and how many threads it took down. The sender is not known:
+// any program, the system or a Cloudroom cleanup can send a kill, and other
+// signals (SIGABRT, SIGSEGV...) mean the process crashed. The message reaches
+// parent threads, so it never carries stderr.
 function buildProviderProcessExitMessage(
   info: AgentRuntimeProcessExitInfo,
 ): string {
-  return `Provider "${info.providerId}" exited unexpectedly with ${formatProviderProcessExitStatus(info)}`;
+  if (!info.signal) {
+    return `Provider "${info.providerId}" exited unexpectedly with ${formatProviderProcessExitStatus(info)}`;
+  }
+  const count = info.threads.length;
+  const owner = `${info.pid === undefined ? "its process" : `process ${info.pid}`}, shared by ${count} thread${count === 1 ? "" : "s"},`;
+  return KILL_SIGNALS.has(info.signal)
+    ? `Provider "${info.providerId}" exited unexpectedly: ${owner} was killed with ${info.signal} (sender unknown).`
+    : `Provider "${info.providerId}" exited unexpectedly: ${owner} crashed with ${info.signal}.`;
 }
 
 function buildProviderProcessExitDetail(
@@ -142,9 +165,15 @@ export interface EnsureEnvironmentArgs {
   injectedSkillSources?: readonly HostDaemonInjectedSkillSource[];
   setupScriptTimeoutMs?: number | null;
   setupContributedEnv?: readonly HostDaemonContributedEnvEntry[];
+  /** Hooks are read from Git at the merge base of HEAD and this branch; null is the default branch. */
+  hookBaseBranch?: string | null;
+  /** Where the hooks read for this environment are saved; the daemon's data folder by default. */
+  hookDataDir?: string;
   targetThreadId?: string;
   workspacePath?: string;
   provision?: ProvisionWorkspaceArgs;
+  /** Aborted by a cancel that arrived before this provision registered (#2171). */
+  cancelSignal?: AbortSignal;
 }
 
 interface CancelEnvironmentProvisionArgs {
@@ -198,6 +227,7 @@ export interface RuntimeManagerOptions {
 export interface RuntimeManagerReapIdleProviderSessionsArgs {
   idleForMs: number;
   nowMs: number;
+  threadId?: string;
 }
 
 interface RuntimeManagerReapedIdleProviderSession extends ReapedIdleProviderSession {
@@ -240,7 +270,19 @@ function shellEnvEquals(
   if (leftEntries.length !== rightEntries.length) {
     return false;
   }
-  return leftEntries.every(([key, value]) => right[key] === value);
+  // fnm puts a new per-shell link in PATH on every run: compare the Node it
+  // selects, so only a different Node is a change (#1026).
+  const fnmTarget = (value: string | undefined) =>
+    value?.replace(FNM_SHELL_LINK, (link) => {
+      try {
+        return readlinkSync(link);
+      } catch {
+        return link;
+      }
+    });
+  return leftEntries.every(
+    ([key, value]) => fnmTarget(right[key]) === fnmTarget(value),
+  );
 }
 
 function providerProcessEnvFromShellEnv(
@@ -256,6 +298,13 @@ function providerProcessEnvFromShellEnv(
     env.BB_PROVIDER_BRIDGE_RECORD_DIR = recordDir;
   }
   return Object.keys(env).length > 0 ? env : null;
+}
+
+function provisionCancelledError(): WorkspaceError {
+  return new WorkspaceError(
+    "provision_cancelled",
+    "Environment provisioning was cancelled",
+  );
 }
 
 export class RuntimeManager {
@@ -420,6 +469,15 @@ export class RuntimeManager {
   listThreadOwnerEntries(threadId: string): RuntimeEntry[] {
     return [...this.entries.values()].filter((entry) =>
       entry.runtime.hasThread(threadId),
+    );
+  }
+
+  /** Its session, or a message edit's staged copy, still holds the thread's agent (#607). */
+  holdsThreadAgent(threadId: string): boolean {
+    return [...this.entries.values()].some(
+      (entry) =>
+        entry.runtime.hasThread(threadId) ||
+        entry.runtime.hasStagedRewind?.(threadId) === true,
     );
   }
 
@@ -742,8 +800,11 @@ export class RuntimeManager {
     return null;
   }
 
-  async invalidateProviderMaintenanceRuntime(): Promise<void> {
-    this.providerInstallationGate.clear();
+  /** After an install or update: the CLI changed, so saved answers go. */
+  async invalidateProviderMaintenanceRuntime(
+    verified?: Parameters<ProviderInstallationGate["reset"]>[0],
+  ): Promise<void> {
+    this.providerInstallationGate.reset(verified);
     try {
       await this.shutdownProviderMaintenanceRuntime();
     } catch (error) {
@@ -912,6 +973,9 @@ export class RuntimeManager {
     const pendingProvision = this.createPendingEnvironmentProvision(
       args.environmentId,
     );
+    if (args.cancelSignal?.aborted) {
+      pendingProvision.abortController.abort(provisionCancelledError());
+    }
     const creation = Promise.resolve()
       .then(() =>
         this.createEntry({
@@ -991,12 +1055,7 @@ export class RuntimeManager {
       return { aborted: false };
     }
 
-    pending.abortController.abort(
-      new WorkspaceError(
-        "provision_cancelled",
-        "Environment provisioning was cancelled",
-      ),
-    );
+    pending.abortController.abort(provisionCancelledError());
     return { aborted: true };
   }
 
@@ -1049,6 +1108,24 @@ export class RuntimeManager {
       return;
     }
     await this.cleanupUnusedInjectedSkillStagingDirs([]);
+  }
+
+  /** For a changed folder: keeps a runtime with running turns, tasks or another thread's command, since shutdown ends them with no notice (#912). */
+  async forgetIdleEnvironment(
+    environmentId: string,
+    excludingThreadId?: string,
+  ): Promise<boolean> {
+    const entry = await this.getOrAwait(environmentId);
+    if (
+      entry &&
+      (entry.runtime.getLiveThreadIds().length > 0 ||
+        entry.runtime.hasOpenBackgroundWork() ||
+        this.hasInFlightThreadCommand(entry, excludingThreadId))
+    ) {
+      return false;
+    }
+    await this.forgetEnvironment(environmentId);
+    return true;
   }
 
   async shutdownAll(): Promise<void> {
@@ -1169,6 +1246,7 @@ export class RuntimeManager {
   }
 
   private async createEntry(args: CreateEntryArgs): Promise<RuntimeEntry> {
+    args.provisionSignal.throwIfAborted();
     const provision =
       args.provision ??
       (args.workspacePath ? { path: args.workspacePath } : null);
@@ -1180,8 +1258,24 @@ export class RuntimeManager {
     }
 
     if (args.setupScriptTimeoutMs != null) {
+      const dataDir = args.hookDataDir ?? this.options.dataDir;
+      if (dataDir === undefined)
+        throw new Error("Environment setup needs the host data folder");
+      // First setup of a provider-owned folder, before any agent runs in it:
+      // the hooks are read from Git now, and only these copies ever run.
+      const scripts = await captureEnvironmentHookScripts({
+        dataDir,
+        environmentId: args.environmentId,
+        workspacePath: provision.path,
+        baseBranch: args.hookBaseBranch ?? null,
+        shellPath: this.getShellEnv().PATH,
+        signal: args.provisionSignal,
+        onProgress: provision.onProgress,
+      });
       await runSetupScript({
         workspacePath: provision.path,
+        script: scripts.setup,
+        dataDir,
         timeoutMs: args.setupScriptTimeoutMs,
         contributedEnv: args.setupContributedEnv,
         shellPath: this.getShellEnv().PATH,

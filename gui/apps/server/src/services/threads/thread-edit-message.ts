@@ -6,7 +6,6 @@ import {
   getActivePendingInteractionForThread,
   getHighWaterMarks,
   getThread,
-  hasQueuedThreadMessages,
   hasRootStoredTurnStarted,
   listActiveBackgroundTaskCountsByThreadIds,
   type DbQueryConnection,
@@ -30,9 +29,11 @@ import { ApiError } from "../../errors.js";
 import {
   appendThreadEventInTransaction,
   createClientTurnRequestId,
+  getLastProviderThreadId,
   parseStoredTurnRequestEvent,
 } from "./thread-events.js";
 import { parseStoredEvent } from "./thread-data.js";
+import { hasQueuedMessagesBlockingEdit } from "./thread-queued-messages.js";
 import {
   buildExecutionOptions,
   buildThreadStartCommand,
@@ -415,7 +416,7 @@ export async function editThreadMessage(
   if (deps.pendingInteractions.hasPendingThreadInteraction(args.thread.id)) {
     conflict("Resolve the pending interaction before editing the message");
   }
-  if (hasQueuedThreadMessages(deps.db, args.thread.id)) {
+  if (hasQueuedMessagesBlockingEdit(deps.db, args.thread.id)) {
     conflict("Send or remove queued messages before editing a message");
   }
   const initialThread = getThread(deps.db, args.thread.id);
@@ -449,6 +450,12 @@ export async function editThreadMessage(
 
   let stagedProviderThreadId: string | null = null;
   let rewindLeaseId: string | null = null;
+  // The edit's new session keeps the Goal of the session the thread runs on
+  // now, which the history source can predate (#857). Only Codex carries it.
+  const replacesProviderThreadId =
+    editableThread.providerId === "codex"
+      ? getLastProviderThreadId(deps, editableThread.id)
+      : null;
   if (target.precedingProviderCheckpoint !== null) {
     if (target.sourceProviderThreadId === null) {
       conflict("This earlier turn has no provider session");
@@ -515,7 +522,7 @@ export async function editThreadMessage(
             "Resolve the pending interaction before editing the message",
           );
         }
-        if (hasQueuedThreadMessages(tx, editableThread.id)) {
+        if (hasQueuedMessagesBlockingEdit(tx, editableThread.id)) {
           conflict("Send or remove queued messages before editing a message");
         }
         const currentThread = getThread(tx, editableThread.id);
@@ -563,6 +570,7 @@ export async function editThreadMessage(
       environment: args.environment,
       historyReplacement: {
         forkSourceProviderThreadId: stagedProviderThreadId,
+        replacesProviderThreadId,
         ...(discardStagedRewind !== undefined
           ? { onCommandSettled: discardStagedRewind }
           : {}),

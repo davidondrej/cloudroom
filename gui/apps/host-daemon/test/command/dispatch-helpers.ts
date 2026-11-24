@@ -27,6 +27,7 @@ import { RuntimeManager } from "../../src/runtime-manager.js";
 import { noopEventSink } from "../../src/command-dispatch-support.js";
 import type { CommandDispatchOptions } from "../../src/command-dispatch-support.js";
 import type { FetchProjectAttachment } from "../../src/project-attachments.js";
+import { saveEnvironmentHookScripts } from "../../src/environment-hook-scripts.js";
 
 const tempDirs: string[] = [];
 const execFileAsync = promisify(execFile);
@@ -507,6 +508,45 @@ export function makeDispatchOptions(
     threadStorageRootPath: "/tmp/bb-test-thread-storage",
     ...overrides,
   };
+}
+
+export const HOOK_TEST_ENVIRONMENT_ID = "env-hook-test";
+
+/** Saves hooks as an environment's first setup does, read from Git; only these ever run. */
+export async function saveHooks(
+  dataDir: string,
+  scripts: { setup?: string; teardown?: string },
+  environmentId: string = HOOK_TEST_ENVIRONMENT_ID,
+): Promise<void> {
+  await saveEnvironmentHookScripts(dataDir, environmentId, {
+    commit: "0".repeat(40),
+    base: "main",
+    setup: scripts.setup === undefined ? null : Buffer.from(scripts.setup),
+    teardown:
+      scripts.teardown === undefined ? null : Buffer.from(scripts.teardown),
+  });
+}
+
+/** Makes `dir` a Git repo whose one commit on `main` holds these hooks, as a
+ *  project commits them: the attach path reads hooks only from Git. */
+export async function commitHooks(
+  dir: string,
+  scripts: { setup?: string; teardown?: string },
+): Promise<void> {
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Test",
+    GIT_AUTHOR_EMAIL: "test@example.com",
+    GIT_COMMITTER_NAME: "Test",
+    GIT_COMMITTER_EMAIL: "test@example.com",
+  };
+  const git = (...args: string[]) =>
+    execFileAsync("git", args, { cwd: dir, env });
+  await git("init", "-q", "-b", "main");
+  for (const [kind, content] of Object.entries(scripts))
+    await fs.writeFile(path.join(dir, `.bb-env-${kind}.sh`), content);
+  await git("add", "-A");
+  await git("commit", "-q", "--allow-empty", "-m", "hooks");
 }
 
 export async function makeTempDir(prefix: string): Promise<string> {

@@ -71,6 +71,8 @@ export interface ProviderCommandSuggestion {
   argumentHint: string | null;
   pluginId?: string;
   usage?: number;
+  /** Named like a Cloudroom action (`/plan`), so it goes in as typed text the action can't claim. */
+  insertAsText?: true;
 }
 
 export function toProviderCommandSuggestion(

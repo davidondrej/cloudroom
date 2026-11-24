@@ -6,14 +6,20 @@ import {
   Routes,
   useLocation,
   useParams,
-} from "react-router-dom";
+} from "react-router";
 import { AppLayout } from "./components/layout/AppLayout";
 import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
 import { InviteOffer } from "./components/InviteOffer";
 import { StarPrompt } from "./components/StarPrompt";
+import { PlanLoops } from "./components/PlanLoops";
+import { Wrapped } from "./components/Wrapped";
+import { MoveToApplicationsPrompt } from "./components/MoveToApplicationsPrompt";
 import { CreditsExplainer } from "./components/CloudQueue";
 import { ActivationChecklist } from "./components/ActivationChecklist";
+import { CornerHost } from "./components/CornerHost";
+import { PartnerCard } from "./components/PartnerCard";
+import { CallTicket } from "./components/CallTicket";
 import { SharedThreadOpener } from "./components/SharedThreadOpener";
 import { InstallAppSheet } from "./components/InstallAppSheet";
 import { AuthCallbackView } from "./views/AuthCallbackView";
@@ -21,8 +27,7 @@ import { QuickCreateProjectProvider } from "./hooks/useQuickCreateProject";
 import { RouteNavigationProvider } from "./components/ui/app-route-anchor";
 import { RouteNavigationIndicator } from "./components/ui/route-navigation-indicator";
 import { AppNavigationUrlHost } from "./lib/url-open-routing";
-import { NativeShellReporter } from "./lib/native-shell";
-import { watchMacosDesktopZoom } from "./lib/bb-desktop";
+import { watchMacosDesktopZoom } from "./lib/room-desktop";
 import { UiPreferencesSync } from "@/lib/ui-preferences/UiPreferencesSync";
 import { AppFileExternalNavigationHost } from "./components/plugin/AppFileExternalNavigationHost";
 import { useAppTheme } from "./hooks/useAppTheme";
@@ -34,6 +39,7 @@ import { useRememberPluginNavPanelChrome } from "@/lib/plugin-nav-panel-chrome";
 import { useWebSocket } from "./hooks/useWebSocket";
 import {
   AUTH_CALLBACK_ROUTE_PATH,
+  CLOUD_CREDITS_SETTINGS_PATH,
   LEGACY_AUTOMATION_DETAIL_ROUTE_PATH,
   LEGACY_AUTOMATIONS_ROUTE_PATH,
   LEGACY_TOOLS_AUTOMATION_BROWSE_ROUTE_PATH,
@@ -69,7 +75,6 @@ import {
   getAutomationDetailRoutePath,
   getAutomationEditRoutePath,
   getAutomationsRoutePath,
-  getPluginConfigurationRoutePath,
   getSettingsRoutePath,
   getSettingsProjectRoutePath,
 } from "./lib/route-paths";
@@ -114,6 +119,14 @@ function NavigatePreservingLocation({ pathname }: { pathname: string }) {
       replace
     />
   );
+}
+
+function LegacyProviderUsageSettings() {
+  const { search } = useLocation();
+  // The installed plugin details share this path with the former Usage tab.
+  return new URLSearchParams(search).get("view") === "installed"
+    ? <SettingsView />
+    : <Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />;
 }
 
 function LegacyProjectSettingsRedirect() {
@@ -276,14 +289,11 @@ export function AppRoutes() {
         <Routes>
           <Route
             path="/settings/usage"
-            element={
-              <Navigate
-                to={getPluginConfigurationRoutePath({
-                  pluginId: "provider-usage",
-                })}
-                replace
-              />
-            }
+            element={<Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />}
+          />
+          <Route
+            path="/settings/plugins/provider-usage"
+            element={<LegacyProviderUsageSettings />}
           />
           <Route path={SETTINGS_ROUTE_PATH} element={<SettingsView />} />
           <Route
@@ -440,7 +450,6 @@ export function App() {
           <AppNavigationUrlHost>
             <AppFileExternalNavigationHost>
               <HashNavigationScroll />
-              <NativeShellReporter />
               <UiPreferencesSync />
               <Routes>
                 <Route
@@ -450,11 +459,17 @@ export function App() {
                 <Route path="*" element={<AppRoutes />} />
               </Routes>
               <ProviderCliInstallLogDialogHost />
+              <CornerHost />
               <ActivationChecklist />
               <Onboarding />
+              <MoveToApplicationsPrompt />
               <InviteOffer />
               <CreditsExplainer />
+              <PlanLoops />
               <StarPrompt />
+              <Wrapped />
+              <PartnerCard />
+              <CallTicket />
               <SharedThreadOpener />
               <InstallAppSheet />
               <CloudroomAccountPanels />

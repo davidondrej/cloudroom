@@ -277,7 +277,7 @@ export interface FakePluginRegistrations {
     | null;
   /** Provider from contributeInstructions, or null when none registered. */
   instructionProvider:
-    | ((ctx: { threadId: string; projectId: string }) => string | null)
+    | Parameters<PluginAgents["contributeInstructions"]>[0]
     | null;
   threadEventHandlers: Record<PluginThreadEventName, number>;
   /** The handler registered per hook by `bb.experimental_hooks.on`. */
@@ -947,7 +947,7 @@ function createFakePluginHostInternal(
     | ((context: PluginAgentConfigurationContext) => PluginAgentConfiguration)
     | null = null;
   let instructionProvider:
-    | ((ctx: { threadId: string; projectId: string }) => string | null)
+    | Parameters<PluginAgents["contributeInstructions"]>[0]
     | null = null;
   function registerProviderDeclaration(
     declaration: PluginProviderDeclaration,
@@ -1107,6 +1107,10 @@ function createFakePluginHostInternal(
     get loopbackBaseUrl(): string {
       assertLive();
       return loopbackBaseUrl;
+    },
+    get experimental_loopbackHeaders(): Readonly<Record<string, string>> {
+      assertLive();
+      return {};
     },
     get experimental_dataDir(): string {
       assertLive();

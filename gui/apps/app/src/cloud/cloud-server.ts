@@ -1,11 +1,20 @@
 import { COMPUTER, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { appToast } from "@/components/ui/app-toast";
+import { sidebarNavigationQueryKey } from "@/hooks/queries/query-keys";
+import { appQueryClient } from "@/lib/app-query-client";
+import { getAppSurface } from "@/lib/app-surface";
 import { wsManager } from "@/lib/ws";
-import { cloudApi, SignedOutError, type CloudThreadSummary } from "./cloud-api";
+import {
+  cloudApi,
+  CloudError,
+  SignedOutError,
+  type CloudCreate,
+  type CloudThreadSummary,
+} from "./cloud-api";
 import { macOnline, markMacOff, SAVED_API, startupMac } from "./cloud-mode";
 import {
   CloudThreadEvents,
-  cloudTimelineRows,
+  cloudTimeline,
   cloudTurnDetails,
   type CompletedTurnDisplay,
 } from "./cloud-timeline";
@@ -28,6 +37,8 @@ const UI_PREFERENCE = /^\/api\/v1\/preferences\/ui\/([^/]+)$/;
 const PLUGIN_ASSET = /^\/api\/v1\/plugins\/[^/]+\/assets\//;
 const CLOUD_THREAD = /^\/api\/v1\/cloudroom\/threads\/(thr_[a-z0-9]+)(\/.*)?$/;
 const LIST_TTL_MS = 30_000;
+// No socket tells a Mac-off phone about new or archived threads, so its sidebar reloads the list this often.
+const SIDEBAR_REFRESH_MS = 60_000;
 const WAKE_MS = 90_000;
 const FIRST_ROWS_MS = 1500;
 const SAVED_TIMEOUT_MS = 700;
@@ -36,6 +47,9 @@ const OUTBOX_MS = 10 * 60_000;
 const MAC_CHECK_MS = 60_000;
 const MATCH_CHARS = 3000;
 const MAC_CHECK_MAX_MS = 5 * 60_000;
+const WARM_EVERY_MS = 60_000;
+const RETRY_SOON_MS = 10_000;
+const RETRY_SOON_FOR_MS = 2 * 60_000;
 const BUSY_RECHECK_MS = 10_000;
 const RETRY_HISTORY_MS = 10_000;
 const AUTO_RETRIES = 3;
@@ -66,6 +80,7 @@ const newProject = (id: string | null, name: string | null): Project => ({
 const cloudEntry = (
   thread: CloudThreadSummary,
   projectId: string,
+  parentThreadId: string | null,
 ): ThreadEntry => {
   const at = thread.woke_at ? Date.parse(thread.woke_at) : 0;
   return {
@@ -78,7 +93,7 @@ const cloudEntry = (
     titleFallback: null,
     sectionId: null,
     status: "idle",
-    parentThreadId: null,
+    parentThreadId,
     sourceThreadId: null,
     originKind: null,
     originPluginId: null,
@@ -113,6 +128,23 @@ const object = (value: unknown): Json =>
   value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Json)
     : {};
+const textOf = (body: Json): string | Response => {
+  const parts = (Array.isArray(body.input) ? body.input : []).map(object);
+  if (parts.some((part) => part.type !== "text"))
+    return needsMac(`Photos and files need your ${COMPUTER} for now.`);
+  const text = parts
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("\n")
+    .trim();
+  return (
+    text ||
+    json(
+      { message: `Only text messages work while your ${COMPUTER} is off.` },
+      400,
+    )
+  );
+};
 
 async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -122,6 +154,23 @@ async function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
       timer = setTimeout(() => resolve(null), ms);
     }),
   ]).finally(() => clearTimeout(timer));
+}
+
+async function createSoon(body: CloudCreate): Promise<CloudThreadSummary> {
+  const until = Date.now() + RETRY_SOON_FOR_MS;
+  for (;;) {
+    try {
+      return await cloudApi.create(body);
+    } catch (failure) {
+      if (
+        !(failure instanceof CloudError) ||
+        failure.code !== "retry_soon" ||
+        Date.now() + RETRY_SOON_MS > until
+      )
+        throw failure;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_SOON_MS));
+    }
+  }
 }
 
 class CloudThread {
@@ -147,7 +196,11 @@ class CloudThread {
     this.events = new CloudThreadEvents(id);
   }
 
-  async send(text: string, requestId: string | undefined) {
+  async send(
+    text: string,
+    requestId: string | undefined,
+    surface?: string,
+  ) {
     const outgoing: Outgoing | null =
       requestId && this.historyLoaded
         ? {
@@ -157,7 +210,7 @@ class CloudThread {
             after: this.events.promptLog.length,
           }
         : null;
-    await cloudApi.send(this.id, text, requestId);
+    await cloudApi.send(this.id, text, requestId, surface);
     if (outgoing && !this.logged(outgoing)) this.outbox.push(outgoing);
     if (this.historyLoaded) {
       this.keepFollowing();
@@ -374,6 +427,7 @@ class CloudServer {
   private readonly readAt = new Map<string, number>();
   private readonly tabs = new Map<string, Json>();
   private busy = 0;
+  private warmedAt = 0;
   private readonly preferences: Json = {};
   private readonly savedCopies = new Map<
     string,
@@ -385,6 +439,7 @@ class CloudServer {
   constructor(private readonly network: typeof fetch) {}
 
   install() {
+    document.documentElement.dataset.cloudroomCloudOnly = "true";
     const network = this.network;
     window.fetch = (input, init) => {
       const request = new Request(input, init);
@@ -427,6 +482,10 @@ class CloudServer {
         checkMac(Math.min(delay * 2, MAC_CHECK_MAX_MS));
       }, delay);
     checkMac(MAC_CHECK_MS);
+    // A tick keeps the 30 s list cache, so one firing just after a resume reads nothing new.
+    setInterval(() => {
+      if (document.visibilityState === "visible") this.refreshSidebar();
+    }, SIDEBAR_REFRESH_MS);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") {
         for (const thread of this.threads.values()) thread.pause();
@@ -434,7 +493,14 @@ class CloudServer {
       }
       reloadIfMacBack();
       this.list = null;
+      this.refreshSidebar();
       for (const thread of this.threads.values()) thread.refresh();
+    });
+  }
+
+  private refreshSidebar() {
+    void appQueryClient.invalidateQueries({
+      queryKey: sidebarNavigationQueryKey(),
     });
   }
 
@@ -465,24 +531,17 @@ class CloudServer {
     if (onMac) return onMac;
     if (thread && thread[2] === "/send") {
       const body = object(await request.json().catch(() => null));
-      const parts = (Array.isArray(body.input) ? body.input : []).map(object);
-      if (parts.some((part) => part.type !== "text"))
-        return needsMac(`Photos and files need your ${COMPUTER} for now.`);
-      const text = parts
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text as string)
-        .join("\n")
-        .trim();
-      if (!text)
-        return json(
-          { message: `Only text messages work while your ${COMPUTER} is off.` },
-          400,
-        );
+      const text = textOf(body);
+      if (text instanceof Response) return text;
       const requestId =
         typeof body.requestId === "string" && REQUEST_ID.test(body.requestId)
           ? body.requestId
           : undefined;
-      const queuedMessage = await this.thread(thread[1]).send(text, requestId);
+      const queuedMessage = await this.thread(thread[1]).send(
+        text,
+        requestId,
+        await this.usageSurface(),
+      );
       return json(
         queuedMessage
           ? { ok: true, delivery: "queued", queuedMessage }
@@ -538,11 +597,80 @@ class CloudServer {
       return json({ key, ...entry });
     }
     if (path === "/api/v1/threads" && request.method === "POST")
-      return needsMac(`Starting a new thread needs your ${COMPUTER} for now.`);
+      return this.create(object(await request.json().catch(() => null)));
     if (/^\/api\/v1\/projects\/[^/]+\/attachments/.test(path))
       return needsMac(`Photos and files need your ${COMPUTER} for now.`);
-    if (path === "/api/v1/cloudroom/account/activity") return empty();
+    if (path === "/api/v1/cloudroom/account/activity") {
+      if (Date.now() - this.warmedAt >= WARM_EVERY_MS) {
+        this.warmedAt = Date.now();
+        void cloudApi.warm().catch(() => undefined);
+      }
+      return empty();
+    }
     return needsMac();
+  }
+
+  private async create(body: Json): Promise<Response> {
+    if (body.executionTarget !== "cloud")
+      return needsMac(
+        `Local threads need your ${COMPUTER}. Pick Cloud to start one now.`,
+      );
+    const prompt = textOf(body);
+    if (prompt instanceof Response) return prompt;
+    const optional = (value: unknown) =>
+      typeof value === "string" ? value : undefined;
+    const onMac = [
+      "sourceThreadId",
+      "parentThreadId",
+      "sendAt",
+      "baseBranch",
+      "pluginSubmission",
+    ];
+    const startNeedsMac = `Starting a new thread needs your ${COMPUTER} for now.`;
+    if (
+      typeof body.projectId !== "string" ||
+      onMac.some((key) => body[key] != null)
+    )
+      return needsMac(startNeedsMac);
+    const thread = await createSoon({
+      project: body.projectId,
+      request_id: optional(body.requestId) ?? crypto.randomUUID(),
+      text: prompt,
+      title: optional(body.title),
+      harness: optional(body.providerId),
+      model: optional(body.model),
+      reasoning: optional(body.reasoningLevel),
+      service_tier: optional(body.serviceTier),
+      target: optional(body.cloudTarget),
+      surface: await this.usageSurface(),
+    }).catch((failure: unknown) => {
+      if (!(failure instanceof CloudError)) throw failure;
+      return failure.code === "no_cloud_thread"
+        ? needsMac(startNeedsMac)
+        : json({ message: failure.message }, failure.status);
+    });
+    if (thread instanceof Response) return thread;
+    this.list = null;
+    return json(
+      this.live({
+        activeBackgroundAgentCount: 0,
+        canSpawnChild: false,
+        projectCopy: null,
+        ...cloudEntry(thread, body.projectId, null),
+        providerId: optional(body.providerId) ?? "claude-code",
+        queuedMessageCount: 0,
+      }),
+      201,
+    );
+  }
+
+  /** The Mac is off, so it can't count this message. The website does, but only while the Mac's saved settings
+   *  have usage data on. */
+  private async usageSurface(): Promise<string | undefined> {
+    const config = object(await this.saved("/api/v1/system/config"));
+    return object(config.generalSettings).telemetryEnabled === true
+      ? getAppSurface()
+      : undefined;
   }
 
   private async account(): Promise<Json> {
@@ -729,7 +857,17 @@ class CloudServer {
         project = newProject(projectId, thread.project_name);
         projects.set(projectId!, project);
       }
-      project.threads.push(this.live(cloudEntry(thread, project.id)));
+      // A subagent sits under its parent, as on the desktop, when the parent is listed too.
+      const parent = thread.parent_thread_id ?? null;
+      project.threads.push(
+        this.live(
+          cloudEntry(
+            thread,
+            project.id,
+            parent && ids.has(parent) ? parent : null,
+          ),
+        ),
+      );
     }
     return {
       ...sidebar,
@@ -872,7 +1010,7 @@ class CloudServer {
             })
           : json({ message: "Turn not found." }, 404);
       }
-      const rows = cloudTimelineRows(thread.events, title, display);
+      const { rows, activeBackgroundCommands } = cloudTimeline(thread.events, title, display);
       const maxSeq = thread.events.events.length;
       const status = this.status(id);
       return json({
@@ -883,7 +1021,7 @@ class CloudServer {
         activePromptMode: null,
         activeThinking: null,
         activeWorkflows: [],
-        activeBackgroundCommands: [],
+        activeBackgroundCommands,
         pendingTodos: null,
         goal: null,
         modelFallback: null,

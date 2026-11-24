@@ -11,6 +11,7 @@ import {
 import { z } from "zod";
 import {
   applyCodexRateLimitUpdate,
+  codexRateLimitsDelta,
   clearCodexEventTranslationThreadState,
   createCodexEventTranslationState,
   setCodexInjectedTools,
@@ -347,7 +348,7 @@ interface ActivateThreadGitWritableRootsArgs {
   threadId: string;
 }
 
-interface ClearGitWritableRootsByBbThreadIdArgs {
+interface ClearGitWritableRootsByRoomThreadIdArgs {
   threadId: string;
 }
 
@@ -373,6 +374,7 @@ export function createCodexEventTranslator(
 ) {
   const additionalWorkspaceWriteRoots = options.additionalWorkspaceWriteRoots;
   const eventTranslationState = createCodexEventTranslationState();
+  let seedApplied = false;
   const nativeTurnStartClientRequestIdsByProviderThreadId = new Map<
     string,
     ClientTurnRequestId[]
@@ -382,7 +384,7 @@ export function createCodexEventTranslator(
     string[]
   >();
   const workspaceWriteGitWritableRootsByThreadId = new Map<string, string[]>();
-  const bbThreadIdByProviderThreadId = new Map<string, string>();
+  const roomThreadIdByProviderThreadId = new Map<string, string>();
   const rawCommandOutputStateByProviderThreadId = new Map<
     string,
     CodexRawCommandOutputState
@@ -431,17 +433,17 @@ export function createCodexEventTranslator(
     workspaceWriteGitWritableRootsByThreadId.set(args.threadId, [
       ...writableRoots,
     ]);
-    bbThreadIdByProviderThreadId.set(args.providerThreadId, args.threadId);
+    roomThreadIdByProviderThreadId.set(args.providerThreadId, args.threadId);
   }
 
-  function clearGitWritableRootsByBbThreadId(
-    args: ClearGitWritableRootsByBbThreadIdArgs,
+  function clearGitWritableRootsByRoomThreadId(
+    args: ClearGitWritableRootsByRoomThreadIdArgs,
   ): void {
     pendingWorkspaceWriteGitWritableRootsByThreadId.delete(args.threadId);
     workspaceWriteGitWritableRootsByThreadId.delete(args.threadId);
-    for (const [providerThreadId, threadId] of bbThreadIdByProviderThreadId) {
+    for (const [providerThreadId, threadId] of roomThreadIdByProviderThreadId) {
       if (threadId === args.threadId) {
-        bbThreadIdByProviderThreadId.delete(providerThreadId);
+        roomThreadIdByProviderThreadId.delete(providerThreadId);
       }
     }
   }
@@ -449,12 +451,12 @@ export function createCodexEventTranslator(
   function clearGitWritableRootsByProviderThreadId(
     args: ClearGitWritableRootsByProviderThreadIdArgs,
   ): void {
-    const threadId = bbThreadIdByProviderThreadId.get(args.providerThreadId);
-    bbThreadIdByProviderThreadId.delete(args.providerThreadId);
+    const threadId = roomThreadIdByProviderThreadId.get(args.providerThreadId);
+    roomThreadIdByProviderThreadId.delete(args.providerThreadId);
     if (!threadId) {
       return;
     }
-    clearGitWritableRootsByBbThreadId({ threadId });
+    clearGitWritableRootsByRoomThreadId({ threadId });
   }
 
   function prepareWorkspaceWriteGitRoots(
@@ -473,7 +475,7 @@ export function createCodexEventTranslator(
         writableRoots,
       });
     } else {
-      clearGitWritableRootsByBbThreadId({ threadId: command.threadId });
+      clearGitWritableRootsByRoomThreadId({ threadId: command.threadId });
     }
     return {
       config: buildCodexConfig({
@@ -1515,6 +1517,9 @@ export function createCodexEventTranslator(
         },
         required: false,
         onResult(result: unknown) {
+          // Codex's own updates are newer than this read (#1816).
+          if (eventTranslationState.codexSentRateLimits) return;
+          seedApplied = true;
           const response = codexRateLimitReadResponseSchema.parse(result);
           const snapshots = response.rateLimitsByLimitId;
           if (snapshots === null || Object.keys(snapshots).length === 0) {
@@ -1569,6 +1574,13 @@ export function createCodexEventTranslator(
     );
   }
 
+  /** The rate-limit event for a seed applied after the bridge stopped waiting. */
+  function takeLateSeedDeltas(): ThreadDelta[] {
+    if (!seedApplied) return [];
+    seedApplied = false;
+    return codexRateLimitsDelta(eventTranslationState);
+  }
+
   function configureInjectedTools(tools: readonly CodexInjectedTool[]): void {
     setCodexInjectedTools(eventTranslationState, tools);
   }
@@ -1581,6 +1593,7 @@ export function createCodexEventTranslator(
     getThreadGitWritableRoots,
     prepareTurnStart: queueNativeTurnStartClientRequestId,
     prepareWorkspaceWriteGitRoots,
+    takeLateSeedDeltas,
     translateEvent,
   };
 }

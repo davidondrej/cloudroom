@@ -1,7 +1,22 @@
-import { toString as cronstrueToString } from "cronstrue";
 import type { AutomationTrigger } from "../src/rpc-types";
+import { describeCron } from "./describe-cron.js";
 
 export const PERSONAL_PROJECT_ID = "proj_personal";
+
+/** A model ID as people read it: "claude-opus-5-5" is "Opus 5.5", "gpt-6.1-sol" is "GPT-6.1 Sol". */
+export function formatModelName(model: string): string {
+  const [, base = model, context] = /^(.+?)(?:\[(\w+)\])?$/u.exec(model) ?? [];
+  const name = (base.split("/").at(-1) ?? base)
+    .replace(/^claude-/u, "")
+    .split("-")
+    .map((part) =>
+      part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1),
+    )
+    .join(" ")
+    .replace(/(\d) (?=\d)/gu, "$1.")
+    .replace(/^GPT /u, "GPT-");
+  return context === undefined ? name : `${name} (${context.toUpperCase()})`;
+}
 
 const SCHEDULE_RUN_FORMATTER = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -56,7 +71,7 @@ const DAY_ABBREVIATION: Record<string, string> = {
 function formatCronCadence(cron: string): string {
   let text: string;
   try {
-    text = cronstrueToString(cron, { verbose: false });
+    text = describeCron(cron);
   } catch {
     return "Custom schedule";
   }
@@ -159,7 +174,7 @@ export function formatScheduleStatusLabel({
     if (oneShotLifecycle === "expired") return "Expired — edit to reschedule";
   }
   if (!enabled) {
-    return "Paused";
+    return "Off";
   }
   if (nextRunAt === null) {
     return trigger?.triggerType === "webhook"
@@ -175,7 +190,7 @@ export function formatOverviewScheduleMetadata(
   const label = formatScheduleStatusLabel(args);
   if (
     label === "Failed" ||
-    label === "Paused" ||
+    label === "Off" ||
     label === "Completed" ||
     label === "Expired — edit to reschedule"
   ) {
@@ -191,7 +206,7 @@ export function formatDetailScheduleStatusLabel(
   args: FormatScheduleStatusLabelArgs,
 ): string | null {
   const label = formatScheduleStatusLabel(args);
-  return label === "Paused" || label === "Completed" ? null : label;
+  return label === "Off" || label === "Completed" ? null : label;
 }
 
 export function matchesAutomationStatusFilters(
@@ -215,4 +230,33 @@ export function matchesAutomationStatusFilters(
     return filters.includes("paused");
   }
   return false;
+}
+
+function clockLabel(hour: number, minute: number): string {
+  const minutes = minute === 0 ? "" : `:${String(minute).padStart(2, "0")}`;
+  return `${hour % 12 || 12}${minutes}${hour < 12 ? "AM" : "PM"}`;
+}
+
+/** A cron in a few characters, for a template card: "Every 2h", "Every 30m", "Daily 3AM". Other crons get the long description. */
+export function cronCadence(cron: string): string {
+  const [minute = "", hour = "", day = "", month, weekday] = cron
+    .trim()
+    .split(/\s+/u);
+  const every = (spec: string) => /^\*\/(\d+)$/u.exec(spec)?.[1];
+  const long = () =>
+    formatAutomationTrigger({ triggerType: "schedule", cron, timezone: "UTC" });
+  if (month !== "*" || weekday !== "*" || !/^\d+$|^\*\/\d+$/u.test(minute))
+    return long();
+  const at = Number(minute);
+  if (every(minute))
+    return hour === "*" && day === "*" ? `Every ${every(minute)}m` : long();
+  if (hour === "*") return day === "*" ? "Every 1h" : long();
+  if (every(hour)) return day === "*" ? `Every ${every(hour)}h` : long();
+  const span = /^(\d+)-(\d+)\/(\d+)$/u.exec(hour);
+  if (span && day === "*")
+    return `Every ${span[3]}h, ${clockLabel(Number(span[1]), at)}-${clockLabel(Number(span[2]), at)}`;
+  if (!/^\d+$/u.test(hour)) return long();
+  const clock = clockLabel(Number(hour), at);
+  if (day === "*") return `Daily ${clock}`;
+  return every(day) ? `Every ${every(day)}d, ${clock}` : long();
 }

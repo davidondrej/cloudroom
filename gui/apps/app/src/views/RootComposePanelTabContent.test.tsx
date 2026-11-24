@@ -6,11 +6,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createTerminalFixedPanelTab,
   createWorkspaceFilePreviewFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import { buildFileOpenerPanelTab } from "@/components/plugin/file-opener-tabs";
 import { RootComposePanelTabContent } from "./RootComposePanelTabContent";
 
-vi.mock("@/components/secondary-panel/lazySecondaryPanelComponents", () => ({
+vi.mock("@/components/right-panel/shell/lazy-chunks", () => ({
   LazyFilePreview: () => null,
   LazyHostFilePreviewTabContent: () => null,
   LazyNewTabPage: () => null,
@@ -70,7 +70,7 @@ vi.mock("@/hooks/queries/environment-queries", () => ({
   }),
 }));
 
-vi.mock("@/components/secondary-panel/useThreadStorageViewer", () => ({
+vi.mock("@/components/right-panel/tabs/thread-storage", () => ({
   useThreadStorageViewer: () => ({ threadStorageRootPath: null }),
 }));
 

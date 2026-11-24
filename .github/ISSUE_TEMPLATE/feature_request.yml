@@ -1,0 +1,12 @@
+name: Feature request
+description: An idea to make Cloudroom better.
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: What would you like to happen?

@@ -48,7 +48,7 @@ export const toolResultBlockSchema = z.object({
   type: z.literal("tool_result"),
   tool_use_id: z.string(),
   tool_name: z.string().optional(),
-  content: z.unknown(),
+  content: z.unknown().optional(),
   is_error: z.boolean().optional(),
   tool_use_result: claudeToolUseResultSchema.nullish(),
 });
@@ -394,6 +394,7 @@ export const claudeResultMessageSchema = z
     api_error_status: z.number().nullable().optional(),
     errors: z.array(z.string()).optional(),
     result: z.unknown().optional(),
+    terminal_reason: z.string().optional(),
     usage: z.unknown().optional(),
     modelUsage: z.unknown().optional(),
     origin: claudeMessageOriginSchema.optional(),

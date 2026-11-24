@@ -1,6 +1,6 @@
 import {
-  createBbDesktopVersionFeedFileName,
-  type BbDesktopVersionFeedPlatform,
+  createRoomDesktopVersionFeedFileName,
+  type RoomDesktopVersionFeedPlatform,
 } from "@cloudroom/desktop-contract";
 
 type DesktopReleaseChannel = "latest" | "nightly";
@@ -58,9 +58,9 @@ const DESKTOP_UPDATE_RELEASE_BASE_URL =
   DESKTOP_RELEASE_INFO.updateReleaseBaseUrl;
 
 export function createDesktopUpdateFeedUrl(
-  platform: BbDesktopVersionFeedPlatform,
+  platform: RoomDesktopVersionFeedPlatform,
 ): string {
-  return `${DESKTOP_UPDATE_RELEASE_BASE_URL}${createBbDesktopVersionFeedFileName(platform)}`;
+  return `${DESKTOP_UPDATE_RELEASE_BASE_URL}${createRoomDesktopVersionFeedFileName(platform)}`;
 }
 
 export interface DesktopAutoUpdateFeedConfig {
@@ -83,7 +83,7 @@ interface DesktopUpdateSupport {
 interface ResolveDesktopUpdateSupportArgs {
   canReplaceAppImage: (appImagePath: string) => boolean;
   env: NodeJS.ProcessEnv;
-  platform: BbDesktopVersionFeedPlatform;
+  platform: RoomDesktopVersionFeedPlatform;
 }
 
 export function resolveDesktopUpdateSupport(

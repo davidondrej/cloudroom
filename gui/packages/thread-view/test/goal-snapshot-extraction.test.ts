@@ -4,8 +4,7 @@ import {
   threadScope,
 } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
-import { extractThreadTimelineGoal } from "../src/goal-snapshot-extraction.js";
-import type { ThreadEventWithMeta } from "../src/build-event-projection.js";
+import { extractThreadTimelineGoal, type ThreadEventWithMeta } from "../src/index.js";
 
 function goalUpdatedEvent({
   objective,

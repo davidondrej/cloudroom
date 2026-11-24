@@ -14,28 +14,28 @@ import {
   environmentPathsQueryKey,
   threadStoragePathsQueryKey,
 } from "@/hooks/queries/query-keys";
-import { ThreadSecondaryPanel } from "./ThreadSecondaryPanel";
-import type { SecondaryPanelRenderableTab } from "./ThreadSecondaryPanel";
-import { NewTabPage } from "./NewTabPage";
-import type { FileSearchSelection } from "./useThreadFileTabs";
+import { ThreadSecondaryPanel } from "@/components/right-panel/shell/panel-shell";
+import type { SecondaryPanelRenderableTab } from "@/components/right-panel/shell/panel-shell";
+import { NewTabPage } from "@/components/right-panel/tabs/new-tab";
+import type { FileSearchSelection } from "@/components/right-panel/store/use-panel-tabs";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
   getThreadRecentItemsStorageKey,
   type ThreadRecentItem,
-} from "./threadRecentItems";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   createNewTabFixedPanelTab,
   createTerminalFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   getFileNameFromPath,
   resolveRightPanelFileIconName,
-} from "./rightPanelFileVisuals";
+} from "@/components/right-panel/tabs/file-tab-visuals";
 import {
   resolveTerminalHost,
   TerminalHostSelector,
-} from "./TerminalHostSelector";
+} from "@/components/right-panel/tabs/tab-primitives";
 
 export default {
   title: "right-panel/New tab",

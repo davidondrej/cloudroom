@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { LOOP_TEMPLATES } from "../templates.js";
 import {
+  cronCadence,
   formatDetailScheduleStatusLabel,
   formatOverviewScheduleMetadata,
   formatScheduleStatusLabel,
@@ -237,4 +239,33 @@ describe("one-shot automation lifecycle", () => {
       ).toBe(expectedLabel);
     },
   );
+});
+
+describe("cronCadence", () => {
+  it("shortens the schedules templates use", () => {
+    expect(cronCadence("0 */2 * * *")).toBe("Every 2h");
+    expect(cronCadence("0 * * * *")).toBe("Every 1h");
+    expect(cronCadence("*/30 * * * *")).toBe("Every 30m");
+    expect(cronCadence("0 3 * * *")).toBe("Daily 3AM");
+    expect(cronCadence("30 15 * * *")).toBe("Daily 3:30PM");
+    expect(cronCadence("0 0 * * *")).toBe("Daily 12AM");
+    expect(cronCadence("0 8-22/3 * * *")).toBe("Every 3h, 8AM-10PM");
+    expect(cronCadence("0 8 */2 * *")).toBe("Every 2d, 8AM");
+  });
+
+  it("never shortens a schedule it would get wrong", () => {
+    // Weekdays only, two times a day, and every 2 hours on some days are not "Daily" or "Every".
+    for (const cron of ["0 9 * * 1-5", "0 9,17 * * *", "0 */2 1 * *"]) {
+      const label = cronCadence(cron);
+      expect(label, cron).not.toMatch(/^(Daily \d|Every \d+[mhd])/u);
+      expect(label, cron).not.toBe("");
+    }
+  });
+
+  it("has a short label for every template", () => {
+    for (const template of LOOP_TEMPLATES)
+      expect(cronCadence(template.cron), template.id).toMatch(
+        /^(Daily|Every) \d/u,
+      );
+  });
 });

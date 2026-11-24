@@ -14,6 +14,7 @@ import {
 } from "../plugins/plugin-thread-events.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import { noteTurnFailed } from "../system/auth-failure-telemetry.js";
+import { notePlanLimitStatus } from "../system/plan-limit-telemetry.js";
 import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
 
 /**
@@ -30,9 +31,33 @@ function announceTurnFailed(
   args: ApplyThreadLifecycleEventArgs,
   outcome: ApplyThreadLifecycleEventOutcome,
 ): void {
+  if (outcome.applied) notePlanLimitStatus(args.threadId, outcome.thread.status);
   if (!outcome.applied || args.event.type !== "run.failed") return;
   emitPluginTurnFailed(args.threadId);
   noteTurnFailed(args.threadId);
+}
+
+/** Threads whose current failure was already reported; any status change forgets them (#1804). */
+const reportedFailureThreadIds = new Set<string>();
+
+/**
+ * True once per status change, so a child still in error that fails again
+ * doesn't re-notify its parent, while a child a restart moved to error
+ * without a notice still gets one (#1804).
+ */
+export function isFirstFailureReportSinceStatusChange(
+  threadId: string,
+): boolean {
+  if (reportedFailureThreadIds.has(threadId)) return false;
+  reportedFailureThreadIds.add(threadId);
+  return true;
+}
+
+function forgetReportedFailure(
+  args: ApplyThreadLifecycleEventArgs,
+  outcome: ApplyThreadLifecycleEventOutcome,
+): void {
+  if (outcome.applied) reportedFailureThreadIds.delete(args.threadId);
 }
 
 interface ApplyLoggedThreadLifecycleEventDeps {
@@ -79,6 +104,7 @@ export function applyLoggedThreadLifecycleEvent(
     );
   }
   logUnappliedThreadLifecycleEvent(deps.logger, args, outcome);
+  forgetReportedFailure(args, outcome);
   emitPluginThreadLifecycleOutcome(outcome);
   announceTurnFailed(args, outcome);
   return outcome;
@@ -90,6 +116,7 @@ export function applyLoggedThreadLifecycleEventInTransaction(
 ): ApplyThreadLifecycleEventOutcome {
   const outcome = applyThreadLifecycleEventInTransaction(deps.db, args);
   logUnappliedThreadLifecycleEvent(deps.logger, args, outcome);
+  forgetReportedFailure(args, outcome);
   emitPluginThreadLifecycleOutcome(outcome);
   announceTurnFailed(args, outcome);
   return outcome;

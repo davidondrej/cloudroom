@@ -13,9 +13,9 @@ import {
 import { PluginIcon } from "./PluginIcon";
 import { arrayMove } from "@cloudroom/client-core";
 import { arrangeByStoredOrder } from "@/lib/stored-order";
-import type { SecondaryPanelRenderableTab } from "@/components/secondary-panel/ThreadSecondaryPanel";
-import type { ThreadSecondaryPanelProps } from "@/components/secondary-panel/ThreadSecondaryPanel";
-import { SecondaryPanelContentSkeleton } from "@/components/secondary-panel/lazySecondaryPanelComponents";
+import type { SecondaryPanelRenderableTab } from "@/components/right-panel/shell/panel-shell";
+import type { ThreadSecondaryPanelProps } from "@/components/right-panel/shell/panel-shell";
+import { SecondaryPanelContentSkeleton } from "@/components/right-panel/shell/lazy-chunks";
 import {
   usePublishPluginDetailOpener,
   type PluginDetailDestination,

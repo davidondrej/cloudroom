@@ -46,6 +46,8 @@ export const threadStartParamsSchema = z
   .object({
     ...sessionConstructionFields,
     input: z.array(promptInputSchema).optional(),
+    /** A message edit's start replaces this native session of the same thread. */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .passthrough();
 
@@ -61,6 +63,8 @@ export const threadForkParamsSchema = z
     ...sessionConstructionFields,
     sourceProviderThreadId: z.string().min(1),
     sourceProviderCheckpointId: z.string().min(1).optional(),
+    /** A message edit's fork replaces this native session of the same thread. */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .passthrough();
 
@@ -70,6 +74,11 @@ export const threadStopParamsSchema = z
     providerThreadId: z.string().min(1),
     intent: z.enum(["interrupt", "release"]),
     activeTurnId: z.string().min(1).nullable(),
+    /**
+     * The provider may stay alive when nothing of this thread still runs. A
+     * bridge that keeps it answers `sessionKept: true`.
+     */
+    keepSession: z.boolean().optional(),
   })
   .passthrough();
 

@@ -2,9 +2,9 @@
 
 import { act, cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BbDesktopCloseWindowRequestHandler } from "@cloudroom/desktop-contract";
+import type { RoomDesktopCloseWindowRequestHandler } from "@cloudroom/desktop-contract";
 import { AppCommandProvider } from "@/components/commands/AppCommandProvider";
-import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
+import { createRoomDesktopApi } from "@/test/room-desktop-test-utils";
 import { RootComposePanelCommandHandlers } from "./RootComposePanelCommandHandlers";
 
 const commandFixture = vi.hoisted(() => ({
@@ -81,9 +81,9 @@ describe("RootComposePanelCommandHandlers", () => {
     const firstClose = vi.fn(() => true);
     const secondToggle = vi.fn();
     const secondClose = vi.fn(() => true);
-    const desktopCloseHandlers = new Set<BbDesktopCloseWindowRequestHandler>();
+    const desktopCloseHandlers = new Set<RoomDesktopCloseWindowRequestHandler>();
     window.bbDesktop = {
-      ...createBbDesktopApi(desktopInfo),
+      ...createRoomDesktopApi(desktopInfo),
       onCloseWindowRequest(listener) {
         desktopCloseHandlers.add(listener);
         return () => desktopCloseHandlers.delete(listener);

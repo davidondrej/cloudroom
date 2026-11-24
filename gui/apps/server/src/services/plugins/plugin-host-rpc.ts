@@ -8,6 +8,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 import type { JsonValue } from "@cloudroom/domain";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
+import { ApiError } from "../../errors.js";
 import type { WorkSessionDeps } from "../../types.js";
 import { callHostOnlineRpc } from "../hosts/online-rpc.js";
 import type { PluginHostArtifactSnapshot } from "./plugin-service-internal.js";
@@ -56,6 +57,15 @@ function abortError(): Error {
   return Object.assign(new Error("Host plugin call was cancelled"), {
     name: "AbortError",
   });
+}
+
+// The host never answered, so a cancelled call may still be running there.
+function isUnansweredHostCall(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    (error.body.code === "host_unavailable" ||
+      error.body.code === "command_timeout")
+  );
 }
 
 export async function callPluginHostRpc(
@@ -134,7 +144,16 @@ export async function callPluginHostRpc(
           rpc.then(
             (value) =>
               finish(() => (aborted ? reject(abortError()) : resolve(value))),
-            (error) => finish(() => reject(aborted ? abortError() : error)),
+            // Only the host's own answer confirms the cancel; a dropped
+            // connection stays a transport error for the caller (#1366).
+            (error) =>
+              finish(() =>
+                reject(
+                  aborted && !isUnansweredHostCall(error)
+                    ? abortError()
+                    : error,
+                ),
+              ),
           );
         });
   const output = await validateValue(method.output, result.output, "output");

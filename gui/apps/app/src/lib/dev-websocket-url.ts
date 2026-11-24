@@ -15,7 +15,11 @@ function resolveBrowserHostDevWebSocketBaseUrl(
     return `${protocol}//${window.location.host}/ws`;
   }
 
-  return `${protocol}//${window.location.hostname}:${serverPort}/ws`;
+  const hostname =
+    window.location.hostname === "localhost"
+      ? "127.0.0.1"
+      : window.location.hostname;
+  return `${protocol}//${hostname}:${serverPort}/ws`;
 }
 
 function resolveDevWebSocketBaseUrl(): string | undefined {
@@ -48,8 +52,13 @@ export function buildDevWebSocketUrl(
 }
 
 export function buildBrowserWebSocketUrl(path: string): string {
-  return (
-    buildDevWebSocketUrl({ path }) ??
-    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${path}`
-  );
+  const devUrl = buildDevWebSocketUrl({ path });
+  if (devUrl !== undefined) {
+    return devUrl;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${protocol}//${window.location.host}`);
+  url.pathname = path;
+  return url.toString();
 }

@@ -16,6 +16,8 @@ import {
   CommandSeparator,
 } from "@cloudroom/shared-ui/command";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
+import { FLOATING_DRAWER_CLASS_NAME } from "@cloudroom/shared-ui/responsive-overlay";
+import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
   COARSE_POINTER_COMPACT_ICON_SIZE_CLASS,
   COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
@@ -61,6 +63,11 @@ const MACHINE_CONTEXTUAL_MENU_MIN_OPTIONS = 3;
 const MACHINE_TARGET_CONTENT_CLASS_NAME =
   "grid min-w-0 flex-1 grid-cols-[0.375rem_0.875rem_minmax(0,1fr)] gap-x-2 max-md:pointer-coarse:grid-cols-[0.5rem_1.25rem_minmax(0,1fr)]";
 
+// Mobile sheet: same floating drawer and padding as the Model and Effort pickers.
+const COMPACT_SHEET_PADDING_CLASS_NAME =
+  "px-3.5 pt-0 pb-[max(1.5rem,env(safe-area-inset-bottom))]";
+const COMPACT_SEPARATOR_CLASS_NAME = "mx-4 my-2 shrink-0";
+
 export interface EnvironmentPickerMachines {
   hosts: readonly Host[];
   localDaemonHostId: string | null;
@@ -87,6 +94,7 @@ export interface EnvironmentPickerUIProps {
     note?: string;
     onSelect: () => void;
     vps?: { selected: boolean; busy: boolean; description: string; onSelect: () => void };
+    onAddMachine?: () => void;
   };
   onRequestMachineSetup?: (host: Host) => void;
   providers?: readonly SystemEnvironmentProvider[];
@@ -223,6 +231,7 @@ export function EnvironmentPickerUI({
   const commandRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
+  const isCompactViewport = useIsCompactViewport();
   const availableMachines = useMemo(
     () =>
       machines === null || machines === undefined
@@ -430,9 +439,7 @@ export function EnvironmentPickerUI({
                 className={cn(
                   COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
                   isLoading && "animate-spin",
-                  !isLoading &&
-                    selected.icon === "Cloud" &&
-                    "text-primary [&_path]:stroke-[1.9]",
+                  !isLoading && selected.icon === "Cloud" && "cloud-icon",
                 )}
               />
             ) : (
@@ -480,14 +487,21 @@ export function EnvironmentPickerUI({
         align="start"
         aria-label="Environment"
         mobileTitle="Environment"
+        mobileClassName={FLOATING_DRAWER_CLASS_NAME}
         autoFocusRef={
           isLoading ? undefined : showSearch ? searchInputRef : commandRef
         }
         className={cn(
           "flex max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] w-80 flex-col overflow-hidden p-0 max-md:min-h-0 max-md:w-full max-md:flex-1",
           isLoading && "min-w-52",
+          isCompactViewport && COMPACT_SHEET_PADDING_CLASS_NAME,
         )}
       >
+        {isCompactViewport && !isLoading ? (
+          <div className="shrink-0 px-4 pt-1 pb-2 text-sm text-subtle-foreground">
+            Environment
+          </div>
+        ) : null}
         {isLoading ? (
           <PickerLoadingRows
             label="Loading environments"
@@ -602,7 +616,7 @@ export function EnvironmentPickerUI({
                       ) : null}
                     </CommandGroup>
                   )}
-                  <CommandSeparator className="mx-0 shrink-0" />
+                  <EnvironmentSeparator />
                   <CommandGroup>
                     <EnvironmentMenuItem
                       value="cloud:primary-checkout"
@@ -626,6 +640,19 @@ export function EnvironmentPickerUI({
                         onSelect={() => {
                           cloud.vps?.onSelect();
                           handleOpenChange(false);
+                        }}
+                      />
+                    ) : null}
+                    {cloud.onAddMachine ? (
+                      <EnvironmentMenuItem
+                        value="cloud:add-machine"
+                        label="Add machine"
+                        icon="Plus"
+                        selected={false}
+                        muted
+                        onSelect={() => {
+                          handleOpenChange(false);
+                          cloud.onAddMachine?.();
                         }}
                       />
                     ) : null}
@@ -747,7 +774,7 @@ function HostlessEnvironmentOptions({
 
   return (
     <>
-      {separated ? <CommandSeparator className="mx-0 shrink-0" /> : null}
+      {separated ? <EnvironmentSeparator /> : null}
       <CommandGroup heading={heading} className="shrink-0">
         {providers.map((provider) => (
           <EnvironmentMenuItem
@@ -1011,7 +1038,7 @@ function MachineContextualEnvironmentOptions({
       </div>
       {activeHost ? (
         <>
-          <CommandSeparator className="mx-0 shrink-0" />
+          <EnvironmentSeparator />
           <div className="shrink-0">
             <MachineSection
               host={activeHost}
@@ -1210,6 +1237,17 @@ function MachineSection({
   );
 }
 
+function EnvironmentSeparator() {
+  const isCompactViewport = useIsCompactViewport();
+  return (
+    <CommandSeparator
+      className={
+        isCompactViewport ? COMPACT_SEPARATOR_CLASS_NAME : "mx-0 shrink-0"
+      }
+    />
+  );
+}
+
 interface EnvironmentMenuItemProps {
   value: string;
   provider?: SystemEnvironmentProvider;
@@ -1220,6 +1258,8 @@ interface EnvironmentMenuItemProps {
   onSelect: () => void;
   disabled?: boolean;
   alignIconWithMachine?: boolean;
+  /** Grey action row (e.g. "Add machine"); brightens on hover. */
+  muted?: boolean;
 }
 
 function EnvironmentMenuItem({
@@ -1232,18 +1272,22 @@ function EnvironmentMenuItem({
   onSelect,
   disabled,
   alignIconWithMachine = false,
+  muted = false,
 }: EnvironmentMenuItemProps) {
+  const isCompactViewport = useIsCompactViewport();
+  const iconSizeClassName = isCompactViewport
+    ? "shrink-0"
+    : COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS;
   const menuIcon =
     provider === undefined ? (
       <Icon
         name={icon}
         className={cn(
-          !alignIconWithMachine &&
-            "mt-px text-muted-foreground max-md:pointer-coarse:mt-0",
-          alignIconWithMachine
-            ? "!size-full"
-            : COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
-          icon === "Cloud" && "text-primary [&_path]:stroke-[1.9]",
+          !alignIconWithMachine && "mt-px max-md:pointer-coarse:mt-0",
+          alignIconWithMachine ? "!size-full" : iconSizeClassName,
+          icon === "Cloud"
+            ? "cloud-icon"
+            : !alignIconWithMachine && "text-muted-foreground",
         )}
       />
     ) : (
@@ -1254,7 +1298,7 @@ function EnvironmentMenuItem({
             "mt-px text-muted-foreground max-md:pointer-coarse:mt-0",
           alignIconWithMachine
             ? "!size-full !min-h-0 !min-w-0"
-            : COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
+            : iconSizeClassName,
         )}
       />
     );
@@ -1269,7 +1313,18 @@ function EnvironmentMenuItem({
       }}
       className={cn(
         "flex items-start justify-between gap-3 whitespace-normal",
-        "py-[0.3125rem] text-xs max-md:py-2",
+        isCompactViewport
+          ? "min-h-[54px] items-center rounded-[18px] px-4 py-2.5 [&>[data-icon-root]]:!size-5"
+          : "py-[0.3125rem] text-xs max-md:py-2",
+        isCompactViewport &&
+          !alignIconWithMachine &&
+          "[&_[data-icon-root]]:!size-[22px]",
+        // Touch has no keyboard cursor: only the chosen row is highlighted.
+        isCompactViewport &&
+          (selected
+            ? "bg-composer font-medium shadow-message data-[selected=true]:bg-composer"
+            : "data-[selected=true]:bg-transparent"),
+        muted && "text-subtle-foreground",
         LIST_HOVER_TRANSITION,
       )}
     >
@@ -1279,7 +1334,7 @@ function EnvironmentMenuItem({
           alignIconWithMachine
             ? MACHINE_TARGET_CONTENT_CLASS_NAME
             : "flex min-w-0 flex-1 gap-2",
-          "items-start",
+          isCompactViewport ? "items-center gap-3.5" : "items-start",
         )}
       >
         {alignIconWithMachine ? (
@@ -1303,9 +1358,21 @@ function EnvironmentMenuItem({
           menuIcon
         )}
         <span className="flex min-w-0 flex-col">
-          <span className="whitespace-normal break-words text-xs">{label}</span>
+          <span
+            className={cn(
+              "whitespace-normal break-words",
+              isCompactViewport ? "text-[17px] leading-snug" : "text-xs",
+            )}
+          >
+            {label}
+          </span>
           {description ? (
-            <span className="mt-0.5 whitespace-normal break-words text-xs leading-snug text-muted-foreground">
+            <span
+              className={cn(
+                "mt-0.5 whitespace-normal break-words leading-snug text-muted-foreground",
+                isCompactViewport ? "text-sm font-normal" : "text-xs",
+              )}
+            >
               {description}
             </span>
           ) : null}

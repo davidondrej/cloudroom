@@ -545,6 +545,51 @@ describe("public thread parenting routes", () => {
     });
   });
 
+  it("keeps a running child open when its parent is archived (#603)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const parentThread = seedThread(harness.deps, {
+        environmentId: environment.id,
+        projectId: project.id,
+      });
+      const runningChild = seedThread(harness.deps, {
+        environmentId: environment.id,
+        parentThreadId: parentThread.id,
+        projectId: project.id,
+        status: "active",
+      });
+      const idleChild = seedThread(harness.deps, {
+        environmentId: environment.id,
+        parentThreadId: parentThread.id,
+        projectId: project.id,
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${parentThread.id}/archive-all`,
+        { method: "POST" },
+      );
+
+      expect(response.status).toBe(200);
+      expect(
+        threadArchiveAllResponseSchema.parse(await readJson(response)),
+      ).toEqual({
+        ok: true,
+        archivedThreadIds: [idleChild.id, parentThread.id],
+        keptLiveThreadIds: [runningChild.id],
+      });
+      const kept = getThread(harness.db, runningChild.id);
+      expect(kept?.archivedAt).toBeNull();
+      expect(kept?.parentThreadId).toBeNull();
+    });
+  });
+
   it("archives hierarchy children and hidden source-derived forks", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps);
@@ -645,6 +690,22 @@ describe("public thread parenting routes", () => {
           originKind: "fork",
           sourceThreadId: child.id,
         });
+        // A side chat moved under another thread now belongs to it (#2136).
+        const movedSideChat = seedThread(harness.deps, {
+          ...defaults,
+          originKind: "fork",
+          visibility: "hidden",
+          sourceThreadId: child.id,
+        });
+        const moved = await harness.app.request(
+          `/api/v1/threads/${movedSideChat.id}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ parentThreadId: unrelated.id }),
+          },
+        );
+        expect(moved.status).toBe(200);
         const archived = [
           root,
           child,
@@ -687,7 +748,7 @@ describe("public thread parenting routes", () => {
             );
           }
         }
-        for (const thread of [unrelated, visibleFork]) {
+        for (const thread of [unrelated, visibleFork, movedSideChat]) {
           expect(getThread(harness.db, thread.id)?.archivedAt).toBeNull();
         }
       });

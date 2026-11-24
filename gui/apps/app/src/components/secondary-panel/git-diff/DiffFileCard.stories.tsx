@@ -1,12 +1,12 @@
 import { useCallback, useState } from "react";
 import type { DiffFileEntry } from "@cloudroom/server-contract";
 import type { DiffPresentation } from "@/components/code/code-rendering";
-import type { RequestDiffFileContents } from "@/components/git-diff/GitDiffCardBody";
+import type { RequestDiffFileContents } from "@/components/diff/diff-store";
 import { DEFAULT_CODE_OVERFLOW_MODE } from "@/lib/code-overflow-mode";
 import type { DiffPatchState } from "@/hooks/queries/use-environment-diff-patches";
 import { appToast } from "@/components/ui/app-toast";
 import { StoryCard, StoryRow } from "../../../../.ladle/story-card";
-import { DiffFileCard } from "./DiffFileCard";
+import { DiffFileCard } from "@/components/diff/diff-card";
 import { makeDiffFileEntry } from "@/test/fixtures/diff-files";
 
 export default {

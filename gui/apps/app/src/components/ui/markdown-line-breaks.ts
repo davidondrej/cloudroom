@@ -1,5 +1,5 @@
 import type { PhrasingContent, Root } from "mdast";
-import { visit } from "unist-util-visit";
+import { visit } from "./markdown-visit.js";
 
 export function remarkLineBreaks() {
   return (tree: Root): void => {

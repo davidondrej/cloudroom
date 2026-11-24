@@ -14,7 +14,9 @@ import {
 import {
   blurActiveKeyboardInputBeforeOverlayOpen,
   getOverlayTriggerClassName,
+  OverlayCloseFocusContext,
   preventOverlayTriggerSelection,
+  useOverlayCloseFocus,
 } from "./overlay-trigger.js";
 import { usePointerCoarse } from "./hooks/use-pointer-coarse.js";
 
@@ -126,12 +128,14 @@ const PopoverContent = React.forwardRef<
       mobileClassName,
       onMobileContentAnimationEnd,
       onOpenAutoFocus,
+      onCloseAutoFocus,
       autoFocusRef,
       ...props
     },
     ref,
   ) => {
     const { isCompactViewport, open, onOpenChange } = useResponsivePopover();
+    const returnFocusOnClose = useOverlayCloseFocus();
     const isPointerCoarse = usePointerCoarse();
     const scopeProps = usePortalScopeProps();
 
@@ -184,6 +188,10 @@ const PopoverContent = React.forwardRef<
             if (isPointerCoarse || autoFocusRef) event.preventDefault();
             if (!isPointerCoarse) onOpenAutoFocus?.(event);
           }}
+          onCloseAutoFocus={(event) => {
+            onCloseAutoFocus?.(event);
+            returnFocusOnClose(event);
+          }}
           className={cn(
             "z-50 w-96 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95",
             className,
@@ -194,7 +202,10 @@ const PopoverContent = React.forwardRef<
             onInteractOutside?.(event);
           }}
         >
-          {children}
+          {/* Popovers nested in this one return focus to their own trigger. */}
+          <OverlayCloseFocusContext.Provider value={null}>
+            {children}
+          </OverlayCloseFocusContext.Provider>
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     );

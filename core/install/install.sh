@@ -83,6 +83,7 @@ install -d -m 755 $LIB
 install -d -m 700 -o cloudroom-agent -g cloudroom-agent /code
 install -m 755 "$stage/cloudroom" $LIB/cloudroom
 install -m 755 "$stage/install/configure.py" $LIB/configure.py
+install -m 755 "$stage/install/previews.py" $LIB/previews.py
 install -m 644 "$stage/install/cloudroom.service" /etc/systemd/system/cloudroom.service
 
 echo 'Writing configuration...'
@@ -101,16 +102,21 @@ EOF
 )
 chown cloudroom:cloudroom $ETC/core.env
 python3 $LIB/configure.py --storage-only $ETC
+# Mac access, secret requests, and previews, with no new account and no SSH changes. Core still runs without them.
+python3 $LIB/previews.py --tunnel /var/lib/cloudroom/history >/dev/null ||
+  echo 'Warning: Mac access, secret requests, and previews are not set up. Upgrading Core retries this.' >&2
 
 echo 'Starting the service...'
 systemctl daemon-reload
 systemctl enable --now cloudroom.service
+# Only a health check proves it runs: on a taken port, Core stays active while it waits for the port (#1968).
+healthy=''
 for _ in $(seq 30); do
   printf 'header = "Authorization: Bearer %s"\n' "$token" |
-    curl --config - --silent --fail http://127.0.0.1:9840/v1/health >/dev/null && break
+    curl --config - --silent --fail http://127.0.0.1:9840/v1/health >/dev/null && { healthy=1; break; }
   sleep 1
-done || true
-systemctl is-active --quiet cloudroom.service || fail 'the service did not start; check: journalctl -u cloudroom.service -n 50'
+done
+[ -n "$healthy" ] || fail 'the service did not answer on 127.0.0.1:9840; check: journalctl -u cloudroom.service -n 50'
 
 cat <<EOF
 

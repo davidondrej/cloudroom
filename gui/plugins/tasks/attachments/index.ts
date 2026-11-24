@@ -90,8 +90,8 @@ function removeAttachmentDescriptionReferences(
   return markdown.replace(new RegExp(`!\\[[^\\]]*\\]\\(${url}\\)`, "g"), "");
 }
 
-function pluginDataDirectory(bb: BbPluginApi): string {
-  const main = bb.storage
+function pluginDataDirectory(room: BbPluginApi): string {
+  const main = room.storage
     .database()
     .prepare<[], DatabaseListRow>("PRAGMA database_list")
     .all()
@@ -125,7 +125,7 @@ function pathInside(root: string, blobPath: string): string {
 }
 
 export async function removeAttachmentBlobs(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksStore,
   attachments: readonly Pick<Attachment, "id" | "blobPath">[],
 ): Promise<void> {
@@ -141,7 +141,7 @@ export async function removeAttachmentBlobs(
     if (result.status === "fulfilled") return [];
     const attachment = attachments[index];
     const message = errorMessage(result.reason);
-    bb.log.warn(
+    room.log.warn(
       `failed to remove attachment blob ${attachment?.id ?? "unknown"}: ${message}`,
     );
     return [result.reason];
@@ -415,7 +415,7 @@ function errorResponse(context: PluginHttpContext, error: unknown): Response {
 }
 
 export async function deleteAttachmentById(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksStore,
   attachmentId: string,
   options: {
@@ -447,7 +447,7 @@ export async function deleteAttachmentById(
   }
 
   try {
-    await (options.removeBlobs ?? removeAttachmentBlobs)(bb, store, [
+    await (options.removeBlobs ?? removeAttachmentBlobs)(room, store, [
       attachment,
     ]);
   } catch (error) {
@@ -457,12 +457,12 @@ export async function deleteAttachmentById(
     store.updateTask(ownerTask.id, { description: nextDescription });
   }
   if (!store.deleteAttachment(attachment.id)) return null;
-  publishAttachmentChanged(bb, store, attachment);
+  publishAttachmentChanged(room, store, attachment);
   return attachment;
 }
 
 export function publishAttachmentChanged(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksStore,
   attachment: Attachment,
 ): void {
@@ -473,26 +473,26 @@ export function publishAttachmentChanged(
       : undefined);
   const task = taskId ? store.getTask(taskId) : undefined;
   if (!task) {
-    bb.log.warn(`failed to publish attachment change ${attachment.id}`);
+    room.log.warn(`failed to publish attachment change ${attachment.id}`);
     return;
   }
-  bb.realtime.publish("tasks:changed", {
+  room.realtime.publish("tasks:changed", {
     taskId: task.id,
     projectId: task.projectId,
   });
 }
 
 export function registerAttachments(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksStore,
   options: {
     removeBlobs?: typeof removeAttachmentBlobs;
   } = {},
 ): void {
-  const root = pluginDataDirectory(bb);
+  const root = pluginDataDirectory(room);
   storeRoots.set(store, root);
 
-  bb.http.route(
+  room.http.route(
     "POST",
     UPLOAD_PATH,
     async (context) => {
@@ -507,7 +507,7 @@ export function registerAttachments(
           body.byteLength,
           (destinationPath) => writeFile(destinationPath, body),
         );
-        publishAttachmentChanged(bb, store, attachment);
+        publishAttachmentChanged(room, store, attachment);
         return context.json(
           {
             attachmentId: attachment.id,
@@ -522,7 +522,7 @@ export function registerAttachments(
     { auth: "token" },
   );
 
-  bb.http.route("GET", DOWNLOAD_PATH, async (context) => {
+  room.http.route("GET", DOWNLOAD_PATH, async (context) => {
     const attachmentId = context.req.query("attachmentId")?.trim();
     const attachment = attachmentId
       ? store.getAttachment(attachmentId)
@@ -552,11 +552,11 @@ export function registerAttachments(
     });
   });
 
-  bb.http.route("DELETE", DELETE_PATH, async (context) => {
+  room.http.route("DELETE", DELETE_PATH, async (context) => {
     const attachmentId = context.req.query("attachmentId")?.trim();
     try {
       const attachment = attachmentId
-        ? await deleteAttachmentById(bb, store, attachmentId, {
+        ? await deleteAttachmentById(room, store, attachmentId, {
             removeBlobs: options.removeBlobs,
             removeDescriptionReferences:
               context.req.query("removeDescriptionReferences") === "true",

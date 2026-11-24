@@ -740,6 +740,16 @@ export interface PluginNavPanelRegistration {
    */
   experimental_sidebarAccessory?: ComponentType;
   /**
+   * Optional component right after this panel's title in its sidebar row, for
+   * a short status worth noticing, like "4 paused". Unlike the accessory it may
+   * be interactive, for example a hover card. It receives no props and renders
+   * nothing when there is nothing to say. Clicks in portalled content still
+   * bubble to the row through React, so stop them there.
+   *
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_sidebarLabel?: ComponentType;
+  /**
    * Optional component rendered on the right side of the shared title bar
    * (e.g. a sync button or a count). Contained separately from the body: a
    * throwing headerContent is hidden without breaking the title bar.
@@ -1522,6 +1532,31 @@ export interface PluginThreadHeaderActionRegistration {
    */
   title: string;
   component: ComponentType<PluginThreadHeaderActionProps>;
+}
+
+/** Props passed to an `experimental_projectAction` component: the page the action opens. */
+export interface ExperimentalProjectActionProps {
+  /** The project whose menu opened the page. */
+  projectId: string;
+}
+
+/**
+ * Add an item to every project's actions menu (the sidebar's three dots and
+ * its right-click menu). Host-rendered chrome: the plugin supplies the title,
+ * icon, and an optional badge. Selecting it opens `component` as a full page
+ * for that project, at `/plugins/<pluginId>/<id>/<projectId>`. The page has no
+ * sidebar entry of its own.
+ */
+export interface ExperimentalProjectActionRegistration {
+  /** Unique within the plugin; letters, digits, `-`, `_`. */
+  id: string;
+  /** The menu item's label. */
+  title: string;
+  /** Resolved names take precedence over plugin branding; unknown names fall back to branding. */
+  icon: BbIconName;
+  /** A short label after the title, in the accent color, like "NEW". */
+  badge?: string;
+  component: ComponentType<ExperimentalProjectActionProps>;
 }
 
 export interface ExperimentalPluginBrowserToolbarActionRegistration {
@@ -2383,6 +2418,14 @@ export interface PluginAppSlots {
   experimental_threadAction<Data = undefined>(
     registration: PluginThreadActionRegistration<Data>,
   ): void;
+  /**
+   * Add an item to every project's actions menu that opens a plugin page for
+   * that project (see {@link ExperimentalProjectActionRegistration}).
+   * Experimental: see docs/api_to_audit.md.
+   */
+  experimental_projectAction(
+    registration: ExperimentalProjectActionRegistration,
+  ): void;
   /** Render a component beside each Browser tab's address bar. */
   experimental_browserToolbarAction(
     registration: ExperimentalPluginBrowserToolbarActionRegistration,
@@ -3117,7 +3160,7 @@ export interface PluginComposerApi {
  * composer, the embedded composer and `bb.sdk.threads.spawn` alike.
  */
 export interface ComposerSelection {
-  /** New-thread composers only. BB's personal-project id means "Don't work in a project". */
+  /** New-thread composers only. BB's personal-project id means "No project". */
   projectId?: string;
   /**
    * New-thread composers only. `{ type: "project-default" }` and a `host`
@@ -3251,6 +3294,19 @@ export interface ExperimentalProviderModelPickerValue {
   serviceTier?: ServiceTier;
 }
 
+/**
+ * One more choice shown after the picker's provider tabs, for a caller whose
+ * selection can be something that is not an agent (Loops offers Jev, a
+ * decision model that runs no agent). Picking it closes the picker and calls
+ * `onSelect`. The picker's own `value` stays as it is: the caller decides
+ * what the choice means and what to render for it.
+ */
+export interface ExperimentalProviderModelPickerExtraChoice {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  onSelect(): void;
+}
+
 /** Where the picker resolves the live provider and model catalog. */
 export type ExperimentalProviderModelPickerRouting =
   | { kind: "host"; hostId: string }
@@ -3265,12 +3321,16 @@ export type ExperimentalProviderModelPickerRouting =
  * model catalog depends on the selected workspace.
  */
 export interface ExperimentalProviderModelPickerProps {
+  /** Discover models for a Cloud thread. Defaults to local discovery. */
+  cloud?: boolean;
   value: ExperimentalProviderModelPickerValue;
   onChange(value: ExperimentalProviderModelPickerValue): void;
   /** Route discovery through an explicit machine or existing environment. */
   routing?: ExperimentalProviderModelPickerRouting;
   /** Allow switching providers. Defaults to true; false hides provider tabs. */
   allowProviderChange?: boolean;
+  /** One more choice after the provider tabs; needs `allowProviderChange`. */
+  extraChoice?: ExperimentalProviderModelPickerExtraChoice;
   /** Horizontal popover alignment. Defaults to `"start"`. */
   align?: "start" | "center" | "end";
   /** Render the shared selection summary without allowing changes. */
@@ -3379,7 +3439,7 @@ export interface NewThreadRequest {
   /** Cloud only: the GitHub branch the sandbox starts from. Omitted means the default branch. */
   baseBranch?: string;
   /**
-   * The selected project id. Choosing "Don't work in a project" submits BB's
+   * The selected project id. Choosing "No project" submits BB's
    * personal-project id (not `null`) together with a `personal` workspace
    * environment. Forward those fields unchanged to `threads.spawn`; if the
    * plugin needs project metadata, request it from the plugin backend with
@@ -3429,7 +3489,7 @@ export interface NewThreadRequest {
 export interface NewThreadComposerProps {
   /**
    * Seeds the project picker. The user can change it, including choosing
-   * "Don't work in a project"; see {@link NewThreadRequest.projectId} for the
+   * "No project"; see {@link NewThreadRequest.projectId} for the
    * submitted projectless shape.
    */
   defaultProjectId?: string;

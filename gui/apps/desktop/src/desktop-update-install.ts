@@ -1,15 +1,21 @@
-import { execFile, spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { accessSync, constants, statSync } from "node:fs";
+import { open, readdir, readFile } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 export const IDLE_INSTALL_AFTER_MS = 10 * 60_000;
 const IDLE_CHECK_MS = 15_000;
+const BACKGROUND_WAIT_MAX_MS = 24 * 60 * 60_000;
 
 export interface IdleInstallArgs {
   isUpdateDownloaded(): boolean;
   systemIdleSeconds(): number;
   hasRunningThreads(): Promise<boolean>;
+  /** Idle Local threads still waiting on a background command, agent or workflow. */
+  hasBackgroundWork?(): Promise<boolean>;
+  /** False: never install by itself, only when a window asks (`report` returns true). */
+  autoInstall?: boolean;
   report?(installAt: number | null): Promise<boolean>;
   install(): Promise<void>;
   now?: () => number;
@@ -21,6 +27,10 @@ export function startIdleInstall(args: IdleInstallArgs): {
 } {
   const now = args.now ?? Date.now;
   let busyAt = now();
+  // Background work (#1114): the 24 h cap counts from the first wait and is never restarted.
+  let waitingSince: number | null = null;
+  let backgroundOpen = false;
+  let backgroundEndedAt = -Infinity;
   let installing = false;
   // A slow server can make a check outlast the 15 s interval; overlapping checks would install twice.
   let checking = false;
@@ -34,10 +44,28 @@ export function startIdleInstall(args: IdleInstallArgs): {
       }
       const running = await args.hasRunningThreads().catch(() => true);
       if (running) busyAt = now();
-      const installAt = running
-        ? null
-        : Math.max(busyAt, now() - args.systemIdleSeconds() * 1000) +
-          IDLE_INSTALL_AFTER_MS;
+      const capped = waitingSince !== null && now() - waitingSince >= BACKGROUND_WAIT_MAX_MS;
+      let installAt =
+        running || args.autoInstall === false
+          ? null
+          : Math.max(busyAt, capped ? -Infinity : backgroundEndedAt, now() - args.systemIdleSeconds() * 1000) +
+            IDLE_INSTALL_AFTER_MS;
+      // The restart would end that work and the thread would never wake (#1114). Asked when due, then on every check
+      // while work runs and through the 10 minutes after it ends (it lists every thread). A failed check counts as none.
+      const watching = backgroundOpen || now() < backgroundEndedAt + IDLE_INSTALL_AFTER_MS;
+      if (installAt !== null && !capped && (watching || now() >= installAt)) {
+        const background = (await args.hasBackgroundWork?.().catch(() => false)) ?? false;
+        if (background) {
+          waitingSince ??= now();
+          backgroundOpen = true;
+          installAt = null;
+        } else if (backgroundOpen) {
+          // The completion notice and the agent's next turn get the same 10 minutes as a finished turn.
+          backgroundOpen = false;
+          backgroundEndedAt = now();
+          installAt = Math.max(installAt, backgroundEndedAt + IDLE_INSTALL_AFTER_MS);
+        }
+      }
       const requested = (await args.report?.(installAt).catch(() => false)) ?? false;
       if (!requested && (installAt === null || now() < installAt)) return;
       installing = true;
@@ -51,19 +79,44 @@ export function startIdleInstall(args: IdleInstallArgs): {
   return { check, stop: () => clearInterval(timer) };
 }
 
-const REOPEN_SCRIPT = `
+// Our own ShipIt: a process named ShipIt with our launchd job label ("<bundle id>.ShipIt", Squirrel's
+// SQRLShipItLauncher) as one argument, so another app's ShipIt doesn't count. A ShipIt running as root
+// (a password install) counts too, since this user may not see its arguments.
+const OUR_SHIPIT = `
 id=$(defaults read "$1/Contents/Info" CFBundleIdentifier) || exit 1
-running() { [ -n "$(lsappinfo find bundleid="$id")" ]; }
+shipit() {
+  for p in $(pgrep -x ShipIt); do
+    case "$(ps -o uid= -p "$p" | tr -d ' ') $(ps -o args= -p "$p") " in "0 "* | *" $id.ShipIt "*) return 0 ;; esac
+  done
+  return 1
+}
+`;
+
+const REOPEN_SCRIPT = `${OUR_SHIPIT}running() { [ -n "$(lsappinfo find bundleid="$id")" ]; }
 for _ in $(seq 1800); do kill -0 "$2" 2>/dev/null || break; sleep 1; done
 sleep 5
 for _ in $(seq 100); do
   running && exit 0
-  pgrep -x ShipIt >/dev/null || break
+  shipit || break
   sleep 3
 done
 sleep 5
 running || open "$1"
 `;
+
+/** Squirrel.Mac is still installing an update into this app. */
+export function shipItRunning(execPath: string): Promise<boolean> {
+  const bundle = macAppBundle(execPath);
+  if (bundle === null) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    execFile(
+      "/bin/sh",
+      ["-c", `${OUR_SHIPIT}shipit`, "sh", bundle],
+      { timeout: 5_000 },
+      (error) => resolve(error === null),
+    );
+  });
+}
 
 export function macAppBundle(execPath: string): string | null {
   return /^(.+?\.app)\/Contents\/MacOS\/[^/]+$/u.exec(execPath)?.[1] ?? null;
@@ -92,6 +145,38 @@ export function installNeedsPassword(execPath: string): boolean {
   return bundle !== null && !(canWrite(bundle) && canWrite(dirname(bundle)));
 }
 
+// Opened from the disk image or translocated from Downloads: no password helps, Squirrel.Mac
+// refuses a read-only app ("Cannot update while running on a read-only volume").
+export function appOnReadOnlyVolume(execPath: string): boolean {
+  const bundle = macAppBundle(execPath);
+  if (bundle === null) return false;
+  try {
+    accessSync(bundle, constants.W_OK);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EROFS";
+  }
+}
+
+// On another disk than Applications (an external drive), Squirrel.Mac moves the app to its temp folder on the boot
+// disk, a copy that macOS can refuse halfway, and then can't put the old app back: the app is gone (#2511).
+export function appOnOtherVolume(
+  execPath: string,
+  stat: (path: string) => { dev: number } = statSync,
+): boolean {
+  const bundle = macAppBundle(execPath);
+  if (bundle === null) return false;
+  try {
+    return stat(bundle).dev !== stat("/Applications").dev;
+  } catch {
+    return bundle.startsWith("/Volumes/");
+  }
+}
+
+// An unanswered prompt (hidden behind windows, on another screen) would leave Restart to update
+// spinning forever; after this the prompt closes and the button works again.
+const OWNERSHIP_PROMPT_TIMEOUT_MS = 2 * 60_000;
+
 const TAKE_OWNERSHIP_SCRIPT = [
   "on run argv",
   'do shell script "/usr/sbin/chown -R " & item 1 of argv & " " & quoted form of item 2 of argv & " && /bin/chmod -R u+w " & quoted form of item 2 of argv with prompt "Cloudroom needs your password once, so future updates install by themselves." with administrator privileges',
@@ -102,15 +187,16 @@ const TAKE_OWNERSHIP_SCRIPT = [
 // again. Only a writable folder (e.g. /Applications for admins) can be fixed this way.
 export function takeAppOwnership(
   execPath: string,
-): Promise<"fixed" | "canceled" | "failed" | "skipped"> {
+): Promise<"fixed" | "canceled" | "timed-out" | "failed" | "skipped"> {
   const bundle = macAppBundle(execPath);
   if (bundle === null || !canWrite(dirname(bundle))) {
     return Promise.resolve("skipped");
   }
   const args = [...TAKE_OWNERSHIP_SCRIPT, String(userInfo().uid), bundle];
   return new Promise((resolve) => {
-    execFile("/usr/bin/osascript", args, (error, _stdout, stderr) => {
+    execFile("/usr/bin/osascript", args, { timeout: OWNERSHIP_PROMPT_TIMEOUT_MS }, (error, _stdout, stderr) => {
       if (error === null) resolve(canWrite(bundle) ? "fixed" : "failed");
+      else if (error.killed) resolve("timed-out");
       else resolve(/\(-128\)/u.test(stderr) ? "canceled" : "failed");
     });
   });
@@ -124,4 +210,111 @@ export function reopenAfterExit(execPath: string, pid: number): boolean {
     stdio: "ignore",
   }).unref();
   return true;
+}
+
+interface StageLogger {
+  info(message: string): void;
+  warn(message: string): void;
+}
+
+/** Electron's own fs treats app.asar as a folder, so main.ts passes original-fs here. */
+interface StageFs {
+  open: typeof open;
+  readdir: typeof readdir;
+}
+
+// Windows (#2525): unpack a downloaded update next to the running app, like Squirrel.Mac stages one. The installer's
+// --cloudroom-stage mode writes "<install dir>.next" (build/installer.nsh). Opening every file once makes Defender
+// scan it now, not while the updated backend starts. Restart to update then only swaps the two folders.
+export function createWindowsUpdateStager(
+  logger: StageLogger,
+  fs: StageFs = { open, readdir },
+  installDir = dirname(process.execPath),
+) {
+  let child: { proc: ChildProcess; exited: Promise<void> } | null = null;
+  let run = 0;
+  let closed = false;
+
+  async function prewarm(dir: string, current: number): Promise<number> {
+    let files = 0;
+    for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+      if (current !== run) break;
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) files += await prewarm(path, current);
+      else if (entry.isFile()) {
+        await (await fs.open(path)).close();
+        files += 1;
+      }
+    }
+    return files;
+  }
+
+  /**
+   * Ends a running or queued stage. The installer allows one copy at a time, so Restart to update must not hand off
+   * on false: the stage was still running 10 s after the kill.
+   */
+  async function stop(): Promise<boolean> {
+    run += 1;
+    const current = child;
+    if (current === null) return true;
+    current.proc.kill();
+    const timeout = new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000).unref());
+    return Promise.race([current.exited.then(() => true), timeout]);
+  }
+
+  /** Quit: no stage starts from now on. True when one was still running; it is killed but may not be gone yet. */
+  function close(): boolean {
+    closed = true;
+    const running = child !== null;
+    void stop();
+    return running;
+  }
+
+  function warm(version: string, current: number, startedAt: number): void {
+    const unpackedAt = Date.now();
+    prewarm(`${installDir}.next`, current)
+      .then((files) =>
+        logger.info(`Staged ${version} in ${unpackedAt - startedAt} ms; opened ${files} files in ${Date.now() - unpackedAt} ms.`),
+      )
+      .catch((error: unknown) => logger.warn(`Pre-warming the staged ${version} failed: ${String(error)}`));
+  }
+
+  function stage(installerPath: string, version: string): void {
+    if (closed) return;
+    const previous = stop();
+    // Any stop() after this call, even before the previous stage has exited, cancels this one.
+    const current = run;
+    void previous.then(async (stopped) => {
+      // A stage that outlived its kill still holds the installer's lock and stays in `child` for the next stop().
+      if (!stopped) return;
+      const startedAt = Date.now();
+      const staged = await readFile(join(`${installDir}.next`, ".cloudroom-staged"), "utf8").catch(() => null);
+      if (current !== run || closed) return;
+      // The marker is "<version> <files> <KB>" (build/installer.nsh).
+      if (staged?.split(" ")[0] === version) {
+        warm(version, current, startedAt);
+        return;
+      }
+      const proc = spawn(installerPath, ["--cloudroom-stage", "/S"], { stdio: "ignore", windowsHide: true });
+      const exited = new Promise<void>((resolve) => {
+        proc.once("exit", () => resolve());
+        proc.once("error", () => resolve());
+      });
+      child = { proc, exited };
+      void exited.then(() => {
+        if (child?.proc === proc) child = null;
+      });
+      proc.once("error", (error) => logger.warn(`Staging ${version} didn't start: ${error.message}`));
+      proc.once("exit", (code) => {
+        if (current !== run) return;
+        if (code !== 0) {
+          logger.warn(`Staging ${version} failed (exit ${code}); Restart to update does the full install.`);
+          return;
+        }
+        warm(version, current, startedAt);
+      });
+    });
+  }
+
+  return { close, stage, stop };
 }

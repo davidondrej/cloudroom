@@ -21,6 +21,11 @@ describe("computeMutedPrefixLength", () => {
     expect(text.slice(13)).toBe("Welcome!");
   });
 
+  it("mutes the [system] tag, and the older [bb system] one", () => {
+    expect(computeMutedPrefixLength("system", "[system]\n\nWelcome!")).toBe(10);
+    expect(computeMutedPrefixLength("system", "[bb system]\n\nHi")).toBe(13);
+  });
+
   it("eats a single space after ] for inline-form messages", () => {
     const text = "[bb system] Thread completed.";
     expect(computeMutedPrefixLength("system", text)).toBe(12);
@@ -32,10 +37,14 @@ describe("computeMutedPrefixLength", () => {
     expect(computeMutedPrefixLength("system", text)).toBe(text.length);
   });
 
-  it("handles the agent prefix shape", () => {
-    const prefix = "[bb message from thread:thr_sender]";
-    const text = `${prefix}\n\nHi`;
-    expect(computeMutedPrefixLength("agent", text)).toBe(prefix.length + 2);
-    expect(text.slice(prefix.length + 2)).toBe("Hi");
+  it("handles the agent prefix shape, with or without bb", () => {
+    for (const prefix of [
+      "[bb message from thread:thr_sender]",
+      "[message from thread:thr_sender]",
+    ]) {
+      const text = `${prefix}\n\nHi`;
+      expect(computeMutedPrefixLength("agent", text)).toBe(prefix.length + 2);
+      expect(text.slice(prefix.length + 2)).toBe("Hi");
+    }
   });
 });

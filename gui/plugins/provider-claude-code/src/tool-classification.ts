@@ -38,9 +38,9 @@ export interface ClaudeInjectedTool {
   presentation?: DeltaPresentation;
 }
 
-export const BB_BRIDGE_MCP_SERVER_NAME = "bb-bridge";
+export const ROOM_BRIDGE_MCP_SERVER_NAME = "bb-bridge";
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 const claudeBackgroundFlagSchema = z
   .object({ run_in_background: z.boolean().optional() })
@@ -325,7 +325,7 @@ function classifyDelegation(
   };
 }
 
-function bbTool(
+function roomTool(
   tool: string,
   args: unknown,
   injected: ClaudeInjectedTool | undefined,
@@ -335,7 +335,7 @@ function bbTool(
     shape: {
       type: "tool",
       tool,
-      server: BB_TOOL_SERVER,
+      server: ROOM_TOOL_SERVER,
       ...(toolArguments ? { args: toolArguments } : {}),
     },
     presentation: injected?.presentation ?? toolPresentation(tool),
@@ -455,8 +455,8 @@ export function classifyClaudeToolUse(args: {
       if (mcp === null) {
         return genericTool(toolName, input);
       }
-      if (mcp.server === BB_BRIDGE_MCP_SERVER_NAME) {
-        return bbTool(mcp.tool, input, args.injectedTools.get(mcp.tool));
+      if (mcp.server === ROOM_BRIDGE_MCP_SERVER_NAME) {
+        return roomTool(mcp.tool, input, args.injectedTools.get(mcp.tool));
       }
       return mcpTool(toolName, mcp.server, mcp.tool, input);
     }

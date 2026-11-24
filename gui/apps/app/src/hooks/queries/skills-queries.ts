@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { DeleteSkillRequest, SkillSummary } from "@cloudroom/server-contract";
+import {
+  skillListResponseSchema,
+  type DeleteSkillRequest,
+  type SkillSummary,
+} from "@cloudroom/server-contract";
+import { createLastKnownCache } from "@/lib/last-known-cache";
 import { sdk } from "@/lib/sdk";
 import {
   projectSkillsQueryKey,
@@ -10,11 +15,30 @@ import {
 } from "@/hooks/queries/query-keys";
 import { invalidateProjectSkillsMutationQueries } from "@/hooks/cache-owners/skills-cache-effects";
 
+// The last installed-skills list per project, so Skills and Analytics open instantly.
+const projectSkillsCache = createLastKnownCache({
+  prefix: "bb.project-skills",
+  version: "1",
+  schema: skillListResponseSchema,
+  maxEntries: 8,
+});
+
+/** Shows the last saved list at once, then refreshes it in the background. */
 export function useProjectSkills(projectId: string) {
+  const cacheKey = projectSkillsCache.key(projectId);
   return useQuery({
     queryKey: projectSkillsQueryKey(projectId),
-    queryFn: ({ signal }) =>
-      sdk.skills.list({ projectId, environmentId: null, signal }),
+    queryFn: async ({ signal }) => {
+      const list = await sdk.skills.list({
+        projectId,
+        environmentId: null,
+        signal,
+      });
+      projectSkillsCache.write(cacheKey, list);
+      return list;
+    },
+    initialData: () => projectSkillsCache.read(cacheKey) ?? undefined,
+    initialDataUpdatedAt: 0,
     enabled: projectId.length > 0,
     staleTime: 0,
     refetchOnMount: "always",

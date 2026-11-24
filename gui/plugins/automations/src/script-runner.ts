@@ -4,6 +4,11 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { access, mkdir, stat } from "node:fs/promises";
 import {
+  gitShell,
+  normalizeWindowsEnv,
+  terminateWindowsProcessTrees,
+} from "@cloudroom/process-utils";
+import {
   AUTOMATION_SCRIPT_TIMEOUT_MAX_MS,
   type AutomationScriptInterpreter,
 } from "./rpc-types.js";
@@ -15,10 +20,11 @@ import {
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_OUTPUT_MAX_BYTES = 1024 * 1024;
+const SLEEP_GAP_MS = 5_000;
 
-let resolvedBbPath: string | null = null;
+let resolvedRoomPath: string | null = null;
 
-const BB_NOT_INJECTED_WARNING =
+const ROOM_NOT_INJECTED_WARNING =
   "[Cloudroom] warning: could not locate the CLI, so `room-cli` is not on PATH for this script.";
 
 async function commandWorks(command: string, args: string[]): Promise<boolean> {
@@ -30,7 +36,7 @@ async function commandWorks(command: string, args: string[]): Promise<boolean> {
   }
 }
 
-export function bbBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
+export function roomBinaryCandidates(env: NodeJS.ProcessEnv): string[] {
   const candidates: string[] = [];
   const pushIfAbsolute = (candidate: string): void => {
     if (isAbsolute(candidate)) {
@@ -66,14 +72,18 @@ async function isExecutableFile(candidate: string): Promise<boolean> {
   }
 }
 
-async function resolveBbBinary(
+async function resolveRoomBinary(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | null> {
-  if (resolvedBbPath !== null) return resolvedBbPath;
-  for (const candidate of bbBinaryCandidates(env)) {
+  if (resolvedRoomPath !== null) return resolvedRoomPath;
+  for (const candidate of roomBinaryCandidates(env)) {
     if (!(await isExecutableFile(candidate))) continue;
-    if (await commandWorks(candidate, ["--version"])) {
-      resolvedBbPath = candidate;
+    const works =
+      process.platform === "win32"
+        ? await commandWorks(process.execPath, [candidate, "--version"])
+        : await commandWorks(candidate, ["--version"]);
+    if (works) {
+      resolvedRoomPath = candidate;
       return candidate;
     }
   }
@@ -81,15 +91,15 @@ async function resolveBbBinary(
 }
 
 export function scriptPathEnv(
-  bbPath: string | null,
+  roomPath: string | null,
   inheritedPath: string | undefined,
 ): string {
   const basePath = inheritedPath ?? "";
-  if (bbPath === null || !isAbsolute(bbPath)) {
+  if (roomPath === null || !isAbsolute(roomPath)) {
     return basePath;
   }
-  const bbDir = dirname(bbPath);
-  return basePath.length > 0 ? `${bbDir}${delimiter}${basePath}` : bbDir;
+  const roomDir = dirname(roomPath);
+  return basePath.length > 0 ? `${roomDir}${delimiter}${basePath}` : roomDir;
 }
 
 export function isWakeAgentSuppressed(output: string): boolean {
@@ -174,7 +184,61 @@ export function mapScriptResultToRun(
   };
 }
 
+async function windowsProcessTree(pid: number): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync(
+      join(
+        process.env.SystemRoot ?? "C:\\Windows",
+        "System32",
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+      ),
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+      ],
+      { timeout: 10_000, windowsHide: true },
+    );
+    const links = stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim().split(" ").map(Number));
+    const tree = [pid];
+    for (let index = 0; index < tree.length; index += 1) {
+      for (const [childPid, parentPid] of links) {
+        if (
+          childPid !== undefined &&
+          parentPid === tree[index] &&
+          !tree.includes(childPid)
+        ) {
+          tree.push(childPid);
+        }
+      }
+    }
+    return tree;
+  } catch {
+    return [pid];
+  }
+}
+
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform === "win32" && child.pid !== undefined) {
+    const exited = child.exitCode !== null || child.signalCode !== null;
+    void (
+      exited
+        ? Promise.resolve(true)
+        : windowsProcessTree(child.pid).then((pids) =>
+            terminateWindowsProcessTrees(pids),
+          )
+    ).then((ended) => {
+      if (!ended) child.kill(signal);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    });
+    return;
+  }
   try {
     if (process.platform !== "win32" && child.pid !== undefined) {
       process.kill(-child.pid, signal);
@@ -239,7 +303,7 @@ function executeWithProcessGroup(args: {
       terminateGroup();
     });
     child.once("close", (code) => {
-      clearTimeout(timeout);
+      clearInterval(timeout);
       if (forceKill) clearTimeout(forceKill);
       if (timedOut || outputLimitExceeded) {
         signalProcessGroup(child, "SIGKILL");
@@ -253,10 +317,23 @@ function executeWithProcessGroup(args: {
         timedOut,
       });
     });
-    timeout = setTimeout(() => {
-      timedOut = true;
-      terminateGroup();
-    }, args.timeoutMs);
+    // Count only awake time: with the lid closed a Mac wakes for a few seconds at a time, and a plain timer would
+    // count the sleep in between and time the script out (2026-11-18). A tick gap over SLEEP_GAP_MS was sleep.
+    let awakeMs = 0;
+    let lastTick = Date.now();
+    timeout = setInterval(
+      () => {
+        const now = Date.now();
+        const gap = now - lastTick;
+        lastTick = now;
+        if (gap > 0 && gap <= SLEEP_GAP_MS) awakeMs += gap;
+        if (awakeMs < args.timeoutMs) return;
+        clearInterval(timeout);
+        timedOut = true;
+        terminateGroup();
+      },
+      Math.min(1_000, args.timeoutMs),
+    );
     timeout.unref();
   });
 }
@@ -279,28 +356,34 @@ export async function executeStoredScript(args: {
   });
   const interpreter =
     args.interpreter ?? resolveDefaultInterpreter(args.scriptFile);
-  const bbPath = await resolveBbBinary();
-  const warning = bbPath === null ? `${BB_NOT_INJECTED_WARNING}\n` : "";
+  const roomPath = await resolveRoomBinary();
+  const warning = roomPath === null ? `${ROOM_NOT_INJECTED_WARNING}\n` : "";
   const scriptEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(args.env ?? {}),
-    PATH: scriptPathEnv(bbPath, process.env.PATH),
+    PATH: scriptPathEnv(roomPath, process.env.PATH),
     ROOM_SERVER_URL: args.serverUrl,
     ROOM_PROJECT_ID: args.projectId,
     BB_AUTOMATION_ID: args.automationId,
     BB_AUTOMATION_RUN_ID: args.runId,
   };
-  if (bbPath !== null) {
-    scriptEnv.ROOM_CLI = bbPath;
+  if (roomPath !== null) {
+    scriptEnv.ROOM_CLI = roomPath;
   }
   const cwd = scriptsRoot(args.pluginDataDir);
   await mkdir(cwd, { recursive: true });
+  const windowsShell =
+    process.platform !== "win32"
+      ? null
+      : interpreter === "bash"
+        ? await gitShell(scriptEnv).catch(() => null)
+        : { command: interpreter, env: normalizeWindowsEnv(scriptEnv) };
   const result = await executeWithProcessGroup({
-    command: interpreter,
+    command: windowsShell?.command ?? interpreter,
     scriptPath,
     cwd,
     timeoutMs: Math.min(args.timeoutMs, AUTOMATION_SCRIPT_TIMEOUT_MAX_MS),
-    env: scriptEnv,
+    env: windowsShell?.env ?? scriptEnv,
   });
   return { ...result, output: `${warning}${result.output}` };
 }

@@ -17,7 +17,12 @@ const gitConfig = [
 
 const aiCoAuthorPattern =
   "^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|factory-droid|windsurf|codeium)";
-const stripAiCoAuthorsHook = `cloudroom_strip_ai_co_authors() { grep -viE '${aiCoAuthorPattern}' "$1" > "$1.cloudroom"; [ $? -le 1 ] && mv "$1.cloudroom" "$1" || rm -f "$1.cloudroom"; }; cloudroom_strip_ai_co_authors`;
+// Applies machine-wide: Local builds this env without a session's project path (Core scopes Cloud's hook, #811).
+// Both events are needed (--no-verify/cherry-pick vs editor/reword). In bash (Git for Windows' sh), one byte-wise
+// (LC_ALL=C) read of a message under 1 KB skips grep when no line starts with Co-authored-by: one shell start per
+// hook instead of two processes (#1873). A NUL, 1 KB or more, a read error or another shell take the grep path.
+// No $', $& or $` anywhere: tools that paste env into a JS string.replace() expand them (Astro < 7.4.6, #2529).
+const stripAiCoAuthorsHook = `cloudroom_maybe_co_author() { [ -n "\${BASH_VERSION-}" ] || return 0; local LC_ALL=C m=; IFS= read -r -d '' -n 1025 m < "$1" 2>/dev/null; [ $? -eq 1 ] && [ "\${#m}" -lt 1025 ] || return 0; case "$m" in [Cc][Oo]-[Aa][Uu][Tt][Hh][Oo][Rr][Ee][Dd]-[Bb][Yy]:*|*"\n"[Cc][Oo]-[Aa][Uu][Tt][Hh][Oo][Rr][Ee][Dd]-[Bb][Yy]:*) return 0 ;; esac; return 1; }; cloudroom_strip_ai_co_authors() { cloudroom_maybe_co_author "$1" || return 0; grep -qiE '${aiCoAuthorPattern}' "$1" || return 0; t=$(mktemp) || return 0; grep -viE '${aiCoAuthorPattern}' "$1" > "$t"; [ $? -le 1 ] && cat "$t" > "$1" && echo 'Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)' >&2; rm -f "$t"; return 0; }; cloudroom_strip_ai_co_authors`;
 const stripAiCoAuthorsConfig = [
   ["hook.cloudroom-strip-ai-co-authors.command", stripAiCoAuthorsHook],
   ["hook.cloudroom-strip-ai-co-authors.event", "prepare-commit-msg"],
@@ -33,6 +38,7 @@ async function runGh(args: string[]): Promise<string> {
   const { stdout } = await exec("gh", args, {
     timeout: 15_000,
     maxBuffer: 1024 * 1024,
+    windowsHide: true,
   });
   return stdout;
 }

@@ -163,4 +163,14 @@ describe("normalizeLocalFileMarkdownLinks", () => {
     const content = "[x](C:not-a-path) and [mail](mailto:me@example.com)";
     expect(normalizeLocalFileMarkdownLinks(content)).toBe(content);
   });
+
+  it("handles repeated unclosed link destinations without rescanning the line", () => {
+    const content = "[x](".repeat(16_000);
+    expect(normalizeLocalFileMarkdownLinks(content)).toBe(content);
+  }, 1_000);
+
+  it("handles repeated escaped closing brackets without rescanning the line", () => {
+    const content = String.raw`\](`.repeat(16_000);
+    expect(normalizeLocalFileMarkdownLinks(content)).toBe(content);
+  }, 1_000);
 });

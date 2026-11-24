@@ -1,4 +1,4 @@
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 
 const STATUS_CONTENT = {

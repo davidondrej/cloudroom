@@ -301,3 +301,37 @@ export function buildClaudeCodeModels(
     selectedOnlyModels,
   };
 }
+
+export interface ClaudeEffortSettings {
+  effortLevel?: unknown;
+  modelSettings?: Record<string, { effortLevel?: unknown } | null | undefined>;
+}
+
+/** The user's own Claude Code effort (`modelSettings[<model>]` first, then
+ *  `effortLevel`) becomes a model's default when the model supports it, so a
+ *  new thread nobody picked a level for matches the terminal (#656). Aliases
+ *  such as `opus` are looked up under the model they resolve to. */
+export function applyClaudeEffortSettings(
+  catalog: ListClaudeCodeModelsResult,
+  settings: ClaudeEffortSettings,
+  discoveredModels: readonly ModelInfo[] = [],
+): ListClaudeCodeModelsResult {
+  const apply = (model: AvailableModel): AvailableModel => {
+    const resolved =
+      discoveredModels.find((discovered) => discovered.value === model.model)
+        ?.resolvedModel ?? model.model;
+    const key = resolved.replace(/\[1m\]$/u, "");
+    const level =
+      settings.modelSettings?.[key]?.effortLevel ?? settings.effortLevel;
+    const match = model.supportedReasoningEfforts.find(
+      (effort) => effort.reasoningEffort === level,
+    );
+    return match
+      ? { ...model, defaultReasoningEffort: match.reasoningEffort }
+      : model;
+  };
+  return {
+    models: catalog.models.map(apply),
+    selectedOnlyModels: catalog.selectedOnlyModels.map(apply),
+  };
+}

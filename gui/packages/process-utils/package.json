@@ -13,6 +13,11 @@
       "types": "./src/claude-token.ts",
       "default": "./src/claude-token.ts"
     },
+    "./antigravity-status": {
+      "source": "./src/antigravity-status.ts",
+      "types": "./src/antigravity-status.ts",
+      "default": "./src/antigravity-status.ts"
+    },
     "./socket-type-of-service": {
       "source": "./src/socket-type-of-service.ts",
       "types": "./src/socket-type-of-service.ts",
@@ -21,8 +26,8 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
@@ -33,7 +38,6 @@
     "@types/cross-spawn": "^6.0.6",
     "@types/node": "^22.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

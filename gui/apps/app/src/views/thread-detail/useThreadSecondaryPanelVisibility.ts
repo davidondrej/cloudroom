@@ -4,7 +4,7 @@ import type {
   ThreadStorageFileTabState,
   WorkspaceFileTabState,
 } from "@cloudroom/client-core";
-import type { ThreadSecondaryPanel } from "@/lib/thread-secondary-panel";
+import type { ThreadSecondaryPanel } from "@/components/right-panel/store/tab-model";
 import type { FileOpenerOverride } from "@/lib/plugin-slot-resolvers";
 
 type ThreadSecondaryPanelThreadId = string | undefined;

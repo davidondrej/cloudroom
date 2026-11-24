@@ -1,4 +1,5 @@
 import {
+  defaultReasoningLevel,
   reconcileReasoningLevel,
   type AvailableModel,
   type ReasoningLevel,
@@ -126,7 +127,8 @@ export function resolveModelCatalogSelection({
     });
   }
 
-  const preferredLevel = preferredReasoningLevel ?? "medium";
+  const preferredLevel =
+    preferredReasoningLevel ?? defaultReasoningLevel(activeModel);
   const reasoningLevel = resolveModelReasoningLevel(
     activeModel,
     preferredLevel,

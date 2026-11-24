@@ -11,20 +11,17 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@cloudroom/config": "workspace:*",
-    "pino": "^9.6.0",
-    "pino-roll": "^4.0.0",
-    "pino-pretty": "^13.0.0"
+    "pino-roll": "^4.0.0"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

@@ -19,12 +19,17 @@ import {
   experimental_toolPresentation as toolPresentation,
   experimental_webFetchPresentation as webFetchPresentation,
   experimental_webSearchPresentation as webSearchPresentation,
+  experimental_presentationTitle as presentationTitle,
+  getRecordProperty,
+  getStringProperty,
+  isRecord,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   codexBridgeEnvelopeSchema,
   codexHandledEventSchema,
   codexHandledThreadItemSchema,
   isHandledCodexMethod,
+  knownCodexErrorInfoSchema,
   type CodexDynamicToolCallContentItem,
   type CodexErrorInfo,
   type CodexHandledEvent,
@@ -33,6 +38,7 @@ import {
   type CodexRateLimitSnapshot,
   type CodexRateLimitSnapshotUpdate,
   type CodexTurnStatus,
+  type KnownCodexErrorInfo,
 } from "./schemas.js";
 import {
   AGENT_MESSAGE_PRESENTATION,
@@ -50,6 +56,7 @@ import {
   type CodexGoalState,
 } from "./extension-kinds.js";
 import { codexVisibilityMetadata } from "./visibility.js";
+import { z } from "zod";
 
 function assertNever(value: never): never {
   throw new Error(`Unexpected value: ${String(value)}`);
@@ -65,17 +72,30 @@ interface CodexRetryErrorContext {
   failureText: string;
 }
 
+interface CodexShownTerminalError {
+  turnId: string | undefined;
+  message: string;
+  fromTurn: boolean;
+}
+
 interface CodexEventTranslationState {
   rateLimitsByLimitId: Map<string, CodexRateLimitSnapshot>;
+  /** Codex sent account/rateLimits/updated; a later startup read is stale. */
+  codexSentRateLimits: boolean;
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
+  lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
+  windowsSandboxWarned: boolean;
 }
 
 export function createCodexEventTranslationState(): CodexEventTranslationState {
   return {
     rateLimitsByLimitId: new Map(),
+    codexSentRateLimits: false,
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
+    lastTerminalErrorByThreadId: new Map(),
+    windowsSandboxWarned: false,
   };
 }
 
@@ -270,6 +290,25 @@ type CodexRateLimitCandidate = {
   rateLimits: ProviderRateLimitState;
 };
 
+/** The usual rate-limit event for the current state, worst bucket first. */
+export function codexRateLimitsDelta(
+  state: CodexEventTranslationState,
+): ThreadDelta[] {
+  let worst: ProviderRateLimitState | undefined;
+  for (const limitId of state.rateLimitsByLimitId.keys()) {
+    const rateLimits = normalizeCodexRateLimits(state, limitId);
+    if (
+      worst === undefined ||
+      rateLimitStatusRank(rateLimits.status) > rateLimitStatusRank(worst.status)
+    ) {
+      worst = rateLimits;
+    }
+  }
+  return worst === undefined
+    ? []
+    : [{ kind: "provider.rateLimits", rateLimits: worst }];
+}
+
 function normalizeCodexRateLimits(
   state: CodexEventTranslationState,
   preferredLimitId: string,
@@ -344,7 +383,7 @@ type CodexItemTranslationResult =
   | { kind: "ignored" }
   | { kind: "unhandled" };
 
-function getCodexErrorProviderCode(errorInfo: CodexErrorInfo): string {
+function getCodexErrorProviderCode(errorInfo: KnownCodexErrorInfo): string {
   if (typeof errorInfo === "string") {
     return errorInfo;
   }
@@ -366,7 +405,9 @@ function getCodexErrorProviderCode(errorInfo: CodexErrorInfo): string {
   return assertNever(errorInfo);
 }
 
-function getCodexErrorHttpStatusCode(errorInfo: CodexErrorInfo): number | null {
+function getCodexErrorHttpStatusCode(
+  errorInfo: KnownCodexErrorInfo,
+): number | null {
   if (typeof errorInfo === "string") {
     return null;
   }
@@ -389,7 +430,7 @@ function getCodexErrorHttpStatusCode(errorInfo: CodexErrorInfo): number | null {
 }
 
 function getProviderErrorCategory(
-  errorInfo: CodexErrorInfo,
+  errorInfo: KnownCodexErrorInfo,
 ): ProviderErrorCategory {
   if (typeof errorInfo === "string") {
     switch (errorInfo) {
@@ -409,11 +450,17 @@ function getProviderErrorCategory(
       case "unauthorized":
         return "unauthorized";
       case "badRequest":
+      case "modelNotFound":
         return "bad-request";
       case "threadRollbackFailed":
         return "thread-rollback-failed";
       case "sandboxError":
         return "sandbox";
+      // A short in-stream throttle Codex retries itself, not a plan limit.
+      case "rateLimitExceeded":
+      case "flexUnavailable":
+      case "policyCapacityUnavailable":
+      case "tooManyDenials":
       case "other":
         return "unknown";
     }
@@ -442,10 +489,22 @@ function toProviderErrorInfo(
   if (!errorInfo) {
     return null;
   }
+  const known = knownCodexErrorInfoSchema.safeParse(errorInfo);
+  if (!known.success) {
+    // A code newer than this adapter reads as `other` but keeps its name.
+    return {
+      category: "unknown",
+      providerCode:
+        typeof errorInfo === "string"
+          ? errorInfo
+          : (Object.keys(errorInfo)[0] ?? null),
+      httpStatusCode: null,
+    };
+  }
   return {
-    category: getProviderErrorCategory(errorInfo),
-    providerCode: getCodexErrorProviderCode(errorInfo),
-    httpStatusCode: getCodexErrorHttpStatusCode(errorInfo),
+    category: getProviderErrorCategory(known.data),
+    providerCode: getCodexErrorProviderCode(known.data),
+    httpStatusCode: getCodexErrorHttpStatusCode(known.data),
   };
 }
 
@@ -473,6 +532,38 @@ export function clearCodexEventTranslationThreadState(
       state.retryErrorsByTurnKey.delete(key);
     }
   }
+  state.lastTerminalErrorByThreadId.delete(threadId);
+}
+
+/**
+ * Codex can report a turn's terminal error as an `error` notification, a
+ * failed `turn/completed`, or both, in either order (#941). Shows it once: a
+ * report from the other path with the same message is its twin.
+ */
+function isTwinOfShownTerminalError(
+  state: CodexEventTranslationState,
+  params: CodexErrorParams,
+  fromTurn: boolean,
+): boolean {
+  const { threadId, turnId, error } = params;
+  const last = state.lastTerminalErrorByThreadId.get(threadId);
+  const twin =
+    last !== undefined &&
+    last.fromTurn !== fromTurn &&
+    last.message === error.message &&
+    (last.turnId === undefined ||
+      turnId === undefined ||
+      last.turnId === turnId);
+  if (twin) {
+    state.lastTerminalErrorByThreadId.delete(threadId);
+  } else {
+    state.lastTerminalErrorByThreadId.set(threadId, {
+      turnId,
+      message: error.message,
+      fromTurn,
+    });
+  }
+  return twin;
 }
 
 function resolveCodexErrorInfo(
@@ -497,6 +588,92 @@ function resolveCodexErrorInfo(
   return errorInfo === "other" && retryError?.failureText === failureText
     ? retryError.errorInfo
     : errorInfo;
+}
+
+/**
+ * Codex tags an HTTP 400 it can't classify as `other` and sends the raw body as
+ * the whole message, without the status or request id (#941).
+ */
+const BARE_BAD_REQUEST_PATTERN =
+  /^\s*(?:\{\s*"detail"\s*:\s*"bad request"\s*\}|bad request)\s*$/iu;
+const BAD_REQUEST_RECOVERY =
+  "Send a message to try again. If it keeps failing, start a new thread.";
+const BARE_BAD_REQUEST_NOTE = `The model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID. ${BAD_REQUEST_RECOVERY}`;
+/**
+ * The account can't use the thread's model (anymore), as when a ChatGPT plan
+ * drops one. Codex tags it `other`, `badRequest`, or nothing, so one code lets
+ * the server reload the agent's models (#2009).
+ */
+const UNSUPPORTED_MODEL_PATTERN =
+  /model is not supported when using Codex with a ChatGPT account/iu;
+const UNSUPPORTED_MODEL_NOTE =
+  "This account can't use this model now. Pick another one in the model picker (or `room-cli thread update <thread> --model <model>`), then send again. A loop that starts new threads keeps its own model: change it in the loop's Agent setting (or `room-cli loop update <loop> --project <project> --model <model>`).";
+/**
+ * Before each model request, Codex asks chatgpt.com which workspace backend to
+ * use. Each thread's Codex keeps the answer in memory, so one thread can work
+ * while a restarted one can't get an answer (#2426). The 401 variant is handled
+ * separately (#2206).
+ */
+const ROUTING_DISCOVERY_PATTERN =
+  /\bworkspace routing discovery (?:timed out|failed)\b/iu;
+const ROUTING_DISCOVERY_NOTE =
+  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree. The chat is kept: send again to retry. If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
+
+function codexProviderErrorDelta(
+  state: CodexEventTranslationState,
+  params: CodexErrorParams,
+): ThreadDelta {
+  const { error, turnId, willRetry } = params;
+  let errorInfo = toProviderErrorInfo(resolveCodexErrorInfo(state, params));
+  const bareBadRequest =
+    willRetry !== true &&
+    (errorInfo?.category ?? "unknown") === "unknown" &&
+    BARE_BAD_REQUEST_PATTERN.test(error.message);
+  if (bareBadRequest) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: errorInfo?.providerCode ?? null,
+      httpStatusCode: null,
+    };
+  }
+  const unsupportedModel =
+    willRetry !== true &&
+    (errorInfo?.providerCode === "modelNotFound" ||
+      UNSUPPORTED_MODEL_PATTERN.test(error.message));
+  if (unsupportedModel) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: "modelNotFound",
+      httpStatusCode: errorInfo?.httpStatusCode ?? null,
+    };
+  }
+  return {
+    kind: "provider.error",
+    message: "Provider error",
+    detail: [
+      error.message,
+      error.additionalDetails,
+      bareBadRequest
+        ? error.additionalDetails
+          ? BAD_REQUEST_RECOVERY
+          : BARE_BAD_REQUEST_NOTE
+        : null,
+      unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
+      willRetry !== true &&
+      ROUTING_DISCOVERY_PATTERN.test(
+        `${error.message}\n${error.additionalDetails ?? ""}`,
+      )
+        ? ROUTING_DISCOVERY_NOTE
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    ...(willRetry !== undefined ? { willRetry } : {}),
+    ...(errorInfo ? { errorInfo } : {}),
+    ...(turnId !== undefined
+      ? { providerTurnId: turnId }
+      : { threadScoped: true }),
+  };
 }
 
 function toRawEvent(rawEvent: JsonRpcMessage): ProviderRawEvent {
@@ -540,6 +717,50 @@ function buildUnhandledCodexDeltas(
         ? { providerTurnId: args.providerTurnId }
         : {}),
       ...(args.parentRef !== undefined ? { parentRef: args.parentRef } : {}),
+    },
+  ];
+}
+
+const unreadableTurnCompletedSchema = z
+  .object({
+    threadId: z.string(),
+    turn: z.object({ id: z.string().min(1) }).passthrough(),
+  })
+  .passthrough();
+
+/**
+ * A turn/completed Cloudroom can't parse (say, a newer status) still ends the
+ * turn it names, as failed. Dropping it left the turn running forever, and
+ * every steer failed with "no active turn to steer" (#986).
+ */
+function endUnreadableCodexTurn(
+  state: CodexEventTranslationState,
+  rawEvent: JsonRpcMessage,
+): ThreadDelta[] {
+  const parsed =
+    rawEvent.method === "turn/completed"
+      ? unreadableTurnCompletedSchema.safeParse(rawEvent.params)
+      : null;
+  if (!parsed?.success) {
+    return [];
+  }
+  const { threadId, turn } = parsed.data;
+  takeCodexRetryError(state, { threadId, turnId: turn.id });
+  const message =
+    "Codex ended this turn, but Cloudroom couldn't read how it finished";
+  return [
+    {
+      kind: "provider.error",
+      message,
+      detail: "Its work may be incomplete. Updating Cloudroom may fix this.",
+      willRetry: false,
+      providerTurnId: turn.id,
+    },
+    {
+      kind: "turn.boundary",
+      providerTurnId: turn.id,
+      status: "failed",
+      error: { message },
     },
   ];
 }
@@ -724,7 +945,7 @@ function toolStatusFields(status: CodexItemStatus): {
 
 const PLAN_STEPS_CHANNEL = "planSteps";
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 function isTerminalCodexItemStatus(status: CodexItemStatus): boolean {
   return status !== "inProgress";
@@ -754,7 +975,13 @@ function summarizeCollabAgentsStates(
   agentsStates: Record<string, unknown>,
 ): string | undefined {
   const lines = Object.entries(agentsStates).map(([agentThreadId, state]) => {
-    const rendered = typeof state === "string" ? state : JSON.stringify(state);
+    let rendered: string | undefined;
+    try {
+      rendered = typeof state === "string" ? state : JSON.stringify(state);
+    } catch {
+      // Provider JSON can nest beyond JSON.stringify's stack limit.
+      rendered = "[state too deeply nested]";
+    }
     return `${agentThreadId}: ${rendered}`;
   });
   return lines.length > 0 ? lines.join("\n") : undefined;
@@ -853,7 +1080,7 @@ function translateCodexItemShape(
         kind: "translated",
         shape: {
           type: "tool",
-          ...(injected === undefined ? {} : { server: BB_TOOL_SERVER }),
+          ...(injected === undefined ? {} : { server: ROOM_TOOL_SERVER }),
           tool: parsedItem.tool,
           ...(parsedItem.arguments === undefined
             ? {}
@@ -994,6 +1221,126 @@ function translateCodexItemShape(
   }
 }
 
+// A failed, blocked or stopped hook becomes a warning; the timeline folds
+// identical repeats into one "×N" row. The detail is the raw notification
+// minus the per-run id and timings, so repeats of one failure stay identical.
+function hookProblemWarning(
+  params: Record<string, unknown> | undefined,
+): ThreadDelta | null {
+  const run = params ? getRecordProperty(params, "run") : null;
+  const status = run ? getStringProperty(run, "status") : undefined;
+  if (
+    !run ||
+    !(status === "failed" || status === "blocked" || status === "stopped")
+  ) {
+    return null;
+  }
+  const entries: unknown[] = Array.isArray(run.entries) ? run.entries : [];
+  // Codex puts failures in error entries and block or stop reasons in
+  // feedback or stop entries. statusMessage is only the progress label, and
+  // context entries are notes for the model, so both come last.
+  const texts = (match: (kind: unknown) => boolean) =>
+    entries.map((entry) =>
+      isRecord(entry) && match(entry.kind)
+        ? getStringProperty(entry, "text")
+        : undefined,
+    );
+  const reason = [
+    ...texts((kind) => kind === "error"),
+    ...texts((kind) => kind !== "error" && kind !== "context"),
+    getStringProperty(run, "statusMessage"),
+    ...texts((kind) => kind === "context"),
+  ]
+    .map((text) => text?.trim())
+    .find(Boolean);
+  const source = getStringProperty(run, "sourcePath")?.split(/[\\/]/).pop();
+  const hook = `${getStringProperty(run, "eventName") ?? "Codex"} hook${source ? ` in ${source}` : ""}`;
+  const { id, startedAt, completedAt, durationMs, ...stableRun } = run;
+  return {
+    kind: "provider.warning",
+    category: "general",
+    summary:
+      presentationTitle(`${hook} ${status}${reason ? `: ${reason}` : ""}`) ??
+      hook,
+    details: JSON.stringify(
+      { method: "hook/completed", params: { ...params, run: stableRun } },
+      null,
+      2,
+    ),
+  };
+}
+
+// Codex's Windows sandbox can fail its setup before a command starts, so every
+// command fails with "setup refresh had errors" (#1231). Warn once per thread
+// with the repair; the failed command shows as before.
+function windowsSandboxSetupWarning(
+  state: CodexEventTranslationState,
+  translation: Extract<CodexItemTranslationResult, { kind: "translated" }>,
+): ThreadDelta[] {
+  if (
+    process.platform !== "win32" ||
+    state.windowsSandboxWarned ||
+    translation.shape.type !== "command" ||
+    translation.status === "completed"
+  ) {
+    return [];
+  }
+  const line = translation.shape.aggregatedOutput
+    ?.split("\n")
+    .find((text) => text.includes("setup refresh had errors"));
+  if (line === undefined) return [];
+  state.windowsSandboxWarned = true;
+  return [
+    {
+      kind: "provider.warning",
+      category: "general",
+      summary: `Codex can't set up its command sandbox on this Windows computer (${line.trim()}). Update Codex, or switch this thread to Full Access.`,
+    },
+  ];
+}
+
+// Codex MCP errors can quote URLs, headers and rejected credentials, so a
+// warning shows only a fixed reason picked from the error, never its text.
+const MCP_STARTUP_REASONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/not logged in|reauthenticat/i, "It needs a sign-in."],
+  [
+    /\b40[13]\b|unauthori[sz]ed|forbidden|auth required|invalid (credential|api.?key|token)/i,
+    "It rejected the sign-in or key.",
+  ],
+  [/timed out|timeout/i, "It took too long to start."],
+  [
+    /os error 2\b|no such file|cannot find the file|program not found|not recognized as/i,
+    "Its command was not found.",
+  ],
+  [
+    /error sending request|connection refused|could not connect|dns error|failed to lookup/i,
+    "Codex could not reach it.",
+  ],
+  [
+    /connection closed|initialize response|handshak|exit/i,
+    "It stopped while starting.",
+  ],
+];
+
+// A server name can be a URL with a credential, so only plain names are shown.
+const SAFE_MCP_SERVER_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+export function codexMcpStartupReason(params: {
+  name?: unknown;
+  error?: unknown;
+  failureReason?: unknown;
+}): string {
+  const { name, error, failureReason } = params;
+  if (failureReason === "reauthenticationRequired")
+    return "It needs a sign-in.";
+  if (typeof error !== "string") return "Codex did not say why.";
+  // Codex quotes the name in its error, so `timeout-tools` is not a timeout.
+  const text =
+    typeof name === "string" && name ? error.replaceAll(name, "") : error;
+  const match = MCP_STARTUP_REASONS.find(([pattern]) => pattern.test(text));
+  return match?.[1] ?? "Codex did not say why.";
+}
+
 export function translateCodexEventToDeltas(
   event: ProviderRuntimeEvent,
   state: CodexEventTranslationState,
@@ -1006,6 +1353,8 @@ export function translateCodexEventToDeltas(
   if (envelope.data.method === "hook/completed") {
     const reason = commandGuardBlockReason(envelope.data.params);
     if (reason) return [{ kind: "provider.warning", category: "general", summary: reason }];
+    const problem = hookProblemWarning(envelope.data.params);
+    if (problem) return [problem];
   }
 
   const rawEvent: JsonRpcMessage = {
@@ -1016,14 +1365,18 @@ export function translateCodexEventToDeltas(
 
   const parsed = codexHandledEventSchema.safeParse(rawEvent);
   if (!parsed.success) {
-    return isHandledCodexMethod(rawEvent.method)
-      ? buildUnhandledCodexDeltas({ rawEvent, rawType: rawEvent.method })
-      : buildUnhandledCodexDeltas({ rawEvent });
+    return [
+      ...(isHandledCodexMethod(rawEvent.method)
+        ? buildUnhandledCodexDeltas({ rawEvent, rawType: rawEvent.method })
+        : buildUnhandledCodexDeltas({ rawEvent })),
+      ...endUnreadableCodexTurn(state, rawEvent),
+    ];
   }
 
   const handledEvent: CodexHandledEvent = parsed.data;
   switch (handledEvent.method) {
     case "account/rateLimits/updated": {
+      state.codexSentRateLimits = true;
       const rateLimits = applyCodexRateLimitUpdate(
         state,
         handledEvent.params.rateLimits,
@@ -1039,25 +1392,38 @@ export function translateCodexEventToDeltas(
       ];
     }
     case "turn/started":
+      state.lastTerminalErrorByThreadId.delete(handledEvent.params.threadId);
       return [
         { kind: "turn.open", providerTurnId: handledEvent.params.turn.id },
       ];
     case "turn/completed": {
-      takeCodexRetryError(state, {
-        threadId: handledEvent.params.threadId,
-        turnId: handledEvent.params.turn.id,
-      });
-      const status = toTurnStatus(handledEvent.params.turn.status);
+      const { threadId, turn } = handledEvent.params;
+      const status = toTurnStatus(turn.status);
+      // A failed turn shows its error, with its code and details, unless an
+      // `error` notification already did (#941).
+      const failure =
+        status === "failed" && turn.error
+          ? { threadId, turnId: turn.id, error: turn.error, willRetry: false }
+          : null;
+      const deltas: ThreadDelta[] =
+        failure && !isTwinOfShownTerminalError(state, failure, true)
+          ? [codexProviderErrorDelta(state, failure)]
+          : [];
+      if (!failure) {
+        state.lastTerminalErrorByThreadId.delete(threadId);
+      }
+      takeCodexRetryError(state, { threadId, turnId: turn.id });
       return [
+        ...deltas,
         {
           kind: "turn.boundary",
-          providerTurnId: handledEvent.params.turn.id,
+          providerTurnId: turn.id,
           status,
-          ...(handledEvent.params.turn.error?.message
-            ? { error: { message: handledEvent.params.turn.error.message } }
+          ...(turn.error?.message
+            ? { error: { message: turn.error.message } }
             : {}),
           ...(status === "completed" || status === "interrupted"
-            ? { providerCheckpointId: handledEvent.params.turn.id }
+            ? { providerCheckpointId: turn.id }
             : {}),
         },
       ];
@@ -1154,6 +1520,7 @@ export function translateCodexEventToDeltas(
           presentation: translation.presentation,
           providerTurnId: handledEvent.params.turnId,
         },
+        ...windowsSandboxSetupWarning(state, translation),
       ];
     }
     case "item/agentMessage/delta":
@@ -1304,27 +1671,11 @@ export function translateCodexEventToDeltas(
           providerTurnId: handledEvent.params.turnId,
         },
       ];
-    case "error": {
-      const errorInfo = toProviderErrorInfo(
-        resolveCodexErrorInfo(state, handledEvent.params),
-      );
-      return [
-        {
-          kind: "provider.error",
-          message: "Provider error",
-          detail: handledEvent.params.error.additionalDetails
-            ? `${handledEvent.params.error.message}\n${handledEvent.params.error.additionalDetails}`
-            : handledEvent.params.error.message,
-          ...(handledEvent.params.willRetry !== undefined
-            ? { willRetry: handledEvent.params.willRetry }
-            : {}),
-          ...(errorInfo ? { errorInfo } : {}),
-          ...(handledEvent.params.turnId !== undefined
-            ? { providerTurnId: handledEvent.params.turnId }
-            : { threadScoped: true }),
-        },
-      ];
-    }
+    case "error":
+      return handledEvent.params.willRetry !== true &&
+        isTwinOfShownTerminalError(state, handledEvent.params, false)
+        ? []
+        : [codexProviderErrorDelta(state, handledEvent.params)];
     case "deprecationNotice":
       return [
         {
@@ -1344,6 +1695,30 @@ export function translateCodexEventToDeltas(
           summary: handledEvent.params.message,
         },
       ];
+    case "mcpServer/startupStatus/updated": {
+      const { name, status } = handledEvent.params;
+      if (status !== "failed") return [];
+      const reason = codexMcpStartupReason(handledEvent.params);
+      const safe = typeof name === "string" && SAFE_MCP_SERVER_NAME.test(name);
+      const server = safe ? `MCP server ${name}` : "An MCP server";
+      const check = safe
+        ? `Check its setup with \`codex mcp get ${name}\` or sign in again with \`codex mcp login ${name}\``
+        : "See your servers with `codex mcp list`";
+      const fix =
+        name === "codex_apps"
+          ? ""
+          : ` ${check}. A new thread picks up the fix. With Codex 0.147 or newer, this thread retries it too, at most once a minute.`;
+      return [
+        {
+          kind: "provider.warning",
+          category: "general",
+          summary:
+            presentationTitle(`${server} did not start. ${reason}`) ??
+            `${server} did not start`,
+          details: `${reason} Run \`codex\` in a terminal to see the full error.${fix}`,
+        },
+      ];
+    }
     case "configWarning":
       return [
         {

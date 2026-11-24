@@ -572,12 +572,14 @@ describe("machine and environment provider composition", () => {
       );
 
       release.resolve();
+      // The machine never connected, so its removal retires the environment.
       await expect
         .poll(() => getPreparingEnvironment(harness.db, thread.id))
         .toMatchObject({
-          status: "error",
+          status: "destroyed",
           statusMessage: "Cloud quota exceeded",
         });
+      expect(getThread(harness.db, thread.id)?.status).toBe("error");
     });
   });
 });
@@ -590,6 +592,7 @@ function createTargetThread(
     hostId?: string | null;
     model?: string | undefined;
     environmentProviderId?: string;
+    parentThreadId?: string;
   },
 ) {
   const model = "model" in args ? args.model : "requested-model";
@@ -611,6 +614,7 @@ function createTargetThread(
     projectId: args.projectId,
     providerId: "codex",
     ...(model !== undefined ? { model } : {}),
+    ...(args.parentThreadId ? { parentThreadId: args.parentThreadId } : {}),
     startedOnBehalfOf: null,
   });
 }
@@ -1033,6 +1037,8 @@ describe("environment providers are asked inside provisioning", () => {
       expect(queued.command).toMatchObject({
         path: producedPath,
         setupScriptTimeoutMs: 15 * 60 * 1_000,
+        // Setup reads hooks from Git where the environment branched off this base.
+        hookBaseBranch: "origin/main",
       });
 
       await reportQueuedCommandSuccess(harness, queued, {
@@ -1044,6 +1050,59 @@ describe("environment providers are asked inside provisioning", () => {
       });
       await vi.waitFor(() => {
         expect(getEnvironment(harness.db, environmentId)?.status).toBe("ready");
+      });
+    });
+  });
+
+  it("tells the parent once when its child's workspace setup fails (#2217)", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedTargetFixture(harness, "host-target-setup-failed");
+      registerTestHostRpcCapture(harness, { hostId: fixture.host.id, sessionId: fixture.session.id });
+      installTarget({ provision: () => ({ action: "ready", environment: { type: "host", hostId: fixture.host.id, ownsPath: true, path: "/tmp/setup-failed" } }) });
+      const parent = seedThread(harness.deps, { environmentId: fixture.environment.id, projectId: fixture.project.id });
+      const child = await createTargetThread(harness, { projectId: fixture.project.id, parentThreadId: parent.id });
+      const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach");
+      await reportQueuedCommandError(harness, queued, { errorCode: "setup_failed", errorMessage: "Setup script exited with code 1" });
+      await vi.waitFor(() => expect(getThread(harness.db, child.id)?.status).toBe("error"));
+      await new Promise((resolve) => setTimeout(resolve, 2_300)); // past the notice batch window
+      const notices = listEvents(harness.db, { threadId: parent.id }).filter((event) => event.data.includes("Workspace setup failed"));
+      expect(notices.map((event) => event.type)).toEqual(["client/turn/requested"]);
+    });
+  }, 10_000);
+
+  it("sends no setup for a personal workspace, which has no repository to read hooks from", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, project, session } = seedTargetFixture(
+        harness,
+        "host-target-personal-setup",
+      );
+      registerTestHostRpcCapture(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+      installTarget({
+        id: "personal-workspace",
+        provision: () => ({
+          action: "ready",
+          environment: {
+            type: "host",
+            hostId: host.id,
+            ownsPath: true,
+            path: "/tmp/environment-providers-personal",
+          },
+        }),
+      });
+      await createTargetThread(harness, {
+        projectId: project.id,
+        environmentProviderId: "personal-workspace",
+      });
+      const queued = await waitForQueuedCommand(
+        harness,
+        (candidate) => candidate.command.type === "environment.attach",
+      );
+      expect(queued.command).toMatchObject({
+        type: "environment.attach",
+        setupScriptTimeoutMs: null,
       });
     });
   });
@@ -1615,7 +1674,7 @@ describe("environment providers are asked inside provisioning", () => {
     });
   });
 
-  it("applies git-checkout availability eligibility to explicit selection", async () => {
+  it("accepts explicit selection when HEAD is unborn but a base branch exists", async () => {
     await withTestHarness(async (harness) => {
       installTarget({
         requiresGitCheckout: true,
@@ -1623,14 +1682,14 @@ describe("environment providers are asked inside provisioning", () => {
       });
       const { host, project, session } = seedTargetFixture(
         harness,
-        "host-target-unusable-git-checkout",
+        "host-target-unborn-git-checkout",
       );
       registerTestHostRpcCapture(harness, {
         hostId: host.id,
         sessionId: session.id,
         gitSourceInspectionResult: {
-          checkout: { kind: "unborn", branchName: "main" },
-          defaultBranch: null,
+          checkout: { kind: "unborn", branchName: "deleted" },
+          defaultBranch: "main",
           defaultBranchRelation: null,
           isWorktree: false,
           hasUncommittedChanges: false,
@@ -1638,19 +1697,11 @@ describe("environment providers are asked inside provisioning", () => {
           originDefaultBranch: null,
         },
       });
-      const failed = await createTargetThread(harness, {
+      const created = await createTargetThread(harness, {
         projectId: project.id,
         hostId: host.id,
-      }).then(
-        () => null,
-        (error: unknown) => error,
-      );
-      expect(failed).toBeInstanceOf(ApiError);
-      if (!(failed instanceof ApiError)) {
-        throw new Error("expected provider selection to be rejected");
-      }
-      expect(failed.body.code).toBe("environment_provider_rejected");
-      expect(failed.message).toContain("no usable git branch");
+      });
+      expect(getThread(harness.db, created.id)?.status).toBe("starting");
     });
   });
 
@@ -2351,7 +2402,7 @@ describe("environment provider listing", () => {
         );
         expect(later.providers[0]?.availability).toEqual({
           status: "unavailable",
-          message: "This project checkout has no usable git branch.",
+          message: `The project folder ${WORKSPACE_PATH} is missing or git can't read it (not a git repository). Change the folder in project settings, or run it as a Cloud thread.`,
         });
       });
       expect(inspect).toHaveBeenCalledTimes(1);

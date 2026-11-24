@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const binaryExtensions = new Set([".png", ".jpg", ".icns", ".mp4"]);
+const binaryExtensions = new Set([".png", ".jpg", ".icns", ".mp4", ".gz", ".zip", ".docx", ".pptx", ".xlsx"]);
 const { stdout } = await promisify(execFile)("git", ["ls-files", "-z"], {
   cwd: root,
   maxBuffer: 16 * 1024 * 1024,

@@ -7,7 +7,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
@@ -163,13 +163,13 @@ describe("PluginAuthorPage", () => {
     await screen.findByRole("heading", { name: /^Pat Lee/u });
     const headerContainer = screen
       .getByRole("link", { name: "Browse plugins" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     const toolbarContainer = screen
       .getByRole("textbox", { name: "Search plugins" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     const gridContainer = screen
       .getByRole("button", { name: "Open Alpha details" })
-      .closest(".max-w-3xl");
+      .closest(".max-w-5xl");
     for (const container of [
       headerContainer,
       toolbarContainer,

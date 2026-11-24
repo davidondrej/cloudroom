@@ -104,6 +104,13 @@ export function runBridgeRequest<
       return;
     }
     const message = error instanceof Error ? error.message : String(error);
-    args.sendError(args.request.id, -32000, message);
+    const reason = errorReason(error);
+    args.sendError(args.request.id, -32000, message, reason ? { reason } : undefined);
   });
+}
+
+/** An error's own string code, like `cli_missing`. Numeric codes are JSON-RPC's, not the failure's. */
+function errorReason(error: unknown): string | null {
+  const code = error instanceof Error && "code" in error ? error.code : null;
+  return typeof code === "string" && code.length > 0 ? code : null;
 }

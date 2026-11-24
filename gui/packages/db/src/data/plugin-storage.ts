@@ -3,19 +3,9 @@ import type { DbConnection } from "../connection.js";
 import { pluginKv, pluginSettings } from "../schema.js";
 import { likePrefixPattern } from "./sql-like.js";
 
-export interface PluginKvRow {
-  pluginId: string;
-  key: string;
-  value: string;
-  updatedAt: number;
-}
+export type PluginKvRow = typeof pluginKv.$inferSelect;
 
-export interface PluginSettingRow {
-  pluginId: string;
-  key: string;
-  value: string;
-  updatedAt: number;
-}
+export type PluginSettingRow = typeof pluginSettings.$inferSelect;
 
 
 export function getPluginKvValue(

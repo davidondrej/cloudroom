@@ -6,10 +6,11 @@ import type {
 import type { JsonValue } from "./types.js";
 import type {
   WorkflowCallInspection,
+  WorkflowQueueStatus,
   WorkflowRunInspectionPage,
   WorkflowService,
 } from "./service.js";
-import type { WorkflowRunRow } from "./data.js";
+import type { SupersededCallRow, WorkflowRunRow } from "./data.js";
 import type { WorkflowSourceInput } from "./source-resolution.js";
 import { parseStoredWorkflowSettings } from "./settings.js";
 import { utf8Prefix } from "./utf8.js";
@@ -179,7 +180,10 @@ function inlineRunResult(run: WorkflowRunRow): {
   };
 }
 
-function statusSummary(page: WorkflowRunInspectionPage) {
+function statusSummary(
+  page: WorkflowRunInspectionPage,
+  queue: WorkflowQueueStatus | null,
+) {
   const { run, callCounts } = page;
   const result = inlineRunResult(run);
   const name = boundedText(run.name, STATUS_DISPLAY_TEXT_MAX_BYTES);
@@ -226,6 +230,7 @@ function statusSummary(page: WorkflowRunInspectionPage) {
       parseStoredJson(run.settingsJson, "workflow settings"),
     ),
     status: run.status,
+    queue,
     phase: phase.value,
     phaseTruncated: phase.truncated,
     resumedFromRunId: run.resumedFromRunId,
@@ -316,6 +321,7 @@ function callLogRecord(call: WorkflowCallInspection, exportedAt: number) {
     logVersion: 1,
     exportedAt,
     ...fields,
+    superseded: false,
     label: call.options.title,
     phase: call.options.phase,
     resultAvailable: resultJson !== null,
@@ -326,11 +332,27 @@ function callLogRecord(call: WorkflowCallInspection, exportedAt: number) {
   };
 }
 
+function supersededCallLogRecord(
+  attempt: SupersededCallRow,
+  exportedAt: number,
+) {
+  const error = boundedText(attempt.error, STATUS_ERROR_MAX_BYTES);
+  return {
+    type: "call",
+    logVersion: 1,
+    exportedAt,
+    ...attempt,
+    superseded: true,
+    error: error.value,
+    errorTruncated: error.truncated,
+  };
+}
+
 export function registerWorkflowCli(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   service: WorkflowService,
 ): void {
-  bb.cli.register({
+  room.cli.register({
     name: "workflows",
     summary: "Run and inspect durable Cloudroom workflows",
     commands: [
@@ -382,7 +404,7 @@ export function registerWorkflowCli(
           ]);
           const context = requireContext(ctx);
           const prepared = await prepareWorkflowSource(
-            bb,
+            room,
             context,
             sourceInput(options, ctx.cwd),
           );
@@ -404,7 +426,7 @@ export function registerWorkflowCli(
           ]);
           const context = requireContext(ctx);
           const prepared = await prepareWorkflowSource(
-            bb,
+            room,
             context,
             sourceInput(options, ctx.cwd),
           );
@@ -421,7 +443,10 @@ export function registerWorkflowCli(
           if (page === null || page.run.projectId !== context.projectId) {
             throw new Error(`Unknown workflow run ${runId}`);
           }
-          return success(statusSummary(page));
+          return success({
+            ...statusSummary(page, service.queueStatus(page.run)),
+            workers: service.runningWorkers(runId),
+          });
         }
         if (command === "history") {
           const { options, positionals } = parseArguments(
@@ -453,18 +478,33 @@ export function registerWorkflowCli(
           const calls = page.calls.slice(0, limit);
           const hasMore = page.calls.length > limit;
           const nextCursor = hasMore ? calls.at(-1)!.callIndex + 1 : null;
+          // A restarted call's earlier attempts come right before it (#2196).
+          const attempts =
+            calls.length === 0
+              ? []
+              : service.supersededCalls(
+                  runId,
+                  calls[0]!.callIndex,
+                  calls.at(-1)!.callIndex,
+                );
+          const callRecords = calls.flatMap((call) => [
+            ...attempts
+              .filter((attempt) => attempt.callIndex === call.callIndex)
+              .map((attempt) => supersededCallLogRecord(attempt, exportedAt)),
+            callLogRecord(call, exportedAt),
+          ]);
           return jsonLines([
             cursor === 0
               ? runLogRecord(page.run, exportedAt)
               : runReferenceLogRecord(page.run, exportedAt),
-            ...calls.map((call) => callLogRecord(call, exportedAt)),
+            ...callRecords,
             {
               type: "page",
               logVersion: 1,
               runId,
               cursor,
               limit,
-              returned: calls.length,
+              returned: callRecords.length,
               totalCalls: page.callCounts.total,
               hasMore,
               nextCursor,

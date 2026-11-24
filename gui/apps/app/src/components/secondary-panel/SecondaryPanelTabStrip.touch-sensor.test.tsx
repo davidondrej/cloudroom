@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   SecondaryPanelTabStrip,
   type SecondaryPanelTabStripProps,
-} from "./SecondaryPanelTabStrip";
+} from "@/components/right-panel/shell/tab-strip";
 
 function makeTabs(count: number): SecondaryPanelTabStripProps["tabs"] {
   return Array.from({ length: count }, (_, index) => ({

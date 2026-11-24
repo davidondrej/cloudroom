@@ -8,8 +8,8 @@ import { Switch } from "@cloudroom/shared-ui/switch";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { MachineLaunchCommand } from "@/components/dialogs/AddMachineDialog";
 import { MachineStatusDot } from "@/components/machines/MachineStatusDot";
-import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS, SettingsBadge } from "@/components/ui/settings-section";
-import { OsTile, osFromName, shortOsName } from "@/components/machines/OsTile";
+import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
+import { OsTile, PlaceChip, osFromName, shortOsName } from "@/components/machines/OsTile";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { sdk } from "@/lib/sdk";
@@ -51,7 +51,7 @@ export function VpsMachineRow() {
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex min-w-0 items-center gap-1.5">
             <span className="min-w-0 truncate text-sm text-foreground">{label}</span>
-            <SettingsBadge>VPS</SettingsBadge>
+            <PlaceChip place="vps" />
           </div>
           <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-subtle-foreground/75">
             <span className="inline-flex min-w-0 items-center gap-1.5">
@@ -94,7 +94,8 @@ export function ConnectVpsDialog({ open, onOpenChange }: { open: boolean; onOpen
   const ready = code.isSuccess && vps.data?.connected === true && vps.data.health !== null;
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next) void queryClient.invalidateQueries({ queryKey: KEY }); onOpenChange(next); }} modal={false}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto">
+      {/* The "Add a machine" menu takes focus back as it closes. Losing focus must not close this dialog (#1116). */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onFocusOutside={(event) => event.preventDefault()}>
         <DialogHeader>
           <DialogTitle>Connect your VPS</DialogTitle>
           <DialogDescription>Run Cloud threads on your own server. When it's busy, new threads use Cloudroom Cloud.</DialogDescription>

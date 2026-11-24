@@ -15,6 +15,7 @@ The plugin reacts to each failed turn. It only retries app restarts, overload er
 ## Settings
 
 - `Maximum automatic wait`: skip a retry when the reset is farther away than 6 hours, 24 hours, or no limit.
+- `Loops` > `Switch provider at a limit`: a loop that hits a Claude or Codex limit runs on the other one right away, with the model of the same level (Fable and GPT-6 Astra, Opus and GPT-6.1 Sol, Sonnet and GPT-6.1 Terra, Haiku and GPT-6 Luna). On by default. It is an account setting saved on the website, so it covers Local and Cloud loops. Switching between your own accounts of one provider stays manual.
 
 ## CLI
 

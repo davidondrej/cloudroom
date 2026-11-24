@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import type { DbConnection } from "@cloudroom/db";
 import { defaultFeatureFlags } from "@cloudroom/domain";
+import { createCallerProofIssuer } from "@cloudroom/config/caller-proof";
 import {
   acquireDaemonLock,
   createHostDaemonApp,
@@ -38,7 +39,7 @@ import { SkillTreeRegistry } from "../../../apps/server/src/services/skills/inje
 import { PluginHostArtifactRegistry } from "../../../apps/server/src/services/plugins/plugin-host-artifact-registry.js";
 import { createAppVersionService } from "../../../apps/server/src/services/system/app-version.js";
 import { createProviderNativeRootsCache } from "../../../apps/server/src/services/providers/native-roots.js";
-import { createBbAppManagedConfigReloader } from "../../../apps/server/src/services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "../../../apps/server/src/services/system/app-managed-config.js";
 import { createNoopTelemetryService } from "../../../apps/server/src/services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "../../../apps/server/src/services/terminals/terminal-session-lifecycle.js";
 import type {
@@ -217,7 +218,7 @@ async function startIntegrationServer(
   });
   await machineAuth.ensureReady();
   const lifecycleDedupers = createLifecycleDedupers();
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config,
     hub,
     logger: testLogger,
@@ -248,7 +249,8 @@ async function startIntegrationServer(
   const appVersion = createAppVersionService({ config });
   const serverDeps = {
     appVersion,
-    bbAppManagedConfig,
+    bbAppManagedConfig: roomAppManagedConfig,
+    callerProofs: await createCallerProofIssuer({ dataDir: serverDataDir }),
     providerRegistry,
     providerNativeRoots: createProviderNativeRootsCache(),
     pluginHostArtifacts,

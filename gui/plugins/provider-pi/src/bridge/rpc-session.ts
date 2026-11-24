@@ -91,20 +91,40 @@ const OVERFLOW_DECISION_WAIT_MS = 2_000;
 
 type PiSessionConstructionOutcome = { ok: true } | { ok: false; error: Error };
 
+/**
+ * Pi gives up on a busy lock in its shared agent dir (trust.json, settings)
+ * after ~200ms and crashes at startup. Parallel children hit it (#2154).
+ * The stack trace can push the message out of the stderr tail; the code
+ * stays. Colored stderr (FORCE_COLOR) wraps it in ANSI escapes.
+ */
+export function isPiLockContention(stderr: string): boolean {
+  const plain = stderr.replace(/\u001b\[[\d;]*m/gu, "");
+  return (
+    plain.includes("Lock file is already being held") ||
+    plain.includes("code: 'ELOCKED'")
+  );
+}
+
 function waitForPiTransientAuthRetry(): Promise<void> {
+  // Jitter, so children that crashed together don't retry in lockstep.
   return new Promise((resolve) =>
-    setTimeout(resolve, PI_TRANSIENT_AUTH_RETRY_DELAY_MS),
+    setTimeout(
+      resolve,
+      PI_TRANSIENT_AUTH_RETRY_DELAY_MS * (1 + Math.random()),
+    ),
   );
 }
 
 export async function runPiTransientAuthConstruction(args: {
-  attempt: () => Promise<PiSessionConstructionOutcome>;
+  attempt: (isLastAttempt: boolean) => Promise<PiSessionConstructionOutcome>;
   discardFailedAttempt: () => void;
   isClosed: () => boolean;
   waitBeforeRetry: () => Promise<void>;
 }): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
-    const outcome = await args.attempt();
+    const outcome = await args.attempt(
+      attempt >= PI_TRANSIENT_AUTH_MAX_RETRIES,
+    );
     if (outcome.ok) {
       return;
     }
@@ -113,6 +133,8 @@ export async function runPiTransientAuthConstruction(args: {
     }
     args.discardFailedAttempt();
     await args.waitBeforeRetry();
+    // Closed during the wait: never spawn a child nothing can stop.
+    if (args.isClosed()) throw outcome.error;
   }
 }
 
@@ -188,7 +210,7 @@ export class PiRpcSession {
 
   async start(): Promise<void> {
     await runPiTransientAuthConstruction({
-      attempt: () => this.spawnAndVerify(),
+      attempt: (isLastAttempt) => this.spawnAndVerify(isLastAttempt),
       discardFailedAttempt: () => {
         const failed = this.child;
         this.child = undefined;
@@ -199,12 +221,14 @@ export class PiRpcSession {
     });
   }
 
-  private async spawnAndVerify(): Promise<PiSessionConstructionOutcome> {
+  private async spawnAndVerify(
+    isLastAttempt: boolean,
+  ): Promise<PiSessionConstructionOutcome> {
     const toolsFilePath = join(
       this.options.scratchDir,
       `pi-tools-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`,
     );
-    mkdirSync(dirname(toolsFilePath), { recursive: true });
+    mkdirSync(dirname(toolsFilePath), { recursive: true, mode: 0o700 });
     writeFileSync(
       toolsFilePath,
       JSON.stringify({ tools: this.options.dynamicTools ?? [], commandGuardEnabled: this.options.commandGuardEnabled !== false }),
@@ -241,6 +265,7 @@ export class PiRpcSession {
     }
 
     this.ready = createDeferred();
+    let constructing = true;
     const onExtensionUiRequest = this.options.onExtensionUiRequest;
     const child = new PiRpcChild({
       cwd: this.options.cwd,
@@ -257,7 +282,13 @@ export class PiRpcSession {
       },
       onExit: (info) => {
         for (const file of scratchFiles) rmSync(file, { force: true });
-        if (child === this.child) this.handleExit(info);
+        if (child !== this.child) return;
+        if (constructing && !isLastAttempt && isPiLockContention(info.stderrTail)) {
+          // Retried below: no session error for this attempt.
+          this.ready.reject(new PiRpcChildExitedError(info));
+          return;
+        }
+        this.handleExit(info);
       },
       recordThreadId: this.options.recordThreadId,
       onExtensionUiRequest: onExtensionUiRequest
@@ -268,8 +299,21 @@ export class PiRpcSession {
     });
     this.child = child;
 
-    const state = await this.getState(CHANNEL_REQUEST_TIMEOUT_MS);
-    await this.awaitReady(readinessTimeoutMs(), child);
+    let state: PiRpcSessionState;
+    try {
+      state = await this.getState(CHANNEL_REQUEST_TIMEOUT_MS);
+      await this.awaitReady(readinessTimeoutMs(), child);
+    } catch (error) {
+      if (
+        error instanceof PiRpcChildExitedError &&
+        isPiLockContention(error.message)
+      ) {
+        return { ok: false, error };
+      }
+      throw error;
+    } finally {
+      constructing = false;
+    }
     if (state.model?.provider === "unknown") {
       return {
         ok: false,
@@ -452,6 +496,27 @@ export class PiRpcSession {
     this.child?.kill();
   }
 
+  get exited(): boolean {
+    return !this.child || this.child.exited;
+  }
+
+  /** Whether this session's pi has exited, waiting up to timeoutMs for it. */
+  async waitForExit(timeoutMs: number): Promise<boolean> {
+    const child = this.child;
+    if (!child || child.exited) return true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        child.waitForExit().then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), Math.max(0, timeoutMs));
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   static async forkSessionFile(args: {
     sourceFile: string;
     targetFile: string;
@@ -590,7 +655,9 @@ export class PiRpcSession {
    * Pi reports a context overflow as a failed run, then may compact and retry
    * on its own. Hold a failed agent_end until Pi decides: a retry is passed on
    * as `willRetry`, so the turn stays open and stoppable like Pi's other
-   * retries. Anything else releases it unchanged.
+   * retries. A failed overflow compaction attaches its error, so the run
+   * fails even when Pi's reply was only cut off. Anything else releases it
+   * unchanged.
    */
   private holdPossibleOverflowEnd(event: PiRpcEvent): boolean {
     const held = this.heldOverflowEnd;
@@ -625,8 +692,10 @@ export class PiRpcSession {
       return false;
     }
     if (event.reason === "overflow" && event.type === "compaction_end") {
+      const willRetry = event.willRetry === true && event.aborted !== true;
       this.releaseOverflowEnd(
-        event.willRetry === true && event.aborted !== true,
+        willRetry,
+        willRetry || event.aborted === true ? undefined : event.errorMessage,
       );
       return false;
     }
@@ -636,7 +705,10 @@ export class PiRpcSession {
     return false;
   }
 
-  private releaseOverflowEnd(willRetry: boolean): void {
+  private releaseOverflowEnd(
+    willRetry: boolean,
+    recoveryError?: unknown,
+  ): void {
     const held = this.heldOverflowEnd;
     if (held === null) {
       return;
@@ -646,7 +718,11 @@ export class PiRpcSession {
       clearTimeout(held.timer);
     }
     this.handleEvent(
-      willRetry ? { ...held.event, willRetry } : held.event,
+      willRetry
+        ? { ...held.event, willRetry }
+        : typeof recoveryError === "string"
+          ? { ...held.event, recoveryError }
+          : held.event,
       true,
     );
   }
@@ -669,6 +745,10 @@ export class PiRpcSession {
     const last = messages[messages.length - 1] as
       | { role?: string; stopReason?: string; errorMessage?: string }
       | undefined;
+    if (typeof event.recoveryError === "string") {
+      pending.resolve({ error: new Error(event.recoveryError) });
+      return;
+    }
     if (
       last?.role === "assistant" &&
       last.stopReason === "error" &&

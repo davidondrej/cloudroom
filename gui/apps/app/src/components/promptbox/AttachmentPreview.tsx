@@ -13,10 +13,14 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import type { PromptDraftAttachment } from "@cloudroom/client-core";
 import { toUserAttachmentImageSrc } from "@/lib/user-attachment-images";
 import {
+  type AttachmentThumbnail,
+  canMakeAttachmentThumbnails,
+  getAttachmentThumbnail,
   getLocalAttachmentPreviewSrc,
   releaseLocalAttachmentPreview,
   rememberLocalAttachmentAspectRatio,
 } from "@/lib/attachment-local-previews";
+import { formatFileSize } from "@/lib/format-file-size";
 
 export function resolveAttachmentPreviewSrc(
   path: string,
@@ -25,6 +29,77 @@ export function resolveAttachmentPreviewSrc(
   return (
     getLocalAttachmentPreviewSrc(path) ??
     toUserAttachmentImageSrc(path, attachmentProjectId)
+  );
+}
+
+/**
+ * Returns a small copy of an image for tiny tiles, the full image if no copy
+ * can be made, or null while the copy is still being made.
+ */
+export function useAttachmentThumbnail(
+  src: string,
+): (Partial<AttachmentThumbnail> & { src: string }) | null {
+  const enabled = canMakeAttachmentThumbnails();
+  const [result, setResult] = useState<{
+    for: string;
+    thumbnail: AttachmentThumbnail | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    void getAttachmentThumbnail(src).then((thumbnail) => {
+      if (!cancelled) setResult({ for: src, thumbnail });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, src]);
+  if (!enabled) return { src };
+  if (result?.for !== src) return null;
+  return result.thumbnail ?? { src };
+}
+
+function AttachmentImageThumbnail({
+  path,
+  name,
+  src,
+}: {
+  path: string;
+  name: string;
+  src: string;
+}) {
+  const thumbnail = useAttachmentThumbnail(src);
+  useEffect(() => {
+    if (thumbnail?.width !== undefined && thumbnail.height !== undefined) {
+      rememberLocalAttachmentAspectRatio(
+        path,
+        thumbnail.width,
+        thumbnail.height,
+      );
+    }
+  }, [path, thumbnail]);
+  const className =
+    "size-14 rounded-[10px] object-cover outline-1 -outline-offset-1 outline-foreground/10 transition-colors group-hover/attachment-image:outline-foreground/40";
+  if (thumbnail === null) {
+    return <span aria-hidden="true" className={className} />;
+  }
+  return (
+    <img
+      src={thumbnail.src}
+      alt={name}
+      className={className}
+      loading="lazy"
+      decoding="async"
+      onLoad={(event) => {
+        if (thumbnail.width === undefined) {
+          rememberLocalAttachmentAspectRatio(
+            path,
+            event.currentTarget.naturalWidth,
+            event.currentTarget.naturalHeight,
+          );
+        }
+      }}
+    />
   );
 }
 
@@ -52,12 +127,6 @@ export function AttachmentFileIcon({ name }: { name: string }) {
       className={`size-4 shrink-0 ${match?.[2] ?? "text-muted-foreground"}`}
     />
   );
-}
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function isImageAttachment(attachment: PromptDraftAttachment): boolean {
@@ -176,18 +245,10 @@ export function AttachmentPreview({
                     onClick={() => onExpandedImageIndexChange(index)}
                     title={attachment.name}
                   >
-                    <img
-                      src={attachmentImageItems[index]?.src}
-                      alt={attachment.name}
-                      className="size-14 rounded-[10px] object-cover outline-1 -outline-offset-1 outline-foreground/10 transition-colors group-hover/attachment-image:outline-foreground/40"
-                      loading="lazy"
-                      decoding="async"
-                      onLoad={(event) =>
-                        rememberLocalAttachmentAspectRatio(
-                          attachment.path,
-                          event.currentTarget,
-                        )
-                      }
+                    <AttachmentImageThumbnail
+                      path={attachment.path}
+                      name={attachment.name}
+                      src={attachmentImageItems[index]?.src ?? ""}
                     />
                   </button>
                   {onRemoveAttachment ? (

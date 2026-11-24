@@ -10,11 +10,8 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiffFileEntry } from "@cloudroom/server-contract";
 import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
-import type {
-  DiffFileContentsResult,
-  RequestDiffFileContents,
-} from "@/components/git-diff/GitDiffCardBody";
-import { DiffFileCard } from "./DiffFileCard";
+import type { DiffFileContentsResult, RequestDiffFileContents } from "@/components/diff/diff-store";
+import { DiffFileCard } from "@/components/diff/diff-card";
 import { makeDiffFileEntry } from "@/test/fixtures/diff-files";
 
 const diffViewMock = vi.hoisted(() => ({

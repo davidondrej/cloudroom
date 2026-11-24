@@ -25,7 +25,7 @@ import {
 import type { Readable, Writable } from "node:stream";
 import { promisify } from "node:util";
 import crossSpawn from "cross-spawn";
-import { normalizeWindowsEnv } from "./windows.js";
+import { normalizeWindowsEnv, resolveWindowsShim } from "./windows.js";
 
 interface PortableSpawnRequest {
   command: string;
@@ -155,10 +155,17 @@ export function spawnPortableProcess(
   // shim is cmd.exe; on Windows the whole tree ends first instead.
   const treeTimeout =
     process.platform === "win32" ? request.timeout : undefined;
-  const child = crossSpawn(request.command, request.args, {
+  const env = request.env && normalizeWindowsEnv(request.env);
+  const launch = resolveWindowsShim({
+    command: request.command,
+    args: request.args,
+    cwd: request.cwd,
+    env,
+  });
+  const child = crossSpawn(launch.command, launch.args, {
     cwd: request.cwd,
     detached: request.detached,
-    env: request.env && normalizeWindowsEnv(request.env),
+    env,
     stdio: request.stdio,
     timeout: treeTimeout === undefined ? request.timeout : undefined,
     windowsHide: request.windowsHide,
@@ -195,6 +202,7 @@ export function spawnPortablePipedProcess(
   const child = spawnPortableProcess({
     ...request,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
   assertPortablePipedProcess(child);
   return child;
@@ -771,8 +779,11 @@ export function sanitizeInheritedChildProcessEnv(
     if (value === undefined) {
       continue;
     }
+    // The AppImage runtime exports ARGV0, and zsh launches every command under
+    // that name, so rustup's cargo fails as "unknown proxy name" (#1640).
     if (
       key === "NODE_ENV" ||
+      key === "ARGV0" ||
       key.startsWith("BB_") ||
       key.startsWith("ROOM_")
     ) {

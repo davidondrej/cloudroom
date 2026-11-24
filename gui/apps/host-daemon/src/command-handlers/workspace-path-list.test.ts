@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runGit } from "@cloudroom/host-workspace";
 import { listWorkspacePaths } from "./file-list.js";
-import { listHostPaths } from "./host-files.js";
+import { listHostPaths } from "./files.js";
 
 const roots: string[] = [];
 

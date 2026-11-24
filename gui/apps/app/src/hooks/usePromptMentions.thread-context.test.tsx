@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { makeThreadListEntry } from "@cloudroom/test-helpers/domain-fixtures";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { usePromptMentions } from "./usePromptMentions";
 
 const mocks = vi.hoisted(() => ({
@@ -30,6 +30,8 @@ vi.mock("./queries/sidebar-navigation-query", () => ({
 vi.mock("./queries/thread-queries", () => ({
   useThreadMentionCandidates: mocks.useThreadMentionCandidates,
 }));
+
+afterEach(cleanup);
 
 beforeEach(() => {
   mocks.usePathSuggestions.mockReturnValue({
@@ -91,6 +93,55 @@ describe("usePromptMentions thread contexts", () => {
         currentThreadId: "thr_existing",
         environmentId: "env_worktree",
       }),
+    );
+  });
+
+  it("offers folder and project tags in Cloud threads, which have no environment", () => {
+    mocks.usePathSuggestions.mockReturnValue({
+      suggestions: [
+        {
+          source: "workspace",
+          entryKind: "directory",
+          path: "web/src",
+          name: "src",
+          score: 10,
+          positions: [],
+        },
+      ],
+      isLoading: false,
+      isError: false,
+      isDebouncing: false,
+    });
+    mocks.useSidebarNavigation.mockReturnValue({
+      data: {
+        projects: [{ id: "proj_web", name: "web" }],
+        personalProject: { id: "proj_personal", name: "Personal" },
+        sections: [],
+      },
+    });
+    const { result } = renderHook(() =>
+      usePromptMentions("proj_1", {
+        currentThreadId: "thr_cloud",
+        environmentId: null,
+      }),
+    );
+
+    act(() => {
+      result.current.setQuery("web", "@");
+    });
+
+    // Without an environment, files come from the project's own folder.
+    expect(mocks.usePathSuggestions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ projectId: "proj_1", environmentId: null }),
+    );
+    expect(result.current.results.suggestions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "project",
+          replacement: "project:proj_web",
+        }),
+        expect.objectContaining({ kind: "path", replacement: "web/src/" }),
+      ]),
     );
   });
 

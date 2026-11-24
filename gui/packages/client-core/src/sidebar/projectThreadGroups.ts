@@ -143,8 +143,42 @@ function buildStatsForHiddenThreads(
   };
 }
 
+// Sidebar rows are memoized on their node. Every thread-list update rebuilds
+// the tree, so hand back the previous node (and item) for a thread when nothing
+// in it changed. Then an agent event redraws only the rows it touched.
+const previousNodeByThread = new WeakMap<ThreadListEntry, ProjectThreadNode>();
+const itemByNode = new WeakMap<ProjectThreadNode, ProjectThreadItem>();
+
+function hasSameEntries<T extends object>(left: T, right: T): boolean {
+  const keys = Object.keys(left) as (keyof T)[];
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => left[key] === right[key])
+  );
+}
+
+function reuseUnchangedNode(node: ProjectThreadNode): ProjectThreadNode {
+  const previous = previousNodeByThread.get(node.thread);
+  if (
+    previous !== undefined &&
+    previous.depth === node.depth &&
+    previous.stats.childCount === node.stats.childCount &&
+    hasSameEntries(previous.stats.childActivity, node.stats.childActivity) &&
+    hasSameEntries(previous.children, node.children)
+  ) {
+    return previous;
+  }
+  previousNodeByThread.set(node.thread, node);
+  return node;
+}
+
 function buildThreadItem(node: ProjectThreadNode): ProjectThreadItem {
-  return { kind: "thread", node };
+  let item = itemByNode.get(node);
+  if (item === undefined) {
+    item = { kind: "thread", node };
+    itemByNode.set(node, item);
+  }
+  return item;
 }
 
 function buildSortedItems(
@@ -187,7 +221,7 @@ function buildThreadNode({
   }
 
   const children = buildSortedItems(childNodes, compareThreads);
-  return {
+  return reuseUnchangedNode({
     thread,
     children,
     depth,
@@ -195,7 +229,7 @@ function buildThreadNode({
       getProjectThreadItemDescendants(children),
       draftThreadIds,
     ),
-  };
+  });
 }
 
 function isRootThread(

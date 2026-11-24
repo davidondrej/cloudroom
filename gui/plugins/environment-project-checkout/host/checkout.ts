@@ -166,6 +166,7 @@ async function switchBranch(
         });
         await runGit(switchArgs, {
           cwd,
+          hooks: true,
           ...(signal !== undefined ? { signal } : {}),
         });
       },

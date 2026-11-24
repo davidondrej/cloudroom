@@ -468,7 +468,17 @@ export const pendingInteractionResolutionSchema = z.union(
     pluginPendingInteractionResolutionSchema,
     pluginExtensionInteractionResolutionSchema,
   ],
-  approvalDecisionDiscriminatorError,
+  {
+    // Zod 4.6 aborts an oversized array before its elements, so the union no
+    // longer narrows to the matching branch; keep that branch's limit message.
+    // Only a branch whose kind/decision matched fails on size limits alone.
+    error: (issue) =>
+      (issue.code === "invalid_union" &&
+        issue.errors.find((branch) =>
+          branch.every(({ code }) => code === "too_big"),
+        )?.[0]?.message) ||
+      approvalDecisionDiscriminatorError,
+  },
 );
 export type PendingInteractionResolution = z.infer<
   typeof pendingInteractionResolutionSchema

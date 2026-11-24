@@ -1,32 +1,48 @@
-import { z } from "zod/mini";
+import { z } from "zod";
 
 export interface PlanMeter {
   label: string;
   used: number;
   limit: number;
   unit: string;
+  /** Overrides the plan's period, e.g. for extra credits, which never refill. */
+  period?: string;
 }
 
 export interface PlanSummary {
   plan: string;
   period: string;
+  /** When plan credits refill (ADR 20261108-142517); null from older websites, whose rows show credits left instead. */
+  resetsAt: string | null;
+  /** Plan + extra credits left, for the line under the meters, e.g. "478,265 credits left"; null without `resetsAt`. */
+  left: string | null;
   meters: PlanMeter[];
 }
 
-// Cloud Credits in the rolling 30 days (ADR 0307); null credits while metering is stale.
+// Cloud Credits this credit period (ADR 20261108-142517); null credits while metering is stale.
 const creditsSchema = z.object({
   plan: z.string(),
   credits: z.nullable(z.number()),
   creditsLimit: z.number(),
+  resetsAt: z.optional(z.nullable(z.string())),
+  extraCredits: z.optional(z.number()),
+  extraCreditsTotal: z.optional(z.number()),
 });
 
+/** With extra credits (packs, ADR 0317), they get their own row before the plan's, like the account menu. */
 export function fromCredits(usage: z.infer<typeof creditsSchema>): PlanSummary {
+  const extra = Math.max(0, usage.extraCredits ?? 0), total = Math.max(extra, usage.extraCreditsTotal ?? 0);
+  const plan = { used: usage.credits ?? 0, limit: usage.creditsLimit, unit: " credits" };
   return {
     plan: usage.plan,
-    period: "last 30 days",
+    period: "this month",
+    resetsAt: usage.resetsAt ?? null,
+    left: usage.resetsAt && usage.credits !== null ? `${(Math.max(0, Math.floor(plan.limit - plan.used)) + Math.floor(extra)).toLocaleString("en-US")} credits left` : null,
     meters: usage.credits === null
       ? []
-      : [{ label: "credits", used: usage.credits, limit: usage.creditsLimit, unit: " credits" }],
+      : extra > 0
+        ? [{ label: "extra", used: total - extra, limit: total, unit: " credits", period: "never resets" }, { label: "plan", ...plan }]
+        : [{ label: "credits", ...plan }],
   };
 }
 

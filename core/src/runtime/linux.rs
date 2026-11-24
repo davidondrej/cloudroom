@@ -14,20 +14,63 @@ const AGENT_DIR: &str = "/run/cloudroom/agent";
 /// Sourced by every non-interactive bash a harness starts (BASH_ENV; Claude Code's command shells skip it and source
 /// CLAUDE_ENV_FILE instead), so each command an agent runs, and all it starts, is what the kernel kills first when
 /// memory runs out, never the agent or Core. A harness launched through a bash wrapper (its parent is Core) keeps 0.
+/// It runs after login startup files, so a Mac environment they set (#1034, #1033) can't hide tools or logins: the
+/// system tool folders go back on PATH, last, so the user's own folders still win. HOME, XDG_CONFIG_HOME and
+/// GH_CONFIG_DIR change only when they name a missing Mac folder. Plain sh, since CLAUDE_ENV_FILE may meet zsh.
+/// Commands Claude runs (CLAUDECODE, which Claude sets only for them) get back the Anthropic keys Core hid from Claude
+/// itself under CLOUDROOM_APP_ names, once and only where unset: deeper shells keep what the command set or unset,
+/// and a key the command's own settings set stays (#1340). Tracing (`bash -x`) pauses there, so it never prints them.
 const BASH_ENV: &str = r#"{ read -r _cloudroom_parent < /proc/$PPID/comm; } 2>/dev/null
 [ "$_cloudroom_parent" = cloudroom ] || { echo 500 > /proc/$$/oom_score_adj; } 2>/dev/null
-unset _cloudroom_parent
+if [ -n "${CLAUDECODE-}" ]; then
+  case $- in *x*) _cloudroom_x=1; { set +x; } 2>/dev/null ;; *) _cloudroom_x= ;; esac
+  [ -n "${ANTHROPIC_API_KEY+x}" ] || [ -z "${CLOUDROOM_APP_ANTHROPIC_API_KEY+x}" ] || export ANTHROPIC_API_KEY="$CLOUDROOM_APP_ANTHROPIC_API_KEY"
+  [ -n "${ANTHROPIC_AUTH_TOKEN+x}" ] || [ -z "${CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN+x}" ] || export ANTHROPIC_AUTH_TOKEN="$CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN"
+  unset CLOUDROOM_APP_ANTHROPIC_API_KEY CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN
+  [ -z "$_cloudroom_x" ] || set -x
+fi
+for _cloudroom_dir in /usr/local/bin /usr/bin /bin; do
+  case ":${PATH-}:" in *":$_cloudroom_dir:"*) ;; *) PATH="${PATH:+$PATH:}$_cloudroom_dir" ;; esac
+done
+case "${HOME-}" in /Users/*|/Volumes/*)
+  if [ ! -e "$HOME" ] && _cloudroom_dir=$(getent passwd "$(id -u)" | cut -d: -f6) && [ -d "$_cloudroom_dir" ]; then HOME=$_cloudroom_dir; fi ;;
+esac
+case "${XDG_CONFIG_HOME-}" in /Users/*|/Volumes/*) [ -e "$XDG_CONFIG_HOME" ] || unset XDG_CONFIG_HOME ;; esac
+case "${GH_CONFIG_DIR-}" in /Users/*|/Volumes/*) [ -e "$GH_CONFIG_DIR" ] || unset GH_CONFIG_DIR ;; esac
+unset _cloudroom_parent _cloudroom_dir _cloudroom_x
 "#;
-/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU.
-const NODE_CPUS: &str = r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
+/// Like BASH_ENV, gives the Anthropic keys back once to Node that Claude starts without a shell, such as an MCP server,
+/// unless its own settings set one (#1340).
+macro_rules! node_keys {
+    () => {
+        r#"for (const name of process.env.CLAUDECODE ? ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'] : []) {
+  const alias = 'CLOUDROOM_APP_' + name;
+  if (alias in process.env && !(name in process.env)) process.env[name] = process.env[alias];
+  delete process.env[alias];
+}
+"#
+    };
+}
+const NODE_KEYS: &str = node_keys!();
+/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU. It restores the
+/// keys itself, without requiring keys.cjs: `node --permission` may read only the preload it was given (#2225).
+const NODE_CPUS: &str = concat!(
+    r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
 if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
-"#;
+"#,
+    node_keys!()
+);
 /// Python 3.13 reads PYTHON_CPU_COUNT itself; older versions count every host CPU for worker pools. Then it runs the
-/// `sitecustomize` this one hides (the user's or the system's), since Python loads only the first it finds.
+/// `sitecustomize` this one hides (the user's or the system's), since Python loads only the first it finds. Like
+/// NODE_KEYS, it gives the Anthropic keys back once to Python that Claude starts without a shell (#1340).
 const PYTHON_CPUS: &str = r#"import importlib.machinery, importlib.util, os, sys
 if sys.version_info < (3, 13) and os.environ.get('PYTHON_CPU_COUNT', '').isdigit():
     _count = int(os.environ['PYTHON_CPU_COUNT'])
     os.cpu_count = lambda: _count
+for _name in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN') if os.environ.get('CLAUDECODE') else ():
+    _app = os.environ.pop('CLOUDROOM_APP_' + _name, None)
+    if _app is not None:
+        os.environ.setdefault(_name, _app)
 _here = os.path.dirname(os.path.abspath(__file__))
 _next = importlib.machinery.PathFinder.find_spec('sitecustomize', [p for p in sys.path if os.path.abspath(p or '.') != _here])
 if _next and _next.loader:
@@ -46,28 +89,52 @@ pub(crate) fn agent_env() -> &'static [(&'static str, String)] {
             let hook = dir.join("bash-env.sh").display().to_string();
             env.extend([("BASH_ENV", hook.clone()), ("CLAUDE_ENV_FILE", hook)]);
         }
-        if let Some(cpus) = cpu_quota() {
+        let quota = cpu_quota();
+        if let Some(cpus) = quota {
             env.push(("OMP_NUM_THREADS", cpus.to_string())); // nproc, make -j$(nproc), OpenMP and BLAS
             env.push(("PYTHON_CPU_COUNT", cpus.to_string()));
-            if helpers {
-                let node = dir.join("cpus.cjs");
-                env.push(("NODE_OPTIONS", format!("--require {}", node.display())));
-                env.push(("PYTHONPATH", dir.display().to_string()));
-            }
+        }
+        // The CPU limits apply only with a quota; the Anthropic keys come back with or without one (#1340).
+        if helpers {
+            env.push(("NODE_OPTIONS", node_options(dir, quota.is_some())));
+            env.push(("PYTHONPATH", dir.display().to_string()));
         }
         env
     })
 }
 
+/// One `--require`, since Next.js workers fold repeated ones into a single missing path (#1632): cpus.cjs holds
+/// keys.cjs's code too, so the keys come back with or without a quota.
+fn node_options(dir: &Path, quota: bool) -> String {
+    let file = if quota { "cpus.cjs" } else { "keys.cjs" };
+    format!("--require {}", dir.join(file).display())
+}
+
+const HELPERS: [(&str, &str); 4] = [
+    ("bash-env.sh", BASH_ENV),
+    ("cpus.cjs", NODE_CPUS),
+    ("keys.cjs", NODE_KEYS),
+    ("sitecustomize.py", PYTHON_CPUS),
+];
+
+/// Whether the helpers are on disk for the next launch, written again if one went missing (a cleaned /run). Without
+/// them, a launch gets none of the variables that name them: Node would fail on a missing `--require` (#1340).
+pub(crate) fn helpers_ready() -> bool {
+    let dir = Path::new(AGENT_DIR);
+    HELPERS.iter().all(|(name, _)| dir.join(name).is_file()) || write_helpers(dir).is_ok()
+}
+
 fn write_helpers(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
+    // One writer at a time: launches starting together share the temporary names, and a lost race in `agent_env`
+    // would leave every launch until Core restarts without the hook (#1340).
+    static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _writing = WRITING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     fs::create_dir_all(dir)?;
     fs::set_permissions(dir, fs::Permissions::from_mode(0o755))?;
-    for (name, text) in [
-        ("bash-env.sh", BASH_ENV),
-        ("cpus.cjs", NODE_CPUS),
-        ("sitecustomize.py", PYTHON_CPUS),
-    ] {
+    for (name, text) in HELPERS {
         // Replaced whole, so an agent already running never reads half a file.
         let temporary = dir.join(format!(".{name}"));
         fs::write(&temporary, text)?;
@@ -105,6 +172,8 @@ enum Group {
 pub struct Workload {
     group: Group,
     paused: watch::Sender<bool>,
+    /// The agent account (uid, gid), whose write counters Core may read as that account (`written`).
+    agent: Option<(u32, u32)>,
 }
 
 /// A process group's disk writes, and the command line of its heaviest member.
@@ -135,7 +204,11 @@ impl Workload {
             None => Group::Marked(id),
         };
         let (paused, _) = watch::channel(false);
-        Ok(Self { group, paused })
+        Ok(Self {
+            group,
+            paused,
+            agent: Some((policy.agent_uid, policy.agent_gid)),
+        })
     }
     pub fn attach(&self, command: &mut Command, policy: &Policy) -> io::Result<()> {
         let (uid, gid) = (policy.agent_uid, policy.agent_gid);
@@ -208,7 +281,7 @@ impl Workload {
     }
     /// Idle sleep treats processes beyond the launch count as background jobs. Codex starts its code-mode
     /// host on the first command and keeps it for the session, so it is harness, not a background job. The
-    /// virtual screen and its browser are neither: an open page alone never keeps the sandbox awake.
+    /// virtual screen and its browser are neither: an open page alone never keeps the sandbox awake (ADR 0272).
     pub fn process_count(&self) -> Option<usize> {
         Some(
             self.pids()
@@ -221,20 +294,11 @@ impl Workload {
     /// The process group, other than the harness's own, that wrote the most to disk: a tool command, never the
     /// harness or its helpers. The youngest group wins ties. None when nothing but the harness remains.
     pub fn top_writer(&self, harness: u32) -> io::Result<Option<Writer>> {
-        let pids = self.pids()?;
-        let own_group = stat(harness as i32).map(|(group, _)| group);
+        let tools = self.tools(harness)?;
+        let bytes = written(tools.iter().map(|(pid, ..)| *pid).collect(), self.agent);
         let mut groups: std::collections::HashMap<i32, Vec<(i32, u64, u64)>> = Default::default();
-        for pid in pids {
-            if let Some((group, started)) = stat(pid)
-                && pid != harness as i32
-                && Some(group) != own_group
-                && !helper(pid)
-            {
-                groups
-                    .entry(group)
-                    .or_default()
-                    .push((pid, written(pid), started));
-            }
+        for ((pid, group, started), bytes) in tools.into_iter().zip(bytes) {
+            groups.entry(group).or_default().push((pid, bytes, started));
         }
         let Some(members) = groups.into_values().max_by_key(|m| {
             (
@@ -259,6 +323,26 @@ impl Workload {
             pids: members.iter().map(|p| p.0).collect(),
             command,
         }))
+    }
+    /// Kills every tool command group, leaving the harness and its helpers: a stop on a full disk then wakes only the
+    /// agent, never what filled the disk (#606). Never the virtual screen or the shared browser, which other agents use.
+    pub fn stop_commands(&self, harness: u32) -> io::Result<()> {
+        for (pid, ..) in self.tools(harness)? {
+            if !desktop(pid) {
+                signal(pid, SIGKILL);
+            }
+        }
+        Ok(())
+    }
+    /// Its processes outside the harness's own group, other than helpers (tool commands): pid, group, start time.
+    fn tools(&self, harness: u32) -> io::Result<Vec<(i32, i32, u64)>> {
+        let own_group = stat(harness as i32).map(|(_, group, _)| group);
+        Ok((self.pids()?.into_iter())
+            .filter_map(|pid| stat(pid).map(|(_, group, started)| (pid, group, started)))
+            .filter(|(pid, group, _)| {
+                *pid != harness as i32 && Some(*group) != own_group && !helper(*pid)
+            })
+            .collect())
     }
     pub fn terminate(&self) -> io::Result<()> {
         match &self.group {
@@ -386,38 +470,271 @@ pub(crate) fn environment_hidden(pid: u32) -> bool {
 }
 /// Codex's code-mode host runs in its own group but holds session state, so it counts as harness.
 fn helper(pid: i32) -> bool {
+    program(pid, b"codex-code-mode-host")
+}
+fn program(pid: i32, name: &[u8]) -> bool {
     fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
         let program = cmdline.split(|b| *b == 0).next().unwrap_or_default();
-        program.rsplit(|b| *b == b'/').next() == Some(b"codex-code-mode-host".as_slice())
+        program.rsplit(|b| *b == b'/').next() == Some(name)
     })
 }
-/// Computer use marks the virtual screen, its helpers and the apps it launches (Chromium included) with
-/// `CLOUDROOM_DESKTOP=1`; browser-harness runs its daemon as `python -m browser_harness.daemon`. For idle sleep
-/// only: the disk guard still sees them. An unreadable environment counts as a background job, as before.
+/// Computer use marks the virtual screen, its helpers and the apps it launches with `CLOUDROOM_DESKTOP=1`; the
+/// shared browser is matched by `browser`, and Chromium's crash reporter is never real work. For idle sleep and burn:
+/// the disk guard still sees them. An unreadable environment counts as a background job, as before.
 fn desktop(pid: i32) -> bool {
     let marked = fs::read(format!("/proc/{pid}/environ"))
         .is_ok_and(|environ| values(&environ, DESKTOP_MARKER).any(|value| value == b"1"));
-    marked
-        || fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
-            let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).skip(1).take(2).collect();
-            args == [b"-m".as_slice(), b"browser_harness.daemon".as_slice()]
-        })
+    marked || browser(pid) || program(pid, b"chrome_crashpad_handler")
 }
-/// A process's group and start time, from `/proc/PID/stat`.
-fn stat(pid: i32) -> Option<(i32, u64)> {
+/// The shared browser: browser-harness's daemons (`python -m browser_harness.daemon`) and every process of the
+/// Chromium its wrapper starts with `--user-data-dir=$HOME/.config/chromium-agent` (web/browser.sh). Chromium wipes
+/// its environment and rewrites its command line as one space-joined title, so only a substring can tell (#610).
+/// Only those programs match: another process carrying the same words is never paused.
+fn browser(pid: i32) -> bool {
+    fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|cmdline| {
+        let mut words = cmdline.split(|b| *b == 0 || *b == b' ');
+        let program = words.next().unwrap_or_default();
+        match program.rsplit(|b| *b == b'/').next().unwrap_or_default() {
+            b"chromium" => words.any(|word| {
+                word.starts_with(b"--user-data-dir=") && word.ends_with(b"/.config/chromium-agent")
+            }),
+            name => {
+                name.starts_with(b"python")
+                    && words
+                        .take(2)
+                        .eq([b"-m".as_slice(), b"browser_harness.daemon".as_slice()])
+            }
+        }
+    })
+}
+/// Pauses (SIGSTOP) or resumes (SIGCONT) the shared browser, so an open page burns no Cloud Credits while nothing
+/// uses it (#610). Tabs, logins and page state stay; its daemons pause too, so their connection to Chromium survives.
+/// Resuming is harmless when nothing is paused. Only the idle sleeper pauses (session `Browser`).
+/// Only the agent account's browser: `owner` is its uid, or Core's own when agents share it. Another account's
+/// browser on the same server is never touched, even though Core may signal it (`CAP_KILL`).
+pub(crate) fn pause_browser(paused: bool, owner: Option<u32>) {
+    let owner = owner.unwrap_or_else(|| {
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        unsafe { geteuid() }
+    });
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok())
+            && pid != std::process::id() as i32
+            && uid(pid) == Some(owner)
+            && browser(pid)
+        {
+            signal(pid, if paused { SIGSTOP } else { SIGCONT });
+        }
+    }
+}
+/// Where a process comes from, for idle burn (docs/scopes/credit-burn.md). Only the agent account's processes are
+/// jobs or strays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Origin {
+    /// Core, and what runs in the process group of one of its direct children: harnesses and their helpers, sync,
+    /// terminal shells.
+    Core(i32),
+    /// A command a harness or terminal started in a group of its own, or anything in a live workload: builds, tests,
+    /// downloads, servers. Never stopped.
+    Job,
+    /// Nothing tracks it: orphaned, outside every workload, and started after Core, as are all its descendants.
+    Stray,
+    /// Other accounts, the virtual screen and shared browser, Codex's host, and anything uncertain.
+    Other,
+}
+
+/// Sorts processes by origin, each once. Make a new one for each reading: pids are reused.
+pub(crate) struct Origins {
+    agent: u32,
+    core: u32,
+    started: u64,
+    /// Core's own cgroup, which holds every workload. None where workloads are marked instead.
+    cgroup: Option<PathBuf>,
+    known: std::collections::HashMap<u32, Origin>,
+}
+
+impl Origins {
+    pub fn new(policy: &Policy) -> Self {
+        let core = std::process::id();
+        Self {
+            agent: policy.agent_uid,
+            core,
+            started: stat(core as i32).map_or(u64::MAX, |(_, _, start)| start),
+            // Unreadable means everything is in it, so nothing is a stray.
+            cgroup: (policy.cgroup_root.is_some())
+                .then(|| cgroup(core).unwrap_or_else(|| PathBuf::from("/"))),
+            known: Default::default(),
+        }
+    }
+
+    /// The origin of the process that started at `start` (ticks after boot); `Other` once that process is gone.
+    pub fn of(&mut self, pid: u32, start: u64) -> Origin {
+        match stat(pid as i32) {
+            Some((_, _, now)) if now == start => self.find(pid),
+            _ => Origin::Other,
+        }
+    }
+
+    fn find(&mut self, pid: u32) -> Origin {
+        if let Some(origin) = self.known.get(&pid) {
+            return *origin;
+        }
+        // A pid reused mid-walk can't loop.
+        self.known.insert(pid, Origin::Other);
+        let origin = self.sort(pid).unwrap_or(Origin::Other);
+        self.known.insert(pid, origin);
+        origin
+    }
+
+    fn sort(&mut self, pid: u32) -> Option<Origin> {
+        let (parent, group, start) = stat(pid as i32)?;
+        if pid == self.core {
+            return Some(Origin::Core(group));
+        }
+        let id = pid as i32;
+        if pid <= 1 || uid(id)? != self.agent || desktop(id) || helper(id) {
+            return Some(Origin::Other);
+        }
+        if parent == self.core {
+            return Some(Origin::Core(group));
+        }
+        Some(match (self.find(parent), self.workload(pid)) {
+            (Origin::Core(own), _) if own == group => Origin::Core(own),
+            (Origin::Core(_) | Origin::Job, _) | (_, Some(true)) => Origin::Job,
+            // Chromium's helpers overwrite their environment, so they follow their parent.
+            (Origin::Stray, _) => Origin::Stray,
+            (_, Some(false)) if parent == 1 && start > self.started => Origin::Stray,
+            _ => Origin::Other,
+        })
+    }
+
+    /// Whether a process runs in Core's cgroup or carries a workload marker. None when unreadable.
+    fn workload(&self, pid: u32) -> Option<bool> {
+        match &self.cgroup {
+            Some(own) => Some(cgroup(pid)?.starts_with(own)),
+            None => {
+                let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+                Some(values(&environ, MARKER).next().is_some())
+            }
+        }
+    }
+}
+
+/// A process's cgroup v2 path, from `/proc/PID/cgroup`.
+fn cgroup(pid: u32) -> Option<PathBuf> {
+    let groups = fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    groups
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(PathBuf::from)
+}
+
+/// Stops strays: asks each to quit (SIGTERM), then kills what is left 5 s later (SIGKILL). Only the same processes:
+/// a pid whose start time changed belongs to another one now.
+pub(crate) async fn stop(strays: Vec<(u32, u64)>) {
+    let signal = |number| {
+        for (pid, start) in &strays {
+            if stat(*pid as i32).is_some_and(|(_, _, now)| now == *start) {
+                send(*pid as i32, number);
+            }
+        }
+    };
+    signal(15);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    signal(SIGKILL);
+}
+
+/// A process's real uid, from `/proc/PID/status`. Readable even when the process isn't dumpable, unlike the
+/// owner of `/proc/PID`, which is then root.
+fn uid(pid: i32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    status.lines().find_map(|line| {
+        line.strip_prefix("Uid:")?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    })
+}
+/// A process's parent, group and start time, from `/proc/PID/stat`.
+fn stat(pid: i32) -> Option<(u32, i32, u64)> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<&str> = stat.rsplit_once(") ")?.1.split_whitespace().collect();
-    Some((fields.get(2)?.parse().ok()?, fields.get(19)?.parse().ok()?))
+    Some((
+        fields.get(1)?.parse().ok()?,
+        fields.get(2)?.parse().ok()?,
+        fields.get(19)?.parse().ok()?,
+    ))
 }
-/// Bytes a process sent to disk. Zero when unreadable: another account's counters need ptrace rights.
-fn written(pid: i32) -> u64 {
-    fs::read_to_string(format!("/proc/{pid}/io"))
-        .ok()
-        .and_then(|io| {
-            io.lines()
-                .find_map(|line| line.strip_prefix("write_bytes: ")?.parse().ok())
+/// Processes' disk writes, zero where unreadable. The agent account's counters need ptrace rights, which Core lacks when it runs as another
+/// account (cgroups): those are read on a short-lived thread whose file system identity is the agent's (CAP_SETUID,
+/// CAP_SETGID), so no other thread's identity or capabilities change. Never as anyone else, root included (#606).
+fn written(pids: Vec<i32>, agent: Option<(u32, u32)>) -> Vec<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fn read(pid: i32) -> Option<u64> {
+        let io = fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+        io.lines()
+            .find_map(|line| line.strip_prefix("write_bytes: ")?.parse().ok())
+    }
+    let mut bytes: Vec<_> = pids.iter().map(|pid| read(*pid)).collect();
+    let Some((uid, gid)) = agent else {
+        return bytes.into_iter().map(Option::unwrap_or_default).collect();
+    };
+    let agents: Vec<_> = (pids.iter().zip(&bytes))
+        .filter(|(pid, b)| {
+            b.is_none() && fs::metadata(format!("/proc/{pid}")).is_ok_and(|m| m.uid() == uid)
         })
-        .unwrap_or(0)
+        .map(|(pid, _)| *pid)
+        .collect();
+    // A thread that can't start (the process limit) leaves them unread, never panics the disk guard.
+    let read_as_agent = (!agents.is_empty())
+        .then(|| std::thread::Builder::new().spawn(move || read_as(uid, gid, &agents, read)))
+        .and_then(Result::ok);
+    if let Some(read_as_agent) = read_as_agent {
+        for (pid, found) in read_as_agent.join().unwrap_or_default() {
+            if let Some(i) = pids.iter().position(|p| *p == pid) {
+                bytes[i] = found;
+            }
+        }
+    }
+    bytes.into_iter().map(Option::unwrap_or_default).collect()
+}
+/// Reads `pids` with this thread's file system identity set to `uid`/`gid`, then sets it back and restores the
+/// process's dumpable flag, which a changed identity clears and crash dumps need. Only on a thread of its own.
+#[cfg(target_os = "linux")]
+fn read_as(
+    uid: u32,
+    gid: u32,
+    pids: &[i32],
+    read: fn(i32) -> Option<u64>,
+) -> Vec<(i32, Option<u64>)> {
+    unsafe extern "C" {
+        fn setfsuid(uid: u32) -> i32;
+        fn setfsgid(gid: u32) -> i32;
+        fn prctl(option: i32, ...) -> i32;
+    }
+    const PR_GET_DUMPABLE: i32 = 3;
+    const PR_SET_DUMPABLE: i32 = 4;
+    let dumpable = unsafe { prctl(PR_GET_DUMPABLE) };
+    let (own_gid, own_uid) = unsafe { (setfsgid(gid), setfsuid(uid)) };
+    let found = pids.iter().map(|pid| (*pid, read(*pid))).collect();
+    unsafe {
+        setfsuid(own_uid as u32);
+        setfsgid(own_gid as u32);
+        if (0..=1).contains(&dumpable) {
+            prctl(PR_SET_DUMPABLE, dumpable as std::ffi::c_ulong);
+        }
+    }
+    found
+}
+#[cfg(not(target_os = "linux"))]
+fn read_as(_: u32, _: u32, _: &[i32], _: fn(i32) -> Option<u64>) -> Vec<(i32, Option<u64>)> {
+    Vec::new()
 }
 fn signal(pid: i32, number: i32) {
     send(pid, number);
@@ -523,6 +840,171 @@ mod tests {
     use super::*;
 
     #[test]
+    fn login_startup_files_never_hide_the_system_tools_or_home() {
+        let home = std::env::temp_dir().join(format!("bash-env-test-{}", std::process::id()));
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("hook.sh"), BASH_ENV).unwrap();
+        let account = std::process::Command::new("sh")
+            .args(["-c", "getent passwd \"$(id -u)\" | cut -d: -f6"])
+            .output()
+            .unwrap();
+        let account = String::from_utf8_lossy(&account.stdout).trim().to_owned();
+        for (startup, expected) in [
+            (
+                "PATH=/opt/homebrew/bin:/usr/bin HOME=/Users/a GH_CONFIG_DIR=/Users/a/gh",
+                format!("/opt/homebrew/bin:/usr/bin:/usr/local/bin:/bin|{account}|-"),
+            ),
+            (
+                "PATH=/a/bin:/usr/local/bin:/usr/bin:/bin GH_CONFIG_DIR=/tmp/no-gh",
+                format!(
+                    "/a/bin:/usr/local/bin:/usr/bin:/bin|{}|/tmp/no-gh",
+                    home.display()
+                ),
+            ),
+            (
+                "set -eu; unset HOME PATH",
+                "/usr/local/bin:/usr/bin:/bin||-".into(),
+            ),
+        ] {
+            fs::write(home.join(".bash_profile"), format!("{startup}\n")).unwrap();
+            let output = std::process::Command::new("/bin/bash")
+                .args(["-lc", "printf %s \"${PATH-}|${HOME-}|${GH_CONFIG_DIR--}\""])
+                .env_clear()
+                .env("HOME", &home)
+                .env("BASH_ENV", home.join("hook.sh"))
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        // An app's Anthropic key, hidden from Claude itself, is back in its commands once: a deeper shell keeps the
+        // command's own value, a key already set stays, and shells outside Claude (no CLAUDECODE) never get it (#1340).
+        let keys = r#"printf %s "${ANTHROPIC_API_KEY-unset}|${CLOUDROOM_APP_ANTHROPIC_API_KEY-gone}|"
+ANTHROPIC_API_KEY=temp bash -c 'printf %s "$ANTHROPIC_API_KEY|"'; unset ANTHROPIC_API_KEY
+bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
+        for (claude, own, expected) in [
+            ("1", None, "app|gone|temp|unset"),
+            ("1", Some("own"), "own|gone|temp|unset"),
+            ("", None, "unset|app|temp|unset"),
+        ] {
+            let mut command = std::process::Command::new("/bin/bash");
+            command
+                .args(["-c", keys])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("CLAUDECODE", claude)
+                .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "app")
+                .env("BASH_ENV", home.join("hook.sh"));
+            if let Some(own) = own {
+                command.env("ANTHROPIC_API_KEY", own);
+            }
+            let output = command.output().unwrap();
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        // A traced launcher (`bash -x`) never prints the keys, and is still traced afterwards.
+        let output = std::process::Command::new("/bin/bash")
+            .args([
+                "-xc",
+                "printenv ANTHROPIC_API_KEY > /dev/null && case $- in *x*) printf on ;; esac",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("CLAUDECODE", "1")
+            .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "sk-app-secret")
+            .env("CLOUDROOM_APP_ANTHROPIC_AUTH_TOKEN", "sk-token-secret")
+            .env("BASH_ENV", home.join("hook.sh"))
+            .output()
+            .unwrap();
+        let trace = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "on");
+        assert!(
+            !trace.contains("secret") && trace.contains("printf"),
+            "{trace}"
+        );
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn node_gets_one_preload_that_caps_cpus_and_restores_keys() {
+        // Next.js workers fold repeated `--require`s into one missing path, so Core passes one (#1632). Permission
+        // mode lets Node read only that preload and the script (#2225).
+        let dir = std::env::temp_dir().join(format!("node-preload-test-{}", std::process::id()));
+        write_helpers(&dir).unwrap();
+        let script = dir.join("check.js");
+        fs::write(&script, "const os = require('node:os'); process.stdout.write(`${os.cpus.toString().includes('usable')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)").unwrap();
+        for (quota, expected) in [(true, "true|app|undefined"), (false, "false|app|undefined")] {
+            let options = node_options(&dir, quota);
+            assert_eq!(options.matches("--require").count(), 1, "{options}");
+            let output = std::process::Command::new("node")
+                .arg("--permission")
+                .arg(&script)
+                .env_clear()
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("NODE_OPTIONS", options)
+                .env("CLAUDECODE", "1")
+                .env("CLOUDROOM_APP_ANTHROPIC_API_KEY", "app")
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                expected,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn idle_burn_never_calls_a_tracked_job_a_stray() {
+        // Marked workloads, as in a container. Both orphans' shells exit; only the job keeps its marker.
+        let uid = uid(std::process::id() as i32).unwrap();
+        let policy: Policy = serde_json::from_value(serde_json::json!({"agent_uid": uid,
+            "agent_gid": uid, "cache_dir": "/tmp", "cgroup_root": null, "agent_sudo": true}))
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(20)); // Start times count 10 ms ticks.
+        let orphan = |marked: bool| {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 30 > /dev/null 2>&1 & echo $!"]);
+            command.env_clear().env("PATH", "/usr/bin:/bin");
+            if marked {
+                command.env("CLOUDROOM_WORKLOAD", "idle-test");
+            }
+            let output = command.output().unwrap();
+            let pid: u32 = String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .unwrap();
+            (pid, stat(pid as i32).unwrap())
+        };
+        let (job, (_, _, job_start)) = orphan(true);
+        let (stray, (parent, _, stray_start)) = orphan(false);
+        let mut harness = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let harness_start = stat(harness.id() as i32).unwrap().2;
+        let mut origins = Origins::new(&policy);
+        assert_eq!(origins.of(job, job_start), Origin::Job);
+        assert!(matches!(
+            origins.of(harness.id(), harness_start),
+            Origin::Core(_)
+        ));
+        // A reaper other than init in between (some CI containers) leaves it uncertain.
+        let expected = if parent == 1 {
+            Origin::Stray
+        } else {
+            Origin::Other
+        };
+        assert_eq!(origins.of(stray, stray_start), expected);
+        assert_eq!(origins.of(stray, stray_start + 1), Origin::Other);
+        for pid in [job, stray] {
+            send(pid as i32, SIGKILL);
+        }
+        let _ = harness.kill();
+        let _ = harness.wait();
+    }
+
+    #[test]
     fn a_full_disk_stops_the_writing_tool_command_not_the_harness() {
         let id = format!("disk-test-{}", std::process::id());
         // A real disk: writes to a memory disk are not counted as disk writes.
@@ -554,6 +1036,7 @@ mod tests {
         let workload = Workload {
             group: Group::Marked(id),
             paused: watch::channel(false).0,
+            agent: None,
         };
         let top = workload.top_writer(harness.id()).unwrap().unwrap();
         assert!(top.command.starts_with("sh -c i=0"), "{}", top.command);

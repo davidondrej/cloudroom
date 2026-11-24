@@ -6,6 +6,7 @@ import {
 import { operationEnvironment } from "./operation-environment.js";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
 import {
+  ensureDataTempDir,
   findGitShellPath,
   isProcessGroupAlive,
   killProcessGroup,
@@ -33,6 +34,12 @@ import {
 
 export interface RunSetupScriptArgs {
   workspacePath: string;
+  /** The script as committed at the environment's base commit (see
+   *  environment-hook-scripts.ts); null runs nothing. Never the copy in the
+   *  workspace: sandboxed agents can write it, and hooks run outside every sandbox. */
+  script: Buffer | null;
+  /** The script runs from a private copy in this data folder. */
+  dataDir: string;
   timeoutMs: number;
   shellPath?: string;
   env?: NodeJS.ProcessEnv;
@@ -169,17 +176,53 @@ export async function resolveWindowsBashPath(
   }
 }
 
-async function resolveLifecycleScriptPath(
-  workspacePath: string,
-  scriptName: string,
-): Promise<string | null> {
-  const scriptPath = path.join(workspacePath, scriptName);
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+/**
+ * Writes the script to a fresh private folder in the data folder, where bash
+ * starts it as `./<name>`. Its first line first moves into the workspace, so
+ * `$0` and `BASH_SOURCE` are `./<name>` and resolve to the workspace root, as
+ * when someone runs `bash ./<name>` there. The prefix shares line 1 with the
+ * script (a `#!` line becomes a comment), so line numbers stay the same.
+ */
+async function writePrivateScriptCopy(args: {
+  dataDir: string;
+  workspacePath: string;
+  scriptName: string;
+  script: Buffer;
+}): Promise<string> {
+  const runDir = await fs.mkdtemp(
+    path.join(ensureDataTempDir(args.dataDir), "hook-"),
+  );
+  // Git for Windows' bash reads `C:/...`; backslashes stay literal in quotes either way.
+  const workspace =
+    process.platform === "win32"
+      ? args.workspacePath.replaceAll("\\", "/")
+      : args.workspacePath;
   try {
-    await fs.access(scriptPath);
-  } catch {
-    return null;
+    await fs.writeFile(
+      path.join(runDir, args.scriptName),
+      Buffer.concat([
+        Buffer.from(`cd -- ${shellQuote(workspace)} || exit 1; `),
+        args.script,
+      ]),
+      { mode: 0o600, flag: "wx" },
+    );
+  } catch (error) {
+    // A full disk can fail the write; leave no folder behind.
+    await fs.rm(runDir, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
   }
-  return scriptPath;
+  return runDir;
+}
+
+async function isDirectory(value: string): Promise<boolean> {
+  return fs.stat(value).then(
+    (info) => info.isDirectory(),
+    () => false,
+  );
 }
 
 async function runLifecycleScript(
@@ -205,14 +248,30 @@ async function runLifecycleScript(
 async function runLifecycleScriptOnce(
   args: RunLifecycleScriptArgs,
 ): Promise<{ ran: boolean }> {
-  const scriptPath = await resolveLifecycleScriptPath(
-    args.workspacePath,
-    args.scriptName,
-  );
-  if (!scriptPath) {
+  if (args.script === null || !(await isDirectory(args.workspacePath))) {
     return { ran: false };
   }
+  throwIfProvisionAborted(args.signal);
+  const runDir = await writePrivateScriptCopy({
+    dataDir: args.dataDir,
+    workspacePath: args.workspacePath,
+    scriptName: args.scriptName,
+    script: args.script,
+  });
+  try {
+    return await runPrivateScriptCopy(args, runDir);
+  } finally {
+    await fs
+      .rm(runDir, { recursive: true, force: true })
+      .catch(() => undefined);
+  }
+}
 
+async function runPrivateScriptCopy(
+  args: RunLifecycleScriptArgs,
+  runDir: string,
+): Promise<{ ran: boolean }> {
+  const scriptPath = path.join(args.workspacePath, args.scriptName);
   throwIfProvisionAborted(args.signal);
   const { timeoutMs } = args;
   const env = operationEnvironment(
@@ -232,7 +291,7 @@ async function runLifecycleScriptOnce(
     kind: args.kind,
     scriptName: args.scriptName,
     platform: process.platform,
-    scriptPath,
+    scriptPath: `./${args.scriptName}`,
     windowsBashPath,
   });
   const startedAt = Date.now();
@@ -251,7 +310,7 @@ async function runLifecycleScriptOnce(
   const child = spawnPortableOutputProcess({
     command: command.command,
     args: command.args,
-    cwd: args.workspacePath,
+    cwd: runDir,
     detached: supportsProcessGroups(),
     env: scriptEnv,
   });

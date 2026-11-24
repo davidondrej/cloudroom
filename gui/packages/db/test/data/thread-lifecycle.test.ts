@@ -240,7 +240,7 @@ describe("applyThreadLifecycleEvent", () => {
           target: "idle",
         },
         {
-          attention: false,
+          attention: true,
           event: { type: "run.succeeded" },
           parent: true,
           status: "active",

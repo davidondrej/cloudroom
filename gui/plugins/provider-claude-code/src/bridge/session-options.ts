@@ -1,11 +1,15 @@
 import {
   experimental_findCliExecutable as findCliExecutable,
+  experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
+  experimental_privateDataPaths as privateDataPaths,
   type InstructionMode,
   type ReasoningLevel,
   type RuntimePermissionScope,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import type {
@@ -46,6 +50,15 @@ const SUMMARIZED_ADAPTIVE_THINKING = {
   display: "summarized",
 } satisfies Exclude<Options["thinking"], undefined>;
 const CLAUDE_CODE_EXECUTABLE_ENV = "BB_CLAUDE_CODE_EXECUTABLE";
+// Claude's own timers and schedules. Cloudroom can't see them, so a reply they wake can get lost: `room-cli wake` and
+// loops replace them. The `/loop` and `/schedule` skills run on these tools, so they go too.
+const CLAUDE_TIMER_TOOLS = [
+  "ScheduleWakeup",
+  "CronCreate",
+  "CronDelete",
+  "CronList",
+  "RemoteTrigger",
+];
 
 export function toSdkEffort(
   reasoningLevel: ReasoningLevel,
@@ -56,13 +69,30 @@ export function toSdkEffort(
   return reasoningLevel;
 }
 
-function buildFlagSettings(params: BuildSessionOptionsArgs): Settings {
+function buildFlagSettings(
+  params: BuildSessionOptionsArgs,
+  env: NodeJS.ProcessEnv,
+): Settings {
+  const deny = privateDataReadDenyRules(env);
   return {
     autoMemoryEnabled: params.memoryEnabled ?? true,
     disableClaudeAiConnectors: params.claudeAiConnectorsEnabled !== true,
     enableWorkflows: params.workflowsEnabled,
     ultracode: params.reasoningLevel === "ultracode",
+    skillOverrides: { loop: "off", schedule: "off" },
+    ...(deny.length > 0 ? { permissions: { deny } } : {}),
   };
+}
+
+/**
+ * `Read(//path)` deny rules for Cloudroom's credential files (#2191). Claude
+ * applies them to its Read, Grep, and Glob tools in every mode, and adds them
+ * to the sandbox's denyRead, so sandboxed shell commands can't read them.
+ */
+export function privateDataReadDenyRules(env: NodeJS.ProcessEnv): string[] {
+  return privateDataPaths(env.ROOM_DATA_DIR)
+    .filter((path) => path.startsWith("/"))
+    .map((path) => `Read(/${path})`);
 }
 
 export function buildChromeExtraArgs(
@@ -96,7 +126,7 @@ export function buildWorkspaceWriteDenialMessage(): string {
 
 type PermissionSessionOptionsArgs = Pick<
   BuildSessionOptionsArgs,
-  "additionalWorkspaceWriteRoots" | "permissionMode" | "permissionScope"
+  "additionalWorkspaceWriteRoots" | "cwd" | "permissionMode" | "permissionScope"
 >;
 
 function usesWorkspaceSandbox(params: PermissionSessionOptionsArgs): boolean {
@@ -127,33 +157,115 @@ function claudeSandboxCanStart(): boolean {
   return linuxSandboxWorks;
 }
 
+const MAC_USER_TEMP_DIR = /^\/private\/var\/folders\/[^/]+\/[^/]+\/T$/u;
+
+// macOS APIs (Swift, NSTemporaryDirectory, Vision) ignore the sandbox's
+// TMPDIR and write to the user's /var/folders/.../T, which Codex's workspace
+// sandbox already allows (#1117). TMPDIR can point anywhere, even $HOME, so ask
+// macOS for the dir and grant it only in its canonical form.
+export function macUserTempDirs(
+  getconf: () => string | null | undefined = () =>
+    spawnSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).stdout,
+): string[] {
+  if (process.platform !== "darwin") return [];
+  try {
+    const reported = getconf()?.trim();
+    const dir = reported ? realpathSync(reported) : "";
+    return MAC_USER_TEMP_DIR.test(dir) ? [dir] : [];
+  } catch {
+    return [];
+  }
+}
+
+// Claude reads project settings from cwd and the local file from the repo root
+// (the main checkout's root in a worktree), so check all three. null = unsure.
+function claudeProjectDirs(cwd: string): string[] | null {
+  const git = spawnSync(
+    "git",
+    [
+      "rev-parse",
+      "--path-format=absolute",
+      "--show-toplevel",
+      "--git-common-dir",
+    ],
+    { cwd, encoding: "utf8", timeout: 5_000 },
+  );
+  const [toplevel, commonDir] =
+    git.status === 0 ? git.stdout.trim().split("\n") : [];
+  if (!toplevel || !commonDir || basename(commonDir) !== ".git") return null;
+  return [cwd, toplevel, dirname(commonDir)];
+}
+
+// Our --settings outrank the user's own Claude settings. Add the trustd flag
+// only when every settings file Claude may read is absent or valid JSON and
+// none sets sandbox.enableWeakerNetworkIsolation: false. Any doubt leaves it off.
+export function claudeSettingsAllowTrustd(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+): boolean {
+  const projectDirs = claudeProjectDirs(cwd);
+  if (!projectDirs) return false;
+  const userDir =
+    env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
+  return [
+    join(userDir, "settings.json"),
+    ...projectDirs.flatMap((dir) => [
+      join(dir, ".claude", "settings.json"),
+      join(dir, ".claude", "settings.local.json"),
+    ]),
+  ].every((path) => {
+    let text: string;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+    try {
+      return JSON.parse(text)?.sandbox?.enableWeakerNetworkIsolation !== false;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function buildWorkspaceWriteSandbox(
   params: PermissionSessionOptionsArgs,
+  env: NodeJS.ProcessEnv,
 ): Options["sandbox"] | undefined {
   if (!usesWorkspaceSandbox(params) || !claudeSandboxCanStart()) {
     return undefined;
   }
 
-  const allowWrite = params.additionalWorkspaceWriteRoots ?? [];
+  const allowWrite = [
+    ...(params.additionalWorkspaceWriteRoots ?? []),
+    ...macUserTempDirs(),
+  ];
   return {
     enabled: true,
     failIfUnavailable: false,
     autoAllowBashIfSandboxed: true,
     allowUnsandboxedCommands: true,
-    network: { allowLocalBinding: true },
-    ...(allowWrite.length > 0
-      ? { filesystem: { allowWrite: [...allowWrite] } }
+    // macOS only: lets curl, gh, and Go tools reach the system trust service
+    // (com.apple.trustd.agent) to verify TLS certificates (#1117).
+    ...(claudeSettingsAllowTrustd(params.cwd, env)
+      ? { enableWeakerNetworkIsolation: true }
       : {}),
+    network: { allowLocalBinding: true },
+    ...(allowWrite.length > 0 ? { filesystem: { allowWrite } } : {}),
   };
 }
 
 export function buildPermissionSessionOptions(
   params: PermissionSessionOptionsArgs,
+  env: NodeJS.ProcessEnv,
 ): Pick<
   SdkSessionOptions,
   "additionalDirectories" | "permissionMode" | "sandbox"
 > {
-  const sandbox = buildWorkspaceWriteSandbox(params);
+  const sandbox = buildWorkspaceWriteSandbox(params, env);
   const additionalDirectories = usesWorkspaceSandbox(params)
     ? (params.additionalWorkspaceWriteRoots ?? [])
     : [];
@@ -174,12 +286,18 @@ export function resolveClaudeCodeExecutable(
   if (trimmedExplicitPath && trimmedExplicitPath.length > 0) {
     try {
       accessSync(trimmedExplicitPath, constants.X_OK);
-      return trimmedExplicitPath;
     } catch {
       throw new Error(
         `${CLAUDE_CODE_EXECUTABLE_ENV} must point to an executable Claude CLI path: ${trimmedExplicitPath}`,
       );
     }
+    // npm's unfinished stub can't run Claude (#1148); say so at start.
+    if (isClaudeNpmPlaceholder(trimmedExplicitPath)) {
+      throw new Error(
+        `${CLAUDE_CODE_EXECUTABLE_ENV} points to npm's unfinished Claude Code placeholder, not the Claude CLI: ${trimmedExplicitPath}. Reinstall Claude Code there, or point ${CLAUDE_CODE_EXECUTABLE_ENV} at a working claude.`,
+      );
+    }
+    return trimmedExplicitPath;
   }
 
   return findCliExecutable("claude", args.env);
@@ -201,7 +319,7 @@ export function buildSessionOptions(
         };
   const model = params.model;
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutable({ env });
-  const flagSettings = buildFlagSettings(params);
+  const flagSettings = buildFlagSettings(params, env);
   const extraArgs = buildChromeExtraArgs(params.chromeEnabled);
 
   return {
@@ -209,7 +327,7 @@ export function buildSessionOptions(
     systemPrompt,
     model,
     env,
-    ...buildPermissionSessionOptions(params),
+    ...buildPermissionSessionOptions(params, env),
     ...(params.reasoningLevel
       ? { effort: toSdkEffort(params.reasoningLevel) }
       : {}),
@@ -220,8 +338,6 @@ export function buildSessionOptions(
     ...(extraArgs ? { extraArgs } : {}),
     ...(pathToClaudeCodeExecutable ? { pathToClaudeCodeExecutable } : {}),
     ...(params.plugins ? { plugins: params.plugins } : {}),
-    ...(params.disallowedTools && params.disallowedTools.length > 0
-      ? { disallowedTools: [...params.disallowedTools] }
-      : {}),
+    disallowedTools: [...(params.disallowedTools ?? []), ...CLAUDE_TIMER_TOOLS],
   };
 }

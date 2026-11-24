@@ -1,6 +1,8 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_PROCESS_LOCAL_LOCK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -9,7 +11,11 @@ export type ProcessLocalQueuedLockWork<T> = () => Promise<T>;
 
 export type ProcessLocalQueuedLockSpec = {
   key: string;
+  // How long a waiter lets one owner hold the lock before calling it stuck.
   timeoutMs?: number;
+  // The work is one child process that ends or is cancelled on its own, so
+  // waiters keep waiting while it runs, however long it takes.
+  heldByChildProcess?: boolean;
 };
 
 export class ProcessLocalQueuedLockTimeoutError extends Error {
@@ -26,6 +32,10 @@ export class ProcessLocalQueuedLockTimeoutError extends Error {
 
 const heldLocks = new AsyncLocalStorage<Set<string>>();
 const lockQueues = new Map<string, Promise<void>>();
+const lockHolders = new Map<
+  string,
+  { since: number; heldByChildProcess: boolean }
+>();
 
 function normalizeProcessLocalLockSpecs(
   locks: ProcessLocalQueuedLockSpec[],
@@ -93,6 +103,7 @@ function withProcessLocalQueuedLock<T>(args: {
     args.lock.key,
     () => heldLocks.run(new Set([...(held ?? []), args.lock.key]), args.work),
     args.lock.timeoutMs ?? DEFAULT_PROCESS_LOCAL_LOCK_TIMEOUT_MS,
+    args.lock.heldByChildProcess === true,
     args.signal,
   );
 }
@@ -108,6 +119,7 @@ function runInProcessQueue<T>(
   key: string,
   work: ProcessLocalQueuedLockWork<T>,
   timeoutMs: number,
+  heldByChildProcess: boolean,
   signal: AbortSignal | undefined,
 ): Promise<T> {
   if (signal?.aborted) {
@@ -138,7 +150,15 @@ function runInProcessQueue<T>(
         throw new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs });
       }
       started = true;
-      return work();
+      const holder = { since: performance.now(), heldByChildProcess };
+      lockHolders.set(key, holder);
+      try {
+        return await work();
+      } finally {
+        if (lockHolders.get(key) === holder) {
+          lockHolders.delete(key);
+        }
+      }
     });
   const settled = next.then(
     () => undefined,
@@ -155,13 +175,25 @@ function runInProcessQueue<T>(
   }
 
   return new Promise<T>((resolve, reject) => {
-    timeout = setTimeout(() => {
-      if (started) {
-        return;
-      }
-      timedOut = true;
-      reject(new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs }));
-    }, timeoutMs);
+    const armTimeout = (delayMs: number): void => {
+      timeout = setTimeout(() => {
+        if (started || aborted) {
+          return;
+        }
+        const holder = lockHolders.get(key);
+        const stuckMs =
+          holder === undefined || holder.heldByChildProcess
+            ? 0
+            : performance.now() - holder.since;
+        if (stuckMs < timeoutMs) {
+          armTimeout(timeoutMs - stuckMs);
+          return;
+        }
+        timedOut = true;
+        reject(new ProcessLocalQueuedLockTimeoutError({ key, timeoutMs }));
+      }, delayMs);
+    };
+    armTimeout(timeoutMs);
 
     if (signal) {
       const onAbort = () => {
@@ -209,6 +241,49 @@ const GIT_REF_FS_LOCK_STALE_MS = 10 * 60_000;
 const GIT_REF_FS_LOCK_POLL_MS = 100;
 const GIT_REF_FS_LOCK_DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
+// Lines: PID, host, and a token that tells this owner from a later one with a
+// reused PID. Older apps wrote the PID alone.
+function isDeadLocalOwner(owner: string): boolean {
+  const [pid, host] = owner.split("\n");
+  const ownerPid = Number(pid);
+  if (
+    (host !== undefined && host !== "" && host !== os.hostname()) ||
+    !Number.isSafeInteger(ownerPid) ||
+    ownerPid <= 0
+  ) {
+    return false;
+  }
+  try {
+    process.kill(ownerPid, 0);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ESRCH";
+  }
+}
+
+// An app that quit mid-update leaves its lock behind (#1689). Renaming the
+// owner file lets one waiter claim it; a waiter that grabbed a newer owner's
+// file puts it back.
+async function reclaimDeadOwnerLock(lockPath: string): Promise<boolean> {
+  const ownerPath = path.join(lockPath, "owner");
+  const owner = await fs.readFile(ownerPath, "utf8").catch(() => null);
+  if (owner === null || !isDeadLocalOwner(owner)) {
+    return false;
+  }
+  const claimedPath = `${ownerPath}.${process.pid}`;
+  try {
+    await fs.rename(ownerPath, claimedPath);
+  } catch {
+    return false;
+  }
+  if ((await fs.readFile(claimedPath, "utf8").catch(() => null)) !== owner) {
+    await fs.rename(claimedPath, ownerPath).catch(() => undefined);
+    return false;
+  }
+  await fs.rm(lockPath, { recursive: true, force: true });
+  return true;
+}
+
 async function acquireGitRefFsLock(
   commonDir: string,
   options: { signal?: AbortSignal; timeoutMs?: number },
@@ -220,7 +295,10 @@ async function acquireGitRefFsLock(
     options.signal?.throwIfAborted();
     try {
       await fs.mkdir(lockPath);
-      await fs.writeFile(path.join(lockPath, "owner"), `${process.pid}\n`);
+      await fs.writeFile(
+        path.join(lockPath, "owner"),
+        `${process.pid}\n${os.hostname()}\n${randomUUID()}\n`,
+      );
       return async () => {
         await fs.rm(lockPath, { recursive: true, force: true });
       };
@@ -230,6 +308,9 @@ async function acquireGitRefFsLock(
       ) {
         throw error;
       }
+    }
+    if (await reclaimDeadOwnerLock(lockPath)) {
+      continue;
     }
     const held = await fs.stat(lockPath).catch(() => null);
     if (held !== null && Date.now() - held.mtimeMs > GIT_REF_FS_LOCK_STALE_MS) {

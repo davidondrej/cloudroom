@@ -4,7 +4,7 @@ import { getMachineEnrollmentService } from "./services/machines/machine-service
 import { withManualMachineProvider } from "./services/machines/manual-provider.js";
 import { registerDesktopBrowserRoutes } from "./routes/desktop-browsers.js";
 import { INSTALL_MACHINE_SCRIPT_PATH } from "./install-machine-asset.js";
-import { createNodeWebSocket } from "@hono/node-ws";
+import { createNodeWebSocket } from "./node-websocket.js";
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
@@ -34,7 +34,7 @@ import {
   createPluginService,
   type PluginService,
 } from "./services/plugins/plugin-service.js";
-import { bbCompatAppVersion } from "./services/plugins/sdk-compat.js";
+import { roomCompatAppVersion } from "./services/plugins/sdk-compat.js";
 import { setPluginAgentContributions } from "./services/plugins/plugin-agent-contributions.js";
 import { setPluginThreadEventEmitter } from "./services/plugins/plugin-thread-events.js";
 import { setPluginHookProvider } from "./services/plugins/plugin-hook-registry.js";
@@ -54,7 +54,9 @@ import { requestQueuedMessageDispatch } from "./services/threads/queued-message-
 import { registerInternalEventRoutes } from "./internal/events.js";
 import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
+import { registerInternalThreadMemoryLimitRoutes } from "./internal/thread-memory-limit.js";
 import { registerInternalPluginHostArtifactRoutes } from "./internal/plugin-host-artifacts.js";
+import { registerInternalVoiceAudioRoutes } from "./services/ai/voice-audio-store.js";
 import { registerInternalSessionRoutes } from "./internal/session.js";
 import { registerInternalSkillRoutes } from "./internal/skills.js";
 import { registerInternalToolCallRoutes } from "./internal/tool-calls.js";
@@ -89,9 +91,9 @@ import {
   onTerminalSocketOpen,
 } from "./ws/terminal-protocol.js";
 import {
-  createBbAppArtifactService,
-  type BbAppArtifactService,
-} from "./services/install/bb-app-artifact.js";
+  createRoomAppArtifactService,
+  type RoomAppArtifactService,
+} from "./services/install/host-artifact.js";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 import {
   createPluginCatalogService,
@@ -103,12 +105,24 @@ import {
   allowedAppOrigins,
   browserRequestProblem,
 } from "./browser-request-guard.js";
+import { installHumanClick } from "./human-click.js";
+import {
+  arrivedOverLoopback,
+  assertTrustedCaller,
+  type CallerTrustReader,
+  callerProofRequiredResponse,
+  captureCallerTrust,
+  isOpenWithoutCallerProof,
+  isTrustedCaller,
+  loopbackPeer,
+  PLUGIN_WIRE_HTTP_PATH,
+  registerCallerProofRoutes,
+} from "./caller-access.js";
 import {
   callPluginHostRpc,
   disposePluginHostWorkers,
 } from "./services/plugins/plugin-host-rpc.js";
 
-const PLUGIN_WIRE_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
 import { rankAcceptedAssetEncodings } from "./asset-content-encoding.js";
 import { apiJsonCompression } from "./api-response-compression.js";
 
@@ -140,6 +154,8 @@ function unauthorizedResponse(): Response {
   );
 }
 
+const VOICE_AUDIO_INTERNAL_PATH = /^\/internal\/voice-audio\/[a-f0-9]{64}$/u;
+
 function normalizeInternalAuthPath(path: string): string {
   if (path === "/") {
     return path;
@@ -148,7 +164,7 @@ function normalizeInternalAuthPath(path: string): string {
 }
 
 interface CreateAppOptions {
-  bbAppArtifactService?: BbAppArtifactService;
+  bbAppArtifactService?: RoomAppArtifactService;
   slowApiRequestLogThresholdMs?: number;
   staticDir?: string;
 }
@@ -429,15 +445,16 @@ export function createApp(
   });
   const slowApiRequestLogThresholdMs =
     options?.slowApiRequestLogThresholdMs ?? SLOW_API_REQUEST_LOG_THRESHOLD_MS;
-  const bbAppArtifactService =
+  const roomAppArtifactService =
     options?.bbAppArtifactService ??
-    createBbAppArtifactService({
+    createRoomAppArtifactService({
       dataDir: deps.config.dataDir,
       serverEntryUrl: import.meta.url,
     });
 
   app.use("*", async (context, next) => {
     captureTrustedRemoteAddress(context);
+    captureCallerTrust(context, deps.callerProofs);
     if (getGateAuthKind(context) === "session") void notePhoneUse(deps).catch(() => {});
     return runWithTelemetryAppSurface(resolveRequestAppSurface(context), next);
   });
@@ -471,7 +488,9 @@ export function createApp(
       await compressApiJson(context, next);
     });
   });
-  app.onError((error) => errorToResponse(error, deps.logger));
+  app.onError((error, context) =>
+    errorToResponse(error, deps.logger, context.req),
+  );
   app.get("/health", (context) =>
     context.json(
       deps.config.launchId === undefined
@@ -512,12 +531,21 @@ export function createApp(
   });
   app.get("/install/version", async (context) => {
     return context.json({
-      version: await bbAppArtifactService.getVersion(),
+      version: await roomAppArtifactService.getVersion(),
       protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
     });
   });
   app.get("/install/bb-app.tgz", async (context) => {
-    const artifact = await bbAppArtifactService.getArtifact();
+    const artifact = await roomAppArtifactService
+      .getArtifact()
+      .catch((error: unknown) => {
+        deps.logger.error({ err: error }, "Couldn't build the host package");
+        throw new ApiError(
+          503,
+          "host_package_unavailable",
+          "This Cloudroom server couldn't build its host package. Check the server log for the cause.",
+        );
+      });
     const etag = `"sha256-${artifact.digest}"`;
     const headers = {
       "cache-control": "public, max-age=300",
@@ -556,6 +584,26 @@ export function createApp(
       );
     }
   });
+  app.use("/api/v1/*", async (context, next) => {
+    if (PLUGIN_WIRE_HTTP_PATH.test(context.req.path)) {
+      return next();
+    }
+    const problem = browserRequestProblem(context, deps);
+    if (problem !== null) {
+      throw new ApiError(problem.status, "forbidden_origin", problem.error);
+    }
+    if (
+      isTrustedCaller(context) ||
+      (await isOpenWithoutCallerProof(
+        context.req.method,
+        context.req.path,
+        loopbackPeer(context),
+      ))
+    ) {
+      return next();
+    }
+    return callerProofRequiredResponse(context);
+  });
   app.use("/api/v1/development-only/*", async (_context, next) => {
     if (!deps.config.isDevelopment) {
       throw new ApiError(404, "not_found", "Not found");
@@ -564,6 +612,21 @@ export function createApp(
   });
   app.use("/internal/*", async (context, next) => {
     const normalizedPath = normalizeInternalAuthPath(context.req.path);
+    if (
+      context.req.method === "GET" &&
+      VOICE_AUDIO_INTERNAL_PATH.test(normalizedPath)
+    ) {
+      if (
+        context.req.header("origin") !== undefined ||
+        context.req.header("sec-fetch-site") !== undefined
+      ) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return next();
+    }
+    if (!isTrustedCaller(context) && arrivedOverLoopback(context)) {
+      return callerProofRequiredResponse(context);
+    }
     if (normalizedPath === "/internal/hosts/enroll-key") {
       return next();
     }
@@ -592,7 +655,7 @@ export function createApp(
     telemetry: deps.telemetry,
     pendingInteractions: deps.pendingInteractions,
     dataDir: deps.config.dataDir,
-    appVersion: bbCompatAppVersion(deps.config.appVersion),
+    appVersion: roomCompatAppVersion(deps.config.appVersion),
     getAppUrl: () => deps.config.appUrl ?? null,
     sharedPorts: deps.sharedPorts,
     providerRegistry: deps.providerRegistry,
@@ -677,13 +740,18 @@ export function createApp(
   });
   const pluginCatalogService = createPluginCatalogService({
     db: deps.db,
-    appVersion: bbCompatAppVersion(deps.config.appVersion),
+    appVersion: roomCompatAppVersion(deps.config.appVersion),
     marketplaceUrl: deps.config.marketplaceUrl,
     dataDir: deps.config.dataDir,
     plugins: pluginService,
     notifyCatalogChanged: () => deps.hub.notifySystem(["plugins-changed"]),
     warn: (message) => deps.logger.warn(message),
   });
+  installHumanClick(app, deps, {
+    catalog: pluginCatalogService,
+    plugins: pluginService,
+  });
+  registerCallerProofRoutes(publicApi, deps.callerProofs);
   registerProjectRoutes(publicApi, deps);
   registerThreadSectionRoutes(publicApi, deps);
   registerFileRoutes(publicApi, deps);
@@ -710,13 +778,15 @@ export function createApp(
   registerInternalSessionRoutes(internalApi, deps, pluginService);
   registerInternalSkillRoutes(internalApi, deps);
   registerInternalPluginHostArtifactRoutes(internalApi, deps);
+  registerInternalVoiceAudioRoutes(internalApi, deps);
   registerInternalEventRoutes(internalApi, deps);
   registerInternalToolCallRoutes(internalApi, deps);
   registerInternalInteractiveRequestRoutes(internalApi, deps);
+  registerInternalThreadMemoryLimitRoutes(internalApi, deps);
   app.route("/internal", internalApi);
 
   const assertBrowserWebSocketAllowed = (
-    context: Parameters<typeof browserRequestProblem>[0],
+    context: Parameters<typeof browserRequestProblem>[0] & CallerTrustReader,
   ): void => {
     const problem = browserRequestProblem(context, deps);
     if (problem !== null) {
@@ -727,6 +797,7 @@ export function createApp(
         false,
       );
     }
+    assertTrustedCaller(context);
   };
 
   app.get(
@@ -747,6 +818,9 @@ export function createApp(
     upgradeWebSocket((context) => {
       assertBrowserWebSocketAllowed(context);
       const terminalId = context.req.param("terminalId");
+      if (terminalId === undefined) {
+        throw new ApiError(404, "terminal_not_found", "missing terminal id");
+      }
       const query = terminalWebSocketQuerySchema.safeParse({
         sinceSeq: context.req.query("sinceSeq"),
       });
@@ -823,7 +897,15 @@ export function createApp(
         reason: WEB_SOCKET_SHUTDOWN_REASON,
         server: wss,
       }),
-    injectWebSocket,
+    // Node hands upgrade sockets over without an error listener, and the
+    // WebSocket handler awaits the app before it answers. A client reset in
+    // that time would crash the server.
+    injectWebSocket: (server) => {
+      server.on("upgrade", (_request, socket) => {
+        socket.on("error", () => socket.destroy());
+      });
+      injectWebSocket(server);
+    },
     pluginService,
     pluginCatalogService,
   };

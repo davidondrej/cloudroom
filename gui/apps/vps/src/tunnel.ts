@@ -44,6 +44,14 @@ export function startTunnel(config: Config, save: (patch: Partial<Config>) => Pr
     const socket = new WebSocket(url, { headers: { authorization: `Bearer ${credential}` } });
     let openedAt = 0;
     let session: TunnelSession | undefined;
+    // Runs on "close", or sooner on a missed heartbeat: ws can stall before "close" (#220). The first call wins, so a late close never retries twice.
+    let retried = false;
+    const retry = () => {
+      if (retried) return;
+      retried = true;
+      session?.dispose();
+      again(openedAt ? Date.now() - openedAt : 0);
+    };
     socket.on("open", () => {
       openedAt = Date.now();
       console.log(JSON.stringify({ tunnel: "connected", handle }));
@@ -55,7 +63,7 @@ export function startTunnel(config: Config, save: (patch: Partial<Config>) => Pr
           if (port === undefined || !Number.isInteger(number) || !allowed(number)) return { kind: "unregistered" };
           return { kind: "ok", resolved: { origin: `http://127.0.0.1:${number}`, publicOrigin: `https://${handle}--${number}.${baseDomain}`, host: `127.0.0.1:${number}` } };
         },
-        onHeartbeatMissed: () => socket.terminate(),
+        onHeartbeatMissed: retry,
       });
       session.start();
     });
@@ -67,10 +75,7 @@ export function startTunnel(config: Config, save: (patch: Partial<Config>) => Pr
       socket.terminate();
     });
     socket.on("error", (error) => console.error(JSON.stringify({ tunnel: error.message })));
-    socket.on("close", () => {
-      session?.dispose();
-      again(openedAt ? Date.now() - openedAt : 0);
-    });
+    socket.on("close", retry);
   }
 
   void connect();

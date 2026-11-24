@@ -30,6 +30,41 @@ export interface RunGitOptions extends GitProcessOptions {
   allowFailure?: boolean;
   env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
+  /** Runs the checkout's hooks, as the user's own `git worktree add` or `git switch` would. */
+  hooks?: boolean;
+}
+
+/**
+ * Settings a checkout's own Git config can't override, so agents and cloned folders can't make Cloudroom's Git calls
+ * run their programs on this computer (#2189): no file watcher (`core.fsmonitor`), no `ext::` transport, and no
+ * hooks unless the caller asks. Config hooks (Git 2.54+) ignore `core.hooksPath`, so each event these calls fire is
+ * off through `hook.<event>.enabled`, which covers every hook of the event from Git 2.55 (2.54 reads it only for a
+ * hook named after the event).
+ */
+export function gitSafetyArgs(hooks = false): string[] {
+  return [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "protocol.ext.allow=never",
+    // A checkout's `log.showSignature` would run its `gpg.program` on every `git log`.
+    "-c",
+    "log.showSignature=false",
+    ...(hooks
+      ? []
+      : [
+          "-c",
+          "core.hooksPath=/dev/null",
+          ...[
+            "post-checkout",
+            "post-commit",
+            "post-index-change",
+            "pre-auto-gc",
+            "prepare-commit-msg",
+            "reference-transaction",
+          ].flatMap((event) => ["-c", `hook.${event}.enabled=false`]),
+        ]),
+  ];
 }
 
 export interface GitCommandResult {
@@ -142,7 +177,7 @@ export function runGit(
 
     const child = spawnPortableOutputProcess({
       command: "git",
-      args,
+      args: [...gitSafetyArgs(options.hooks), ...args],
       cwd: options.cwd,
       env: resolveGitProcessEnv(options),
     });

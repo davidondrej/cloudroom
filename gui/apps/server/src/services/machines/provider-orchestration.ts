@@ -121,6 +121,8 @@ const machineSweepOperations = new WeakMap<
 >();
 
 const MACHINE_CREATE_FAILURE_CLEANUP_GRACE_MS = 30_000;
+const OFFLINE_CLEANUP_MESSAGE =
+  "This machine is offline, so its environments can't be removed. Reconnect it, then retry cleanup.";
 
 function runTrackedOperation(args: {
   map: Map<string, ActiveOperation>;
@@ -151,6 +153,11 @@ function deleteMachineProjectSources(
 }
 
 type MachineHostRow = NonNullable<ReturnType<typeof getHost>>;
+
+// A daemon session marks its host seen, so no lastSeenAt means it never connected.
+function neverConnected(deps: Deps, row: MachineHostRow): boolean {
+  return row.lastSeenAt === null && !deps.hub.hasDaemonForHost(row.id);
+}
 
 function createOwns(
   current: ReturnType<typeof getHost>,
@@ -1187,6 +1194,8 @@ async function removeMachine(deps: Deps, hostId: string): Promise<void> {
   const record = getMachineProvider(row.machineProviderId);
   if (record === undefined) return;
   const resource = row.resource;
+  const retireEnvironments =
+    row.type === "ephemeral" || neverConnected(deps, row);
   const operationId = `${record.pluginId}:${randomUUID()}`;
   const attempt = row.teardownAttempt + 1;
   const creationFailureMessage =
@@ -1226,7 +1235,7 @@ async function removeMachine(deps: Deps, hostId: string): Promise<void> {
           !lifecycleOwns(current, record.provider.id, operationId, "removing")
         )
           return;
-        if (current.type === "ephemeral") {
+        if (retireEnvironments) {
           markHostEnvironmentsDestroyed(deps.db, deps.hub, hostId);
         }
         await deps.machineAuth.revokeHostEnrollKeys({ hostId });
@@ -1347,7 +1356,9 @@ export async function sweepProviderMachine(
       environment.status !== "destroyed" ||
       environment.teardownStatus !== "removed",
   );
-  if (row.type === "persistent") {
+  // A machine whose daemon never connected holds no environments to remove;
+  // removeMachine retires their rows locally (#1065).
+  if (row.type === "persistent" && !neverConnected(deps, row)) {
     if (
       environments.some((environment) => environment.providerOwnsPath) &&
       row.suspendedAt !== null
@@ -1369,7 +1380,24 @@ export async function sweepProviderMachine(
       });
       if (current.length > 0) pendingEnvironment = true;
     }
-    if (pendingEnvironment) return;
+    if (pendingEnvironment) {
+      // An offline machine can't remove its environments. Show that as a
+      // failed teardown so the user sees why and can retry cleanup (#1307).
+      if (!deps.hub.hasDaemonForHost(hostId)) {
+        updateHost(deps.db, deps.hub, hostId, {
+          teardownAttempt: row.teardownAttempt + 1,
+          teardownStatus: "failed",
+          statusMessage: OFFLINE_CLEANUP_MESSAGE,
+          removeRetryAt: Date.now() + 60_000,
+        });
+      } else if (row.statusMessage === OFFLINE_CLEANUP_MESSAGE) {
+        updateHost(deps.db, deps.hub, hostId, {
+          teardownStatus: null,
+          statusMessage: null,
+        });
+      }
+      return;
+    }
   }
   if (
     row.teardownStatus === "failed" &&

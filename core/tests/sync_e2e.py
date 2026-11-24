@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Real HTTP sync checks for skills/settings/login, including safe repository-sync retirement."""
+import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -11,7 +13,7 @@ from unittest.mock import patch
 import core_fixture
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src/sync'))
 from client import cycle, Remote, configure
-from files import Tree, Conflict, atomic_json
+from files import Tree, Conflict, atomic_json, transfer
 
 
 class SyncTests(unittest.TestCase):
@@ -22,13 +24,48 @@ class SyncTests(unittest.TestCase):
         self.local = self.root / 'local'; self.local.mkdir()
         self.cloud = Path(self.env['CLOUDROOM_ACCOUNT_HOME']).resolve() / '.agents/skills'; self.cloud.mkdir(parents=True)
         self.client_state = self.root / 'client'; self.client_state.mkdir()
-        self.config = {'device': 'mac', 'roots': [{'id': 'skills-shared', 'tree': {'root': str(self.local), 'kind': 'skills'}}]}
+        self.config = {'device': 'mac', 'connectionFile': str(self.client_state / 'cloudroom.json'), 'roots': [{'id': 'skills-shared', 'tree': {'root': str(self.local), 'kind': 'skills'}}]}
+        self.mac_access('full')
         self.start()
         self.connection = {'url': 'http://' + self.service.address, 'token': self.env['CLOUDROOM_TOKEN']}
         self.remote = Remote(self.connection, 'mac')
 
     def sync(self):
         return cycle(self.config, self.connection, self.client_state)
+
+    def mac_access(self, level):
+        atomic_json(self.client_state / 'cloudroom-mac-access.json', {'level': level})
+
+    def test_below_full_mac_access_nothing_from_the_cloud_reaches_the_mac(self):
+        self.prepare()
+        (self.local / 'skill').write_text('mac')
+        self.sync()
+        for level in ['off', 'read-only', 'ask', None]:
+            with self.subTest(level=level):
+                if level: self.mac_access(level)
+                else: (self.client_state / 'cloudroom-mac-access.json').unlink()
+                (self.cloud / 'skill').write_text('vm edit'); (self.cloud / 'planted').write_text('vm file')
+                self.sync()
+                self.assertEqual((self.local / 'skill').read_text(), 'mac')
+                self.assertFalse((self.local / 'planted').exists())
+        (self.local / 'skill').write_text('mac edit')
+        self.sync()
+        self.assertEqual((self.cloud / 'skill').read_text(), 'mac edit')
+        # Off saved mid-sync: after the scan, and while a download is in flight.
+        self.mac_access('full'); (self.cloud / 'skill').unlink()
+        scan = Remote.scan
+        def revoke(remote, root):
+            self.mac_access('off')
+            return scan(remote, root)
+        with patch.object(Remote, 'scan', revoke): self.sync()
+        self.assertEqual((self.local / 'skill').read_text(), 'mac edit')
+        self.assertFalse((self.local / 'planted').exists())
+        with self.assertRaises(Conflict):
+            Tree(self.local).apply('late', None, transfer(io.BytesIO(b'x'), 'file', False), io.BytesIO(b'x'), lambda: False)
+        self.assertFalse((self.local / 'late').exists())
+        self.mac_access('full'); self.sync()
+        self.assertEqual((self.local / 'planted').read_text(), 'vm file')
+        self.assertFalse((self.local / 'skill').exists())
 
     def test_external_skill_link_does_not_block_other_skills_or_delete_old_copy(self):
         self.prepare()
@@ -163,6 +200,24 @@ class SyncTests(unittest.TestCase):
             self.remote.upload('skills-shared','escape/file',None,{'tag':'x','kind':'file','executable':False,'size':1},io.BytesIO(b'x'))
         self.assertFalse((outside / 'file').exists())
 
+    def test_deep_directories_scan_iteratively(self):
+        root = self.root / 'deep'; root.mkdir()
+        parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        parents = []
+        try:
+            for _ in range(sys.getrecursionlimit() + 1):
+                parents.append(parent)
+                os.mkdir('d', dir_fd=parent)
+                parent = os.open('d', os.O_RDONLY | os.O_DIRECTORY, dir_fd=parent)
+            os.close(parent); parent = None
+            self.assertEqual(Tree(root).scan(), {'files': {}, 'skipped': []})
+        finally:
+            if parent is not None:
+                os.close(parent)
+            for parent in reversed(parents):
+                os.rmdir('d', dir_fd=parent)
+                os.close(parent)
+
     def test_settings_sync_without_copying_codex_logins_and_old_workers_are_denied(self):
         self.prepare()
         local = self.root / 'settings'; local.mkdir()
@@ -284,6 +339,26 @@ class SyncTests(unittest.TestCase):
             (self.local / 'file').write_text('concurrent edit')
             with self.assertRaises(Conflict): tree.apply('file', old, entry, data)
         self.assertEqual((self.local / 'file').read_text(), 'concurrent edit')
+
+    def test_malformed_native_uploads_are_rejected(self):
+        session = {'type': 'session', 'id': '01a1b544-cd8e-7663-b01e-2cfebbb19098', 'cwd': '/old', 'version': 3}
+        cases = [('pi', [], '/code/demo'), ('codex', {'type': 'session_meta', 'payload': []}, '/code/demo'), ('pi', session, [])]
+        for index, (harness, header, cwd) in enumerate(cases):
+            data = json.dumps(header).encode() + b'\n'
+            request = {'path': 'rollout.jsonl', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                       'native': {'harness': harness, 'id': session['id'], 'cwd': cwd}}
+            with self.subTest(harness=harness, header=header, cwd=cwd), self.assertRaises(ValueError):
+                Tree(self.root / str(index), create=True).install_transfer(request, io.BytesIO(data))
+
+    def test_cross_platform_codex_teleport_maps_workspace_roots(self):
+        native = {'harness': 'codex', 'id': '01a1b544-cd8e-7663-b01e-2cfebbb19098', 'cwd': '/code/demo'}
+        for index, (source, roots, expected) in enumerate([('C:\\demo', ['C:\\demo', 'D:\\x', '/kept'], ['/code/demo', '/kept']),
+                                                           ('C:\\Demo', ['c:/demo/'], ['/code/demo']), ('C:\\demo', ['D:\\x'], ['/code/demo']),
+                                                           ('C:\\demo', None, None), ('/Users/me', ['/Users/me'], ['/Users/me'])]):
+            data = json.dumps({'type': 'session_meta', 'payload': {'id': native['id'], 'cwd': source, 'runtime_workspace_roots': roots}}).encode() + b'\n{}\n'
+            request = {'path': 'rollout.jsonl', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(), 'native': native}
+            written = Path(Tree(self.root / str(index), create=True).install_transfer(request, io.BytesIO(data))['path']).read_bytes()
+            self.assertEqual(json.loads(written.split(b'\n')[0])['payload']['runtime_workspace_roots'], expected)
 
 
 if __name__ == '__main__': unittest.main()

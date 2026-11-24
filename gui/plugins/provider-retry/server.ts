@@ -1,8 +1,16 @@
-import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { z } from "zod";
 import { registerProviderRetryCli } from "./src/cli.js";
 import { DEFAULT_MAXIMUM_WAIT_MS, decideRetry } from "./src/retry-policy.js";
 
 const MAXIMUM_WAIT_OPTIONS = ["6 hours", "24 hours", "No limit"] as const;
+
+export const loopFallbackRpcContract = defineRpcContract({
+  loopFallback: {
+    input: z.object({ fallback: z.boolean().optional() }).strict(),
+    output: z.object({ fallback: z.boolean() }).strict(),
+  },
+});
 
 function maximumWaitMs(value: string): number | null {
   switch (value) {
@@ -19,8 +27,8 @@ function maximumWaitMs(value: string): number | null {
   }
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(room: BbPluginApi) {
+  const settings = room.settings.define({
     maximumWait: {
       type: "select",
       label: "Maximum automatic wait",
@@ -44,7 +52,7 @@ export default async function plugin(bb: BbPluginApi) {
    * What is left is policy, and then one call: core owns the queue, the
    * schedule and the re-attempt, so asking for the retry IS scheduling it.
    */
-  bb.events.on("turn.failed", async (event) => {
+  room.events.on("turn.failed", async (event) => {
     const decision = decideRetry({
       failure: event,
       maximumWaitMs: maximumWait,
@@ -55,18 +63,28 @@ export default async function plugin(bb: BbPluginApi) {
       return;
     }
     try {
-      await bb.sdk.threads.retry({
+      await room.sdk.threads.retry({
         threadId: event.threadId,
         turnRequestId: event.requestId,
         sendAt: decision.sendAt,
         reason: decision.reason,
       });
     } catch (error) {
-      bb.log.debug(
+      room.log.debug(
         `Retry not scheduled for ${event.threadId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   });
 
-  registerProviderRetryCli(bb);
+  room.rpc.register(loopFallbackRpcContract, {
+    async loopFallback({ fallback }) {
+      const settings = await room.sdk.cloudroom.automations({
+        action: "settings",
+        ...(fallback === undefined ? {} : { fallback }),
+      });
+      return { fallback: settings.fallback !== false };
+    },
+  });
+
+  registerProviderRetryCli(room);
 }

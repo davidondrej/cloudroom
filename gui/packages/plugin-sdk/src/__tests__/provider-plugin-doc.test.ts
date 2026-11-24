@@ -46,6 +46,7 @@ const REGISTRATION_FIELDS = {
   signInHint: "strings.signInHint",
   expiredHint: "strings.expiredHint",
   installUrl: "strings.installUrl",
+  signInCommand: "strings.signInCommand",
   brandPrefix: "strings.brandPrefix",
   planModeCopy: "strings.planModeCopy",
   iconTint: "strings.iconTint",
@@ -56,6 +57,7 @@ const REGISTRATION_FIELDS = {
   fork: "capabilities.fork",
   supportsNativeUserQuestion: "capabilities.supportsNativeUserQuestion",
   supportsManualCompaction: "capabilities.supportsManualCompaction",
+  resumesInNewFolder: "capabilities.resumesInNewFolder",
   supportsThreadArchive: "capabilities.supportsThreadArchive",
   supportsThreadRename: "capabilities.supportsThreadRename",
   supportsServiceTier: "capabilities.supportsServiceTier",
@@ -87,6 +89,7 @@ const HANDSHAKE_FIELDS = {
   fork: "fork",
   approvalEnforcedBy: "approvalEnforcedBy",
   steerMode: "steerMode",
+  stopsUnopenedTurns: "stopsUnopenedTurns",
   skills: "skills",
 } as const satisfies Record<
   string,

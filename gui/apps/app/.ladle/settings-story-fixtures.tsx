@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { PERSONAL_PROJECT_ID, type ProviderInfo } from "@cloudroom/domain";
 import { UPDATE_ACTION_ICON } from "@cloudroom/domain/update-state";
@@ -32,7 +32,7 @@ import {
 import { makeProviderInfo } from "@cloudroom/test-helpers/domain-fixtures";
 import { getSettingsRoutePath } from "../src/lib/route-paths";
 import {
-  BbAppUpdateRows,
+  RoomAppUpdateRows,
   MachineUpdatesFleetSection,
   MachineUpdatesRows,
   MachineUpdatesSection,
@@ -251,7 +251,7 @@ export function SettingsUpdatesStory() {
         machine={settingsUpdateMachine}
         isThisMachine={false}
       >
-        <BbAppUpdateRows
+        <RoomAppUpdateRows
           systemVersion={systemVersion}
           desktopInfo={null}
           isDesktop={false}
