@@ -580,7 +580,7 @@ describe("electron-builder signing config", () => {
     expect(JSON.parse(linux.stdout).extraMetadata.name).toBeUndefined();
   });
 
-  it("stops the preview helper and finds Cloudroom in the NSIS hooks without quoting the install path into PowerShell", async () => {
+  it("stops the preview helper, guards the empty install path and falls back without PowerShell", async () => {
     const script = await readFile(resolve(desktopPackageRoot, "build", "installer.nsh"), "utf8");
     const powershell = script.split("\n").filter((line) => line.includes("powershell.exe"));
 
@@ -589,13 +589,20 @@ describe("electron-builder signing config", () => {
     expect(script).toMatch(/!macro customCheckAppRunning[\s\S]*!insertmacro cloudroomAppCheck/);
     expect(powershell).toHaveLength(2);
     for (const line of powershell) {
+      expect(line).toContain("$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe");
       expect(line).toContain("$$env:CLOUDROOM_INSTALL_DIR");
+      expect(line).toContain("if (-not $$root)");
+      expect(line).toContain(".TrimEnd('\\') + '\\'");
       expect(line).not.toContain("$INSTDIR");
       // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
       expect(line).toContain("@(& $$left)");
       expect(line).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
     }
-    expect(script).toContain("${If} $0 == 1");
+    expect(script).toContain("if (-not $$root) { exit 0 }");
+    expect(script).toContain("if (-not $$root) { exit 2 }");
+    expect(script).toContain("tasklist /FI \"IMAGENAME eq Cloudroom.exe\"");
+    expect(script).toContain("wmic process where \"name='python.exe'");
+    expect(script).toContain("${If} $0 == 42");
   });
 
   it("keeps every date-fns file pino-roll loads in the slimmer Windows build", async () => {

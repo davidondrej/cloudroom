@@ -28,12 +28,23 @@
 
 ; PowerShell 5.1 unrolls a single pipeline result to one object, so the count goes
 ; through @(...). The path arrives as $env:CLOUDROOM_INSTALL_DIR: splicing $INSTDIR
-; into -Command breaks on quotes and backslashes.
+; into -Command breaks on quotes and backslashes. The empty guard matters: StartsWith('')
+; is true for every process, and an empty install dir must never kill unrelated Python.
 !macro cloudroomStopPython
   !insertmacro cloudroomSetInstallDir
-  nsExec::ExecToStack `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$left = { Get-CimInstance Win32_Process | Where-Object { $$_.Name -eq 'python.exe' -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$env:CLOUDROOM_INSTALL_DIR, 'OrdinalIgnoreCase') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue } }; @(& $$left).Count | Out-Null"`
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:CLOUDROOM_INSTALL_DIR; if (-not $$root) { exit 0 }; $$root = $$root.TrimEnd('\') + '\'; try { $$left = { Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $$_.Name -eq 'python.exe' -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, 'OrdinalIgnoreCase') } | ForEach-Object { Stop-Process -Id $$_.ProcessId -Force -ErrorAction SilentlyContinue } }; @(& $$left).Count | Out-Null; exit 0 } catch { exit 2 }"`
   Pop $0
   Pop $1
+  ${If} $0 != 0
+    ; PowerShell is unavailable or WMI failed. WMI is the only path-filtered
+    ; fallback without it; if WMI is missing too, leave Python alone rather than
+    ; kill an unrelated python.exe.
+    ${If} $INSTDIR != ""
+      nsExec::ExecToStack `"$SYSDIR\cmd.exe" /C wmic process where "name='python.exe' and ExecutablePath like '$$INSTDIR%'" call terminate`
+      Pop $0
+      Pop $1
+    ${EndIf}
+  ${EndIf}
 !macroend
 
 !macro stopPreviewHelper
@@ -50,15 +61,30 @@
 !macroend
 
 ; electron-builder's default check looks for a window by name and misses a hidden
-; process. Compare executable paths instead, again through the environment.
+; process. Compare executable paths instead, again through the environment. Exit 42
+; is "running", so a PowerShell policy/parse error (usually 1) still reaches the
+; tasklist fallback instead of aborting the installer with a false positive.
 !macro cloudroomAppCheck
   !insertmacro cloudroomSetInstallDir
-  nsExec::ExecToStack `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$left = { Get-CimInstance Win32_Process | Where-Object { $$_.Name -eq 'Cloudroom.exe' -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$env:CLOUDROOM_INSTALL_DIR, 'OrdinalIgnoreCase') } }; if (@(& $$left).Count -gt 0) { exit 1 } else { exit 0 }"`
+  nsExec::ExecToStack `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:CLOUDROOM_INSTALL_DIR; if (-not $$root) { exit 2 }; $$root = $$root.TrimEnd('\') + '\'; try { $$left = { Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object { $$_.Name -eq 'Cloudroom.exe' -and $$_.ExecutablePath -and $$_.ExecutablePath.StartsWith($$root, 'OrdinalIgnoreCase') } }; if (@(& $$left).Count -gt 0) { exit 42 } else { exit 0 } } catch { exit 2 }"`
   Pop $0
   Pop $1
-  ${If} $0 == 1
+  ${If} $0 == 42
     MessageBox MB_OK|MB_ICONEXCLAMATION "Cloudroom is still running. Close it, then run the installer again." /SD IDOK
     Abort
+  ${Else}
+    ${If} $0 != 0
+      ; PowerShell unavailable or WMI failed: fall back to the same image-name check
+      ; electron-builder uses. It cannot compare paths, so it may also catch the
+      ; nightly build while it is running.
+      nsExec::ExecToStack `"$SYSDIR\cmd.exe" /C tasklist /FI "IMAGENAME eq Cloudroom.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /I /L /C:"Cloudroom.exe"`
+      Pop $0
+      Pop $1
+      ${If} $0 == 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Cloudroom is still running. Close it, then run the installer again." /SD IDOK
+        Abort
+      ${EndIf}
+    ${EndIf}
   ${EndIf}
 !macroend
 
