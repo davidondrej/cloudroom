@@ -28,6 +28,7 @@ interface StoredQueuedThreadMessageRow {
   content: string;
   createdAt: number;
   failureReason: string | null;
+  fromComposer: boolean;
   id: string;
   hardQueue: boolean;
   model: string;
@@ -108,7 +109,9 @@ function toQueuedMessagePayload(
   row: StoredQueuedThreadMessageRow,
 ): QueuedMessagePayload {
   if (row.payloadKind === "inline") {
-    return { kind: "inline" };
+    return row.fromComposer
+      ? { kind: "inline", fromComposer: true }
+      : { kind: "inline" };
   }
   if (
     row.retryOfTurnRequestId === null ||

@@ -41,8 +41,8 @@ const fakeSocketState = vi.hoisted(() => {
   };
 });
 
-vi.mock("partysocket/ws", () => ({
-  default: fakeSocketState.FakeReconnectingWebSocket,
+vi.mock("@cloudroom/domain/reconnecting-websocket", () => ({
+  ReconnectingWebSocket: fakeSocketState.FakeReconnectingWebSocket,
 }));
 
 vi.mock("./dev-websocket-url", () => ({

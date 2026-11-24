@@ -1,6 +1,7 @@
 import {
   THREAD_SEARCH_LIMIT_PER_GROUP_DEFAULT,
   THREAD_SEARCH_LIMIT_PER_GROUP_MAX,
+  countClaimedQueuedThreadMessages,
   countNonDeletedAssignedChildThreads,
   countThreads,
   getEnvironment,
@@ -17,6 +18,7 @@ import type { Environment, Thread, ThreadListEntry } from "@cloudroom/domain";
 import { toEnvironmentResponse } from "../../services/environments/environment-response.js";
 import {
   threadIncludeOptionSchema,
+  THREAD_COUNT_ANY_PARENT,
   THREAD_COUNT_ROOT_PARENT,
   publicApiRoutes,
   typedRoutes,
@@ -47,7 +49,7 @@ import { listRunningThreadsWithIntendedHosts } from "../../services/threads/disp
 import { dispatchThreadRenameCommand } from "../../services/threads/thread-commands.js";
 import { deleteThreadOnMac } from "../../services/threads/thread-lifecycle.js";
 import { listThreadWithDescendants } from "../../services/threads/thread-archive.js";
-import { createThreadFromRequest } from "../../services/threads/thread-create.js";
+import { createThreadOnce } from "../../services/threads/thread-create.js";
 import { cancelThreadTitleRetry } from "../../services/threads/thread-metadata-inference.js";
 import { cancelTitleRecheck } from "../../services/threads/title-recheck.js";
 import { createThreadForkFromRequest } from "../../services/threads/thread-fork.js";
@@ -61,7 +63,11 @@ import { handleThreadOwnershipChange } from "../../services/threads/thread-owner
 import { applyThreadExecutionOverride } from "../../services/threads/thread-execution-override.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { binding } from "../../services/cloudroom/store.js";
-import { switchThreadHarness } from "../../services/threads/thread-harness-switch.js";
+import {
+  requireSwitchableThread,
+  switchThreadHarness,
+  type HarnessSwitchResend,
+} from "../../services/threads/thread-harness-switch.js";
 
 function parseThreadIncludes(query: ThreadGetQuery): Set<ThreadIncludeOption> {
   const includes = new Set<ThreadIncludeOption>();
@@ -233,13 +239,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
             parent:
               query.parentThreadId === THREAD_COUNT_ROOT_PARENT
                 ? { kind: "root" as const }
-                : {
-                    kind: "id" as const,
-                    parentThreadId: query.parentThreadId,
-                  },
+                : query.parentThreadId === THREAD_COUNT_ANY_PARENT
+                  ? { kind: "child" as const }
+                  : {
+                      kind: "id" as const,
+                      parentThreadId: query.parentThreadId,
+                    },
           }),
       ...(query.groupBy !== undefined ? { groupBy: query.groupBy } : {}),
       includeArchived: query.includeArchived === "true",
+      archivedOnly: query.archivedOnly === "true",
       includeHidden: query.includeHidden === "true",
     });
     const response: ThreadCountResponse = {
@@ -274,6 +283,13 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       requireThreadSection(deps, query.sectionId);
     }
     const threads = listThreadsWithPendingInteractionState(deps.db, {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.providerId ? { providerId: query.providerId } : {}),
+      ...(query.executionTarget
+        ? { executionTarget: query.executionTarget }
+        : {}),
+      ...(query.pinned ? { pinned: query.pinned === "true" } : {}),
+      ...(query.sort ? { sort: query.sort } : {}),
       ...(query.projectId ? { projectId: query.projectId } : {}),
       ...(query.environmentId ? { environmentId: query.environmentId } : {}),
       ...(query.parentThreadId ? { parentThreadId: query.parentThreadId } : {}),
@@ -305,11 +321,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     const limitPerGroup = parseSearchLimitPerGroup(query.limitPerGroup);
+    if (query.projectId) {
+      requirePublicProject(deps.db, query.projectId);
+    }
     return context.json(
       buildThreadSearchResponse(deps, {
         ...searchThreadsWithPendingInteractionState(deps.db, {
           query: searchQuery,
           limitPerGroup,
+          ...(query.projectId ? { projectId: query.projectId } : {}),
+          ...(query.hasParent ? { hasParent: query.hasParent === "true" } : {}),
         }),
       }) satisfies ThreadSearchResponse,
     );
@@ -343,7 +364,7 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (payload.sectionId) {
       requireThreadSection(deps, payload.sectionId);
     }
-    const thread = await createThreadFromRequest(deps, {
+    const thread = await createThreadOnce(deps, {
       ...payload,
       origin: payload.origin,
     });
@@ -357,12 +378,16 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.get, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    return context.json(
-      buildThreadResponse(deps, {
+    return context.json({
+      ...buildThreadResponse(deps, {
         includes: parseThreadIncludes(query),
         thread,
       }),
-    );
+      dispatchingMessageCount: countClaimedQueuedThreadMessages(
+        deps.db,
+        thread.id,
+      ),
+    });
   });
 
   function getThreadChildSummary(thread: Thread): ThreadChildSummaryResponse {
@@ -398,15 +423,45 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       });
     }
 
-    // Another harness, or any model change in Cloud (Core fixes a session's model), moves the thread in place (ADR 0211).
+    // Another harness, or a Cloud model change its Core can't make in the session, moves the thread in place (ADR 0211).
+    // Cloud Claude changes models in the same session, as Local does: the pick is saved now and rides the next prompt.
     const switchTo = payload.providerId ?? thread.providerId;
-    if (
+    const checkIdleSession = payload.idleSessionOnly ? () => {
+      const current = requireSwitchableThread(deps, thread.id);
+      if (current.providerId !== switchTo || current.executionTarget !== thread.executionTarget) {
+        throw new ApiError(409, "thread_changed", "The thread changed. Choose a model from its current harness.");
+      }
+    } : undefined;
+    checkIdleSession?.();
+    let resend: HarnessSwitchResend | null = null;
+    const model = typeof payload.model === "string" ? payload.model : null;
+    const cloudModel =
+      model !== null &&
+      switchTo === thread.providerId &&
+      isCloudThread(thread) &&
+      model !== binding(deps.db, thread.id)?.model;
+    const inSession =
+      model !== null &&
+      (cloudModel || (checkIdleSession && isCloudThread(thread))) &&
+      payload.resend !== true &&
+      (await cloudroom(deps).changeModel(
+        thread,
+        model,
+        payload.reasoningLevel ?? null,
+        checkIdleSession,
+      ));
+    if (checkIdleSession && isCloudThread(thread) && !inSession) {
+      throw new ApiError(409, "cloudroom_unsupported", "This Cloud session cannot switch to that model in place.");
+    }
+    if (inSession) {
+      deps.hub.notifyThread(thread.id, ["execution-options-changed"], {
+        projectId: thread.projectId,
+      });
+    } else if (
       typeof payload.model === "string" &&
-      (switchTo !== thread.providerId ||
-        (isCloudThread(thread) &&
-          payload.model !== binding(deps.db, thread.id)?.model))
+      (switchTo !== thread.providerId || cloudModel)
     ) {
-      await switchThreadHarness(
+      resend = await switchThreadHarness(
         deps,
         thread.id,
         {
@@ -427,6 +482,8 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       } else {
         await applyThreadExecutionOverride(deps, {
           thread,
+          beforeSave: checkIdleSession,
+          recordModelSelection: typeof payload.model === "string",
           patch: {
             ...("model" in payload ? { model: payload.model } : {}),
             ...("reasoningLevel" in payload
@@ -463,6 +520,8 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if ("visibility" in payload) {
       metadataUpdate.visibility = payload.visibility;
     }
+    // The parent as committed now: `thread` predates the awaits above (#2281).
+    const previous = getThread(deps.db, thread.id) ?? thread;
     const updated =
       Object.keys(metadataUpdate).length > 0
         ? updateThread(deps.db, deps.hub, thread.id, metadataUpdate)
@@ -495,17 +554,24 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
       }
     }
 
-    if (
-      "parentThreadId" in payload &&
-      payload.parentThreadId !== thread.parentThreadId
-    ) {
+    if ("parentThreadId" in payload) {
       await handleThreadOwnershipChange(deps, {
-        previousThread: thread,
+        previousThread: previous,
         updatedThread: updated,
       });
     }
 
-    return context.json(toThreadResponseFromThread(deps, { thread: updated }));
+    if (resend?.delivery === "failed") {
+      throw new ApiError(
+        502,
+        "resend_failed",
+        `Switched to ${updated.providerId}, but its first turn didn't start: ${resend.error}. The conversation is kept; send a message to continue.`,
+      );
+    }
+    return context.json({
+      ...toThreadResponseFromThread(deps, { thread: updated }),
+      ...(resend ? { resend: resend.delivery } : {}),
+    });
   });
 
   del(routes.delete, async (context, payload) => {

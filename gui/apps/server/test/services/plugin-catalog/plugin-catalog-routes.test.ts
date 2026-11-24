@@ -75,10 +75,10 @@ describe("plugin catalog routes", () => {
       },
     });
     const search = await app.request(
-      "/plugin-catalog/search?q=durable%20memory",
+      "/plugin-catalog/search?q=github%20issues",
     );
     await expect(search.json()).resolves.toMatchObject({
-      results: [{ entryId: "memory", installed: false }],
+      results: [{ entryId: "github", installed: false }],
       collections: [{ id: "bb-official", displayName: "Cloudroom Official" }],
     });
 
@@ -92,7 +92,7 @@ describe("plugin catalog routes", () => {
     const install = await app.request("/plugin-catalog/install", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entryId: "memory" }),
+      body: JSON.stringify({ entryId: "github" }),
     });
     expect(install.status).toBe(422);
     await expect(install.json()).resolves.toMatchObject({
@@ -102,7 +102,7 @@ describe("plugin catalog routes", () => {
     const versionOverride = await app.request("/plugin-catalog/install", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ entryId: "memory", version: "0.2.0" }),
+      body: JSON.stringify({ entryId: "github", version: "0.2.0" }),
     });
     expect(versionOverride.status).toBe(422);
   });

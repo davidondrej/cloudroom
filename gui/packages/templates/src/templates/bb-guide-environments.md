@@ -21,16 +21,26 @@ Making your repo work with bb:
   Directory switching creates a core-owned attachment with no provider identity.
 
   Commit a .bb-env-setup.sh script at the repo root when new cloudroom worktrees need
-  repo-specific setup. After cloudroom creates a new managed worktree environment, it
-  looks for .bb-env-setup.sh inside that new workspace. If the file is absent,
-  provisioning continues with no error.
+  repo-specific setup. Hooks run outside every sandbox, so cloudroom never runs the
+  copy in the workspace folder, which a sandboxed agent can change. At the
+  environment's first setup, before any agent runs there, it reads
+  .bb-env-setup.sh and .bb-env-teardown.sh from Git, as committed where the
+  environment branched off its base branch (for a fork or a move: the source's
+  base branch), and saves them in its data folder. Only those copies run. If the
+  base commit has no script, provisioning continues with no error.
 
-  The script must be tracked by git. A fresh worktree only checks out tracked
-  files, so an untracked .bb-env-setup.sh in your source checkout will not be
-  present and will not run.
+  So the script must be committed on the base branch. An untracked or edited
+  copy, a copy committed only on a thread's own branch, a carried file, a
+  .worktreeinclude copy, or a fork's uncommitted files never run. A hook edited
+  after an environment was set up applies to new environments, not that one.
 
-  Cloudroom runs the hook as `env bash .bb-env-setup.sh` with cwd set to the new
-  workspace. On Windows it runs the script with the bash that Git for Windows
+  Cloudroom runs the saved hook like `bash ./.bb-env-setup.sh` from the root of
+  the new workspace: $0 and BASH_SOURCE are ./.bb-env-setup.sh, so dirname gives
+  that root until the script changes directory; save $PWD at the top to keep
+  it. A hook that runs other files from the folder (a script, `source`,
+  package scripts) runs whatever is there, so keep teardown self-contained.
+
+  On Windows cloudroom runs the script with the bash that Git for Windows
   installs, so the same script works there; without Git for Windows the hook
   fails with a message naming it. The hook
   inherits the host daemon's sanitized environment: NODE_ENV and every BB_*
@@ -52,10 +62,11 @@ Making your repo work with bb:
   ".bb-env-setup.sh failed", or ".bb-env-setup.sh cancelled".
 
   Commit a .bb-env-teardown.sh script at the repo root when setup creates
-  resources outside the managed worktree. Cloudroom runs the hook as
-  `env bash .bb-env-teardown.sh` from the worktree before it removes the
-  worktree. The hook receives the same sanitized environment as the setup
-  hook, and stdin is closed.
+  resources outside the managed worktree. Cloudroom runs the copy it saved at
+  setup, from the worktree root, before it removes the worktree. An environment
+  set up before cloudroom saved hooks skips teardown with a logged note. The
+  hook receives the same sanitized environment as the setup hook, and stdin is
+  closed.
 
   Teardown has a separate 15-minute timeout. A non-zero exit, timeout, or
   signal reports failure in the destroy transcript, but cloudroom removes the
@@ -180,7 +191,7 @@ truncation markers are preserved.
 
 Remote access (cloudroom connect):
 
-  Cloudroom Connect opens this Mac's Cloudroom from a phone or another computer at
+  Cloudroom Connect opens this computer's Cloudroom from a phone or another computer at
   https://<id>.cloudroom.run. It sets itself up once you are signed in to Cloudroom:
   the server registers with the relay, holds the tunnel itself, and reconnects on
   restart. A phone opens cloudroom.dev/m and signs in with the Cloudroom account.
@@ -198,13 +209,13 @@ Remote access (cloudroom connect):
   choice for expose, unexpose, and shares. Server-host URLs use
   `https://<id>--<port>.cloudroom.run`; remote-host URLs use
   `https://<machine-id>--<port>.cloudroom.run` and proxy directly through that
-  machine's daemon. Only phones and browsers signed in to this Mac can open them;
+  machine's daemon. Only phones and browsers signed in to this computer can open them;
   they are not public internet links. Agents should run expose from the thread that
   started the server, share the returned URL, and unexpose from the same thread when
   it stops. `room-cli connect status` shows all shares with host + URL. `shares --json`
   returns the resolved `host` and rows with `hostId`, `hostName`, `port`, and `url`.
 
-  Remote hosts added in Settings → Machines reach this Mac through the same relay
+  Remote hosts added in Settings → Machines reach this computer through the same relay
   with their own credential. Removing the machine revokes it.
 
   Remote access is owned by the builtin "connect" plugin. Disabling the plugin

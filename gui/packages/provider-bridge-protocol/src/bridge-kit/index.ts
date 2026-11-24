@@ -22,4 +22,5 @@ export {
   execPortableFile,
   isClosedPipeError,
   spawnPortableProcess,
+  terminateWindowsProcessTrees,
 } from "@cloudroom/process-utils";

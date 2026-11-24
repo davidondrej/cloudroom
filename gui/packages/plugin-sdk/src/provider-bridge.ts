@@ -198,6 +198,7 @@ export {
   getRawSdkMessage,
   getRecordProperty,
   getStringProperty,
+  installationRunUnavailable as experimental_installationRunUnavailable,
   installationVerification as experimental_installationVerification,
   isRecord,
   jsonRpcEnvelopeSchema,
@@ -211,6 +212,7 @@ export {
   presentationDetail as experimental_presentationDetail,
   presentationFileName as experimental_presentationFileName,
   presentationTitle as experimental_presentationTitle,
+  probeCliVersion as experimental_probeCliVersion,
   probeNpmGlobalPackage as experimental_probeNpmGlobalPackage,
   readBoundedLines as experimental_readBoundedLines,
   readCliVersion as experimental_readCliVersion,
@@ -264,11 +266,21 @@ export { sanitizeInheritedChildProcessEnv } from "@cloudroom/process-utils";
  * install folders and app bundles, so an app update that moves the CLI does
  * not break bridges. `experimental_findBrokenCliLink` names a PATH link whose
  * target is gone, for a clearer "not installed" error.
+ * `experimental_isClaudeNpmPlaceholder` spots npm's unfinished Claude Code
+ * stub (directly or behind its Windows `.cmd` shim), which it skips.
  */
 export {
   findBrokenCliLink as experimental_findBrokenCliLink,
   findCliExecutable as experimental_findCliExecutable,
+  isClaudeNpmPlaceholder as experimental_isClaudeNpmPlaceholder,
 } from "@cloudroom/process-utils";
+
+/**
+ * Absolute paths of the Cloudroom data folder's credential files and app
+ * database. Bridges deny them to sandboxed agents, given the session's
+ * `ROOM_DATA_DIR`; empty when it is unset.
+ */
+export { privateDataPaths as experimental_privateDataPaths } from "@cloudroom/process-utils";
 
 /**
  * Spawns a provider CLI by name the way the daemon does: on Windows it resolves
@@ -279,6 +291,9 @@ export {
  * `node:child_process` `spawn` for a provider executable.
  */
 export { spawnPortableProcess as experimental_spawnPortableProcess } from "@cloudroom/process-utils";
+
+/** The file `experimental_spawnPortableProcess` would start for a command on Windows; `undefined` elsewhere. */
+export { resolveWindowsCommandFile as experimental_resolveWindowsCommandFile } from "@cloudroom/process-utils";
 
 /**
  * Runs a provider CLI to completion and returns its output, like a promisified

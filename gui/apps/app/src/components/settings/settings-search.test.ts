@@ -17,18 +17,27 @@ function visibleSectionTitles(): string[] {
 }
 
 describe("searchSettings", () => {
+  const state = {
+    activePluginId: null,
+    activeSection: null,
+    pluginEntries: [],
+    sections: SETTINGS_NAV_SECTIONS,
+  };
+
   it("finds every settings card and section by its title", () => {
-    const state = {
-      activePluginId: null,
-      activeSection: null,
-      pluginEntries: [],
-      sections: SETTINGS_NAV_SECTIONS,
-    };
     const titles = visibleSectionTitles();
     expect(titles.length).toBeGreaterThan(20);
     const missing = titles.filter(
       (title) => !searchSettings(title, state).some((result) => result.label === title),
     );
     expect(missing).toEqual([]);
+  });
+
+  it("leaves out DeepAPI when its section is hidden", () => {
+    const hidden = { ...state, deepapiShown: false };
+    expect(searchSettings("deepapi", hidden)).toEqual([]);
+    const labels = searchSettings("credits", hidden).map((result) => result.label);
+    expect(labels).toContain("Cloud Credits");
+    expect(labels).not.toContain("Pay with Cloud Credits");
   });
 });

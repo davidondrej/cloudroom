@@ -13,17 +13,17 @@ import { PluginSourceCode } from "@/components/plugin/PluginSourceCode";
 import { SourceCodeHost } from "./SourceCodeHost";
 import { makePluginRegistrationSet } from "@/test/fixtures/plugins";
 
-const bbSourceCode = vi.hoisted(() => ({
+const roomSourceCode = vi.hoisted(() => ({
   loaded: false,
   lastProps: null as Record<string, unknown> | null,
 }));
 
-vi.mock("./BbSourceCode", async () => {
+vi.mock("./RoomSourceCode", async () => {
   const React = await import("react");
-  bbSourceCode.loaded = true;
+  roomSourceCode.loaded = true;
   return {
     default: (props: Record<string, unknown>) => {
-      bbSourceCode.lastProps = props;
+      roomSourceCode.lastProps = props;
       return React.createElement(
         "div",
         { "data-testid": "bb-source-code" },
@@ -48,8 +48,8 @@ function registerSourceCodeRenderer(
 }
 
 beforeEach(() => {
-  bbSourceCode.loaded = false;
-  bbSourceCode.lastProps = null;
+  roomSourceCode.loaded = false;
+  roomSourceCode.lastProps = null;
   received.length = 0;
   resetPluginSlotStoreForTest();
   resetDeprecatedAliasWarningsForTests();
@@ -75,7 +75,7 @@ describe("SourceCodeHost", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(bbSourceCode.loaded).toBe(false);
+    expect(roomSourceCode.loaded).toBe(false);
   });
 
   it("hands the replacement resolved semantic props, not BB's host-only inputs", async () => {
@@ -122,9 +122,9 @@ describe("SourceCodeHost", () => {
     );
 
     expect(await screen.findByTestId("bb-source-code")).toBeDefined();
-    expect(bbSourceCode.loaded).toBe(true);
-    expect(bbSourceCode.lastProps?.cacheKey).toBe("rev-2:src/app.ts");
-    expect(bbSourceCode.lastProps?.scrollToHighlightedLines).toBe(true);
+    expect(roomSourceCode.loaded).toBe(true);
+    expect(roomSourceCode.lastProps?.cacheKey).toBe("rev-2:src/app.ts");
+    expect(roomSourceCode.lastProps?.scrollToHighlightedLines).toBe(true);
   });
 
   it("falls back to BB's renderer when the replacement crashes", async () => {
@@ -143,8 +143,8 @@ describe("SourceCodeHost", () => {
     render(<SourceCodeHost content={CONTENT} path="src/app.ts" />);
 
     await screen.findByTestId("bb-source-code");
-    expect(bbSourceCode.lastProps?.overflow).toBe("scroll");
-    expect(bbSourceCode.lastProps?.highlightedLines).toBeNull();
+    expect(roomSourceCode.lastProps?.overflow).toBe("scroll");
+    expect(roomSourceCode.lastProps?.highlightedLines).toBeNull();
   });
 });
 
@@ -160,7 +160,7 @@ describe("experimental_SourceCode", () => {
     await screen.findByTestId("plugin-source");
     expect(received.at(-1)?.content).toBe(CONTENT);
     expect(received.at(-1)?.highlightedLines).toBeNull();
-    expect(bbSourceCode.loaded).toBe(false);
+    expect(roomSourceCode.loaded).toBe(false);
   });
 });
 
@@ -181,7 +181,7 @@ describe("SourceCodeHost experimental_Original alias", () => {
       <SourceCodeHost content={CONTENT} path="src/app.ts" />,
     );
     expect(await screen.findByTestId("bb-source-code")).toBeDefined();
-    expect(bbSourceCode.lastProps?.overflow).toBe("scroll");
+    expect(roomSourceCode.lastProps?.overflow).toBe("scroll");
 
     rerender(
       <SourceCodeHost content={CONTENT} path="src/app.ts" overflow="wrap" />,
@@ -189,7 +189,7 @@ describe("SourceCodeHost experimental_Original alias", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    expect(bbSourceCode.lastProps?.overflow).toBe("wrap");
+    expect(roomSourceCode.lastProps?.overflow).toBe("wrap");
     expect(renders).toBe(2);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(

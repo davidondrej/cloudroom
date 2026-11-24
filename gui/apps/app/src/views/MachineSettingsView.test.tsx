@@ -15,7 +15,7 @@ import type {
   ProviderCliStatus,
   ProviderCliStatusResponse,
 } from "@cloudroom/host-daemon-contract";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";

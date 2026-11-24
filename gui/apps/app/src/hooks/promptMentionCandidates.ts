@@ -37,6 +37,8 @@ interface OrderPromptMentionSuggestionsArgs {
   suggestions: readonly PromptMentionSuggestion[];
 }
 
+const THREADS_GROUP_KEY = "threads";
+
 function threadMentionCandidate(
   suggestion: ThreadMentionSuggestion,
 ): MentionCandidate {
@@ -46,7 +48,7 @@ function threadMentionCandidate(
     identityTerms: [suggestion.threadId],
     supportingTerms:
       suggestion.projectName === undefined ? [] : [suggestion.projectName],
-    groupKey: "threads",
+    groupKey: THREADS_GROUP_KEY,
     groupLabel: "Threads",
   };
 }
@@ -125,9 +127,13 @@ function promptMentionCandidate(
 export function orderPromptMentionSuggestions(
   args: OrderPromptMentionSuggestionsArgs,
 ): OrderedMentionSuggestions {
+  // Threads that match the typed text stay on top, so a file or folder that
+  // matches better, or loads a moment later, can't steal Enter. A "/" in the
+  // query means a path search, so threads get no priority then.
   return orderMentionCandidates(
     args.suggestions.map(promptMentionCandidate),
     args.query,
+    args.query.includes("/") ? undefined : THREADS_GROUP_KEY,
   );
 }
 

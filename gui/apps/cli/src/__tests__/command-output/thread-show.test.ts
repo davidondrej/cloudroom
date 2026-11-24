@@ -80,6 +80,27 @@ describe("room-cli thread show command output", () => {
     expect(lines.some((line) => line.includes("Archived:"))).toBe(true);
   });
 
+  it("room-cli thread show says why a Cloud thread is still pending (#1273)", async () => {
+    const thread = fixtures.makeThread({ id: "thread-cloud-1", projectId: "proj-1", providerId: "codex", status: "pending", executionTarget: "cloud" });
+    stubServerApi({ "v1.threads.:id.$get": vi.fn(async () => thread), "v1.threads.:id.timeline.$get": fixtures.makeEmptyTimelineGetMock() });
+    const error = "Codex in Cloud didn't answer the login check. Cloudroom tries again by itself.";
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ model: "m", reasoning: "low", error, reconnecting: false }), { headers: { "Content-Type": "application/json" } }));
+
+    await runCommand(["thread", "show", "thread-cloud-1"], register);
+
+    expect(collectLogLines(vi.mocked(console.log))).toContain(`  Cloud: ${error}`);
+  });
+
+  it.each([{ error: null, reconnecting: false }, {}])("room-cli thread show --json adds no cloud key to a healthy Cloud thread (%j)", async (fields) => {
+    const thread = fixtures.makeThread({ id: "thread-cloud-2", projectId: "proj-1", providerId: "codex", status: "idle", executionTarget: "cloud" });
+    stubServerApi({ "v1.threads.:id.$get": vi.fn(async () => thread), "v1.threads.:id.timeline.$get": fixtures.makeEmptyTimelineGetMock() });
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({ model: "m", reasoning: "low", ...fields }), { headers: { "Content-Type": "application/json" } }));
+
+    await runCommand(["thread", "show", "thread-cloud-2", "--json", "--no-pr"], register);
+
+    expect(JSON.parse(collectLogLines(vi.mocked(console.log))[0]!)).not.toHaveProperty("cloud");
+  });
+
   it("room-cli thread show prints pinned timestamp for pinned threads", async () => {
     const thread: domain.Thread = fixtures.makeThread({
       id: "thread-pinned-1",
@@ -461,6 +482,43 @@ describe("room-cli thread show command output", () => {
       },
       pendingTodos: null,
     });
+  });
+
+  it("room-cli thread show --no-pr skips the pull request lookup", async () => {
+    const thread: domain.Thread = fixtures.makeThread({
+      id: "thread-show-no-pr",
+      projectId: "proj-1",
+      providerId: "codex",
+      environmentId: "env-show-no-pr",
+      status: "idle",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const environment = fixtures.makeEnvironment({
+      id: "env-show-no-pr",
+      projectId: "proj-1",
+      hostId: "host-1",
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const pullRequestGet = vi.fn(() => new Promise<never>(() => {}));
+    stubServerApi({
+      "v1.environments.:id.$get": vi.fn(async () => environment),
+      "v1.environments.:id.pull-request.$get": pullRequestGet,
+      "v1.threads.:id.$get": vi.fn(async () => thread),
+      "v1.threads.:id.timeline.$get": fixtures.makeEmptyTimelineGetMock(),
+    });
+
+    await runCommand(
+      ["thread", "show", "thread-show-no-pr", "--json", "--no-pr"],
+      register,
+    );
+
+    expect(pullRequestGet).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])).environment
+        .pullRequest,
+    ).toEqual({ status: "skipped", pullRequest: null });
   });
 
   it("room-cli thread show --json prints the thread in status payload format", async () => {

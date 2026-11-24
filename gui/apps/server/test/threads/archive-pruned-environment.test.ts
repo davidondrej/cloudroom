@@ -109,6 +109,7 @@ describe("archive after environment prune", () => {
       expect(await readJson(response)).toEqual({
         ok: true,
         archivedThreadIds: [thread.id],
+        keptLiveThreadIds: [],
       });
       expect(getThread(harness.deps.db, thread.id)?.archivedAt).not.toBeNull();
     });

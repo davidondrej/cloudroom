@@ -4,6 +4,7 @@ import { StoryCard, StoryRow } from "../../../../.ladle/story-card";
 import {
   ThreadContextWindowCard,
   ThreadContextWindowIndicator,
+  type ThreadContextWindowActions,
 } from "./ThreadContextWindowIndicator";
 
 export default {
@@ -31,14 +32,18 @@ const approachingLimit = { ...usage(166_000), compactions: 2 };
 const critical = usage(192_000);
 const estimated = usage(150_000, true);
 
+const noop = () => {};
+
 function UsageCardRow({
   label,
   hint,
   usage: u,
+  actions = { onCompact: noop, onFreshThread: noop },
 }: {
   label: string;
   hint: string;
   usage: ThreadContextWindowUsage;
+  actions?: ThreadContextWindowActions;
 }) {
   return (
     <StoryRow
@@ -46,7 +51,11 @@ function UsageCardRow({
       hint={hint}
       className="max-md:grid-cols-1 max-md:gap-y-3"
     >
-      <ThreadContextWindowCard usage={u} className="max-w-full max-md:w-80" />
+      <ThreadContextWindowCard
+        usage={u}
+        actions={actions}
+        className="max-w-full max-md:w-80"
+      />
     </StoryRow>
   );
 }
@@ -228,7 +237,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="Optional context breakdown"
-        hint="Claude sample data. The card grows upward from the bottom-right corner; the toggle stays under the pointer."
+        hint="Claude sample data. Click the token count: the dots take each category's colour and the list opens."
         className="max-md:grid-cols-1 max-md:gap-y-3"
       >
         <div className="flex h-[42rem] w-full items-end justify-end overflow-hidden rounded-lg border border-border-hairline bg-surface-recessed p-3">
@@ -255,8 +264,31 @@ export function Overview() {
       />
       <UsageCardRow
         label="Usage menu — estimated (75%)"
-        hint='Header reads "Estimated context"'
+        hint='Label reads "context used, estimated"'
         usage={estimated}
+      />
+      <UsageCardRow
+        label="Usage menu — low (18%)"
+        hint="Neutral dots. White dots are the last turn; the estimate restarts after a compaction."
+        usage={low}
+      />
+      <UsageCardRow
+        label="Agent is working"
+        hint="Compact queues behind the turn. Fresh thread waits."
+        usage={approachingLimit}
+        actions={{ onCompact: noop, onFreshThread: noop, working: true }}
+      />
+      <UsageCardRow
+        label="Starting a fresh thread"
+        hint="Spinner until the new thread opens"
+        usage={critical}
+        actions={{ onCompact: noop, onFreshThread: noop, pending: "fresh" }}
+      />
+      <UsageCardRow
+        label="Cloud thread"
+        hint="Compact only: a Cloud thread can't share its folder yet"
+        usage={critical}
+        actions={{ onCompact: noop }}
       />
     </StoryCard>
   );

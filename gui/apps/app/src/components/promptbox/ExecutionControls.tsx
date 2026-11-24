@@ -2,7 +2,7 @@ import { memo } from "react";
 import type { PermissionMode, ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import type {
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import { formatModelLabel } from "@/hooks/useThreadCreationOptions";
 import {
@@ -37,6 +37,8 @@ interface ExecutionServiceTierConfig {
   supported: boolean;
   supportByProvider?: Record<string, boolean>;
   fastLabel?: string;
+  /** The selected model also offers Ultra Fast where this thread runs. */
+  ultraFast?: boolean;
 }
 
 interface ExecutionReasoningConfig {
@@ -53,7 +55,7 @@ export interface ExecutionPermissionConfig {
 }
 
 export interface ExecutionControlsProps {
-  providerRouting?: SystemProvidersQuery;
+  providerRouting?: SystemExecutionOptionsQuery;
   provider: ExecutionProviderConfig;
   model: ExecutionModelConfig;
   serviceTier?: ExecutionServiceTierConfig;
@@ -61,7 +63,7 @@ export interface ExecutionControlsProps {
   // An existing thread's picker reports every pick with its provider (ADR 0211).
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
   // Switches provider and model in one step; used by /opus and /astra.
-  selectModel?: (selection: { providerId: string; model: string }) => void;
+  selectModel?: (selection: { providerId: string; model: string }) => void | Promise<void>;
   disabled?: boolean;
   lockModelSelection?: boolean;
 }
@@ -113,11 +115,10 @@ export const ExecutionControls = memo(function ExecutionControls({
           reasoningValue={reasoning.value}
           reasoningOptions={reasoning.options}
           onReasoningChange={reasoning.onChange}
-          fastModeEnabled={serviceTier?.value === "fast"}
-          onFastModeChange={(enabled) =>
-            handleServiceTierChange(enabled ? "fast" : "default")
-          }
-          showFastModeToggle={serviceTier?.supported ?? false}
+          serviceTier={serviceTier?.value}
+          onServiceTierChange={handleServiceTierChange}
+          showServiceTiers={serviceTier?.supported ?? false}
+          showUltraFast={serviceTier?.ultraFast}
           serviceTierSupportByProvider={serviceTier?.supportByProvider}
           fastModeLabel={serviceTier?.fastLabel}
           muted

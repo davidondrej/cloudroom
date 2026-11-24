@@ -5,16 +5,19 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type KeyboardEventHandler,
   type ReactNode,
 } from "react";
 import type {
   SystemExecutionOptionsModelLoadError,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
-import type { ReasoningLevel } from "@cloudroom/domain";
+import type { ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import { useQueryClient } from "@tanstack/react-query";
 import { useAtomValue } from "jotai";
+import { useInRouterContext, useNavigate } from "react-router";
+import { getSettingsRoutePath } from "@/lib/route-paths";
 import {
   stripModelBrandPrefix,
   type ProviderPickerOption,
@@ -24,11 +27,7 @@ import { showUltraEffortsAtom, withoutHiddenUltraEfforts } from "@/lib/ultra-eff
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
-import {
-  COARSE_POINTER_ICON_SIZE_CLASS,
-  COARSE_POINTER_ICON_SIZE_SHRINK_CLASS,
-  COARSE_POINTER_TEXT_SM_CLASS,
-} from "@cloudroom/shared-ui/coarse-pointer-sizing";
+import { COARSE_POINTER_ICON_SIZE_SHRINK_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -39,12 +38,17 @@ import {
 } from "@cloudroom/shared-ui/dropdown-menu";
 import {
   Popover,
-  PopoverAnchor,
   PopoverContent,
   PopoverTrigger,
 } from "@cloudroom/shared-ui/popover";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
-import { Switch } from "@cloudroom/shared-ui/switch";
+import { ToggleGroup, ToggleGroupItem } from "@cloudroom/shared-ui/toggle-group";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@cloudroom/shared-ui/tooltip";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   MENU_ITEM_LAST_HOVERED_CLASS,
@@ -69,8 +73,15 @@ import {
   OPTION_TRIGGER_CONTENT_CLASS_NAME,
 } from "@cloudroom/shared-ui/option-display";
 import { type PickerOption } from "./OptionPicker";
+import { ModelPickerHarnessStrip, useEdgeFade } from "./ModelPickerHarnessStrip";
 import { PickerLoadingRows } from "./PickerLoadingRows";
-import { ModelUnavailable } from "./ModelUnavailable";
+import {
+  MissingModelsNote,
+  ModelUnavailable,
+  restartProviderModels,
+  useRoutedHostId,
+} from "./ModelUnavailable";
+import { useProviderLogin } from "@/components/settings/ProviderLoginButton";
 import type { ModelPickerOption } from "./model-picker-option";
 import { searchPickerOptions } from "./picker-search";
 import { useResetPickerScroll } from "./useResetPickerScroll";
@@ -136,7 +147,10 @@ const REASONING_CYCLE_COMMANDS = [
 ] as const;
 
 const MODEL_SEARCH_MIN_OPTIONS = 5;
-const MODEL_PICKER_MENU_WIDTH_CLASS_NAME = "w-max min-w-64 max-w-80";
+const FIVE_MODEL_ROWS =
+  "max-h-[calc(5*var(--model-row-height))] [&>button]:h-(--model-row-height) [&>button]:shrink-0";
+// The chat input's own surface: no outline, a soft shadow.
+const QUIET_SURFACE_CLASS_NAME = "rounded-xl border-0 bg-composer shadow-message";
 
 const COMPACT_SHEET_PADDING_CLASS_NAME =
   "px-3.5 pt-0 pb-[max(1.5rem,env(safe-area-inset-bottom))]";
@@ -158,13 +172,11 @@ type ModelNavRow =
 export function buildModelNavRows({
   modelOptions,
   moreModelOptions,
-  isCompactViewport,
   isSearching,
   showMoreModels,
 }: {
   modelOptions: readonly ModelPickerOption[];
   moreModelOptions: readonly ModelPickerOption[];
-  isCompactViewport: boolean;
   isSearching: boolean;
   showMoreModels: boolean;
 }): ModelNavRow[] {
@@ -179,27 +191,30 @@ export function buildModelNavRows({
     return rows;
   }
 
-  if (isCompactViewport) {
-    rows.push({ kind: "more-toggle" });
-    if (showMoreModels) {
-      for (const option of moreModelOptions) {
-        rows.push({ kind: "model", option });
-      }
+  rows.push({ kind: "more-toggle" });
+  if (showMoreModels) {
+    for (const option of moreModelOptions) {
+      rows.push({ kind: "model", option });
     }
   }
-
   return rows;
 }
 
 interface ModelReasoningPickerProps {
-  providerRouting?: SystemProvidersQuery;
+  providerRouting?: SystemExecutionOptionsQuery;
   providerOptions: readonly ProviderPickerOption[];
   selectedProviderId: string;
   onSelectedProviderChange?: (value: string) => void;
   onProviderPreviewResolved?: (value: ResolvedProviderPreview) => void;
   requireVerifiedProviderPreview?: boolean;
   hasMultipleProviders: boolean;
-  modelValue: string;
+  modelValue: string | null;
+  /** Additional choices for a harness, including targets available without a local model catalog. */
+  extendModelOptions?: (
+    providerId: string,
+    models: readonly ModelPickerOption[],
+    moreModels: readonly ModelPickerOption[],
+  ) => readonly ModelPickerOption[];
   modelOptions: readonly ModelPickerOption[];
   moreModelOptions?: readonly ModelPickerOption[];
   modelIsLoading?: boolean;
@@ -210,9 +225,11 @@ interface ModelReasoningPickerProps {
   reasoningValue: ReasoningLevel;
   reasoningOptions: readonly PickerOption<ReasoningLevel>[];
   onReasoningChange: (value: ReasoningLevel) => void;
-  fastModeEnabled: boolean;
-  onFastModeChange: (enabled: boolean) => void;
-  showFastModeToggle: boolean;
+  serviceTier: ServiceTier | undefined;
+  onServiceTierChange: (tier: ServiceTier) => void;
+  showServiceTiers: boolean;
+  /** The selected model also offers Ultra Fast. */
+  showUltraFast?: boolean;
   commandShortcutsEnabled?: boolean;
   serviceTierSupportByProvider?: Record<string, boolean>;
   className?: string;
@@ -227,6 +244,14 @@ interface ModelReasoningPickerProps {
    * Picking another provider switches the thread's harness in place (ADR 0211).
    */
   onSelectModel?: (selection: ModelReasoningPickerSelection) => void;
+  /** A caller's own choice after the harnesses (Loops: Jev, which runs no agent). Picking it closes the picker. */
+  extraChoice?: ExtraChoice;
+}
+
+interface ExtraChoice {
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  onSelect: () => void;
 }
 
 export function ModelReasoningPicker({
@@ -238,6 +263,7 @@ export function ModelReasoningPicker({
   requireVerifiedProviderPreview = false,
   hasMultipleProviders,
   modelValue,
+  extendModelOptions,
   modelOptions,
   moreModelOptions = [],
   modelIsLoading = false,
@@ -248,9 +274,10 @@ export function ModelReasoningPicker({
   reasoningValue,
   reasoningOptions: allReasoningOptions,
   onReasoningChange,
-  fastModeEnabled,
-  onFastModeChange,
-  showFastModeToggle,
+  serviceTier,
+  onServiceTierChange,
+  showServiceTiers,
+  showUltraFast = false,
   commandShortcutsEnabled = true,
   serviceTierSupportByProvider,
   className,
@@ -261,6 +288,7 @@ export function ModelReasoningPicker({
   disabled,
   lockModelSelection = false,
   onSelectModel,
+  extraChoice,
 }: ModelReasoningPickerProps) {
   const showUltraEfforts = useAtomValue(showUltraEffortsAtom);
   const reasoningOptions = useMemo(
@@ -268,6 +296,7 @@ export function ModelReasoningPicker({
     [allReasoningOptions, reasoningValue, showUltraEfforts],
   );
   const isCompactViewport = useIsCompactViewport();
+  const inRouter = useInRouterContext();
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -281,10 +310,18 @@ export function ModelReasoningPicker({
   const reasoningShortcut = commandShortcutsEnabled
     ? registeredReasoningShortcut
     : null;
+  const registeredReasoningBackwardShortcut = useAppCommandShortcut(
+    "modelPicker.cycleReasoningBackward",
+  );
+  const reasoningBackwardShortcut = commandShortcutsEnabled
+    ? registeredReasoningBackwardShortcut
+    : null;
   const [searchQuery, setSearchQuery] = useState("");
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
+  const listFade = useEdgeFade(listRef, "y");
   const [activeIndex, setActiveIndex] = useState(-1);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const activeHarnessRef = useRef<HTMLButtonElement>(null);
   const isSearching = searchQuery.trim().length > 0;
   const navId = useId();
   const listboxId = `${navId}-listbox`;
@@ -294,7 +331,6 @@ export function ModelReasoningPicker({
     null,
   );
   const [showMoreModels, setShowMoreModels] = useState(false);
-  const [moreModelsOpen, setMoreModelsOpen] = useState(false);
   const [trackedSelectedProviderId, setTrackedSelectedProviderId] =
     useState(selectedProviderId);
 
@@ -302,7 +338,6 @@ export function ModelReasoningPicker({
     setTrackedSelectedProviderId(selectedProviderId);
     setPreviewProviderId(null);
     setShowMoreModels(false);
-    setMoreModelsOpen(false);
     setSearchQuery("");
     setActiveIndex(-1);
   }
@@ -313,8 +348,10 @@ export function ModelReasoningPicker({
     (p) => p.value === selectedProviderId,
   );
   const ProviderIcon = selectedProvider?.icon;
-  const selectedModelOption = modelOptions.find((m) => m.value === modelValue);
-  const selectedModelLabel = selectedModelOption?.label ?? modelValue;
+  const selectedOptions =
+    extendModelOptions?.(selectedProviderId, modelOptions, moreModelOptions) ?? modelOptions;
+  const selectedModelOption = selectedOptions.find((m) => m.value === modelValue);
+  const selectedModelLabel = selectedModelOption?.label ?? modelValue ?? "";
   const hasSelectedModel = selectedModelLabel.trim().length > 0;
   const selectedProviderLabel = selectedProvider?.label ?? selectedProviderId;
   const selectedModelLoadErrorMatches =
@@ -326,8 +363,23 @@ export function ModelReasoningPicker({
     (onSelectedProviderChange !== undefined || onSelectModel !== undefined) &&
     providerOptions.length > 1;
   const queryClient = useQueryClient();
+  // Signs in on the machine that checks models (in a Cloud thread, this Mac),
+  // then reloads them. It lives here because the popover closes for its drawer.
+  const loginProviderId = useRef<string | null>(null);
+  const providerLogin = useProviderLogin(
+    useRoutedHostId(providerRouting, open),
+    () => {
+      if (loginProviderId.current === null) return;
+      void restartProviderModels(
+        queryClient,
+        loginProviderId.current,
+        providerRouting,
+      ).catch(() => undefined);
+    },
+  );
   const prefetchRoutingEnvironmentId = providerRouting?.environmentId;
   const prefetchRoutingHostId = providerRouting?.hostId;
+  const prefetchRoutingProjectId = providerRouting?.projectId;
   const siblingIdsKey = providerOptions
     .map((option) => option.value)
     .filter((id) => id !== selectedProviderId)
@@ -340,6 +392,7 @@ export function ModelReasoningPicker({
       routing: {
         environmentId: prefetchRoutingEnvironmentId,
         hostId: prefetchRoutingHostId,
+        projectId: prefetchRoutingProjectId,
       },
       providerIds: siblingIdsKey.split("\0"),
     });
@@ -348,11 +401,12 @@ export function ModelReasoningPicker({
     open,
     prefetchRoutingEnvironmentId,
     prefetchRoutingHostId,
+    prefetchRoutingProjectId,
     queryClient,
     siblingIdsKey,
   ]);
   const hasAlternateSelectionPath =
-    modelOptions.length > 0 ||
+    selectedOptions.length > 0 ||
     (selectedModelLoadErrorMatches && canSwitchProviders);
   const selectedModelLoadErrorText =
     selectedModelLoadErrorMatches && modelLoadError
@@ -369,7 +423,7 @@ export function ModelReasoningPicker({
         ? hasAlternateSelectionPath
           ? "Select model"
           : FAILED_TO_LOAD_MODELS_LABEL
-        : modelOptions.length === 0
+        : selectedOptions.length === 0
           ? canSwitchProviders
             ? "Select model"
             : selectedProvider?.signInCommand
@@ -439,7 +493,6 @@ export function ModelReasoningPicker({
       reasoningValue,
     ],
   );
-  const previewModelOptions = previewSelection?.modelOptions ?? modelOptions;
   const previewMoreModelOptions =
     previewSelection?.moreModelOptions ?? moreModelOptions;
   useEffect(() => {
@@ -469,9 +522,6 @@ export function ModelReasoningPicker({
   const activeModelLoadError = isPreviewing
     ? (previewQuery.data?.modelLoadError ?? null)
     : (modelLoadError ?? null);
-  const activeModelIsLoading = isPreviewing
-    ? previewQuery.isLoading
-    : modelIsLoading;
   const activeProvider = providerOptions.find(
     (p) => p.value === activeProviderId,
   );
@@ -483,9 +533,15 @@ export function ModelReasoningPicker({
     : modelLoadFailed || activeModelLoadErrorMatches;
   const canRestartModelDiscovery =
     activeModelLoadErrorMatches && activeModelLoadError?.canRestart === true;
-  const activeModelOptions = canRestartModelDiscovery
+  const baseOptions = canRestartModelDiscovery
     ? EMPTY_MODEL_OPTIONS
-    : previewModelOptions;
+    : previewSelection?.modelOptions ?? modelOptions;
+  const activeModelOptions = isPreviewing || canRestartModelDiscovery
+    ? extendModelOptions?.(activeProviderId, baseOptions, previewMoreModelOptions) ?? baseOptions
+    : selectedOptions;
+  const activeModelIsLoading =
+    (isPreviewing ? previewQuery.isLoading : modelIsLoading) &&
+    !(extendModelOptions && activeModelOptions.length > 0);
   const activeMoreModelOptions =
     previewSelectionBlocked || canRestartModelDiscovery
       ? EMPTY_MODEL_OPTIONS
@@ -496,8 +552,8 @@ export function ModelReasoningPicker({
   const isShowingModelError =
     !activeModelIsLoading && !hasActiveModelOptions && activeModelLoadFailed;
   const showProviderTabs =
-    canSwitchProviders &&
-    providerOptions.length > 1 &&
+    // A caller's extra choice lives in the strip, so it shows even with one harness.
+    (canSwitchProviders || extraChoice !== undefined) &&
     (!isShowingModelError || activeModelErrorIsProviderSpecific);
 
   const activeBrandPrefix = activeProvider?.brandPrefix;
@@ -531,14 +587,12 @@ export function ModelReasoningPicker({
       buildModelNavRows({
         modelOptions: filteredModelOptions,
         moreModelOptions: filteredMoreModelOptions,
-        isCompactViewport,
         isSearching,
         showMoreModels,
       }),
     [
       filteredModelOptions,
       filteredMoreModelOptions,
-      isCompactViewport,
       isSearching,
       showMoreModels,
     ],
@@ -547,8 +601,8 @@ export function ModelReasoningPicker({
   const highlightedIndex =
     activeIndex >= 0 && activeIndex < navRows.length ? activeIndex : -1;
 
-  const effectiveShowFastModeToggle =
-    showFastModeToggle &&
+  const effectiveShowServiceTiers =
+    showServiceTiers &&
     !isPreviewing &&
     hasActiveModelOptions &&
     (!serviceTierSupportByProvider ||
@@ -556,14 +610,27 @@ export function ModelReasoningPicker({
   const effectiveFastModeLabel = isPreviewing
     ? fastServiceTierLabel(previewProvider)
     : (fastModeLabel ?? "Fast");
-  const fastModeText = `${effectiveFastModeLabel} mode`;
-  const showSelectedFastMode =
-    hasSelectedModel && fastModeEnabled && modelOptions.length > 0;
+  // An Ultra Fast choice the selected model lacks runs, and shows, as standard.
+  const activeTier: ServiceTier =
+    serviceTier === "fast" || (serviceTier === "ultrafast" && showUltraFast)
+      ? serviceTier
+      : "default";
+  // One bolt per step above standard, here and on the trigger.
+  const speedTiers: { id: ServiceTier; label: string; bolts: number }[] = [
+    { id: "default", label: "Standard", bolts: 0 },
+    { id: "fast", label: effectiveFastModeLabel, bolts: 1 },
+    ...(showUltraFast
+      ? [{ id: "ultrafast" as const, label: "Ultra Fast", bolts: 2 }]
+      : []),
+  ];
+  const selectedSpeedTier =
+    hasSelectedModel && modelOptions.length > 0 && activeTier !== "default"
+      ? speedTiers.find((tier) => tier.id === activeTier)
+      : undefined;
 
   const resetBrowseState = useCallback(() => {
     setPreviewProviderId(null);
     setShowMoreModels(false);
-    setMoreModelsOpen(false);
     setSearchQuery("");
     setActiveIndex(-1);
   }, []);
@@ -575,10 +642,6 @@ export function ModelReasoningPicker({
     },
     [resetBrowseState],
   );
-
-  const openSub = useCallback(() => {
-    setMoreModelsOpen(true);
-  }, []);
 
   const handleModelSelect = useCallback(
     (model: string, close = true) => {
@@ -605,7 +668,6 @@ export function ModelReasoningPicker({
       } else {
         onModelChange(model);
       }
-      setMoreModelsOpen(false);
       setPreviewProviderId(null);
     },
     [
@@ -707,8 +769,8 @@ export function ModelReasoningPicker({
       if (lockModelSelection || !ownsCycleChord(target)) return false;
       const next =
         index === 0
-          ? nextCycleValue(modelOptions, modelValue)
-          : previousCycleValue(modelOptions, modelValue);
+          ? nextCycleValue(modelOptions, modelValue ?? "")
+          : previousCycleValue(modelOptions, modelValue ?? "");
       if (next !== null) {
         onModelChange(next);
         setPreviewProviderId(null);
@@ -754,6 +816,15 @@ export function ModelReasoningPicker({
     50,
     commandShortcutsEnabled,
   );
+  const reasoningIndex = reasoningOptions.findIndex(
+    (option) => option.value === reasoningValue,
+  );
+  const reasoningStepTarget = (delta: 1 | -1) =>
+    reasoningIndex < 0 ? undefined : reasoningOptions[reasoningIndex + delta];
+  const stepReasoning = (delta: 1 | -1) => {
+    const next = reasoningStepTarget(delta);
+    if (next) handleReasoningSelect(next.value);
+  };
   const handleReasoningArrowKeyDown: KeyboardEventHandler<HTMLElement> = (
     event,
   ) => {
@@ -776,15 +847,10 @@ export function ModelReasoningPicker({
     ) {
       return;
     }
-    const index = reasoningOptions.findIndex(
-      (option) => option.value === reasoningValue,
-    );
-    if (index < 0) return;
+    if (reasoningIndex < 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const next =
-      reasoningOptions[index + (event.key === "ArrowRight" ? 1 : -1)];
-    if (next) handleReasoningSelect(next.value);
+    stepReasoning(event.key === "ArrowRight" ? 1 : -1);
   };
 
   const handleQueryChange = useCallback((value: string) => {
@@ -848,7 +914,7 @@ export function ModelReasoningPicker({
       : triggerModelLabel;
   const triggerTitle = [
     `${selectedProviderLabel}: ${triggerTitleModelLabel}`,
-    showSelectedFastMode ? " (Fast mode)" : "",
+    selectedSpeedTier ? ` (${selectedSpeedTier.label} mode)` : "",
   ].join("");
   const halfClassName = cn(
     OPTION_BASE_CLASS_NAME,
@@ -859,15 +925,22 @@ export function ModelReasoningPicker({
     muted && "font-normal",
     disabled && "cursor-default disabled:opacity-100",
   );
+  const chevronColorClassName = muted
+    ? "text-subtle-foreground/75"
+    : "text-muted-foreground";
   const chevron = disabled ? null : (
     <Icon
       name="ChevronDown"
-      className={cn(
-        "size-3.5 shrink-0",
-        muted ? "text-subtle-foreground/75" : "text-muted-foreground",
-      )}
+      className={cn("size-3.5 shrink-0", chevronColorClassName)}
     />
   );
+  const showReasoningStepper =
+    !disabled && !isPreviewing && reasoningOptions.length > 1;
+  // Every level shares one grid cell so the label keeps the widest level's
+  // width and the step buttons stay put between clicks.
+  const reasoningLabels = showReasoningStepper
+    ? [...new Set([reasoningLabel, ...reasoningOptions.map((o) => o.label)])]
+    : [reasoningLabel];
   const trigger = (
     <Button
       ref={triggerRef}
@@ -908,10 +981,10 @@ export function ModelReasoningPicker({
               className="h-3 w-8 shrink-0 rounded-sm"
             />
           </>
-        ) : showSelectedFastMode ? (
-          <Icon
-            name="Zap"
-            className="size-3.5 shrink-0 fill-current text-subtle-foreground"
+        ) : selectedSpeedTier ? (
+          <SpeedBolts
+            count={selectedSpeedTier.bolts}
+            className="size-3.5 text-subtle-foreground"
           />
         ) : TriggerIcon ? (
           <TriggerIcon className="size-4 shrink-0" />
@@ -951,29 +1024,40 @@ export function ModelReasoningPicker({
       aria-keyshortcuts={reasoningShortcut?.ariaKeyshortcuts}
       disabled={disabled}
       onKeyDown={handleReasoningArrowKeyDown}
-      className={cn(halfClassName, "min-w-0 shrink-[0.001]")}
+      className={cn(halfClassName, "min-w-0 shrink-[0.001] rounded-r-lg")}
     >
       <span
-        className="min-w-0 truncate text-subtle-foreground"
+        className="grid min-w-0 text-left text-subtle-foreground"
         title={`Reasoning effort: ${reasoningLabel}`}
       >
-        {reasoningLabel}
+        {reasoningLabels.map((label) => (
+          <span
+            key={label}
+            aria-hidden={label === reasoningLabel ? undefined : true}
+            className={cn(
+              "col-start-1 row-start-1 min-w-0 truncate",
+              label !== reasoningLabel && "invisible pointer-coarse:hidden",
+            )}
+          >
+            {label}
+          </span>
+        ))}
       </span>
-      {chevron}
     </Button>
   );
 
   const renderSplit = (modelPart: ReactNode) => (
     <div
       className={cn(
-        "inline-flex h-8 min-w-0 max-w-full items-center rounded-lg",
+        "group/model-effort inline-flex h-8 min-w-0 max-w-full items-center rounded-lg",
         className,
       )}
     >
       {modelPart}
+      {providerLogin.drawer}
       {showEffortControl ? (
         <>
-          <span aria-hidden className="h-4 w-px shrink-0 bg-border" />
+          <span aria-hidden className="h-4 w-px shrink-0 bg-foreground/10" />
           {disabled ? (
             effortTrigger
           ) : (
@@ -990,6 +1074,16 @@ export function ModelReasoningPicker({
               {effortTrigger}
             </ReasoningEffortMenu>
           )}
+          {showReasoningStepper ? (
+            <ReasoningStepButtons
+              colorClassName={chevronColorClassName}
+              canLower={reasoningStepTarget(-1) !== undefined}
+              canRaise={reasoningStepTarget(1) !== undefined}
+              lowerShortcut={reasoningBackwardShortcut}
+              raiseShortcut={reasoningShortcut}
+              onStep={stepReasoning}
+            />
+          ) : null}
         </>
       ) : null}
     </div>
@@ -1012,74 +1106,43 @@ export function ModelReasoningPicker({
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
       <PopoverContent
         align={align}
+        sideOffset={isCompactViewport ? undefined : 6}
         mobileTitle="Model"
-        mobileClassName={FLOATING_DRAWER_CLASS_NAME}
+        mobileClassName={cn(FLOATING_DRAWER_CLASS_NAME, "border-foreground/10 bg-composer")}
         onKeyDown={handleReasoningArrowKeyDown}
         onMobileContentAnimationEnd={handleMobileContentAnimationEnd}
-        autoFocusRef={showSearchInput ? searchInputRef : undefined}
+        autoFocusRef={
+          showSearchInput ? searchInputRef : showProviderTabs ? activeHarnessRef : undefined
+        }
         className={cn(
-          "group/model-picker flex min-h-0 w-72 flex-col",
+          "group/model-picker flex min-h-0 flex-col",
           isCompactViewport
-            ? cn("overflow-y-hidden", COMPACT_SHEET_PADDING_CLASS_NAME)
-            : "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] max-w-[calc(100vw-1rem)] overflow-hidden p-0",
-          !isCompactViewport && !lockModelSelection && "data-[side=top]:h-80",
+            ? cn(
+                "w-[19rem] overflow-y-hidden [--model-row-height:42px]",
+                COMPACT_SHEET_PADDING_CLASS_NAME,
+              )
+            : cn(
+                "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] w-80 max-w-[calc(100vw-1rem)] overflow-hidden p-0 [--model-row-height:1.75rem]",
+                QUIET_SURFACE_CLASS_NAME,
+                // Opening upward, a fixed height keeps the harness row still.
+                !lockModelSelection && "data-[side=top]:h-[16.5rem]",
+              ),
         )}
       >
         <ResetBrowseStateOnContentUnmount onReset={resetBrowseState} />
         <div className="flex min-h-0 flex-1 flex-col">
           {showProviderTabs ? (
-            <div
-              className={cn(
-                "flex shrink-0 items-center",
-                isCompactViewport
-                  ? "gap-1 rounded-full bg-surface-recessed p-1"
-                  : "gap-0.5 border-b border-border bg-background px-1.5",
-              )}
+            <ModelPickerHarnessStrip
+              options={providerOptions}
+              activeId={activeProviderId}
+              activeButtonRef={activeHarnessRef}
+              onSelect={handleProviderSelect}
             >
-              {providerOptions.map((provider) => {
-                const TabIcon = provider.icon;
-                const isActive = provider.value === activeProviderId;
-                return (
-                  <button
-                    key={provider.value}
-                    type="button"
-                    title={provider.label}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      if (provider.value === activeProviderId) {
-                        return;
-                      }
-                      handleProviderSelect(provider.value);
-                    }}
-                    className={cn(
-                      "relative flex items-center justify-center focus-visible:outline-none",
-                      LIST_HOVER_TRANSITION,
-                      isCompactViewport
-                        ? "aspect-square min-w-0 max-w-10 flex-1 rounded-full"
-                        : "h-8 w-7 max-md:pointer-coarse:h-10 max-md:pointer-coarse:w-9",
-                      isActive
-                        ? isCompactViewport
-                          ? "bg-composer text-foreground shadow-message"
-                          : "text-foreground after:absolute after:inset-x-1 after:-bottom-px after:h-0.5 after:rounded-full after:bg-foreground"
-                        : "text-subtle-foreground hover:text-foreground",
-                    )}
-                  >
-                    {TabIcon ? (
-                      <TabIcon className={COARSE_POINTER_ICON_SIZE_CLASS} />
-                    ) : (
-                      <span
-                        className={cn(
-                          "font-medium",
-                          COARSE_POINTER_TEXT_SM_CLASS,
-                        )}
-                      >
-                        {provider.label.charAt(0)}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
+              {extraChoice ? (
+                <ExtraChoiceButton choice={extraChoice} onClose={() => setOpen(false)} />
+              ) : null}
+              {inRouter && <ConnectHarnessButton onClose={() => setOpen(false)} />}
+            </ModelPickerHarnessStrip>
           ) : null}
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -1101,23 +1164,21 @@ export function ModelReasoningPicker({
             <MenuHoverProvider>
               <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
                 {lockModelSelection ? (
-                  <div className="flex shrink-0 items-center gap-2 px-3 py-2.5 text-xs">
+                  <div className="flex h-10 shrink-0 items-center gap-2 px-3 text-xs">
                     {TriggerIcon ? (
                       <TriggerIcon className="size-4 shrink-0" />
                     ) : null}
                     <span className="min-w-0 truncate font-medium">
                       {triggerModelBase}
                       {triggerModelTag ? (
-                        <span className="ml-1 font-normal text-subtle-foreground">
+                        <span className="ml-1.5 font-normal text-subtle-foreground">
                           {triggerModelTag}
                         </span>
                       ) : null}
                     </span>
                     <span className="ml-auto flex shrink-0 items-center gap-1.5 text-subtle-foreground">
-                      <span title="Fixed in this thread">
-                        <Icon name="Lock" className="size-3" aria-hidden />
-                        <span className="sr-only">Fixed in this thread</span>
-                      </span>
+                      Fixed in this thread
+                      <Icon name="Lock" className="size-3" aria-hidden />
                     </span>
                   </div>
                 ) : (
@@ -1127,12 +1188,28 @@ export function ModelReasoningPicker({
                     role={showSearchInput ? "listbox" : undefined}
                     id={showSearchInput ? listboxId : undefined}
                     aria-label={showSearchInput ? "Models" : undefined}
+                    onScroll={isCompactViewport ? undefined : listFade.measure}
+                    style={isCompactViewport ? undefined : listFade.style}
                     className={cn(
-                      "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain p-1",
-                      showSearchInput && "pt-0.5",
+                      "flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain [scrollbar-width:thin]",
                       isCompactViewport
-                        ? "fade-clip-bottom -mx-3.5 max-h-[15.25rem] px-3.5 pb-8 pt-1.5"
-                        : "max-h-64 group-data-[side=top]/model-picker:max-h-none",
+                        ? cn(
+                            "my-1 px-0",
+                            hasActiveModelOptions && !activeModelIsLoading && FIVE_MODEL_ROWS,
+                          )
+                        : cn(
+                            "px-1.5 pb-1.5 group-data-[side=top]/model-picker:max-h-none",
+                            !showSearchInput &&
+                              (!showProviderTabs
+                                ? "pt-1.5"
+                                : hasActiveModelOptions && !activeModelIsLoading
+                                  ? "pt-1"
+                                  : undefined),
+                            // Five rows plus the bottom padding, then scroll.
+                            hasActiveModelOptions &&
+                              !activeModelIsLoading &&
+                              "max-h-[calc(5*var(--model-row-height)+0.5rem)] [&>button]:h-(--model-row-height) [&>button]:shrink-0",
+                          ),
                     )}
                   >
                     {activeModelIsLoading ? (
@@ -1178,25 +1255,13 @@ export function ModelReasoningPicker({
                             />
                           );
                         })}
-                        {!isCompactViewport &&
-                        !isSearching &&
-                        filteredMoreModelOptions.length > 0 ? (
-                          <MoreModelsSubmenu
-                            open={moreModelsOpen}
-                            onOpenChange={setMoreModelsOpen}
-                            openSub={openSub}
-                            activeBrandPrefix={activeBrandPrefix}
-                            isPreviewing={isPreviewing}
-                            modelValue={modelValue}
-                            options={filteredMoreModelOptions}
-                            onSelect={handleModelSelect}
-                          />
-                        ) : null}
                         {isSearching && navRows.length === 0 ? (
                           <div
                             className={cn(
-                              "px-2 text-xs text-muted-foreground",
-                              isCompactViewport ? "py-2" : "py-[0.3125rem]",
+                              "px-2 text-xs",
+                              isCompactViewport
+                                ? "py-2 text-muted-foreground"
+                                : "py-1.5 text-subtle-foreground",
                             )}
                           >
                             No models match your search
@@ -1223,7 +1288,17 @@ export function ModelReasoningPicker({
                           : { installUrl: activeProvider.installUrl })}
                         {...(activeProvider?.signInCommand === undefined
                           ? {}
-                          : { signInCommand: activeProvider.signInCommand })}
+                          : {
+                              signInCommand: activeProvider.signInCommand,
+                              onSignIn: () => {
+                                setOpen(false);
+                                loginProviderId.current = activeProviderId;
+                                providerLogin.start(
+                                  activeProvider.signInCommand!,
+                                  activeProviderLabel,
+                                );
+                              },
+                            })}
                         {...(activeProvider?.signInHint === undefined
                           ? {}
                           : { signInHint: activeProvider.signInHint })}
@@ -1232,28 +1307,45 @@ export function ModelReasoningPicker({
                   </div>
                 )}
 
-                {effectiveShowFastModeToggle ? (
+                {lockModelSelection || activeModelIsLoading ? null : (
+                  <MissingModelsNote
+                    providerId={activeProviderId}
+                    providerLabel={activeProviderLabel}
+                    routing={providerRouting}
+                    modelIds={[...activeModelOptions, ...activeMoreModelOptions].map(
+                      (option) => option.value,
+                    )}
+                  />
+                )}
+
+                {effectiveShowServiceTiers ? (
                   <>
-                    <div className="shrink-0 border-t border-border" />
-                    <div className="shrink-0 p-1">
-                      <label className="flex cursor-pointer items-center justify-between gap-3 rounded-sm px-2 py-[0.3125rem] text-xs">
-                        <span className="flex min-w-0 items-center gap-2">
-                          <Icon
-                            name="Zap"
-                            className="size-4 fill-current text-muted-foreground"
-                          />
-                          <span>{fastModeText}</span>
-                        </span>
-                        <Switch
-                          checked={fastModeEnabled}
-                          onCheckedChange={onFastModeChange}
-                          aria-label={fastModeText}
-                          className={cn(
-                            LIST_HOVER_TRANSITION,
-                            "[&>span]:size-3.5",
-                          )}
-                        />
-                      </label>
+                    <div className="h-px shrink-0 bg-foreground/[0.07]" />
+                    <div className="shrink-0 p-1.5">
+                      <ToggleGroup
+                        type="single"
+                        aria-label="Speed"
+                        value={activeTier}
+                        onValueChange={(next) => {
+                          if (next !== "") onServiceTierChange(next as ServiceTier);
+                        }}
+                        className="w-full gap-0.5 rounded-md bg-foreground/5 p-0.5"
+                      >
+                        {speedTiers.map((tier) => (
+                          <ToggleGroupItem
+                            key={tier.id}
+                            value={tier.id}
+                            className={cn(
+                              LIST_HOVER_TRANSITION,
+                              "min-w-0 grow gap-1 rounded-sm px-2 text-xs font-normal text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-background data-[state=on]:font-medium data-[state=on]:text-foreground data-[state=on]:shadow-message dark:data-[state=on]:bg-surface-recessed",
+                              isCompactViewport ? "h-9" : "h-7",
+                            )}
+                          >
+                            <SpeedBolts count={tier.bolts} className="size-3" />
+                            <span className="truncate">{tier.label}</span>
+                          </ToggleGroupItem>
+                        ))}
+                      </ToggleGroup>
                     </div>
                   </>
                 ) : null}
@@ -1263,6 +1355,22 @@ export function ModelReasoningPicker({
         </div>
       </PopoverContent>
     </Popover>,
+  );
+}
+
+/** One bolt for Fast, two for Ultra Fast. */
+function SpeedBolts({ count, className }: { count: number; className: string }) {
+  if (count === 0) return null;
+  return (
+    <span className="flex shrink-0 items-center -space-x-1.5">
+      {Array.from({ length: count }, (_, index) => (
+        <Icon
+          key={index}
+          name="Zap"
+          className={cn("shrink-0 fill-current", className)}
+        />
+      ))}
+    </span>
   );
 }
 
@@ -1286,11 +1394,13 @@ function MoreModelsToggleRow({
       onClick={onToggle}
       aria-expanded={expanded}
       className={cn(
-        "relative flex w-full cursor-default select-none items-center gap-1 rounded-sm px-2 text-xs text-muted-foreground outline-none hover:bg-state-hover hover:text-foreground",
+        "relative flex w-full cursor-default select-none items-center gap-1 px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
         LIST_HOVER_TRANSITION,
         MENU_ITEM_LAST_HOVERED_CLASS,
-        isActive && "bg-state-active",
-        isCompactViewport ? COMPACT_ROW_CLASS_NAME : "py-[0.3125rem]",
+        isActive && "bg-state-active text-foreground",
+        isCompactViewport
+          ? cn(COMPACT_ROW_CLASS_NAME, "text-muted-foreground")
+          : "rounded-lg text-subtle-foreground",
       )}
       {...hoverProps}
     >
@@ -1300,117 +1410,6 @@ function MoreModelsToggleRow({
         className="size-3.5 shrink-0"
       />
     </button>
-  );
-}
-
-function MoreModelsSubmenu({
-  open,
-  onOpenChange,
-  openSub,
-  activeBrandPrefix,
-  isPreviewing,
-  modelValue,
-  options,
-  onSelect,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  openSub: () => void;
-  activeBrandPrefix: string | undefined;
-  isPreviewing: boolean;
-  modelValue: string;
-  options: readonly ModelPickerOption[];
-  onSelect: (value: string) => void;
-}) {
-  const { isLastHovered, hoverProps } = useMenuItemHover();
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const focusFirstSubItem = useCallback(() => {
-    window.setTimeout(() => {
-      contentRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    }, 0);
-  }, []);
-
-  useEffect(() => {
-    if (open && !isLastHovered) {
-      onOpenChange(false);
-    }
-  }, [open, isLastHovered, onOpenChange]);
-
-  return (
-    <Popover open={open} onOpenChange={onOpenChange}>
-      <PopoverAnchor asChild>
-        <button
-          ref={triggerRef}
-          type="button"
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={openSub}
-          onPointerEnter={(event) => {
-            hoverProps.onPointerEnter(event);
-            openSub();
-          }}
-          onKeyDown={(event) => {
-            hoverProps.onKeyDown(event);
-
-            if (
-              event.key === "Enter" ||
-              event.key === " " ||
-              event.key === "Spacebar" ||
-              event.key === "ArrowRight"
-            ) {
-              event.preventDefault();
-              openSub();
-              focusFirstSubItem();
-              return;
-            }
-
-            if (event.key === "Escape" || event.key === "ArrowLeft") {
-              event.preventDefault();
-              onOpenChange(false);
-            }
-          }}
-          className={cn(
-            "relative flex w-full cursor-default select-none items-center gap-1 rounded-sm px-2 py-[0.3125rem] text-xs text-muted-foreground outline-none hover:bg-state-hover hover:text-foreground",
-            LIST_HOVER_TRANSITION,
-            MENU_ITEM_LAST_HOVERED_CLASS,
-          )}
-          data-last-hovered={hoverProps["data-last-hovered"]}
-        >
-          <span>More models</span>
-          <Icon name="ChevronRight" className="size-3.5 shrink-0" />
-        </button>
-      </PopoverAnchor>
-      <PopoverContent
-        ref={contentRef}
-        side="right"
-        align="start"
-        sideOffset={6}
-        className={cn(
-          "flex flex-col p-1 data-[state=closed]:animate-none",
-          MODEL_PICKER_MENU_WIDTH_CLASS_NAME,
-        )}
-        onKeyDown={(event) => {
-          if (event.key === "Escape" || event.key === "ArrowLeft") {
-            event.preventDefault();
-            onOpenChange(false);
-            triggerRef.current?.focus();
-          }
-        }}
-      >
-        <MenuHoverProvider>
-          {options.map((option) => (
-            <MenuRowButton
-              key={option.value}
-              label={stripModelBrandPrefix(option.label, activeBrandPrefix)}
-              qualifier={option.routeProviderId}
-              selected={!isPreviewing && option.value === modelValue}
-              onClick={() => onSelect(option.value)}
-            />
-          ))}
-        </MenuHoverProvider>
-      </PopoverContent>
-    </Popover>
   );
 }
 
@@ -1454,13 +1453,14 @@ function MenuRowButton({
       aria-selected={role === "option" ? Boolean(isActive) : undefined}
       onClick={onClick}
       className={cn(
-        "relative flex w-full cursor-default select-none items-center justify-between gap-3 rounded-sm px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
+        "relative flex w-full cursor-default select-none items-center justify-between gap-3 px-2 text-xs outline-none hover:bg-state-hover hover:text-foreground",
         LIST_HOVER_TRANSITION,
         MENU_ITEM_LAST_HOVERED_CLASS,
-        isActive && "bg-state-active",
+        isActive && "bg-state-active text-foreground",
         disabled && "cursor-not-allowed opacity-60",
-        isCompactViewport ? COMPACT_ROW_CLASS_NAME : "py-1",
-        isCompactViewport && selected && COMPACT_SELECTED_ROW_CLASS_NAME,
+        isCompactViewport
+          ? cn(COMPACT_ROW_CLASS_NAME, selected && "bg-foreground/5 font-medium")
+          : cn("rounded-lg", selected ? "text-foreground" : "text-muted-foreground"),
       )}
       {...hoverProps}
     >
@@ -1480,7 +1480,7 @@ function MenuRowButton({
         name="Check"
         className={cn(
           COARSE_POINTER_ICON_SIZE_SHRINK_CLASS,
-          "text-subtle-foreground dark:text-primary",
+          isCompactViewport ? "text-muted-foreground" : "text-foreground",
           selected ? "opacity-100" : "opacity-0",
         )}
       />
@@ -1517,9 +1517,12 @@ function ReasoningEffortMenu({
         align={align}
         mobileTitle="Effort"
         mobileClassName={FLOATING_DRAWER_CLASS_NAME}
+        sideOffset={isCompactViewport ? undefined : 6}
         className={cn(
           "min-w-36",
-          isCompactViewport && COMPACT_SHEET_PADDING_CLASS_NAME,
+          isCompactViewport
+            ? COMPACT_SHEET_PADDING_CLASS_NAME
+            : cn("p-1.5", QUIET_SURFACE_CLASS_NAME),
         )}
       >
         <DropdownMenuLabel className="font-normal text-subtle-foreground">
@@ -1539,17 +1542,30 @@ function ReasoningEffortMenu({
                       COMPACT_ROW_CLASS_NAME,
                       selected && COMPACT_SELECTED_ROW_CLASS_NAME,
                     )
-                  : selected &&
-                      "bg-background text-foreground shadow-message dark:bg-surface-recessed",
+                  : cn(
+                      "justify-between gap-3 rounded-lg py-1.5",
+                      selected ? "text-foreground" : "text-muted-foreground",
+                    ),
               )}
             >
               {option.label}
+              {isCompactViewport ? null : (
+                <Icon
+                  name="Check"
+                  className={cn(
+                    "size-3.5 shrink-0 text-foreground",
+                    selected ? "opacity-100" : "opacity-0",
+                  )}
+                />
+              )}
             </DropdownMenuItem>
           );
         })}
         {shortcut ? (
           <>
-            <DropdownMenuSeparator />
+            <DropdownMenuSeparator
+              className={isCompactViewport ? undefined : "bg-foreground/[0.07]"}
+            />
             <div className="flex items-center gap-2 px-2 py-1 text-xs text-subtle-foreground">
               Cycle
               <AppCommandShortcutPill shortcut={shortcut} ariaHidden={false} />
@@ -1558,6 +1574,127 @@ function ReasoningEffortMenu({
         ) : null}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+// Hidden until the model picker is hovered; no layout shift because the
+// buttons keep their space. Keyboard uses ←/→, touch uses the effort menu.
+function ReasoningStepButtons({
+  colorClassName,
+  canLower,
+  canRaise,
+  lowerShortcut,
+  raiseShortcut,
+  onStep,
+}: {
+  colorClassName: string;
+  canLower: boolean;
+  canRaise: boolean;
+  lowerShortcut: AppShortcutPresentation | null;
+  raiseShortcut: AppShortcutPresentation | null;
+  onStep: (delta: 1 | -1) => void;
+}) {
+  const steps = [
+    {
+      delta: -1,
+      verb: "Lower",
+      icon: "ChevronDown",
+      enabled: canLower,
+      shortcut: lowerShortcut,
+    },
+    {
+      delta: 1,
+      verb: "Raise",
+      icon: "ChevronUp",
+      enabled: canRaise,
+      shortcut: raiseShortcut,
+    },
+  ] as const;
+  return (
+    <TooltipProvider delayDuration={300}>
+      <span className="flex shrink-0 items-center pr-1 opacity-0 transition-opacity duration-100 group-hover/model-effort:opacity-100 motion-reduce:transition-none pointer-coarse:hidden">
+        {steps.map((step) => (
+          <Tooltip key={step.verb}>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                tabIndex={-1}
+                aria-label={`${step.verb} reasoning effort`}
+                aria-keyshortcuts={step.shortcut?.ariaKeyshortcuts}
+                disabled={!step.enabled}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onStep(step.delta)}
+                className={cn("h-6 w-5.5 px-0", colorClassName)}
+              >
+                <Icon name={step.icon} className="size-3.5" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {step.shortcut
+                ? `${step.verb} effort (${step.shortcut.label})`
+                : `${step.verb} effort`}
+            </TooltipContent>
+          </Tooltip>
+        ))}
+      </span>
+    </TooltipProvider>
+  );
+}
+
+/** Looks like a harness tab that is not open: its logo, and its name on hover. */
+function ExtraChoiceButton({
+  choice,
+  onClose,
+}: {
+  choice: ExtraChoice;
+  onClose: () => void;
+}) {
+  const Logo = choice.icon;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={choice.label}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onClose();
+            choice.onSelect();
+          }}
+          className="flex h-7 shrink-0 items-center rounded-lg px-1.5 text-subtle-foreground outline-none hover:bg-state-hover hover:text-foreground focus-visible:bg-state-hover focus-visible:text-foreground pointer-coarse:h-10 pointer-coarse:px-2.5"
+        >
+          <Logo className="size-4 shrink-0 pointer-coarse:size-5" />
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">{choice.label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function ConnectHarnessButton({ onClose }: { onClose: () => void }) {
+  const navigate = useNavigate();
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label="Connect agent"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onClose();
+            void navigate(getSettingsRoutePath("providers"));
+          }}
+          className="group/connect flex h-8 w-7 shrink-0 items-center justify-center text-subtle-foreground hover:text-foreground focus-visible:text-foreground focus-visible:outline-none pointer-coarse:size-10"
+        >
+          <span className="flex size-5 items-center justify-center rounded-md bg-foreground/5 group-hover/connect:bg-foreground/10 group-focus-visible/connect:bg-foreground/10 pointer-coarse:size-7">
+            <Icon name="Plus" className="size-3" aria-hidden />
+          </span>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="top">Connect agent</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -1579,39 +1716,42 @@ function ModelSearchInput({
   activeOptionId,
 }: ModelSearchInputProps) {
   const isCompactViewport = useIsCompactViewport();
+  const input = (
+    <Input
+      ref={inputRef}
+      value={query}
+      onChange={(event) => onQueryChange(event.target.value)}
+      onKeyDown={onKeyDown}
+      placeholder="Search models"
+      aria-label="Search models"
+      role="combobox"
+      aria-expanded
+      aria-controls={listboxId}
+      aria-autocomplete="list"
+      aria-activedescendant={activeOptionId}
+      className={
+        isCompactViewport
+          ? "h-10 rounded-full border-transparent bg-surface-recessed pl-10 pr-4 text-xs text-foreground shadow-none placeholder:text-subtle-foreground focus-visible:ring-0"
+          : "h-7 min-w-0 flex-1 rounded-none border-0 bg-transparent px-0 text-xs text-foreground shadow-none placeholder:text-subtle-foreground focus-visible:ring-0 dark:bg-transparent"
+      }
+    />
+  );
+  if (!isCompactViewport) {
+    return (
+      <label className="flex h-8 shrink-0 items-center gap-2 px-3">
+        <Icon name="Search" className="size-3.5 shrink-0 text-subtle-foreground" />
+        {input}
+      </label>
+    );
+  }
   return (
-    <div
-      className={cn(
-        "shrink-0",
-        isCompactViewport ? "pt-2.5" : "px-1.5 pb-1 pt-1.5",
-      )}
-    >
+    <div className="shrink-0 pt-2.5">
       <div className="relative">
         <Icon
           name="Search"
-          className={cn(
-            "pointer-events-none absolute top-1/2 -translate-y-1/2 text-muted-foreground",
-            isCompactViewport ? "left-4 size-4" : "left-2 size-3.5",
-          )}
+          className="pointer-events-none absolute left-4 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
         />
-        <Input
-          ref={inputRef}
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="Search models"
-          aria-label="Search models"
-          role="combobox"
-          aria-expanded
-          aria-controls={listboxId}
-          aria-autocomplete="list"
-          aria-activedescendant={activeOptionId}
-          className={cn(
-            "h-7 rounded-md border border-border bg-foreground/5 pl-7 pr-2 text-xs text-foreground placeholder:text-subtle-foreground shadow-none focus-visible:border-primary/50 focus-visible:ring-0",
-            isCompactViewport &&
-              "h-10 rounded-full border-transparent bg-surface-recessed pl-10 pr-4",
-          )}
-        />
+        {input}
       </div>
     </div>
   );

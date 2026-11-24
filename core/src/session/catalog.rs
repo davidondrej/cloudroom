@@ -1,6 +1,14 @@
 //! Read-only views: the session list, dashboard, harness capabilities, and model checks.
 use super::*;
 
+/// What starting Claude with an exact model its catalog omits found for that model (#1059).
+#[derive(Clone)]
+enum Probe {
+    Listed(Vec<String>),
+    Unlisted,
+    Failed(Instant),
+}
+
 impl Manager {
     pub fn dashboard(&self) -> Value {
         let (sampled_at, resources) = self.observability.resources();
@@ -33,7 +41,8 @@ impl Manager {
             "onboarding":{"localConnected":null,"offlineTaskVerified":null},
             "capabilities":{"settings":true,"updates":false},
             "sessionCount":sessions.len(),"agents":local.agent_counts(),"sessions":summaries,
-            "terminals":self.terminals.summary(),"previews":{"lastActivity":self.previews.last_activity()}})
+            "terminals":self.terminals.summary(),"previews":{"lastActivity":self.previews.last_activity()},
+            "mac":{"waiting":self.mac.waiting()}})
     }
 
     /// The latest 1,000 sessions, newest activity first. Prompts, receipts and records stay
@@ -48,6 +57,7 @@ impl Manager {
             .map(|s| {
                 json!({"session_id":s.session_id,"harness":s.harness,"model":s.model,"provider":s.provider,
                 "state":s.state,"workspace":s.workspace,"parent_session":s.parent_session,
+                "title":s.title,"archived":s.archived,"parent_thread":s.parent_thread(),"last_app_prompt":s.last_app_prompt,
                 "current_request":s.current_request,"queued":s.queue.len(),
                 "last_sequence":s.last_sequence,"last_activity_ms":s.last_activity})
             })
@@ -80,11 +90,84 @@ impl Manager {
         check(&self.model_catalog(kind).await?).ok_or(Error::Conflict("invalid model"))
     }
 
-    async fn catalog(&self, kind: runtime::Kind, saved_ok: bool) -> Result<Vec<runtime::Model>> {
+    /// Why the catalog refuses `reasoning` for `model`, naming the levels it takes (ADR 0123).
+    pub(super) async fn effort_refusal(
+        &self,
+        kind: runtime::Kind,
+        model: &str,
+        reasoning: &str,
+    ) -> Option<Error> {
+        let models = self.catalog(kind, true).await.ok()?;
+        runtime::supports(kind, &models, model, reasoning)
+            .err()
+            .map(Error::Effort)
+    }
+
+    /// The effort levels of a Claude model's own catalog row. Claude lists an exact model its catalog omits only once
+    /// it runs it, so that row comes from a Claude started with the model, without inference (#1059). One probe per
+    /// model runs at a time, within the startup limit, in a task of its own, so a dropped request never cuts it short.
+    /// Its answer is kept, even "not listed"; a failure only for a minute.
+    pub(super) async fn claude_levels(self: &Arc<Self>, model: &str) -> Option<Vec<String>> {
+        type Slots =
+            Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<Option<Probe>>>>>;
+        static PROBES: std::sync::LazyLock<Slots> = std::sync::LazyLock::new(Mutex::default);
+        let models = self.catalog(runtime::Kind::Claude, true).await.ok()?;
+        if let Some(entry) = models.into_iter().find(|entry| entry.model == model) {
+            return Some(entry.reasoning_levels);
+        }
+        let slot = PROBES
+            .lock()
+            .unwrap()
+            .entry(model.to_owned())
+            .or_default()
+            .clone();
+        let (manager, model) = (self.clone(), model.to_owned());
+        let probe = tokio::spawn(async move {
+            let mut answer = slot.lock().await;
+            match &*answer {
+                Some(Probe::Failed(at)) if at.elapsed() >= Duration::from_secs(60) => {}
+                Some(found) => return found.clone(),
+                None => {}
+            }
+            let found = match manager.startups.acquire().await {
+                Ok(_startup) => {
+                    let mut config = manager.config.clone();
+                    match config.harnesses.get_mut(&runtime::Kind::Claude) {
+                        Some(profile) => profile.model.clone_from(&model),
+                        None => return Probe::Failed(Instant::now()),
+                    }
+                    match runtime::models(&config, runtime::Kind::Claude).await.0 {
+                        Ok(models) => models
+                            .into_iter()
+                            .find(|entry| entry.model == model)
+                            .map_or(Probe::Unlisted, |entry| {
+                                Probe::Listed(entry.reasoning_levels)
+                            }),
+                        Err(_) => Probe::Failed(Instant::now()),
+                    }
+                }
+                Err(_) => Probe::Failed(Instant::now()),
+            };
+            *answer = Some(found.clone());
+            found
+        });
+        match probe.await.ok()? {
+            Probe::Listed(levels) => Some(levels),
+            Probe::Unlisted | Probe::Failed(_) => None,
+        }
+    }
+
+    pub(super) async fn catalog(
+        &self,
+        kind: runtime::Kind,
+        saved_ok: bool,
+    ) -> Result<Vec<runtime::Model>> {
         let cache = match kind {
             runtime::Kind::Codex => &self.codex_models,
             runtime::Kind::Claude => &self.claude_models,
             runtime::Kind::Cursor => &self.cursor_models,
+            runtime::Kind::OpenCode => &self.opencode_models,
+            runtime::Kind::Antigravity => &self.antigravity_models,
             _ => return Err(Error::Conflict("model catalog unavailable")),
         };
         let mut cached = cache.lock().await;
@@ -93,11 +176,20 @@ impl Manager {
         {
             return Ok(models.clone());
         }
-        let (result, exit) = if kind == runtime::Kind::Cursor {
-            let models = runtime::cursor_models::list(&self.config, &self.storage).await;
-            (models, None)
-        } else {
-            runtime::models(&self.config, kind).await
+        let (result, exit) = match kind {
+            runtime::Kind::Cursor => (
+                runtime::cursor_models::list(&self.config, &self.storage).await,
+                None,
+            ),
+            runtime::Kind::OpenCode => (
+                runtime::opencode::list_models(&self.config, &self.storage).await,
+                None,
+            ),
+            runtime::Kind::Antigravity => (
+                runtime::antigravity::models(&self.config, &self.storage).await,
+                None,
+            ),
+            _ => runtime::models(&self.config, kind).await,
         };
         let crashed = matches!(
             exit,
@@ -123,7 +215,20 @@ impl Manager {
                 *cached = Some((Instant::now(), models.clone()));
                 return Ok(models);
             }
-            Err(_) if kind == runtime::Kind::Cursor => "model catalog unavailable",
+            Err(e)
+                if kind == runtime::Kind::Antigravity
+                    && e.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                return Err(Error::Conflict(runtime::antigravity::SIGN_IN));
+            }
+            Err(_)
+                if matches!(
+                    kind,
+                    runtime::Kind::Cursor | runtime::Kind::OpenCode | runtime::Kind::Antigravity
+                ) =>
+            {
+                "model catalog unavailable"
+            }
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
                 "model catalog unavailable (agent timed out listing models)"
             }
@@ -156,6 +261,8 @@ impl Manager {
                     harness["compact"] = json!(true);
                     harness["service_tier"] = json!(kind.fast());
                     harness["skill_mentions"] = json!(*kind == runtime::Kind::Claude);
+                    harness["set_model"] = json!(*kind == runtime::Kind::Claude);
+                    harness["idle_set_model"] = json!(*kind == runtime::Kind::Claude);
                     harness["rewind"] = json!(true);
                     harness["attachments"] = json!({"images":true,"files":true});
                     harness["subagents"] = json!(true);
@@ -167,7 +274,10 @@ impl Manager {
                 | runtime::Kind::Hermes
                 | runtime::Kind::Devin
                 | runtime::Kind::Droid
-                | runtime::Kind::OpenClaw => {
+                | runtime::Kind::Kimi
+                | runtime::Kind::Antigravity
+                | runtime::Kind::OpenClaw
+                | runtime::Kind::AgentZero => {
                     let capabilities = runtime::cursor::capabilities(*kind);
                     for (key, value) in capabilities.as_object().unwrap() {
                         harness[key] = value.clone();
@@ -177,7 +287,10 @@ impl Manager {
                         runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS,
                         runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS,
                         runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS,
+                        runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS,
+                        runtime::Kind::Antigravity => runtime::antigravity::LEVELS,
                         runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS,
+                        runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS,
                         _ => runtime::PI_REASONING_LEVELS,
                     });
                     // Cursor and OpenCode open images from the attached path; fx gets them inline.
@@ -189,7 +302,12 @@ impl Manager {
                             json!([runtime::PI_REASONING_LEVELS, &["max"]].concat());
                         harness["prompt_reasoning"] = json!(true);
                     }
-                    if *kind == runtime::Kind::Cursor {
+                    if matches!(
+                        *kind,
+                        runtime::Kind::Cursor
+                            | runtime::Kind::OpenCode
+                            | runtime::Kind::Antigravity
+                    ) {
                         harness["models"] = if self.storage.blocks() {
                             Value::Null
                         } else {
@@ -223,6 +341,39 @@ impl Manager {
         capabilities
     }
 
+    /// A model pick for Claude, which switches in its session (`set_model`); other agents keep their launch model.
+    /// Returns the effort it runs with: the one asked for, or the session's nearest one the model takes.
+    pub async fn check_model_switch(
+        &self,
+        id: &str,
+        model: &str,
+        reasoning: Option<&str>,
+    ) -> Result<String> {
+        if model.is_empty() || model.len() > 256 || model.chars().any(char::is_control) {
+            return Err(Error::Conflict("invalid model"));
+        }
+        let current = {
+            let local = self.local.lock().unwrap();
+            let session = local.sessions.get(id).ok_or(Error::NotFound)?;
+            if session.harness != runtime::Kind::Claude {
+                return Err(Error::Conflict(
+                    "this agent keeps its model; switch agents to change it",
+                ));
+            }
+            session.reasoning.clone().unwrap_or_else(|| "none".into())
+        };
+        let kind = runtime::Kind::Claude;
+        if let Some(level) = reasoning {
+            if !self.reasoning_supported(kind, model, level).await? {
+                return Err(Error::Conflict("invalid reasoning effort"));
+            }
+            return Ok(level.to_owned());
+        }
+        let models = self.catalog(kind, true).await?;
+        runtime::fit_reasoning(kind, &models, model, &current)
+            .ok_or(Error::Conflict("invalid model"))
+    }
+
     /// Follow-up reasoning is checked against the launch model. Omitted reasoning stays on the launch default.
     pub async fn check_prompt_reasoning(&self, id: &str, reasoning: Option<&str>) -> Result<()> {
         let Some(reasoning) = reasoning else {
@@ -238,7 +389,10 @@ impl Manager {
                     | runtime::Kind::Hermes
                     | runtime::Kind::Devin
                     | runtime::Kind::Droid
+                    | runtime::Kind::Kimi
+                    | runtime::Kind::Antigravity
                     | runtime::Kind::OpenClaw
+                    | runtime::Kind::AgentZero
             ) && session.reasoning.as_deref() != Some(reasoning)
             {
                 return Err(Error::Conflict("invalid reasoning effort"));
@@ -261,7 +415,10 @@ impl Manager {
             runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Antigravity => runtime::antigravity::LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {
             return Err(Error::Conflict("invalid reasoning effort"));
@@ -273,9 +430,6 @@ impl Manager {
         let Some(tier) = tier else {
             return Ok(());
         };
-        if tier != "default" && tier != "fast" {
-            return Err(Error::Conflict("invalid service tier"));
-        }
         let kind = self
             .local
             .lock()
@@ -284,7 +438,7 @@ impl Manager {
             .get(id)
             .ok_or(Error::NotFound)?
             .harness;
-        if !kind.fast() && tier == "fast" {
+        if !kind.tier(tier) {
             return Err(Error::Conflict("invalid service tier"));
         }
         Ok(())

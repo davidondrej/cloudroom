@@ -39,7 +39,7 @@ it("shows details when a snapshot arrives and removes them when only aggregate u
   const { rerender } = render(
     <ThreadContextWindowCard usage={aggregateUsage} />,
   );
-  expect(screen.getByText("10% used")).toBeTruthy();
+  expect(screen.getByText("10%")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Show details" })).toBeNull();
   rerender(<ThreadContextWindowCard usage={usage} />);
   fireEvent.click(screen.getByRole("button", { name: "Show details" }));
@@ -47,5 +47,5 @@ it("shows details when a snapshot arrives and removes them when only aggregate u
   rerender(<ThreadContextWindowCard usage={aggregateUsage} />);
   expect(screen.queryByText("Messages")).toBeNull();
   expect(screen.queryByRole("button", { name: "Hide details" })).toBeNull();
-  expect(screen.getByText("10% used")).toBeTruthy();
+  expect(screen.getByText("10%")).toBeTruthy();
 });

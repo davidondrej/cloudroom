@@ -55,6 +55,40 @@ describe("buildPromptMentionResults", () => {
     ).toEqual(["Automations", "project:proj_automations"]);
   });
 
+  it("keeps a matching thread above a closer file or folder match", () => {
+    const results = buildPromptMentionResults({
+      query: "bare",
+      paths: [
+        {
+          kind: "path",
+          source: "workspace",
+          entryKind: "directory",
+          path: ".agents/skills/bare-metal",
+          name: "bare-metal",
+          replacement: ".agents/skills/bare-metal/",
+        },
+      ],
+      threads: [
+        {
+          kind: "thread",
+          path: "thread:thr_bare",
+          replacement: "thread:thr_bare",
+          projectId: "proj_app",
+          threadId: "thr_bare",
+          title: "🔥 bare-metal: astra advisor",
+        },
+      ],
+      projects: [],
+      sections: [],
+      plugins: [],
+    });
+
+    expect(results.groups.map((group) => group.label)).toEqual([
+      "Threads",
+      "Workspace",
+    ]);
+  });
+
   it("keeps provider sections distinct when their visible labels collide", () => {
     const first = plugin("First");
     const second: PluginMentionSuggestion = {

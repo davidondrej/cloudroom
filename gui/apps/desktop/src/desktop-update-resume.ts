@@ -94,6 +94,27 @@ export async function saveUpdateAttempt(dataDir: string, from: string, to: strin
   await writeFile(join(dataDir, ATTEMPT_FILE_NAME), JSON.stringify({ from, to, at: Date.now(), ...note }));
 }
 
+const attemptSchema = z.object({
+  from: z.string(),
+  to: z.string(),
+  at: z.number(),
+  yielded: z.boolean().optional(),
+});
+
+/** The last Mac "Restart to update", or null. The server deletes it once it has reported it. */
+export async function readUpdateAttempt(
+  dataDir: string,
+): Promise<z.infer<typeof attemptSchema> | null> {
+  const text = await readFile(join(dataDir, ATTEMPT_FILE_NAME), "utf8").catch(
+    () => null,
+  );
+  try {
+    return text === null ? null : attemptSchema.parse(JSON.parse(text));
+  } catch {
+    return null;
+  }
+}
+
 /** Adds what happened after "Restart to update" (a quit timeout, an updater error), so a failed install says why. */
 export async function noteUpdateAttempt(dataDir: string, note: AttemptNote): Promise<void> {
   const file = join(dataDir, ATTEMPT_FILE_NAME);
@@ -149,6 +170,28 @@ export async function runningLocalThreadIds(
         RUNNING_STATUSES.has(threads[index]!.status),
     )
     .map(({ id }) => id);
+}
+
+const backgroundThreadsSchema = z.array(
+  threadSchema.extend({
+    activity: z.object({
+      activeBackgroundAgentCount: z.number(),
+      activeBackgroundCommandCount: z.number(),
+      activeWorkflowCount: z.number(),
+    }),
+  }),
+);
+
+/** True when an idle Local thread still waits on a background command, agent or workflow. */
+export async function hasLocalBackgroundWork(serverUrl: string): Promise<boolean> {
+  const threads = backgroundThreadsSchema.parse(
+    await requestJson(serverUrl, "/threads?archived=false&includeHidden=true"),
+  );
+  return threads.some(
+    ({ activity, ...thread }) =>
+      isLocalThread(thread) &&
+      activity.activeBackgroundAgentCount + activity.activeBackgroundCommandCount + activity.activeWorkflowCount > 0,
+  );
 }
 
 export async function stopThreadsForUpdate(

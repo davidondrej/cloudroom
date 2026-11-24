@@ -46,8 +46,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => null,
 }));
 
 const draft = { text: "hello", mentions: [], attachments: [] };

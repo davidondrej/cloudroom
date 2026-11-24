@@ -191,6 +191,21 @@ export const timelineNonOperationSystemRowSchema =
     systemKind: z.enum(["debug", "error", "reconnect"]),
     /** The provider's plan or usage limit stopped the turn. */
     planLimit: z.boolean().optional(),
+    /** The provider refused the work (say OpenAI's cybersecurity filter); it gets the same card to continue elsewhere. */
+    refusal: z.boolean().optional(),
+    /** The thread then moved to another agent: `from` hit the limit, `to` took over at `at` (ms), right away with `resend`. */
+    planLimitSwitch: z
+      .object({
+        from: z.string(),
+        to: z.string(),
+        resend: z.boolean(),
+        at: z.number(),
+      })
+      .optional(),
+    /** The thread then continued on another account of the same agent: `from` hit the limit, `to` took over. */
+    planLimitAccountSwitch: z
+      .object({ provider: z.string(), from: z.string(), to: z.string() })
+      .optional(),
   });
 export type TimelineNonOperationSystemRow = z.infer<
   typeof timelineNonOperationSystemRowSchema

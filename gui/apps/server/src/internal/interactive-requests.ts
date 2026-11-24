@@ -25,6 +25,7 @@ import { requireAuthenticatedDaemonSession } from "./session-state.js";
 interface RequestChildThreadNeedsAttentionNotificationArgs {
   blockerSummary: string | null;
   childThreadId: string;
+  interactionId: string;
 }
 
 const CHILD_THREAD_BLOCKER_SUMMARY_MAX_LINES = 4;
@@ -82,9 +83,20 @@ function pluginFormTitleLines(interaction: PendingInteraction): string[] {
     : [payload.title];
 }
 
+/**
+ * How the parent reaches the blocker. A parent that only replies to the child
+ * gets its message queued behind the interaction, and the child stays blocked.
+ */
+function childThreadBlockerNextStep(interaction: PendingInteraction): string {
+  const show = `\`room-cli thread interactions show ${interaction.id} ${interaction.threadId}\``;
+  return isUserQuestionPendingInteractionPayload(interaction.payload)
+    ? `${show} prints the choices and the command that answers it. A \`thread tell\` only queues behind the question.`
+    : `${show} prints the details. A \`thread tell\` only queues behind it.`;
+}
+
 export function buildChildThreadBlockerSummary(
   interaction: PendingInteraction,
-): string | null {
+): string {
   const detailLines = formatPendingInteractionSubjectDetailLines(interaction);
   const details = (
     detailLines.length > 0 ? detailLines : pluginFormTitleLines(interaction)
@@ -92,15 +104,17 @@ export function buildChildThreadBlockerSummary(
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .slice(0, CHILD_THREAD_BLOCKER_SUMMARY_MAX_LINES);
+  const nextStep = childThreadBlockerNextStep(interaction);
   if (details.length === 0) {
-    return null;
+    return `It is blocked on a pending interaction.\n${nextStep}`;
   }
-  return truncateChildThreadBlockerSummary(
+  const summary = truncateChildThreadBlockerSummary(
     [
       `Blocked on ${pendingInteractionBlockerLabel(interaction)}:`,
       ...details,
     ].join("\n"),
   );
+  return `${summary}\n${nextStep}`;
 }
 
 function requestChildThreadNeedsAttentionNotification(
@@ -125,6 +139,7 @@ function requestChildThreadNeedsAttentionNotification(
       queueChildThreadNeedsAttentionNotificationBestEffort(deps, {
         blockerSummary: args.blockerSummary,
         childThread,
+        interactionId: args.interactionId,
         parentThreadId,
       }),
   });
@@ -198,6 +213,7 @@ export function registerInternalInteractiveRequestRoutes(
             registered.interaction,
           ),
           childThreadId: registered.interaction.threadId,
+          interactionId: registered.interaction.id,
         });
       }
 

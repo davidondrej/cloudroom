@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { BbDesktopBrowserApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
 import {
   DESKTOP_BROWSER_IMPORT_FAILURE_COPY,
   isRetryableDesktopBrowserImportReason,
@@ -29,7 +29,7 @@ import {
 
 export interface BrowserImportDialogProps {
   source: DesktopBrowserImportSource;
-  desktopBrowser: BbDesktopBrowserApi;
+  desktopBrowser: RoomDesktopBrowserApi;
   onClose: () => void;
   onImported: (
     source: DesktopBrowserImportSource,

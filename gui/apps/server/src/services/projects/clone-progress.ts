@@ -1,4 +1,5 @@
 import type { PluginEnvironmentProviderProgress } from "@get-bb/plugin-sdk/environment-provider";
+import { stripTextGitUrlCredentials } from "@cloudroom/domain";
 
 export function createCloneProgressReporter(
   target: PluginEnvironmentProviderProgress,
@@ -23,7 +24,8 @@ export function createCloneProgressReporter(
 
   function log(text: string) {
     if (disposed) return;
-    pending = text;
+    // Older daemons send git's lines as is, tokens included (#2190).
+    pending = stripTextGitUrlCredentials(text);
     const delay = Math.max(0, 1_000 - (Date.now() - lastEmittedAt));
     if (delay === 0) flush();
     else if (timer === null) {

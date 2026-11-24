@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchWithAppSurface } from "@/lib/app-surface";
@@ -7,7 +7,7 @@ import { getLocalStorage } from "@/lib/browser-storage";
 const ORDER = ["credits", "star", "install"] as const;
 export type Popup = (typeof ORDER)[number];
 type Detail = "starred" | "opened" | "already" | "migrated";
-type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number };
+type State = { closed: Popup[]; shownAt: number | null; credits: boolean; checklistHides: number; cardsLeft?: number };
 type Unsaved = { popup: Popup | "star_card"; detail?: Detail };
 const PATH = "/api/v1/cloudroom/popups";
 const KEY = ["cloudroom-popups"];
@@ -15,9 +15,9 @@ const DAY = 86_400_000;
 const UNSAVED_KEY = "cloudroom.popups.unsaved";
 const LEGACY_KEYS: Partial<Record<Popup, string>> = { credits: "cloudroom.creditsExplainerSeen", install: "cloudroom.installApp.dismissed" };
 const statusAtom = atom<Partial<Record<Popup, boolean | null>>>({});
-const openAtom = atom<Popup | "claiming" | null>(null);
+const openAtom = atom<Popup | "claiming" | "plan" | "computer-access" | null>(null);
 
-const send = async (body: { popup: Popup | "star_card"; event: "shown" | "closed"; detail?: Detail }) => {
+const send = async (body: { popup: Popup | "star_card" | "cloud_card"; event: "shown" | "closed"; detail?: Detail }) => {
   const response = await fetchWithAppSurface(PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   if (!response.ok) throw new Error("The pop-up could not be saved.");
   return (await response.json() as { ok?: boolean }).ok === true;
@@ -46,7 +46,6 @@ async function saveClosed(item: Unsaved) {
   if (saved) writeUnsaved(readUnsaved().filter((other) => other.popup !== item.popup));
 }
 
-export const claimStarCard = () => send({ popup: "star_card", event: "shown" }).catch(() => false);
 export const closeStarCard = (detail?: "starred" | "opened") => void saveClosed({ popup: "star_card", ...(detail ? { detail } : {}) });
 
 function usePopupState() {
@@ -62,6 +61,47 @@ function usePopupState() {
       return { ...state, closed: [...new Set([...state.closed, ...unsaved.flatMap((item) => item.popup === "star_card" ? [] : [item.popup])])] };
     },
   });
+}
+
+// The cards above the chat input, most important first. Only the first one that wants to show does (ADR 20261111-222457).
+// The update card is a notice. The Cloud and star cards spend the account's weekly budget when they show. The skill
+// card shows only while that budget has a card left, and keeps its own limit of one a week (docs/scopes/skill-suggestions.md).
+// So does the "build next" note: it spends none of the budget, and is asked once per round (docs/scopes/build-next.md).
+const CARDS = ["update", "cloud", "skill", "build", "star"] as const;
+type Card = (typeof CARDS)[number];
+const cardWantsAtom = atom<Record<Card, number>>({ update: 0, cloud: 0, skill: 0, build: 0, star: 0 });
+const REFUSED_WAIT_MS = 10 * 60_000;
+const cardRefusedAtom = atom(false);
+
+/** True when this card may show: nothing more important wants the space above the chat input.
+ *  Pass null while this card is still loading what it needs to decide, so a less important card waits for it. */
+export function useCard(card: Card, wants: boolean | null): boolean {
+  const [all, setAll] = useAtom(cardWantsAtom);
+  const holds = wants !== false;
+  useEffect(() => {
+    if (!holds) return;
+    setAll((current) => ({ ...current, [card]: current[card] + 1 }));
+    return () => setAll((current) => ({ ...current, [card]: current[card] - 1 }));
+  }, [card, holds, setAll]);
+  return wants === true && CARDS.find((other) => all[other] > 0) === card;
+}
+
+/** The account's weekly budget for those cards. `left` is null while loading. `claim` spends one card:
+ *  false means none are left or another device just showed one, and nothing asks again for 10 minutes. */
+export function useCardBudget() {
+  const { data, isPending } = usePopupState();
+  const client = useQueryClient();
+  const [refused, setRefused] = useAtom(cardRefusedAtom);
+  const claim = async (popup: "star_card" | "cloud_card") => {
+    const claimed = await send({ popup, event: "shown" }).catch(() => false);
+    if (!claimed) {
+      setRefused(true);
+      setTimeout(() => setRefused(false), REFUSED_WAIT_MS);
+    }
+    void client.invalidateQueries({ queryKey: KEY });
+    return claimed;
+  };
+  return { left: isPending ? null : !refused && (data?.cardsLeft ?? 0) > 0, claim };
 }
 
 export const useCreditsCohort = () => {
@@ -100,4 +140,33 @@ export function usePopup(id: Popup, eligible: boolean | null) {
     void saveClosed({ popup: id, ...(detail ? { detail } : {}) });
   };
   return { open: open === id, close };
+}
+
+/** A pop-up with its own rules (the one after buying a plan) takes the one pop-up slot while it wants to show, so
+ *  no other pop-up opens over it. False while another one is open: it waits its turn. */
+export function usePopupSlot(id: "plan" | "computer-access", wants: boolean): boolean {
+  const [open, setOpen] = useAtom(openAtom);
+  useEffect(() => {
+    if (wants && open === null) setOpen(id);
+    else if (!wants && open === id) setOpen(null);
+  }, [id, open, setOpen, wants]);
+  useEffect(() => () => setOpen((current) => (current === id ? null : current)), [id, setOpen]);
+  return wants && open === id;
+}
+
+/** A "hidden until" time saved on this Mac. The thing shows again by itself once the time is up. */
+export function useHiddenUntil(key: string) {
+  const [until, setUntil] = useState(() => Number(getLocalStorage()?.getItem(key)) || 0);
+  useEffect(() => {
+    const left = until - Date.now();
+    if (left <= 0) return;
+    const timer = setTimeout(() => setUntil(0), left);
+    return () => clearTimeout(timer);
+  }, [until]);
+  const save = (next: number) => {
+    if (next) getLocalStorage()?.setItem(key, String(next));
+    else getLocalStorage()?.removeItem(key);
+    setUntil(next);
+  };
+  return { hidden: until > Date.now(), hideFor: (ms: number) => save(Date.now() + ms), show: () => save(0) };
 }

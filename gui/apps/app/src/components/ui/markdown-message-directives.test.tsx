@@ -12,7 +12,7 @@ import {
   type Mock,
 } from "vitest";
 import type { PluginMessageDirectiveProps } from "@get-bb/plugin-sdk";
-import { useBbNavigate } from "@/lib/plugin-sdk-hooks";
+import { useRoomNavigate } from "@/lib/plugin-sdk-hooks";
 import { MarkdownPreview } from "./markdown-preview";
 import {
   buildMessageDirectiveRegistry,
@@ -25,7 +25,7 @@ import {
 } from "@/components/plugin/PluginSlotMount";
 import type { PluginMessageDirectiveSlot } from "@/lib/plugin-slots";
 import { ConversationMessageContent } from "@/components/thread/timeline/ConversationMessageContent";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { ThreadTimelineRows } from "@/components/thread/timeline/ThreadTimelineRows";
@@ -76,7 +76,7 @@ function WorkspaceFileVis(props: PluginMessageDirectiveProps) {
 }
 
 function ThreadPanelVis(_props: PluginMessageDirectiveProps) {
-  const navigate = useBbNavigate();
+  const navigate = useRoomNavigate();
   return (
     <button
       type="button"

@@ -14,6 +14,7 @@ import type {
   SystemMachineProvider,
 } from "@cloudroom/server-contract";
 import type { ComposerView } from "@get-bb/plugin-sdk";
+import { OverlayCloseFocusContext } from "@cloudroom/shared-ui/overlay-trigger";
 import type { ComposerTextEffectSource } from "@/lib/composer-text-effects";
 import { ComposerBannersSlot } from "@/components/plugin/PluginComposerBanners";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
@@ -77,7 +78,12 @@ import {
   selectPrimaryHost,
   useHosts,
 } from "@/hooks/queries/host-queries";
-import { useSystemConfig } from "@/hooks/queries/system-queries";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  providerModelsRoute,
+  systemExecutionOptionsQueryOptions,
+  useSystemConfig,
+} from "@/hooks/queries/system-queries";
 import { useSystemMachineProviders } from "@/hooks/queries/machine-provider-queries";
 import { useHostDaemon } from "@/hooks/useHostDaemon";
 
@@ -344,6 +350,30 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
   onComposerLayoutChange,
 }: DefaultNewThreadComposerProps) {
   const isProjectlessPrompt = project?.value === null;
+  const focusPrompt = useCallback(
+    () => promptBoxRef.current?.focus(),
+    [promptBoxRef],
+  );
+  const queryClient = useQueryClient();
+  const { environmentId, hostId, projectId } = execution.providerRouting ?? {};
+  // Shortcuts read the same cached list the model picker shows for that harness.
+  const loadModels = useCallback(
+    async (providerId: string) =>
+      (
+        await queryClient.fetchQuery(
+          systemExecutionOptionsQueryOptions({
+            ...providerModelsRoute(
+              queryClient,
+              { environmentId, hostId, projectId },
+              providerId,
+            ),
+            providerId,
+            writeLastKnown: false,
+          }),
+        )
+      ).models.map(({ model }) => model),
+    [environmentId, hostId, projectId, queryClient],
+  );
   const placeholder = placeholderOverride ?? NEW_THREAD_PROMPT_PLACEHOLDER;
   const placeholderHint =
     placeholderOverride === undefined && !isProjectlessPrompt
@@ -425,7 +455,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           execution.model.isLoading ||
           execution.model.loadFailed
             ? undefined
-            : promptModelShortcuts(execution)
+            : promptModelShortcuts(execution, { loadModels })
         }
         locationCommands={promptLocationCommands(
           modeConfig.environment,
@@ -450,44 +480,50 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
         header={modeConfig.header}
         footerStart={<ExecutionControls {...execution} />}
       />
-      <div className="mt-1 flex select-none items-center justify-between gap-2 px-3.5">
-        <div className="flex min-w-0 flex-1 items-center gap-1">
-          {project ? (
-            <ProjectSelector
-              projects={project.projects}
-              value={project.value}
-              onChange={project.onChange}
-              allowNoProject={project.allowNoProject ?? false}
-              createProject={project.createProject}
-              disabled={project.disabled}
-              isLoading={project.isLoading}
-              showChevronWhenDisabled={project.showChevronWhenDisabled}
-              className="shrink-0"
+      <OverlayCloseFocusContext.Provider value={focusPrompt}>
+        <div className="mt-1 flex select-none items-center justify-between gap-2 px-3.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {project ? (
+              <ProjectSelector
+                projects={project.projects}
+                value={project.value}
+                onChange={(projectId) => {
+                  // A project picked by hand is on purpose, so the wrong-project hint stays off for this prompt.
+                  nudge.dismiss();
+                  project.onChange(projectId);
+                }}
+                allowNoProject={project.allowNoProject ?? false}
+                createProject={project.createProject}
+                disabled={project.disabled}
+                isLoading={project.isLoading}
+                showChevronWhenDisabled={project.showChevronWhenDisabled}
+                className="shrink-0"
+              />
+            ) : null}
+            <EnvironmentSlot
+              projectless={project?.value === null}
+              environment={modeConfig.environment}
+              worktree={modeConfig.worktree}
+              environmentProviderInputsSlot={
+                modeConfig.environmentProviderInputsSlot
+              }
+              machineProviderInputsSlot={modeConfig.machineProviderInputsSlot}
+              cloudInputsSlot={modeConfig.cloudInputsSlot}
             />
-          ) : null}
-          <EnvironmentSlot
-            projectless={project?.value === null}
-            environment={modeConfig.environment}
-            worktree={modeConfig.worktree}
-            environmentProviderInputsSlot={
-              modeConfig.environmentProviderInputsSlot
-            }
-            machineProviderInputsSlot={modeConfig.machineProviderInputsSlot}
-            cloudInputsSlot={modeConfig.cloudInputsSlot}
-          />
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <PermissionModePicker
+              value={modeConfig.permission.value}
+              options={modeConfig.permission.options}
+              onChange={modeConfig.permission.onChange}
+              supported={modeConfig.permission.supported}
+              disabled={permissionPickerDisabledByPlanMode}
+              showChevronWhenDisabled={permissionPickerDisabledByPlanMode}
+              displayOverride={permissionDisplayOverride}
+            />
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <PermissionModePicker
-            value={modeConfig.permission.value}
-            options={modeConfig.permission.options}
-            onChange={modeConfig.permission.onChange}
-            supported={modeConfig.permission.supported}
-            disabled={permissionPickerDisabledByPlanMode}
-            showChevronWhenDisabled={permissionPickerDisabledByPlanMode}
-            displayOverride={permissionDisplayOverride}
-          />
-        </div>
-      </div>
+      </OverlayCloseFocusContext.Provider>
       {nudgeProject && project ? (
         <ProjectNudgeHint
           name={nudgeProject.name}

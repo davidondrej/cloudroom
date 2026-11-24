@@ -1,8 +1,10 @@
 use crate::config::Config;
+use crate::runtime::linux::{Origin, Origins};
 use crate::workspace::storage::{Disk, disk};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
+    cmp::Reverse,
     collections::{BTreeMap, HashMap},
     fs,
     os::unix::fs::MetadataExt,
@@ -15,6 +17,20 @@ const MS_PER_TICK: u64 = 10;
 /// A minute with no agent working that still used half a CPU is idle burn: a leftover job, or a bug.
 const IDLE_BURN_MS: u64 = 30_000;
 const TOP_PROGRAMS: usize = 5;
+/// Idle-burn minutes in a row before Core stops strays and tells the agent about burning jobs (David, 2026-11-09).
+/// A working agent, a queued message, or a calm minute starts the count again.
+const IDLE_STOP_MINUTES: u32 = 15;
+/// Off: a dry run. Core only names the strays it would stop (`would_stop`). Turn on once that has been read.
+const STOP_STRAYS: bool = false;
+/// A program using this much CPU in an idle-burn minute (a tenth of a CPU) is burning.
+const BURNING_MS: u64 = 6_000;
+/// While a preview was used this recently, nothing stops: Core can't always tell which process serves it.
+pub(super) const PREVIEW_IN_USE_MS: u64 = 2 * 60 * 60 * 1000;
+/// A glance between minutes reads `/proc` only after the container used this much CPU since the last one (a quarter
+/// of a CPU over the 2 s between glances), so an idle sandbox never pays for it.
+const GLANCE_BUSY_US: u64 = 500_000;
+/// More processes than any sandbox runs in a minute; a fork storm only loses names, never CPU.
+const GLANCE_MAX: usize = 20_000;
 
 #[derive(Serialize)]
 pub(crate) struct Resources {
@@ -29,7 +45,7 @@ pub(crate) struct Resources {
     pub(super) agents: Option<super::metrics::AgentCounts>,
     /// Once a minute; absent from the other samples.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) cpu_minute: Option<CpuMinute>,
+    pub(super) cpu_minute: Option<Box<CpuMinute>>,
     /// Disk the history journal takes, with the CPU minute (#280).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) journal_bytes: Option<u64>,
@@ -39,10 +55,98 @@ pub(crate) struct Resources {
 #[derive(Serialize)]
 pub(crate) struct CpuMinute {
     total_ms: u64,
-    /// The top programs, `(exited)` for processes that ended during the minute, and `(other)` for the rest.
+    /// The top programs, `(exited)` for processes that ended during the minute unseen, and `(other)` for the rest.
     programs: BTreeMap<String, u64>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     idle_burn: bool,
+    /// Idle-burn minutes in a row, this one included.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    idle_minutes: Option<u32>,
+    /// In idle-burn minutes, the CPU of strays and of background jobs, by program (`runtime::linux::Origin`).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    strays: BTreeMap<String, u64>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    jobs: BTreeMap<String, u64>,
+    /// From `IDLE_STOP_MINUTES` in a row: the burning stray programs Core stopped, or in the dry run would stop.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    stopped: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    would_stop: Vec<String>,
+    /// In idle-burn minutes, each process's own CPU: pid, start time, program, milliseconds.
+    #[serde(skip)]
+    burning: Vec<(u32, u64, String, u64)>,
+}
+
+impl CpuMinute {
+    /// Returns the idle-burn minutes in a row, given those before this one. In an idle-burn minute it splits the CPU
+    /// into strays and jobs. From `IDLE_STOP_MINUTES` on it stops burning strays (in the dry run only names them),
+    /// and at that minute it tells the agent which jobs burn. Off Linux, or without an agent account, it only counts.
+    pub(super) fn idle(&mut self, before: u32, config: &Config, preview_at: Option<u64>) -> u32 {
+        if !self.idle_burn {
+            return 0;
+        }
+        let minutes = before + 1;
+        self.idle_minutes = Some(minutes);
+        let Some(policy) = &config.storage else {
+            return minutes;
+        };
+        let mut origins = Origins::new(policy);
+        let (mut strays, mut jobs, mut found) = (HashMap::new(), HashMap::new(), Vec::new());
+        for (pid, start, program, ms) in std::mem::take(&mut self.burning) {
+            match origins.of(pid, start) {
+                Origin::Stray => {
+                    *strays.entry(program.clone()).or_default() += ms;
+                    found.push((pid, start, program));
+                }
+                Origin::Job => *jobs.entry(program).or_default() += ms,
+                _ => {}
+            }
+        }
+        let burning = |used: &HashMap<String, u64>| {
+            let mut used: Vec<_> = used.iter().filter(|(_, ms)| **ms >= BURNING_MS).collect();
+            used.sort_by_key(|(program, ms)| (Reverse(**ms), program.to_owned()));
+            used.into_iter()
+                .map(|(program, _)| program.clone())
+                .collect::<Vec<_>>()
+        };
+        // For the agent's next prompt, hidden from the user's view of it like the app's own notes.
+        let notice = |text: String| {
+            let note = format!(
+                "<cloudroom_custom_instructions>\n[Cloud Credits] {text}\n</cloudroom_custom_instructions>"
+            );
+            crate::session::prompt::add_notice(&config.state_dir, &note);
+        };
+        let named = |programs: &[String]| programs[..programs.len().min(TOP_PROGRAMS)].join(", ");
+        let previewed =
+            preview_at.is_some_and(|at| super::now_ms().saturating_sub(at) < PREVIEW_IN_USE_MS);
+        if minutes >= IDLE_STOP_MINUTES && !previewed {
+            let programs = burning(&strays);
+            if STOP_STRAYS && !programs.is_empty() {
+                let targets = found.into_iter().filter(|(_, _, p)| programs.contains(p));
+                tokio::spawn(crate::runtime::linux::stop(
+                    targets.map(|(pid, start, _)| (pid, start)).collect(),
+                ));
+                notice(format!(
+                    "Cloudroom stopped leftover processes that no thread, terminal or preview owned, after they \
+                     used CPU for 15 minutes with no agent working: {}. Start them again if you still need them.",
+                    named(&programs)
+                ));
+                self.stopped = programs;
+            } else {
+                self.would_stop = programs;
+            }
+        }
+        let programs = burning(&jobs);
+        if minutes == IDLE_STOP_MINUTES && !programs.is_empty() {
+            notice(format!(
+                "These background jobs used CPU for 15 minutes with no agent working, which costs Cloud Credits: \
+                 {}. Stop them if they are no longer needed.",
+                named(&programs)
+            ));
+        }
+        (self.strays, self.jobs) = (top(strays), top(jobs));
+        minutes
+    }
 }
 
 /// One process's CPU ticks: its own, and its finished children's (added when it reaps them).
@@ -80,6 +184,11 @@ pub(super) struct Sampler {
     minute_usage: Option<u64>,
     /// Without that counter: ticks counted twice in an earlier minute, still to be taken back.
     over_counted: u64,
+    /// Each process's latest ticks from this minute's glances, so short commands (installs, builds, tests) that end
+    /// before the minute's reading keep their names instead of all reading `(exited)`.
+    seen: Processes,
+    /// The container's CPU counter at the last glance.
+    glance_usage: Option<u64>,
 }
 
 impl Sampler {
@@ -143,15 +252,32 @@ impl Sampler {
         self.tally(processes, usage, busy)
     }
 
+    /// Between minutes, every 2 s: remembers what each process has used so far, only while the container is busy.
+    pub fn glance(&mut self) {
+        let Some(usage) = container_usage().filter(|_| cgroup_cpus().is_some()) else {
+            return;
+        };
+        let last = self.glance_usage.replace(usage);
+        if last.is_none_or(|last| usage.saturating_sub(last) < GLANCE_BUSY_US) {
+            return;
+        }
+        for (key, ticks) in processes() {
+            if self.seen.len() < GLANCE_MAX || self.seen.contains_key(&key) {
+                self.seen.insert(key, ticks);
+            }
+        }
+    }
+
     fn tally(&mut self, now: Processes, usage: Option<u64>, busy: bool) -> Option<CpuMinute> {
         let usage_before = std::mem::replace(&mut self.minute_usage, usage);
+        let seen = std::mem::take(&mut self.seen);
         let before = self.processes.replace(now)?;
-        let (mut used, children) = account(&before, self.processes.as_ref()?);
-        used.sort_by_key(|(_, ticks)| std::cmp::Reverse(*ticks));
+        let now = self.processes.as_ref()?;
+        let (used, children) = account(&before, now);
         let own_ms = used.iter().map(|(_, ticks)| ticks).sum::<u64>() * MS_PER_TICK;
         // `/proc` can't be read all at once: a process reaped between two reads counts in both its own and its
         // parent's numbers. The container's counter is exact, so it sets the total and the rest is `(exited)`.
-        let exited_ms = match usage.zip(usage_before) {
+        let mut exited_ms = match usage.zip(usage_before) {
             Some((now, before)) => (now.saturating_sub(before) / 1000).saturating_sub(own_ms),
             None => {
                 let net = children - i128::from(self.over_counted);
@@ -160,24 +286,59 @@ impl Sampler {
             }
         };
         let total_ms = own_ms + exited_ms;
-        let mut programs = BTreeMap::new();
-        for (i, (program, ticks)) in used.into_iter().enumerate() {
-            let name = if i < TOP_PROGRAMS {
-                program
-            } else {
-                "(other)".into()
-            };
-            *programs.entry(name).or_default() += ticks * MS_PER_TICK;
+        // Processes a glance saw that ended before this reading take their names back out of `(exited)`, never
+        // more than it holds, so the total stays the counter's.
+        let mut by_name: HashMap<String, u64> = used
+            .into_iter()
+            .map(|(program, ticks)| (program, ticks * MS_PER_TICK))
+            .collect();
+        for (program, ticks) in ended(&before, now, &seen) {
+            let ms = (ticks * MS_PER_TICK).min(exited_ms);
+            exited_ms -= ms;
+            *by_name.entry(program).or_default() += ms;
         }
+        let mut programs = top(by_name);
         if exited_ms > 0 {
             programs.insert("(exited)".into(), exited_ms);
         }
+        let idle_burn = !busy && total_ms >= IDLE_BURN_MS;
+        let burning = now
+            .iter()
+            .filter(|_| idle_burn)
+            .filter_map(|(&(pid, start), process)| {
+                let old = before.get(&(pid, start)).map_or(0, |old| old.own);
+                let ticks = process.own.saturating_sub(old);
+                (ticks > 0).then(|| (pid, start, process.program.clone(), ticks * MS_PER_TICK))
+            })
+            .collect();
         Some(CpuMinute {
             total_ms,
             programs,
-            idle_burn: !busy && total_ms >= IDLE_BURN_MS,
+            idle_burn,
+            idle_minutes: None,
+            strays: BTreeMap::new(),
+            jobs: BTreeMap::new(),
+            stopped: Vec::new(),
+            would_stop: Vec::new(),
+            burning,
         })
     }
+}
+
+/// The top programs by CPU, and `(other)` for the rest.
+fn top(used: HashMap<String, u64>) -> BTreeMap<String, u64> {
+    let mut used: Vec<_> = used.into_iter().filter(|(_, ms)| *ms > 0).collect();
+    used.sort_by_key(|(_, ms)| Reverse(*ms));
+    let mut programs = BTreeMap::new();
+    for (i, (program, ms)) in used.into_iter().enumerate() {
+        let name = if i < TOP_PROGRAMS {
+            program
+        } else {
+            "(other)".into()
+        };
+        *programs.entry(name).or_default() += ms;
+    }
+    programs
 }
 
 /// Ticks per program between two readings, and the net ticks of finished children: a process that ended moved
@@ -197,6 +358,19 @@ fn account(before: &Processes, now: &Processes) -> (Vec<(String, u64)>, i128) {
     }
     let used = used.into_iter().filter(|(_, ticks)| *ticks > 0).collect();
     (used, children)
+}
+
+/// Own ticks since the last reading of processes a glance saw that are gone now, by program, most first. Only their
+/// own: their children's ticks may belong to processes a glance named too.
+fn ended(before: &Processes, now: &Processes, seen: &Processes) -> Vec<(String, u64)> {
+    let mut ended: HashMap<String, u64> = HashMap::new();
+    for (key, last) in seen.iter().filter(|(key, _)| !now.contains_key(key)) {
+        let old = before.get(key).map_or(0, |process| process.own);
+        *ended.entry(last.program.clone()).or_default() += last.own.saturating_sub(old);
+    }
+    let mut ended: Vec<_> = ended.into_iter().filter(|(_, ticks)| *ticks > 0).collect();
+    ended.sort_by_key(|(_, ticks)| std::cmp::Reverse(*ticks));
+    ended
 }
 
 /// Every process `/proc` shows, parents (lower pids) first: a child that ends mid-walk then lands in its parent's
@@ -237,10 +411,17 @@ fn processes() -> Processes {
     found
 }
 
-/// The process name. For Node (`node`, or `node-MainThread` in newer versions), the npm package its script
+/// The process name. For Node (`node`, `node-MainThread`, or `MainThread` from Node 24), the npm package its script
 /// belongs to (`typescript`, `@anthropic-ai/claude-code`), so tools and harnesses don't all read `node`.
 fn program(pid: u32, comm: &str) -> String {
-    if !matches!(comm, "node" | "node-MainThread") {
+    if !matches!(comm, "node" | "node-MainThread" | "MainThread") {
+        return comm.to_owned();
+    }
+    // Other programs may name their main thread `MainThread` too: only Node's own binary reads as `node`.
+    let node = comm != "MainThread"
+        || fs::read_link(format!("/proc/{pid}/exe"))
+            .is_ok_and(|exe| exe.file_name().is_some_and(|name| name == "node"));
+    if !node {
         return comm.to_owned();
     }
     let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
@@ -418,6 +599,28 @@ fn cpu_minute_counts_ended_processes_once() {
     used.sort();
     assert_eq!(used, [("cargo".to_owned(), 40), ("claude".to_owned(), 10)]);
     assert_eq!(exited, 70);
+
+    // Glances saw the build at 340 ticks and the command at 15: they keep those names, and the unseen rest of
+    // the 120 ticks the container counted stays `(exited)`.
+    let mut sampler = Sampler::default();
+    sampler.tally(before, Some(0), true);
+    sampler.seen = Processes::from([
+        ((2, 5), ticks("tsc", 340, 0)),
+        ((4, 2), ticks("make", 15, 0)),
+    ]);
+    let minute = sampler.tally(now, Some(1_200_000), true).unwrap();
+    let expected = [
+        ("(exited)", 150),
+        ("cargo", 400),
+        ("claude", 100),
+        ("make", 150),
+        ("tsc", 400),
+    ];
+    assert_eq!(minute.total_ms, 1200);
+    assert_eq!(
+        minute.programs,
+        expected.map(|(name, ms)| (name.to_owned(), ms)).into()
+    );
 }
 
 #[test]

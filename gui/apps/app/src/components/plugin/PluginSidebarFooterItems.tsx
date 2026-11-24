@@ -7,7 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router";
 import type { ExperimentalSidebarFooterCommandKind } from "@get-bb/plugin-sdk/internal/plugin-app-collector";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -56,6 +56,10 @@ function footerTriggerId(item: PluginSidebarFooterItemSlot): string {
   return `plugin-sidebar-footer-trigger-${item.pluginId}-${item.id}-${item.generation}`;
 }
 
+// A hovered disclosure mounts hidden, so its data loads before the click; it stays warm this long after the pointer leaves.
+// Not on focus: focus returns to the button on close and can stay there, which would keep a hidden card polling.
+const WARM_LINGER_MS = 30_000;
+
 export function usePluginSidebarFooterDisclosure() {
   const { sidebarFooterItems } = usePluginSlots();
   const disclosures = useMemo(
@@ -63,11 +67,33 @@ export function usePluginSidebarFooterDisclosure() {
     [sidebarFooterItems],
   );
   const [activeKey, setActiveKey] = useState<string | null>(null);
+  const [warmKey, setWarmKey] = useState<string | null>(null);
+  const coolTimer = useRef<number | null>(null);
   const [restoreFocusKey, setRestoreFocusKey] = useState<string | null>(null);
   const lastProgrammaticCommand = useRef(0);
   const activeItem = useMemo(
     () => disclosures.find((item) => footerItemKey(item) === activeKey) ?? null,
     [activeKey, disclosures],
+  );
+  const warmItem = useMemo(
+    () => disclosures.find((item) => footerItemKey(item) === warmKey) ?? null,
+    [warmKey, disclosures],
+  );
+  const handleWarm = useCallback((itemKey: string, warm: boolean) => {
+    if (coolTimer.current !== null) window.clearTimeout(coolTimer.current);
+    coolTimer.current = null;
+    if (warm) setWarmKey(itemKey);
+    else
+      coolTimer.current = window.setTimeout(() => {
+        coolTimer.current = null;
+        setWarmKey((current) => (current === itemKey ? null : current));
+      }, WARM_LINGER_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (coolTimer.current !== null) window.clearTimeout(coolTimer.current);
+    },
+    [],
   );
   const restoreFocusItem = useMemo(
     () =>
@@ -128,18 +154,24 @@ export function usePluginSidebarFooterDisclosure() {
   return {
     activeItem,
     activeKey: activeItem === null ? null : activeKey,
+    warmItem,
     dismiss,
     handleCommand,
+    handleWarm,
   };
 }
 
 export function PluginSidebarFooterDisclosure({
-  item,
+  item: activeItem,
+  warmItem = null,
   onDismiss,
 }: {
   item: PluginSidebarFooterItemSlot | null;
+  /** Mounted but invisible while its button is hovered, so opening it reuses the loaded component. */
+  warmItem?: PluginSidebarFooterItemSlot | null;
   onDismiss: () => void;
 }) {
+  const item = activeItem ?? warmItem;
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [contentHeight, setContentHeight] = useState<number | null>(null);
 
@@ -163,10 +195,13 @@ export function PluginSidebarFooterDisclosure({
       id={footerDisclosureId(item)}
       aria-label={item.label}
       data-testid={`plugin-sidebar-footer-disclosure-${item.pluginId}-${item.id}`}
-      className="absolute bottom-full left-2 z-[70] w-[calc(100%-1rem)] overflow-hidden rounded-lg border border-sidebar-border bg-sidebar shadow-xl transition-[height] duration-200 ease-out motion-reduce:transition-none"
+      className={cn(
+        "absolute bottom-full left-2 z-[70] w-[calc(100%-1rem)] overflow-hidden rounded-lg border border-sidebar-border bg-sidebar shadow-xl transition-[height] duration-200 ease-out motion-reduce:transition-none",
+        activeItem === null && "invisible pointer-events-none",
+      )}
       style={{ height: contentHeight ?? undefined }}
     >
-      <div ref={contentRef} className="max-h-80 overflow-auto">
+      <div ref={contentRef} className="max-h-[calc(100dvh-8rem)] overflow-auto">
         <PluginSlotMount
           pluginId={item.pluginId}
           slotKind="experimental_sidebarFooter"
@@ -190,6 +225,7 @@ export interface BuiltinFooterAction {
 export function PluginSidebarFooterItems({
   activeDisclosureKey,
   onDisclosureCommand,
+  onDisclosureWarm,
   onNavigate,
   builtInActions = [],
 }: {
@@ -199,6 +235,7 @@ export function PluginSidebarFooterItems({
     command: ExperimentalSidebarFooterCommandKind,
     sequence?: number,
   ) => void;
+  onDisclosureWarm?: (itemKey: string, warm: boolean) => void;
   onNavigate?: () => void;
   builtInActions?: readonly BuiltinFooterAction[];
 }) {
@@ -312,6 +349,10 @@ export function PluginSidebarFooterItems({
                       ? {
                           "aria-expanded": active,
                           "aria-controls": footerDisclosureId(item.slot),
+                          onPointerEnter: () =>
+                            onDisclosureWarm?.(footerItemKey(item.slot), true),
+                          onPointerLeave: () =>
+                            onDisclosureWarm?.(footerItemKey(item.slot), false),
                         }
                       : {})}
                     onClick={

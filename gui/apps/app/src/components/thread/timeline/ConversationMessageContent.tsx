@@ -1,4 +1,11 @@
-import { useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 import type {
   TimelineConversationAttachments,
   TimelineRowBase,
@@ -50,10 +57,15 @@ import {
   useMessageDirectiveRegistry,
   type MarkdownMessageDirectives,
 } from "@/components/ui/markdown-message-directives.js";
+import { DraftMessageProvider } from "./DraftEditor";
 import {
   boundedMarkdownPreview,
+  boundedMarkdownTail,
   closeUnterminatedMarkdownCodeSpan,
+  splitMessageContextSegments,
   USER_MESSAGE_CHAR_CAP,
+  type MessageContextBlockSegment,
+  type MessageContextTextSegment,
 } from "@cloudroom/client-core";
 import { turnRequestLabel } from "@cloudroom/client-core";
 import {
@@ -66,13 +78,16 @@ import {
   PROSE_COLUMN_INSET_CLASS,
 } from "./MessageActionBar.js";
 import {
+  ConversationMessageCollapsedDivider,
   ConversationMessageOverflowToggle,
+  useHiddenLineCount,
   useIsOverflowing,
 } from "./conversation-message-overflow.js";
 import {
   SelectableMessageProse,
   type MessageProseSelection,
 } from "./SelectableMessageProse.js";
+import { MessageContextGroup } from "./MessageContextChip.js";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
 import type { PromptDraftAttachment } from "@cloudroom/client-core";
 import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
@@ -116,12 +131,20 @@ type AssistantMessageRowIdentity = Pick<
   "id" | "threadId" | "turnId"
 >;
 
-const COLLAPSED_MESSAGE_FADE_STYLE: CSSProperties = {
-  maskImage:
-    "linear-gradient(to bottom, black calc(100% - 2.5rem), transparent)",
-  WebkitMaskImage:
-    "linear-gradient(to bottom, black calc(100% - 2.5rem), transparent)",
+const COLLAPSED_HEAD_FADE =
+  "linear-gradient(to bottom, black calc(100% - 1.25rem), transparent)";
+const COLLAPSED_HEAD_FADE_STYLE: CSSProperties = {
+  maskImage: COLLAPSED_HEAD_FADE,
+  WebkitMaskImage: COLLAPSED_HEAD_FADE,
 };
+const COLLAPSED_TAIL_FADE =
+  "linear-gradient(to top, black calc(100% - 1rem), transparent)";
+const COLLAPSED_TAIL_FADE_STYLE: CSSProperties = {
+  maskImage: COLLAPSED_TAIL_FADE,
+  WebkitMaskImage: COLLAPSED_TAIL_FADE,
+};
+/** Lines a collapsed message still shows: 12 at the start, 8 at the end. */
+const COLLAPSED_VISIBLE_LINES = 20;
 
 const ASSISTANT_THREAD_MENTIONS: MarkdownThreadMentions = {
   mentions: [],
@@ -201,6 +224,80 @@ interface AssistantConversationMessageProps extends AssistantMessageRowIdentity 
   workspaceRootPath?: string;
 }
 
+interface MessageMarkdownProps {
+  linkRouting?: MarkdownLinkRouting;
+  mentions: readonly PromptTextMention[];
+  parseAsMarkdown: boolean;
+  resolveMentionLink?: PromptMentionLinkResolver;
+  resolveSegmentLinkHref?: TimelineTitleLinkResolver;
+  text: string;
+}
+
+function MessageMarkdown({
+  linkRouting,
+  mentions,
+  parseAsMarkdown,
+  resolveMentionLink,
+  resolveSegmentLinkHref,
+  text,
+}: MessageMarkdownProps) {
+  const promptMentions = useMemo<MarkdownPromptMentions>(
+    () => ({
+      mentions,
+      resolveLinkHref: resolveSegmentLinkHref,
+      resolveMentionLink,
+    }),
+    [mentions, resolveSegmentLinkHref, resolveMentionLink],
+  );
+  const threadMentions = useMemo<MarkdownThreadMentions>(
+    () => ({ mentions, preserveSoftBreaks: true }),
+    [mentions],
+  );
+  if (!parseAsMarkdown) {
+    return <span>{text}</span>;
+  }
+  return (
+    <MarkdownPreview
+      content={text}
+      promptMentions={promptMentions}
+      threadMentions={threadMentions}
+      linkRouting={linkRouting}
+    />
+  );
+}
+
+const FOCUSABLE_SELECTOR =
+  "a[href], button, input, select, textarea, [tabindex]";
+
+/**
+ * The visible end of a collapsed message. It is a visual copy: screen readers
+ * and Tab skip it and reach the start and the expand button instead.
+ */
+function CollapsedMessageEnd({
+  children,
+  contentKey,
+}: {
+  children: ReactNode;
+  contentKey: string;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const focusables =
+      ref.current?.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR) ?? [];
+    for (const element of focusables) element.tabIndex = -1;
+  }, [contentKey]);
+  return (
+    <div
+      ref={ref}
+      aria-hidden
+      className="flex h-[calc(8lh+1.25rem)] flex-col justify-end overflow-hidden break-words"
+      style={COLLAPSED_TAIL_FADE_STYLE}
+    >
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
 interface CollapsibleMessageTextProps {
   linkRouting?: MarkdownLinkRouting;
   mentions: readonly PromptTextMention[];
@@ -210,6 +307,11 @@ interface CollapsibleMessageTextProps {
   mutePrefixLength?: number;
 }
 
+/**
+ * A message taller than 22 lines collapses to its start and its end, with a
+ * divider between them. The collapsed bubble stays as tall as before:
+ * 12 lines + 2-line divider + 8 lines and the old "Show more" row's 1.25rem.
+ */
 function CollapsibleMessageText({
   linkRouting,
   mentions,
@@ -243,27 +345,46 @@ function CollapsibleMessageText({
       }),
     [mentions, bodyOffset, renderedBodyText],
   );
-  const promptMentions = useMemo<MarkdownPromptMentions>(
-    () => ({
-      mentions: body.mentions,
-      resolveLinkHref: resolveSegmentLinkHref,
-      resolveMentionLink,
-    }),
-    [body.mentions, resolveSegmentLinkHref, resolveMentionLink],
-  );
-  const rawThreadMentions = useMemo<MarkdownThreadMentions>(
-    () => ({
-      mentions: body.mentions,
-      preserveSoftBreaks: true,
-    }),
-    [body.mentions],
-  );
   const isOverflowing = useIsOverflowing({
     elementRef: bodyRef,
     enabled: !isExpanded,
     measurementKey: body.text,
   });
-  const showToggle = isExpanded || exceedsCollapsedRenderCap || isOverflowing;
+  const isCollapsed =
+    !isExpanded && (exceedsCollapsedRenderCap || isOverflowing);
+  const tail = useMemo(() => {
+    if (!isCollapsed) return null;
+    const preview = boundedMarkdownTail(bodyText, USER_MESSAGE_CHAR_CAP);
+    const tailMentions = shiftMentionsToTextRange({
+      mentions,
+      rangeStart: bodyOffset + preview.sourceStart,
+      rangeEnd: bodyOffset + bodyText.length,
+    }).map((mention) => ({
+      ...mention,
+      start: mention.start + preview.prefixLength,
+      end: mention.end + preview.prefixLength,
+    }));
+    return { ...preview, mentions: tailMentions };
+  }, [isCollapsed, bodyText, bodyOffset, mentions]);
+  const hiddenLines = useHiddenLineCount({
+    elementRef: bodyRef,
+    enabled: isCollapsed,
+    measurementKey: body.text,
+    scale: bodyText.length / Math.max(renderedBodyText.length, 1),
+    visibleLines: COLLAPSED_VISIBLE_LINES,
+  });
+  // The toggle button unmounts on click, so hand focus to the one that appears.
+  const pendingFocus = useRef<"expand" | "collapse" | null>(null);
+  const toggle = (expand: boolean) => {
+    pendingFocus.current = expand ? "collapse" : "expand";
+    setIsExpanded(expand);
+  };
+  const focusWhenShown =
+    (button: "expand" | "collapse") => (node: HTMLButtonElement | null) => {
+      if (node === null || pendingFocus.current !== button) return;
+      pendingFocus.current = null;
+      node.focus({ preventScroll: true });
+    };
 
   return (
     <>
@@ -276,35 +397,57 @@ function CollapsibleMessageText({
         </span>
       ) : null}
       <div
-        ref={bodyRef}
         data-image-gallery-clipped={!isExpanded ? "" : undefined}
-        className={cn(
-          "break-words",
-          !isExpanded && "max-h-[22lh] overflow-hidden",
-        )}
-        style={
-          !isExpanded && showToggle ? COLLAPSED_MESSAGE_FADE_STYLE : undefined
-        }
+        className={cn(isCollapsed && "h-[12lh] overflow-hidden")}
+        style={isCollapsed ? COLLAPSED_HEAD_FADE_STYLE : undefined}
       >
-        {collapsedPreview?.parseAsMarkdown === false ? (
-          <span>{body.text}</span>
-        ) : (
-          <MarkdownPreview
-            content={
+        {/* Keeps the 22-line clamp so overflow is measured as before. */}
+        <div
+          ref={bodyRef}
+          className={cn(
+            "break-words",
+            !isExpanded && "max-h-[22lh] overflow-hidden",
+          )}
+        >
+          <MessageMarkdown
+            linkRouting={linkRouting}
+            mentions={body.mentions}
+            parseAsMarkdown={collapsedPreview?.parseAsMarkdown !== false}
+            resolveMentionLink={resolveMentionLink}
+            resolveSegmentLinkHref={resolveSegmentLinkHref}
+            text={
               collapsedPreview?.wasCapped === true
                 ? closeUnterminatedMarkdownCodeSpan(body.text)
                 : body.text
             }
-            promptMentions={promptMentions}
-            threadMentions={rawThreadMentions}
-            linkRouting={linkRouting}
           />
-        )}
+        </div>
       </div>
-      {showToggle ? (
+      {tail !== null ? (
+        <>
+          <ConversationMessageCollapsedDivider
+            approximate={collapsedPreview !== null}
+            buttonRef={focusWhenShown("expand")}
+            hiddenLines={hiddenLines}
+            onExpand={() => toggle(true)}
+          />
+          <CollapsedMessageEnd contentKey={tail.text}>
+            <MessageMarkdown
+              linkRouting={linkRouting}
+              mentions={tail.mentions}
+              parseAsMarkdown={tail.parseAsMarkdown}
+              resolveMentionLink={resolveMentionLink}
+              resolveSegmentLinkHref={resolveSegmentLinkHref}
+              text={tail.text}
+            />
+          </CollapsedMessageEnd>
+        </>
+      ) : null}
+      {isExpanded ? (
         <ConversationMessageOverflowToggle
-          expanded={isExpanded}
-          onToggle={() => setIsExpanded((prev) => !prev)}
+          buttonRef={focusWhenShown("collapse")}
+          expanded
+          onToggle={() => toggle(false)}
         />
       ) : null}
     </>
@@ -394,6 +537,32 @@ function UserConversationMessage({
             originKind: null,
           }
         : null;
+  const hasGeneratedSource = generatedSource !== null;
+  const contextParts = useMemo(() => {
+    if (hasGeneratedSource) return null;
+    const segments = splitMessageContextSegments(text);
+    if (!segments.some((segment) => segment.kind === "context")) {
+      return null;
+    }
+    const grouped: Array<
+      | { kind: "contexts"; items: MessageContextBlockSegment[] }
+      | MessageContextTextSegment
+    > = [];
+    for (const segment of segments) {
+      if (segment.kind === "context") {
+        const previous = grouped.at(-1);
+        if (previous?.kind === "contexts") {
+          previous.items.push(segment);
+        } else {
+          grouped.push({ kind: "contexts", items: [segment] });
+        }
+      } else if (segment.text.trim().length > 0) {
+        grouped.push(segment);
+      }
+    }
+    return grouped;
+  }, [hasGeneratedSource, text]);
+
   if (generatedSource !== null) {
     const body = generatedConversationBodySlice({ initiator, text });
     const bodyMentions = shiftMentionsToTextRange({
@@ -439,7 +608,33 @@ function UserConversationMessage({
         ) : null}
         <div className="flex w-fit max-w-full flex-col items-end">
           <div className="max-w-full rounded-xl bg-background px-4 py-2.5 shadow-message dark:bg-surface-recessed text-sm leading-relaxed text-foreground">
-            {messageText ? (
+            {contextParts !== null ? (
+              <div className="space-y-2">
+                {contextParts.map((part, index) =>
+                  part.kind === "contexts" ? (
+                    <MessageContextGroup key={`ctx-${index}`} items={part.items} />
+                  ) : (
+                    <CollapsibleMessageText
+                      key={`txt-${part.start}`}
+                      mentions={shiftMentionsToTextRange({
+                        mentions,
+                        rangeStart: part.start,
+                        rangeEnd: part.end,
+                      })}
+                      resolveMentionLink={resolveMentionLink}
+                      resolveSegmentLinkHref={resolveSegmentLinkHref}
+                      linkRouting={linkRouting}
+                      text={part.text}
+                      mutePrefixLength={
+                        part.start === 0 && mutePrefixLength > 0
+                          ? Math.min(mutePrefixLength, part.text.length)
+                          : undefined
+                      }
+                    />
+                  ),
+                )}
+              </div>
+            ) : messageText ? (
               <CollapsibleMessageText
                 mentions={mentions}
                 resolveMentionLink={resolveMentionLink}
@@ -506,6 +701,12 @@ function AssistantConversationMessage({
   const contextReport = useMemo(
     () => (streaming ? null : parseClaudeContextReport(text)),
     [streaming, text],
+  );
+  const hasDraft = text.includes("```draft");
+  const draftMessage = useMemo(
+    () =>
+      hasDraft ? { messageId: id, threadId, streaming, onAddToChat } : null,
+    [hasDraft, id, onAddToChat, streaming, threadId],
   );
   const liveMarkdown = useMemo(() => {
     const tail = streamingSplit?.tail ?? text;
@@ -588,31 +789,33 @@ function AssistantConversationMessage({
         <ClaudeContextReportCard report={contextReport} />
       ) : (
         <SelectableMessageProse onSelect={onSelectProse}>
-          <MarkdownPreview
-            className={
-              streamingSplit === null
-                ? undefined
-                : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
-            }
-            content={
-              streamingSplit === null ? liveMarkdown : streamingSplit.settled
-            }
-            incrementalBlocks
-            linkRouting={linkRouting}
-            messageDirectives={messageDirectives}
-            threadMentions={ASSISTANT_THREAD_MENTIONS}
-          />
-          {streamingSplit === null ? null : (
+          <DraftMessageProvider value={draftMessage}>
             <MarkdownPreview
-              className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
-              content={liveMarkdown}
-              sourcePrefix={streamingSplit.settled}
+              className={
+                streamingSplit === null
+                  ? undefined
+                  : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
+              }
+              content={
+                streamingSplit === null ? liveMarkdown : streamingSplit.settled
+              }
               incrementalBlocks
               linkRouting={linkRouting}
               messageDirectives={messageDirectives}
               threadMentions={ASSISTANT_THREAD_MENTIONS}
             />
-          )}
+            {streamingSplit === null ? null : (
+              <MarkdownPreview
+                className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
+                content={liveMarkdown}
+                sourcePrefix={streamingSplit.settled}
+                incrementalBlocks
+                linkRouting={linkRouting}
+                messageDirectives={messageDirectives}
+                threadMentions={ASSISTANT_THREAD_MENTIONS}
+              />
+            )}
+          </DraftMessageProvider>
         </SelectableMessageProse>
       )}
       <ConversationAttachments

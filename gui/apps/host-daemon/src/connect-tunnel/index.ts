@@ -52,8 +52,13 @@ interface ConnectTunnelClientOptions {
 
 interface TrustedConnectGate {
   apiOrigin: string;
+  /** Set only when the enrollment host is a relay owner address (the Worker's 10-character handle). */
+  apexOrigin: string | null;
   baseDomain: string;
 }
+
+const RELAY_OWNER_HANDLE = /^[a-hjkmnp-tv-z2-9]{10}$/;
+const RELAY_MACHINE_REFUSAL = "Machine not authorized\n";
 
 class ConnectTunnelCredentialRejectedError extends Error {
   readonly code = "credential_rejected";
@@ -83,6 +88,9 @@ export function resolveTrustedConnectGate(
   }
   return {
     apiOrigin: parsed.origin,
+    apexOrigin: RELAY_OWNER_HANDLE.test(parsed.hostname.slice(0, firstDot))
+      ? `${parsed.protocol}//${baseDomain}`
+      : null,
     baseDomain,
   };
 }
@@ -190,16 +198,32 @@ export class ConnectTunnelClient {
       );
     }
 
-    const assignmentUrl = new URL("/api/connect/machine-label", gate.apiOrigin);
+    const assignLabel = (origin: string) =>
+      this.fetchFn(new URL("/api/connect/machine-label", origin), {
+        method: "POST",
+        redirect: "error",
+        headers: {
+          "content-type": "application/json",
+          "x-bb-connect-machine": credential,
+        },
+        body: JSON.stringify({ desiredName: this.options.hostName }),
+      });
     let pending: Promise<HostDaemonConnectTunnelIdentity>;
-    pending = this.fetchFn(assignmentUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-bb-connect-machine": credential,
-      },
-      body: JSON.stringify({ desiredName: this.options.hostName }),
-    })
+    // An owner Mac's relay address refuses this with the Worker's own 403: labels live on the relay apex.
+    // Any other answer, or a failed apex try, ends exactly as main did with the first response.
+    pending = assignLabel(gate.apiOrigin)
+      .then(async (response) => {
+        const apexOrigin = gate.apexOrigin;
+        if (
+          apexOrigin === null ||
+          response.status !== 403 ||
+          (await response.text().catch(() => "")) !== RELAY_MACHINE_REFUSAL
+        ) {
+          return response;
+        }
+        const apex = await assignLabel(apexOrigin).catch(() => null);
+        return apex?.ok ? apex : response;
+      })
       .then(async (response) => {
         if (response.status === 401 || response.status === 403) {
           const error = new ConnectTunnelCredentialRejectedError(

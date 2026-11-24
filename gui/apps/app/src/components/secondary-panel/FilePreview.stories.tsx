@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { FilePreview } from "./FilePreview";
+import { FilePreview } from "@/components/right-panel/tabs/file-preview";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 
 export default {

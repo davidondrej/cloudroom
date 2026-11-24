@@ -144,6 +144,12 @@ struct Derived {
     guarded_turn: bool,
     #[serde(default)]
     replies: Vec<(String, String)>,
+    #[serde(default)]
+    tokens: tokens::Tokens,
+    /// Missing in snapshots from before token counting: their base is unknown, so a Codex or Pi session's next
+    /// reading only sets it.
+    #[serde(default)]
+    tokens_restored: Option<bool>,
 }
 
 impl Derived {
@@ -169,6 +175,8 @@ impl Derived {
             limit_resumes: s.limit_resumes,
             resume_refused: s.resume_refused,
             replies: s.replies.clone(),
+            tokens: s.tokens,
+            tokens_restored: Some(s.tokens_restored),
         }
     }
 
@@ -193,6 +201,10 @@ impl Derived {
         s.resume_plan_only = self.resume_plan_only;
         s.guarded_turn = self.guarded_turn;
         s.replies = self.replies;
+        s.tokens = self.tokens;
+        s.tokens_restored = self
+            .tokens_restored
+            .unwrap_or(s.harness != runtime::Kind::Claude);
     }
 }
 
@@ -200,17 +212,22 @@ impl Local {
     /// Opens the journal and rebuilds the sessions: from a usable snapshot, then the records after it.
     /// A missing, unreadable, older or too-new snapshot means a full replay.
     pub(super) fn open(directory: &std::path::Path) -> io::Result<Self> {
-        let snapshot = Journal::read_snapshot(directory)
-            .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
-            .filter(|s| s.version == SNAPSHOT_VERSION);
-        let journal = Journal::open_from(directory, snapshot.as_ref().map_or(0, |s| s.sequence))?;
+        let mut snapshot = None;
+        let journal = Journal::open_from(directory, || {
+            snapshot = Journal::read_snapshot(directory)
+                .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
+                .filter(|s| s.version == SNAPSHOT_VERSION);
+            snapshot.as_ref().map_or(0, |s| s.sequence)
+        })?;
         let (changed, _) = watch::channel(journal.last());
         let mut local = Local {
+            loud: journal.last(),
             journal,
             sessions: BTreeMap::new(),
             sequences: BTreeMap::new(),
             changed,
-            database_available: false,
+            database_available: true,
+            report_waits: false,
             draining: false,
             snapshot_at: 0,
             browser: sleep::Browser::Paused,
@@ -321,13 +338,21 @@ impl Local {
         if error.is_some() {
             receipt.error = error;
         }
+        // A turn its parent hears of keeps when it ended, after any other of its turns, also within a millisecond: the
+        // parent's reports keep the order the turns ended in, and a self-started one says when the child went quiet (#217).
+        if matches!(receipt.command.as_str(), "prompt" | "auto") {
+            let last = (self.sessions[id].receipts.values())
+                .filter_map(|r| r.input["ended"].as_u64())
+                .max();
+            receipt.input["ended"] = json!(now_ms().max(last.map_or(0, |at| at + 1)));
+        }
         self.append(
             id,
             "receipt",
-            serde_json::to_value(receipt).map_err(io::Error::other)?,
+            serde_json::to_value(&receipt).map_err(io::Error::other)?,
             None,
         )?;
-        Ok(())
+        super::children::supersede(self, id, &receipt)
     }
 
     pub(super) fn fail_pending(&mut self, id: &str) -> Result<()> {
@@ -337,6 +362,10 @@ impl Local {
     /// Fail queued prompts, keeping the cause on each receipt (ADR 0123).
     pub(super) fn fail_pending_because(&mut self, id: &str, cause: Option<&str>) -> Result<()> {
         for request in self.sessions[id].queue.clone() {
+            self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
+        }
+        // A compaction waiting for an agent that won't come back never holds the session.
+        if let Some(request) = self.sessions[id].compact_request.clone() {
             self.finish_receipt_with(id, &request, "failed", cause.map(str::to_owned))?;
         }
         Ok(())
@@ -376,6 +405,7 @@ impl Local {
                 session.native_offset = cursor["offset"].as_u64().unwrap_or(0);
             }
             session.state = SessionState::Suspended;
+            session.tokens_restored = session.harness != runtime::Kind::Claude;
             let sequences = self.sequences.entry(record.session_id.clone()).or_default();
             sequences.truncate(before);
             sequences.push(record.sequence);
@@ -414,6 +444,11 @@ impl Local {
                     | "native_history_unavailable"
                     | "parent_report"
                     | "child_state"
+                    | "child_start_state"
+                    | "own_child"
+                    | "thread_report"
+                    | "continuing"
+                    | "continued"
             )
         {
             session.last_activity = record.timestamp_ms.or(session.last_activity);
@@ -489,13 +524,39 @@ impl Local {
                 if receipt.command == "close" {
                     session.close_request = Some(receipt.request_id.clone());
                 }
+                if receipt.command == "start" && session.title.is_none() {
+                    session.title = receipt.input["title"].as_str().map(str::to_owned);
+                }
+                // Which computer last used the thread, and a user's prompt cancelling an archive the agent made (#237).
+                if matches!(
+                    receipt.command.as_str(),
+                    "prompt" | "steer" | "edit" | "rewind"
+                ) && receipt.state == "accepted"
+                    && !session.receipts.contains_key(&receipt.request_id)
+                {
+                    if receipt.request_id.starts_with("app_") {
+                        session.last_app_prompt = Some(
+                            json!({"request_id":receipt.request_id,"sequence":record.sequence}),
+                        );
+                    }
+                    if super::user_request(&receipt.request_id) {
+                        session
+                            .thread_reports
+                            .retain(|report| report["kind"] != "archived");
+                    }
+                }
                 if receipt.command == "prompt" {
                     // Acceptance is also queue insertion: one fsynced record, including
                     // legacy receipts whose separate enqueue write never finished.
                     if receipt.state == "accepted"
                         && !session.receipts.contains_key(&receipt.request_id)
                     {
-                        session.queue.push(receipt.request_id.clone());
+                        // A compaction's follow-up (`first`) runs right after it, before older messages.
+                        if receipt.input["first"] == true {
+                            session.queue.insert(0, receipt.request_id.clone());
+                        } else {
+                            session.queue.push(receipt.request_id.clone());
+                        }
                         session.recovery_attempted = false; // A new user request permits one recovery.
                         session.usage_limited = false;
                         session.usage_resets_ms = None;
@@ -527,6 +588,16 @@ impl Local {
                     && let Some(target) = receipt.input["target_request_id"].as_str()
                 {
                     session.queue.retain(|id| id != target);
+                }
+                // The user's model pick (`model`): the session's model and effort from now on, restarts included.
+                if receipt.command == "model"
+                    && receipt.state == "accepted"
+                    && !session.receipts.contains_key(&receipt.request_id)
+                {
+                    session.model = receipt.input["model"].as_str().map(str::to_owned);
+                    if let Some(level) = receipt.input["reasoning"].as_str() {
+                        session.reasoning = Some(level.to_owned());
+                    }
                 }
                 if receipt.command == "reorder"
                     && receipt.state == "accepted"
@@ -577,10 +648,14 @@ impl Local {
                 let id = record.data["id"]
                     .as_str()
                     .ok_or_else(|| io::Error::other("missing native identity"))?;
-                if session.native_id.as_deref().is_some_and(|old| old != id)
-                    && record.data["replaced"] != true
-                {
+                // Before its first turn there is no chat to lose: a fresh start replaces it (Manager::relaunch).
+                let changed = session.native_id.as_deref().is_some_and(|old| old != id);
+                if changed && record.data["replaced"] != true && session.has_dispatched {
                     return Err(io::Error::other("native identity changed"));
+                }
+                if changed {
+                    session.native_cursor = Value::Null;
+                    session.native_offset = 0;
                 }
                 session.native_id = Some(id.into());
                 if let Some(capabilities) = record.data.get("capabilities") {
@@ -632,7 +707,11 @@ impl Local {
                         None => reason.into(),
                     }
                 });
-                if session.state == SessionState::Resuming && record.data["recovery"] == true {
+                if matches!(
+                    session.state,
+                    SessionState::Resuming | SessionState::Suspended
+                ) && record.data["recovery"] == true
+                {
                     session.recovery_attempted = true;
                 }
                 if let Some(error) = record.data["startup_error"].as_str() {
@@ -669,6 +748,7 @@ impl Local {
                 if let Some(level) = record.data["reasoning"].as_str() {
                     session.reasoning = Some(level.into());
                 }
+                session.owe("reasoning", &record.data, record.sequence);
             }
             "launch_reasoning" => {
                 if session.reasoning.is_none() {
@@ -687,6 +767,7 @@ impl Local {
                 session.native_cursor = record.data["cursor"].clone();
                 session.native_offset = session.native_cursor["offset"].as_u64().unwrap_or(0);
                 session.checkpoint = None;
+                session.tokens_restored = session.harness != runtime::Kind::Claude;
                 session.rewind_request = None;
                 session.state = SessionState::Idle;
                 if let Some(request) = record.data["request_id"].as_str()
@@ -707,8 +788,49 @@ impl Local {
                 session.rewind_request = None;
                 session.state = SessionState::Idle;
             }
-            "archive" => session.archived = true,
+            "archive" => {
+                session.archived = true;
+                // The thread's own archive by its agent reaches the website, once no other visible thread is left in
+                // the sandbox (relay.rs). A user's archive went there from the app.
+                session.owe("archived", &record.data, record.sequence);
+                if record.data["self"] == true {
+                    session.archive_turn = session.current_request.clone();
+                }
+                // Its children still starting never start (relay.rs).
+                for start in session.child_starts.values_mut() {
+                    if !start.done && start.error.is_none() {
+                        start.error = Some("its thread was archived".to_owned());
+                        start.body = Value::Null;
+                    }
+                }
+            }
             "detach" => session.parent_session = None,
+            "title" => {
+                session.title = record.data["title"].as_str().map(str::to_owned);
+                session.owe("title", &record.data, record.sequence);
+            }
+            "pin" => {
+                session.pinned = true;
+                session.owe("pinned", &record.data, record.sequence);
+            }
+            "thread_report" => session
+                .thread_reports
+                .retain(|report| report["seq"] != record.data["seq"]),
+            // A user's restore (#237): its own kind, which apps before it ignore. An archive still owed is dropped.
+            "unarchive" => {
+                session.archived = false;
+                session
+                    .thread_reports
+                    .retain(|report| report["kind"] != "archived");
+            }
+            "continuing" => session.continuing = record.data["session"].as_str().map(str::to_owned),
+            "continued" => {
+                session.continued = Some(record.data.clone());
+                session.tokens_restored = session.harness != runtime::Kind::Claude;
+                if session.last_app_prompt.is_none() && !record.data["last_app_prompt"].is_null() {
+                    session.last_app_prompt = Some(record.data["last_app_prompt"].clone());
+                }
+            }
             "child_state" => {
                 if let (Some(child), Some(state)) =
                     (record.data["child"].as_str(), record.data["state"].as_str())
@@ -716,6 +838,58 @@ impl Local {
                     session
                         .child_states
                         .insert(child.to_owned(), state.to_owned());
+                    match record.timestamp_ms.filter(|_| state == "archived") {
+                        Some(at) => session.child_archived_at.insert(child.to_owned(), at),
+                        None => session.child_archived_at.remove(child),
+                    };
+                    // An archive its child's Core took names the reports it may still send, maybe none; a queued
+                    // one can't, so it keeps no list (relay.rs `holds_archive`).
+                    match record.data["late"].as_array() {
+                        Some(late) => {
+                            let late = late.iter().filter_map(|id| Some(id.as_str()?.to_owned()));
+                            session
+                                .late_reports
+                                .insert(child.to_owned(), late.collect())
+                        }
+                        None => session.late_reports.remove(child),
+                    };
+                }
+            }
+            "child_start" => {
+                if let Some(request) = record.data["request_id"].as_str() {
+                    let at_ms = record.timestamp_ms.unwrap_or_default();
+                    // Settled starts are forgotten after an hour: the website still finds the same child by request ID.
+                    session.child_starts.retain(|_, start| {
+                        (!start.done && start.error.is_none())
+                            || at_ms.saturating_sub(start.at_ms) < 3_600_000
+                    });
+                    session
+                        .child_starts
+                        .entry(request.to_owned())
+                        .or_insert_with(|| super::ChildStart {
+                            body: record.data["body"].clone(),
+                            at_ms,
+                            ..Default::default()
+                        });
+                }
+            }
+            "child_start_state" => {
+                if let Some(start) = record.data["request_id"]
+                    .as_str()
+                    .and_then(|request| session.child_starts.get_mut(request))
+                {
+                    if let Some(child) = record.data["child"].as_str() {
+                        start.child = Some(child.to_owned());
+                        session.started.insert(child.to_owned());
+                    }
+                    start.done |= record.data["done"] == true;
+                    if let Some(error) = record.data["error"].as_str() {
+                        start.error = Some(error.to_owned());
+                    }
+                    // Its prompt isn't needed once it settled, and sessions are read whole.
+                    if start.done || start.error.is_some() {
+                        start.body = Value::Null;
+                    }
                 }
             }
             "child_reply" => {
@@ -763,6 +937,12 @@ impl Local {
                     session.resume_refused = true;
                 }
             }
+            "usage" => {
+                if let Some(totals) = tokens::Tokens::of(&record.data, session.harness) {
+                    session.tokens = totals;
+                    session.tokens_restored = false;
+                }
+            }
             "storage_warning" => session.storage_warned = true,
             "storage_pause" => session.storage_paused = record.data["paused"] == true,
             "storage_recovered" => {
@@ -806,6 +986,9 @@ impl Local {
             native,
         };
         self.journal.append(&serde_json::to_vec(&record)?)?;
+        if kind != "parent_report" {
+            self.loud = record.sequence;
+        }
         self.apply(&record)?;
         if record.sequence >= self.snapshot_at + SNAPSHOT_EVERY {
             self.save_snapshot();
@@ -825,6 +1008,43 @@ mod tests {
             .map(|s| json!([s, Derived::of(s)]))
             .collect();
         json!([sessions, local.sequences])
+    }
+
+    #[test]
+    fn child_starts_survive_a_restart_and_archiving_cancels_the_unsettled_ones() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-child-starts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (kind, data) in [
+            (
+                "child_start",
+                json!({"request_id":"r1","body":{"prompt":"one"}}),
+            ),
+            (
+                "child_start",
+                json!({"request_id":"r2","body":{"prompt":"two"}}),
+            ),
+            (
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_one","done":true}),
+            ),
+        ] {
+            local.append("a", kind, data, None).unwrap();
+        }
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        let a = &local.sessions["a"];
+        // A settled start keeps who it started, not its request; an unsettled one keeps its request to repeat.
+        assert!(a.child_starts["r1"].body.is_null() && a.started.contains("thr_one"));
+        assert_eq!(a.child_starts["r2"].body["prompt"], "two");
+        local
+            .append("a", "archive", json!({"archived":true}), None)
+            .unwrap();
+        let r2 = &local.sessions["a"].child_starts["r2"];
+        assert_eq!(r2.error.as_deref(), Some("its thread was archived"));
+        assert!(r2.body.is_null() && local.sessions["a"].child_starts["r1"].error.is_none());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -990,6 +1210,26 @@ mod tests {
     }
 
     /// Today's answers for every state and the side fields they combine with. A type change must keep each one.
+    #[test]
+    fn a_model_pick_survives_a_restart_and_resumes_on_its_model_and_effort() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-model-pick-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s1","command":"start","state":"accepted","model":"claude-opus-5-5","input":{"harness":"claude-code","reasoning":"max"}});
+        local.append("s", "receipt", start, None).unwrap();
+        let native = json!({"id":"native","path":"/native.jsonl","model":"claude-opus-5-5"});
+        local.append("s", "native_identity", native, None).unwrap();
+        for state in ["accepted", "completed"] {
+            let pick = json!({"request_id":"m1","command":"model","state":state,"input":{"model":"claude-haiku-5-5","reasoning":"high"}});
+            local.append("s", "receipt", pick, None).unwrap();
+        }
+        drop(local);
+        let resume = Local::open(&dir).unwrap().sessions["s"].resume().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(resume.model.as_deref(), Some("claude-haiku-5-5"));
+        assert_eq!(resume.reasoning.as_deref(), Some("high"));
+    }
+
     #[test]
     fn state_answers_stay_the_same() {
         let dir = std::env::temp_dir().join(format!("cloudroom-answers-{}", std::process::id()));

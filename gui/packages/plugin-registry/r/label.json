@@ -4,16 +4,14 @@
   "type": "registry:ui",
   "title": "label",
   "description": "BB ui \"label\" — vendored from the BB app's own source (version-matched to this BB release).",
-  "dependencies": [
-    "@radix-ui/react-label"
-  ],
   "registryDependencies": [
+    "@bb/slot",
     "@bb/utils"
   ],
   "files": [
     {
       "path": "registry/components/ui/label.tsx",
-      "content": "import * as React from \"react\";\nimport * as LabelPrimitive from \"@radix-ui/react-label\";\n\nimport { cn } from \"../../lib/utils\";\n\nconst Label = React.forwardRef<\n  React.ComponentRef<typeof LabelPrimitive.Root>,\n  React.ComponentPropsWithoutRef<typeof LabelPrimitive.Root>\n>(({ className, ...props }, ref) => (\n  <LabelPrimitive.Root\n    ref={ref}\n    className={cn(\n      \"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\",\n      className,\n    )}\n    {...props}\n  />\n));\nLabel.displayName = LabelPrimitive.Root.displayName;\n\nexport { Label };\n",
+      "content": "import * as React from \"react\";\nimport { Slot } from \"./slot\";\n\nimport { cn } from \"../../lib/utils\";\n\nconst Label = React.forwardRef<\n  HTMLLabelElement,\n  React.ComponentPropsWithoutRef<\"label\"> & { asChild?: boolean }\n>(({ className, asChild, onMouseDown, ...props }, ref) => {\n  const Component = asChild ? Slot : \"label\";\n  return (\n    <Component\n      ref={ref}\n      className={cn(\n        \"text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70\",\n        className,\n      )}\n      {...props}\n      onMouseDown={(event) => {\n        const target = event.target as HTMLElement;\n        if (target.closest(\"button, input, select, textarea\")) return;\n        onMouseDown?.(event);\n        if (!event.defaultPrevented && event.detail > 1) event.preventDefault();\n      }}\n    />\n  );\n});\nLabel.displayName = \"Label\";\n\nexport { Label };\n",
       "type": "registry:ui",
       "target": "components/ui/label.tsx"
     }

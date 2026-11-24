@@ -29,3 +29,15 @@ export function entriesByMarketplaceAuthor<
     (entry) => pluginMarketplaceAuthorKey(entry) === authorKey,
   );
 }
+
+// A bundled plugin Cloudroom adapted from another author, such as BB, credits
+// both: "Created by" that author and "Improved by" Cloudroom.
+export function pluginImprovedByCloudroom(
+  entry: Pick<PluginCatalogSearchEntry, "author" | "marketplace">,
+): boolean {
+  return (
+    entry.marketplace === "bb-official" &&
+    entry.author !== null &&
+    entry.author.name !== "Cloudroom"
+  );
+}

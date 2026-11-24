@@ -6,8 +6,8 @@ import type { PluginFileOpenerSource } from "@get-bb/plugin-sdk";
 import type {
   PluginPanelFixedPanelTab,
   SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
-import type { SecondaryPanelPaneRenderContext } from "@/components/secondary-panel/ThreadSecondaryPanel";
+} from "@/components/right-panel/store/tab-model";
+import type { SecondaryPanelPaneRenderContext } from "@/components/right-panel/shell/panel-shell";
 import {
   LazyFilePreview,
   LazyHostFilePreviewTabContent,
@@ -16,8 +16,8 @@ import {
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
   LazyWorkspaceFilePreviewTabContent,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { FileSearchSelection } from "@/components/secondary-panel/useThreadFileTabs";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { FileSearchSelection } from "@/components/right-panel/store/use-panel-tabs";
 import {
   PluginPanelTabContent,
   type PluginPanelActionEntry,
@@ -28,7 +28,7 @@ import {
   type FileOpenerOriginalTab,
 } from "@/components/plugin/file-opener-tabs";
 import { useEnvironment } from "@/hooks/queries/environment-queries";
-import { useThreadStorageViewer } from "@/components/secondary-panel/useThreadStorageViewer";
+import { useThreadStorageViewer } from "@/components/right-panel/tabs/thread-storage";
 import { useHostDaemon } from "@/hooks/useHostDaemon";
 import { useLocalOpenTargets } from "@/hooks/useLocalOpenTargets";
 import {

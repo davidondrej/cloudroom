@@ -6,6 +6,9 @@ const SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR =
 
 export const SIDEBAR_WINDOWED_NAV_ATTRIBUTE = "data-sidebar-windowed-nav";
 
+/** Threads of a collapsed section that still take Cmd+1–9 (the Pinned section). */
+export const SIDEBAR_COLLAPSED_NAV_ATTRIBUTE = "data-sidebar-collapsed-nav";
+
 export interface SidebarWindowedNavigationEntry {
   threadId: string;
   projectId: string;
@@ -47,15 +50,13 @@ export const SidebarThreadShortcutKeysContext = createContext<
 function collectSidebarThreadTargets(
   root: HTMLElement | null,
   limit: number,
-  includeWindowedPlaceholders: boolean,
+  placeholderAttribute: string,
 ): SidebarThreadShortcutTarget[] {
   if (!root) {
     return [];
   }
 
-  const selector = includeWindowedPlaceholders
-    ? `${SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR}, [${SIDEBAR_WINDOWED_NAV_ATTRIBUTE}]`
-    : SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR;
+  const selector = `${SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR}, [${placeholderAttribute}]`;
   const elements = root.querySelectorAll<HTMLElement>(selector);
   const targets: SidebarThreadShortcutTarget[] = [];
 
@@ -73,7 +74,7 @@ function collectSidebarThreadTargets(
         isChild: element.dataset.sidebarThreadChild !== undefined,
       });
     } else {
-      const encoded = element.getAttribute(SIDEBAR_WINDOWED_NAV_ATTRIBUTE);
+      const encoded = element.getAttribute(placeholderAttribute);
       if (!encoded) {
         continue;
       }
@@ -105,13 +106,21 @@ function collectSidebarThreadTargets(
 export function getSidebarThreadShortcutTargets(
   root: HTMLElement | null,
 ): SidebarThreadShortcutTarget[] {
-  return collectSidebarThreadTargets(root, MAX_SIDEBAR_THREAD_SHORTCUTS, false);
+  return collectSidebarThreadTargets(
+    root,
+    MAX_SIDEBAR_THREAD_SHORTCUTS,
+    SIDEBAR_COLLAPSED_NAV_ATTRIBUTE,
+  );
 }
 
 export function getSidebarThreadNavigationTargets(
   root: HTMLElement | null,
 ): SidebarThreadShortcutTarget[] {
-  return collectSidebarThreadTargets(root, Number.POSITIVE_INFINITY, true);
+  return collectSidebarThreadTargets(
+    root,
+    Number.POSITIVE_INFINITY,
+    SIDEBAR_WINDOWED_NAV_ATTRIBUTE,
+  );
 }
 
 const MAX_REVEAL_FRAMES = 30;

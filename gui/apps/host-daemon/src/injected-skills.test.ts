@@ -286,6 +286,52 @@ describe("injected skill staging", () => {
     ).rejects.toThrow("Fetched skill tree content hash mismatch");
   });
 
+  it.each([
+    { code: "EPERM", peerPublishes: true, transient: false, ok: true },
+    { code: "EBUSY", peerPublishes: true, transient: false, ok: true },
+    { code: "EBUSY", peerPublishes: false, transient: true, ok: true },
+    { code: "EPERM", peerPublishes: false, transient: false, ok: false },
+  ])(
+    "handles a $code store rename (peer published: $peerPublishes, transient: $transient)",
+    async ({ code, peerPublishes, transient, ok }) => {
+      const dataDir = await makeTempDir();
+      const payload = createTreePayload("raced-tree");
+      const realRename = fs.rename.bind(fs);
+      let failures = 0;
+      const rename = vi
+        .spyOn(fs, "rename")
+        .mockImplementation(async (from, to) => {
+          if (!String(to).includes("skill-store") || (transient && failures)) {
+            return realRename(from, to);
+          }
+          failures += 1;
+          if (peerPublishes) await seedStoredTree(dataDir, payload);
+          throw Object.assign(new Error(`${code}: rename ${failures}`), {
+            code,
+          });
+        });
+      try {
+        const staging = stageInjectedSkillSources({
+          dataDir,
+          fetchSkillTree: async () => payload,
+          injectedSkillSources: [
+            createTreeSource("raced-tree", payload.treeHash),
+          ],
+        });
+        await (ok ? expect(staging).resolves : expect(staging).rejects).toEqual(
+          ok
+            ? expect.anything()
+            : expect.objectContaining({ code, message: `${code}: rename 1` }),
+        );
+      } finally {
+        rename.mockRestore();
+      }
+      await expect(
+        readdir(path.join(dataDir, "runtime", "skill-store")),
+      ).resolves.toEqual(ok ? [payload.treeHash] : []);
+    },
+  );
+
   it("verifies Unicode paths with locale-independent code-point ordering", async () => {
     const dataDir = await makeTempDir();
     const entries = ["ä", "z", "A", "a"].map((entryPath) => ({

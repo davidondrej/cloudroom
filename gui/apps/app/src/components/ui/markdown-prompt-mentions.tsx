@@ -1,8 +1,7 @@
 import { normalizePromptTextMentions } from "@cloudroom/client-core";
 import type { ComponentType } from "react";
 import type { Nodes, Parent, PhrasingContent, Text } from "mdast";
-import type {} from "mdast-util-to-hast";
-import { visit } from "unist-util-visit";
+import { visit } from "./markdown-visit.js";
 import type { PromptTextMention } from "@cloudroom/domain";
 import { PromptMentionPill } from "@/components/thread/timeline/ConversationMessageMentions.js";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";

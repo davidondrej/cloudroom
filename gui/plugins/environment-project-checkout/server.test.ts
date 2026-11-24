@@ -383,3 +383,89 @@ it.each(["branch", "timeout", "abort"] as const)(
     }
   },
 );
+
+it("fails a silent attach at 60 s but lets a started branch switch run on", async () => {
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "environment-project-checkout",
+    experimental_callHostRpc: (call) =>
+      new Promise((resolve, reject) => {
+        const { operationId } = call.input as { operationId: string };
+        // "lost": the connection drops after the stall cancel, so the host
+        // never confirms the stop.
+        call.signal?.addEventListener("abort", () =>
+          reject(
+            operationId === "lost#1"
+              ? new Error("Host is not connected")
+              : Object.assign(new Error("cancelled"), { name: "AbortError" }),
+          ),
+        );
+        if (operationId === "switch#1")
+          setTimeout(
+            () =>
+              resolve({
+                status: "attached",
+                path: CHECKOUT_PATH,
+                branchName: "release",
+              }),
+            65_000,
+          );
+        // The connection drops mid-switch; the host's switch may run on.
+        if (operationId === "dropped#1")
+          setTimeout(() => reject(new Error("Host is not connected")), 30_000);
+      }),
+  });
+  try {
+    await plugin(bb);
+    const provider = harness.registrations.environmentProviders.get(
+      PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
+    );
+    if (!provider) throw new Error("Missing provider");
+    vi.useFakeTimers();
+    const results: Record<string, unknown> = {};
+    for (const pathKey of ["stuck", "switch", "dropped", "lost"])
+      void provider
+        .create({
+          project: PROJECT,
+          host: HOST,
+          projectCheckout: {
+            path: CHECKOUT_PATH,
+            experimental_ownsPath: false,
+          },
+          gitRemote: null,
+          inputs: {},
+          thread: makeThreadResponse(),
+          suggestedBranchName: "bb/test",
+          attempt: 1,
+          pathKey,
+          rebuild: false,
+          experimental_claimPath: async () => true,
+          previous: null,
+          report: { step() {}, log() {} },
+          signal: new AbortController().signal,
+        })
+        .then(
+          (value) => (results[pathKey] = value),
+          (error: unknown) => (results[pathKey] = error),
+        );
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (const operationId of ["switch#1", "dropped#1"])
+      await harness.behavior.experimental_emitHostSignal(HOST.id, "progress", {
+        operationId,
+        type: "step",
+        text: "Switching to branch release",
+        status: "started",
+      });
+    await vi.advanceTimersByTimeAsync(65_000);
+    expect(results.stuck).toMatchObject({
+      status: "failed",
+      message: expect.stringContaining("Privacy & Security"),
+    });
+    expect(results.switch).toMatchObject({ status: "created" });
+    // Thrown, not "failed": the engine keeps the folder claimed (#1366).
+    expect(results.dropped).toEqual(new Error("Host is not connected"));
+    expect(results.lost).toEqual(new Error("Host is not connected"));
+  } finally {
+    vi.useRealTimers();
+    await harness.lifecycle.dispose();
+  }
+});

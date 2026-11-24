@@ -35,7 +35,13 @@ type PromptDraftListener = () => void;
 
 interface PromptDraftWriteOptions {
   persist: "immediate" | "deferred";
+  notify?: "immediate" | "after-paint";
 }
+
+// Typing tells React after the next paint, so the letter shows before the
+// composer re-renders. The timeout covers hidden windows, which pause frames.
+const PROMPT_DRAFT_NOTIFY_FALLBACK_MS = 100;
+const pendingPromptDraftNotifies = new Map<string, () => void>();
 
 const EMPTY_PROMPT_DRAFT = emptyPromptDraftState();
 const promptDraftCache = new Map<string, PromptDraftCacheEntry>();
@@ -72,12 +78,41 @@ function readPromptDraft(storageKey: string | null): PromptDraftState {
 }
 
 function emitPromptDraftChange(storageKey: string): void {
+  pendingPromptDraftNotifies.get(storageKey)?.();
   const listeners = promptDraftSubscribers.get(storageKey);
   if (!listeners || listeners.size === 0) return;
 
   for (const listener of listeners) {
     listener();
   }
+}
+
+function notifyPromptDraftAfterPaint(storageKey: string): void {
+  if (pendingPromptDraftNotifies.has(storageKey)) return;
+  const notify = () => emitPromptDraftChange(storageKey);
+  let paintTimer: number | undefined;
+  const frame = window.requestAnimationFrame(() => {
+    paintTimer = window.setTimeout(notify, 0);
+  });
+  const fallbackTimer = window.setTimeout(
+    notify,
+    PROMPT_DRAFT_NOTIFY_FALLBACK_MS,
+  );
+  pendingPromptDraftNotifies.set(storageKey, () => {
+    pendingPromptDraftNotifies.delete(storageKey);
+    window.cancelAnimationFrame(frame);
+    window.clearTimeout(paintTimer);
+    window.clearTimeout(fallbackTimer);
+  });
+}
+
+/** Tells React about typing now instead of after paint. Returns false when nothing was waiting. */
+export function flushPromptDraftNotifies(): boolean {
+  if (pendingPromptDraftNotifies.size === 0) return false;
+  for (const storageKey of Array.from(pendingPromptDraftNotifies.keys())) {
+    emitPromptDraftChange(storageKey);
+  }
+  return true;
 }
 
 function clearPromptDraftPersistTimer(storageKey: string): void {
@@ -156,6 +191,9 @@ function ensurePromptDraftStorageObserver(): void {
     emitPromptDraftChange(event.key);
   });
   window.addEventListener("pagehide", flushPendingPromptDraftPersists);
+  // A press always comes before its click, so buttons that read the draft
+  // (Send, queue, toolbar actions) render with every typed letter.
+  window.addEventListener("pointerdown", flushPromptDraftNotifies, true);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
       flushPendingPromptDraftPersists();
@@ -198,16 +236,28 @@ function writePromptDraft(
 ): void {
   if (!storageKey || typeof window === "undefined") return;
 
+  const draft = isPromptDraftEmpty(value) ? EMPTY_PROMPT_DRAFT : value;
+  // React may not have seen pending typing yet. A fresh object forces a render,
+  // so the editor drops that text even if this write matches React's last view.
+  const skipsPendingTyping =
+    options.notify !== "after-paint" &&
+    pendingPromptDraftNotifies.has(storageKey);
   promptDraftCache.set(storageKey, {
     rawValue: null,
-    draft: isPromptDraftEmpty(value) ? EMPTY_PROMPT_DRAFT : value,
+    draft: skipsPendingTyping
+      ? { ...draft, mentions: [...draft.mentions] }
+      : draft,
   });
   if (options.persist === "deferred") {
     schedulePromptDraftPersist(storageKey);
   } else {
     persistPromptDraftCache(storageKey);
   }
-  emitPromptDraftChange(storageKey);
+  if (options.notify === "after-paint") {
+    notifyPromptDraftAfterPaint(storageKey);
+  } else {
+    emitPromptDraftChange(storageKey);
+  }
 }
 
 function restorePromptDraftIfEmpty(
@@ -325,6 +375,8 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
     [storageKey],
   );
 
+  // For editors that own their text (TipTap): React hears after paint.
+  // A controlled <input> would flicker; use setDraft there.
   const setTextAndMentions = useCallback(
     (nextText: string, nextMentions: PromptTextMention[]) => {
       writePromptDraft(
@@ -334,7 +386,7 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
           text: nextText,
           mentions: nextMentions,
         },
-        { persist: "deferred" },
+        { persist: "deferred", notify: "after-paint" },
       );
     },
     [storageKey],

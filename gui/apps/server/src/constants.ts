@@ -2,7 +2,11 @@ export const COMMAND_TIMEOUT_MS = 30_000;
 export const HEARTBEAT_INTERVAL_MS = 5_000;
 export const LEASE_TIMEOUT_MS = 30_000;
 export const DAEMON_DISCONNECT_GRACE_MS = 5_000;
-export const DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS = LEASE_TIMEOUT_MS;
+// A host daemon waits up to 30 s between reconnect tries, so after a tunnel
+// flap a 30 s grace interrupted threads still running on it (#1956).
+export const DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS = 2 * LEASE_TIMEOUT_MS;
+// Workspace setup and thread starts keep main's 30 s.
+export const DAEMON_SETUP_DISCONNECT_GRACE_MS = LEASE_TIMEOUT_MS;
 export const WORKSPACE_DIFF_MAX_DIFF_BYTES = 2 * 1024 * 1024;
 export const WORKSPACE_DIFF_MAX_FILE_LIST_BYTES = 256 * 1024;
 export const WORKSPACE_STATUS_MAX_UNTRACKED_LINE_STAT_FILES = 50;

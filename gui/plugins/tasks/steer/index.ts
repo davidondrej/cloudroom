@@ -23,7 +23,7 @@ function steerPrompt(
 }
 
 export async function deliverCommentToLatestAgent(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksStore,
   input: DeliverCommentInput,
 ): Promise<number> {
@@ -39,16 +39,16 @@ export async function deliverCommentToLatestAgent(
   const threadId = latestReply.threadId;
   const prompt = steerPrompt(task.key, input.authorName, input.body);
   try {
-    const thread = await bb.sdk.threads.get({ threadId });
+    const thread = await room.sdk.threads.get({ threadId });
     if (isSideChatShapedThread(thread)) return 0;
-    await bb.sdk.threads.send({
+    await room.sdk.threads.send({
       threadId,
       input: [{ type: "text", text: prompt, mentions: [] }],
       mode: "steer-if-active",
     });
     return 1;
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `failed to deliver comment ${input.commentId} to thread ${threadId}: ${errorMessage(error)}`,
     );
     return 0;

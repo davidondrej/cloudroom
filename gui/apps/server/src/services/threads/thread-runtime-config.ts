@@ -1,9 +1,10 @@
 import {
-  cloudClaudeLoginEnvironment,
+  providerLoginEnvironment,
   resolveHostEnvironment,
   mergeHostAndProviderEnvironment,
 } from "../hosts/host-environment.js";
 import { getAppSettings, getEnvironment, getHost, getProject } from "@cloudroom/db";
+import { stripGitUrlCredentials } from "@cloudroom/domain";
 import type {
   DynamicTool,
   InstructionMode,
@@ -24,7 +25,6 @@ import {
   listPluginInstructionContributions,
   getPluginSkillRootContributions,
   resolvePluginAgentConfiguration,
-  resolvePluginProviderEnv,
 } from "../plugins/plugin-agent-contributions.js";
 import { resolveSkillCatalog } from "../skills/skill-catalog.js";
 import { discoverPluginSkillIds } from "../skills/injected-skills.js";
@@ -50,7 +50,7 @@ import {
 const ASK_USER_QUESTION_TOOL_NAME = "AskUserQuestion";
 
 const UPDATE_ENVIRONMENT_DIRECTORY_INSTRUCTIONS =
-  "If the user asks you to move this thread to a new worktree, run `room-cli thread worktree` and follow its output; never create a worktree yourself. If they ask to move it to another existing checkout or directory, make sure it exists, then call `update_environment_directory` with its absolute path. After it succeeds, stop work in the current turn; future turns will run in the updated environment. If they ask to move it to another Cloudroom project, run `room-cli thread move --self --project PROJECT` and end your turn.";
+  "If the user asks you to move this thread to a new worktree, run `room-cli thread worktree --carry <the uncommitted files this thread changed>` and end your turn—Cloudroom moves the thread and resumes you there automatically (never carry other agents' files or create a worktree yourself). If they ask to move it to another existing checkout or directory, make sure it exists, then call `update_environment_directory` with its absolute path. After it succeeds, stop work in the current turn; future turns will run in the updated environment. If they ask to move it to another Cloudroom project, run `room-cli thread move --self --project PROJECT` and end your turn.";
 
 export interface ThreadRuntimeCommandEnvironment {
   hostId: string;
@@ -161,7 +161,9 @@ export async function resolveThreadRuntimeCommandConfig(
         id: project.id,
         kind: project.kind,
         name: project.name,
-        gitRemoteUrl: project.gitRemoteUrl,
+        // Plugins never see a legacy row's username or token (#2190).
+        gitRemoteUrl:
+          project.gitRemoteUrl && stripGitUrlCredentials(project.gitRemoteUrl),
       },
       environment: {
         id: environment.id,
@@ -195,21 +197,15 @@ export async function resolveThreadRuntimeCommandConfig(
         hostId: host.id,
         projectId: project.id,
       })),
-      ...cloudClaudeLoginEnvironment(deps, {
-        hostId: host.id,
-        providerId: args.thread.providerId,
-      }),
       ...(args.thread.providerId === "codex"
         ? await cloudroom(deps).codexAccounts.environment()
         : []),
     ],
-    await resolvePluginProviderEnv({
+    await providerLoginEnvironment(deps, {
+      hostId: host.id,
       providerId: args.thread.providerId,
-      context: {
-        threadId: args.thread.id,
-        projectId: project.id,
-        hostId: host.id,
-      },
+      threadId: args.thread.id,
+      projectId: project.id,
     }),
   );
   const injectedSkillSources = resolveSkillCatalog(deps, {
@@ -233,7 +229,7 @@ export async function resolveThreadRuntimeCommandConfig(
   const dynamicTools = dynamicToolContributions.map(
     (contribution) => contribution.tool,
   );
-  const systemPrompt = cloudroomSystemPrompt(deps.db);
+  const systemPrompt = cloudroomSystemPrompt(deps.db, "local");
   const instructionSections: string[] = systemPrompt ? [systemPrompt] : [];
   for (const contribution of dynamicToolContributions) {
     if (!contribution.instructions) continue;

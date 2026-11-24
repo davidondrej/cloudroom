@@ -310,10 +310,7 @@ interface PluginHostSignalHandler {
   }) => void | Promise<void>;
 }
 
-type PluginInstructionProvider = (ctx: {
-  threadId: string;
-  projectId: string;
-}) => string | null;
+type PluginInstructionProvider = Parameters<PluginAgents["contributeInstructions"]>[0];
 
 type PluginAgentConfigurationProvider = (
   context: PluginAgentConfigurationContext,

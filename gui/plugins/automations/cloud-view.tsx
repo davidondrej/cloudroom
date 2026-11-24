@@ -10,7 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { loopsChanged } from "./paused-notice";
+import { loopsChanged, useCloudLoginFixed, usePlanLoopsChanged } from "./paused-notice";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { AutomationAgentSummary } from "./src/rpc-types.js";
 
@@ -30,7 +30,13 @@ export type CloudAutomation = {
   runs: number;
   prompt?: string;
   new_thread?: boolean;
+  /** Runs first; a Jev loop's prints its items. */
+  script?: string | null;
+  /** A Jev loop's action script (docs/scopes/loops.md, Jev loops): its `prompt` is Jev's questions and it runs no agent. */
+  jev_action?: string | null;
   agent?: AutomationAgentSummary | null;
+  /** Two or more agents that take turns, in order; `agent` is the first. */
+  agents?: AutomationAgentSummary[];
   project_id?: string | null;
   /** P1-P4; missing until the website's 0094 update. */
   priority?: number;
@@ -43,7 +49,12 @@ export type CloudAutomationChanges = {
   harness?: string;
   model?: string;
   reasoning?: string;
+  /** Two or more agents that take turns, one per run. */
+  agents?: { harness: string; model: string; reasoning?: string }[];
   secrets?: string[];
+  /** With `prompt` (Jev's questions) and `jev_action`, saved together for a Jev loop. */
+  script?: string;
+  jev_action?: string;
 };
 export type CloudAutomationActions = {
   onOpen: (a: CloudAutomation) => void;
@@ -132,6 +143,8 @@ export function useCloudAutomations(): {
   useEffect(() => {
     void load();
   }, [load]);
+  useCloudLoginFixed(() => void load());
+  usePlanLoopsChanged(() => void load());
   const act = useCallback(
     async (request: Request, done: string) => {
       try {
@@ -150,7 +163,7 @@ export function useCloudAutomations(): {
       // A project loop (no thread hosts it) opens its project.
       onOpen: (a) => a.thread_id.startsWith("proj_") ? navigate.toProject(a.thread_id) : navigate.toThread(a.thread_id),
       onRun: (a) =>
-        void act({ action: "run", id: a.id }, "Runs within a minute"),
+        void act({ action: "run", id: a.id }, "Starting now"),
       onNewUrl: (a) =>
         void replaceWebhookUrl(
           async () =>

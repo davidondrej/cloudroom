@@ -59,6 +59,7 @@ describe("buildPluginProviderRegistration", () => {
         supportsNativeUserQuestion: true,
         supportsFork: true,
         supportsSessionRewind: true,
+        supportsManualCompaction: false,
         modelCatalogScope: "workspace",
         permissionModes: ["accept-edits", "full"],
       },
@@ -352,6 +353,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "acp-antigravity",
+        logoUrl: "/api/v1/system/providers/acp-antigravity/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-cursor",
         logoUrl: "/api/v1/system/providers/acp-cursor/logo",
         icon: undefined,
@@ -406,6 +412,16 @@ describe("buildPluginProviderRegistration", () => {
         logoUrl: "/api/v1/system/providers/acp-cline/logo",
         icon: undefined,
       },
+      {
+        id: "acp-kimi",
+        logoUrl: "/api/v1/system/providers/acp-kimi/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-agent-zero",
+        logoUrl: "/api/v1/system/providers/acp-agent-zero/logo",
+        icon: undefined,
+      },
     ]);
   });
 
@@ -438,6 +454,9 @@ describe("buildPluginProviderRegistration", () => {
       "acp-droid": "collapse",
       "acp-kilo": "collapse",
       "acp-cline": "collapse",
+      "acp-kimi": "collapse",
+      "acp-antigravity": "collapse",
+      "acp-agent-zero": "collapse",
     });
   });
 });

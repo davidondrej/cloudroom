@@ -286,6 +286,8 @@ const threadStartCommandSchema = hostDaemonThreadTargetSchema
         sourceProviderCheckpointId: z.string().min(1).optional(),
       })
       .optional(),
+    /** A message edit replaces this native session and keeps its Goal (#857). */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -354,6 +356,8 @@ export const threadStopCommandSchema = hostDaemonThreadTargetSchema
     type: z.literal("thread.stop"),
     intent: threadStopIntentSchema,
     immediate: z.boolean().optional(),
+    /** The user's own Stop: the agent may stay alive once its turn has ended. */
+    keepSession: z.boolean().optional(),
   })
   .strict();
 
@@ -362,7 +366,8 @@ const threadTeleportCommandSchema = hostDaemonThreadWorkspaceTargetSchema.extend
   type: z.literal("thread.teleport"),
   transferId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   action: z.enum(["capture", "read", "import"]),
-  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode"]) })).optional(),
+  // `optional`: an archived child that never started, left out when it saved no conversation (#1767).
+  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode", "antigravity"]), optional: z.boolean().optional() })).optional(),
   file: z.string().optional(),
   attachments: z.array(z.string()).optional(),
   keepImages: z.boolean().optional(),
@@ -603,6 +608,8 @@ const hostRemovePathCommandSchema = z
 const hostBrowseDirectoryCommandSchema = z.object({
   type: z.literal("host.browse_directory"),
   path: z.string().min(1).optional(),
+  /** Folders anywhere under `path` whose names match, best first. Empty only warms the search. */
+  search: z.string().max(200).optional(),
 });
 
 const hostPathsExistCommandSchema = pathsExistRequestSchema
@@ -657,6 +664,8 @@ const environmentHookRunCommandSchema = z
     contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     resumeOnly: z.boolean().default(false),
     operationId: z.string().min(1),
+    // Names the hooks saved at this environment's first setup: the only ones that run.
+    environmentId: z.string().min(1),
     path: z.string().min(1),
     kind: z.enum(["setup", "teardown"]),
     timeoutMs: z.number().int().positive().max(MAX_NODE_TIMER_DELAY_MS),
@@ -711,6 +720,10 @@ const directoryEntrySchema = z.object({
   kind: hostPathEntryKindSchema,
   name: z.string(),
   path: z.string(),
+  /** Folders: when they were last used, from the folder and its Git index. */
+  activityAt: z.number().optional(),
+  /** Folders: a Git repo, or a worktree or submodule of another repo (`.git` is a file). */
+  git: z.enum(["repo", "worktree"]).optional(),
 });
 export type DirectoryEntry = z.infer<typeof directoryEntrySchema>;
 
@@ -764,6 +777,8 @@ const discoveredSkillSchema = z.object({
   filePath: z.string(),
   rootKind: skillRootKindSchema,
   linked: z.boolean(),
+  /** Linked skills: the skill folder with symlinks resolved. */
+  realDirectoryPath: z.string().optional(),
 });
 export type DiscoveredSkill = z.infer<typeof discoveredSkillSchema>;
 
@@ -800,16 +815,16 @@ const hostDeleteSkillCommandSchema = z
         message: "cwd is required to delete a bb-project skill",
       });
     }
-    const isBbScope =
+    const isRoomScope =
       command.scope === "bb-user" || command.scope === "bb-project";
-    if (isBbScope && command.rootPath !== null) {
+    if (isRoomScope && command.rootPath !== null) {
       context.addIssue({
         code: "custom",
         path: ["rootPath"],
         message: "rootPath must be null for a bb skill",
       });
     }
-    if (!isBbScope && command.rootPath === null) {
+    if (!isRoomScope && command.rootPath === null) {
       context.addIssue({
         code: "custom",
         path: ["rootPath"],
@@ -818,12 +833,12 @@ const hostDeleteSkillCommandSchema = z
     }
   });
 
-const writableBbSkillScopeSchema = z.enum(["bb-user", "bb-project"]);
+const writableRoomSkillScopeSchema = z.enum(["bb-user", "bb-project"]);
 
 const hostWriteSkillCommandSchema = z
   .object({
     type: z.literal("host.write_skill"),
-    scope: writableBbSkillScopeSchema,
+    scope: writableRoomSkillScopeSchema,
     name: z.string().min(1),
     cwd: z.string().min(1).nullable(),
     content: z.string().min(1).max(1_000_000),
@@ -948,6 +963,9 @@ const unmanagedEnvironmentProvisionCommandSchema =
     .extend({
       path: z.string().min(1),
       setupScriptTimeoutMs: z.number().int().positive().nullable(),
+      // Lifecycle hooks are read from Git at the merge base of HEAD and this
+      // branch (the default branch when null), never from the folder's files.
+      hookBaseBranch: gitBranchNameSchema.nullable().optional(),
       contributedEnv: z.array(hostDaemonContributedEnvEntrySchema),
     })
     .strict();

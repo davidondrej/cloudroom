@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { codexVisibilityMetadata } from "./visibility.js";
 
 describe("codex visibility raw events", () => {
-  it("classifies Codex MCP startup status updates as noise", () => {
+  it("classifies failed Codex MCP startups as normalized and the rest as noise", () => {
     expect(
       codexVisibilityMetadata.describeRawEvent({
         jsonrpc: "2.0",
@@ -15,7 +15,7 @@ describe("codex visibility raw events", () => {
       }),
     ).toEqual({
       kind: "mcpServer/startupStatus/updated",
-      coverage: "noise",
+      coverage: "normalized",
     });
 
     expect(

@@ -22,6 +22,7 @@ import type { CommandResultSideEffectsDeps } from "../../internal/command-result
 import { ApiError } from "../../errors.js";
 import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
+  countThreadStartsSent,
   startLiveHostCommand,
 } from "../hosts/live-command.js";
 import { getLastProviderThreadId } from "./thread-events.js";
@@ -50,6 +51,7 @@ type ExecutionOptionsRequest = ExistingThreadExecutionInputRequest;
 
 export interface ThreadStopCommandArgs {
   immediate?: boolean;
+  keepSession?: boolean;
   environmentId: string;
   hostId: string;
   intent: ThreadStopIntent;
@@ -270,7 +272,11 @@ export async function buildThreadStartCommand(
     environment: args.environment,
     model: args.execution.model,
   });
-  const bridgeLaunch = requireBridgeLaunchForProviderId(deps, args.providerId);
+  const bridgeLaunch = requireBridgeLaunchForProviderId(
+    deps,
+    args.providerId,
+    args.environment.hostId,
+  );
   return {
     type: "thread.start",
     environmentId: args.environment.id,
@@ -283,8 +289,10 @@ export async function buildThreadStartCommand(
     bridgeLaunch,
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
-      { threadId: args.thread.id, projectId: args.projectId },
+      deps.db,
+      { threadId: args.thread.id, projectId: args.projectId, experimental_execution: { providerId: args.providerId, model: args.execution.model } },
       args,
+      true,
     ),
     options: toRuntimeExecutionOptions({
       ...args,
@@ -310,6 +318,7 @@ function buildPreparedTurnSubmitCommandPayload(
   const bridgeLaunch = requireBridgeLaunchForProviderId(
     args.deps,
     args.runtimeContext.providerId,
+    args.hostId,
   );
   return {
     type: "turn.submit",
@@ -317,7 +326,8 @@ function buildPreparedTurnSubmitCommandPayload(
     threadId: args.threadId,
     bridgeLaunch,
     ...prepareCustomInstructionInput(
-      { threadId: args.threadId, projectId: args.runtimeContext.projectId },
+      args.deps.db,
+      { threadId: args.threadId, projectId: args.runtimeContext.projectId, experimental_execution: { providerId: args.runtimeContext.providerId, model: args.execution.model } },
       args,
     ),
     options: toRuntimeExecutionOptions({
@@ -474,29 +484,55 @@ export function scheduleArchivedThreadProcessStop(
     environment: { id: string; hostId: string };
   },
 ): void {
-  const warn = (error: unknown) =>
-    deps.logger.warn(
-      { err: error, threadId: args.threadId },
-      "Stopping an archived thread's processes failed",
-    );
+  const startsSent = countThreadStartsSent(args.threadId);
   setTimeout(() => {
     try {
       const thread = getThread(deps.db, args.threadId);
       if (thread && thread.archivedAt !== args.archivedAt) return;
-      startLiveHostCommand(deps, {
-        command: {
-          type: "thread.processes.stop",
-          environmentId: args.environment.id,
-          threadId: args.threadId,
-        },
-        hostId: args.environment.hostId,
-        timeoutMs: 60_000,
-        onError: ({ error }) => warn(error),
-      });
+      sendThreadProcessesStop(deps, { ...args, startsSent });
     } catch (error) {
-      warn(error);
+      deps.logger.warn(
+        { err: error, threadId: args.threadId },
+        "Stopping an archived thread's processes failed",
+      );
     }
   }, ARCHIVED_THREAD_PROCESS_STOP_DELAY_MS).unref();
+}
+
+/**
+ * Has the host free the thread's idle agent session and end what it left
+ * running. Archive sends it, and so does `room-cli thread stop` of an idle
+ * thread (#607); other stops end only the agent. `startsSent` is the count
+ * when the stop or archive began: newer work since then keeps its jobs.
+ */
+export function sendThreadProcessesStop(
+  deps: CommandResultSideEffectsDeps,
+  args: {
+    threadId: string;
+    environment: { id: string; hostId: string };
+    startsSent: number;
+  },
+): void {
+  if (countThreadStartsSent(args.threadId) !== args.startsSent) return;
+  const warn = (error: unknown) =>
+    deps.logger.warn(
+      { err: error, threadId: args.threadId },
+      "Stopping a thread's processes failed",
+    );
+  try {
+    startLiveHostCommand(deps, {
+      command: {
+        type: "thread.processes.stop",
+        environmentId: args.environment.id,
+        threadId: args.threadId,
+      },
+      hostId: args.environment.hostId,
+      timeoutMs: 60_000,
+      onError: ({ error }) => warn(error),
+    });
+  } catch (error) {
+    warn(error);
+  }
 }
 
 /** Pushes a generated title to a local thread's live provider session, when it has one. */
@@ -663,6 +699,7 @@ export function buildThreadStopCommand(
     intent: args.intent,
     threadId: args.threadId,
     ...(args.immediate ? { immediate: true } : {}),
+    ...(args.keepSession && !args.immediate ? { keepSession: true } : {}),
   };
 }
 

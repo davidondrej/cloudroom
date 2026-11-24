@@ -5,6 +5,7 @@ import type { HostDaemonLogger } from "./logger.js";
 import {
   currentProcessTable,
   isInstalledApp,
+  pickThreadProcesses,
   stopThreadProcesses,
   type ProcessRow,
   type ProcessTable,
@@ -175,9 +176,10 @@ export function startMemoryGuard(options: MemoryGuardOptions): {
       run("top", ["-l", "1", "-stats", "pid,mem"]),
     ]);
     const now = Date.now();
+    const footprints = parseTopFootprints(top);
     const hit = threadOverLimit({
       rows,
-      footprints: parseTopFootprints(top),
+      footprints,
       serverUrl,
       limitBytes,
       skipThreadIds: new Set(
@@ -188,8 +190,22 @@ export function startMemoryGuard(options: MemoryGuardOptions): {
     });
     if (!hit) return;
     killedAt.set(hit.threadId, now);
+    // Its biggest processes, to compare with what `ps` shows (#1965).
+    const biggest = pickThreadProcesses(rows, {
+      threadId: hit.threadId,
+      serverUrl,
+      selfPid: process.pid,
+      includeLive: true,
+    })
+      .map((row) => ({
+        pid: row.pid,
+        exe: row.exe,
+        bytes: footprints.get(row.pid) ?? 0,
+      }))
+      .sort((a, b) => b.bytes - a.bytes)
+      .slice(0, 5);
     options.logger.warn(
-      { ...hit, totalBytes, limitBytes },
+      { ...hit, totalBytes, limitBytes, biggest },
       "Stopping a thread that is using too much memory",
     );
     // Tell the server first, so it records a stop instead of a failure.

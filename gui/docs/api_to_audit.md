@@ -1,5 +1,17 @@
 # APIs To Audit
 
+## Target for custom instructions
+
+`bb.agents.contributeInstructions` can receive `ctx.experimental_execution` with the resolved `providerId` and `model` for a user message. It is absent for callers without a resolved target.
+
+
+## `experimental_createHostUsageSource`
+
+Plugins can bundle host-local usage handlers from `@get-bb/plugin-sdk/provider-usage`
+in SDK 0.6.53. Each call owns its cache. The plugin supplies its schemas, plugin
+ID, and optional provider ID, then registers its own list and fetch RPC methods.
+Before stabilizing, check whether another usage source needs a different cache policy.
+
 ## `app.commands.register`
 
 `app.commands.register` requires SDK 0.4.91; `defaultShortcut` and keyboard
@@ -84,7 +96,7 @@ environment variables to that provider. The resolver receives an
 
 **What it does.** Registers one resolver per provider per plugin. The server
 calls it for each matching session and turn with the thread, project, and host
-ids, validates at most 32 environment entries, resolves registration conflicts
+ids, and with only the host id for helper inference (thread naming, purposes), validates at most 32 environment entries, resolves registration conflicts
 in plugin load order, and sends the winning values to the host. A value may be
 a literal string or a server-relative path that the host expands against its
 authenticated `BB_SERVER_URL`. Contributions override the shell environment and
@@ -540,7 +552,8 @@ receive previous.environment and previous.resource, null after completed
 removal. The six policy defaults are 5 minutes/60 seconds/30 seconds/3/
 per-thread/null; nullable retirement and create timeout disable those policies.
 EnvironmentStatus remains provisioning/ready/error/destroyed;
-retiring and teardown are lifecycle phases, not restored statuses.
+retiring and teardown are lifecycle phases, not restored statuses. A ready
+worktree whose folder was removed after archiving reports the parked phase.
 Audit availability message ownership, create-time error presentation, the
 interaction between the `requires` floor and provider decisions, and whether
 the current decision timeout is appropriate before stabilizing it.
@@ -1092,7 +1105,7 @@ whether `retryable` should be per kind (only `sessionArchived` and
 `rateLimited` read it today) and whether the runtime should bound the
 `rateLimited` ladder from the hint rather than from a constant.
 
-## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
+## Provider maintenance toolkit (`experimental_findCliExecutable`, `experimental_findBrokenCliLink`, `experimental_isClaudeNpmPlaceholder`, `experimental_resolveExecutablePath`, `experimental_readCliVersion`, `experimental_probeCliVersion`, `experimental_commandOutput`, `experimental_versionFrom`, `experimental_compareVersions`, `experimental_formatCommand`, `experimental_npmCommand`, `experimental_npmGlobalInstallCommand`, `experimental_npmLatestVersion`, `experimental_probeNpmGlobalPackage`, `experimental_npmGlobalInstallSource`, `experimental_installationVerification`, `experimental_installationRunUnavailable`, `experimental_downloadedInstallerCommand`, `experimental_clampPercent`) (`@get-bb/plugin-sdk/provider-bridge`)
 
 **What it does.** The host-local probes and install-action plumbing behind a
 bridge's `provider/health`, `provider/usage` and `provider/installation/*`
@@ -1102,12 +1115,18 @@ on PATH, then in common install folders, the Codex standalone package and,
 on macOS, the ChatGPT and Codex app bundles, old and new layout; null when
 absent), `experimental_findBrokenCliLink` (a PATH entry for that CLI whose
 symlink target is gone, for the "not installed" message),
+`experimental_isClaudeNpmPlaceholder` (true for npm's unfinished Claude Code
+`bin/claude.exe` stub, directly or behind its Windows `.cmd` shim; what
+`experimental_findCliExecutable` skips),
 `experimental_resolveExecutablePath` (the command's absolute path — the path
 itself when given absolute and executable, else the first `which`/`where`
 hit, null when absent; 5 s), `experimental_readCliVersion` (`<command>
 --version` with stdin closed, so CLIs that start a stdio server on unknown
 flags exit instead of hitting the timeout; the first version token on stdout
 or stderr, or null if it is invalid SemVer; 5 s),
+`experimental_probeCliVersion` (the same probe, plus the output of a
+`--version` that exited non-zero, so a bridge can tell a broken install
+from a slow one; null on a timeout),
 `experimental_commandOutput` (any command's trimmed stdout+stderr or null on
 failure; 15 s), `experimental_versionFrom` (the first version token in a
 banner, or null if it is invalid SemVer), `experimental_npmLatestVersion` (`npm view <package> version`) and
@@ -1118,7 +1137,10 @@ metadata; throws `TypeError` for invalid inputs), `experimental_npmGlobalInstall
 the executable sits inside npm's global bin, `external` otherwise,
 `notInstalled` when absent) and `experimental_installationVerification` (an
 install verifies by existence; an update by reaching the latest version the
-status saw, or by any change when the registry was unreachable). The
+status saw, or by any change when the registry was unreachable) and
+`experimental_installationRunUnavailable` (refuses an install or update the
+fresh status no longer offers, naming the installed version and the action
+it does offer). The
 actions: `experimental_npmGlobalInstallCommand` (`npm install -g
 <package>@latest` with its display string), `experimental_downloadedInstallerCommand`
 (a vendor's `curl | bash` script run from a temp file),
@@ -1148,7 +1170,22 @@ dist-tag and `doctor` parsing) beside them.
    enum should grow before it is relied on.
 4. **`downloadedInstallerCommand` is POSIX.** `sh -c` with `mktemp`, `curl`
    and `bash`; there is no Windows form. Decide whether it should refuse on
-   win32 rather than hand the daemon a command that cannot run.
+   win32 rather than hand the daemon a command that cannot run. Its script
+   waits in `${TMPDIR:-/tmp}`, which the daemon points at a private folder
+   (macOS, Linux). A plugin's own plan that hard-codes `/tmp` gets no such
+   protection.
+
+## Private data paths (`experimental_privateDataPaths`) (`@get-bb/plugin-sdk/provider-bridge`)
+
+**What it does.** Returns the absolute paths of the data folder's credential
+files and app database for a session's `ROOM_DATA_DIR` (empty when unset).
+The Claude and Codex bridges deny them to sandboxed agents (#2191).
+
+**Audit before stabilizing.** The list lives in `@cloudroom/process-utils`:
+fixed names plus a scan of each plugin's `secrets/`, account profiles, and
+preview folders when it is called. A new kind of credential file must be added
+there. It names files, not the whole folder, because worktrees and attachments
+live in it too.
 
 ## Presentation builders (`experimental_presentationTitle`, `experimental_presentationDetail`, `experimental_withTitle`, `experimental_presentationFileName`, `experimental_COMPACTION_PRESENTATION`, `experimental_REASONING_PRESENTATION`, `experimental_fileReadPresentation`, `experimental_searchPresentation`, `experimental_webSearchPresentation`, `experimental_webFetchPresentation`, `experimental_planStepsPresentation`, `experimental_toolPresentation`) (`@get-bb/plugin-sdk/provider-bridge`)
 
@@ -1491,7 +1528,7 @@ Before stabilization, audit:
 
 ## `PluginProviderDeclaration.experimental_modelDiscoveryRestart`
 
-Opt-in model-picker recovery. Cursor, Codex, and Pi enable it; other providers remain unchanged. On model discovery failure, the picker offers Restart. The API restarts only that provider's maintenance process and reloads its catalog, without stopping threads or changing credentials. For a provider with workspace-scoped catalogs (Pi), it also marks the provider's other cached workspace catalogs on that host stale. Experimental until recovery is proven with more providers.
+Opt-in model-picker recovery. Every ACP agent, Codex, and Pi enable it; other providers remain unchanged. On model discovery failure, the picker offers Restart. The API restarts only that provider's maintenance process and reloads its catalog, without stopping threads or changing credentials. For a provider with workspace-scoped catalogs (Pi, OpenCode, Kilo Code), it also marks the provider's other cached workspace catalogs on that host stale. Experimental until recovery is proven with more providers.
 
 ## `bb.providers.register` (`experimental_bridgeOptions`, `experimental_visibility`, and the `experimental_providerBridge` artifact export)
 
@@ -1517,7 +1554,8 @@ Ids are flat and first-wins: a live id collision fails the later plugin's
 load, and no id is reserved ahead of time (`RESERVED_PROVIDER_ID_OWNERS` is
 gone). Listing order is plugin install order — bundled first-party plugins
 rank first, in their bundled-list order, then every other plugin by install
-time — under the user's `providerOrder` / `defaultProviderId` app settings
+time — under the user's `defaultProviderId` (first) and their thread counts
+per provider over the last 30 days (most used next)
 (`PRODUCT_PROVIDER_ORDER` and `PRODUCT_DEFAULT_PROVIDER_ID` are gone).
 `experimental_visibility: "installed"` withholds a provider from unscoped
 listings until its own `provider/health` result is not `not_installed`.
@@ -1531,9 +1569,8 @@ bridge as provider-scoped static options. Core does not interpret its keys.
    `BUNDLED_PLUGINS`; other plugins by `installedAt`. Confirm that a
    reinstalled builtin (tombstone then reinstall) keeping its bundled rank is
    right, and that `installedAt` is the fact users expect for third-party
-   order (vs. first-load time). The user overlay (`providerOrder`) is an
-   ordered id list that ignores unknown ids; decide whether stale ids should
-   be pruned on write.
+   order (vs. first-load time). Usage order only counts threads, so a new
+   provider sits behind the ones already used until it is used.
 2. **Icon URL shape.** `icon` uses the `bb.branding.icon` grammar (a named host
    glyph, or a `./`-prefixed plugin-relative SVG) plus the plugin's own
    declared icons as `"<pluginId>/<name>"` (`bb.branding.experimental_icons`;
@@ -1926,6 +1963,9 @@ Verified data may come from the machine's stored catalog while a background
 refresh runs, or while that provider's refresh keeps failing or timing out, so
 a model newer than the stored list can be normalized away before a refresh
 lands.
+`extraChoice={{ label, icon, onSelect }}` adds one tab after the providers for
+a caller's choice that is not an agent (Loops: Jev); picking it closes the
+picker and calls `onSelect` without changing `value`.
 `allowProviderChange={false}` hides provider tabs while retaining model,
 reasoning, and service-tier selection for the controlled provider. Routing
 never implies provider locking: an environment supplies host/workspace context
@@ -2234,9 +2274,10 @@ renders in the same footer row.
 3. **Programmatic opening.** Confirm `open()` should remain available. The
    intended policy is direct user-driven flows; background changes should not
    surprise-open sidebar content.
-4. **Disclosure lifecycle.** Components currently mount only while open and
-   remount after dismissal. Confirm plugins do not require retained hidden state,
-   or add an explicit retention policy before stabilizing.
+4. **Disclosure lifecycle.** Components mount while open, and also hidden while
+   their button is hovered, so data loads before the click. A hidden
+   mount ends 30 s after the pointer leaves. Confirm plugins tolerate mounting
+   without being seen, or add an explicit opt-out before stabilizing.
 5. **Footer capacity.** Establish overflow behavior when several plugins
    register items, including compact viewports and icon-collapsed sidebars.
 6. **Compatibility.** Migrate representative users of
@@ -2325,7 +2366,7 @@ one toast.
 
 **What it does.** Lets a plugin serve bb's own AI services — server-side
 helper inference (thread titles, thread purposes, commit messages: prompt + JSON Schema in,
-structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes) and voice transcription — from its `bb.host` entry.
+structured value out; `reasoningEffort` is `none`, `low`, `medium`, or `high`, widened from `none` on 2026-10-13 for thread purposes; an optional `env` carries the login of the provider with the same id, added 2026-11-11) and voice transcription — from its `bb.host` entry.
 `bb.experimental_aiServices.register({ id, displayName, kinds })` stages the
 service during the factory and lands it when the load commits; the host entry
 implements `experimental_aiServicesHostContract` (`ai.inference.complete`,
@@ -2613,6 +2654,26 @@ deliberately: it mounts once, and a crash there should disable it everywhere.
 Confirm that split before stabilizing, and decide whether other multi-mount
 slots need the same treatment.
 
+## `app.slots.experimental_projectAction` (`@get-bb/plugin-sdk/app`)
+
+**Added 2026-11-16** for the built-in Shared projects plugin, its only consumer.
+
+**What it does.** Adds an item to every project's actions menu (the sidebar's
+three dots and its right-click menu). The host draws the item from `title`,
+`icon`, and an optional `badge` (a short accent label, like "NEW"). Selecting
+it opens `component` as a full page for that project, at
+`/plugins/<pluginId>/<id>/<projectId>`. The page has no sidebar entry.
+
+**Audit before stabilizing.**
+
+1. **Page or `run`.** Every other action slot takes `run`. Decide whether this
+   one should too, with the page as one thing `run` can open.
+2. **Route.** The page shares the nav panels' route, so an action id must not
+   match a nav panel path of the same plugin. Decide whether the collector
+   should refuse that.
+3. **Budget.** Decide a cap, or a submenu, before several plugins add an item.
+4. **Badge.** Free text today. Decide whether it should be a fixed set.
+
 ## `app.slots.experimental_browserToolbarAction` (`@get-bb/plugin-sdk/app`)
 
 **What it does.** Renders a plugin component beside the address bar in each
@@ -2688,7 +2749,7 @@ the draft after request failure. Consumers: `plugins/scheduled-send` and
 
 `bb.sdk.experimental_desktopBrowsers` and the exported `ExperimentalDesktopBrowsersArea`, `ExperimentalDesktopBrowserScope`, `ExperimentalDesktopBrowserLease`, `ExperimentalDesktopBrowserCreateInput`, and `ExperimentalDesktopBrowserAcquireInput` expose explicit host/window/thread discovery, isolated tab creation, expiring control leases, scoped CDP connections, capture, reveal, close, release, disposable tab-state subscriptions, and cookie import from an installed browser through `listImportSources` and `importCookies` (`ExperimentalDesktopBrowserInstanceRequest`, `ExperimentalDesktopBrowserImportCookiesInput`, `ExperimentalDesktopBrowserImportSources`, `ExperimentalDesktopBrowserImportOutcome`). The matching core CLI is `bb browser`.
 
-Before stabilization, audit cookie import authorization: any caller with server access can copy the desktop user's browser sessions into a BB profile, including an automation profile an agent controls, with OS consent only where the platform demands it (macOS Keychain for Chromium, Full Disk Access for Safari; none for Firefox or keyring-free Linux Chromium). Decide whether imports into automation profiles need an explicit handoff like personal-tab control, and whether the daemon should require a desktop-side confirmation. Also audit personal-profile handoff policy, per-tab mutual exclusion and child-target scope, native popup handling, debugger detachment, daemon/desktop disconnect and reconnect generations, expiry and cancellation races, bounded screenshot bytes, and cross-platform desktop startup. Connection credentials must remain private to workers on the browser host. `subscribe` polls every two seconds with one outstanding request; it is state observation, not a lossless event log. Cloud browsers and external provider registration are outside this surface.
+The desktop broker enforces two rules (security sweep 8): cookie import writes only into the personal profile, never an automation profile, and personal tabs can never be captured, leased, or reached over CDP. Before stabilization, decide whether agent-triggered imports into the personal profile need a desktop-side confirmation (OS consent applies only where the platform demands it: macOS Keychain for Chromium, Full Disk Access for Safari; none for Firefox or keyring-free Linux Chromium). Also audit per-tab mutual exclusion and child-target scope, native popup handling, debugger detachment, daemon/desktop disconnect and reconnect generations, expiry and cancellation races, bounded screenshot bytes, and cross-platform desktop startup. Connection credentials must remain private to workers on the browser host. `subscribe` polls every two seconds with one outstanding request; it is state observation, not a lossless event log. Cloud browsers and external provider registration are outside this surface.
 
 ## Host process primitives (`@get-bb/plugin-sdk/host`)
 
@@ -3101,7 +3162,7 @@ dedicated side-chat create call.
 
 ## `bb.experimental_telemetry.capture`
 
-`capture(name, properties)` sends one PostHog event through the server's own
+`capture(name, properties)` sends one usage event through the server's own
 telemetry service, tagged with `plugin_id`. Only built-in plugins get a working
 call; for others it is a silent no-op. It does nothing when the user turned
 telemetry off. Names must be snake_case (at most 64 characters); at most 32

@@ -244,7 +244,28 @@ describe("codex turn lifecycle translation", () => {
         error: { message: "rate limited" },
       }),
     );
-    expect(events[0]).not.toHaveProperty("providerCheckpointId");
+    expect(events.at(-1)).not.toHaveProperty("providerCheckpointId");
+    // No `error` notification came first, so the failed turn shows its own.
+    expect(events[0]).toMatchObject({
+      type: "provider/error",
+      detail: "rate limited\ntry again",
+      willRetry: false,
+    });
+    // ...and a late twin `error` does not show it again.
+    expect(
+      harness.translate(
+        codexEvent("error", {
+          threadId: "t1",
+          turnId: "turn-1",
+          error: {
+            message: "rate limited",
+            codexErrorInfo: null,
+            additionalDetails: null,
+          },
+          willRetry: false,
+        }),
+      ),
+    ).toEqual([]);
   });
 
   it("stamps the codex turn id as providerCheckpointId on completed turns", () => {
@@ -1197,6 +1218,44 @@ describe("codex item translation", () => {
     );
   });
 
+  it("survives deeply nested collab agent state", () => {
+    const harness = createHarness();
+    let state: unknown = null;
+    for (let depth = 0; depth < 5_000; depth++) state = { x: state };
+
+    const events = harness.translate({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        threadId: "t1",
+        turnId: "turn-1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-deep-1",
+          tool: "spawnAgent",
+          status: "completed",
+          senderThreadId: "t1",
+          receiverThreadIds: ["sub-thread-1"],
+          prompt: null,
+          model: null,
+          reasoningEffort: null,
+          agentsStates: { "sub-thread-1": state },
+        },
+      },
+    });
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "item/completed",
+        item: expect.objectContaining({
+          type: "delegation",
+          childRef: "sub-thread-1",
+          summary: "sub-thread-1: [state too deeply nested]",
+        }),
+      }),
+    );
+  });
+
   it("keeps a collabAgentToolCall without a receiver a generic tool call", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1921,6 +1980,78 @@ describe("codex error and warning translation", () => {
     ]);
   });
 
+  it("explains a failed workspace routing lookup, not its 401 (#2426)", () => {
+    const final = (message: string) =>
+      createHarness().translate(
+        codexEvent("error", {
+          threadId: "t1",
+          turnId: "turn-1",
+          willRetry: false,
+          error: { message, codexErrorInfo: "other", additionalDetails: null },
+        }),
+      )[0];
+    expect(final("workspace routing discovery timed out")).toMatchObject({
+      detail: expect.stringContaining("not this thread or its worktree"),
+    });
+    const unauthorized = "workspace routing discovery unauthorized (401)";
+    expect(final(unauthorized)).toMatchObject({ detail: unauthorized });
+  });
+
+  it("says plainly when Codex sends only a bare Bad Request", () => {
+    const harness = createHarness();
+    const events = harness.translate(
+      codexEvent("error", {
+        threadId: "t1",
+        turnId: "turn-1",
+        error: {
+          message: '{"detail":"Bad Request"}',
+          codexErrorInfo: "other",
+          additionalDetails: null,
+        },
+        willRetry: false,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        detail: expect.stringMatching(
+          /^\{"detail":"Bad Request"\}\nThe model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID\./u,
+        ),
+        errorInfo: {
+          category: "bad-request",
+          providerCode: "other",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+
+  it("tags a model the ChatGPT account can't use and says how to pick another (#2009)", () => {
+    const harness = createHarness();
+    const events = harness.translate(
+      codexEvent("error", {
+        threadId: "t1",
+        turnId: "turn-1",
+        error: {
+          message:
+            '{"detail":"The \'gpt-6.1-sol\' model is not supported when using Codex with a ChatGPT account."}',
+          codexErrorInfo: "other",
+          additionalDetails: null,
+        },
+        willRetry: false,
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        detail: expect.stringContaining("Pick another one in the model picker"),
+        errorInfo: {
+          category: "bad-request",
+          providerCode: "modelNotFound",
+          httpStatusCode: null,
+        },
+      }),
+    ]);
+  });
+
   it("maps codexErrorInfo to provider error info", () => {
     const harness = createHarness();
     const events = harness.translate(
@@ -1957,6 +2088,9 @@ describe("codex error and warning translation", () => {
   it.each([
     ["sessionBudgetExceeded", "budget-exceeded"],
     ["misalignmentPolicyViolation", "policy"],
+    ["rateLimitExceeded", "unknown"],
+    // A code newer than the adapter still shows and still ends the turn.
+    ["brandNewCode", "unknown"],
   ] as const)(
     "normalizes %s errors and failed turn completion",
     (codexErrorInfo, category) => {
@@ -2053,15 +2187,26 @@ describe("codex error and warning translation", () => {
     );
   });
 
-  it("ignores MCP startup status updates", () => {
+  it("warns about a failed MCP startup with a fixed reason, never Codex's error text", () => {
     const harness = createHarness();
     const failedEvents = harness.translate({
       jsonrpc: "2.0",
       method: "mcpServer/startupStatus/updated",
       params: {
-        name: "codex_apps",
+        name: "timeout-tools",
         status: "failed",
-        error: "MCP client failed to start",
+        error:
+          'MCP client for `timeout-tools` failed to start: error sending request for url (https://user:pw@mcp.example.com/s/SECRET1/mcp): {"API_KEY":"SECRET2"} --token SECRET3 Cookie: a=SECRET4; b=SECRET5',
+        failureReason: null,
+      },
+    });
+    const unsafeEvents = harness.translate({
+      jsonrpc: "2.0",
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        name: "https://user:SECRET6@example.com/mcp",
+        status: "failed",
+        error: { token: "SECRET7" },
       },
     });
     const readyEvents = harness.translate({
@@ -2074,7 +2219,23 @@ describe("codex error and warning translation", () => {
       },
     });
 
-    expect(failedEvents).toEqual([]);
+    expect(failedEvents).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        category: "general",
+        summary:
+          "MCP server timeout-tools did not start. Codex could not reach it.",
+      }),
+    ]);
+    expect(unsafeEvents).toEqual([
+      expect.objectContaining({
+        type: "provider/warning",
+        summary: "An MCP server did not start. Codex did not say why.",
+      }),
+    ]);
+    expect(JSON.stringify([...failedEvents, ...unsafeEvents])).not.toMatch(
+      /SECRET|pw@/,
+    );
     expect(readyEvents).toEqual([]);
   });
 });
@@ -2596,6 +2757,40 @@ describe("codex account rate-limit translation", () => {
         reachedReason: "rate_limit_reached",
       },
     });
+  });
+
+  it.each([
+    ["applies and announces a late seed when Codex sent nothing yet", false],
+    ["ignores a late seed once Codex sent its own update", true],
+  ] as const)("%s (#1816)", (_name, codexUpdatedFirst) => {
+    const harness = createHarness();
+    const [rateLimitRead] = harness.translator.buildPostInitializeRequests();
+    const update = () =>
+      harness.translate({
+        jsonrpc: "2.0",
+        method: "account/rateLimits/updated",
+        params: { rateLimits: { primary: { usedPercent: 25, resetsAt: 1 } } },
+      });
+    if (codexUpdatedFirst) update();
+    rateLimitRead?.onResult({
+      rateLimits: {
+        limitId: "codex",
+        secondary: {
+          usedPercent: 100,
+          windowDurationMins: 10_080,
+          resetsAt: 2,
+        },
+      },
+    });
+    const late = harness.translator.takeLateSeedDeltas();
+    if (codexUpdatedFirst) {
+      expect(late).toEqual([]);
+      expect(update()[0]).toMatchObject({ rateLimits: { status: "allowed" } });
+    } else {
+      expect(late).toMatchObject([
+        { kind: "provider.rateLimits", rateLimits: { status: "blocked" } },
+      ]);
+    }
   });
 
   it("hydrates Codex rate limits before merging truly sparse rolling updates", () => {

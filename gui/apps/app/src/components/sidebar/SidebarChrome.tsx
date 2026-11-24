@@ -3,18 +3,18 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import {
   CHROME_ROW_CLASS,
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
   shouldReserveMacosTrafficLights,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
 import { SidebarHistoryNavigationControls } from "./SidebarHistoryNavigationControls";
 
 export function SidebarTopReserveRow({ testId }: { testId: string }) {
   const closeOnMobile = useCloseMobileSidebar();
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const desktopWindowState = useDesktopWindowState();
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
   const controlsLiveInWindowCapsule = shouldReserveMacosTrafficLights({

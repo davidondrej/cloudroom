@@ -46,6 +46,22 @@ fn roots(handle: &Handle, origin: &str) -> io::Result<Vec<PathBuf>> {
     }
 }
 
+/// Claude Code's shell syntax, as it matches it: a ```` ```! ```` block, or `` !`command` `` at a line start or after a
+/// space. A `` `Hi!` `` in plain text is not one: it once refused /slack mid-message.
+fn runs_shell(body: &str) -> bool {
+    body.find("```!")
+        .is_some_and(|at| body[at + 4..].contains("```"))
+        || body.match_indices("!`").any(|(at, _)| {
+            body[..at]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+                && body[at + 2..]
+                    .split_once('`')
+                    .is_some_and(|(command, _)| !command.is_empty())
+        })
+}
+
 /// The skill's instructions, or `None` when only Claude Code can run it (tool, model, hook, shell or argument settings).
 fn body(content: &str, name: &str) -> io::Result<Option<String>> {
     let content = content.trim_start_matches('\u{feff}').replace("\r\n", "\n");
@@ -99,7 +115,7 @@ fn body(content: &str, name: &str) -> io::Result<Option<String>> {
         }
         body = rest.trim_start();
     }
-    if body.contains("!`") || body.contains("$ARGUMENTS") || body.contains("${CLAUDE_") {
+    if runs_shell(body) || body.contains("$ARGUMENTS") || body.contains("${CLAUDE_") {
         return Ok(None);
     }
     if body.trim().is_empty() {
@@ -312,6 +328,11 @@ mod tests {
         let native = "---\nname: native\nmodel: sonnet\nallowed-tools: Bash\n---\nDo it.\n";
         assert_eq!(body(native, "native").unwrap(), None);
         assert_eq!(body("Plan $ARGUMENTS", "gsd").unwrap(), None);
+        assert_eq!(body("Branch: !`git branch`", "git").unwrap(), None);
+        assert_eq!(body("!`date`", "date").unwrap(), None);
+        assert_eq!(body("```!\ngit status\n```", "block").unwrap(), None);
+        let plain = "Post `Hey {first name}!`. Then use `jq`.";
+        assert_eq!(body(plain, "slack").unwrap().as_deref(), Some(plain));
         assert_eq!(
             body("---\nname: plain\n---\nDo it.\n", "plain")
                 .unwrap()

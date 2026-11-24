@@ -1,0 +1,35 @@
+name: Bug report
+description: Something in the app or core doesn't work.
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Steps to reproduce, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Version
+      description: App version (Settings → Updates) or core version.
+      placeholder: v142
+    validations:
+      required: true
+  - type: dropdown
+    attributes:
+      label: Where does it happen?
+      options: [Local thread, Cloud thread, Self-hosted core, Not sure]
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Operating system
+      placeholder: macOS 15, Ubuntu 24.04, Windows 11
+  - type: input
+    attributes:
+      label: Agent
+      placeholder: Claude Code, Codex, Pi, OpenCode...
+  - type: textarea
+    attributes:
+      label: Logs or screenshots
+      description: Remove credentials and personal data first.

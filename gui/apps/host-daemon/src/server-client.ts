@@ -1,4 +1,3 @@
-import pRetry, { AbortError } from "p-retry";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonEventBatchResponseSchema,
@@ -24,6 +23,7 @@ import {
   type HostDaemonToolCallResponse,
   type HostDaemonSkillTree,
 } from "@cloudroom/host-daemon-contract";
+import { isSecureOrLoopbackUrl } from "@cloudroom/config/loopback";
 import { HOST_ARTIFACT_MAX_BYTES } from "@cloudroom/host-daemon-contract/protocol";
 import type { PendingInteractionCreate, ToolCallRequest } from "@cloudroom/domain";
 import type { HostDaemonLogger } from "./logger.js";
@@ -144,10 +144,6 @@ function defaultRetryableForStatus(status: number): boolean {
   return status < 400 || status >= 500;
 }
 
-function toRetryControlError(error: ServerResponseError): Error {
-  return error.retryable ? error : new AbortError(error);
-}
-
 export type FetchFn = (
   ...args: Parameters<typeof fetch>
 ) => ReturnType<typeof fetch>;
@@ -208,21 +204,73 @@ export interface ServerClient {
 
 const INTERACTIVE_REQUEST_REGISTRATION_RETRIES = 5;
 
-export function usesSecureInternalFetchTransport(serverUrl: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(serverUrl);
-  } catch {
-    return false;
+// Node's fetch reports a dropped connection as TypeError "fetch failed", or
+// "terminated" mid-body. Any other TypeError is a bug a retry won't fix.
+function isRetryableRegistrationError(error: unknown): error is Error {
+  if (error instanceof ServerResponseError) return error.retryable;
+  if (error instanceof TypeError) {
+    return error.message === "fetch failed" || error.message === "terminated";
   }
-  if (parsed.protocol === "https:") {
-    return true;
-  }
+  return error instanceof Error;
+}
 
-  return (
-    parsed.hostname === "127.0.0.1" ||
-    parsed.hostname === "localhost" ||
-    parsed.hostname === "::1"
+// Waits 100 ms doubling to a 2 s cap, each wait stretched by a random 1-2x.
+// When every attempt fails, throws the most common error (latest on a tie).
+async function retryInteractiveRequestRegistration<T>(
+  attempt: () => Promise<T>,
+  logger: HostDaemonLogger,
+): Promise<T> {
+  const messageCounts = new Map<string, number>();
+  let mainError: Error | undefined;
+  let mainErrorCount = 0;
+  for (let attemptNumber = 1; ; attemptNumber += 1) {
+    try {
+      return await attempt();
+    } catch (error) {
+      if (!isRetryableRegistrationError(error)) throw error;
+      const retriesLeft =
+        INTERACTIVE_REQUEST_REGISTRATION_RETRIES - attemptNumber + 1;
+      logger.warn(
+        {
+          attempt: attemptNumber,
+          retriesLeft,
+          ...runtimeErrorLogFields(error),
+        },
+        "interactive request registration failed, retrying",
+      );
+      const count = (messageCounts.get(error.message) ?? 0) + 1;
+      messageCounts.set(error.message, count);
+      if (count >= mainErrorCount) {
+        mainError = error;
+        mainErrorCount = count;
+      }
+      if (retriesLeft === 0) throw mainError ?? error;
+      const delayMs = Math.min(
+        Math.round((1 + Math.random()) * 100 * 2 ** (attemptNumber - 1)),
+        2_000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+export function usesSecureInternalFetchTransport(serverUrl: string): boolean {
+  return isSecureOrLoopbackUrl(serverUrl);
+}
+
+/** Refuses a remote plain-HTTP server URL unless BB_ALLOW_INSECURE_SERVER_URL=1 opts in: the host key and session traffic would cross the network unencrypted (#2194). */
+export function assertSecureServerUrl(
+  serverUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  if (
+    usesSecureInternalFetchTransport(serverUrl) ||
+    env.BB_ALLOW_INSECURE_SERVER_URL === "1"
+  ) {
+    return;
+  }
+  throw new Error(
+    `Refusing to connect to ${serverUrl} over plain HTTP: this machine's key would travel unencrypted. Use an https:// server address (Cloudroom Connect or Tailscale Serve), or, on a network you trust, set BB_ALLOW_INSECURE_SERVER_URL=1 in this machine's env.json.`,
   );
 }
 
@@ -472,7 +520,7 @@ export function createServerClient(
       args: FetchProjectAttachmentArgs,
     ): Promise<FetchedProjectAttachment> {
       if (!usesSecureInternalFetchTransport(options.serverUrl)) {
-        throw new AbortError(
+        throw new Error(
           `Refusing to fetch project attachment over insecure server URL: ${options.serverUrl}`,
         );
       }
@@ -595,52 +643,32 @@ export function createServerClient(
     async registerInteractiveRequest(
       request: PendingInteractionCreate,
     ): Promise<HostDaemonInteractiveRequestResponse> {
-      return pRetry(
-        async () => {
-          await options.beforeInteractiveRequestRegistrationAttempt?.();
-          const payload: HostDaemonInteractiveRequest = {
-            sessionId: requireSessionId(),
-            interaction: request,
-          };
-          const response = await fetchFn(
-            buildInternalUrl("/session/interactive-request"),
-            {
-              method: "POST",
-              headers: headers(),
-              body: JSON.stringify(payload),
-            },
-          );
-
-          if (!response.ok) {
-            throw toRetryControlError(
-              await createResponseError(
-                "register interactive request",
-                response,
-              ),
-            );
-          }
-
-          return hostDaemonInteractiveRequestResponseSchema.parse(
-            await response.json(),
-          );
-        },
-        {
-          retries: INTERACTIVE_REQUEST_REGISTRATION_RETRIES,
-          minTimeout: 100,
-          maxTimeout: 2_000,
-          randomize: true,
-          onFailedAttempt(context): void {
-            options.logger.warn(
-              {
-                attempt: context.attemptNumber,
-                retriesLeft: context.retriesLeft,
-                ...runtimeErrorLogFields(context),
-              },
-              "interactive request registration failed, retrying",
-            );
+      return retryInteractiveRequestRegistration(async () => {
+        await options.beforeInteractiveRequestRegistrationAttempt?.();
+        const payload: HostDaemonInteractiveRequest = {
+          sessionId: requireSessionId(),
+          interaction: request,
+        };
+        const response = await fetchFn(
+          buildInternalUrl("/session/interactive-request"),
+          {
+            method: "POST",
+            headers: headers(),
+            body: JSON.stringify(payload),
           },
-        },
-      );
+        );
+
+        if (!response.ok) {
+          throw await createResponseError(
+            "register interactive request",
+            response,
+          );
+        }
+
+        return hostDaemonInteractiveRequestResponseSchema.parse(
+          await response.json(),
+        );
+      }, options.logger);
     },
 
     async interruptInteractiveRequests(

@@ -2,6 +2,7 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const APPROVAL_RENDERER_ID = "computer-use-approval";
+export const ACTIVE_CHANGED_CHANNEL = "active-changed";
 
 export const permissionsSchema = z
   .object({
@@ -40,7 +41,8 @@ export const hostContract = defineRpcContract({
         tool: z.string().min(1).max(80),
         args: z.record(z.string(), z.unknown()),
         session: z.string().min(1).max(64),
-        shotsDir: z.string().min(1),
+        // Folder name only: each host saves screenshots under its own temp dir (#1411).
+        shotsKey: z.string().regex(/^[A-Za-z0-9_-]+$/),
       })
       .strict(),
     output: z
@@ -66,7 +68,7 @@ export const hostContract = defineRpcContract({
   },
   appForName: {
     input: z.object({ name: z.string().min(1).max(200) }).strict(),
-    output: appSchema,
+    output: appSchema.nullable(),
   },
   requestPermission: {
     input: z.object({ kind: permissionKindSchema }).strict(),
@@ -82,6 +84,7 @@ export const approvalPayloadSchema = z
     purpose: z.string().nullable(),
     platform: z.string(),
     permissions: permissionsSchema,
+    foreground: z.boolean().optional(),
   })
   .strict();
 export type ApprovalPayload = z.infer<typeof approvalPayloadSchema>;
@@ -97,7 +100,20 @@ export const settingsSchema = z
     alwaysAllowed: z.array(appSchema),
   })
   .strict();
+export const activeThreadSchema = z
+  .object({
+    threadId: z.string().min(1),
+    appName: z.string().min(1).nullable(),
+  })
+  .strict();
+export const activeStateSchema = z
+  .object({
+    active: z.array(activeThreadSchema),
+  })
+  .strict();
+
 export const rpcContract = defineRpcContract({
+  getActive: { input: z.null(), output: activeStateSchema },
   getSettings: { input: z.null(), output: settingsSchema },
   removeAlwaysAllowed: {
     input: z.object({ key: z.string().min(1) }).strict(),

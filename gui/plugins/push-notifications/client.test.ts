@@ -92,6 +92,27 @@ describe("client system notifications", () => {
     delivery.dispose();
   });
 
+  it.each([
+    { platform: "windows", native: 1, fails: false },
+    { platform: "windows", native: 1, fails: true },
+    { platform: "macos", native: 0, fails: false },
+    { platform: "linux", native: 0, fails: false },
+  ])("foregrounds natively on click only on $platform (fails: $fails)", async ({ platform, native, fails }) => {
+    const focusWindow = vi.fn(() => {
+      if (fails) throw new Error("bridge gone");
+    });
+    vi.stubGlobal("bbDesktop", { platform, focusWindow });
+    const navigate = vi.fn();
+    const delivery = createClientDelivery(navigate);
+    await delivery.deliver({ ...message, channels: ["desktop"] }, true);
+    TestNotification.instances[0]?.onclick?.();
+    expect(focusWindow).toHaveBeenCalledTimes(native);
+    expect(window.focus).toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith("thread-1");
+    expect(TestNotification.instances[0]?.close).toHaveBeenCalled();
+    delivery.dispose();
+  });
+
   it("still delivers when browser storage is unavailable", async () => {
     const delivery = createClientDelivery(vi.fn());
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {

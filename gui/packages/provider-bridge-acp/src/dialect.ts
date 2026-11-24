@@ -2,8 +2,14 @@ import type { ReasoningLevel } from "@cloudroom/domain";
 import type { DeltaItemShape } from "@cloudroom/provider-bridge-protocol";
 import { basename } from "node:path";
 import { z } from "zod";
+import { prepareAntigravityLaunch } from "./antigravity.js";
 import type { AcpContextEstimateTuning } from "./context-estimate.js";
 import {
+  readCursorSessionContextUsage,
+  type AcpContextUsageReading,
+} from "./cursor-store-usage.js";
+import {
+  ANTIGRAVITY_ACP_MAINTENANCE,
   CURSOR_ACP_MAINTENANCE,
   type AcpMaintenanceDialect,
 } from "./bridge/provider-maintenance.js";
@@ -59,6 +65,13 @@ export interface AcpDialect {
   openSession?(opening: AcpSessionOpening): Promise<string>;
   sessionMcpServers?: false;
   hidesModel?(id: string): boolean;
+  // The effort a new thread starts at when the model offers it, instead of the agent's own saved level.
+  defaultReasoningLevel?: ReasoningLevel;
+  // Args, from the launch's, that delete a session; model discovery's probe session would otherwise stay in the user's list.
+  deleteSessionArgs?(
+    launchArgs: readonly string[],
+    sessionId: string,
+  ): string[] | undefined;
   emptyTurnError?: string;
   toolIdentity?(event: AcpToolCallUpdateEvent): AcpToolIdentity | undefined;
   classifyToolCall?(
@@ -71,13 +84,36 @@ export interface AcpDialect {
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   isNotice?(text: string): boolean;
+  // Exact agent messages that mean the turn failed, mapped to a clearer error.
+  errorMessages?: Readonly<Record<string, string>>;
+  // A clearer error when the agent fails to start; `command` is the launched executable.
+  startError?(message: string, command: string): string | undefined;
   stopReasons?: Readonly<Record<string, AcpStopReason>>;
   steerMeta?: string;
   resumeSession?: boolean;
   systemPromptLimit?: number;
+  // Instructions the agent needs about the thread's folder, sent with the first prompt.
+  workspaceInstructions?(cwd: string): string;
+  // Each message chunk repeats the whole message so far.
+  cumulativeText?: boolean;
+  // Cancelling leaves the agent unable to take the next prompt, so a steer waits for the turn to end.
+  steerWaits?: boolean;
+  // Its commands run in process groups of their own, so Stop kills every process it started.
+  stopEndsCommands?: boolean;
+  // It answers a prompt before sending the reply's last text; the turn stays open this long for it.
+  lateTextMs?: number;
   isBusySession?(message: string): boolean;
+  // It asks for approval before sending rawInput; a call titled just this has its command only in the streamed args.
+  streamedArgsTitle?: string;
+  // Part of its restore error when it can't reach its servers: the session is intact, so never start fresh.
+  unreachableError?: string;
   maintenance?: AcpMaintenanceDialect;
   contextEstimate?: AcpContextEstimateTuning;
+  readContextUsage?(args: {
+    sessionId: string;
+    model: string | undefined;
+    env: Readonly<Record<string, string | undefined>>;
+  }): AcpContextUsageReading | undefined;
 }
 
 export function acpPromptResultSchemaFor(dialect: AcpDialect) {
@@ -251,13 +287,15 @@ function cursorHandleClientRequest(
 
 export const CURSOR_ACP_DIALECT: AcpDialect = {
   id: "cursor",
+  unreachableError: "Failed to initialize session services",
   classifyToolCall: cursorClassifyToolCall,
   handleClientRequest: cursorHandleClientRequest,
   maintenance: CURSOR_ACP_MAINTENANCE,
+  readContextUsage: readCursorSessionContextUsage,
   contextEstimate: {
     baseTokens: 19_000,
     charsPerToken: 3.4,
-    defaultWindowTokens: 200_000,
+    defaultWindowTokens: 300_000,
   },
 };
 
@@ -428,9 +466,29 @@ function normalizeOpenCodeCommandEvent(
   };
 }
 
+// Two OpenCode versions sharing one data folder fail on each other's SQLite schema (#858).
+function openCodeStartError(
+  message: string,
+  command: string,
+): string | undefined {
+  const mismatch = /no such column: ?["'`]?[\w.]*["'`]?/u.exec(message)?.[0];
+  return mismatch === undefined
+    ? undefined
+    : `OpenCode's data may have been written by another OpenCode version (${mismatch}). Update or reinstall OpenCode, or remove the older copy if you have two. Cloudroom started ${command}.\n\n${message}`;
+}
+
 export const OPENCODE_ACP_DIALECT: AcpDialect = {
   id: "opencode",
+  // OpenCode and Kilo keep every session, and `-c` resumes the latest one (#1236). Swapping the `acp` subcommand
+  // keeps a wrapper launch (`npx -y opencode-ai acp`, `node kilo.js acp`) on the same CLI.
+  deleteSessionArgs: (launchArgs, sessionId) => {
+    const acp = launchArgs.lastIndexOf("acp");
+    return acp < 0
+      ? undefined
+      : [...launchArgs.slice(0, acp), "session", "delete", sessionId];
+  },
   normalizeCommandEvent: normalizeOpenCodeCommandEvent,
+  startError: openCodeStartError,
 };
 
 export const FX_ACP_DIALECT: AcpDialect = {
@@ -438,6 +496,11 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isNotice: (text) =>
     text.startsWith("[context] ") ||
     text.startsWith("skill discovery warning: "),
+  // fx reports every model API failure as just "HTTP error" and stop reason "refused".
+  errorMessages: {
+    "HTTP error":
+      "fx's model request failed (HTTP error). On Claude Fable, a known fx bug breaks the session after a turn that read files, and every later message fails. Start a new thread, or use Claude Code for Fable.",
+  },
   stopReasons: {
     refused: "refusal",
     max_output_tokens: "max_tokens",
@@ -449,6 +512,34 @@ export const FX_ACP_DIALECT: AcpDialect = {
   isBusySession: (message) => message.includes("Session is busy"),
 };
 
+// Kimi ends a turn whose model request failed with a plain end_turn and logs the reason only to itself (#1721).
+export const KIMI_ACP_DIALECT: AcpDialect = {
+  id: "kimi",
+  emptyTurnError:
+    "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in the .kimi-code/sessions folder in your home folder.",
+  streamedArgsTitle: "Bash",
+};
+
+// A signed-out `agy acp` answers session/new with "Authentication required", so the picker offers `agy acp --login`.
+export const ANTIGRAVITY_ACP_DIALECT: AcpDialect = {
+  id: "antigravity",
+  maintenance: ANTIGRAVITY_ACP_MAINTENANCE,
+  prepareLaunch: prepareAntigravityLaunch,
+  defaultReasoningLevel: "high",
+};
+
+// Agent Zero runs on its own server and reaches the thread's folder only through its `a0` bridge's host tools, which
+// it uses only when told to (ADR 20261116-153548). Core sends Cloud threads the same words (runtime/agent_zero.rs).
+export const AGENT_ZERO_ACP_DIALECT: AcpDialect = {
+  id: "agent-zero",
+  workspaceInstructions: (cwd) =>
+    `You run through the A0 CLI. The user's project folder is ${cwd} on the A0 CLI host. Do all file work and run every command there, with code_execution_remote and text_editor_remote. Never use code_execution_tool or your own server's files for this project.`,
+  cumulativeText: true,
+  steerWaits: true,
+  stopEndsCommands: true,
+  lateTextMs: 500,
+};
+
 const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [CURSOR_ACP_DIALECT.id, CURSOR_ACP_DIALECT],
   [GROK_ACP_DIALECT.id, GROK_ACP_DIALECT],
@@ -456,6 +547,9 @@ const DIALECTS_BY_ID: ReadonlyMap<string, AcpDialect> = new Map([
   [OMP_ACP_DIALECT.id, OMP_ACP_DIALECT],
   [OPENCODE_ACP_DIALECT.id, OPENCODE_ACP_DIALECT],
   [OPENCLAW_ACP_DIALECT.id, OPENCLAW_ACP_DIALECT],
+  [KIMI_ACP_DIALECT.id, KIMI_ACP_DIALECT],
+  [ANTIGRAVITY_ACP_DIALECT.id, ANTIGRAVITY_ACP_DIALECT],
+  [AGENT_ZERO_ACP_DIALECT.id, AGENT_ZERO_ACP_DIALECT],
 ]);
 
 const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
@@ -465,6 +559,9 @@ const DIALECT_IDS_BY_COMMAND: Readonly<Record<string, string>> = {
   omp: OMP_ACP_DIALECT.id,
   opencode: OPENCODE_ACP_DIALECT.id,
   openclaw: OPENCLAW_ACP_DIALECT.id,
+  kimi: KIMI_ACP_DIALECT.id,
+  agy: ANTIGRAVITY_ACP_DIALECT.id,
+  a0: AGENT_ZERO_ACP_DIALECT.id,
 };
 
 export function resolveAcpDialect(launch: {

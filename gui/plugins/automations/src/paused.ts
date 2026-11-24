@@ -55,24 +55,28 @@ export function pausedLocal(db: Db, now: number): PausedLoop[] {
   });
 }
 
-let cloud: { at: number; loops: PausedLoop[] } | null = null;
+/** `newest`: when the account's newest Cloud loop was created (0: it has none), or null while that is not known. */
+type CloudRead = { loops: PausedLoop[]; newest: number | null };
+let cloud: ({ at: number } & CloudRead) | null = null;
 // Bumped by forgetCloud, so a read that started before a change never caches the old answer.
 let generation = 0;
 
-/** Cloud loops the website paused ("Paused after 3 failed runs. ..."). A failed read keeps the last answer. */
-export async function pausedCloud(
+/** One read of the account's Cloud loops serves the paused label and the Scan card. A failed read keeps the last answer. */
+async function readCloud(
   cloudroom: Pick<BbPluginApi["sdk"]["cloudroom"], "automations">,
   now: number,
-): Promise<PausedLoop[]> {
-  if (cloud && now - cloud.at < CLOUD_EVERY_MS) return cloud.loops;
-  const last = cloud?.loops ?? [];
+): Promise<CloudRead> {
+  if (cloud && now - cloud.at < CLOUD_EVERY_MS) return cloud;
+  const last: CloudRead = { loops: cloud?.loops ?? [], newest: cloud?.newest ?? null };
   const read = generation;
-  cloud = { at: now, loops: last };
+  cloud = { at: now, ...last };
   const result = await cloudroom
     .automations({ action: "list" })
     .catch(() => null);
   if (!result) return last;
-  const loops = (result.automations ?? []).flatMap((loop) => {
+  const all = result.automations ?? [];
+  const newest = Math.max(0, ...all.map((loop) => Date.parse(loop.created_at) || 0));
+  const loops = all.flatMap((loop) => {
     const at = Date.parse(loop.last_run_at ?? loop.created_at);
     const pause = failurePause(
       { enabled: loop.enabled, lastError: loop.last_error, at },
@@ -92,8 +96,20 @@ export async function pausedCloud(
         ]
       : [];
   });
-  if (read === generation) cloud = { at: now, loops };
-  return loops;
+  if (read === generation) cloud = { at: now, loops, newest };
+  return { loops, newest };
+}
+
+type Cloudroom = Parameters<typeof readCloud>[0];
+/** Cloud loops the website paused ("Paused after 3 failed runs. ..."). */
+export const pausedCloud = async (cloudroom: Cloudroom, now: number) => (await readCloud(cloudroom, now)).loops;
+
+/** When the newest loop was created, Local on this computer or Cloud on the account. 0: there are none.
+ *  Null: the Cloud loops could not be read, so it is not known. */
+export async function newestLoopAt(db: Db, cloudroom: Cloudroom, now: number): Promise<number | null> {
+  const local = (db.prepare(`SELECT MAX(created_at) AS at FROM automations`).get() as { at: number | null }).at ?? 0;
+  const { newest } = await readCloud(cloudroom, now);
+  return newest === null ? null : Math.max(local, newest);
 }
 
 /** A Cloud loop changed here (say, resumed): the next read asks the website again. */

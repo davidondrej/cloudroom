@@ -34,6 +34,7 @@ pub(super) const OPENCLAW: cursor::Flavor = cursor::Flavor {
     empty_turn: Some(
         "OpenClaw ended the turn without replying. Its model probably has no login in Cloud: sign in with OpenClaw on your Mac and Cloudroom copies it, or add the provider's API key in Settings → Cloud environment. Claude plans can't be used in Cloud.",
     ),
+    cumulative_text: false,
 };
 const DATABASE: &str = "agents/main/agent/openclaw-agent.sqlite";
 const KEY: &str = "agent:main:cloudroom-";

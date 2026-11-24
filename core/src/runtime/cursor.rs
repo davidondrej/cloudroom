@@ -33,6 +33,8 @@ pub(super) struct Flavor {
     pub explain_stops: bool,
     /// Fails a turn the agent ended without any output, with this reason.
     pub empty_turn: Option<&'static str>,
+    /// Each message chunk repeats the whole message so far (Agent Zero).
+    pub cumulative_text: bool,
 }
 pub(super) const CURSOR: Flavor = Flavor {
     harness: "cursor",
@@ -44,11 +46,29 @@ pub(super) const CURSOR: Flavor = Flavor {
     replay: true,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 
+/// Cursor's own words when the account's usage is used up (its PRO_USER_USAGE_LIMIT-style errors). Not its short
+/// capacity limits, which retry on their own.
+fn cursor_plan_limit(message: &str) -> bool {
+    // Error codes like PRO_USER_USAGE_LIMIT read as words.
+    let text = message.to_ascii_lowercase().replace('_', " ");
+    [
+        "usage limit",
+        "hit your limit",
+        "out of usage",
+        "weekly usage",
+        "weekly pool",
+    ]
+    .iter()
+    .any(|words| text.contains(words))
+}
+
 pub(crate) fn capabilities(kind: Kind) -> Value {
+    // Agent Zero can't take a prompt right after a cancel, so its follow-ups queue instead of steering.
     json!({"resume":true,"interrupt":true,"system_notice":false,"interactive_dialogs":false,
-        "steer":true,"compact":false,"rewind":false,"attachments":true,
+        "steer":kind != Kind::AgentZero,"compact":false,"rewind":false,"attachments":true,
         "service_tier":kind.fast(),"subagents":false,"usage":false,"command_guard":false})
 }
 
@@ -165,17 +185,50 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
             )
             .await?;
     }
-    prompt(handle, request, input, false, Vec::new()).await
+    let inline = if handle.kind == Kind::Antigravity {
+        images(handle, input).await?
+    } else {
+        Vec::new()
+    };
+    prompt(handle, request, input, false, inline).await
 }
 
 /// Cloudroom's rules for the agent: plain-chat questions and the Cloudroom system prompt.
 pub(super) fn instructions(handle: &Handle) -> String {
-    match &handle.system_prompt {
+    let rules = match &handle.system_prompt {
         Some(system_prompt) => {
             format!("{PLAIN_CHAT}\n\n[Cloudroom system prompt]\n{system_prompt}")
         }
         None => PLAIN_CHAT.to_owned(),
+    };
+    match handle.kind {
+        Kind::AgentZero => format!(
+            "{}\n\n{rules}",
+            super::agent_zero::workspace(&handle.repository)
+        ),
+        _ => rules,
     }
+}
+
+/// Image attachments go inline when the ACP server accepts images; their paths still follow the text.
+pub(super) async fn images(handle: &Handle, input: &Value) -> io::Result<Vec<Value>> {
+    if handle.acp.lock().unwrap()["promptCapabilities"]["image"] != true {
+        return Ok(Vec::new());
+    }
+    // Leave room in the ACP frame for the text, the instructions, and the envelope.
+    let used = serde_json::to_vec(input)?.len() + instructions(handle).len() + 4096;
+    let remaining = super::process::MAX_LINE.saturating_sub(used);
+    let (reader, input) = (handle.clone(), input.clone());
+    tokio::task::spawn_blocking(move || super::files::images(&reader, &input, remaining))
+        .await
+        .map_err(io::Error::other)?
+        // No prompt was sent: reject this request and allow queued work to continue.
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot read image attachment: {error}"),
+            )
+        })
 }
 
 /// Sends one turn, with any inline images after the text. Agents that do not keep the instructions
@@ -213,6 +266,17 @@ pub(super) async fn prompt(
 
 pub(super) async fn steer(handle: &Handle, request: &str, text: &str) -> io::Result<()> {
     let _control = handle.controls.lock().await;
+    if handle.kind == Kind::Antigravity {
+        return handle
+            .process
+            .dispatch(
+                "cloudroom/join",
+                json!({"sessionId":handle.native()?,"prompt":[{"type":"text","text":text}]}),
+                None,
+                Some(request),
+            )
+            .await;
+    }
     handle
         .process
         .control(
@@ -322,11 +386,13 @@ pub(super) struct Protocol {
     restart: Option<(u64, Value)>,
     /// Steering prompts the agent joins to the running turn; each is answered when that turn ends.
     steering: Vec<u64>,
+    /// The current prompt got output. A steer's new prompt starts without, so its empty end is still silent (#1721).
+    replied: bool,
     acknowledgement: Option<(Value, u64)>,
     responses: Vec<Value>,
     closing: bool,
     tools: BTreeMap<String, Value>,
-    terminal: Option<(String, String, Option<String>)>,
+    terminal: Option<Event>,
     message: u64,
     text: String,
     thinking: String,
@@ -342,6 +408,7 @@ impl Protocol {
             cancel: None,
             restart: None,
             steering: Vec::new(),
+            replied: false,
             acknowledgement: None,
             responses: Vec::new(),
             closing: false,
@@ -361,8 +428,8 @@ impl Protocol {
     }
     fn finish_message(&mut self, state: &mut Progress, events: &mut Vec<Event>) {
         for (kind, text) in [
-            ("agentMessage", std::mem::take(&mut self.text)),
             ("reasoning", std::mem::take(&mut self.thinking)),
+            ("agentMessage", std::mem::take(&mut self.text)),
         ] {
             if !text.is_empty() {
                 if kind == "agentMessage" {
@@ -400,6 +467,7 @@ impl Adapter for Protocol {
         }
         if request.is_some() {
             self.prompt = Some(id);
+            self.replied = false;
         }
         if method == "cloudroom/join" {
             self.steering.push(id);
@@ -487,6 +555,7 @@ impl Adapter for Protocol {
                 kind,
                 "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update"
             ) {
+                self.replied = true;
                 events.extend(state.started());
             }
             let text = update["content"]["text"].as_str().unwrap_or_default();
@@ -499,26 +568,41 @@ impl Adapter for Protocol {
             match kind {
                 "agent_message_chunk" | "agent_thought_chunk" if !notice => {
                     let thinking = kind == "agent_thought_chunk";
-                    let item_type = if thinking {
-                        "reasoning"
+                    // Keep only what is new; a chunk that doesn't continue the message starts the next one.
+                    let text = if self.flavor.cumulative_text && !thinking {
+                        match text.strip_prefix(self.text.as_str()) {
+                            Some(rest) => rest,
+                            None => {
+                                self.finish_message(state, &mut events);
+                                text
+                            }
+                        }
                     } else {
-                        "agentMessage"
+                        text
                     };
-                    let item_id = format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
-                    let empty = if thinking {
-                        self.thinking.is_empty()
-                    } else {
-                        self.text.is_empty()
-                    };
-                    if empty {
-                        events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                    if !text.is_empty() {
+                        let item_type = if thinking {
+                            "reasoning"
+                        } else {
+                            "agentMessage"
+                        };
+                        let item_id =
+                            format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
+                        let empty = if thinking {
+                            self.thinking.is_empty()
+                        } else {
+                            self.text.is_empty()
+                        };
+                        if empty {
+                            events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                        }
+                        if thinking {
+                            self.thinking.push_str(text);
+                        } else {
+                            self.text.push_str(text);
+                        }
+                        events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                     }
-                    if thinking {
-                        self.thinking.push_str(text);
-                    } else {
-                        self.text.push_str(text);
-                    }
-                    events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                 }
                 "tool_call" | "tool_call_update" => {
                     if kind == "tool_call" {
@@ -605,6 +689,7 @@ impl Adapter for Protocol {
                 );
                 self.acknowledgement = Some((value["id"].clone(), id));
                 self.prompt = Some(id);
+                self.replied = false;
             } else if value.get("error").is_none()
                 && stop == Some("end_turn")
                 && !self.steering.is_empty()
@@ -621,7 +706,7 @@ impl Adapter for Protocol {
                 {
                     self.acknowledgement = Some((value["id"].clone(), id));
                 }
-                let silent = stop == Some("end_turn") && !state.started;
+                let silent = stop == Some("end_turn") && !self.replied;
                 let status = match stop {
                     _ if silent && self.flavor.empty_turn.is_some() => "failed",
                     Some("end_turn") => "completed",
@@ -634,6 +719,18 @@ impl Adapter for Protocol {
                     }
                     match (stop, value["error"]["message"].as_str()) {
                         (Some(stop), _) => format!("{} stopped the turn: {stop}", self.flavor.name),
+                        (None, Some(message))
+                            if self.flavor.harness == "cursor" && cursor_plan_limit(message) =>
+                        {
+                            // Marks the session stopped by a plan limit, so a new Cursor login continues it (ADR 0117).
+                            // Not reported: the website holds loops only at Claude and Codex limits.
+                            let mut limited = super::plan_limited("cursor", None);
+                            if let Event::Record { data, .. } = &mut limited {
+                                data["model_only"] = json!(true);
+                            }
+                            events.push(limited);
+                            super::plan_limit_error("Cursor", None, message)
+                        }
                         (None, Some(message)) => {
                             format!("{} failed the turn: {message}", self.flavor.name)
                         }
@@ -645,7 +742,12 @@ impl Adapter for Protocol {
                 if let Some(request) = state.request.clone() {
                     events.extend(state.started());
                     state.finished = true;
-                    self.terminal = Some((request, status.into(), error));
+                    self.terminal = Some(Event::Finished {
+                        request,
+                        status: status.into(),
+                        error,
+                        text: state.last_text.clone(),
+                    });
                 }
             }
         }
@@ -696,13 +798,7 @@ impl Adapter for Protocol {
         self.responses.clone()
     }
     fn capture(&mut self) -> io::Result<Vec<Event>> {
-        Ok((self.terminal.take().into_iter())
-            .map(|(request, status, error)| Event::Finished {
-                request,
-                status,
-                error,
-            })
-            .collect())
+        Ok(self.terminal.take().into_iter().collect())
     }
     fn capture_pending(&self) -> bool {
         self.terminal.is_some()

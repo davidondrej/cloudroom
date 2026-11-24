@@ -96,6 +96,7 @@ it("reads ChatGPT credentials with the account id from the access token claims",
     accountId: "account-123",
     accountEmail: "codex@example.com",
     expired: false,
+    canRenew: true,
     isFedrampAccount: true,
   });
 });

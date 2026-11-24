@@ -1,5 +1,5 @@
 import type { KeyboardEvent, MouseEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import type { PromptMentionResource, PromptTextMention } from "@cloudroom/domain";
 import { RouteAnchor } from "@/components/ui/app-route-anchor.js";
 import {

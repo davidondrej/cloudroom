@@ -2,6 +2,346 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 166
+
+Side chats pick their own agent (2026-11-24)
+
+### Changes
+
+- Side chats can use any agent and model: pick one in the side chat, or switch mid-chat.
+- In Local threads, when Claude Code or Codex hits its plan limit, the new Cloudroom Agent plugin keeps you going in one click on frontier open source models.
+- Loop runs show as a clear divider with the loop name and time, instead of looking like your own message.
+- Forking from an agent's reply in Cloud threads works again, and Droid, Agent Zero and OpenClaw now start on their first use in Cloud.
+- Security fixes.
+
+## 165
+
+Cloud agents reach Windows PCs (2026-11-24)
+
+### Changes
+
+- Cloud agents can now run commands and move files on your paired Windows computer.
+- Windows updates now stage in the background for quick restarts, and npm-installed Claude Code signs in cleanly.
+- Back-to-back Claude plan limits in Cloud threads each get a plan-limit card, and restarted Cloud threads no longer report a fake exit status 1.
+- Background command markers are now minimal hairline dividers, Claude plan changes sync to Cloud, and Workflow and Cyber scans keep going past unreadable files.
+- Security fixes.
+
+## 164
+
+Share only the repos you pick (2026-11-23)
+
+### Changes
+
+- Connect GitHub can now share only the repos you pick with cloud agents.
+- Hitting a Claude plan limit in a Cloud thread shows the plan-limit card, not a raw error.
+- Cloud previews of dev servers load right away instead of stalling.
+- Image attachments show small thumbnails in the message box, and privacy mode hides your email.
+- Security fixes.
+
+## 163
+
+Live bubbles for background commands (2026-11-22)
+
+### Changes
+
+- Background commands show as live bubbles in the chat, so you always see why an agent replied on its own.
+- Long threads open and update faster, thanks to a rebuilt chat timeline.
+- Images in Local chats keep showing, even after the original file is deleted.
+- Claude Code sign-in goes straight to login, and Kimi approvals show the real command.
+- Pick Electric lime or Crisp white for the Cloud icon in Appearance.
+- Security fixes.
+
+## 162
+
+GitLab projects in the cloud (2026-11-21)
+
+### Changes
+
+- Cloud threads now work with GitLab.com projects, not just GitHub.
+- Unused worktrees park themselves to free disk, and threads keep running after a worktree move.
+- The app starts faster, and sleeping threads open their history at once.
+- A subagent bar under the thread title shows every child thread at a glance.
+- Signed-out accounts show a one-click Sign in again button right in the chat.
+- Security fixes.
+
+## 161
+
+The Antigravity Update (2026-11-21)
+
+### Changes
+
+- Antigravity is a full agent now: one-click Google sign-in, High thinking by default, and it shows even before you install it.
+- Antigravity runs in Cloud threads too, and its plan and quota show in the usage box and Settings.
+- Fork and Move to worktree work for every agent, not just Claude Code and Codex.
+- Long voice recordings are never lost, on your phone or your computer.
+- Computer use no longer steals focus from the chat input while you type.
+- Archiving a Cloud thread is instant, and Undo works in split panes.
+- Cursor's context meter shows real usage, and large local images open in previews.
+- Security fixes.
+
+## 160
+
+One-click scans on new threads (2026-11-19)
+
+### Changes
+
+- The new-thread screen offers one-click Workflow and Cyber scans of your work.
+- Custom instructions can now apply to just one agent or one model.
+- Included context shows as a collapsible chip in sent messages, and survives edits.
+- The sidebar shows which thread is using an app on your computer.
+- Security fixes.
+
+## 159
+
+A new Ultra Fast speed (2026-11-19)
+
+### Changes
+
+- Codex has a third speed: pick Standard, Fast, or Ultra Fast in the model picker, or type /ultrafast.
+- With the sidebar open, the chat is now centered in the free space.
+- A short connection drop to a remote computer no longer interrupts threads still running on it.
+- A Codex thread stuck on "already has an active writer" recovers on your next message.
+- On Windows, Claude skills load without admin rights, and Cursor sign-in works when its CLI is off PATH.
+- Security fixes.
+
+## 158
+
+Floating sidebar and snippets (2026-11-18)
+
+### Changes
+
+- The sidebar is now a floating, rounded card with a soft shadow.
+- Snippets: save text you reuse, expand it in any message, and keep it synced across your computers.
+- Fork a Claude thread from any reply, even after edits or agent switches.
+- Switch models with a shortcut in an idle thread and keep the same session.
+- Replies show the quoted message as a chip with a hover preview.
+- Security fixes.
+
+## 157
+
+Animated grid while agents work (2026-11-17)
+
+### Changes
+
+- A small animated grid now shows next to "Working" and "Thinking", so you can see an agent is busy.
+- Sending a voice prompt on your phone leaves the message box empty.
+- Deleting a queued message in a Cloud thread is instant, and the deleted message is never sent.
+- Cloud Codex threads no longer lose replies that come after a follow-up message.
+- Messages to a thread whose agent login failed now wait, and switching its agent sends them again.
+- Loop templates have a compact repo picker, one line per repo.
+- On Windows, Cloudroom no longer flashes console windows during Git work and chat imports.
+- Security fixes.
+
+## 156
+
+Start fresh when context fills up (2026-11-16)
+
+### Changes
+
+- A new context card shows how full a thread is, with Compact and Fresh thread buttons.
+- The Git panel runs on a new engine, the same for Local and Cloud threads.
+- Loops can take turns between agents, and switch to your other agent when one hits its limit.
+- When Cloud is down, a clear "Cloud is paused" banner shows, and Local threads keep working.
+- The app works without an account: setup has a "Use without an account" button.
+- An agent whose login expired gets a one-click Sign in button in the usage popup.
+- Security fixes.
+
+## 155
+
+Copy from any selection (2026-11-16)
+
+### Changes
+
+- Selecting text shows a simpler menu with Reply, Side chat, and Copy, in chats and drafts.
+- Copy keeps exactly what you selected, whitespace included.
+- Cmd+F opens search, same as Cmd+K.
+- Cursor has a Sign in button in the model picker, and Reload really checks again.
+- After a Cloud sandbox restarts, your next message no longer gets stuck.
+- Restoring a thread right after archiving it now works.
+- A new scroll-to-bottom button with a smooth hover.
+
+## 154
+
+Archived threads restore cleanly (2026-11-15)
+
+### Changes
+
+- The Archived threads page shows a Restored toast with an Open button, real totals, and a Retry when loading fails.
+- Restoring a thread can bring back its subagent threads too.
+- Self-hosters can connect their own Core right from setup, with no Cloudroom account.
+- Keep Awake has three levels and is on by default, only while agents work.
+- Thread notes now say what each thread is for, then where it stands.
+- With two Macs, Cloud threads follow the Mac you are using.
+- Selecting text in a draft shows a simple Copy button below it.
+
+## 153
+
+See which chats need you (2026-11-13)
+
+### Changes
+
+- Chats waiting on you stand out in the sidebar: GPU requests in red with an Approve button, everything else in yellow.
+- GPU approvals are a card in the chat instead of a full-screen pop-up, and one approval covers the thread for 24 hours.
+- New Local worktrees no longer wait on the network, so threads start sooner.
+- Settings reopens the last tab you used in each section.
+- With two Macs, the app stays on the Mac you picked and shows which one you are viewing.
+- Opening a sleeping Cloud thread no longer moves it up the sidebar.
+- Security fixes.
+
+## 152
+
+Search deeper from Cmd+K (2026-11-13)
+
+### Changes
+
+- Cmd+K has a new "Not here? Search deeper" link. An agent finds the chat you mean, archived ones too.
+- Switching Claude models in a Cloud thread is now instant, and the chat keeps its full context.
+- Monthly Wrapped: a shareable Story of your last month in Cloudroom.
+- Rename "This Mac" on the Accounts page, and one privacy switch hides emails there and in the usage box.
+- New Local worktrees are ready faster.
+- Cloud subagents report back to a sleeping parent right away instead of getting lost.
+- Security fixes.
+
+## 151
+
+Edit messages with no delay (2026-11-12)
+
+### Changes
+
+- Editing a sent message now applies at once, and Cloud edits are seconds faster.
+- Sign in to Codex with one button. Cloudroom installs Codex first if it is missing.
+- The Skills page has a new look, with a Featured shelf and a 3-column grid.
+- Wallpaper: put your own image or GIF behind New thread and your chats.
+- On phones, buttons and suggestions respond to every tap, and new threads open right away.
+- Import chats keeps more of your Codex history and groups a repo's worktrees into one project.
+- Security fixes.
+
+## 150
+
+Attach files while agents work (2026-11-11)
+
+### Changes
+
+- Files and images you send to a busy Cloud agent now reach it right away, instead of waiting or getting lost.
+- After you switch Claude accounts, a thread that hit a limit carries on with the new account.
+- The "Limit hit" mark clears as soon as that account works again.
+- A message sent while a Cloud sandbox sleeps or wakes shows a calm reconnecting state, not a red error.
+- Long voice recordings no longer cut off after 10 seconds.
+- Cursor has an Auto-update switch in Settings, off by default.
+- Security fixes.
+
+## 149
+
+Rewrite drafts before you send (2026-11-11)
+
+### Changes
+
+- Edit an agent's draft right in the chat, and preview a shorter version with tracked changes before you use it.
+- Stop now interrupts Local Claude Code and Codex almost instantly, instead of ending them.
+- Settings → Analytics has new tabs for agent hours, models, tokens, and prompts.
+- Settings → Instructions is now Prompts, with an editable prompt for chat suggestions.
+- The usage panel shows each added Claude account's weekly model limits.
+- A turn that never starts now fails and can be retried, instead of staying on "starting".
+- Cloud threads write far less to disk while agents type.
+
+## 148
+
+Cloud Credits last 20% longer (2026-11-10)
+
+### Changes
+
+- A CPU-hour on a Cloud sandbox now costs 500 credits instead of 600, with the same plans and prices.
+- The project picker for new threads is one clean list: your projects first, repos you can add below.
+- Agent questions and Settings → Accounts have a simpler, cleaner look. Press a number key to answer.
+- The Cloudroom name shows at the top of the window. Turn it off with "Show Cloudroom name" in Settings.
+- Threads start with a shorter system prompt, and custom instructions are sent once per thread.
+- Import chats now brings over your Conductor chats.
+- Security fixes.
+
+## 147
+
+Every keystroke shows instantly (2026-11-10)
+
+### Changes
+
+- Typed letters appear right away, and the sidebar only redraws the rows that changed.
+- Local threads wait out an internet drop and continue on their own once you are back online.
+- When Codex signs out in a Cloud thread, a banner with Reconnect fixes it in place.
+- Claude Fable 5.2 is in the model pickers for Claude Code, Cursor, and fx.
+- The sidebar slides open smoothly, and zooming is faster.
+- Side chats show the context window ring.
+- A project you collapse in the sidebar stays collapsed.
+
+## 146
+
+One click clears a full Cloud disk (2026-11-08)
+
+### Changes
+
+- When a Cloud disk fills up, one pill with a Clear caches & builds button frees space.
+- Hover the effort label to step reasoning effort up or down with small arrows.
+- Typing a thread name after @ keeps that thread above files and folders with similar names.
+- Forked threads show a thin divider in the chat instead of a banner.
+- Settings → Analytics shows when your Cloud Credits were used.
+- Cloud threads now accept folder and project tags.
+- Security fixes.
+
+## 145
+
+Long messages fold to fit (2026-11-08)
+
+### Changes
+
+- Long messages you send collapse to their start and end, so the chat stays easy to scan.
+- Kimi Code now runs in Local and Cloud threads.
+- The chat scrollbar grows as your mouse gets close, so it is easier to grab.
+- A new Connect agents button replaces the Claude check, and the Claude Code install shows progress with a Cancel button.
+- Agents can move their own thread into a fresh worktree with room-cli thread worktree.
+- When your app is 3 or more days behind, a small card above the chat offers the update.
+- A refused skill message no longer blocks every message after it.
+
+## 144
+
+Switch accounts, every stalled chat resumes (2026-11-07)
+
+### Changes
+
+- When a plan limit stops your agents, switching accounts once continues every stopped thread, Local and Cloud.
+- A Mac app opened from the disk image now offers to move itself to Applications in one click, so updates work.
+- App shortcuts like Cmd+J and Cmd+T now work while a page in the built-in browser has focus.
+- The Windows installer is about 30% smaller and installs faster.
+- Background dev servers keep running through account switches, harness switches, and /clear.
+- Sign-in now has a Copy link button, for when your default browser is not the one you use.
+- Security fixes.
+
+## 143
+
+All your logins on one page (2026-11-06)
+
+### Changes
+
+- Every Claude Code, Codex, and Cursor account now lives on one Accounts page under Settings → Agents.
+- Quitting while agents are working asks first, so a stray Cmd+Q never stops them.
+- When your other Mac drops, a reconnect dialog replaces the offline banner and brings you back on its own.
+- Check for Updates… is now in the app menu.
+- Codex follow-ups no longer fail after a turn ends, and a stuck Codex turn can no longer run forever.
+- Subagent reports reach their parent even when they arrive mid-turn or during a brief disconnect.
+- Security fixes.
+
+## 142
+
+Forks get their own worktree (2026-11-05)
+
+### Changes
+
+- Forking a Local thread gives the fork its own worktree with your code, so two agents never edit the same files.
+- Add several Cursor accounts and switch between them, in Local and Cloud.
+- One huge tool output no longer kills or freezes a thread.
+- When a subagent can't sign in, a Sign in button appears right in the chat.
+- Pick a project by typing a path with Tab completion, or find any folder by name.
+- Codex errors show their real cause instead of "System error".
+- Codex installs on Windows even without npm.
+
 ## 141
 
 Runaway threads can't sink your Mac (2026-11-04)

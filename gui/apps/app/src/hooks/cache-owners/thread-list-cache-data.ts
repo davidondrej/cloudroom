@@ -97,6 +97,55 @@ export function restoreCachedThreadLists(
   }
 }
 
+/**
+ * Puts one thread back into each cached list the snapshot had it in, just
+ * before the threads that followed it there. A list that has it again is left
+ * alone, and so is every other row: unlike restoring the whole snapshot, this
+ * never undoes changes other mutations made since.
+ */
+export function restoreThreadInCachedLists(
+  queryClient: QueryClient,
+  snapshot: CachedThreadListSnapshot,
+  threadId: string,
+): void {
+  for (const { queryKey, data } of snapshot) {
+    const pages = isThreadListEntryArray(data) ? [data] : data.pages;
+    const pageIndex = pages.findIndex((page) =>
+      page.some((thread) => thread.id === threadId),
+    );
+    const order = pages[pageIndex]?.map((thread) => thread.id) ?? [];
+    const entry = pages[pageIndex]?.[order.indexOf(threadId)];
+    if (!entry) {
+      continue;
+    }
+    const followers = new Set(order.slice(order.indexOf(threadId) + 1));
+    const putBack = (list: ThreadListEntry[]): ThreadListEntry[] => {
+      const next = list.findIndex((thread) => followers.has(thread.id));
+      const at = next === -1 ? list.length : next;
+      return [...list.slice(0, at), entry, ...list.slice(at)];
+    };
+    queryClient.setQueryData<ThreadListCacheData>(queryKey, (current) => {
+      if (!isThreadListCacheData(current)) {
+        return current;
+      }
+      for (const thread of iterateThreadListCacheEntries(current)) {
+        if (thread.id === threadId) return current;
+      }
+      if (isThreadListEntryArray(current)) {
+        return putBack(current);
+      }
+      // The same page, or the last one left.
+      const target = Math.min(pageIndex, current.pages.length - 1);
+      return {
+        ...current,
+        pages: current.pages.map((page, index) =>
+          index === target ? putBack(page) : page,
+        ),
+      };
+    });
+  }
+}
+
 export function applyToCachedThreadLists(
   queryClient: QueryClient,
   options: ApplyToCachedThreadListsOptions,

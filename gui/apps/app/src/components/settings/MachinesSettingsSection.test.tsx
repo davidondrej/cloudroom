@@ -15,7 +15,7 @@ import type {
   SystemConfigResponse,
   SystemMachineProvider,
 } from "@cloudroom/server-contract";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
@@ -586,7 +586,7 @@ describe("MachinesSettingsSection", () => {
 
     expect(await screen.findByText("MacBook Air")).toBeDefined();
     expect(screen.getByText("Not running threads yet")).toBeDefined();
-    expect(screen.getByText("Where your agents run")).toBeDefined();
+    expect(screen.getByText("Run threads on")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Run threads here" }));
     await waitFor(() => {
       expect(vi.mocked(sdk.hosts.experimental_create)).toHaveBeenCalledWith(

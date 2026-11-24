@@ -35,19 +35,25 @@ describe("highlightMarkdownCode", () => {
     },
   );
 
-  it.each([null, "ruby"])(
-    "keeps the JavaScript lexer for a fence with language %j",
+  it.each([null, "text", "plaintext", "ruby", "constructor", "__proto__"])(
+    "renders a fence with language %j as escaped plain text",
     (language) => {
       const html = highlightMarkdownCode({
-        code: "const a = 1 // hi",
+        code: "wait for it's done in\n<b>&</b>",
         language,
       });
-      expect(tokens(html)).toContainEqual(["keyword", "const"]);
-      expect(tokens(html)).toContainEqual(["comment", "// hi"]);
+      expect(html).toBe(
+        '<span class="sh__line">wait for it&#39;s done in</span>\n<span class="sh__line">&lt;b&gt;&amp;&lt;/b&gt;</span>',
+      );
     },
   );
 
   it("keeps the previously mapped aliases highlighted", () => {
+    for (const language of ["ts", "mts", "mjs", "vue"]) {
+      expect(
+        tokens(highlightMarkdownCode({ code: "const a = 1", language })),
+      ).toContainEqual(["keyword", "const"]);
+    }
     expect(
       tokens(highlightMarkdownCode({ code: "# c\nx = 1", language: "py" })),
     ).toContainEqual(["comment", "# c"]);
@@ -120,7 +126,7 @@ describe("highlightMarkdownCode", () => {
     expect(tokens(typescript)).not.toContainEqual(["comment", "# cached note"]);
     expect(highlightMarkdownCode({ code, language: "sh" })).toBe(shell);
     expect(highlightMarkdownCode({ code, language: null })).not.toBe(shell);
-    expect(highlight).toHaveBeenCalledTimes(3);
+    expect(highlight).toHaveBeenCalledTimes(2);
   });
 
   it("recomputes code over 128_000 characters and markup over the character budget without evicting cached blocks", () => {
@@ -134,16 +140,16 @@ describe("highlightMarkdownCode", () => {
     vi.mocked(highlight).mockClear();
 
     for (const code of [thousandLines, thousandLines, longest, longest]) {
-      highlightMarkdownCode({ code, language: null });
+      highlightMarkdownCode({ code, language: "js" });
     }
     expect(highlight).toHaveBeenCalledTimes(2);
 
     const tooLongHtml = highlightMarkdownCode({
       code: tooLong,
-      language: null,
+      language: "js",
     });
     expect(tooLong.length + tooLongHtml.length).toBeLessThan(4_000_000);
-    highlightMarkdownCode({ code: tooLong, language: null });
+    highlightMarkdownCode({ code: tooLong, language: "js" });
     expect(highlight).toHaveBeenCalledTimes(4);
 
     const withinHtml = highlightMarkdownCode({

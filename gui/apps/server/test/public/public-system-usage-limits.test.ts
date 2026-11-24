@@ -171,7 +171,7 @@ describe("GET /api/v1/system/usage-limits", () => {
             ? [request.command.providerId]
             : [],
         ),
-      ).toEqual(["codex", "claude-code", "acp-cursor"]);
+      ).toEqual(["claude-code", "codex", "acp-antigravity", "acp-cursor"]);
     });
   });
 
@@ -201,7 +201,7 @@ describe("GET /api/v1/system/usage-limits", () => {
             ? [request.command.providerId]
             : [],
         ),
-      ).toEqual(["codex", "claude-code", "acp-cursor"]);
+      ).toEqual(["claude-code", "codex", "acp-antigravity", "acp-cursor"]);
     });
   });
 });

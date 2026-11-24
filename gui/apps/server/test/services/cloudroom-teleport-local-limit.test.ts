@@ -15,6 +15,8 @@ import { seedEnvironment, seedHostSession, seedProjectWithSource, seedThreadRunt
 
 // The Cursor key check runs this computer's Cursor CLI, which rejects the tests' fake keys.
 vi.mock("../../src/services/cloudroom/sandboxes.js", async (original) => ({ ...await original<object>(), cursorKeyRejected: async () => false }));
+// Avoid spawning this computer's installed harness CLIs when probing versions on wake.
+vi.mock("../../src/services/cloudroom/harness-versions.js", async (original) => ({ ...await original<object>(), macHarnessVersions: async () => ({}) }));
 
 const listen = async (server: ReturnType<typeof createServer>) => {
   server.listen(0, "127.0.0.1"); await once(server, "listening");
@@ -106,7 +108,7 @@ it("out of credits, Teleport to Local still asks the website, then moves the thr
     expect(texts()).toEqual(["Run the orchestrator for the main project"]);
     // The local agent starts a fresh session that gets the conversation so far, since the cloud session file stayed behind.
     expect(getLastProviderThreadId(harness.deps, thread.id)).toBeNull();
-    const seed = resolveDeferredFirstTurnContext(harness.deps.db, thread.id)?.input ?? [];
+    const seed = resolveDeferredFirstTurnContext(harness.deps.db, local)?.input ?? [];
     const intro = seed.find(item => item.type === "text");
     expect(intro && "text" in intro ? intro.text : "").toContain("Run the orchestrator for the main project");
     expect(intro && "text" in intro ? intro.text : "").not.toContain("Out of credits");

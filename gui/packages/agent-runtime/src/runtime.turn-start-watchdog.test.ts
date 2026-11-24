@@ -48,7 +48,11 @@ describe("turn-start watchdog", () => {
       runtime: {
         workspacePath: tmpDir,
         onEvent: (event) => events.push(event),
-        turnStartWatchdog: { thresholdMs: 120, intervalMs: 25 },
+        turnStartWatchdog: {
+          thresholdMs: 120,
+          intervalMs: 25,
+          stopAfterMs: 400,
+        },
       },
       launch: { scripted: { swallowTurnStart: true } },
     });
@@ -85,6 +89,16 @@ describe("turn-start watchdog", () => {
           event.code === "provider_turn_start_timeout",
       ),
     ).toHaveLength(1);
+
+    // Much later the runtime stops the thread, then fails the turn (#1364).
+    await waitFor(() =>
+      events.find(
+        (event) =>
+          event.type === "system/error" &&
+          event.code === "provider_turn_start_failed",
+      ),
+    );
+    expect(runtime.hasThread("t1")).toBe(false);
   });
 
   it("stays silent when the turn starts within the threshold", async () => {
@@ -120,5 +134,51 @@ describe("turn-start watchdog", () => {
           event.code === "provider_turn_start_timeout",
       ),
     ).toBe(false);
+  });
+
+  it.each([
+    { prompt: "hold_turn", warnings: 1, says: "has sent nothing" },
+    { prompt: "bg_task hold_turn", warnings: 0, says: "" },
+    // Transport retries are not progress (#1853).
+    {
+      prompt: "retry_turn",
+      warnings: 1,
+      says: "retries (last: Reconnecting...",
+    },
+  ])("warns once when an open turn goes silent: $prompt", async (row) => {
+    const events: ThreadEvent[] = [];
+    runtime = createScriptedEchoRuntime({
+      runtime: {
+        workspacePath: tmpDir,
+        onEvent: (event) => events.push(event),
+        turnStartWatchdog: { intervalMs: 25 },
+        turnSilenceWatchdog: { thresholdMs: 100 },
+      },
+    });
+    await runtime.startThread({
+      environmentId: "env-1",
+      threadId: "t1",
+      projectId: "p1",
+      providerId: "fake",
+      options: fullRuntimeOptions,
+    });
+    await runtime.runTurn({
+      clientRequestId: "creq_222222222y",
+      threadId: "t1",
+      input: [promptTextInput({ text: row.prompt })],
+      options: fullRuntimeOptions,
+    });
+
+    await wait(400);
+    const warnings = events.filter(
+      (event) =>
+        event.type === "system/error" && event.code === "provider_turn_silent",
+    );
+    expect(warnings).toHaveLength(row.warnings);
+    if (warnings[0]?.type === "system/error") {
+      expect(warnings[0].message).toContain(row.says);
+    }
+    // The warning never ends the turn: a slow provider may still answer.
+    expect(runtime.getActiveTurnId("t1")).not.toBeNull();
   });
 });

@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import fs, {
+  mkdtemp,
+  readdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, sep } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -12,14 +19,19 @@ import {
 } from "./environment-lifecycle-script.js";
 
 const directories: string[] = [];
-async function workspace(
-  kind: "setup" | "teardown",
-  script: string,
-): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "bb-core-hooks-"));
+async function tempDir(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
   directories.push(directory);
-  await writeFile(join(directory, `.bb-env-${kind}.sh`), script);
   return directory;
+}
+
+/** A workspace, a data folder, and the committed script to run there. */
+async function hook(script: string) {
+  return {
+    workspacePath: await tempDir("bb-core-hooks-"),
+    dataDir: await tempDir("bb-core-hooks-data-"),
+    script: Buffer.from(script),
+  };
 }
 
 afterEach(async () => {
@@ -47,14 +59,14 @@ describe("core environment scripts", () => {
   it.each(["setup", "teardown"] as const)(
     "supplies stdin EOF so %s continues to completion",
     async (kind) => {
-      const workspacePath = await workspace(
-        kind,
+      const args = await hook(
         'cat >/dev/null\nprintf complete > marker\nprintf "\\342"\nsleep 0.05\nprintf "\\234\\223\\n"\nprintf "done\\n" >&2\n',
       );
+      const { workspacePath } = args;
       const output: string[] = [];
       const run = kind === "setup" ? runSetupScript : runTeardownScript;
       const result = await run({
-        workspacePath,
+        ...args,
         timeoutMs: 1000,
         env:
           process.platform === "win32"
@@ -72,13 +84,13 @@ describe("core environment scripts", () => {
   );
 
   it("runs in the environment directory and streams stdout and stderr", async () => {
-    const workspacePath = await workspace(
-      "setup",
+    const args = await hook(
       "{ pwd -W 2>/dev/null || pwd; } > marker\nprintf 'first\\rsecond\\n'\necho stderr >&2\n",
     );
+    const { workspacePath } = args;
     const output: string[] = [];
     await runSetupScript({
-      workspacePath,
+      ...args,
       timeoutMs: 5000,
       onProgress: (entry) => output.push(entry.text),
     });
@@ -93,14 +105,11 @@ describe("core environment scripts", () => {
   });
 
   it("surfaces output before setup failure", async () => {
-    const workspacePath = await workspace(
-      "setup",
-      "echo failed-details >&2\nexit 7\n",
-    );
+    const args = await hook("echo failed-details >&2\nexit 7\n");
     const output: string[] = [];
     await expect(
       runSetupScript({
-        workspacePath,
+        ...args,
         timeoutMs: 5000,
         onProgress: (entry) => output.push(entry.text),
       }),
@@ -111,14 +120,11 @@ describe("core environment scripts", () => {
   it.each(["setup", "teardown"] as const)(
     "enforces the %s timeout",
     async (kind) => {
-      const workspacePath = await workspace(
-        kind,
-        "echo before-timeout\nsleep 120\n",
-      );
+      const args = await hook("echo before-timeout\nsleep 120\n");
       const output: string[] = [];
       const run = kind === "setup" ? runSetupScript : runTeardownScript;
       const result = run({
-        workspacePath,
+        ...args,
         timeoutMs: 100,
         onProgress: (entry) => output.push(entry.text),
       });
@@ -132,14 +138,11 @@ describe("core environment scripts", () => {
   );
 
   it("reports teardown failure without rejecting removal", async () => {
-    const workspacePath = await workspace(
-      "teardown",
-      "echo teardown-details\nexit 9\n",
-    );
+    const args = await hook("echo teardown-details\nexit 9\n");
     const output: string[] = [];
     await expect(
       runTeardownScript({
-        workspacePath,
+        ...args,
         timeoutMs: 5000,
         onProgress: (entry) => output.push(entry.text),
       }),
@@ -149,11 +152,11 @@ describe("core environment scripts", () => {
   });
 
   it("cancels a running setup before returning to cleanup", async () => {
-    const workspacePath = await workspace("setup", "echo started\nsleep 120\n");
+    const args = await hook("echo started\nsleep 120\n");
     const controller = new AbortController();
     await expect(
       runSetupScript({
-        workspacePath,
+        ...args,
         timeoutMs: 5000,
         signal: controller.signal,
         onProgress: (entry) => {
@@ -166,8 +169,7 @@ describe("core environment scripts", () => {
   it.runIf(process.platform === "win32")(
     "stops the programs Git Bash started when a Windows hook is cancelled",
     async () => {
-      const workspacePath = await workspace(
-        "setup",
+      const args = await hook(
         [
           "sleep 120 &",
           "sleeper=$!",
@@ -185,7 +187,7 @@ describe("core environment scripts", () => {
       let pids: number[] = [];
       await expect(
         runSetupScript({
-          workspacePath,
+          ...args,
           timeoutMs: 15_000,
           signal: controller.signal,
           onProgress: (entry) => {
@@ -265,9 +267,87 @@ describe("core environment scripts", () => {
   });
 
   it("skips absent scripts", async () => {
-    const workspacePath = await workspace("setup", "exit 0\n");
+    const args = await hook("exit 0\n");
     await expect(
-      runTeardownScript({ workspacePath, timeoutMs: 5000 }),
+      runTeardownScript({ ...args, script: null, timeoutMs: 5000 }),
     ).resolves.toEqual({ ran: false });
+  });
+
+  it("skips a workspace folder that is gone", async () => {
+    const args = await hook("touch ran\n");
+    await rm(args.workspacePath, { recursive: true });
+    await expect(
+      runTeardownScript({ ...args, timeoutMs: 5000 }),
+    ).resolves.toEqual({ ran: false });
+  });
+
+  it.each(["setup", "teardown"] as const)(
+    "runs the given %s script, never the copy an agent left in the workspace",
+    async (kind) => {
+      const args = await hook("echo committed > ran\n");
+      await writeFile(
+        join(args.workspacePath, `.bb-env-${kind}.sh`),
+        "echo planted > ran\necho planted > planted\n",
+      );
+      const run = kind === "setup" ? runSetupScript : runTeardownScript;
+      await expect(run({ ...args, timeoutMs: 5000 })).resolves.toEqual({
+        ran: true,
+      });
+      expect(await readFile(join(args.workspacePath, "ran"), "utf8")).toBe(
+        "committed\n",
+      );
+      await expect(
+        readFile(join(args.workspacePath, "planted")),
+      ).rejects.toThrow();
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "resolves $0 and BASH_SOURCE to the workspace root, as when run by hand there",
+    async () => {
+      const args = await hook(
+        [
+          "#!/usr/bin/env bash",
+          "set -euo pipefail",
+          'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+          '[[ "${BASH_SOURCE[0]}" == "$0" ]] && main=yes || main=no',
+          `printf '%s\\n' "$0" "$SCRIPT_DIR" "$main" "$LINENO" "$#" > info`,
+          "",
+        ].join("\n"),
+      );
+      await runSetupScript({ ...args, timeoutMs: 5000 });
+      expect(
+        (await readFile(join(args.workspacePath, "info"), "utf8")).split("\n"),
+      ).toEqual([
+        "./.bb-env-setup.sh",
+        await realpath(args.workspacePath),
+        "yes",
+        "5",
+        "0",
+        "",
+      ]);
+    },
+  );
+
+  it("leaves no private folder behind when writing the copy fails", async () => {
+    const args = await hook("echo hi\n");
+    vi.spyOn(fs, "writeFile").mockRejectedValueOnce(
+      Object.assign(new Error("no space left on device"), { code: "ENOSPC" }),
+    );
+    await expect(runSetupScript({ ...args, timeoutMs: 5000 })).rejects.toThrow(
+      "no space left on device",
+    );
+    expect(await readdir(join(args.dataDir, ".cloudroom-tmp"))).toEqual([]);
+  });
+
+  it("removes its private copy of the script when the run ends", async () => {
+    const args = await hook("echo hi\n");
+    await runSetupScript({ ...args, timeoutMs: 5000 });
+    const failing = await hook("exit 3\n");
+    await expect(
+      runSetupScript({ ...failing, timeoutMs: 5000 }),
+    ).rejects.toThrow("exit code 3");
+    for (const dataDir of [args.dataDir, failing.dataDir])
+      expect(await readdir(join(dataDir, ".cloudroom-tmp"))).toEqual([]);
   });
 });

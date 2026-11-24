@@ -103,7 +103,7 @@ async function resumeThread(): Promise<void> {
   expect(response.error).toBeUndefined();
 }
 
-function archiveOutsideBb(): void {
+function archiveOutsideRoom(): void {
   writeFileSync(archiveStatePath, JSON.stringify([PROVIDER_THREAD_ID]));
 }
 
@@ -181,7 +181,7 @@ async function expectRetryAfterUnarchiveSucceeds(
 
 it("keeps the thread resumable when a settings-change rebuild hits an externally archived rollout", async () => {
   await resumeThread();
-  archiveOutsideBb();
+  archiveOutsideRoom();
 
   await expectArchivedHint(await startTurn(2, changedSessionOptions));
   await expectRetryAfterUnarchiveSucceeds(changedSessionOptions);
@@ -208,7 +208,7 @@ it("keeps the thread resumable when the rebuild after the child died hits an ext
     }
     await new Promise((resolveTick) => setTimeout(resolveTick, 20));
   }
-  archiveOutsideBb();
+  archiveOutsideRoom();
 
   await expectArchivedHint(await startTurn(2, sessionOptions));
   await expectRetryAfterUnarchiveSucceeds(sessionOptions);

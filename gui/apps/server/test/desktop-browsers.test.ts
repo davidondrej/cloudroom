@@ -1,4 +1,5 @@
-import { getStoredThreadTabs, markThreadDeleted } from "@cloudroom/db";
+import { getStoredThreadTabs, getThread, markThreadDeleted, threads } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 import {
   desktopBrowserLeaseSchema,
   desktopBrowserResultSchemas,
@@ -12,6 +13,9 @@ import {
 import { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 import { revokeThreadDesktopBrowserControl } from "../src/services/desktop-browsers.js";
+import { cloudroom } from "../src/services/cloudroom/commands.js";
+import { archiveThreadAndChildren } from "../src/services/threads/thread-archive.js";
+import { stopThreadForCurrentState } from "../src/services/threads/thread-lifecycle.js";
 import { onDaemonSocketMessage } from "../src/ws/daemon-protocol.js";
 import {
   registerHostRpcResponder,
@@ -77,6 +81,7 @@ function fixture(harness: TestAppHarness) {
                   instanceId: scope.instanceId,
                   generation: scope.generation,
                   label: "Desktop",
+                  closesOpenedPages: true,
                 },
               ],
             },
@@ -455,7 +460,7 @@ describe("desktop browser public API", () => {
     });
   });
 
-  it("requires explicit personal handoff and rejects missing or foreign tabs", async () => {
+  it("never leases personal tabs and rejects missing or foreign tabs", async () => {
     await withBrowserTest(async (test) => {
       const tab = { ...test.tab(), profile: { kind: "personal" as const } };
       test.setTabs([tab]);
@@ -466,15 +471,25 @@ describe("desktop browser public API", () => {
       });
       expect(denied.status).toBe(403);
       expect(await denied.json()).toMatchObject({
-        code: "desktop_personal_handoff_required",
+        code: "desktop_personal_tab",
       });
+      // The old handoff flag is gone: the strict schema rejects it outright.
+      expect(
+        (
+          await test.post("acquire", {
+            ...test.scope,
+            tabIds: [tab.tabId],
+            controllerLabel: "Agent",
+            allowPersonal: true,
+          })
+        ).status,
+      ).toBe(400);
       expect(
         (
           await test.post("acquire", {
             ...test.scope,
             tabIds: ["missing"],
             controllerLabel: "Agent",
-            allowPersonal: true,
           })
         ).status,
       ).toBe(403);
@@ -483,10 +498,6 @@ describe("desktop browser public API", () => {
           ({ command }) => command.type === "desktop.browser.list_tabs",
         ),
       ).toBe(true);
-      const lease = await test.acquire({ allowPersonal: true });
-      expect(lease.tabIds).toEqual([tab.tabId]);
-      expect(lease.controllerLabel).toBe("Test agent");
-      expect(lease.expiresAt - Date.now()).toBeGreaterThan(290000);
     });
   });
 
@@ -568,7 +579,7 @@ describe("desktop browser public API", () => {
     });
   });
 
-  it("lists import sources and forwards cookie imports with a personal default target", async () => {
+  it("lists import sources and imports cookies only into the personal profile", async () => {
     await withBrowserTest(async (test) => {
       const instance = {
         hostId: test.scope.hostId,
@@ -613,6 +624,13 @@ describe("desktop browser public API", () => {
         sourceProfileDirectory: "Profiles/p1",
       });
       expect(rejected.status).toBe(400);
+      const intoAgent = await test.post("import-cookies", {
+        ...instance,
+        sourceId: "firefox",
+        sourceProfileDirectory: "Profiles/p1",
+        profile: { kind: "automation", id: "agent" },
+      });
+      expect(intoAgent.status).toBe(400);
     });
   });
 
@@ -703,18 +721,20 @@ describe("desktop browser public API", () => {
       expect(
         test.responder.requests.slice(before).map(({ command }) => command),
       ).toEqual([
+        { type: "desktop.browser.list_instances" },
         {
           type: "desktop.browser.release_control",
           instanceId: test.scope.instanceId,
           generation: test.scope.generation,
           threadId: test.scope.threadId,
           leaseId: lease.leaseId,
+          closeOpenedPages: true,
         },
       ]);
       expect(
         (await test.post("release", test.leaseRequest(lease.leaseId))).status,
       ).toBe(200);
-      expect(test.responder.requests).toHaveLength(before + 1);
+      expect(test.responder.requests).toHaveLength(before + 2);
     });
   });
 
@@ -742,6 +762,36 @@ describe("desktop browser public API", () => {
           ({ command }) => command.type === "desktop.browser.open_connection",
         ),
       ).toBe(false);
+    });
+  });
+
+  it.each([
+    ["release", true],
+    ["legacy instance release", undefined],
+    ["stop", undefined],
+    ["cloud stop", undefined],
+    ["archive", true],
+  ] as const)("%s ends control; closeOpenedPages=%s (#1383)", async (how, flag) => {
+    await withBrowserTest(async (test, harness) => {
+      const lease = await test.acquire();
+      const thread = () => getThread(harness.db, test.scope.threadId)!;
+      if (how === "legacy instance release")
+        test.intercept(({ command }) => command.type !== "desktop.browser.list_instances" ? null
+          : { ok: true, result: { instances: [{ instanceId: test.scope.instanceId, generation: test.scope.generation, label: "Old" }] } });
+      if (how.endsWith("release"))
+        expect((await test.post("release", test.leaseRequest(lease.leaseId))).status).toBe(200);
+      if (how === "stop") expect((await test.stop()).status).toBe(200);
+      if (how === "cloud stop") {
+        harness.db.update(threads).set({ executionTarget: "cloud" }).where(eq(threads.id, test.scope.threadId)).run();
+        vi.spyOn(cloudroom(harness.deps), "control").mockResolvedValue();
+        await stopThreadForCurrentState(harness.deps, thread(), null);
+      }
+      if (how === "archive") archiveThreadAndChildren(harness.deps, { parentThread: thread(), includeLive: true });
+      const releases = () => test.responder.requests.flatMap(({ command }) =>
+        command.type === "desktop.browser.release_control" && command.leaseId === lease.leaseId ? [command] : []);
+      await vi.waitFor(() => expect(releases()).toHaveLength(1));
+      expect(releases()[0]!.closeOpenedPages).toBe(flag);
+      expect((await test.post("connection", test.leaseRequest(lease.leaseId))).status).toBe(409);
     });
   });
 

@@ -1,9 +1,13 @@
-import { COMPUTER, reasoningLevelSchema } from "@cloudroom/domain";
+import {
+  CLOUD_NATIVE_FORK_PROVIDERS,
+  usesTextFork,
+  personalProjectAllowsEnvironment,
+  reasoningLevelSchema,
+} from "@cloudroom/domain";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { prepareLocalFork, prepareLocalForkCode } from "../cloudroom/teleport-local.js";
-import { FORK_HARNESSES, forkModel, forkTurn } from "../cloudroom/fork.js";
+import { forkModel, textForkSequence, prepareLocalForkWorktree } from "../cloudroom/fork.js";
 import { messagesSeed } from "./thread-harness-switch.js";
-import { threadMessages } from "./thread-transcript.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { eq } from "drizzle-orm";
@@ -13,10 +17,10 @@ import {
   getProjectExecutionDefaults,
   getEnvironment,
   getLatestCompletedThreadContextClearSequence,
-  getProjectSourceByHost,
   getThread,
 } from "@cloudroom/db";
 import type {
+  AvailableModel,
   ProjectExecutionDefaults,
   Project,
   PromptInput,
@@ -35,6 +39,8 @@ import {
   copyForkSourceHistory,
   recordImportFork,
   recordTextImport,
+  nativeForkPoint,
+  textForkMessages,
   resolveThreadForkPoint,
   type ThreadForkHistory,
   type ThreadForkPoint,
@@ -42,6 +48,7 @@ import {
 import {
   rememberProjectExecutionDefaultsForCreate,
   resolveProjectExecutionDefaultsForCreate,
+  shouldRememberProjectExecutionDefaults,
 } from "./project-execution-defaults.js";
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import {
@@ -58,7 +65,13 @@ import { emitPluginThreadDeleted } from "../plugins/plugin-thread-events.js";
 import {
   createThreadRecord,
   getThreadSafe,
+  requestConflict,
+  requestThreadId,
   requirePublicProjectForThreadCreate,
+  savedSpawnIntent,
+  spawnConflicts,
+  spawnIntent,
+  type SpawnIntent,
 } from "./thread-create-helpers.js";
 import {
   resolveStableThreadRequestEnvironment,
@@ -71,15 +84,22 @@ import {
 import {
   buildProviderThreadExecutionDefaults,
   resolveCreateThreadEnvironment,
+  supportedReasoningLevel,
 } from "./thread-default-policy.js";
+import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
 import { assertValidParentThread } from "./thread-parent.js";
+import { offersSignIn } from "./thread-lifecycle.js";
 import {
   type ThreadCreateServiceRequestInput,
   type ThreadCreateServiceRequest,
 } from "./thread-create-request.js";
 import { deriveTitleFallback } from "./title-generation.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
-import { resolveSystemProviderModels } from "../system/execution-options.js";
+import {
+  projectCheckoutPathOnHost,
+  providerSetupError,
+  resolveSystemProviderModels,
+} from "../system/execution-options.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
 import {
   getEnvironmentProvider,
@@ -91,6 +111,8 @@ type ThreadCreateDeps = LoggedPendingInteractionWorkSessionDeps;
 interface ImportedText {
   history: ThreadForkHistory;
   seed: PromptInput[];
+  /** The seed already rides in the first message (a text fork with one). */
+  carried?: true;
 }
 
 interface CreateProvisioningThreadArgs {
@@ -118,26 +140,50 @@ interface ResolveCatalogExecutionDefaultsArgs {
   hostId: string | null;
   providerId: string;
   providerFallbackCandidates: readonly string[];
+  remembersStart: boolean;
   requestedModel: string | null;
   requestedReasoningLevel: boolean;
 }
 
 async function loadCatalogDefaultForProvider(
   deps: ThreadCreateDeps,
-  args: { cwd?: string; hostId: string; model?: string; providerId: string },
-): Promise<ProjectExecutionDefaults | ApiError> {
+  args: {
+    cwd?: string;
+    hostId: string;
+    model?: string;
+    providerId: string;
+    /** Move a level the provider rejects to one it accepts (#2239). */
+    reconcile?: boolean;
+  },
+): Promise<
+  | { defaults: ProjectExecutionDefaults; fallback: boolean; model: AvailableModel }
+  | ApiError
+> {
   const catalog = await resolveSystemProviderModels(deps, {
     ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
     hostId: args.hostId,
     providerId: args.providerId,
   });
-  if (catalog.modelLoadError !== null) {
+  const loadError = catalog.modelLoadError;
+  // A missing CLI needs a reinstall (#907); a signed-out agent with a sign-in command needs its login (#1160).
+  const setup =
+    loadError !== null &&
+    (loadError.code !== "auth_required" ||
+      offersSignIn(deps.providerRegistry, args.providerId))
+      ? providerSetupError(deps, loadError)
+      : null;
+  if (setup !== null) return setup;
+  // A failed or slow listing starts on the fallback or last listed models (#1399), as a switch does (#1291).
+  const fallback =
+    (loadError?.code === "timeout" || loadError?.code === "failed") &&
+    catalog.models.length > 0;
+  if (loadError !== null && !fallback) {
     return new ApiError(
       503,
       "model_catalog_unavailable",
       `Unable to load ${args.providerId} models to resolve the default. Try again once the host is connected and the provider is ready.`,
       {
-        details: catalog.modelLoadError,
+        details: loadError,
         retryable: true,
       },
     );
@@ -156,10 +202,56 @@ async function loadCatalogDefaultForProvider(
       true,
     );
   }
-  return buildProviderThreadExecutionDefaults(deps.providerRegistry, {
+  const defaults = buildProviderThreadExecutionDefaults(deps.providerRegistry, {
     providerId: args.providerId,
     model: defaultModel,
   });
+  if (args.reconcile === true) {
+    defaults.reasoningLevel = supportedReasoningLevel(deps.providerRegistry, {
+      level: defaults.reasoningLevel,
+      model: defaultModel,
+      providerId: args.providerId,
+    });
+  }
+  return { defaults, fallback, model: defaultModel };
+}
+
+const LISTED_MODEL_WAIT_MS = 2_000;
+
+/** A remembered Claude model saved as `claude-opus-5.5` fails to start while
+ *  `claude-opus-5-5` works (#2202). Use the hyphen ID only when the catalog
+ *  lists it and not the dotted one; anything else keeps the remembered value. */
+async function listedRememberedModel(
+  deps: ThreadCreateDeps,
+  args: { cwd?: string; hostId: string; remembered: ProjectExecutionDefaults },
+): Promise<ProjectExecutionDefaults> {
+  const { remembered } = args;
+  const hyphenated = remembered.model.replace(/(\d)\.(\d)/gu, "$1-$2");
+  if (remembered.providerId !== "claude-code" || hyphenated === remembered.model)
+    return remembered;
+  // A cached catalog answers at once; a cold listing gets 2 s, then the start goes on as before.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const catalog = await Promise.race([
+    resolveSystemProviderModels(deps, {
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      hostId: args.hostId,
+      providerId: remembered.providerId,
+    }).catch(() => null),
+    new Promise<null>((resolve) => {
+      timer = setTimeout(resolve, LISTED_MODEL_WAIT_MS, null);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  // A failed listing returns fallback entries; only a real listing decides.
+  if (catalog === null || catalog.modelLoadError !== null) return remembered;
+  const listed = new Set(
+    [...catalog.models, ...catalog.selectedOnlyModels].map((model) => model.model),
+  );
+  if (listed.has(remembered.model) || !listed.has(hyphenated)) return remembered;
+  deps.logger.warn(
+    { from: remembered.model, to: hyphenated },
+    "Remembered model is not listed; using the listed hyphen ID",
+  );
+  return { ...remembered, model: hyphenated };
 }
 
 async function resolveCatalogExecutionDefaults(
@@ -167,7 +259,44 @@ async function resolveCatalogExecutionDefaults(
   args: ResolveCatalogExecutionDefaultsArgs,
 ): Promise<ProjectExecutionDefaults | null> {
   if (args.executionDefaults !== null) {
-    return args.executionDefaults;
+    // A start saved as the project default keeps the stored ID as is (#2202).
+    const remembered =
+      args.requestedModel !== null || args.hostId === null || args.remembersStart
+        ? args.executionDefaults
+        : await listedRememberedModel(deps, {
+            ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+            hostId: args.hostId,
+            remembered: args.executionDefaults,
+          });
+    // A start saved as the project default never reconciles, so nothing reconciled is saved (#2239).
+    const levels = getSupportedReasoningLevelsForProvider(
+      deps.providerRegistry,
+      args.providerId,
+    );
+    if (
+      args.requestedReasoningLevel ||
+      args.hostId === null ||
+      args.remembersStart ||
+      levels.length === 0 ||
+      levels.includes(remembered.reasoningLevel)
+    )
+      return remembered;
+    const result = await loadCatalogDefaultForProvider(deps, {
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      hostId: args.hostId,
+      model: args.requestedModel ?? remembered.model,
+      providerId: args.providerId,
+    }).catch(() => null);
+    if (result === null || result instanceof ApiError || result.fallback)
+      return remembered;
+    return {
+      ...remembered,
+      reasoningLevel: supportedReasoningLevel(deps.providerRegistry, {
+        level: remembered.reasoningLevel,
+        model: result.model,
+        providerId: args.providerId,
+      }),
+    };
   }
   if (args.requestedModel !== null) {
     // Nothing remembered: start at the requested model's own level (#656).
@@ -177,8 +306,17 @@ async function resolveCatalogExecutionDefaults(
       hostId: args.hostId,
       model: args.requestedModel,
       providerId: args.providerId,
+      reconcile: !args.remembersStart,
     }).catch(() => null);
-    return result instanceof ApiError ? null : result;
+    // A missing CLI can't start whatever the model (#2226).
+    if (
+      result instanceof ApiError &&
+      result.body.code === "provider_cli_missing"
+    )
+      throw result;
+    return result instanceof ApiError || result?.fallback
+      ? null
+      : (result?.defaults ?? null);
   }
 
   if (args.hostId === null) {
@@ -191,17 +329,24 @@ async function resolveCatalogExecutionDefaults(
 
   const candidates = [args.providerId, ...args.providerFallbackCandidates];
   let lastError: ApiError | null = null;
+  let fallback: ProjectExecutionDefaults | null = null;
   for (const providerId of candidates) {
     const result = await loadCatalogDefaultForProvider(deps, {
       ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
       hostId: args.hostId,
       providerId,
+      reconcile: !args.remembersStart,
     });
-    if (!(result instanceof ApiError)) {
-      return result;
+    if (result instanceof ApiError) {
+      lastError = result;
+    } else if (!result.fallback) {
+      return result.defaults;
+    } else {
+      // A provider that lists its models beats another one's fallback.
+      fallback ??= result.defaults;
     }
-    lastError = result;
   }
+  if (fallback !== null) return fallback;
   throw lastError;
 }
 
@@ -245,8 +390,8 @@ async function withCloudDefaultReasoningLevel(
         )
         .catch(() => null)
     : null;
-  return defaults && !(defaults instanceof ApiError)
-    ? { ...request, reasoningLevel: defaults.reasoningLevel }
+  return defaults && !(defaults instanceof ApiError) && !defaults.fallback
+    ? { ...request, reasoningLevel: defaults.defaults.reasoningLevel }
     : request;
 }
 
@@ -324,15 +469,6 @@ function childHostIdForResolvedEnvironment(
   }
 }
 
-function projectCheckoutPathOnHost(
-  deps: Pick<AppDeps, "db">,
-  projectId: string,
-  hostId: string,
-): string | undefined {
-  const source = getProjectSourceByHost(deps.db, projectId, hostId);
-  return source?.type === "local_path" ? source.path : undefined;
-}
-
 function modelCatalogCwdForResolvedEnvironment(
   resolvedEnvironment: ResolvedStableThreadRequestEnvironment,
 ): string | undefined {
@@ -365,17 +501,7 @@ function assertProjectWorkspaceCompatibility(
 ): void {
   const personalWorkspace = requestUsesPersonalWorkspace(request);
   if (project.kind === "personal") {
-    if (
-      request.environment.type !== "reuse" &&
-      request.environment.type !== "provider" &&
-      request.environment.type !== "project-default" &&
-      !(
-        request.environment.type === "host" &&
-        request.environment.workspace.type === "unmanaged" &&
-        request.environment.workspace.path === null
-      ) &&
-      !personalWorkspace
-    ) {
+    if (!personalProjectAllowsEnvironment(request.environment)) {
       throw new ApiError(
         400,
         "invalid_request",
@@ -460,17 +586,23 @@ async function createPendingThreadAndAttemptFirstDispatch(
       : getEnvironment(deps.db, args.environmentId);
   if (environment !== null)
     assertEnvironmentPathAvailable(deps, { ...environment, threadId: null });
+  const history = args.fork?.history ?? args.importedText?.history ?? null;
+  // Only chat imports pass rows: date the thread by the original chat so the sidebar sorts it there.
+  const rows = history?.kind === "rows" ? history.rows : [];
   const thread = createThreadRecord(deps, {
     request: args.request,
     environmentId: args.environmentId,
+    ...(rows.length ? {
+      createdAt: rows.reduce((min, row) => Math.min(min, row.createdAt), Infinity),
+      latestAttentionAt: rows.reduce((max, row) => Math.max(max, row.createdAt), 0),
+    } : {}),
   });
   let execution: Awaited<ReturnType<typeof buildExecutionOptions>>;
   try {
-    const history = args.fork?.history ?? args.importedText?.history ?? null;
     if (history !== null && args.request.visibility === "visible") {
       copyForkSourceHistory(deps, { fork: thread, history });
     }
-    if (args.importedText) recordTextImport(deps, thread, args.importedText.seed);
+    if (args.importedText) recordTextImport(deps, thread, args.importedText.seed, args.importedText.carried);
     if (args.deferFork && args.fork !== null) {
       recordImportFork(
         deps,
@@ -585,6 +717,37 @@ function resolveCreateThreadPluginMetadata(
   };
 }
 
+const createsInFlight = new Map<
+  string,
+  { intent: SpawnIntent; created: Promise<Thread> }
+>();
+
+/** A retry sent while the first request with its request ID still runs waits
+ *  for that request instead of racing it (#860). */
+export async function createThreadOnce(
+  deps: ThreadCreateDeps,
+  request: ThreadCreateServiceRequestInput,
+): Promise<Thread> {
+  if (request.requestId === undefined)
+    return createThreadFromRequest(deps, request);
+  const key = `${request.projectId}:${request.requestId}`;
+  const intent = spawnIntent(request);
+  const running = createsInFlight.get(key);
+  if (running) {
+    if (spawnConflicts(intent, running.intent)) throw requestConflict();
+    return running.created;
+  }
+  const created = createThreadFromRequest(deps, request).finally(() =>
+    createsInFlight.delete(key),
+  );
+  // Leaving out the parent means no parent, not "any parent".
+  createsInFlight.set(key, {
+    intent: { ...intent, parentId: intent.parentId ?? null },
+    created,
+  });
+  return created;
+}
+
 export async function createThreadFromRequest(
   deps: ThreadCreateDeps,
   rawRequestInput: ThreadCreateServiceRequestInput,
@@ -596,60 +759,103 @@ export async function createThreadFromRequest(
     importedText?: ImportedText;
     forkPoint?: ThreadForkPoint;
   } = {},
-) {
+): Promise<Thread> {
   const project = requirePublicProjectForThreadCreate(
     deps,
     rawRequestInput.projectId,
   );
+  // Cloud keeps its own request IDs; a Local one names the thread it made.
+  const requested =
+    rawRequestInput.requestId && rawRequestInput.executionTarget !== "cloud"
+      ? getThread(
+          deps.db,
+          requestThreadId(rawRequestInput.projectId, rawRequestInput.requestId),
+        )
+      : null;
+  if (requested !== null) {
+    if (requested.projectId !== rawRequestInput.projectId)
+      throw requestConflict("in another project");
+    if (requested.deletedAt !== null)
+      throw requestConflict("by a deleted thread; pick a new one");
+    // A Local create saves its start before the first message, and a Local thread
+    // never returns to pending: without it, the create stopped (say, the app quit). Redo it.
+    if (
+      requested.executionTarget === "local" &&
+      requested.status === "pending" &&
+      requested.startupContext === null
+    ) {
+      emitPluginThreadDeleted({ ...requested, deletedAt: Date.now() });
+      deleteThread(deps.db, deps.hub, requested.id);
+    } else {
+      if (
+        spawnConflicts(
+          spawnIntent(rawRequestInput),
+          savedSpawnIntent(deps, requested),
+        )
+      )
+        throw requestConflict();
+      return requested;
+    }
+  }
   const sourceId = rawRequestInput.sourceThreadId ?? rawRequestInput.parentThreadId;
   const source = sourceId ? getThread(deps.db, sourceId) : null;
+  // Every Local fork (fork button, plugin, CLI) passes here, so a new worktree always gets the source's code. Once: a
+  // text fork's recursion (importedText) already carries the prepared environment.
+  if (source !== null && !isCloudThread(source) && rawRequestInput.originKind === "fork" && rawRequestInput.sourceThreadId && rawRequestInput.executionTarget !== "cloud" && !options.freshFork && !options.importedText) {
+    const prepared = await prepareLocalForkWorktree(deps as AppDeps, source, rawRequestInput.projectId, rawRequestInput.environment, rawRequestInput.origin);
+    const note = prepared.note && rawRequestInput.input.length > 0 && options.providerInput === undefined ? [prepared.note] : [];
+    rawRequestInput = { ...rawRequestInput, environment: prepared.environment, input: [...note, ...rawRequestInput.input] };
+  }
   const cloudChild = source !== null && isCloudThread(source) && !rawRequestInput.sourceThreadId && !rawRequestInput.originKind;
   const cloudSourceFork = source !== null && isCloudThread(source) && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId);
   const localFork = cloudSourceFork && rawRequestInput.executionTarget !== "cloud" && (rawRequestInput.executionTarget === "local" || rawRequestInput.environment.type !== "project-default");
   const cloudFork = cloudSourceFork && !localFork;
   const toCloud = rawRequestInput.executionTarget === "cloud" || (cloudSourceFork && !localFork);
-  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && (
-    (rawRequestInput.providerId !== undefined && rawRequestInput.providerId !== source.providerId) ||
-    (toCloud && rawRequestInput.model !== undefined && rawRequestInput.model !== forkModel(deps, source.id)) ||
-    (toCloud && !FORK_HARNESSES.includes(source.providerId)));
+  // A fork the source's harness can't clone copies the chat as text (ADR 20261121-141157). A Cloud source reaches a Local
+  // clone only through Teleport's copy, which takes Claude Code and Codex.
+  const textFork = source !== null && rawRequestInput.originKind === "fork" && Boolean(rawRequestInput.sourceThreadId) && !options.importedText && !options.forkPoint && !options.freshFork && usesTextFork(
+    source.providerId, toCloud && rawRequestInput.model !== undefined ? forkModel(deps, source.id) : undefined,
+    rawRequestInput.providerId, rawRequestInput.model, toCloud,
+    isCloudThread(source) ? CLOUD_NATIVE_FORK_PROVIDERS.includes(source.providerId) : (await nativeForkPoint(deps, { sourceThread: source, sourceSeqEnd: rawRequestInput.sourceSeqEnd })) !== null,
+  );
   if (source !== null && textFork && rawRequestInput.sourceThreadId) {
     if (toCloud && rawRequestInput.input.length === 0) {
       throw new ApiError(400, "invalid_request", "A Cloud fork needs a first message");
     }
     requireLiveSourceThread(deps, { projectId: rawRequestInput.projectId, sourceThreadId: source.id });
     assertValidParentThread(deps, { parentThreadId: source.id, cloudChild: isCloudThread(source) });
-    const { endSequence } = forkTurn(deps.db, source.id, rawRequestInput.sourceSeqEnd);
+    const endSequence = textForkSequence(deps.db, source, rawRequestInput.sourceSeqEnd);
     const cleared = getLatestCompletedThreadContextClearSequence(deps.db, { threadId: source.id });
     const seed = await messagesSeed(
       deps.config.dataDir,
       source.projectId,
-      threadMessages(deps.db, source.id, { ...(cleared != null && cleared < endSequence ? { after: cleared } : {}), before: endSequence + 1 }),
+      textForkMessages(deps, source.id, endSequence, cleared !== null && cleared < endSequence ? cleared : 0),
       (rawRequestInput.providerId ?? source.providerId) === source.providerId
         ? `[Cloudroom] This conversation was forked from another thread. You are continuing it in a fresh ${source.providerId} session.`
         : `[Cloudroom] This conversation was forked from a thread with another agent (${source.providerId}). You are now continuing it as ${rawRequestInput.providerId}.`,
     );
+    const providerId = rawRequestInput.providerId ?? source.providerId;
+    const model = rawRequestInput.model ?? (providerId === source.providerId ? forkModel(deps, source.id) : undefined);
     if (toCloud) {
       const { sourceSeqEnd: _sourceSeqEnd, ...cloudRequest } = rawRequestInput;
-      const sameHarness = (rawRequestInput.providerId ?? source.providerId) === source.providerId;
-      const model = rawRequestInput.model ?? (sameHarness ? forkModel(deps, source.id) : undefined);
-      const thread = await cloudroom(deps).create({ ...cloudRequest, providerId: rawRequestInput.providerId ?? source.providerId, ...(model ? { model } : {}), origin: rawRequestInput.origin ?? "sdk", originKind: "fork", environment: { type: "project-default" }, input: [...seed, ...rawRequestInput.input] }, false, { sourceThreadId: source.id, endSequence });
+      const thread = await cloudroom(deps).create({ ...cloudRequest, providerId, ...(model ? { model } : {}), origin: rawRequestInput.origin ?? "sdk", originKind: "fork", environment: { type: "project-default" }, input: [...seed, ...rawRequestInput.input] }, false, { sourceThreadId: source.id, endSequence });
       deps.telemetry.capture({ name: "thread_created", properties: { execution: cloudExecution(deps, thread.id), is_child_thread: false, provider: thread.providerId } });
       return thread;
     }
     const code = isCloudThread(source) ? await prepareLocalForkCode(deps as AppDeps, source, null, rawRequestInput.environment) : null;
+    const fullSeed = code ? [...seed, code.note] : seed;
     return createThreadFromRequest(deps, {
       ...rawRequestInput,
+      providerId,
+      ...(model ? { model } : {}),
       executionTarget: "local",
       environment: code?.environment ?? rawRequestInput.environment,
-      input: code && rawRequestInput.input.length > 0 ? [code.note, ...rawRequestInput.input] : rawRequestInput.input,
-    }, { ...options, importedText: { history: { kind: "thread", sourceThreadId: source.id, endSequence }, seed } });
+      input: rawRequestInput.input.length ? [...fullSeed, ...rawRequestInput.input] : [],
+    }, { ...options, importedText: { history: { kind: "thread", sourceThreadId: source.id, endSequence }, seed: fullSeed, ...(rawRequestInput.input.length ? { carried: true as const } : {}) } });
   }
   if (localFork && !options.forkPoint && !options.importedText) {
     requireLiveSourceThread(deps, { projectId: rawRequestInput.projectId, sourceThreadId: source.id });
     assertValidParentThread(deps, { parentThreadId: source.id, cloudChild: true });
-    if (!deps.providerRegistry.supportsFork(source.providerId)) {
-      throw new ApiError(400, "invalid_request", `Provider ${source.providerId} does not support thread forks on this ${COMPUTER}`);
-    }
     const prepared = await prepareLocalFork(deps as AppDeps, source, { environment: rawRequestInput.environment, ...(rawRequestInput.sourceSeqEnd === undefined ? {} : { sourceSeqEnd: rawRequestInput.sourceSeqEnd }) });
     return createThreadFromRequest(deps, {
       ...rawRequestInput,
@@ -663,7 +869,7 @@ export async function createThreadFromRequest(
   }
   if (rawRequestInput.executionTarget === "cloud" || cloudChild || cloudFork) {
     const thread = await cloudroom(deps).create({ ...(await withCloudDefaultReasoningLevel(deps, rawRequestInput)), origin: rawRequestInput.origin ?? "sdk", originKind: rawRequestInput.originKind ?? null });
-    // Cloud threads count in the same anonymous usage events as local ones, tagged with where they run.
+    // Cloud threads count in the same usage events as local ones, tagged with where they run.
     const execution = cloudExecution(deps, thread.id);
     const isChildThread = thread.parentThreadId !== null;
     deps.telemetry.capture({ name: "thread_created", properties: { execution, is_child_thread: isChildThread, provider: thread.providerId } });
@@ -903,6 +1109,7 @@ export async function createThreadFromRequest(
       hostId: childHostId,
       providerId,
       providerFallbackCandidates,
+      remembersStart: shouldRememberProjectExecutionDefaults(request),
       requestedModel,
       requestedReasoningLevel,
     },
@@ -987,6 +1194,8 @@ export async function createThreadFromRequest(
       isChildThread: parentThread !== null,
       messageSource: "thread_create",
       providerId: request.providerId,
+      // A scheduled first message is timed from when it is due, not from the click.
+      ...(request.sendAt !== undefined && request.sendAt !== null && request.sendAt > Date.now() ? { sentAt: request.sendAt } : {}),
       threadId: thread.id,
     });
   }

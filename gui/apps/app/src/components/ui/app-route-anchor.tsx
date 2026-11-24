@@ -11,11 +11,11 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useNavigate, type NavigateOptions } from "react-router-dom";
+import { useNavigate, type NavigateOptions } from "react-router";
 import { useStore } from "jotai";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { isRoutePath, resolveRouteHref } from "@/lib/route-paths";
-import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { openPaneContentInSplit } from "@/lib/split-layout/openPaneContentInSplit";
 import { paneContentForPathname } from "@/views/thread-detail/splitThreadNavigation";
 import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";

@@ -6,7 +6,7 @@ import {
   COMMITTED_GIT_DIFF_SELECTION,
   shouldResetSelectedGitDiffSelection,
   UNCOMMITTED_GIT_DIFF_SELECTION,
-} from "./gitDiffPanelHelpers";
+} from "@/components/diff/diff-store";
 
 function makeCommit(
   overrides: Partial<WorkspaceCommitSummary> = {},

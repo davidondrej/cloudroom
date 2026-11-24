@@ -29,7 +29,7 @@ describe("bundled plugin task graph", () => {
     const assembly = turbo.tasks["@cloudroom/bundled-plugins#build"];
     expect(assembly.dependsOn).toEqual([
       "^prepare:bundled",
-      "@cloudroom/server#generate:bb-official-marketplace",
+      "@cloudroom/server#generate:official-marketplace",
     ]);
     expect(assembly.outputs).toEqual(["dist/**"]);
     const plugin = turbo.tasks["prepare:bundled"];

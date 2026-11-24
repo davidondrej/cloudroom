@@ -14,6 +14,8 @@ import {
 
 export const hostDirectoryQuerySchema = z.object({
   path: z.string().min(1).optional(),
+  /** Folders anywhere under `path` whose names match, best first. Empty only warms the search. */
+  search: z.string().max(200).optional(),
 });
 export type HostDirectoryQuery = z.infer<typeof hostDirectoryQuerySchema>;
 
@@ -21,6 +23,10 @@ export const hostDirectoryEntrySchema = z.object({
   kind: z.enum(["file", "directory"]),
   name: z.string(),
   path: z.string(),
+  activityAt: z.number().optional(),
+  git: z.enum(["repo", "worktree"]).optional(),
+  /** The visible project that already uses this folder. */
+  projectId: z.string().optional(),
 });
 
 export const hostDirectoryListingSchema = z.object({
@@ -28,6 +34,8 @@ export const hostDirectoryListingSchema = z.object({
   parent: z.string().nullable(),
   entries: z.array(hostDirectoryEntrySchema),
   roots: z.array(z.string()),
+  /** The visible project that already uses `directory` itself. */
+  projectId: z.string().optional(),
 });
 export type HostDirectoryListing = z.infer<typeof hostDirectoryListingSchema>;
 

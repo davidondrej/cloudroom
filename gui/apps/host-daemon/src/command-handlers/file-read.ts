@@ -20,7 +20,7 @@ import { isFsErrorWithCode } from "../fs-errors.js";
 import { sha256Hex } from "../sha256-hex.js";
 import { resolveNonSymlinkDirectoryPath } from "./root-path.js";
 
-const IMAGE_FILE_SIZE_LIMIT_BYTES = 10 * 1024 * 1024;
+const FILE_READ_SIZE_LIMIT_BYTES = 50 * 1024 * 1024;
 export const NON_IMAGE_FILE_SIZE_LIMIT_BYTES = 25 * 1024 * 1024;
 
 type FileContentEncoding = "base64" | "utf8";
@@ -94,10 +94,8 @@ function isBinaryImageMimeType(mimeType?: string): boolean {
   );
 }
 
-function getFileSizeLimitBytes(mimeType?: string): number {
-  return isBinaryImageMimeType(mimeType)
-    ? IMAGE_FILE_SIZE_LIMIT_BYTES
-    : NON_IMAGE_FILE_SIZE_LIMIT_BYTES;
+function getFileSizeLimitBytes(): number {
+  return FILE_READ_SIZE_LIMIT_BYTES;
 }
 
 function getContentEncoding(
@@ -227,8 +225,26 @@ async function resolveRootPathOrThrowMissingPath(
     if (isFsErrorWithCode(error, "ENOENT")) {
       throw createMissingTargetError(args.resultPath);
     }
-    throw error;
+    throw toPermissionDeniedOr(error);
   }
+}
+
+// macOS privacy checks fail with EPERM, and they can stop allowing a long-running app mid-session (#1127). Unix
+// permissions fail with EACCES, so those keep their own message.
+function toPermissionDeniedOr(error: unknown): unknown {
+  if (
+    !isFsErrorWithCode(error, "EPERM") &&
+    !isFsErrorWithCode(error, "EACCES")
+  ) {
+    return error;
+  }
+  const message =
+    process.platform === "darwin" && error.code === "EPERM"
+      ? "macOS blocked Cloudroom from reading this folder. Quit and reopen Cloudroom; if it keeps happening, check Cloudroom's access in System Settings > Privacy & Security."
+      : error.message;
+  return new CommandDispatchError("permission_denied", message, {
+    cause: error,
+  });
 }
 
 async function throwMissingTargetOrRethrow(
@@ -236,7 +252,7 @@ async function throwMissingTargetOrRethrow(
   error: unknown,
 ): Promise<never> {
   if (!isFsErrorWithCode(error, "ENOENT")) {
-    throw error;
+    throw toPermissionDeniedOr(error);
   }
 
   const rootPath = args.rootPath;
@@ -299,7 +315,7 @@ export async function readFileFromGitRef(
   }
   const gitRelativePath = relativePath.split(path.sep).join("/");
   const mimeType = mimeTypes.lookup(args.resultPath) || undefined;
-  const fileSizeLimitBytes = getFileSizeLimitBytes(mimeType);
+  const fileSizeLimitBytes = getFileSizeLimitBytes();
 
   let blob;
   try {
@@ -353,9 +369,13 @@ export async function readFileForTransport(
       "Path is a directory, not a file",
     );
   }
+  // Reading a FIFO blocks until a writer appears.
+  if (stat.isFIFO()) {
+    throw new CommandDispatchError("invalid_path", "Path is a FIFO, not a file");
+  }
 
   const mimeType = mimeTypes.lookup(args.resultPath) || undefined;
-  const fileSizeLimitBytes = getFileSizeLimitBytes(mimeType);
+  const fileSizeLimitBytes = getFileSizeLimitBytes();
   if (stat.size > fileSizeLimitBytes) {
     throw new CommandDispatchError(
       "file_too_large",

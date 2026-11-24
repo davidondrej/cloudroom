@@ -27,12 +27,13 @@ interface ToolChars {
 }
 
 const IMAGE_CHARS = 6_000;
+const DIFF_RESULT_CHARS = 200;
 const MAX_READ_CHARS = 100_000;
-const TEXT_UPDATES = new Set([
-  "user_message_chunk",
-  "agent_message_chunk",
-  "agent_thought_chunk",
-]);
+const IMAGE_PATH_PATTERN =
+  /\.(?:png|jpe?g|gif|webp|bmp|tiff?|ico|heic|heif|avif)$/i;
+// Prior-turn thinking is dropped from prompt context on subsequent turns, so
+// only user and assistant message text is accumulated across the session.
+const TEXT_UPDATES = new Set(["user_message_chunk", "agent_message_chunk"]);
 
 function textSize(value: unknown): number {
   if (typeof value === "string") {
@@ -42,6 +43,15 @@ function textSize(value: unknown): number {
     return value.reduce<number>((sum, entry) => sum + textSize(entry), 0);
   }
   if (value !== null && typeof value === "object") {
+    const typed = value as { type?: unknown };
+    if (typed.type === "image") {
+      return IMAGE_CHARS;
+    }
+    // Diff blocks carry full before/after file text for IDE rendering, not what
+    // the model keeps in context (e.g. "The file has been updated.").
+    if (typed.type === "diff") {
+      return DIFF_RESULT_CHARS;
+    }
     return Object.entries(value).reduce<number>(
       (sum, [key, entry]) => sum + key.length + textSize(entry),
       0,
@@ -61,6 +71,9 @@ function blockSize(block: unknown): number {
 }
 
 function fileSize(path: string): number {
+  if (IMAGE_PATH_PATTERN.test(path)) {
+    return IMAGE_CHARS;
+  }
   try {
     return Math.min(statSync(path).size, MAX_READ_CHARS);
   } catch {

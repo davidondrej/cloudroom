@@ -6,7 +6,7 @@ import {
   resolveEffectiveMergeBaseBranch,
   resolvePersistedMergeBaseBranch,
   shouldSyncSelectedMergeBaseBranch,
-} from "./useEnvironmentMergeBase";
+} from "@/components/diff/diff-panel-hooks";
 
 type EnvironmentOverrides = Partial<Environment>;
 

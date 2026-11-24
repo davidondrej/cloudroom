@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node ../../scripts/build-node-entry.mjs src/main.ts dist/main.js --clean-dist",
     "image": "pnpm build && docker build -t ghcr.io/cloudroom-dev/vps:$npm_package_version .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@cloudroom/tunnel-client": "workspace:*",

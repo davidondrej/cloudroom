@@ -3,12 +3,15 @@ import {
   CALLER_PROOF_REQUIRED_MESSAGE,
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
+  type CallerPeer,
   type CallerProofIssuer,
 } from "@cloudroom/config/caller-proof";
 import { isLoopbackAddress } from "@cloudroom/config/loopback";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiError } from "./errors.js";
+
+export { isOpenWithoutCallerProof } from "@cloudroom/config/caller-proof";
 
 const CALLER_TRUSTED_CONTEXT_KEY = "cloudroomCallerTrusted";
 const CALLER_TOKEN_REJECTED_CONTEXT_KEY = "cloudroomCallerTokenRejected";
@@ -22,23 +25,6 @@ declare module "hono" {
 
 export const PLUGIN_WIRE_HTTP_PATH =
   /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
-
-const OPEN_POSTS = [
-  /^\/api\/v1\/caller-proofs$/u,
-  /^\/api\/v1\/caller-proofs\/[^/]+$/u,
-];
-
-const OPEN_READS = [
-  /^\/api\/v1\/system\/(?:config|version)$/u,
-  /^\/api\/v1\/plugins(?:\/contributions)?$/u,
-  /^\/api\/v1\/projects\/[^/]+$/u,
-  /^\/api\/v1\/threads$/u,
-  /^\/api\/v1\/threads\/[^/]+$/u,
-  /^\/api\/v1\/threads\/[^/]+\/(?:timeline|output|events|events\/wait)$/u,
-  /^\/api\/v1\/environments\/[^/]+$/u,
-  /^\/api\/v1\/cloudroom\/account\/mcp\/callback$/u,
-  /^\/api\/v1\/file-previews\/[^/]+\/.+$/u,
-];
 
 const PREVIEW_READS = [
   /^\/api\/v1\/threads\/[^/]+\/worktree\/files\/.+$/u,
@@ -86,29 +72,31 @@ export function callerProofStatus(context: CallerTrustReader): string {
 }
 
 interface IncomingSocketBindings {
-  incoming?: { socket?: { localAddress?: string } };
+  incoming?: { socket?: CallerPeer };
 }
 
-export function arrivedOverLoopback(context: Pick<Context, "env">): boolean {
+function incomingSocket(context: Pick<Context, "env">): CallerPeer | undefined {
   const env = context.env as
     | (IncomingSocketBindings & { server?: IncomingSocketBindings })
     | undefined;
-  const localAddress = (env?.server ?? env)?.incoming?.socket?.localAddress;
+  return (env?.server ?? env)?.incoming?.socket;
+}
+
+export function arrivedOverLoopback(context: Pick<Context, "env">): boolean {
+  const localAddress = incomingSocket(context)?.localAddress;
   return localAddress === undefined || isLoopbackAddress(localAddress);
+}
+
+// The connection whose OS user an open read must match. Null for a request
+// without a socket (in process) or one from another computer: binding beyond
+// loopback is only for trusted networks (start-server.ts).
+export function loopbackPeer(context: Pick<Context, "env">): CallerPeer | null {
+  const socket = incomingSocket(context);
+  return socket !== undefined && arrivedOverLoopback(context) ? socket : null;
 }
 
 export function isTrustedCaller(context: CallerTrustReader): boolean {
   return context.get(CALLER_TRUSTED_CONTEXT_KEY) === true;
-}
-
-export function isOpenWithoutCallerProof(
-  method: string,
-  path: string,
-): boolean {
-  if (method.toUpperCase() === "POST") {
-    return OPEN_POSTS.some((pattern) => pattern.test(path));
-  }
-  return isRead(method) && OPEN_READS.some((pattern) => pattern.test(path));
 }
 
 export function callerProofRequiredResponse(

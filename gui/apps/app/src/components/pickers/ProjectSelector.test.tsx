@@ -1,8 +1,16 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
+import * as gitlabHooks from "@/hooks/useGitlabConnection";
+import { sdk } from "@/lib/sdk";
 import { ProjectSelector } from "./ProjectSelector";
+
+// The picker reads folders through React Query, so every render needs a client.
+const render = (ui: ReactElement) =>
+  rtlRender(ui, { wrapper: createQueryClientTestHarness().wrapper });
 
 const PROJECTS = [
   { id: "proj_alpha", name: "Alpha Web" },
@@ -13,9 +21,44 @@ const PROJECTS = [
   { id: "proj_foxtrot", name: "Foxtrot Design" },
 ] as const;
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe("ProjectSelector", () => {
+  function pasteGitlab(ready: boolean, onAdd = vi.fn().mockResolvedValue("proj_existing")) {
+    vi.spyOn(gitlabHooks, "useGitlabConnection").mockReturnValue({
+      accountId: ready ? "account" : undefined, ready, state: undefined, busy: false,
+      change: vi.fn(), open: vi.fn(), error: undefined,
+    });
+    render(<ProjectSelector projects={PROJECTS} value={null} onChange={() => {}}
+      defaultOpen modal={false} createProject={{ onCreate: vi.fn(), suggestions: {
+        hostId: "host_dev", repos: [], githubConnected: true, isLoading: false, addingKey: null, onAdd
+      } }} />);
+    fireEvent.change(screen.getByRole("combobox", { name: "Search projects" }), {
+      target: { value: "https://gitlab.com/group/sub/project" },
+    });
+    return onAdd;
+  }
+
+  it("offers Cloudroom sign-in without probing the pasted private URL", async () => {
+    const check = vi.spyOn(sdk.cloudroom, "gitlabCheck");
+    pasteGitlab(false);
+    expect(screen.getByRole("option", { name: /Sign in to Cloudroom/ })).toBeTruthy();
+    await act(() => new Promise<void>(resolve => setTimeout(resolve, 450)));
+    expect(check).not.toHaveBeenCalled();
+  });
+
+  it("adds a pasted project once when clicked twice during its access check", async () => {
+    let resolve!: (value: { accessible: boolean }) => void;
+    const checking = new Promise<{ accessible: boolean }>(done => { resolve = done; });
+    vi.spyOn(sdk.cloudroom, "gitlabCheck").mockReturnValue(checking);
+    const add = pasteGitlab(true);
+    const row = screen.getByRole("option", { name: /gitlab.com\/group\/sub/ });
+    fireEvent.click(row);
+    fireEvent.click(row);
+    resolve({ accessible: true });
+    await waitFor(() => expect(add).toHaveBeenCalledTimes(1));
+  });
+
   it("exposes the current project separately from keyboard highlight", () => {
     render(
       <ProjectSelector
@@ -38,6 +81,10 @@ describe("ProjectSelector", () => {
     expect(charlie.getAttribute("aria-selected")).toBe("false");
     expect(charlie.getAttribute("aria-current")).toBe("true");
 
+    // The current project is the first row; the rest keep their order.
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+
+    expect(charlie.getAttribute("aria-selected")).toBe("true");
     fireEvent.keyDown(search, { key: "ArrowDown" });
 
     expect(alpha.getAttribute("aria-selected")).toBe("true");
@@ -147,7 +194,7 @@ describe("ProjectSelector", () => {
 
     expect(
       screen
-        .getByRole("option", { name: "Don't work in a project" })
+        .getByRole("option", { name: "No project" })
         .getAttribute("aria-current"),
     ).toBe("true");
     fireEvent.change(
@@ -158,7 +205,7 @@ describe("ProjectSelector", () => {
     expect(screen.getByText("No projects found")).toBeTruthy();
     expect(screen.getByRole("option", { name: "New project" })).toBeTruthy();
     expect(
-      screen.getByRole("option", { name: "Don't work in a project" }),
+      screen.getByRole("option", { name: "No project" }),
     ).toBeTruthy();
 
     fireEvent.click(screen.getByRole("option", { name: "New project" }));
@@ -176,7 +223,7 @@ describe("ProjectSelector", () => {
     expect(screen.queryByRole("option", { selected: true })).toBeNull();
   });
 
-  it("keeps empty-list actions in the project group", () => {
+  it("shows only the actions for an empty list", () => {
     render(
       <ProjectSelector
         projects={[]}
@@ -189,12 +236,8 @@ describe("ProjectSelector", () => {
       />,
     );
 
-    const groups = document.querySelectorAll("[cmdk-group]");
-    expect(groups).toHaveLength(1);
-    expect(groups[0]?.querySelector("[cmdk-group-heading]")?.textContent).toBe(
-      "Project",
-    );
-    expect(groups[0]?.querySelectorAll("[cmdk-item]")).toHaveLength(2);
+    expect(document.querySelectorAll("[cmdk-group]")).toHaveLength(0);
+    expect(document.querySelectorAll("[cmdk-item]")).toHaveLength(2);
     expect(screen.queryByRole("option", { selected: true })).toBeNull();
   });
 

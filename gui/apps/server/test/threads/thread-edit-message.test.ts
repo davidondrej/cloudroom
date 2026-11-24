@@ -434,12 +434,16 @@ describe("editThreadMessage", () => {
       expect(
         listQueuedThreadCommands(harness, "thread.rewind.prepare", thread.id),
       ).toHaveLength(0);
-      await waitForQueuedCommand(
+      const start = await waitForQueuedCommand(
         harness,
         (queued) =>
           queued.command.type === "thread.start" &&
           queued.command.threadId === thread.id,
       );
+      // The fresh session still keeps the current session's Goal (#857).
+      expect(start.command).toMatchObject({
+        replacesProviderThreadId: "provider-original",
+      });
       expect(
         listEvents(harness.db, { threadId: thread.id }).map(
           (event) => event.sequence,
@@ -637,7 +641,9 @@ describe("editThreadMessage", () => {
 
   it("keeps history intact until the staged Codex rewind succeeds, then replaces the suffix", async () => {
     await withTestHarness(async (harness) => {
-      const { environment, thread } = seedEditableThread(harness);
+      const { environment, thread } = seedEditableThread(harness, {
+        firstProviderThreadId: "provider-before-edit",
+      });
       const payload = {
         operationId: "edit-op-success",
         expectedRequestSequence: 7,
@@ -659,7 +665,7 @@ describe("editThreadMessage", () => {
         (queued) => queued.command.type === "thread.rewind.prepare",
       );
       expect(rewind.command).toMatchObject({
-        sourceProviderThreadId: "provider-original",
+        sourceProviderThreadId: "provider-before-edit",
         retainThroughProviderCheckpoint: "checkpoint-first",
         threadId: thread.id,
       });
@@ -700,6 +706,7 @@ describe("editThreadMessage", () => {
       ).toEqual([
         expect.objectContaining({
           fork: { sourceProviderThreadId: "provider-staged-rewind" },
+          replacesProviderThreadId: "provider-original",
           input: [{ type: "text", text: "Replacement message", mentions: [] }],
         }),
       ]);
@@ -865,6 +872,21 @@ describe("editThreadMessage", () => {
           ok: true,
           operationId,
         });
+        // Only Codex looks up the replaced session, for its Goal (#857).
+        const starts = listQueuedThreadCommands(
+          harness,
+          "thread.start",
+          thread.id,
+        );
+        expect(starts).toEqual([
+          expect.objectContaining({
+            fork: { sourceProviderThreadId: `provider-staged-${providerId}` },
+          }),
+        ]);
+        expect(
+          starts[0]?.type === "thread.start" &&
+            starts[0].replacesProviderThreadId,
+        ).toBe(providerId === "codex" ? "provider-original" : undefined);
       });
     },
   );

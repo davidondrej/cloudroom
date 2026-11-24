@@ -11,6 +11,7 @@ import os
 import plistlib
 import socket
 import socketserver
+import subprocess
 import shutil
 import sys
 import tarfile
@@ -72,12 +73,12 @@ class PreviewTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         sock = Path(self.directory.name) / 'upstream.sock'
         self.upstream = UnixServer(str(sock), App)
-        self.tunnel = SimpleNamespace(socket_path=sock, generation='test-generation', closed=False,
+        self.tunnel = SimpleNamespace(socket_path=sock, generation='test-generation', closed=False, reuse=True,
             process=SimpleNamespace(poll=lambda: None), connections=set(), connections_lock=threading.Lock())
         self.server = preview.Server(('127.0.0.1', 0), preview.Proxy)
         self.server.authority = f'p3000-test.localhost:{self.server.server_port}'
         self.server.tunnel = self.tunnel
-        self.tunnel.server = self.server
+        self.tunnel.server, self.tunnel.servers = self.server, [self.server]
         for server in [self.upstream, self.server]:
             threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .01}, daemon=True).start()
             self.addCleanup(server.server_close)
@@ -96,6 +97,16 @@ class PreviewTests(unittest.TestCase):
         body = b'x' * 131072
         self.assertEqual(self.request('POST', '/', body=body)[2], body)
         self.assertIn(('Content-Security-Policy', "frame-ancestors 'self'"), self.request()[1])
+        # A browser connection keeps one tunnel for its next requests, not one per dev module (#2428), unless an older
+        # Core would count only the tunnel's first request as activity.
+        for reuse, tunnels in [(True, 1), (False, 3)]:
+            self.tunnel.reuse = reuse
+            with mock.patch.object(preview.Upstream, 'connect', autospec=True, side_effect=preview.Upstream.connect) as connect, \
+                    contextlib.closing(http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=5)) as connection:
+                for _ in range(3):
+                    connection.request('GET', '/', headers={'Host': self.server.authority})
+                    self.assertEqual(connection.getresponse().read(), b'ok')
+                self.assertEqual(connect.call_count, tunnels)
 
     def test_host_origin_and_websocket_requests_are_private(self):
         for headers in [
@@ -104,6 +115,12 @@ class PreviewTests(unittest.TestCase):
             {'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe'},
         ]:
             self.assertEqual(self.request(headers=headers)[0], 403)
+        # Only a plain loopback visit learns the preview's address (#1879).
+        loopback = f'127.0.0.1:{self.server.server_port}'
+        status, _, body = self.request(headers={'Host': loopback})
+        self.assertEqual(status, 403); self.assertIn(f'http://{self.server.authority}/', body.decode())
+        for headers in [{'Host': 'attacker.example'}, {'Host': loopback, 'Origin': 'https://attacker.example'}]:
+            self.assertNotIn(self.server.authority, self.request(headers=headers)[2].decode())
         self.assertEqual(self.request(headers={'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document'})[0], 200)
         self.assertEqual(self.request('POST', '/', headers={'Transfer-Encoding': 'chunked'})[0], 411)
 
@@ -113,6 +130,24 @@ class PreviewTests(unittest.TestCase):
             self.assertEqual(connection.getresponse().status, 405)
         self.server.RequestHandlerClass = App
         self.assertFalse(preview.Tunnel.healthy(self.tunnel))
+
+    def test_another_app_on_ipv6_loopback_moves_the_preview(self):
+        # Browsers try ::1 first for *.localhost, so an app there would get the preview's browser traffic (#837).
+        with socket.socket(socket.AF_INET6) as other:
+            other.bind(('::1', 0)); other.listen(1)
+            self.tunnel.process.stderr, self.tunnel.stderr = io.BytesIO(), bytearray()
+            preview.Tunnel.listen(self.tunnel, 3000, 'abcdef0123456789', other.getsockname()[1])
+            for server in self.tunnel.servers:
+                self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+            port = self.tunnel.server.server_port
+            self.assertNotEqual(port, other.getsockname()[1])
+            for host in ['127.0.0.1', '::1']:
+                with contextlib.closing(http.client.HTTPConnection(host, port, timeout=5)) as connection:
+                    connection.request('GET', '/', headers={'Host': self.tunnel.server.authority})
+                    self.assertEqual(connection.getresponse().read(), b'ok')
+            self.assertTrue(preview.Tunnel.healthy(self.tunnel))
+            self.tunnel.servers[1].RequestHandlerClass = App  # A broken IPv6 listener is not ready.
+            self.assertFalse(preview.Tunnel.healthy(self.tunnel))
 
     def test_slow_http_does_not_block_other_browser_requests(self):
         with concurrent.futures.ThreadPoolExecutor() as pool:
@@ -142,6 +177,25 @@ class ControlTests(unittest.TestCase):
         self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         url = f'http://127.0.0.1:{server.server_address[1]}/api/desktop/sandboxes'
         self.assertEqual(preview.control(url, {'action': 'awake'}, 'POST', {}), {'echo': {'action': 'awake'}})
+
+    def test_malformed_sandbox_entries_do_not_crash_the_helper(self):
+        account = str(uuid.uuid4())
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(preview.AWAKE, {
+                'at': 0.0, 'checked': 0.0, 'key': None, 'list': [], 'blocked': 0}), \
+                mock.patch.dict(preview.PROBLEMS, {}, clear=True):
+            connection = Path(folder) / 'connection.json'
+            connection.write_text(json.dumps({'account': {'id': account}, 'sandboxToken': 'sandbox-token', 'url': ''}))
+            connection.chmod(0o600)
+            config = {'connectionFile': str(connection), 'binding': ['', account], 'ownThreads': True}
+            malformed = [
+                {'origin': 1, 'token': 'token', 'thread': 'thr_test'},
+                {'origin': 'http://127.0.0.1:9', 'token': 1, 'thread': 'thr_test'},
+                {'origin': 'http://127.0.0.1:9', 'token': 'token', 'thread': []},
+            ]
+            for entry in malformed:
+                with self.subTest(entry=entry), mock.patch.object(preview, 'control', return_value={'sandboxes': [entry]}):
+                    preview.AWAKE.update(at=0.0, key=None)
+                    self.assertEqual(preview.cores(config), [])
 
 
 class UpstreamTimeoutTests(unittest.TestCase):
@@ -173,6 +227,110 @@ class UpstreamTimeoutTests(unittest.TestCase):
             self.assertEqual(len(failures), 1)
             for client in [*waiting, listener]:
                 client.close()
+
+    @unittest.skipIf(sys.platform == 'win32', 'Unix sockets')
+    def test_relay_keeps_accepting_after_a_failed_accept(self):
+        # #902: one failed accept() ended the relay, so the preview stayed unavailable until it was reopened.
+        for error in (ConnectionAbortedError(53, 'client left first'), OSError(24, 'Too many open files')):
+            with self.subTest(error=error), tempfile.TemporaryDirectory(prefix='cr-preview-', dir='/tmp') as folder:
+                path, real, served = Path(folder) / 'relay.sock', socket.socket.accept, threading.Event()
+                fail = iter([error])
+                def accept(sock):
+                    if failure := next(fail, None):
+                        raise failure
+                    return real(sock)
+                with mock.patch.object(socket.socket, 'accept', accept), \
+                        mock.patch.object(preview.Relay, 'pipe', lambda self, client: (client.close(), served.set())):
+                    relay = preview.Relay(None, 3000, 'device', path)
+                    with socket.socket(socket.AF_UNIX) as client:
+                        client.connect(str(path))
+                        self.assertTrue(served.wait(3), 'the relay stopped accepting')
+                    relay.terminate()
+
+    def test_tunnel_refused_before_core_is_not_blamed_on_the_app(self):
+        # #1798: the relay in front of a user's VPS answers the upgrade with 400, then a plain 200, so the report must
+        # say "Tunnel unavailable", not "Cloud HTTP server unavailable". Core's own 409 still means the app is down.
+        # #2016: no answer, or a 101 with no app answer back yet (a stalled sandbox), is the tunnel's too.
+        rows = [({'websocket': 400, 'cloudroom-tunnel': 200}, True, False),
+                ({'websocket': 409}, False, True),
+                ({'websocket': None}, True, False),
+                ({'websocket': 101}, True, False)]
+        for answers, refused, down in rows:
+            with self.subTest(answers=answers), socket.create_server(('127.0.0.1', 0)) as listener, \
+                    tempfile.TemporaryDirectory(prefix='cr-preview-') as folder:
+                def answer():
+                    for _ in answers:
+                        client, _ = listener.accept()
+                        with client:
+                            head = client.recv(4096).decode()
+                            code = answers[head.split('Upgrade: ', 1)[1].split('\r\n', 1)[0]]
+                            if code:
+                                client.sendall(f'HTTP/1.1 {code} X\r\nContent-Length: 0\r\n\r\n'.encode())
+                threading.Thread(target=answer, daemon=True).start()
+                core = SimpleNamespace(url=f'http://127.0.0.1:{listener.getsockname()[1]}', headers={})
+                relay = preview.Relay(core, 3000, 'device', Path(folder) / 'relay.sock')
+                try:
+                    if 101 in answers.values():
+                        relay.open()[0].close()
+                    else:
+                        self.assertRaises(OSError, relay.open)
+                    self.assertEqual((relay.refused, relay.down), (refused, down))
+                finally:
+                    relay.terminate()
+
+
+class WindowsPathTests(unittest.TestCase):
+    """#958: Windows jobs run in Git Bash, so paths cross between its /c/... form and Python's C:/... form."""
+    def test_paths_convert_both_ways_only_on_windows(self):
+        with mock.patch.object(preview, 'WINDOWS', True):
+            self.assertEqual(preview.native('/c/Users/Me Q/x'), 'C:/Users/Me Q/x')  # pathlib would read C:\c\Users.
+            self.assertEqual(preview.native('/d'), 'D:/')
+            self.assertEqual(preview.native(r'C:\Users\me\x'), 'C:/Users/me/x')
+            for kept in ('~/Desktop', 'Desktop/x', '/tmp/x', '/é/x', 'C:/Users/me', '~'):
+                self.assertEqual(preview.native(kept), kept)
+            # Git Bash's tar reads a C: in an archive's path as a remote host, so shell commands get /c/...
+            self.assertEqual(preview.posix(r'C:\Users\Me Q\x'), '/c/Users/Me Q/x')
+            self.assertEqual(preview.posix(Path('D:/x')), '/d/x')
+            self.assertEqual(preview.posix('/c/x'), '/c/x')
+            self.assertEqual(preview.posix('C:rel'), 'C:rel')
+            self.assertEqual(preview.posix(preview.native('/c/a b/c')), '/c/a b/c')
+        with mock.patch.object(preview, 'WINDOWS', False):
+            for path in ('/c/x', r'a\b', 'C:/x'):
+                self.assertEqual((preview.native(path), preview.posix(path)), (path, path))
+
+    def test_push_refuses_names_windows_cannot_store(self):
+        for bad in ('', 'a:b', r'a\b', 'x?', 'a*b', '"q"', 'NUL', 'con.txt', 'CONIN$', 'CONOUT$.txt', 'COM1', 'COM¹', 'lpt9.log', 'LPT³', 'name.', 'name ', 'tab\there'):
+            self.assertFalse(preview.windows_name(bad), bad)
+        for good in ('notes.txt', 'ü q.txt', 'CONSOLE', 'nul2', '.env', 'COM10'):
+            self.assertTrue(preview.windows_name(good), good)
+        with mock.patch.object(preview, 'WINDOWS', True):
+            for bad_to in ('C:', 'C:rel'):
+                with self.assertRaises(ValueError):
+                    preview.copy_command({'name': 'a.txt', 'to': bad_to})
+
+    def test_windows_job_env_strips_server_vars(self):
+        env = preview.windows_job_env('echo hi', {
+            'PATH': r'C:\Windows\System32',
+            'USERPROFILE': r'C:\Users\me',
+            'NODE_ENV': 'production',
+            'ELECTRON_RUN_AS_NODE': '1',
+            'ROOM_CLI': r'C:\app\room-cli',
+            'ROOM_DATA_DIR': r'C:\data',
+            'BB_SERVER_PORT': '4000',
+            'BB_SERVER_HEADERS': '{"authorization":"secret"}',
+            'CLOUDROOM_SERVER_URL': 'http://127.0.0.1:4000',
+            'CLOUDROOM_ROOM_CLI': r'C:\app',
+            'CLOUDROOM_PREVIEW_START': 'abc',
+        })
+        self.assertEqual(env['PATH'], r'C:\Windows\System32')
+        self.assertEqual(env['USERPROFILE'], r'C:\Users\me')
+        self.assertEqual(env['MSYSTEM'], 'MINGW64')
+        self.assertEqual(env['CHERE_INVOKING'], '1')
+        self.assertEqual(env['CLOUDROOM_COMMAND'], 'echo hi')
+        for stripped in ('NODE_ENV', 'ELECTRON_RUN_AS_NODE', 'ROOM_CLI', 'ROOM_DATA_DIR',
+                         'BB_SERVER_PORT', 'BB_SERVER_HEADERS', 'CLOUDROOM_SERVER_URL',
+                         'CLOUDROOM_ROOM_CLI', 'CLOUDROOM_PREVIEW_START'):
+            self.assertNotIn(stripped, env)
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows helper lifecycle')
@@ -227,6 +385,27 @@ class MacJobTests(unittest.TestCase):
             self.assertFalse((folder / 'ran').exists())
             self.assertEqual(posted, ['running'])
 
+    def test_nested_room_cli_reaches_the_app_that_owns_the_helper(self):
+        # #1243, #1290: a stale ROOM_SERVER_URL in the helper's or the login shell's environment, or none (the CLI's default
+        # port, maybe another app's), sent the Mac's room-cli to a dead port or to another app's empty list.
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root)
+            connection, folder, results = root / 'cloudroom.json', root / 'cloudroom-preview', []
+            connection.write_text('{}'); connection.chmod(0o600)
+            for profile in ('.profile', '.zprofile'):
+                (root / profile).write_text('export ROOM_SERVER_URL=http://127.0.0.1:2\n')
+            with mock.patch.dict(os.environ, {'HOME': str(root), 'ROOM_SERVER_URL': 'http://127.0.0.1:1',
+                                              'CLOUDROOM_SERVER_URL': 'http://127.0.0.1:41000'}), \
+                    mock.patch.object(preview, 'review', lambda *_: None):
+                preview.configure(folder, connection, False, None, 'full')
+                core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
+                                       config=preview.private_json(folder / 'config.json'),
+                                       fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
+                jobs = preview.MacJobs(folder)
+                jobs.wanted = {'vm'}
+                jobs.execute(core, 'mac', {'id': 'job', 'command': 'printf %s "$ROOM_SERVER_URL"', 'write': True})
+            self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode(), 'http://127.0.0.1:41000')
+
     def test_sandbox_with_a_key_list_gets_no_mac_jobs(self):
         # Security fix: a Cloud loop's run with only its picked keys (ADR 0342) could read any file on the Mac.
         with tempfile.TemporaryDirectory() as folder:
@@ -245,13 +424,15 @@ class MacJobTests(unittest.TestCase):
                                        fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None,
                                        config={'connectionFile': str(folder / 'cloudroom.json')},
                                        connection={'account': {'id': '11111111-1111-4111-8111-111111111111'}, 'sandboxToken': 'a' * 64})
-            jobs = preview.MacJobs(folder)
+            jobs, downloads = preview.MacJobs(folder), []
+            jobs.wanted = {'run', 'next wake', 'vm'}
             def run(name, on):
-                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}'})
+                jobs.execute(on, 'mac', {'id': name, 'command': f'touch {folder}/{name}', 'stdin_bytes': 5})
                 return results[-1]['code'], bytes.fromhex(results[-1]['stderr']).decode()
             run_sandbox, next_wake, vm = core('run'), core('next wake'), core('vm', sandbox=False)
             unconfirmed = "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again."
-            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None):
+            with mock.patch.object(preview, 'control', control), mock.patch.object(preview, 'review', lambda *_: None), \
+                    mock.patch.object(preview, 'mac_stdin', lambda core, device, job: downloads.append(job['id']) or ''):
                 # Failed, from an older website, without a sandbox row, or garbled: each refuses and asks again next time.
                 answers[:] = [preview.ControlError(503), {'secrets': None}, {'secrets': None, 'found': False}, {'secrets': '.env', 'found': True}]
                 for name in ('failed', 'old', 'missing', 'garbled'):
@@ -274,6 +455,69 @@ class MacJobTests(unittest.TestCase):
             self.assertEqual([body for _, body in asked], [{'action': 'secrets', 'thread': 'thr_run'}] * 6)
             self.assertTrue(all(url == 'https://www.cloudroom.dev/api/desktop/sandboxes' for url, _ in asked))
             self.assertEqual(sorted(path.name for path in folder.iterdir() if path.suffix != '.json'), ['allowed', 'vm'])
+            # A sandbox refused for its key list never makes the Mac download a job's input.
+            self.assertEqual(downloads, ['allowed', 'vm'])
+
+    def test_a_fake_core_gets_no_more_kept_than_core_sends(self):
+        # Security fix: a sandbox's agent has root, so it can answer the helper in place of Core, with jobs, input, and
+        # stops of any size. The helper keeps no more than a real Core sends.
+        with tempfile.TemporaryDirectory() as folder:
+            folder = Path(folder)
+            preview.save(folder / 'config.json', {'macAccess': 'off'})
+            jobs, opened, results, started, held = preview.MacJobs(folder), [], [], [], threading.Event()
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.append(body))
+            # The longest job a real Core sends (up to 0.1.75, with its input inside), a short one, two stops, and a line
+            # longer than any job.
+            longest = {'id': 'longest', 'command': '\x01' * 65536, 'cwd': '\x01' * 4096, 'stdin': '00' * preview.MAC_LIMIT}
+            events = [('job', longest), ('job', {'id': 'short'}), ('cancel', {'id': 'other'}), ('cancel', {'id': 'short'})]
+            stream = ''.join(f'event: {name}\ndata: {json.dumps(data)}\n\n' for name, data in events)
+            stream = (stream + 'data: ' + 'x' * preview.MAC_LINE + '\n').encode()
+            def open(request, timeout):
+                opened.append(request.full_url)
+                if len(opened) == 1:
+                    return io.BytesIO(stream)
+                jobs.wanted = set()
+                raise OSError('Stream closed')
+            def execute(core, device, job):
+                started.append(job['id'])
+                held.wait(10)
+            with mock.patch.dict(preview.NET, opener=SimpleNamespace(open=open)):
+                # Input over Core's own 16 MiB, or a size no Core sends, is refused without a download. So is any input
+                # once Mac access is Off.
+                for size in (preview.MAC_LIMIT + 1, -2, '5', 1.5, True):
+                    self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin_bytes': size}))
+                self.assertIsNone(preview.mac_stdin(core, 'mac', {'id': 'x', 'stdin': '00' * (preview.MAC_LIMIT + 1)}))
+                jobs.execute(core, 'mac', {'id': 'off', 'command': 'true', 'stdin_bytes': 5})
+                self.assertEqual((opened, bytes.fromhex(results[-1]['stderr']).decode()), ([], 'Mac access is off.'))
+                with mock.patch.object(jobs, 'execute', execute):
+                    jobs.wanted = {'core'}
+                    follow = threading.Thread(target=jobs.follow, args=(core, 'mac'))
+                    follow.start()
+                    while follow.is_alive():
+                        with preview.NUDGE:  # Skips the wait before reconnecting.
+                            preview.NUDGE.notify_all()
+                        follow.join(.05)
+                    for _ in range(200):
+                        if len(started) == 2:
+                            break
+                        time.sleep(.01)
+                    # The longest real job is taken, a stop is kept only for a job taken, and the long line ends the stream.
+                    self.assertEqual((sorted(started), jobs.taken, jobs.cancelled, len(opened)),
+                                     (['longest', 'short'], {'longest': 1, 'short': 1}, {'short'}, 2))
+                    held.set()
+                    for _ in range(200):
+                        if not jobs.taken:
+                            break
+                        time.sleep(.01)
+                    self.assertEqual((jobs.taken, jobs.cancelled), ({}, set()))
+            # The review list keeps a fixed-size key, never the command. Its report goes to a closed local port.
+            reviewed = SimpleNamespace(url='http://core', config={}, thread=None,
+                                       connection={'account': {'id': 'a'}, 'sandboxToken': 't', 'websiteUrl': 'http://127.0.0.1:9'})
+            with mock.patch.dict(preview.REVIEWS, sent={}), mock.patch.object(preview, 'control', lambda *_: None):
+                preview.review(reviewed, {'command': 'x' * 65536}, 'full', False)
+                self.assertEqual([len(key) for key in preview.REVIEWS['sent']], [32])
 
     @unittest.skipIf(os.name == 'nt', 'Read-only needs the macOS sandbox')
     def test_read_only_hides_every_cloudroom_folder_with_keys(self):
@@ -290,7 +534,7 @@ class MacJobTests(unittest.TestCase):
                 plistlib.dumps({'EnvironmentVariables': {'BB_DATA_DIR': str(home / 'old-machine')}}))
             (agents / 'app.getbb.host-daemon.broken.plist').write_text('<?xml version="1.0"?><plist><dict>')
             with mock.patch.dict(os.environ, {'HOME': str(home)}):
-                args = preview.read_only(data)
+                args = preview.read_only(data, 'helper.read-only', 'helper.read-only.job')
         params = dict(args[n + 1].split('=', 1) for n, arg in enumerate(args) if arg == '-D')
         group = lambda name: {Path(path) for key, path in params.items() if key.startswith(name)}
         self.assertEqual(group('FOLDER_'), {data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev'})
@@ -303,6 +547,110 @@ class MacJobTests(unittest.TestCase):
                                                     '(deny file-read* file-write* (subpath (param "MACHINE_0"))')]
         self.assertEqual(order, sorted(order))
         self.assertTrue(profile.endswith(f' {preview.READ_ONLY_OLD_KEYS})'))
+        # The marks that let the helper end everything the command starts (end).
+        self.assertIn('(deny mach-lookup (global-name "helper.read-only") (global-name "helper.read-only.job"))', profile)
+
+    @unittest.skipIf(os.name == 'nt', 'Mac access runs on macOS and Linux')
+    def test_read_only_command_leaves_nothing_running(self):
+        # Security fix: a process a Read-only command started kept running after the command, its thread and sandbox, and
+        # Mac access Off. Now nothing a read-only command starts outlives it, its stop, its sandbox's stream, or its helper,
+        # even after setsid and a double fork, or as a chain of processes that each fork and end at once. Full commands keep
+        # theirs (dev servers), and other sandboxes and other helpers' commands run on. Linux has no macOS sandbox, so
+        # there the marks travel in an environment variable.
+        mac, started = sys.platform == 'darwin', []
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, tempfile.TemporaryDirectory(dir='/tmp') as beats, contextlib.ExitStack() as stack:
+            folder, beats = Path(os.path.realpath(folder)), Path(os.path.realpath(beats))
+            if not mac:
+                def covered(pid, names):
+                    with contextlib.suppress(OSError):
+                        env = dict(var.split(b'=', 1) for var in Path(f'/proc/{pid}/environ').read_bytes().split(b'\0') if b'=' in var)
+                        marks = env.get(b'CLOUDROOM_TEST_MARKS', b'').split()
+                        return names[0] in marks and names[1] not in marks
+                    return False
+                listing = lambda: [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
+                stack.enter_context(mock.patch.object(preview, 'sandbox_checks', lambda: (listing, covered)))
+                stack.enter_context(mock.patch.object(preview, 'read_only', lambda data, *marks: ['/usr/bin/env', 'CLOUDROOM_TEST_MARKS=' + ' '.join(marks)]))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'refusal', lambda *_: None))
+                stack.enter_context(mock.patch.object(preview.MacJobs, 'containable', lambda *_: True))
+            stack.enter_context(mock.patch.object(preview, 'review', lambda *_: None))
+            results, jobs = {}, preview.MacJobs(folder)
+            jobs.wanted = {'core'}
+            core = SimpleNamespace(url='http://core', headers={}, key='core', sandbox=False, connection={},
+                                   config={'connectionFile': str(folder / 'cloudroom.json')},
+                                   fetch=lambda url, body, *_: results.__setitem__(url.rsplit('/', 1)[1], body) if body['state'] == 'done' else None)
+            # Each process rewrites its own file every 0.1 s: one in the command's process group, and one that left it with
+            # setsid after a fork, then forked again. The chain writes every 50th process and stops by itself after 30 s.
+            loop = 'for ($n = 0;; $n++) { open(F, ">", $ARGV[0]); print F "$$ $n"; close F; select(undef, undef, undef, .1) }'
+            chain = 'for ($n = 0;; $n++) { exit if fork or time - $^T > 30; next if $n % 50; open(F, ">", $ARGV[0]); print F "0 $n"; close F }'
+            def leaves(name, *also):
+                files = [f'{beats}/{name}-{kind}' for kind in ('group', 'left', *also)]
+                return (f"perl -e '{loop}' {files[0]} & perl -MPOSIX -e 'if (fork) {{ exit }} POSIX::setsid(); if (fork) {{ exit }} {loop}' {files[1]}; "
+                        + ''.join(f"perl -e '{chain}' {file} & " for file in files[2:])
+                        + 'while ' + ' || '.join(f'[ ! -s {file} ]' for file in files) + '; do sleep .05; done')
+            def running(*names):
+                before = [(beats / name).read_text() for name in names]
+                time.sleep(.5)
+                return [(beats / name).read_text() != text for name, text in zip(names, before)]
+            def run(command, level='read-only'):
+                preview.save(folder / 'config.json', {'macAccess': level})
+                job = uuid.uuid4().hex
+                jobs.execute(core, 'mac', {'id': job, 'command': command})
+                return results[job]['code']
+            def start(name):  # A read-only command that keeps running.
+                preview.save(folder / 'config.json', {'macAccess': 'read-only'})
+                job = uuid.uuid4().hex
+                thread = threading.Thread(target=jobs.execute, args=(core, 'mac', {'id': job, 'command': leaves(name) + '; sleep 30'}))
+                thread.start()
+                for _ in range(200):
+                    if (beats / f'{name}-left').exists():
+                        break
+                    time.sleep(.05)
+                return job, thread
+            def ended(job, thread):
+                thread.join(10)
+                return not thread.is_alive() and results[job]['code']
+            try:
+                # Others run on: what an earlier run of this helper left (until the first check), another helper's read-only
+                # command (a dev build), and on a Mac another sandbox.
+                other = f"perl -e '{loop}' {beats}/"
+                for marks, name in (((jobs.mark, jobs.mark + '.0', jobs.mark + '.0.job'), 'old'), (('other.read-only', 'other.read-only.job'), 'other')):
+                    started.append(subprocess.Popen([*preview.read_only(folder, *marks), 'sh', '-c', other + name]))
+                if mac:
+                    started.append(subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny mach-lookup)', 'sh', '-c', other + 'denies-all']))
+                # Full keeps what it leaves running; read-only ends it all with the command.
+                self.assertEqual(run(leaves('full'), 'full'), 0)
+                self.assertEqual(running('full-group', 'full-left'), [True, True])
+                self.assertEqual(run(leaves('read', 'chain')), 0)
+                self.assertEqual(running('read-group', 'read-left', 'read-chain'), [False] * 3)
+                # A running read-only command survives another one's end and the check that ends what earlier runs left.
+                first = start('first')
+                self.assertEqual(run('true'), 0)
+                jobs.end_unwanted()
+                self.assertEqual(running('first-group', 'first-left', 'old'), [True, True, False])
+                # The agent's stop, its sandbox's stream ending (Off here), and the helper's stop each end it all.
+                jobs.cancel(first[0])
+                self.assertEqual(ended(*first), -15)
+                second = start('second')
+                preview.save(folder / 'config.json', {'macAccess': 'off'})
+                jobs.wanted = set()
+                jobs.end_unwanted()
+                self.assertEqual(ended(*second), -9)
+                jobs.wanted = {'core'}
+                third = start('third')
+                jobs.close()
+                self.assertEqual(ended(*third), -9)
+                self.assertEqual(running(*(f'{name}-{kind}' for name in ('first', 'second', 'third') for kind in ('group', 'left'))), [False] * 6)
+                # After the stop nothing new starts, and the others still run.
+                self.assertEqual(run('true', 'full'), 126)
+                self.assertEqual(running('other', *(['denies-all'] if mac else [])), [True] * (1 + mac))
+            finally:
+                for process in started:
+                    process.kill(); process.wait()
+                for beat in beats.iterdir():
+                    with contextlib.suppress(OSError, ValueError, IndexError):  # A beat file caught mid-write is empty.
+                        pid = int(beat.read_text().split()[0])
+                        if pid > 0:  # Chains write 0 and stop by themselves.
+                            os.kill(pid, 9)
 
     def test_ask_first_popup_shows_agent_text_as_text(self):
         # Security sweep: line breaks in a folder name could push the command out of view in the Ask first popup.
@@ -312,18 +660,84 @@ class MacJobTests(unittest.TestCase):
                 shown.append(args[3])
             def communicate(self):
                 return 'Allow\n', None
-        job = {'id': 'job', 'command': 'bash -s\necho two\N{RIGHT-TO-LEFT OVERRIDE}', 'cwd': '/tmp/a\nb' + 'c' * 300,
+        job = {'id': 'job', 'command': 'bash -s\necho two\N{RIGHT-TO-LEFT OVERRIDE}', 'cwd': '/opt/a\nb' + 'c' * 300,
                'write': True, 'stdin': ''.join(f'echo {n}\r\n' for n in range(25)).encode().hex()}
         with mock.patch.object(preview.subprocess, 'Popen', Popup):
             self.assertTrue(preview.MacJobs(Path('/unused')).approve(SimpleNamespace(key='core'), job))
         lines = shown[0].split('\n')
+        self.assertEqual(lines[2:4], ['Warning: 109 more characters of the folder are not shown.', ''])
+        del lines[2:4]
         self.assertEqual(lines[2:12], ['Warning: 44 more characters of its input are not shown, and will also run.', '',
                                        'Command:', '    bash -s', '    echo two\\u202e', '',
-                                       'Folder: /tmp/a\\nb' + 'c' * 191 + '…', '', 'Input (25 lines):', '    echo 0\\r'])
+                                       'Folder: /opt/a\\nb' + 'c' * 191 + '…', '', 'Input (25 lines):', '    echo 0\\r'])
         self.assertEqual(lines[12:], [f'    echo {n}\\r' for n in range(1, 20)])
         self.assertTrue(all(c.isprintable() or c == '\n' for c in shown[0]))
         # Escapes count against the limit, and the hidden count stays in the agent's own characters.
         self.assertEqual(preview.visible('\0' * 300, 600, 10), ('\\x00' * 150, 150))
+
+    @unittest.skipIf(sys.platform == 'win32', 'Mac access is macOS and Linux only')
+    def test_ask_first_popup_shows_the_folder_the_command_runs_in(self):
+        # #2470: `.` and `..` in the agent's folder text could show a project folder while the command ran in a temp folder.
+        shown, home = [], Path(os.path.realpath(tempfile.mkdtemp()))
+        self.addCleanup(shutil.rmtree, home)
+        (home / 'code').mkdir(); (home / 'temp/b').mkdir(parents=True); (home / 'file').touch()
+        (home / 'temp-link').symlink_to(home / 'temp')  # Another spelling of the temp folder, like other letter case on macOS.
+        popup = mock.Mock(side_effect=lambda args, **_: shown.append(args[3]) or mock.Mock(communicate=lambda: ('Allow', None)))
+        jobs, job = preview.MacJobs(Path('/unused')), {'id': 'job', 'command': 'make', 'write': True,
+                                                     'cwd': '~/code/' + './' * 100 + '../' * 30 + str(home).lstrip('/') + '/temp/b'}
+        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'TEMP_FOLDERS', (str(home / 'temp-link'),)), \
+                mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.subprocess, 'Popen', popup), \
+                mock.patch.object(jobs, 'closed', return_value=('ask', None)), mock.patch.object(preview, 'mac_level', return_value='ask'):
+            self.assertIsNone(jobs.refusal(SimpleNamespace(key='core'), job))
+            # `..` never skips a missing part or a file, which the OS would refuse to start in.
+            for bad in ('~/missing/../code', '~/file/../code'):
+                self.assertRegex(jobs.refusal(SimpleNamespace(key='core'), {'id': 'bad', 'command': 'make', 'write': True, 'cwd': bad}),
+                                 'No such file|Not a directory')
+            # Full never runs the folder check, even for a job that names an approved folder itself.
+            full = {'id': 'full', 'command': 'make', 'write': True, 'approved_folder': [0, 0]}
+            with mock.patch.object(jobs, 'closed', return_value=('full', None)):
+                self.assertIsNone(jobs.refusal(SimpleNamespace(key='core'), full))
+            self.assertNotIn('approved_folder', full)
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(job['cwd'], str(home / 'temp/b'))  # The command runs in this folder.
+        self.assertIn('Warning: the command uses files in a temp folder.', shown[0])
+        self.assertTrue(shown[0].endswith('Folder: ~/temp/b'))
+        # macOS: the folder's path as stored on disk (F_GETPATH) wins over realpath, which keeps a typed ~/CODE for ~/code.
+        # Another folder's path refuses, and a failed lookup falls back to realpath.
+        cases = ((home / 'temp-link/b', str(home / 'temp-link/b')), (home / 'code', PermissionError), (OSError(), str(home / 'temp/b')))
+        for found, expected in cases:
+            def lookup(*_, found=found):
+                if isinstance(found, OSError):
+                    raise found
+                return str(found).encode() + bytes(9)
+            with mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.fcntl, 'F_GETPATH', 50, create=True), \
+                    mock.patch.object(preview.fcntl, 'fcntl', lookup):
+                if expected is PermissionError:
+                    self.assertRaises(PermissionError, preview.real_folder, str(home / 'temp/b'))
+                else:
+                    self.assertEqual(preview.real_folder(str(home / 'temp/b'))[0], expected)
+        # Once allowed, it runs there, even if a login file changes folder.
+        connection, folder, results = home / 'cloudroom.json', home / 'cloudroom-preview', []
+        connection.write_text('{}'); connection.chmod(0o600)
+        for profile in ('.profile', '.zprofile', '.bash_profile'):
+            (home / profile).write_text('cd /\n')
+        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'review', lambda *_: None), \
+                mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.MacJobs, 'ask', lambda *_: True):
+            preview.configure(folder, connection, False, None, 'ask')
+            core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
+                                   config=preview.private_json(folder / 'config.json'),
+                                   fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
+            jobs, run = preview.MacJobs(folder), {'id': 'run', 'command': 'pwd', 'cwd': '~/code/../temp/b', 'write': True}
+            # Allow clicked after the sandbox slept: its write command no longer starts, as nobody would read the result
+            # (feedback 0024).
+            jobs.execute(core, 'mac', dict(run))
+            self.assertIn('stopped taking commands', bytes.fromhex(results[-1]['stderr']).decode())
+            jobs.wanted = {'vm'}
+            jobs.execute(core, 'mac', run)
+        self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode().strip(), str(home / 'temp/b'))
+        # A folder swapped after Allow no longer matches what was approved, so it does not start.
+        (home / 'temp/b').rename(home / 'temp/old'); (home / 'temp/b').mkdir()
+        self.assertNotEqual(preview.real_folder(job['cwd']), (job['cwd'], job['approved_folder']))
 
     @unittest.skipIf(sys.platform == 'win32', 'Mac access is macOS and Linux only')
     def test_push_places_only_its_named_item(self):
@@ -343,6 +757,7 @@ class MacJobTests(unittest.TestCase):
                     info.size = len(data or b'')
                     tar.addfile(info, io.BytesIO(data or b''))
             return buffer.getvalue()
+        self.addCleanup(os.umask, os.umask(0o022))  # The Mac's own modes for new files (#1066).
         with tempfile.TemporaryDirectory() as folder:
             folder = Path(os.path.realpath(folder))
             home, outside = folder / 'home', folder / 'outside'
@@ -355,6 +770,7 @@ class MacJobTests(unittest.TestCase):
             (home / '.zshrc').write_text('mine')
             preview.save(folder / 'config.json', {'macAccess': 'full'})
             results, jobs = [], preview.MacJobs(folder)
+            jobs.wanted = {'vm'}
             core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
                                    config={'connectionFile': str(folder / 'cloudroom.json')},
                                    fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
@@ -375,32 +791,51 @@ class MacJobTests(unittest.TestCase):
                 self.assertFalse((folder / 'ran').exists() or (home / 'Library/LaunchAgents/x.plist').exists() or (home / 'notes.txt').exists())
                 # Into the home folder, again (a file replaces), under a new name, and that name again.
                 self.assertEqual(push(archive(('notes.txt', b'one')), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
-                self.assertEqual(push(archive(('notes.txt', b'two')), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
-                self.assertEqual(push(archive(('notes.txt', b'one')), 'notes.txt', '~/new.txt')[:2], (0, f'{home}/new.txt'))
+                self.assertEqual(push(archive(('notes.txt', b'two', 0o700)), 'notes.txt', '~')[:2], (0, f'{home}/notes.txt'))
+                self.assertEqual(push(archive(('notes.txt', b'one', 0o700)), 'notes.txt', '~/new.txt')[:2], (0, f'{home}/new.txt'))
                 self.assertIn('already exists', push(archive(('notes.txt', b'two')), 'notes.txt', '~/new.txt')[2])
                 self.assertEqual([(home / name).read_text() for name in ('notes.txt', 'new.txt')], ['two', 'one'])
+                # Built private and executable in the sandbox, over a 644 file and new.
+                self.assertEqual([(home / name).stat().st_mode & 0o777 for name in ('notes.txt', 'new.txt')], [0o755, 0o755])
                 # A relative place starts at home, not the job's folder; a link in the place is resolved; and a link where the
                 # item lands is replaced, never followed.
                 self.assertEqual(push(archive(('r.txt', b'r')), 'r.txt', 'rel/')[:2], (0, f'{home}/rel/r.txt'))
                 self.assertEqual(push(archive(('r.txt', b'r')), 'r.txt', '~/link')[:2], (0, f'{home}/real/r.txt'))
+                (outside / 'victim').chmod(0o600)
                 self.assertEqual(push(archive(('v.txt', b'new')), 'v.txt', '~')[0], 0)
                 self.assertEqual(((outside / 'victim').read_text(), (home / 'v.txt').is_symlink()), ('victim', False))
+                self.assertEqual((home / 'v.txt').stat().st_mode & 0o777, 0o600)  # No more readable than the linked file.
                 # A folder merges, as cp does, also from a copy staged in pieces, whose staging is removed.
                 (home / 'proj').mkdir()
                 for name, text in (('keep', 'keep'), ('a', 'old')):
                     (home / 'proj' / name).write_text(text)
+                (home / 'proj/a').chmod(0o600)
+                (home / 'proj').chmod(0o1744)
                 staged = Path('/tmp/cloudroom.' + uuid.uuid4().hex)
                 staged.mkdir()
-                data = archive(('proj', None), ('proj/a', b'new'), ('proj/b', b'b'))
+                data = archive(('proj', None), ('proj/a', b'new'), ('proj/b', b'b', 0o600))
                 (staged / '00000').write_bytes(data[:50])
                 (staged / '00001').write_bytes(data[50:])
                 self.assertEqual(push(b'', 'proj', '~/', str(staged))[:2], (0, f'{home}/proj'))
                 self.assertEqual({path.name: path.read_text() for path in (home / 'proj').iterdir()}, {'a': 'new', 'b': 'b', 'keep': 'keep'})
+                # A replaced file keeps its private modes; a new one gets the Mac's, not the sandbox's; the folder keeps all.
+                self.assertEqual([(home / 'proj' / name).stat().st_mode & 0o7777 for name in ('a', 'b', '')], [0o600, 0o644, 0o1744])
                 self.assertFalse(staged.exists())
-                # A merge that can't pack every file fails and changes nothing (root can read any file).
-                if os.geteuid():
-                    self.assertNotEqual(push(archive(('proj', None), ('proj/a', b'newer'), ('proj/b', b'x', 0)), 'proj', '~')[0], 0)
-                    self.assertEqual((home / 'proj/a').read_text(), 'new')
+                # Also when one hard-linked file replaces both, so the private one can't turn public through the link.
+                self.assertEqual(push(archive(('proj', None), ('proj/b', b'new'), ('proj/a', b'', (tarfile.LNKTYPE, 'proj/b'))), 'proj', '~')[0], 0)
+                self.assertEqual([(home / 'proj' / name).stat().st_mode & 0o777 for name in ('a', 'b')], [0o600, 0o644])
+                # A file with an ACL is never replaced: the new file would drop it, and on Linux would let its group read it.
+                (home / 'proj/c').write_text('c')
+                acl = ['/bin/chmod', '+a', 'everyone deny delete'] if sys.platform == 'darwin' else ['setfacl', '-m', f'u:{os.getuid()}:r']
+                if shutil.which(acl[0]) and not subprocess.run([*acl, home / 'proj/c'], capture_output=True).returncode:
+                    self.assertIn('/proj/c has an access control list', push(archive(('proj', None), ('proj/a', b'newer'), ('proj/c', b'x')), 'proj', '~')[2])
+                    self.assertEqual([(home / 'proj' / name).read_text() for name in ('a', 'c')], ['new', 'c'])
+                # A merge that can't set every mode fails and changes nothing.
+                (folder / 'bin').mkdir()
+                (folder / 'bin/chmod').write_text('#!/bin/sh\n[ "$1" = -R ] || exec /bin/chmod "$@"; exit 1\n')
+                (folder / 'bin/chmod').chmod(0o755)
+                self.assertNotEqual(push(archive(('proj', None), ('proj/a', b'newer'), ('proj/b', b'x')), 'proj', '~')[0], 0)
+                self.assertEqual((home / 'proj/a').read_text(), 'new')
                 # A name or place the Mac can't use is refused.
                 for name, to in (('a/b', '~'), ('..', '~'), ('x', '~/missing/..'), ('x', '')):
                     self.assertEqual(push(b'', name, to)[0], 126)

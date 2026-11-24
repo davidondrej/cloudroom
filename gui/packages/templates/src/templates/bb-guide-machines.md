@@ -21,6 +21,12 @@ manage the API keys, repos, and setup script every new cloud sandbox gets; value
 come from stdin. `room-cli cloud auto-delete [days|never]` shows or sets how long
 unused cloud threads are kept.
 Existing cloud threads keep their account, core URL, and project bindings.
+Every computer signed in to the same Cloudroom account shows its Cloud threads: they
+follow the website's list, open in a project with the same ID, GitHub repo, or name,
+and stream only while open, while a turn sent from that computer runs, or on the
+computer that last prompted them, which also runs their agent's moves, forks and
+child requests. Renames, archives and deletes reach every computer. A Local thread
+stays on its computer.
 A rejected cloud start keeps its prompt but stops retrying automatically. Use
 `room-cli cloud retry-start THREAD` or `sdk.cloudroom.retryStart(threadId)` to retry
 with the same request ID. The app offers **Retry start** on the failed thread.
@@ -56,7 +62,7 @@ To opt out, remove `--auto-update` from the launchd plist or systemd user unit
 and reload that service. Foreground/manual `bb-app host-daemon` runs leave it off
 unless you pass `--auto-update` explicitly.
 
-`bb-app`, `bb-server`, and `bb-host-daemon` capture service stdout and stderr
+The launcher (`bb-app`, including `bb-app host-daemon`) captures service stdout and stderr
 directly under the selected data directory in `logs/server-stdio.log` and
 `logs/host-daemon-stdio.log`. These files append across restarts and contain
 console output and startup errors; rotating application logs remain separate.
@@ -87,7 +93,17 @@ room-cli machine retry-cleanup <id-or-name> Retry failed teardown now
 room-cli machine remove <id-or-name> [--yes] Revoke and remove a machine
 room-cli machine provider-cli status <machine>
 room-cli machine provider-cli install <machine> <provider-id>
---action <install|update>
+--action <install|update> (default: the action status offers)
+
+A connected VPS also appears in the text `room-cli machine list` output.
+Inspect it with `room-cli machine show vps` (or its hostname or short name),
+with optional `--json`. Native machines take precedence over matching VPS names.
+`machine list --json` stays a native-host list. Start VPS threads from the app's
+new-thread picker; `thread spawn --machine vps` is not supported yet.
+`room-cli cloud status` shows it too (`vps` in `--json`, null without one):
+`health.disk` is the whole VPS's disk, shared by all its threads. Over 95% CPU,
+85% memory or 90% disk, `busy` names the limit and new threads start in Cloud,
+or fail while `fallback` is false.
 
 Each machine has a permission limit: the highest permission mode any thread on
 that machine can run with. The default is Full Access. A thread that asks for
@@ -96,7 +112,7 @@ limit cannot run there. Set it in Settings → Machines → the machine → Perm
 limit; that page also shows the machine's projects, provider CLIs, update state,
 and rename/remove. There is no CLI or SDK command to set it, and a paired
 machine cannot set it for any machine, so a sandbox machine can stay at Full
-Access while your laptop stays lower. `room-cli machine list --json` and `room-cli machine
+Access while your own computer stays lower. `room-cli machine list --json` and `room-cli machine
 show` report the current limit.
 
 Standalone create does not create a thread or workspace. Omit inputs to use the
@@ -221,7 +237,7 @@ The CLI refuses another host or server identity in the selected machine director
 
 The manual copy command fetches `/install.sh` using a short-lived `X-BB-Enrollment` header. The server supplies the bootstrap only for a pending, unexpired, uncancelled manual enrollment whose credential has not been consumed; downloaded responses are not cached. The command contains no bootstrap JSON or access-provider credentials.
 
-The installer accepts `--bootstrap-env <NAME>`, takes the bundle out of its environment before starting any other program, and pipes it to the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli` without replacing an existing path. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
+The installer accepts `--bootstrap-env <NAME>`, takes the bundle out of its environment before starting any other program, and pipes it to the same enrollment command. It installs a private CLI and supplies `~/.local/bin/room-cli`, replacing only its own wrapper for the same machine directory, never another file or link. Non-login transports can use `command -v cloudroom` with `~/.local/bin/cloudroom` as a fallback. Linux machines without a systemd user session run a detached daemon; systemd and launchd machines receive a persistent service.
 
 Machine bootstrap v2 supplies optional server request headers. `room-cli machine enroll`
 persists them privately as `serverHeaders`; the daemon reads them from that config
@@ -263,6 +279,10 @@ inputs: {}`. Enrolled boxes appear as machine sections in the composer picker;
 DigitalOcean contributes no new-machine/project-checkout shortcut row.
 
 Existing machines
+
+`room-cli machine join-code` codes work only with a direct server URL. A Cloudroom
+Connect address refuses them, and the installer stops before installing anything.
+Use `room-cli machine create --provider manual` there.
 
 `room-cli machine create --provider manual` waits for a private enrollment command,
 prints it once, and follows the host until the daemon connects. Run that command on the target
@@ -337,8 +357,8 @@ After expiry, Add a machine offers Generate new command: it cancels the old
 attempt and creates a fresh one. Manual owns the command and expiry in memory;
 polling does not renew it. Restart machine setup if the plugin or server restarts.
 
-For a new thread on a new Modal sandbox, select the environment composition:
-`room-cli thread spawn --project <id> --environment-provider modal-sandbox --prompt "..."`.
+For a new thread on a new machine from a composed option, select the environment composition:
+`room-cli thread spawn --project <id> --environment-provider <composition-id> --prompt "..."`.
 It creates the machine, prepares the project checkout, and runs environment setup.
 Progress and failures appear in the thread's provisioning details. If cloning
 fails, the machine remains available for retry or explicit removal.

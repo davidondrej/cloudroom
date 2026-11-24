@@ -30,11 +30,12 @@ export function SettingsTab() {
         <Repos org={org} busy={busy} change={change} />
       </div>
       <Permissions org={org} busy={busy} change={change} />
+      {org.board && <Access org={org} busy={busy} change={change} />}
       <Prompts org={org} busy={busy} change={change} />
       <div className="grid gap-4 md:grid-cols-2">
         <Editor title="Your sharing rule" wrap value={org.sharing} max={2000} busy={busy} save={(text) => change({ action: "sharing", text })}
           placeholder="Leave it empty to use the default rule." />
-        <SharingNote />
+        <SharingNote org={org} />
       </div>
       <Leave name={org.name} busy={busy} leave={() => void change({ action: "leave" })} />
       {shown}
@@ -86,11 +87,13 @@ function Members({ org, email, busy, change }: { org: Org; email: string; busy: 
     <Section title="Members" count={org.members.length} action={admin && (
       <button type="button" className={inviting ? button : primary} onClick={() => setInviting(!inviting)}><Icon name={inviting ? "X" : "Plus"} className="size-3.5" />{inviting ? "Cancel" : "Invite"}</button>
     )}>
+      {inviting && org.inviteLink && <InviteLink link={org.inviteLink} seats={org.seats} busy={busy} change={change} />}
       {inviting && (
         <form className="flex gap-2 border-b border-border p-3" onSubmit={send}>
-          <input autoFocus type="email" value={invite} onChange={(event) => setInvite(event.target.value)} placeholder="teammate@company.com" aria-label="Email to invite"
+          <input autoFocus={!org.inviteLink} type="email" value={invite} onChange={(event) => setInvite(event.target.value)} aria-label="Email to invite"
+            placeholder={org.inviteLink ? "Or invite by email: teammate@company.com" : "teammate@company.com"}
             className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-xs outline-none focus:border-foreground/30" />
-          <button className={primary} disabled={busy || !invite.trim()}>Send invite</button>
+          <button className={org.inviteLink ? button : primary} disabled={busy || !invite.trim()}>Send invite</button>
         </form>
       )}
       <ul className="divide-y divide-border">{org.members.map((member) => {
@@ -106,12 +109,30 @@ function Members({ org, email, busy, change }: { org: Org; email: string; busy: 
               : <span className={roleClass}>{role}</span>}
             {admin && !you && (
               <button type="button" className="text-muted-foreground enabled:hover:text-destructive" disabled={busy} aria-label={`Remove ${member.email}`}
-                onClick={() => confirm(`Remove ${member.email}?`) && void change({ action: "remove", email: member.email })}><Icon name="Trash2" className="size-3.5" /></button>
+                onClick={() => confirm(`Remove ${member.email}?${org.inviteLink ? " They can join again with the invite link until you reset it." : ""}`) && void change({ action: "remove", email: member.email })}><Icon name="Trash2" className="size-3.5" /></button>
             )}
           </li>
         );
       })}</ul>
     </Section>
+  );
+}
+
+// The invite link (ADR 20261118-120824): one link for the whole team. Anyone who opens it joins with the account they
+// sign in with, until the seats run out. Reset makes a new link and ends the old one. Matches /org on the website.
+function InviteLink({ link, seats, busy, change }: { link: string; seats: number | null; busy: boolean; change: Change }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => void navigator.clipboard.writeText(link).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }, () => undefined);
+  return (
+    <div className="space-y-2 border-b border-border p-3">
+      <div className="flex gap-2">
+        <input readOnly value={link} aria-label="Invite link" onFocus={(event) => event.target.select()}
+          className="min-w-0 flex-1 rounded-md border border-border bg-transparent px-3 py-1.5 text-xs text-muted-foreground outline-none focus:border-foreground/30" />
+        <button type="button" className={primary} onClick={copy}><Icon name={copied ? "Check" : "Copy"} className="size-3.5" />{copied ? "Copied" : "Copy link"}</button>
+        <button type="button" className={button} disabled={busy} onClick={() => confirm("Reset the invite link? The old link stops working.") && void change({ action: "link" })}>Reset</button>
+      </div>
+      <p className="text-xs text-muted-foreground">Anyone with this link can join{seats === null ? "" : `, until all ${seats} seats are taken`}. Paste it in your team chat.</p>
+    </div>
   );
 }
 
@@ -185,6 +206,52 @@ function Permissions({ org, busy, change }: { org: Org; busy: boolean; change: C
   );
 }
 
+// Whose threads each person, and their agents, see (ADR 20261118-201443): everyone, or picked teammates. On top of
+// "What members see". Admins edit; the website enforces it. Matches /org on the website.
+function Access({ org, busy, change }: { org: Org; busy: boolean; change: Change }) {
+  const admin = org.role === "admin", people = org.members.filter((member) => member.joined);
+  const name = (email: string) => email.split("@")[0] ?? email;
+  const set = (email: string, sees: string[] | null) => void change({ action: "access", email, sees });
+  return (
+    <Section title="Who sees whom">
+      <ul className="divide-y divide-border">{people.map((person) => {
+        const others = people.filter((other) => other.email !== person.email), picked = person.sees;
+        return (
+          <li key={person.email} className="space-y-2 px-4 py-2.5">
+            <div className="flex items-center justify-between gap-4">
+              <span className="min-w-0 truncate text-sm">{person.email}{person.role === "admin" && <span className="text-xs text-primary"> admin</span>}</span>
+              <div role="radiogroup" aria-label={`Whose threads ${person.email} sees`} className="flex shrink-0 rounded-full border border-border p-0.5">
+                {([["everyone", "Everyone"], ["pick", "Pick people"]] as const).map(([id, text]) => {
+                  const on = id === (picked === null ? "everyone" : "pick");
+                  return (
+                    <button key={id} type="button" role="radio" aria-checked={on} disabled={!admin || busy} onClick={() => !on && set(person.email, id === "everyone" ? null : [])}
+                      className={`rounded-full px-3 py-1 text-xs ${on ? "bg-primary font-medium text-primary-foreground" : "text-muted-foreground enabled:hover:text-foreground"}`}>{text}</button>
+                  );
+                })}
+              </div>
+            </div>
+            {picked !== null && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {others.map((other) => {
+                  const on = picked.includes(other.email);
+                  return (
+                    <button key={other.email} type="button" aria-pressed={on} disabled={!admin || busy} title={other.email}
+                      onClick={() => set(person.email, on ? picked.filter((email) => email !== other.email) : [...picked, other.email])}
+                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs ${on ? "border-primary/40 bg-primary/15 text-primary" : "border-dashed border-border text-muted-foreground enabled:hover:text-foreground"}`}>
+                      <Icon name={on ? "Check" : "Plus"} className="size-3" />{name(other.email)}
+                    </button>
+                  );
+                })}
+                {!picked.length && <span className="text-xs text-muted-foreground">Sees nobody's threads.</span>}
+              </div>
+            )}
+          </li>
+        );
+      })}</ul>
+    </Section>
+  );
+}
+
 function Prompts({ org, busy, change }: { org: Org; busy: boolean; change: Change }) {
   const global = <Editor title="Global system prompt" value={org.instructions} placeholder={"Use pnpm. Never push to main.\nRun the tests before opening a PR."} max={4000} busy={busy}
     readOnly={!org.canEditRules} save={(text) => change({ action: "instructions", text })} />;
@@ -205,7 +272,7 @@ function RepoName({ repo }: { repo: string }) {
   return <span className="flex items-center gap-1.5"><Icon name="Github" className="size-3.5" /><span><span className="text-muted-foreground">{owner}/</span>{name}</span></span>;
 }
 
-function SharingNote() {
+function SharingNote({ org }: { org: Org }) {
   const mark = "bg-[linear-gradient(transparent_45%,color-mix(in_srgb,var(--primary)_85%,transparent)_45%)] px-0.5 text-inherit";
   return (
     <div className="flex flex-col pt-9">
@@ -217,7 +284,7 @@ function SharingNote() {
           <li>Start a Cloud thread in a team repo. <mark className={mark}>Jev</mark> reads its first messages.</li>
           <li>Jev <mark className={mark}>shares it</mark> with your team, or keeps it private.</li>
         </ol>
-        <p className="mt-3.5 text-xs text-[#5a5a5a]">The lock button always wins. Local threads are never shared.</p>
+        <p className="mt-3.5 text-xs text-[#5a5a5a]">The lock button always wins. {org.board ? "Local threads share only their title, status, and purpose." : "Local threads are never shared."}</p>
       </aside>
     </div>
   );

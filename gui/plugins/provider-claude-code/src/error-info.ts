@@ -11,7 +11,27 @@ interface BuildClaudeProviderErrorInfoArgs {
   code?: ClaudeAssistantMessageError;
   httpStatusCode?: number | null;
   resultSubtype?: string;
+  /** The error text Claude Code showed, e.g. "Can't reach the API server … (ENOTFOUND)". */
+  detail?: string;
 }
+
+/**
+ * Claude Code reports a dead network as `server_error` with no HTTP status, so
+ * the only honest signal is its own wording: "Can't reach the API server",
+ * "Connection refused", "No internet route", "Connection dropped" and the
+ * older "Unable to connect to API", each with a socket code in parentheses.
+ */
+const CLAUDE_NETWORK_ERROR =
+  /Can't reach the API server|No internet route|Unable to connect to API|Connection dropped|Connection refused|\((?:ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ENETUNREACH|EHOSTUNREACH|ENETDOWN)\)/;
+
+/**
+ * A busy shared pool, not the user's plan: a third-party coding plan answers 429
+ * "capacity pool is momentarily saturated", and Claude Code tags a bare 429 "this
+ * may be a temporary capacity issue" (#2284). A plan limit names its reset, and a
+ * subscription window comes as a rate_limit_event that stays a rate limit.
+ */
+const CLAUDE_CAPACITY_ERROR =
+  /capacity|overloaded|saturated|temporarily limiting|high load|not your usage limit/i;
 
 function getProviderErrorCategoryFromHttpStatus(
   httpStatusCode: number,
@@ -116,14 +136,25 @@ export function buildClaudeProviderErrorInfo(
 ): ProviderErrorInfo | null {
   const httpStatusCode = args.httpStatusCode ?? null;
   const resultSubtype = parseClaudeResultSubtype(args.resultSubtype);
-  const category =
-    args.code !== undefined
+  const networkFailure =
+    httpStatusCode === null &&
+    args.detail !== undefined &&
+    CLAUDE_NETWORK_ERROR.test(args.detail);
+  const reported = networkFailure
+    ? "connection-failed"
+    : args.code !== undefined
       ? getProviderErrorCategoryFromClaudeCode(args.code, httpStatusCode)
       : httpStatusCode !== null
         ? getProviderErrorCategoryFromHttpStatus(httpStatusCode)
         : resultSubtype
           ? getProviderErrorCategoryFromClaudeResultSubtype(resultSubtype)
           : "unknown";
+  const capacity =
+    reported === "rate-limit" &&
+    args.detail !== undefined &&
+    (/not your usage limit/i.test(args.detail) ||
+      (CLAUDE_CAPACITY_ERROR.test(args.detail) && !/reset/i.test(args.detail)));
+  const category = capacity ? "overloaded" : reported;
   const providerCode = getClaudeProviderCode(args);
   if (
     category === "unknown" &&

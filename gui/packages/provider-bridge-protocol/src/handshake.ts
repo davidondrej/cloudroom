@@ -35,6 +35,11 @@ export const bridgeCapabilitiesSchema = z
       PROVIDER_BRIDGE_PROTOCOL_VERSION,
     ]),
     steerMode: bridgeSteerModeSchema.default("queue"),
+    /**
+     * `thread/stop {keepSession}` also ends a turn the bridge has accepted but
+     * not opened yet, so the runtime need not wait for its `turn/started`.
+     */
+    stopsUnopenedTurns: z.boolean().default(false),
     skills: z
       .object({ configure: z.boolean().default(false) })
       .default({ configure: false }),

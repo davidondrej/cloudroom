@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldLoadThreadStorageFileList } from "./useThreadStorageViewer";
+import { shouldLoadThreadStorageFileList } from "@/components/right-panel/tabs/thread-storage";
 
 describe("shouldLoadThreadStorageFileList", () => {
   it("does not load the storage list on a plain thread open", () => {

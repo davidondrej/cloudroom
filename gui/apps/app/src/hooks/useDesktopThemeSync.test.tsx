@@ -2,10 +2,10 @@
 
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BbDesktopInfo, BbDesktopTheme } from "@cloudroom/desktop-contract";
-import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
+import type { RoomDesktopInfo, RoomDesktopTheme } from "@cloudroom/desktop-contract";
+import { createRoomDesktopApi } from "@/test/room-desktop-test-utils";
 
-const desktopInfo: BbDesktopInfo = {
+const desktopInfo: RoomDesktopInfo = {
   lastCheckedAt: null,
   latestVersion: null,
   pendingVersion: null,
@@ -72,8 +72,8 @@ afterEach(() => {
 describe("desktop theme synchronization", () => {
   it("keeps Electron on system while the resolved theme follows OS changes", async () => {
     const colorScheme = installColorSchemeMediaQuery(true);
-    const setThemeCalls: BbDesktopTheme[] = [];
-    const desktopApi = createBbDesktopApi(desktopInfo);
+    const setThemeCalls: RoomDesktopTheme[] = [];
+    const desktopApi = createRoomDesktopApi(desktopInfo);
     desktopApi.setTheme = (theme) => setThemeCalls.push(theme);
     window.bbDesktop = desktopApi;
 

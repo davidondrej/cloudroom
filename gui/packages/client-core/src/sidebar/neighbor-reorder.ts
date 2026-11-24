@@ -1,4 +1,4 @@
-import { arrayMove } from "../panel/array-move.js";
+import { arrayMove } from "../array-move.js";
 
 interface NeighborReorderItem {
   id: string;

@@ -78,7 +78,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Show a short status right after its sidebar title, with an optional hover card, through experimental_sidebarLabel",
         ],
         apiSymbols: ["PluginNavPanelRegistration"],
-        firstParty: ["Loops", "Docs", "GitHub", "Tasks"],
+        firstParty: ["Loops", "GitHub", "Tasks"],
       },
       {
         id: "thread-row-status",
@@ -153,6 +153,19 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         experimental: true,
       },
       {
+        id: "project-action",
+        title: "Project menu actions",
+        summary:
+          "Adds an item to every project's actions menu in the sidebar. With this, a plugin can:",
+        bullets: [
+          "Open its own full page for the project the menu belongs to",
+          "Show a short badge next to the item, like NEW",
+          "Keep that page out of the sidebar's navigation",
+        ],
+        apiSymbols: ["ExperimentalProjectActionRegistration"],
+        experimental: true,
+      },
+      {
         id: "browser-toolbar",
         title: "Browser toolbar controls",
         summary:
@@ -195,7 +208,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Open a file from the workspace when someone interacts with the embed",
         ],
         apiSymbols: ["PluginMessageDirectiveRegistration"],
-        firstParty: ["Docs", "Inline visualizations", "Tasks", "Workflows"],
+        firstParty: ["Inline visualizations", "Tasks", "Workflows"],
       },
       {
         id: "message-actions",
@@ -253,7 +266,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Hide its + button entry with experimental_requiresFork when the thread's provider cannot fork",
         ],
         apiSymbols: ["PluginThreadPanelActionRegistration"],
-        firstParty: ["Docs", "GitHub", "Side chat", "Tasks", "Workflows"],
+        firstParty: ["GitHub", "Side chat", "Tasks", "Workflows"],
       },
       {
         id: "file-opener",
@@ -267,7 +280,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Reveal linked lines with experimental_lineRange, including repeated targets in an already open editor",
         ],
         apiSymbols: ["PluginFileOpenerRegistration", "PluginFileOpenerProps"],
-        firstParty: ["Docs", "File Editor"],
+        firstParty: ["File Editor"],
       },
       {
         id: "app-overlay",
@@ -371,7 +384,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "PluginMentionSearchContext",
           "PluginMentionItem",
         ],
-        firstParty: ["Docs", "GitHub", "Tasks"],
+        firstParty: ["GitHub", "Tasks"],
       },
       {
         id: "composer-rich-text",
@@ -442,6 +455,9 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "ExperimentalPluginProviderEnvEntry",
           "ExperimentalPluginProviderEnvHealthContext",
           "ExperimentalPluginProviderEnvHealth",
+          "experimental_isClaudeNpmPlaceholder",
+          "experimental_privateDataPaths",
+          "experimental_createHostUsageSource",
         ],
         firstParty: [
           "ACP providers",
@@ -544,7 +560,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Supply a heading and a one-line description for Cloudroom to render above it",
         ],
         apiSymbols: ["PluginSettingsSectionRegistration"],
-        firstParty: ["Accounts", "Keep Awake", "Memory", "Remote access"],
+        firstParty: ["Accounts", "Keep Awake", "Remote access"],
       },
     ],
   },
@@ -631,10 +647,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         firstParty: [
           "Loops",
           "Custom instructions",
-          "Docs",
           "GitHub",
           "Keep Awake",
-          "Memory",
           "Provider retry",
           "Remote access",
           "Secrets",
@@ -652,12 +666,12 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Register tools an agent calls the same way it calls Cloudroom's built-in tools",
           "Decide per thread which of its tools and skills are available",
           "Append instructions to a session's system prompt as that session starts",
+          "Match user instructions to the message’s harness and model with experimental_execution",
         ],
         apiSymbols: ["PluginAgents"],
         firstParty: [
           "Ask User Question",
           "Custom instructions",
-          "Memory",
           "Remote access",
           "Workflows",
         ],
@@ -677,7 +691,6 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         apiSymbols: ["PluginBackground", "BbPluginApi.onInstall"],
         firstParty: [
           "Loops",
-          "Docs",
           "GitHub",
           "Keep Awake",
           "Provider retry",
@@ -713,11 +726,9 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         firstParty: [
           "Loops",
           "Custom instructions",
-          "Docs",
           "GitHub",
           "Inline visualizations",
           "Keep Awake",
-          "Memory",
           "Provider retry",
           "Remote access",
           "Side chat",
@@ -900,7 +911,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "PluginMachineProviderResource",
           "PluginMachineProviderRemoveResult",
         ],
-        firstParty: ["Modal sandbox"],
+        firstParty: [],
         experimental: true,
       },
       {
@@ -987,10 +998,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         firstParty: [
           "Loops",
           "Custom instructions",
-          "Docs",
           "GitHub",
           "Keep Awake",
-          "Memory",
           "Remote access",
           "Side chat",
           "Tasks",
@@ -1023,7 +1032,6 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         ],
         firstParty: [
           "Loops",
-          "Docs",
           "GitHub",
           "Inline visualizations",
           "Keep Awake",
@@ -1152,11 +1160,9 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Ask User Question",
           "Loops",
           "Custom instructions",
-          "Docs",
           "GitHub",
           "Inline visualizations",
           "Keep Awake",
-          "Memory",
           "Provider retry",
           "Remote access",
           "Secrets",

@@ -47,22 +47,22 @@ import {
   checkHostPathsExist,
   listHostFiles,
   listHostPaths,
+  mkdirHostPath,
+  moveHostPath,
   readHostFile,
   readHostFileMetadata,
   readHostRelativeFile,
-} from "./command-handlers/host-files.js";
-import { writeHostFile } from "./command-handlers/file-write.js";
-import { claudeSetupToken } from "./command-handlers/claude-setup-token.js";
-import {
-  mkdirHostPath,
-  moveHostPath,
   removeHostPath,
-} from "./command-handlers/path-mutations.js";
+  writeHostFile,
+} from "./command-handlers/files.js";
+import { claudeSetupToken } from "./command-handlers/claude-setup-token.js";
 import { resolveInteractiveRequest } from "./command-handlers/interactive.js";
 import { pickHostFolder } from "./command-handlers/native-folder-picker.js";
 import {
   ProviderInstallationInProgressError,
   streamProviderInstallation,
+  withPrivateInstallTemp,
+  withWindowsGitShell,
 } from "./provider-installation.js";
 import type {
   ProviderInstallationCommand,
@@ -124,13 +124,21 @@ async function stopThreadRuntime(
       await options.eventSink.flush();
       return { providerCheckpointId };
     }
-    if (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) {
+    const keepSession =
+      command.type === "thread.stop" && command.keepSession === true && !command.immediate;
+    // A turn sent just before this Stop may not have opened yet. Most agents
+    // can only interrupt it once it has.
+    if (
+      (command.type !== "thread.stop" || (command.intent !== "release" && !command.immediate)) &&
+      !(keepSession && entry.runtime.stopsUnopenedTurns?.(command.threadId))
+    ) {
       await entry.runtime.waitForActiveTurn(command.threadId, {
         timeoutMs: THREAD_STOP_ACTIVE_TURN_WAIT_MS,
       });
     }
     const result = await entry.runtime.stopThread({
       threadId: command.threadId,
+      ...(keepSession ? { keepSession: true } : {}),
     });
     providerCheckpointId = result.providerCheckpointId ?? providerCheckpointId;
   }
@@ -143,7 +151,12 @@ export {
   getErrorCode,
   type CommandDispatchOptions,
 } from "./command-dispatch-support.js";
-import { stopThreadProcesses } from "./thread-processes.js";
+import {
+  countThreadProcesses,
+  listAgentTree,
+  stopThreadProcesses,
+} from "./thread-processes.js";
+import { providerInstallationGateKey } from "./provider-installation-gate.js";
 
 type CommandHandlerMap = {
   [TType in HostDaemonSettledCommandType]: (
@@ -291,6 +304,40 @@ async function runProviderInstallationOnHost(
       action: command.action,
     });
     if (!run.available) {
+      // Another update (auto-update, a second click) may have just finished:
+      // a current CLI means the update is done, not failed.
+      if (command.action === "update") {
+        let status: ProviderInstallationStatus | null = null;
+        try {
+          status = await options.providerInstallationStatus(maintenanceArgs);
+        } catch {
+          // Unreadable status: report the refusal below.
+        }
+        if (
+          status?.installed &&
+          status.currentVersion !== null &&
+          !status.needsUpdate &&
+          !status.versionUnsupported
+        ) {
+          return {
+            events: [
+              {
+                type: "output",
+                provider: command.providerId,
+                stream: "stdout",
+                text: `Already up to date (${status.currentVersion}).\n`,
+              },
+              {
+                type: "completed",
+                provider: command.providerId,
+                exitCode: 0,
+                signal: null,
+                success: true,
+              },
+            ],
+          };
+        }
+      }
       return {
         events: [
           {
@@ -305,24 +352,35 @@ async function runProviderInstallationOnHost(
       options.streamProviderInstallation ?? streamProviderInstallation;
     const succeeded = (events: ProviderCliInstallEvent[]) =>
       events.some((event) => event.type === "completed" && event.success);
+    let verifiedStatus: ProviderInstallationStatus | undefined;
     const runVerified = async (
       plan: ProviderInstallationCommand,
     ): Promise<ProviderCliInstallEvent[]> => {
-      const events = await readProviderCliInstallEvents(
-        stream({ providerId: command.providerId, plan, env }),
+      const events = await withPrivateInstallTemp(
+        options.dataDir,
+        env,
+        async (installEnv) =>
+          readProviderCliInstallEvents(
+            stream({
+              providerId: command.providerId,
+              ...(await withWindowsGitShell({ plan, env: installEnv })),
+            }),
+          ),
       );
       if (!succeeded(events)) return events;
       try {
         await options.refreshShellEnv({ force: true });
         const status =
           await options.providerInstallationStatus(maintenanceArgs);
-        return installationVerificationPassed(run.verification, status)
-          ? events
-          : failProviderInstallationVerification({
-              providerId: command.providerId,
-              events,
-              message: `${command.providerId} ${command.action} exited successfully, but the provider could not verify the installed result.`,
-            });
+        if (installationVerificationPassed(run.verification, status)) {
+          verifiedStatus = status;
+          return events;
+        }
+        return failProviderInstallationVerification({
+          providerId: command.providerId,
+          events,
+          message: `${command.providerId} ${command.action} exited successfully, but the provider could not verify the installed result.`,
+        });
       } catch {
         return failProviderInstallationVerification({
           providerId: command.providerId,
@@ -338,7 +396,17 @@ async function runProviderInstallationOnHost(
       events = [...events, ...(await runVerified(run.fallback))];
     }
     if (succeeded(events)) {
-      await options.runtimeManager.invalidateProviderMaintenanceRuntime();
+      await options.runtimeManager.invalidateProviderMaintenanceRuntime(
+        verifiedStatus === undefined
+          ? undefined
+          : {
+              key: providerInstallationGateKey({
+                providerId: command.providerId,
+                bridgeLaunch: command.bridgeLaunch,
+              }),
+              status: verifiedStatus,
+            },
+      );
     }
     return { events };
   } catch (error) {
@@ -547,6 +615,8 @@ const commandHandlers: CommandHandlerMap = {
     return {};
   },
   "thread.processes.stop": async (command, options) => {
+    const serverUrl = options.runtimeManager.getShellEnv().ROOM_SERVER_URL;
+    const endAgentTree = await listAgentTree(command.threadId, serverUrl);
     await options.runtimeManager
       .reapIdleProviderSessions({
         idleForMs: 0,
@@ -559,14 +629,25 @@ const commandHandlers: CommandHandlerMap = {
           "Freeing an archived thread's agent session failed",
         ),
       );
-    const stopped = await stopThreadProcesses(
-      command.threadId,
-      options.runtimeManager.getShellEnv().ROOM_SERVER_URL,
-    );
+    // A session kept for its background work or a running command still runs,
+    // and so does a message edit's staged rewind until it is discarded.
+    const freed = !options.runtimeManager.holdsThreadAgent(command.threadId);
+    const stopped =
+      (freed ? await endAgentTree() : 0) +
+      (await stopThreadProcesses(command.threadId, serverUrl));
     if (stopped > 0) {
       options.logger.debug(
         { threadId: command.threadId, stopped },
         "Stopped processes an archived thread left running",
+      );
+    }
+    const remaining = freed
+      ? await countThreadProcesses(command.threadId, serverUrl)
+      : 0;
+    if (remaining > 0) {
+      options.logger.warn(
+        { threadId: command.threadId, remaining },
+        "A stopped or archived thread still has processes running",
       );
     }
     return { stopped };

@@ -34,7 +34,10 @@ import {
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { workflowRow } from "@/test/fixtures/thread-timeline-rows";
-import type { PromptDraftAttachment } from "@cloudroom/client-core";
+import type {
+  PromptDraftAttachment,
+  PromptDraftContext,
+} from "@cloudroom/client-core";
 import { BbHttpError } from "@/lib/sdk";
 import type { TypeaheadConfig } from "@/components/promptbox/PromptBoxInternal";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
@@ -56,6 +59,7 @@ const mocks = vi.hoisted(() => ({
   createQueuedMessageMutateAsync: vi.fn(),
   createThreadMutateAsync: vi.fn(),
   updateThreadMutate: vi.fn(),
+  saveThreadModel: vi.fn().mockResolvedValue(undefined),
   defaultExecutionOptions: null as ResolvedThreadExecutionOptions | null,
   executionInputSources: {} as ExistingThreadExecutionInputSources,
   deleteQueuedMessageMutateAsync: vi.fn(),
@@ -65,6 +69,7 @@ const mocks = vi.hoisted(() => ({
     addAttachment: vi.fn(),
     attachments: [] as PromptDraftAttachment[],
     clearIfCurrentMatches: vi.fn(),
+    contexts: undefined as PromptDraftContext[] | undefined,
     getCurrent: vi.fn(),
     mentions: [] as PromptTextMention[],
     removeAttachment: vi.fn(),
@@ -92,8 +97,8 @@ const mocks = vi.hoisted(() => ({
   useThreadQueuedMessages: vi.fn(),
 }));
 
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useNavigate: () => mocks.navigate,
@@ -101,13 +106,19 @@ vi.mock("react-router-dom", async (importOriginal) => {
 });
 
 vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
+  const { useContext } = await import("react");
   const { ComposerBannersSlot } = await vi.importActual<
     typeof import("@/components/plugin/PluginComposerBanners")
   >("@/components/plugin/PluginComposerBanners");
+  const { PromptDraftContextsContext } = await vi.importActual<
+    typeof import("@/components/promptbox/editor/prompt-context-chip")
+  >("@/components/promptbox/editor/prompt-context-chip");
   return {
     FollowUpPromptBox: ({
       activePromptMode,
       typeahead,
+      threadProviderId,
+      cloudShortcutModels,
       attachments,
       composer,
       environmentSummary,
@@ -124,6 +135,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
     }: {
       activePromptMode?: ThreadTimelineActivePromptMode | null;
       typeahead: TypeaheadConfig;
+      threadProviderId?: string;
+      cloudShortcutModels?: string[];
       attachments: {
         items: readonly unknown[];
         onAttachFiles: (files: File[]) => void | Promise<void>;
@@ -153,6 +166,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           selectedId: string;
           onChange?: (value: string) => void;
         };
+        selectModel?: (selection: { providerId: string; model: string }) => Promise<void>;
         onSelectModel?: (selection: {
           providerId: string;
           model: string;
@@ -172,7 +186,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       textEffects?: readonly {
         effect: { className: string };
       }[];
-    }) => (
+    }) => {
+      const promptDraftContexts = useContext(PromptDraftContextsContext);
+      return (
       <div data-testid="follow-up-prompt-box">
         {environmentSummary}
         <div data-testid="prompt-stack">
@@ -251,6 +267,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
         </div>
         <div data-testid="composer-location">
           {showScrollToBottomButton === false ? "inline" : "bottom"}
+        </div>
+        <div data-testid="prompt-draft-contexts">
+          {JSON.stringify(promptDraftContexts ?? [])}
         </div>
         <div data-testid="plugin-composer-scope">
           {pluginComposerHost
@@ -352,6 +371,9 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
             </button>
           </>
         ) : null}
+        {execution.selectModel && threadProviderId && (!cloudShortcutModels || cloudShortcutModels.length > 0) && (
+          <button onClick={() => execution.selectModel?.({ providerId: threadProviderId, model: cloudShortcutModels?.[0] ?? "gpt-6-astra" })}>Pick model shortcut</button>
+        )}
         {execution.onSelectModel ? (
           <button
             type="button"
@@ -367,7 +389,8 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           </button>
         ) : null}
       </div>
-    ),
+      );
+    },
   };
 });
 
@@ -555,6 +578,7 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
 }));
 
 vi.mock("@/hooks/usePromptDraftStorage", () => ({
+  flushPromptDraftNotifies: () => false,
   usePromptDraftStorage: () => mocks.promptDraft,
 }));
 
@@ -589,6 +613,7 @@ vi.mock("@/hooks/useThreadCreationOptions", async () => {
         isLoadingModels: false,
         modelLoadError: null,
         modelLoadFailed: false,
+        modelCatalogIsVerified: true,
         modelOptions: [
           { value: "openai-codex/gpt-6-astra", label: "GPT-6 Astra" },
           { value: "gpt-6-astra", label: "GPT-6 Astra" },
@@ -642,7 +667,12 @@ vi.mock("@/hooks/mutations/project-mutations", () => ({
   }),
 }));
 
+vi.mock("@/hooks/useFreshThread", () => ({
+  useFreshThread: () => ({ isPending: false, start: vi.fn() }),
+}));
+
 vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
+  useCompactThread: () => ({ isPending: false, mutate: vi.fn() }),
   useCancelThreadPlan: () => ({
     isPending: false,
     mutate: mocks.cancelThreadPlanMutate,
@@ -684,6 +714,7 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
 }));
 
 vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
+  useSaveThreadModel: () => ({ save: mocks.saveThreadModel, pendingModel: null }),
   useUpdateThread: () => ({ mutate: mocks.updateThreadMutate }),
   useUnarchiveThread: () => ({
     isPending: false,
@@ -694,6 +725,11 @@ vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
 
 vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
   useProjectDisplayName: () => "CEO",
+  // The update card above the composer asks whether any thread is busy.
+  useSidebarNavigationThreadSelection: () => ({
+    data: undefined,
+    isBootstrapPending: false,
+  }),
 }));
 
 vi.mock("@/hooks/queries/thread-default-execution-options-query", () => ({
@@ -859,7 +895,6 @@ function buildPromptAreaElement({
         modelFallback={modelFallback}
         isEnvironmentActionPending={false}
         onChangedFileClick={vi.fn()}
-        parentThreadSection={null}
         pendingInteractions={pendingInteractions}
         pendingInteractionsInitialLoading={pendingInteractionsInitialLoading}
         queuedMessageCount={queuedMessageCount}
@@ -896,8 +931,10 @@ beforeEach(() => {
   mocks.promptDraft.text = "";
   mocks.promptDraft.mentions = [];
   mocks.promptDraft.attachments = [];
+  mocks.promptDraft.contexts = undefined;
   mocks.promptDraft.getCurrent.mockImplementation(() => ({
     attachments: mocks.promptDraft.attachments,
+    ...(mocks.promptDraft.contexts ? { contexts: mocks.promptDraft.contexts } : {}),
     mentions: mocks.promptDraft.mentions,
     text: mocks.promptDraft.text,
   }));
@@ -972,20 +1009,30 @@ describe("ThreadDetailPromptArea", () => {
     expect(screen.getByTestId("submit-mode").textContent).not.toBe(":");
   });
 
-  it("clears the neutral reconnect notice while idle and keeps genuine errors visible", async () => {
-    const queryKey = ["cloudroom-thread", "thr_1"];
-    testQueryClient.setQueryDefaults(queryKey, { staleTime: Infinity });
-    const status = { sessionId: "cloud-session", paused: false, model: "gpt-6-astra", reasoning: "medium", error: null, pendingDelivery: 0, reconnecting: true };
-    testQueryClient.setQueryData(queryKey, status);
-    renderPromptArea({ thread: makeThread({ executionTarget: "cloud", status: "idle" }) });
-    expect(screen.getByRole("status").textContent).toBe("Reconnecting…");
-    expect(screen.queryByRole("alert")).toBeNull();
-    await act(async () => { testQueryClient.setQueryData(queryKey, { ...status, reconnecting: false }); });
-    await waitFor(() => expect(screen.queryByText("Reconnecting…")).toBeNull());
-    await act(async () => { testQueryClient.setQueryData(queryKey, { ...status, error: "Cloudroom authentication failed" }); });
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe("Cloudroom authentication failed"));
-    expect(screen.queryByText("Reconnecting…")).toBeNull();
-    expect(mocks.sendMessageMutateAsync).not.toHaveBeenCalled();
+  it("shows the reconnect notice only after 15 s, clears it at once, and keeps genuine errors visible", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const queryKey = ["cloudroom-thread", "thr_1"];
+      testQueryClient.setQueryDefaults(queryKey, { staleTime: Infinity });
+      const status = { sessionId: "cloud-session", paused: false, model: "gpt-6-astra", reasoning: "medium", error: null, pendingDelivery: 0, reconnecting: true };
+      const advance = (ms: number, data?: object) => act(async () => { if (data) testQueryClient.setQueryData(queryKey, data); vi.advanceTimersByTime(ms); });
+      testQueryClient.setQueryData(queryKey, status);
+      renderPromptArea({ thread: makeThread({ executionTarget: "cloud", status: "idle" }) });
+      // A sandbox going to sleep reconnects within seconds, so no pill flashes.
+      await advance(14_000);
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      await advance(1_000);
+      expect(screen.getByRole("status").textContent).toBe("Reconnecting…");
+      expect(screen.queryByRole("alert")).toBeNull();
+      await advance(0, { ...status, reconnecting: false });
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      await advance(0, { ...status, error: "Cloudroom authentication failed" });
+      expect(screen.getByRole("alert").textContent).toBe("Cloudroom authentication failed");
+      expect(screen.queryByText("Reconnecting…")).toBeNull();
+      expect(mocks.sendMessageMutateAsync).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it.each([
@@ -993,6 +1040,7 @@ describe("ThreadDetailPromptArea", () => {
     ["codex", "openai-codex/gpt-6-astra", "GPT-6 Astra"],
     ["codex", "gpt-6-astra", "GPT-6 Astra"],
     ["pi", "anthropic/claude-opus-4-20250514", "Claude Opus 4"],
+    ["claude-code", "anthropic/claude-opus-4-20250514", "Claude Opus 4"],
   ])(
     "keeps the %s agent and model label for %s in a cloud follow-up",
     (providerId, model, label) => {
@@ -1008,6 +1056,9 @@ describe("ThreadDetailPromptArea", () => {
         pendingDelivery: 0,
       });
 
+      testQueryClient.setQueryData(["cloudroom-connection"], { harnesses: [{
+        id: providerId, idle_set_model: providerId === "claude-code", models: [{ model: "claude-fable-5-2" }],
+      }] });
       renderPromptArea({
         thread: makeThread({ executionTarget: "cloud", providerId }),
       });
@@ -1017,6 +1068,12 @@ describe("ThreadDetailPromptArea", () => {
       );
       expect(screen.getByTestId("selected-model").textContent).toBe(model);
       expect(screen.getByTestId("selected-model-label").textContent).toBe(label);
+      if (providerId === "claude-code") {
+        fireEvent.click(screen.getByText("Pick model shortcut"));
+        expect(mocks.saveThreadModel).toHaveBeenCalledWith("claude-fable-5-2", "claude-code");
+      } else {
+        expect(screen.queryByText("Pick model shortcut")).toBeNull();
+      }
     },
   );
 
@@ -2028,6 +2085,8 @@ describe("ThreadDetailPromptArea", () => {
 
   it("switches the harness in place instead of starting a new thread (ADR 0211)", () => {
     renderPromptArea();
+    fireEvent.click(screen.getByText("Pick model shortcut"));
+    expect(mocks.saveThreadModel).toHaveBeenCalledWith("gpt-6-astra", "codex");
     fireEvent.click(screen.getByRole("button", { name: "Switch harness" }));
     expect(mocks.updateThreadMutate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2038,6 +2097,36 @@ describe("ThreadDetailPromptArea", () => {
       expect.anything(),
     );
     expect(mocks.createThreadMutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows a switch still running from before the thread was reopened", () => {
+    void testQueryClient
+      .getMutationCache()
+      .build(testQueryClient, {
+        mutationKey: ["thread-update", "thr_1"],
+        mutationFn: () => new Promise(() => {}),
+      })
+      .execute({ id: "thr_1", providerId: "claude-code", model: "claude-fable-5" });
+
+    renderPromptArea();
+
+    expect(screen.getByTestId("selected-model").textContent).toBe("claude-fable-5");
+  });
+
+  it("shows the switched model at once and restores the old one if the switch fails", () => {
+    renderPromptArea();
+    expect(screen.getByTestId("selected-model").textContent).toBe("gpt-5");
+
+    fireEvent.click(screen.getByRole("button", { name: "Switch harness" }));
+
+    // The server hasn't answered yet: the picker already shows the new agent.
+    expect(screen.getByTestId("selected-model").textContent).toBe("claude-opus-5");
+    const [, callbacks] = mocks.updateThreadMutate.mock.calls[0] as [
+      unknown,
+      { onError: () => void },
+    ];
+    act(() => callbacks.onError());
+    expect(screen.getByTestId("selected-model").textContent).toBe("gpt-5");
   });
 
   it.each([
@@ -2069,5 +2158,36 @@ describe("ThreadDetailPromptArea", () => {
       }),
       expect.anything(),
     );
+  });
+
+  it("provides the queued message's own context previews to the inline queued editor", () => {
+    mocks.promptDraft.contexts = [
+      { label: "[message #1 - 2 words]", text: "bottom quote" },
+    ];
+    mocks.queuedMessages = [
+      makeQueuedMessage({
+        content: [
+          {
+            type: "text",
+            text: '<context message="#1">\nqueued quote\n</context>\nEdit me',
+            mentions: [],
+          },
+        ],
+      }),
+    ];
+
+    renderPromptArea();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Edit queued message 1" }),
+    );
+
+    const inlineEditor = within(
+      screen.getByTestId("inline-queued-message-editor"),
+    );
+    expect(
+      JSON.parse(
+        inlineEditor.getByTestId("prompt-draft-contexts").textContent ?? "[]",
+      ),
+    ).toEqual([{ label: "[message #1 - 2 words]", text: "queued quote" }]);
   });
 });

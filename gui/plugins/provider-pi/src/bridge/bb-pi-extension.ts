@@ -1,6 +1,6 @@
 import { checkCommand } from "@get-bb/plugin-sdk/internal/command-guard";
 
-export const BB_PI_EXTENSION_SOURCE = String.raw`
+export const ROOM_PI_EXTENSION_SOURCE = String.raw`
 const inspectCloudroomCommand = (${checkCommand.toString()});
 import { readFileSync, renameSync, writeSync } from "node:fs";
 import { Socket } from "node:net";

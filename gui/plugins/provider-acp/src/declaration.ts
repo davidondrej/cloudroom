@@ -23,6 +23,17 @@ const ACP_SERVICE_TIERS = [
 
 const DEFAULT_FORK = "none" as const;
 
+// Grok (#1160), Cursor and Antigravity report a signed-out CLI as auth_required:
+// the picker offers its login, then restarts discovery once the user signed in.
+const SIGN_IN_DIALECTS = new Set(["grok", "cursor", "antigravity"]);
+function offersSignIn(agent: AcpAgentDefinition): boolean {
+  return (
+    agent.dialect !== undefined &&
+    SIGN_IN_DIALECTS.has(agent.dialect) &&
+    agent.signInCommand !== undefined
+  );
+}
+
 function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {
   const signIn = agent.signInCommand;
   return {
@@ -34,6 +45,7 @@ function acpStrings(agent: AcpAgentDefinition): PluginProviderStrings {
       signIn === undefined
         ? `Your ${agent.displayName} session expired. Sign in on the machine, then reload.`
         : `Your ${agent.displayName} session expired. Run \`${signIn}\`, then reload.`,
+    ...(offersSignIn(agent) ? { signInCommand: signIn } : {}),
     installUrl: agent.installUrl ?? "https://agentclientprotocol.com",
     ...(agent.iconTint === undefined ? {} : { iconTint: agent.iconTint }),
   };
@@ -48,7 +60,9 @@ export function acpProviderDeclaration(
     family: ACP_FAMILY,
     ...(agent.icon === undefined ? {} : { icon: agent.icon }),
     strings: acpStrings(agent),
-    serviceTiers: [...ACP_SERVICE_TIERS],
+    ...(agent.supportsServiceTier === false
+      ? {}
+      : { serviceTiers: [...ACP_SERVICE_TIERS] }),
     ...(agent.visibility === undefined
       ? {}
       : { experimental_visibility: agent.visibility }),
@@ -86,15 +100,23 @@ export function acpProviderDeclaration(
                 ? { npmPackage: agent.installer.npmPackage }
                 : {
                     scriptUrl: agent.installer.scriptUrl,
+                    ...(agent.installer.powershellUrl === undefined
+                      ? {}
+                      : { powershellUrl: agent.installer.powershellUrl }),
                     args: [...(agent.installer.args ?? [])],
                   },
           }),
+      ...(agent.minimumVersion === undefined
+        ? {}
+        : { acpMinimumVersion: agent.minimumVersion }),
+      ...(agent.custom === true ? { customAgent: true } : {}),
       acpLaunchSpec: { ...agent.launch },
     },
-    models: { scope: "host" },
-    ...(agent.dialect === "cursor"
-      ? { experimental_modelDiscoveryRestart: true }
-      : {}),
+    // A project's opencode.json can hide providers, so OpenCode and its fork Kilo list models per project (#1236).
+    models: { scope: agent.dialect === "opencode" ? "workspace" : "host" },
+    // Every ACP bridge caches its agent's models, so `--restart` is how a
+    // signed-in agent or an edited agent config (opencode.json) shows (#1236).
+    experimental_modelDiscoveryRestart: true,
     maintenance: {
       health: true,
       usage: agent.providerUsage === true,
@@ -103,8 +125,11 @@ export function acpProviderDeclaration(
     },
     capabilities: {
       ...ACP_BASE_CAPABILITIES,
+      supportsServiceTier: agent.supportsServiceTier ?? true,
       fork: agent.fork ?? DEFAULT_FORK,
-      permissionModes: [...ACP_BASE_CAPABILITIES.permissionModes],
+      permissionModes: [
+        ...(agent.permissionModes ?? ACP_BASE_CAPABILITIES.permissionModes),
+      ],
       ...(agent.supportsManualCompaction === true
         ? { supportsManualCompaction: true }
         : {}),

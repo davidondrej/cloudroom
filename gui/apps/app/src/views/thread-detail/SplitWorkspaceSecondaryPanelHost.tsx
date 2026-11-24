@@ -24,25 +24,25 @@ import {
   useAppCommandHandler,
   useAppCommandShortcut,
 } from "@/components/commands/AppCommandProvider";
-import { secondaryPanelWidthPercentAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
+import { secondaryPanelWidthPercentAtom } from "@/components/right-panel/store/panel-prefs";
 import {
   THREAD_SECONDARY_PANEL_MAX_SIZE_PERCENT,
   THREAD_SECONDARY_PANEL_MIN_SIZE_PERCENT,
-} from "@/components/secondary-panel/secondaryPanelSizing";
+} from "@/components/right-panel/shell/panel-tokens";
 import {
   SecondaryPanelHostLayoutContext,
   type SecondaryPanelHostLayout,
-} from "@/components/secondary-panel/SecondaryPanelHostLayoutContext";
-import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/secondary-panel/panelToggleControlState";
+} from "@/components/right-panel/shell/panel-tokens";
+import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/right-panel/shell/panel-tokens";
 import {
   getPanelCollapseTransitionStyle,
   PANEL_COLLAPSE_TRANSITION_CLASS,
   PANEL_RESIZE_HANDLE_LAYER_CLASS,
   PANEL_RESIZE_HIT_TARGET_CLASS,
-} from "@/components/secondary-panel/panelTransitionTokens";
-import { MACOS_APP_REGION_NO_DRAG_CLASS } from "@/lib/bb-desktop";
+} from "@/components/right-panel/shell/panel-tokens";
+import { MACOS_APP_REGION_NO_DRAG_CLASS } from "@/lib/room-desktop";
 import { PluginComposerHostProvider } from "@/components/plugin/plugin-composer-host";
-import { usePanelResizeSnap } from "@/components/secondary-panel/usePanelResizeSnap";
+import { usePanelResizeSnap } from "@/components/right-panel/shell/panel-resize";
 import {
   type PaneSecondaryPanelRegistry,
   usePaneSecondaryPanelModel,

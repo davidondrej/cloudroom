@@ -21,7 +21,11 @@ import type {
   SystemInstallCliSkillsRequest,
   SystemInstallCliSkillsResponse,
   SystemProviderStatesResponse,
-  SystemProvidersQuery,
+  SystemProviderStatesQuery,
+  SystemSkillUsageQuery,
+  SystemSkillUsageResponse,
+  SystemUsageAnalyticsQuery,
+  SystemUsageAnalyticsResponse,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
@@ -36,6 +40,7 @@ import {
   signalRequestArgs,
   type CreateSdkAreaArgs,
 } from "./common.js";
+import type { SdkRequestInit } from "../response.js";
 
 export interface SystemAttentionArgs {
   signal?: AbortSignal;
@@ -58,9 +63,20 @@ export interface SystemVersionArgs {
   signal?: AbortSignal;
 }
 
+// The server's worst case: two attempts of up to 3 minutes each, then the 110 s website backup (#1338).
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 8 * 60_000;
+
 export interface SystemVoiceTranscriptionArgs {
   file: Blob;
   prompt?: string;
+  signal?: AbortSignal;
+}
+
+export interface SystemSkillUsageArgs extends SystemSkillUsageQuery {
+  signal?: AbortSignal;
+}
+
+export interface SystemUsageAnalyticsArgs extends SystemUsageAnalyticsQuery {
   signal?: AbortSignal;
 }
 
@@ -86,7 +102,7 @@ export type SystemUpdateGeneralSettingsResult = AppSettings & {
 };
 export type SystemUpdateKeyboardSettingsResult = AppKeybindingOverrides;
 export type SystemUsageLimitsResult = ProviderUsageResponse;
-export interface SystemProviderStatesArgs extends SystemProvidersQuery {
+export interface SystemProviderStatesArgs extends SystemProviderStatesQuery {
   signal?: AbortSignal;
 }
 export type SystemProviderStatesResult = SystemProviderStatesResponse;
@@ -134,6 +150,10 @@ export interface SystemArea {
     args: SystemInstallCliSkillsArgs,
   ): Promise<SystemInstallCliSkillsResult>;
   reloadConfig(): Promise<SystemReloadConfigResult>;
+  skillUsage(args?: SystemSkillUsageArgs): Promise<SystemSkillUsageResponse>;
+  usageAnalytics(
+    args: SystemUsageAnalyticsArgs,
+  ): Promise<SystemUsageAnalyticsResponse>;
   worktreeStorage(
     args?: SystemWorktreeStorageArgs,
   ): Promise<SystemWorktreeStorageResponse>;
@@ -245,6 +265,22 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
     async reloadConfig() {
       return transport.readJson(transport.api.v1.system.config.reload.$post());
     },
+    async skillUsage({ signal, ...query } = {}) {
+      return transport.readJson(
+        transport.api.v1.system["skill-usage"].$get(
+          { query },
+          ...signalRequestArgs(signal),
+        ),
+      );
+    },
+    async usageAnalytics({ signal, ...query }) {
+      return transport.readJson(
+        transport.api.v1.system["usage-analytics"].$get(
+          { query },
+          ...signalRequestArgs(signal),
+        ),
+      );
+    },
     async worktreeStorage(input = {}) {
       return transport.readJson(
         transport.api.v1.system["worktree-storage"].$get(
@@ -261,12 +297,14 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
       form.set("file", input.file);
       if (input.prompt !== undefined) form.set("prompt", input.prompt);
       const baseUrl = transport.baseUrl.replace(/\/$/u, "");
+      const init: SdkRequestInit = {
+        method: "POST",
+        body: form,
+        signal: input.signal,
+        timeoutMs: VOICE_TRANSCRIPTION_TIMEOUT_MS,
+      };
       const response = await transport.resolve(
-        transport.fetch(`${baseUrl}/api/v1/system/voice-transcription`, {
-          method: "POST",
-          body: form,
-          signal: input.signal,
-        }),
+        transport.fetch(`${baseUrl}/api/v1/system/voice-transcription`, init),
       );
       return systemVoiceTranscriptionResponseSchema.parse(
         await response.json(),
@@ -294,6 +332,7 @@ export function createSystemArea(args: CreateSdkAreaArgs): SystemArea {
             query: {
               environmentId: input.environmentId,
               hostId: input.hostId,
+              providerId: input.providerId,
             },
           },
           ...signalRequestArgs(input.signal),

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { describe, expect, it } from "vitest";
 import {
   ensurePersonalProject,
+  getEnvironment,
   getThread,
   listPublicProjects,
   openSession,
@@ -450,24 +451,62 @@ describe("public project local host routes", () => {
         gitRemoteUrl: "ssh://git.example.test/project-sources.git",
       });
 
-      const updateSourceResponse = await harness.app.request(
-        `/api/v1/projects/${project.id}/sources/${defaultSourceId}`,
-        {
-          method: "PATCH",
-          headers: {
-            "content-type": "application/json",
+      // Threads follow a renamed folder, but not a switch to another one (#1842).
+      const checkout = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/project-sources",
+        environmentProviderId: "project-checkout",
+      });
+      const patchSourcePath = async (
+        path: string,
+        existence: Record<string, boolean>,
+      ) => {
+        const response = harness.app.request(
+          `/api/v1/projects/${project.id}/sources/${defaultSourceId}`,
+          {
+            method: "PATCH",
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({ type: "local_path", path }),
           },
-          body: JSON.stringify({
-            type: "local_path",
-            path: "/tmp/project-sources-renamed",
-          }),
-        },
+        );
+        await reportQueuedCommandSuccess(
+          harness,
+          await waitForQueuedCommand(
+            harness,
+            ({ command }) =>
+              command.type === "host.paths_exist" &&
+              command.paths.includes(path),
+          ),
+          { existence },
+        );
+        return response;
+      };
+      const updateSourceResponse = await patchSourcePath(
+        "/tmp/project-sources-renamed",
+        { "/tmp/project-sources": false, "/tmp/project-sources-renamed": true },
       );
       expect(updateSourceResponse.status).toBe(200);
+      expect(getEnvironment(harness.db, checkout.id)?.path).toBe(
+        "/tmp/project-sources-renamed",
+      );
       await expect(readJson(updateSourceResponse)).resolves.toMatchObject({
         id: defaultSourceId,
         path: "/tmp/project-sources-renamed",
       });
+      const otherCloneResponse = await patchSourcePath(
+        "/tmp/project-sources-other",
+        {
+          "/tmp/project-sources-renamed": true,
+          "/tmp/project-sources-other": true,
+        },
+      );
+      expect(otherCloneResponse.status).toBe(200);
+      expect(getEnvironment(harness.db, checkout.id)?.path).toBe(
+        "/tmp/project-sources-renamed",
+      );
 
       const deleteSourceResponse = await harness.app.request(
         `/api/v1/projects/${project.id}/sources/${defaultSourceId}`,
