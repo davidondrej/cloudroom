@@ -19,6 +19,10 @@ export const CLOUD_HARNESSES = { codex: "codex", pi: "pi", "claude-code": "claud
 export type CloudProvider = keyof typeof CLOUD_HARNESSES;
 export const isCloudProvider = (id: string | undefined): id is CloudProvider => id !== undefined && Object.hasOwn(CLOUD_HARNESSES, id);
 export const HARNESS_NAMES: Record<CloudProvider, string> = { codex: "Codex", pi: "Pi", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-fx": "fx", "acp-opencode": "opencode", "acp-hermes-agent": "Hermes Agent", "acp-devin": "Devin", "acp-droid": "Droid", "acp-kimi": "Kimi Code", "acp-antigravity": "Antigravity", "acp-openclaw": "OpenClaw", "acp-agent-zero": "Agent Zero" };
+/** The app's ID for a Cloud agent named by its app ID or Core's name: a child the website starts carries Core's
+ *  (`antigravity` for `acp-antigravity`). */
+export const cloudProviderId = (name: string | null | undefined): CloudProvider | undefined =>
+  !name ? undefined : isCloudProvider(name) ? name : (Object.keys(CLOUD_HARNESSES) as CloudProvider[]).find((id) => CLOUD_HARNESSES[id] === name);
 export const isAcpProvider = (id: string | undefined): id is Extract<CloudProvider, `acp-${string}`> => isCloudProvider(id) && id.startsWith("acp-");
 const FINISHED = ["completed", "failed", "interrupted", "unknown", "unknown_after_restart"];
 /** A message that failed or was cancelled may never have reached the agent. If it carried the custom instructions, the next one must. */

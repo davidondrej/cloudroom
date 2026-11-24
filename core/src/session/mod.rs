@@ -181,6 +181,10 @@ pub struct Session {
     // Never trimmed, since a child can report long after its start.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub started: std::collections::BTreeSet<String>,
+    // Each of those children's agent, `harness` and `model`, from the website's answer to its start (`own_child`), so
+    // `thread list` names it after its start is forgotten.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_agents: BTreeMap<String, Value>,
     /// The session's latest title, its start's or a `title` record's, for `GET /v1/sessions` (#237).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,

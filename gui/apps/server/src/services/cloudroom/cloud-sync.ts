@@ -13,7 +13,7 @@ import type { AppDeps } from "../../types.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { ELSEWHERE, type CloudThreadStates } from "./cloud-threads.js";
-import { isCloudProvider } from "./events.js";
+import { cloudProviderId } from "./events.js";
 import { cloudRepository } from "./project-copy.js";
 import { SANDBOX_PREFIX, type SandboxDirectory, type ThreadChange } from "./sandboxes.js";
 import { binding, bindings, commands, coreInUse, saveBinding } from "./store.js";
@@ -350,7 +350,8 @@ export class CloudSync {
       saveBinding(this.deps.db, thread.id, { sessionId: row.session, startRequestId: row.session.replace(/^cr_/, ""), cursor: 0, nativeId: null, turnId: null, error: null });
       this.host.threadStates.set(thread.id, { home: null, from: null, ...known, session: row.session, actFrom: null, before: [saved.sessionId, ...known?.before ?? []].filter((id): id is string => Boolean(id)).slice(0, 5) });
     }
-    if (row.harness && isCloudProvider(row.harness) && row.harness !== thread.providerId) updateThread(this.deps.db, buffer, thread.id, { providerId: row.harness });
+    const harness = cloudProviderId(row.harness);
+    if (harness && harness !== thread.providerId) updateThread(this.deps.db, buffer, thread.id, { providerId: harness });
     // A model picked here (changeModel) wins over the row until Core and the website have it; a new session always wins.
     const pickedHere = () => unsent.includes("model") || commands(this.deps.db, thread.id).some((item) => item.command === "model" && item.state === "sending");
     if (row.model && row.model !== saved.model && (row.session !== saved.sessionId || !pickedHere())) saveBinding(this.deps.db, thread.id, { model: row.model });
@@ -417,7 +418,8 @@ export class CloudSync {
       this.skipped.add(row.thread);
       this.deps.logger?.warn({ threadId: row.thread, projectId: row.project, error: why }, "A launched Cloud thread isn't shown here");
     };
-    if (!row.harness || !isCloudProvider(row.harness) || !row.model) return skip("it names no agent or model");
+    const providerId = cloudProviderId(row.harness);
+    if (!providerId || !row.model) return skip("it names no agent or model");
     if (state.deletedProjects.includes(row.project)) return;
     if (this.deps.db.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, row.session)).get()) return;
     const parent = this.parentOf(row);
@@ -426,7 +428,7 @@ export class CloudSync {
     if (!projectId) return skip("its project isn't on this computer");
     const adopted = this.deps.db.transaction((tx) => {
       if (getThread(tx, row.thread)) return null;
-      const thread = createThread(tx, buffer, { id: row.thread, executionTarget: "cloud", projectId, providerId: row.harness!, ...(parent ? { parentThreadId: parent } : {}), title: row.title, titleFallback: row.loop ? "Loop run" : null, status: "idle", createdAt: Date.parse(row.created_at), latestAttentionAt: Date.parse(row.updated_at) });
+      const thread = createThread(tx, buffer, { id: row.thread, executionTarget: "cloud", projectId, providerId, ...(parent ? { parentThreadId: parent } : {}), title: row.title, titleFallback: row.loop ? "Loop run" : null, status: "idle", createdAt: Date.parse(row.created_at), latestAttentionAt: Date.parse(row.updated_at) });
       tx.insert(cloudroomThreads).values({ threadId: row.thread, coreUrl: SANDBOX_PREFIX + row.thread, sessionId: row.session, startRequestId: row.session.replace(/^cr_/, ""), model: row.model!, reasoning: row.reasoning ?? "medium" }).run();
       return thread;
     });

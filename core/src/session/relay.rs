@@ -20,7 +20,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -649,7 +649,7 @@ pub(super) async fn own_children(
 ) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
-    let (shared, known, mine, others, archiving) = {
+    let (shared, known, mine, others, archiving, agents) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
         let since = crate::observability::now_ms().saturating_sub(ARCHIVING_MS);
@@ -670,6 +670,7 @@ pub(super) async fn own_children(
             session.map(|s| s.started.clone()).unwrap_or_default(),
             others,
             archiving,
+            session.map(agents).unwrap_or_default(),
         )
     };
     let Some(api) = m
@@ -720,6 +721,7 @@ pub(super) async fn own_children(
         }
         let status = super::children::status(state, false);
         let mut item = json!({"id":id,"threadId":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
+        describe(&mut item, child, agents.get(id));
         // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
         let refused = start_error(m, caller, id).filter(|_| state == "error");
         let why = waiting_start(m, caller, id).filter(|_| state == "starting");
@@ -738,6 +740,7 @@ pub(super) async fn own_children(
         let archived = known.get(&id).is_some_and(|s| s == "archived");
         if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
             let mut item = json!({"id":id,"threadId":id,"title":null,"state":"starting","status":"active","sandbox":"own"});
+            describe(&mut item, &Value::Null, agents.get(&id));
             // Not linked yet: the website hasn't made its sandbox (#1957).
             if let Some(why) = waiting_start(m, caller, &id) {
                 item["issue"] = json!(why);
@@ -745,6 +748,30 @@ pub(super) async fn own_children(
             list.push(item);
         }
     }
+}
+
+/// Each child's agent, from the website's answer to its start, else the start this session still keeps.
+fn agents(session: &Session) -> HashMap<String, Value> {
+    let starts = session.child_starts.values();
+    let mut agents: HashMap<String, Value> = starts
+        .filter_map(|s| Some((s.child.clone()?, s.body.clone())))
+        .filter(|(_, body)| !body.is_null())
+        .collect();
+    agents.extend(session.child_agents.clone());
+    agents
+}
+
+/// Fills a child's `harness`, `model` and `busy`, as `thread list` shows them for children sharing the sandbox:
+/// the website's list, else `agent` (its start's).
+fn describe(item: &mut Value, listed: &Value, agent: Option<&Value>) {
+    for field in ["harness", "model"] {
+        let known = Some(&listed[field]).filter(|v| !v.is_null());
+        item[field] = known
+            .or(agent.map(|a| &a[field]))
+            .cloned()
+            .unwrap_or(Value::Null);
+    }
+    item["busy"] = json!(item["status"] == "active");
 }
 
 /// A child's state in `thread list`: its sandbox's, or what this thread last heard of it. `archiving`: this thread
@@ -1132,6 +1159,72 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `thread list` names the agent of a child in a sandbox of its own and says whether it works, as it does for a
+    /// child sharing the sandbox: from the start while it starts, then from the website's answer, after the start
+    /// itself is forgotten.
+    #[test]
+    fn an_own_sandbox_child_shows_its_agent_and_whether_it_works() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-own-agents-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let body = json!({"harness":"antigravity","model":"gemini-x","prompt":"go"});
+        local
+            .append(
+                "main",
+                "child_start",
+                json!({"request_id":"r1","body":body}),
+                None,
+            )
+            .unwrap();
+        local
+            .append(
+                "main",
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_kid"}),
+                None,
+            )
+            .unwrap();
+        let show = |local: &Local, status: &str| {
+            let mut item = json!({"id":"thr_kid","status":status});
+            describe(
+                &mut item,
+                &json!({"harness":null}),
+                agents(&local.sessions["main"]).get("thr_kid"),
+            );
+            item
+        };
+        let item = show(&local, "active");
+        assert_eq!(
+            (
+                item["harness"].as_str(),
+                item["model"].as_str(),
+                item["busy"].as_bool()
+            ),
+            (Some("antigravity"), Some("gemini-x"), Some(true))
+        );
+        let answer = json!({"id":"thr_kid","started":true,"session":"cr_kid","harness":"antigravity","model":"gemini-x"});
+        local.append("main", "own_child", answer, None).unwrap();
+        local
+            .append(
+                "main",
+                "child_start_state",
+                json!({"request_id":"r1","child":"thr_kid","done":true}),
+                None,
+            )
+            .unwrap();
+        assert!(local.sessions["main"].child_starts["r1"].body.is_null());
+        let item = show(&local, "idle");
+        assert_eq!(
+            (
+                item["harness"].as_str(),
+                item["model"].as_str(),
+                item["busy"].as_bool()
+            ),
+            (Some("antigravity"), Some("gemini-x"), Some(false))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_relayed_message_names_its_sender_with_or_without_bb() {

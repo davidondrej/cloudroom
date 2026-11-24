@@ -892,6 +892,13 @@ impl Local {
                     }
                 }
             }
+            "own_child" => {
+                if let Some(child) = record.data["id"].as_str() {
+                    let agent =
+                        json!({"harness":record.data["harness"],"model":record.data["model"]});
+                    session.child_agents.insert(child.to_owned(), agent);
+                }
+            }
             "child_reply" => {
                 if let (Some(request), Some(text)) = (
                     record.data["request_id"].as_str(),
