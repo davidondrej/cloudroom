@@ -226,7 +226,9 @@ export async function probeRoomServer(
 const MAX_AWAKE_POLL_GAP_MS = 10_000;
 
 // Allow each probe enough time for the server's same-user caller check on busy machines.
-const PROBE_REQUEST_TIMEOUT_MS = 5_000;
+// Keep two probes (/health and /api/v1/system/config) plus the poll interval under
+// MAX_AWAKE_POLL_GAP_MS so createAwakeTimeout does not treat a hung probe as sleep.
+const PROBE_REQUEST_TIMEOUT_MS = 4_000;
 
 function createAwakeTimeout(timeoutMs: number): () => boolean {
   let awakeMs = 0;
