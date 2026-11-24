@@ -33,7 +33,7 @@ room-cli thread stop --self
 room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
 room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--pin] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
 room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
-room-cli thread list [--include-archived]
+room-cli thread list [--include-archived] [--include-hidden]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
 room-cli thread log CHILD_ID
@@ -41,7 +41,7 @@ room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one. `thread list --include-hidden` changes nothing here: it lists every child of this thread already.";
 /// `room-cli thread` commands only the app on the user's computer has.
 const LOCAL_ONLY: [&str; 26] = [
     "count",
@@ -990,6 +990,15 @@ async fn output(
     Query(query): Query<OutputQuery>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread output")?;
+    output_for(&m, &parent, &id, query.all).await
+}
+
+async fn output_for(
+    m: &Manager,
+    parent: &str,
+    id: &str,
+    all: bool,
+) -> Result<Json<Value>, Failure> {
     if id.starts_with("thr_") {
         // A child in its own sandbox: its saved chat, through the website, which checks this thread started it (ADR 0256).
         let Some(api) = &m.history.api else {
@@ -997,14 +1006,15 @@ async fn output(
                 json!({"id":id,"note":"This child runs in its own sandbox. Its replies arrive as messages when its turns end."}),
             ));
         };
-        let all = if query.all { "1" } else { "0" };
-        let failed = start_error(&m, &parent, &id);
-        return match api.get("chat", &[("thread", &id), ("all", all)]).await {
+        let all = if all { "1" } else { "0" };
+        let failed = start_error(m, parent, id);
+        let known = relay::started_here(m, parent, id);
+        return match api.get("chat", &[("thread", id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
-                if starting(&m, &parent, true).contains(&id) =>
+                if starting(m, parent, true).iter().any(|c| c == id) =>
             {
-                let why = relay::waiting_start(&m, &parent, &id).map(|why| format!("{why} "));
+                let why = relay::waiting_start(m, parent, id).map(|why| format!("{why} "));
                 let why = why.unwrap_or_default();
                 let note = format!(
                     "Its sandbox is still starting. {why}Its replies arrive as messages when its turns end."
@@ -1014,6 +1024,10 @@ async fn output(
             // Its start was refused: no chat, or only what came before. The same story as `thread list` (#1058).
             Err(super::history::ApiError::Status(404, _)) if failed.is_some() => {
                 Ok(json!({"id":id}))
+            }
+            // The website forgot the link to a child this thread started (#149): what Core knows of it, not an error.
+            Err(super::history::ApiError::Status(403 | 404, _)) if known.is_some() => {
+                Ok(json!({"id":id,"state":known,"note":relay::UNLINKED}))
             }
             answer => answer,
         }
@@ -1033,10 +1047,10 @@ async fn output(
         })
         .map_err(|error| website_failure(error, "read the child's chat"));
     }
-    m.own_child(&parent, &id).map_err(session_failure)?;
-    let mut answer = m.children(&parent, Some(&id), true).await["children"][0].clone();
+    m.own_child(parent, id).map_err(session_failure)?;
+    let mut answer = m.children(parent, Some(id), true).await["children"][0].clone();
     // Core keeps only the latest reply of a child in this sandbox, so `thread log` and `--all` say so.
-    if query.all && answer.is_object() {
+    if all && answer.is_object() {
         answer["note"] =
             json!("A child in this sandbox keeps only its latest reply, not its whole chat.");
     }
@@ -1635,10 +1649,12 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
         "fork" => return fork_cli(rest).await,
         "list" => {
             // It lists only this thread's children, so a filter like --project is refused: an ignored one made an
-            // empty list read as "the project has no open threads".
-            if let Some(word) = unknown_word(rest, &[], &["--include-archived"]) {
+            // empty list read as "the project has no open threads". --include-hidden, which Local scripts pass,
+            // changes nothing here: every child of this thread shows (#149).
+            if let Some(word) = unknown_word(rest, &[], &["--include-archived", "--include-hidden"])
+            {
                 eprintln!(
-                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived. In a loop, past runs are in the Loop notes in your prompt."
+                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived (and --include-hidden, which changes nothing here). In a loop, past runs are in the Loop notes in your prompt."
                 );
                 return Ok(2);
             }
@@ -1700,7 +1716,10 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     if let Some(list) = list.filter(|list| !list["note"].is_string()) {
                         let active = |id: &str| {
                             let mut children = list["children"].as_array().into_iter().flatten();
-                            children.any(|c| c["id"] == id && c["status"] == "active")
+                            // One the website forgot is only what this thread last heard (#149): it has the last word.
+                            children.any(|c| {
+                                c["id"] == id && c["status"] == "active" && c["unlinked"] != true
+                            })
                         };
                         ids.retain(|id| {
                             let stopped = id.starts_with("thr_") && !active(id);
@@ -1945,8 +1964,8 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain, session_id};
-    use serde_json::json;
+    use super::*;
+    use crate::session::Local;
 
     // #2271: `thread show`'s moved-child check puts the ID in a request path, so only a whole session ID gets there.
     #[test]
@@ -2045,6 +2064,92 @@ mod tests {
             let children = answer["children"].as_array().unwrap();
             let shown: Vec<bool> = children.iter().map(|c| c["waited"] == true).collect();
             assert_eq!((children.len(), &shown[..]), (3, marked));
+        }
+    }
+
+    // #149: `thread output` falls back to what Core last heard on 403/404 only for a child this thread started;
+    // any other target (including one known only through `child_states`) keeps the website's refusal.
+    #[tokio::test]
+    async fn thread_output_falls_back_only_for_started_children_on_403_and_404() {
+        for status in [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            let app = Router::new().route(
+                "/api/core/chat",
+                get(move || async move {
+                    (
+                        status,
+                        Json(json!({"error":"Not a subagent of this thread"})),
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api_url = format!("http://{}/api/core", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = std::env::temp_dir().join(format!(
+                "cloudroom-output-{}-{}",
+                status.as_u16(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut local = Local::open(&dir).unwrap();
+            for (kind, data) in [
+                (
+                    "child_start",
+                    json!({"request_id":"r1","body":{"prompt":"go"}}),
+                ),
+                (
+                    "child_start_state",
+                    json!({"request_id":"r1","child":"thr_kid","done":true}),
+                ),
+                ("child_state", json!({"child":"thr_kid","state":"idle"})),
+                (
+                    "child_state",
+                    json!({"child":"thr_known","state":"running"}),
+                ),
+            ] {
+                local.append("cr_parent", kind, data, None).unwrap();
+            }
+            drop(local);
+            let config = crate::config::Config {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                token: "t".repeat(32),
+                state_dir: dir.clone(),
+                repository: dir.clone(),
+                api_url: Some(api_url),
+                store: "test".into(),
+                instance: None,
+                account_home: dir.clone(),
+                default_harness: crate::runtime::Kind::Codex,
+                harnesses: [(
+                    crate::runtime::Kind::Codex,
+                    crate::config::HarnessConfig {
+                        binary: "/bin/false".into(),
+                        home: dir.clone(),
+                        model: "fixture".into(),
+                        provider: None,
+                    },
+                )]
+                .into(),
+                storage: None,
+                rpc_timeout: Duration::from_secs(30),
+                diagnostic_upload: Duration::from_secs(3600),
+                previous_exit_wait: Duration::ZERO,
+            };
+            let m = Manager::open(config).unwrap();
+            let kid = output_for(&m, "cr_parent", "thr_kid", false)
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(kid["id"], "thr_kid");
+            assert_eq!(kid["state"], "idle");
+            assert_eq!(kid["note"], relay::UNLINKED);
+            for target in ["thr_known", "thr_other"] {
+                let (err_status, _) = output_for(&m, "cr_parent", target, false)
+                    .await
+                    .expect_err(target);
+                assert_eq!(err_status, status, "{target}");
+            }
+            server.abort();
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 }

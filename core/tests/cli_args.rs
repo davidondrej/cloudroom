@@ -22,6 +22,18 @@ fn non_utf8_argument_is_a_clear_error() {
     assert!(!stderr.contains("panicked"), "{stderr}");
 }
 
+// Scripts written for Local threads pass `thread list --include-hidden`; Cloud refused it with exit 2 before
+// asking Core anything. Listing is read-only, so reaching a Core here changes nothing.
+#[test]
+fn cloud_thread_list_takes_include_hidden() {
+    let output = Command::new(env!("CARGO_BIN_EXE_cloudroom"))
+        .args(["thread", "list", "--include-hidden"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Unknown option"), "{stderr}");
+}
+
 // #1274: `kill` ended a pull at once, leaving its VM archive and its Mac temp folder with the whole archive.
 #[test]
 fn a_killed_pull_stops_its_mac_job_and_removes_its_temp_files() {
