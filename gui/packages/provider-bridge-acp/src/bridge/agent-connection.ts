@@ -1,14 +1,16 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import {
   experimental_recordProviderChildIo,
   isClosedPipeError,
   spawnPortableProcess,
+  terminateWindowsProcessTrees,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type { z } from "zod";
 import { ACP_PROTOCOL_VERSION, acpInitializeResultSchema } from "../wire.js";
 
 const STDERR_TAIL_MAX_CHUNKS = 40;
+const KILL_ESCALATION_MS = 4_000;
 
 export interface AcpAgentRequestResponder {
   result(value: unknown): void;
@@ -45,24 +47,28 @@ interface AcpAgentRequestArgs<TResult> {
 export interface AcpAgentConnection {
   request<TResult>(args: AcpAgentRequestArgs<TResult>): Promise<TResult>;
   notify(method: string, params: unknown): void;
-  kill(): void;
+  /** Stops the agent; settles once it has exited. */
+  /** `tree` also ends the agent's descendants on Windows, where SIGTERM reaches only the root. */
+  kill(options?: { tree?: boolean; descendants?: boolean }): Promise<void>;
   readonly exited: boolean;
 }
 
 export class AcpAgentExitedError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "AcpAgentExitedError";
   }
 }
 
 export class AcpAgentResponseError extends Error {
   readonly code: number | undefined;
+  readonly data: unknown;
 
-  constructor(message: string, code: number | undefined) {
+  constructor(message: string, code: number | undefined, data?: unknown) {
     super(message);
     this.name = "AcpAgentResponseError";
     this.code = code;
+    this.data = data;
   }
 }
 
@@ -90,6 +96,14 @@ export function formatAgentError(error: AgentErrorObject): string {
     error.message ?? `ACP agent returned error code ${error.code ?? "unknown"}`;
   const details = formatAgentErrorData(error.data);
   return details === undefined ? message : `${message}: ${details}`;
+}
+
+/** The HTTP status an agent put in its error's data (Grok: `http_status`), when it gave one. */
+export function agentErrorHttpStatus(data: unknown): number | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const fields = data as Record<string, unknown>;
+  const status = fields.http_status ?? fields.httpStatus ?? fields.status;
+  return typeof status === "number" && status >= 100 && status < 600 ? status : undefined;
 }
 
 function formatAgentErrorData(data: unknown): string | undefined {
@@ -158,6 +172,10 @@ export function createAcpAgentConnection(
   let nextRequestId = 1;
   let exited = false;
   let stopping = false;
+  const exit = new Promise<void>((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", () => resolve());
+  });
 
   function rejectAllPending(error: Error): void {
     for (const [, request] of pending) {
@@ -237,6 +255,7 @@ export function createAcpAgentConnection(
             new AcpAgentResponseError(
               formatAgentError(message.error),
               message.error.code,
+              message.error.data,
             ),
           );
         } else {
@@ -295,6 +314,8 @@ export function createAcpAgentConnection(
     rejectAllPending(
       new AcpAgentExitedError(
         `Failed to launch ACP agent "${options.command}": ${error.message}`,
+        // Keeps spawn's ENOENT, so a missing CLI reads as not installed.
+        { cause: error },
       ),
     );
     options.onExit({ code: null, signal: null, stderrTail: error.message });
@@ -358,9 +379,9 @@ export function createAcpAgentConnection(
       writeLine({ jsonrpc: "2.0", method, params });
     },
 
-    kill() {
+    kill(killOptions) {
       if (stopping || exited) {
-        return;
+        return exit;
       }
       stopping = true;
       rejectAllPending(
@@ -368,9 +389,54 @@ export function createAcpAgentConnection(
           `ACP agent "${options.command}" is not running`,
         ),
       );
-      child.kill("SIGTERM");
+      // An agent slow to exit (omp's teardown) is killed, so stopped threads
+      // leave no agents behind (#607).
+      const escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+      }, KILL_ESCALATION_MS);
+      escalation.unref();
+      void exit.then(() => clearTimeout(escalation));
+      if (killOptions?.descendants && process.platform !== "win32" && child.pid) {
+        killDescendants(child.pid);
+      }
+      if (killOptions?.tree && process.platform === "win32" && child.pid) {
+        void terminateWindowsProcessTrees([child.pid]);
+      } else {
+        child.kill("SIGTERM");
+      }
+      return exit;
     },
   };
+}
+
+/** Kills every process `pid` started, found through `ps` before any dies: an agent's shells may run in process
+ *  groups of their own (Agent Zero's), which a signal to the agent never reaches. */
+function killDescendants(pid: number): void {
+  let table: string;
+  try {
+    table = execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    return;
+  }
+  const children = new Map<number, number[]>();
+  for (const line of table.split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (child && parent) children.set(parent, [...(children.get(parent) ?? []), child]);
+  }
+  for (const stack = [pid], seen = new Set(stack); stack.length > 0; ) {
+    for (const child of children.get(stack.pop()!) ?? []) {
+      if (seen.has(child)) continue;
+      seen.add(child);
+      stack.push(child);
+      try {
+        process.kill(child, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }
 }
 
 function acpClientCapabilities(

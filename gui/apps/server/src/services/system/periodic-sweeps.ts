@@ -57,6 +57,7 @@ import {
 } from "../threads/queued-message-dispatch.js";
 import { deliverLegacyDeferredThreadMessages } from "../threads/legacy-deferred-messages.js";
 import { runEventLoopWork, runEventLoopWorkSync } from "./event-loop-work.js";
+import { runLeftoverStreamPiecePruneSweep } from "./event-pruning.js";
 
 type DatabaseMaintenanceSweepDeps = Pick<AppDeps, "db" | "logger">;
 
@@ -525,6 +526,12 @@ const PERIODIC_SWEEP_JOBS: PeriodicSweepJob[] = [
     category: "retention",
     name: "retained-event-output-expiry",
     run: runRetainedEventOutputExpirySweep,
+  },
+  {
+    cadenceMs: 0,
+    category: "retention",
+    name: "leftover-stream-piece-prune",
+    run: runLeftoverStreamPiecePruneSweep,
   },
   {
     cadenceMs: 0,

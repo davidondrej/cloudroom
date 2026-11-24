@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type {
-  UpdateCheckResult,
-  UpdateDownloadedEvent,
-  UpdateInfo,
+import {
+  AppImageUpdater,
+  type UpdateCheckResult,
+  type UpdateDownloadedEvent,
+  type UpdateInfo,
 } from "electron-updater";
 import {
   createDesktopAutoUpdateService,
+  createElectronAutoUpdaterAdapter,
   shouldEnableDesktopAutoUpdate,
   type DesktopAutoUpdateAvailableHandler,
   type DesktopAutoUpdateDownloadedHandler,
@@ -581,6 +583,31 @@ describe("desktop auto-update service", () => {
     expect(updater.checkForUpdatesCalls).toBe(0);
     expect(updater.autoDownload).toBeNull();
   });
+
+  // Also breaks if an electron-updater upgrade renames spawnLog, which starts the new AppImage.
+  it.runIf(process.platform === "linux")(
+    "starts the new AppImage through the fd cleanup, so old mounts unmount (#2155)",
+    async () => {
+      const updater = Object.create(
+        AppImageUpdater.prototype,
+      ) as AppImageUpdater;
+      const spawned: unknown[][] = [];
+      expect(typeof Reflect.get(updater, "spawnLog")).toBe("function");
+      Reflect.set(updater, "spawnLog", async (...args: unknown[]) =>
+        spawned.push(args),
+      );
+      createElectronAutoUpdaterAdapter(
+        updater,
+        { on: () => undefined },
+        { exit: () => undefined, releaseSingleInstanceLock: () => undefined },
+      );
+      await Reflect.get(updater, "spawnLog")("/apps/Cloudroom.AppImage", [], {
+        PATH: "/usr/bin",
+      });
+      expect(spawned[0]?.[0]).toBe("/bin/bash");
+      expect(spawned[0]?.[1]).toContain("/apps/Cloudroom.AppImage");
+    },
+  );
 
   it("allows the dev-mode auto-update override", () => {
     expect(

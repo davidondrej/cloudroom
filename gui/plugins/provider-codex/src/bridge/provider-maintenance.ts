@@ -14,12 +14,13 @@ import {
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
   experimental_npmCommand as npmCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
   experimental_npmLatestVersion as npmLatestVersion,
+  experimental_probeCliVersion as probeCliVersion,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
-  experimental_readCliVersion as readCliVersion,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -43,6 +44,23 @@ const CODEX_OFFICIAL_INSTALL =
 // PowerShell installer needs neither. PowerShell gets it as one argument, never through cmd.exe.
 const CODEX_WINDOWS_INSTALL =
   "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex";
+// install.ps1 rewrites the user Path as REG_SZ, which expands entries like %NVM_HOME% for good,
+// and has no flag to skip that. So save the raw Path and its kind, run the installer in its own
+// PowerShell (it can `exit`), write Path back as it was, add only Codex's bin folder, and
+// broadcast the change so new terminals see it.
+const CODEX_WINDOWS_INSTALL_KEEPING_PATH = [
+  "$k = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')",
+  "$p = $k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')",
+  "$t = if ($null -eq $p) { 'ExpandString' } else { $k.GetValueKind('Path') }",
+  `& (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command '${CODEX_WINDOWS_INSTALL.replaceAll("'", "''")}'`,
+  "$c = $LASTEXITCODE",
+  "$b = Join-Path $env:LOCALAPPDATA 'Programs\\OpenAI\\Codex\\bin'",
+  "$e = if ($t -eq 'ExpandString') { [char]37 + 'LOCALAPPDATA' + [char]37 + '\\Programs\\OpenAI\\Codex\\bin' } else { $b }",
+  "if ((Test-Path (Join-Path $b 'codex.exe')) -and ([Environment]::ExpandEnvironmentVariables([string]$p).Split(';') -notcontains $b)) { $p = (@($p, $e) | Where-Object { $_ }) -join ';' }",
+  "if ($null -eq $p) { $k.DeleteValue('Path', $false) } else { $k.SetValue('Path', $p, $t) }",
+  "[Environment]::SetEnvironmentVariable('CLOUDROOM_PATH_REFRESH', $null, 'User')",
+  "exit $c",
+].join("; ");
 
 /** OpenAI's own installer, run when npm can't install or update Codex. */
 function codexOfficialInstaller(): ProviderInstallationCommand {
@@ -55,7 +73,7 @@ function codexOfficialInstaller(): ProviderInstallationCommand {
           "-ExecutionPolicy",
           "Bypass",
           "-Command",
-          CODEX_WINDOWS_INSTALL,
+          CODEX_WINDOWS_INSTALL_KEEPING_PATH,
         ],
         displayCommand: CODEX_WINDOWS_INSTALL,
       }
@@ -134,6 +152,57 @@ function codexUpdateCommand(
   };
 }
 
+async function releaseVersion(
+  url: string,
+  field: "version" | "tag_name",
+): Promise<string | null> {
+  try {
+    const signal = AbortSignal.timeout(5_000);
+    const response = await fetchWithProxyFallback((init) =>
+      fetch(url, { ...init, signal }),
+    );
+    if (!response.ok) return null;
+    const metadata = z
+      .record(z.string(), z.unknown())
+      .parse(await response.json());
+    const version = metadata[field];
+    return typeof version === "string" ? versionFrom(version) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function latestCodexVersion(
+  executable: string | null,
+): Promise<string | null> {
+  const resolved =
+    executable && (await realpath(executable).catch(() => executable));
+  const path = resolved?.replaceAll("\\", "/") ?? "";
+  if (path.includes("/Caskroom/codex/")) {
+    return releaseVersion(
+      "https://formulae.brew.sh/api/cask/codex.json",
+      "version",
+    );
+  }
+  if (!/\/packages\/standalone\/(?:current|releases)\//iu.test(path)) {
+    return npmLatestVersion(CODEX_NPM_PACKAGE);
+  }
+  // The standalone installer reads OpenAI's channel first and falls back to GitHub.
+  const preferOpenAI =
+    process.env.CODEX_INSTALLER_USE_RELEASES_OPENAI_COM?.trim() || "true";
+  if (/^(1|true|yes)$/iu.test(preferOpenAI)) {
+    const latest = await releaseVersion(
+      "https://releases.openai.com/codex/channels/latest",
+      "tag_name",
+    );
+    if (latest !== null) return latest;
+  }
+  return releaseVersion(
+    "https://api.github.com/repos/openai/codex/releases/latest",
+    "tag_name",
+  );
+}
+
 export async function getCodexProviderInstallationStatus(
   requirement?: "thread_rewind",
 ): Promise<ProviderInstallationStatus> {
@@ -144,10 +213,18 @@ export async function getCodexProviderInstallationStatus(
   const executable = findCliExecutable("codex");
   const [versionOutput, latestVersion, npmGlobal] = await Promise.all([
     executable === null ? null : commandOutput(executable, ["--version"]),
-    npmLatestVersion(CODEX_NPM_PACKAGE),
+    latestCodexVersion(executable),
     probeNpmGlobalPackage(CODEX_NPM_PACKAGE),
   ]);
-  const installed = executable !== null;
+  // A launcher that can't find its native binary can't run anything, so it
+  // counts as not installed and gets the install action (a reinstall).
+  const broken =
+    executable !== null &&
+    versionOutput === null &&
+    codexBrokenInstallHint(
+      (await probeCliVersion(executable)).failedOutput ?? "",
+    ) !== null;
+  const installed = executable !== null && !broken;
   const currentVersion = versionFrom(versionOutput);
   const needsUpdate =
     installed &&
@@ -223,17 +300,17 @@ function buildCodexProviderInstallationRun(
   npmPrefix: string | null = null,
 ): ProviderInstallationRunResult {
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Codex ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Codex", action, status);
   }
   return {
     available: true,
     command:
       action === "update" && status.executablePath !== null
         ? codexUpdateCommand(status.executablePath, npmPrefix)
-        : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
+        : action === "install" && npmPrefix !== null
+          ? // Reinstall a broken npm Codex into the prefix that owns it.
+            codexUpdateCommand("codex", npmPrefix)
+          : npmGlobalInstallCommand(CODEX_NPM_PACKAGE),
     verification: installationVerification(status, action),
     fallback: codexOfficialInstaller(),
   };
@@ -279,12 +356,30 @@ function healthResult(
   };
 }
 
+// The npm launcher ran, but its native binary is missing or can't run (#907).
+const CODEX_BROKEN_INSTALL_PATTERN =
+  /Missing optional dependency @openai\/codex|execve failed with error code ENOENT|\bspawn \S+ ENOENT\b/u;
+
+/** Reinstall advice when Codex's output shows a broken install, else null. Prefers the launcher's own command. */
+export function codexBrokenInstallHint(output: string): string | null {
+  if (!CODEX_BROKEN_INSTALL_PATTERN.test(output)) return null;
+  const own = /Reinstall Codex: ([^\n]+)/u.exec(output)?.[1]?.trim();
+  return `Reinstall Codex: ${own || npmGlobalInstallCommand(CODEX_NPM_PACKAGE).displayCommand}`;
+}
+
 export async function getCodexProviderHealth(): Promise<ProviderHealthResult> {
   const command = findCliExecutable("codex");
   if (command === null) {
     return healthResult("not_installed");
   }
-  const version = await readCliVersion(command);
+  // A timeout or unclear failure gives no hint, so a slow install still looks ready.
+  const { version, failedOutput } = await probeCliVersion(command);
+  const brokenHint = codexBrokenInstallHint(failedOutput ?? "");
+  if (brokenHint !== null) {
+    return healthResult("unknown", {
+      statusMessage: `\`${command} --version\` failed: this Codex install is broken. ${brokenHint}`,
+    });
+  }
   if (
     version !== null &&
     compareVersions(version, CODEX_MINIMUM_SUPPORTED_VERSION) < 0
@@ -471,7 +566,19 @@ export async function getCodexProviderUsage(): Promise<ProviderUsageResult> {
     };
   }
   if (credentials.expired) {
-    return { supported: true, usage: { status: "expired" } };
+    // Codex renews an expired access token itself while a refresh token is saved; it would only 401 here.
+    return credentials.canRenew
+      ? {
+          supported: true,
+          usage: {
+            status: "error",
+            message:
+              "Codex renews its sign-in on its next reply. Usage shows after that.",
+            planLabel: null,
+            accountEmail: credentials.accountEmail,
+          },
+        }
+      : { supported: true, usage: { status: "expired" } };
   }
   try {
     const headers = new Headers({

@@ -22,18 +22,18 @@ function statusPayload() {
   return { name: TASKS_PLUGIN_NAME, version: TASKS_PLUGIN_VERSION };
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  bb.log.info(`${TASKS_PLUGIN_NAME} ${TASKS_PLUGIN_VERSION} loaded`);
+export default async function plugin(room: BbPluginApi) {
+  room.log.info(`${TASKS_PLUGIN_NAME} ${TASKS_PLUGIN_VERSION} loaded`);
 
-  const store = createStore(bb);
-  registerTasksApi(bb, store);
-  registerAttachments(bb, store.tasks);
-  registerTasksCli(bb, store, statusPayload());
-  registerDelegation(bb, store);
-  registerMentions(bb, store);
-  await registerLifecycle(bb, store);
+  const store = createStore(room);
+  registerTasksApi(room, store);
+  registerAttachments(room, store.tasks);
+  registerTasksCli(room, store, statusPayload());
+  registerDelegation(room, store);
+  registerMentions(room, store);
+  await registerLifecycle(room, store);
 
-  bb.rpc.register(tasksRpcContract, {
+  room.rpc.register(tasksRpcContract, {
     ping(): { ok: true; version: string } {
       return { ok: true, version: TASKS_PLUGIN_VERSION };
     },

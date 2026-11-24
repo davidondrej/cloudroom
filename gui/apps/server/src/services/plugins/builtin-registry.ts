@@ -8,6 +8,7 @@ export interface BundledPluginDefinition {
   autoInstall: boolean;
   defaultEnabled: boolean;
   alwaysEnabled?: boolean;
+  refuseMachineCli?: boolean;
   relayRefusedRpcs?: Readonly<Record<string, "machine" | "all">>;
 }
 
@@ -24,10 +25,23 @@ export const BUILTIN_PLUGINS_DIRECTORY_NAME = "builtin-plugins";
 
 const REPO_PLUGINS_DIRECTORY_NAME = "plugins";
 
-export const BUILTIN_PLUGINS = [
+/**
+ * Built-in plugins that changed id. On start, an install that still has the old
+ * id is moved to the new one, with its on/off state and settings.
+ */
+export const RENAMED_BUILTIN_PLUGINS = [
+  // No BB naming in the app (ADR 20261111-160828).
+  { from: "bb-guide", to: "cloudroom-guide", settingKeys: { bbCli: "roomCli" } },
+];
+
+// Computer use has no Windows driver, so Windows hides it (docs/scopes/windows.md).
+export const WINDOWS_HIDDEN_PLUGIN_NAMES: readonly string[] =
+  process.platform === "win32" ? ["computer-use"] : [];
+
+const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
   {
-    name: "bb-guide",
-    pluginId: "bb-guide",
+    name: "cloudroom-guide",
+    pluginId: "cloudroom-guide",
     defaultEnabled: true,
   },
   {
@@ -83,6 +97,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "plugin-api-tester",
     defaultEnabled: false,
   },
+  // RepoSync (docs/scopes/repo-sync.md): off until the user turns it on.
+  {
+    name: "repo-sync",
+    pluginId: "repo-sync",
+    defaultEnabled: false,
+  },
   {
     name: "inline-vis",
     pluginId: "inline-vis",
@@ -113,6 +133,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "provider-pi",
     defaultEnabled: true,
   },
+  // Off until the user turns it on (David, 2026-11-18, docs/scopes/cloudroom-agent.md).
+  {
+    name: "provider-cloudroom-agent",
+    pluginId: "provider-cloudroom-agent",
+    defaultEnabled: false,
+  },
   {
     name: "provider-usage",
     pluginId: "provider-usage",
@@ -123,9 +149,20 @@ export const BUILTIN_PLUGINS = [
     pluginId: "organization",
     defaultEnabled: false,
   },
+  // Shared projects (docs/scopes/shared-projects.md): on for everyone, so "Share project" is in every project's menu.
+  {
+    name: "shared-projects",
+    pluginId: "shared-projects",
+    defaultEnabled: true,
+  },
   {
     name: "time-in-cloudroom",
     pluginId: "time-in-cloudroom",
+    defaultEnabled: true,
+  },
+  {
+    name: "wallpaper",
+    pluginId: "wallpaper",
     defaultEnabled: true,
   },
   {
@@ -136,7 +173,7 @@ export const BUILTIN_PLUGINS = [
   {
     name: "computer-use",
     pluginId: "computer-use",
-    defaultEnabled: process.platform !== "win32",
+    defaultEnabled: true,
   },
   {
     name: "gpu",
@@ -164,6 +201,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "internet-watch",
+    pluginId: "internet-watch",
+    defaultEnabled: true,
+  },
+  {
     name: "push-notifications",
     pluginId: "push-notifications",
     defaultEnabled: true,
@@ -177,6 +219,13 @@ export const BUILTIN_PLUGINS = [
     name: "drafts",
     pluginId: "drafts",
     defaultEnabled: true,
+  },
+  {
+    name: "snippets",
+    pluginId: "snippets",
+    defaultEnabled: true,
+    relayRefusedRpcs: { view: "machine", run: "machine" },
+    refuseMachineCli: true,
   },
   {
     name: "scheduled-send",
@@ -193,30 +242,25 @@ export const BUILTIN_PLUGINS = [
     pluginId: "workflows",
     defaultEnabled: false,
   },
-].map((plugin): BundledPluginDefinition => ({
-  ...plugin,
-  autoInstall: true,
-}));
+  // Off while the team uses it internally (docs/scopes/director.md).
+  {
+    name: "director",
+    pluginId: "director",
+    defaultEnabled: false,
+  },
+];
+
+export const BUILTIN_PLUGINS = builtinDefinitions
+  .filter((plugin) => !WINDOWS_HIDDEN_PLUGIN_NAMES.includes(plugin.name))
+  .map((plugin): BundledPluginDefinition => ({
+    ...plugin,
+    autoInstall: true,
+  }));
 
 export const OFFICIAL_PLUGINS = [
   {
-    name: "environment-modal-sandbox",
-    pluginId: "environment-modal-sandbox",
-    defaultEnabled: true,
-  },
-  {
     name: "github",
     pluginId: "github",
-    defaultEnabled: true,
-  },
-  {
-    name: "docs",
-    pluginId: "simple-notes",
-    defaultEnabled: true,
-  },
-  {
-    name: "memory",
-    pluginId: "memory",
     defaultEnabled: true,
   },
   {
@@ -238,6 +282,22 @@ export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
   ...BUILTIN_PLUGINS,
   ...OFFICIAL_PLUGINS,
 ];
+
+/**
+ * Bundled plugins the app used to ship. On start, an installed copy is marked
+ * removed, so nothing loads or lists it. Its settings and data stay on disk.
+ * Add a name here whenever a bundled plugin is deleted. Windows also removes
+ * the plugins it hides.
+ */
+export const RETIRED_BUNDLED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
+  ...WINDOWS_HIDDEN_PLUGIN_NAMES,
+  "account-pool",
+  "browser-automation",
+  "concurrency-limit",
+  "docs",
+  "environment-modal-sandbox",
+  "memory",
+]);
 
 const builtinPluginsModuleDir = path.dirname(fileURLToPath(import.meta.url));
 

@@ -95,26 +95,30 @@ export function TeleportNotice({
   const stop = useStopThread();
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const progress = thread.teleport;
+  const complete = progress?.phase === "complete";
   const dismissKey = `cloudroom.teleport.dismissed.${progress?.id}`;
+  // Older versions stored 1 for dismissed, which also works as an expired timestamp.
+  const dismissAt = complete ? Number(window.localStorage.getItem(dismissKey)) : 0;
+  const dismissed = dismissAt > 0 && dismissAt <= Date.now();
   const dismiss = useCallback(() => {
     window.localStorage.setItem(dismissKey, "1");
     rerender();
   }, [dismissKey]);
-  const handedOff =
-    progress?.phase === "complete" && progress.owner === thread.id;
+  const handedOff = complete && progress.owner === thread.id;
   const settled = handedOff && pendingDelivery === 0;
   useEffect(() => {
-    if (!settled) return;
-    const timer = window.setTimeout(dismiss, 15_000);
+    if (!settled || dismissed) return;
+    const deadline = dismissAt || Date.now() + 10_000;
+    if (!dismissAt) window.localStorage.setItem(dismissKey, String(deadline));
+    const timer = window.setTimeout(dismiss, Math.max(0, deadline - Date.now()));
     return () => window.clearTimeout(timer);
-  }, [settled, dismiss]);
+  }, [settled, dismissed, dismissAt, dismissKey, dismiss]);
   useEffect(() => {
     if (handedOff && sending) dismiss();
   }, [handedOff, sending, dismiss]);
   if (!progress || progress.phase === "cancelled") return null;
   const owner = progress.owner === thread.id;
-  const complete = progress.phase === "complete";
-  if (complete && window.localStorage.getItem(dismissKey)) return null;
+  if (complete && dismissed) return null;
   const failed =
     progress.phase === "error" || Boolean(action.error || stop.error);
   const error = action.error?.message ?? stop.error?.message ?? progress.error;

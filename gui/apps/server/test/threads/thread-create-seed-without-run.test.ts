@@ -452,6 +452,11 @@ describe("thread creation child-thread boundary validation", () => {
     await withChildBoundaryHarness(
       "behalf-sender-mismatch",
       async ({ harness, hostId, path, projectId, sourceThreadId }) => {
+        seedTurnStarted(harness.deps, {
+          threadId: sourceThreadId,
+          turnId: "turn-behalf-sender-mismatch",
+          providerThreadId: "provider-behalf-sender-mismatch",
+        });
         const error = await captureCreateError(() =>
           createThreadFromRequest(harness.deps, {
             environment: {
@@ -1136,9 +1141,8 @@ describe("thread creation child-thread boundary validation", () => {
         );
         expect(error.status).toBe(400);
         expect(error.body.code).toBe("fork_source_session_unavailable");
-        expect(error.body.message).toBe(
-          "Cannot fork: source has no active session to clone",
-        );
+        // Nothing finished to copy, natively or as text.
+        expect(error.body.message).toBe("Fork from a message whose turn has finished.");
       },
     );
   });
@@ -1165,9 +1169,8 @@ describe("thread creation child-thread boundary validation", () => {
         );
         expect(error.status).toBe(400);
         expect(error.body.code).toBe("fork_source_session_unavailable");
-        expect(error.body.message).toBe(
-          "Cannot fork: source has no active session to clone",
-        );
+        // Nothing finished to copy, natively or as text.
+        expect(error.body.message).toBe("Fork from a message whose turn has finished.");
       },
     );
   });

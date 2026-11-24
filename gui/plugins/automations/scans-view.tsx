@@ -12,9 +12,9 @@ import { toast } from "sonner";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { AgentSessions } from "./src/agent-sessions.js";
 
-type Agent = AgentSessions["agents"][number];
+export type Agent = AgentSessions["agents"][number];
 
-const COLORS: Record<string, string> = {
+export const COLORS: Record<string, string> = {
   "claude-code": "#D97757",
   codex: "#8FA8FF",
   pi: "#C792EA",
@@ -40,12 +40,19 @@ export function ScansView() {
   const navigate = useBbNavigate();
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [plan, setPlan] = useState<string | null | undefined>(undefined);
-  const [starting, setStarting] = useState(false);
+  const [starting, setStarting] = useState<"workflow" | "cyber" | null>(null);
+  // Which kinds already ran on this computer: a Free plan's first scan of each kind is free (David, 2026-11-19).
+  const [used, setUsed] = useState<Record<"workflow" | "cyber", boolean> | null>(null);
   useEffect(() => {
     let cancelled = false;
     rpc.call("scans_agent_sessions", null).then(
       (result) => !cancelled && setAgents(result.agents),
       () => !cancelled && setAgents([]),
+    );
+    rpc.call("scans_state", null).then(
+      (result) => !cancelled && setUsed({ workflow: result.workflow.used, cyber: result.cyber.used }),
+      // Unknown counts as unused: the server still refuses a second free scan.
+      () => !cancelled && setUsed({ workflow: false, cyber: false }),
     );
     rpc.call("account_plan", null).then(
       (result) => !cancelled && setPlan(result.plan),
@@ -55,14 +62,17 @@ export function ScansView() {
       cancelled = true;
     };
   }, [rpc]);
-  const free = plan === "free";
-  const start = () => {
-    if (free) return navigate.openUrl("https://www.cloudroom.dev/billing");
-    setStarting(true);
-    rpc.call("scans_start", null).then(
+  const upgrade = (kind: "workflow" | "cyber") => plan === "free" && used !== null && used[kind];
+  const start = (kind: "workflow" | "cyber") => {
+    if (upgrade(kind)) {
+      rpc.call("scans_upgrade_clicked", null).catch(() => {});
+      return navigate.openUrl("https://www.cloudroom.dev/billing");
+    }
+    setStarting(kind);
+    rpc.call("scans_start", { kind }).then(
       ({ threadId }) => navigate.toThread(threadId),
       (error: unknown) => {
-        setStarting(false);
+        setStarting(null);
         toast.error(
           error instanceof Error ? error.message : "The scan could not start.",
         );
@@ -79,24 +89,32 @@ export function ScansView() {
           actually work.
         </h2>
         <div className="flex shrink-0 items-center gap-3">
-          <span className="inline-flex h-10 items-center gap-2 rounded-md border border-dashed border-border px-3.5 text-sm text-muted-foreground">
+          <Button
+            type="button"
+            size="lg"
+            variant="outline"
+            className="h-10 gap-2 px-4 font-semibold"
+            disabled={starting !== null || plan === undefined || used === null}
+            onClick={() => start("cyber")}
+          >
             <Icon name="SecurityCheck" className="size-4" aria-hidden />
-            Cyber scan
-            <span className="rounded-[4px] bg-primary/15 px-1.5 py-px text-[10px] font-bold tracking-wide text-primary uppercase">
-              Soon
-            </span>
-          </span>
+            {upgrade("cyber")
+              ? "Upgrade to scan"
+              : starting === "cyber"
+                ? "Starting…"
+                : "Cyber scan"}
+          </Button>
           <Button
             type="button"
             size="lg"
             className="h-10 gap-2 px-5 font-semibold"
-            disabled={starting || plan === undefined || !agents?.length}
-            onClick={start}
+            disabled={starting !== null || plan === undefined || used === null || !agents?.length}
+            onClick={() => start("workflow")}
           >
             <Icon name="Play" className="size-4" aria-hidden />
-            {free
+            {upgrade("workflow")
               ? "Upgrade to scan"
-              : starting
+              : starting === "workflow"
                 ? "Starting…"
                 : "Scan my workflow"}
           </Button>

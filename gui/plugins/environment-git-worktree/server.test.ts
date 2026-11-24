@@ -132,9 +132,9 @@ describe("worktree resource operations", () => {
     });
   });
 
-  it("rebuilds the previous environment branch after the thread is renamed", async () => {
+  it("rebuilds the previous environment branch after the thread is renamed, in its saved folder under the same key", async () => {
     const fixture = await setup();
-    await fixture.provider.create({
+    const rebuild: PluginEnvironmentProviderCreateContext = {
       ...fixture.context,
       suggestedBranchName: "bb/renamed-thread",
       rebuild: true,
@@ -169,10 +169,25 @@ describe("worktree resource operations", () => {
       },
       pathKey: "replacement",
       attempt: 2,
+    };
+    await fixture.provider.create(rebuild);
+    await fixture.provider.create({
+      ...rebuild,
+      pathKey: THREAD_ID,
+      projectCheckout: {
+        experimental_ownsPath: false,
+        path: "/checkouts/renamed",
+      },
     });
-    expect(fixture.harness.experimental_hostRpcCalls[0]?.input).toMatchObject({
+    const [replacement, parked] = fixture.harness.experimental_hostRpcCalls;
+    expect(replacement?.input).toMatchObject({
       branchName: "bb/original-thread",
       branchMode: "reuse-existing",
+    });
+    expect(replacement?.input).not.toHaveProperty("folderName");
+    expect(parked?.input).toMatchObject({
+      sourcePath: "/checkouts/renamed",
+      folderName: "bb",
     });
   });
 

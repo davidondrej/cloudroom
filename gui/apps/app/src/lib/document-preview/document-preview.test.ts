@@ -107,6 +107,35 @@ describe("convertDocument", () => {
     expect(text.split("\n")).toHaveLength(2);
   });
 
+  it("handles deeply nested tar paths without overflowing the stack", async () => {
+    const encoder = new TextEncoder();
+    const longName = encoder.encode(`${"a/".repeat(10_000)}file.txt`);
+    const longNameBlocks = Math.ceil(longName.length / 512);
+    const tar = new Uint8Array(512 + longNameBlocks * 512 + 512);
+    const writeHeader = (
+      offset: number,
+      name: string,
+      size: number,
+      type: string,
+    ) => {
+      tar.set(encoder.encode(name), offset);
+      tar.set(
+        encoder.encode(`${size.toString(8).padStart(11, "0")}\0`),
+        offset + 124,
+      );
+      tar[offset + 156] = type.charCodeAt(0);
+    };
+    writeHeader(0, "LongLink", longName.length, "L");
+    tar.set(longName, 512);
+    writeHeader(512 + longNameBlocks * 512, "file.txt", 0, "0");
+
+    const preview = await convertDocument("tar", tar);
+
+    expect(preview.detail).toBe("1 file · 0 B");
+    expect(preview.parts[0]?.text).toContain("a/");
+    expect(preview.parts[0]?.text).toContain("… 8,001 more lines");
+  });
+
   it("stops at a tar header with a negative size", async () => {
     const header = new Uint8Array(512);
     header.set(new TextEncoder().encode("evil.txt"), 0);

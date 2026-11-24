@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   resolveTerminalHost,
   TerminalHostSelector,
-} from "./TerminalHostSelector";
+} from "@/components/right-panel/tabs/tab-primitives";
 
 const studio = makeHost({
   id: "host-studio",

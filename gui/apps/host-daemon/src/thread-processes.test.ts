@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   macRows,
   pickThreadProcesses,
+  stopStaleThreadAgents,
   stopThreadProcesses,
   type ProcessRow,
 } from "./thread-processes.js";
@@ -41,6 +42,18 @@ describe("pickThreadProcesses", () => {
         tags("thr_abc"),
         "/Applications/Ollama.app/Contents/MacOS/Ollama",
       ),
+      row(
+        57,
+        1,
+        tags("thr_abc"),
+        "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/MacOS/Resolve",
+      ),
+      row(
+        58,
+        1,
+        tags("thr_abc"),
+        "/System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor",
+      ),
       row(54, 1, tags("thr_abc", "http://127.0.0.1:2")),
       row(
         56,
@@ -49,12 +62,19 @@ describe("pickThreadProcesses", () => {
         "/opt/homebrew/Cellar/python@3.15/3.15.0_1/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python",
       ),
       row(55, 1, ["FOO=x ROOM_THREAD_ID=thr_abc", `ROOM_SERVER_URL=${URL}`]),
+      row(60, 20, tags("thr_abc")), // The thread's terminal and its job.
+      row(61, 60, tags("thr_abc")),
     ];
     const pick = (threadId: string, serverUrl: string | undefined) =>
       pickThreadProcesses(rows, { threadId, serverUrl, selfPid: 20 }).map(
         (picked) => picked.pid,
       );
     expect(pick("thr_abc", URL)).toEqual([50, 56]);
+    // A stop ends the agent (40, under bridge 30) and what it runs, never the terminal.
+    const agent = { threadId: "thr_abc", serverUrl: URL, selfPid: 20 };
+    expect(
+      pickThreadProcesses(rows, { ...agent, scope: "agent" }).map((p) => p.pid),
+    ).toEqual([40, 41]);
     // The memory guard also kills what still runs under the daemon, but never
     // the daemon's own line, another thread, or another profile's processes.
     expect(
@@ -64,7 +84,7 @@ describe("pickThreadProcesses", () => {
         selfPid: 20,
         includeLive: true,
       }).map((picked) => picked.pid),
-    ).toEqual([40, 41, 50, 56]);
+    ).toEqual([40, 41, 50, 56, 60, 61]);
     expect(pick("not a thread", URL)).toEqual([]);
     expect(pick("thr_abc", undefined)).toEqual([]);
     expect(pick("thr_abc", "")).toEqual([]);
@@ -106,6 +126,25 @@ describe("stopThreadProcesses", () => {
     };
     expect(await stopThreadProcesses("thr_abc", URL, table)).toBe(0);
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("ends a stale writer: only the thread's agent under a bridge (#1717)", async () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const rows = [
+      row(30, process.pid, []), // A provider bridge.
+      row(40, 30, tags("thr_abc")), // The thread's Codex.
+      row(41, 40, tags("thr_abc")), // What it runs.
+      row(42, 30, tags("thr_other")),
+      row(60, process.pid, tags("thr_abc")), // The thread's terminal.
+    ];
+    let checks = 0;
+    const table = {
+      list: async () => rows,
+      started: async (pids: readonly number[]) =>
+        new Map(checks++ === 0 ? pids.map((pid) => [pid, "1"]) : []),
+    };
+    expect(await stopStaleThreadAgents("thr_abc", URL, table)).toBe(1);
+    expect(kill.mock.calls).toEqual([[40, "SIGTERM"]]);
   });
 
   it.runIf(process.platform === "linux")(

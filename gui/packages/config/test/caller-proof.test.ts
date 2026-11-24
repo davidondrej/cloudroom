@@ -6,17 +6,19 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { endianness, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CALLER_PROOF_STATUS_HEADER,
+  CALLER_PROOF_TIMED_OUT_MESSAGE,
   CALLER_TOKEN_HEADER,
   callerTokenFor,
   createCallerProofFetch,
   createCallerProofIssuer,
   proveLocalCaller,
   SERVER_CALLER_PROOF_PATH,
+  tcpConnectionOwner,
   type CallerProofIssuer,
 } from "../src/caller-proof.js";
 
@@ -185,6 +187,26 @@ describe("caller proof", () => {
     expect((await authed(`${origin}/api/v1/hosts`)).status).toBe(401);
     now += 1_000;
     expect((await authed(`${origin}/api/v1/hosts`)).status).toBe(200);
+
+    // A proof that times out says Cloudroom is busy, and its POST is never sent (#1285).
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const sent: string[] = [];
+    const busy = createCallerProofFetch(((input) => {
+      sent.push(new URL(String(input)).pathname);
+      now += 60_000;
+      return Promise.reject(
+        Object.assign(new Error("busy"), { name: "TimeoutError" }),
+      );
+    }) as typeof fetch);
+    const refused = await busy("http://127.0.0.1:9/api/v1/hosts", {
+      body: "{}",
+      method: "POST",
+    });
+    expect(refused.status).toBe(401);
+    expect(await refused.json()).toMatchObject({
+      message: CALLER_PROOF_TIMED_OUT_MESSAGE,
+    });
+    expect(sent).toEqual([SERVER_CALLER_PROOF_PATH]);
   });
 
   it("keeps a Request's own headers when it adds the caller token", async () => {
@@ -323,4 +345,71 @@ describe("caller proof", () => {
       expect(await readdir(issuer.directory)).toEqual([]);
     },
   );
+});
+
+// Rows as Linux writes them on little-endian machines (all our CI runners).
+describe.runIf(endianness() === "LE")("tcpConnectionOwner", () => {
+  const header =
+    "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+  const row = (local: string, remote: string, uid: number, inode = 1) =>
+    `   0: ${local} ${remote} ${inode === 0 ? "06" : "01"} 00000000:00000000 00:00000000 00000000 ${uid}        0 ${inode} 1 0000000000000000 20 0 0 10 -1`;
+  const table = (...rows: string[]) => [header, ...rows, ""].join("\n");
+  // 127.0.0.1:42044 (A43C) is the caller, 127.0.0.1:46305 (B4E1) is us.
+  const v4 = (address: string, port: string) => `${address}:${port}`;
+  const v6 = (address: string, port: string) =>
+    `0000000000000000FFFF0000${address}:${port}`;
+  const peer = {
+    localAddress: "127.0.0.1",
+    localPort: 46305,
+    remoteAddress: "127.0.0.1",
+    remotePort: 42044,
+  };
+
+  it("finds the one live socket at the caller's end of this connection", () => {
+    const tcp = table(
+      // Our own end of the connection, with our uid.
+      row(v4("0100007F", "B4E1"), v4("0100007F", "A43C"), 1003),
+      // Another account using the same ports from 127.0.0.2.
+      row(v4("0200007F", "A43C"), v4("0100007F", "B4E1"), 65534),
+      // The caller's end, plus a closed earlier socket the kernel lists as uid 0.
+      row(v4("0100007F", "A43C"), v4("0100007F", "B4E1"), 1001),
+      row(v4("0100007F", "A43C"), v4("0100007F", "B4E1"), 0, 0),
+    );
+    expect(tcpConnectionOwner(peer, [tcp, null])).toBe(1001);
+    // A dual-stack listener sees the same IPv4 caller as IPv4-mapped.
+    const mapped = {
+      ...peer,
+      localAddress: "::ffff:127.0.0.1",
+      remoteAddress: "::ffff:127.0.0.1",
+    };
+    expect(tcpConnectionOwner(mapped, [tcp, null])).toBe(1001);
+    // A caller on an IPv6 socket is listed in tcp6, also for 127.0.0.1.
+    const tcp6 = table(
+      row(v6("0100007F", "A43C"), v6("0100007F", "B4E1"), 1002),
+    );
+    expect(tcpConnectionOwner(peer, [table(), tcp6])).toBe(1002);
+    const loopback6 = "00000000000000000000000001000000";
+    expect(
+      tcpConnectionOwner(
+        { ...peer, localAddress: "::1", remoteAddress: "::1" },
+        [null, table(row(`${loopback6}:A43C`, `${loopback6}:B4E1`, 1004))],
+      ),
+    ).toBe(1004);
+  });
+
+  it("names no owner when the tables can't say for sure", () => {
+    const caller = row(v4("0100007F", "A43C"), v4("0100007F", "B4E1"), 1001);
+    expect(tcpConnectionOwner(peer, [null, null])).toBeNull();
+    expect(tcpConnectionOwner(peer, [table(), table()])).toBeNull();
+    expect(
+      tcpConnectionOwner({ ...peer, remotePort: undefined }, [
+        table(caller),
+        null,
+      ]),
+    ).toBeNull();
+    const twice = table(
+      row(v6("0100007F", "A43C"), v6("0100007F", "B4E1"), 1003),
+    );
+    expect(tcpConnectionOwner(peer, [table(caller), twice])).toBeNull();
+  });
 });

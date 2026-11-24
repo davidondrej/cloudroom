@@ -6,10 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { DndContext, useDroppable } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import type { NeighborReorderRequest } from "@cloudroom/client-core";
 import {
   DropPreviewRow,
@@ -142,6 +139,11 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
   onReorderPinnedRoot,
 }: PinnedThreadTreeProps) {
   const chronologicalDnd = useChronologicalSectionThreadDnd();
+  const chronologicalPinnedIds = chronologicalDnd?.pinnedItemIds;
+  const chronologicalPinnedItems = useMemo(
+    () => [...(chronologicalPinnedIds ?? [])],
+    [chronologicalPinnedIds],
+  );
   const handleReorderPinnedRoot = useCallback<
     UseNeighborReorderSortableArgs<ProjectThreadNode>["onReorder"]
   >(
@@ -203,7 +205,7 @@ export const PinnedThreadTree = memo(function PinnedThreadTree({
         onClickCapture={chronologicalDnd.onClickCapture}
       >
         <SortableContext
-          items={[...chronologicalDnd.pinnedItemIds]}
+          items={chronologicalPinnedItems}
           strategy={verticalListSortingStrategy}
         >
           {chronologicalRootNodes.map((node) => (

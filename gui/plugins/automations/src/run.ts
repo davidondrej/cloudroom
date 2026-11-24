@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
@@ -14,7 +15,9 @@ import {
   parseAutomationTrigger,
   markAutomationThread,
   setAutomationEnabled,
+  setAutomationRunSentId,
   setAutomationRunThread,
+  REFUSED,
   THREAD_ARCHIVED_ERROR,
   type AutomationRow,
   type AutomationRunRow,
@@ -22,6 +25,7 @@ import {
 } from "./data.js";
 import { loopAgent, type FallbackSdk } from "./fallback.js";
 import { publishAutomationChange } from "./realtime.js";
+import { savedReports } from "./review.js";
 import { executeStoredScript, mapScriptResultToRun } from "./script-runner.js";
 import { computeNextScheduledTime } from "./schedule-helpers.js";
 import type { AutomationExecution } from "./rpc-types.js";
@@ -128,7 +132,7 @@ export function lastNote(reply: string): string | null {
 
 // Loop run records (ADR 0298): every run reports what it did, why, and how sure it was. Same text as Cloud loops.
 const REPORT_ASK =
-  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus one `--action "..."` per change.';
+  'Before replying, run `room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason "why"`, plus up to ten `--action "..."` values: group related changes into one, as the run\'s transcript keeps the full details.';
 
 /** Reports are saved on the website, so a signed-out app can't send them (#872). Only a confirmed sign-out counts:
  *  a failed, unknown, or slow (over 2 s) status keeps today's report instruction. */
@@ -153,32 +157,39 @@ export function memoryText(notes: string[]): string {
   return `${past}\n\n${NOTE_ASK}`;
 }
 
-/** The newest notes from the loop's earlier runs, dated. A run whose reply can't be read is skipped. */
+/** The newest notes from the loop's earlier runs, dated. A run whose reply can't be read is skipped. Failed, skipped,
+ *  or note-less runs don't push older notes out (#1777): up to 100 runs are scanned, their replies read in parallel
+ *  batches sized to the notes still missing, until 20 notes are found. */
 async function pastNotes(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
   automationId: string,
 ): Promise<string[]> {
-  const runs = listAutomationRuns(db, { automationId, limit: NOTES }).filter(
-    (run) => run.threadId !== null,
-  );
-  const notes = await Promise.all(
-    runs.map(async (run) => {
-      try {
-        const reply = await bb.sdk.threads.output?.({
-          threadId: run.threadId!,
-        });
-        const note = lastNote(reply?.output ?? "");
-        return (
-          note &&
-          `${new Date(run.startedAt).toISOString().slice(0, 10)}: ${note}`
-        );
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return notes.filter((note): note is string => Boolean(note));
+  const runs = listAutomationRuns(db, {
+    automationId,
+    limit: NOTES * 5,
+  }).filter((run) => run.threadId !== null);
+  const notes: string[] = [];
+  for (let i = 0; i < runs.length && notes.length < NOTES;) {
+    const batch = await Promise.all(
+      runs.slice(i, (i += NOTES - notes.length)).map(async (run) => {
+        try {
+          const reply = await room.sdk.threads.output?.({
+            threadId: run.threadId!,
+          });
+          const note = lastNote(reply?.output ?? "");
+          return (
+            note &&
+            `${new Date(run.startedAt).toISOString().slice(0, 10)}: ${note}`
+          );
+        } catch {
+          return null;
+        }
+      }),
+    );
+    notes.push(...batch.filter((note): note is string => Boolean(note)));
+  }
+  return notes.slice(0, NOTES);
 }
 
 interface AgentRunArgs {
@@ -191,54 +202,104 @@ interface AgentRunArgs {
 }
 
 export async function executeAgentRun(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
   args: AgentRunArgs,
 ): Promise<void> {
   try {
     if (args.automation.targetThreadId !== null) {
-      await reuseTargetThreadForRun(bb, db, {
+      await reuseTargetThreadForRun(room, db, {
         ...args,
         targetThreadId: args.automation.targetThreadId,
       });
       return;
     }
     const [notes, ask] = await Promise.all([
-      pastNotes(bb, db, args.automation.id),
-      reportAsk(bb.sdk),
+      pastNotes(room, db, args.automation.id),
+      reportAsk(room.sdk),
     ]);
-    const thread = sdkThreadSchema.parse(
-      await bb.sdk.threads.spawn({
-        projectId: args.automation.projectId,
-        environment: args.execution.environment,
-        prompt: withEvents(
-          args.execution.prompt + memoryText(notes) + ask,
-          args.events,
-        ),
-        title: args.automation.name,
-        ...(await loopAgent(bb.sdk, args.automation, args.execution)),
-        permissionMode: args.execution.permissionMode,
-      }),
-    );
-    setAutomationRunThread(db, { runId: args.run.id, threadId: thread.id });
-    markAutomationThread(db, {
-      automationId: args.automation.id,
-      runId: args.run.id,
-      threadId: thread.id,
-      now: Date.now(),
-    });
+    const input = {
+      requestId: args.run.id,
+      projectId: args.automation.projectId,
+      environment: args.execution.environment,
+      prompt: withEvents(
+        args.execution.prompt + memoryText(notes) + ask,
+        args.events,
+      ),
+      title: args.automation.name,
+      ...(await loopAgent(room.sdk, db, args.automation, args.execution)),
+      permissionMode: args.execution.permissionMode,
+    };
+    let spawned: unknown;
+    try {
+      spawned = await room.sdk.threads.spawn(input);
+    } catch (error) {
+      if (!unanswered(error)) throw error;
+      // A slow create (a first clone, a waking machine) can outlast the request and still make the thread. The run's
+      // ID names it, so asking once more gets it, not a second one, and the run links the work it started (#1293),
+      // like `room-cli thread spawn`. Unawaited, so other due loops don't wait; the running run blocks this loop's.
+      void room.sdk.threads
+        .spawn(input)
+        .then(async (late) => {
+          const thread = linkSpawnedThread(db, args, late);
+          // Its turn may have ended before this answer, when its idle or failed event had no run to settle.
+          if (thread.status === "idle" || thread.status === "error")
+            await closeAutomationRunForSettledThread(room, db, {
+              threadId: thread.id,
+              threadCreatedAt: thread.createdAt,
+              status: thread.status === "idle" ? "idle" : "failed",
+            });
+        })
+        .catch((late: unknown) => {
+          if (db.open) settleDispatchFailure(room, db, args, late);
+        })
+        .finally(() =>
+          publishAutomationChange(room, args.automation.projectId, [
+            "automations-changed",
+            "automation-runs-changed",
+          ]),
+        )
+        // Only a closed or broken database fails here (the plugin reloaded): nothing is left to record.
+        .catch(() => undefined);
+      return;
+    }
+    linkSpawnedThread(db, args, spawned);
   } catch (error) {
-    settleDispatchFailure(bb, db, args, error);
+    settleDispatchFailure(room, db, args, error);
   } finally {
-    publishAutomationChange(bb, args.automation.projectId, [
+    publishAutomationChange(room, args.automation.projectId, [
       "automations-changed",
       "automation-runs-changed",
     ]);
   }
 }
 
+/** No answer, so the thread may exist: a timeout or a dropped connection. */
+function unanswered(error: unknown): boolean {
+  return (
+    error instanceof TypeError ||
+    (error instanceof Error && error.name === "BbRequestTimeoutError")
+  );
+}
+
+function linkSpawnedThread(
+  db: Db,
+  args: AgentRunArgs,
+  spawned: unknown,
+): SdkThread {
+  const thread = sdkThreadSchema.parse(spawned);
+  setAutomationRunThread(db, { runId: args.run.id, threadId: thread.id });
+  markAutomationThread(db, {
+    automationId: args.automation.id,
+    runId: args.run.id,
+    threadId: thread.id,
+    now: Date.now(),
+  });
+  return thread;
+}
+
 function settleDispatchFailure(
-  bb: Pick<BbPluginApi, "log">,
+  room: Pick<BbPluginApi, "log">,
   db: Db,
   args: AgentRunArgs,
   error: unknown,
@@ -261,26 +322,26 @@ function settleDispatchFailure(
   } else {
     args.onFailure(error);
   }
-  bb.log.error(
+  room.log.error(
     `Failed to dispatch automation ${args.automation.id}: ${message}`,
   );
 }
 
 async function reuseTargetThreadForRun(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
   args: AgentRunArgs & { targetThreadId: string },
 ): Promise<void> {
   // Before the run is linked to the thread, so the thread going idle meanwhile can't finish it unsent.
-  const ask = await reportAsk(bb.sdk);
+  const ask = await reportAsk(room.sdk);
   let thread: SdkThread;
   try {
     thread = sdkThreadSchema.parse(
-      await bb.sdk.threads.get({ threadId: args.targetThreadId }),
+      await room.sdk.threads.get({ threadId: args.targetThreadId }),
     );
   } catch (error) {
     if (!isThreadGoneError(error)) throw error;
-    closeRunForUnusableTargetThread(bb, db, {
+    closeRunForUnusableTargetThread(room, db, {
       ...args,
       detail: errorMessage(error),
     });
@@ -288,7 +349,7 @@ async function reuseTargetThreadForRun(
   }
 
   if (thread.deletedAt !== null) {
-    closeRunForUnusableTargetThread(bb, db, { ...args, detail: "deleted" });
+    closeRunForUnusableTargetThread(room, db, { ...args, detail: "deleted" });
     return;
   }
   if (thread.archivedAt !== null) {
@@ -311,15 +372,15 @@ async function reuseTargetThreadForRun(
       lastError: THREAD_ARCHIVED_ERROR,
       ...(markSelf ? { alsoId: args.automation.id } : {}),
     });
-    bb.log.warn(
+    room.log.warn(
       `Automation ${args.automation.id} paused: target thread ${thread.id} is archived`,
     );
-    const again = await bb.sdk.threads
+    const again = await room.sdk.threads
       .get({ threadId: thread.id })
       .then((value) => sdkThreadSchema.parse(value))
       .catch(() => null);
     if (again?.archivedAt === null && again.deletedAt === null)
-      resumeAutomationsForUnarchivedThread(bb, db, thread.id);
+      resumeAutomationsForUnarchivedThread(room, db, thread.id);
     return;
   }
 
@@ -327,7 +388,7 @@ async function reuseTargetThreadForRun(
     runId: args.run.id,
     threadId: args.targetThreadId,
   });
-  await bb.sdk.threads.send({
+  const sent = (await room.sdk.threads.send({
     threadId: args.targetThreadId,
     mode: "steer-if-active",
     input: [
@@ -340,11 +401,16 @@ async function reuseTargetThreadForRun(
         mentions: [],
       },
     ],
-  });
+  })) as { requestId?: string; queuedMessage?: { id?: string; content?: unknown[] } } | undefined;
+  // Core's ID for what it took: the turn request, or the queued row it sends later with the content Core queued, so
+  // any edit of the row no longer matches (#1100).
+  const queued = sent?.queuedMessage;
+  const sentId = sent?.requestId ?? (queued?.id && queued.content ? queuedSentId(queued.id, queued.content) : null);
+  if (sentId) setAutomationRunSentId(db, args.run.id, sentId);
 }
 
 function closeRunForUnusableTargetThread(
-  bb: Pick<BbPluginApi, "log">,
+  room: Pick<BbPluginApi, "log">,
   db: Db,
   args: AgentRunArgs & { targetThreadId: string; detail: string },
 ): void {
@@ -359,13 +425,13 @@ function closeRunForUnusableTargetThread(
     error: `Target thread ${args.targetThreadId} is unavailable: ${args.detail}`,
     now,
   });
-  bb.log.error(
+  room.log.error(
     `Automation ${args.automation.id} target thread ${args.targetThreadId} is unavailable: ${args.detail}`,
   );
 }
 
 export async function executeScriptRun(
-  bb: Pick<BbPluginApi, "realtime" | "log">,
+  room: Pick<BbPluginApi, "realtime" | "log">,
   db: Db,
   args: {
     pluginDataDir: string;
@@ -424,13 +490,13 @@ export async function executeScriptRun(
     });
   } catch (error) {
     args.onFailure(error);
-    bb.log.error(
+    room.log.error(
       `Failed to run script for automation ${args.automation.id}: ${errorMessage(error)}`,
     );
   } finally {
     if (eventsFile)
       await rm(eventsFile, { force: true }).catch(() => undefined);
-    publishAutomationChange(bb, args.automation.projectId, [
+    publishAutomationChange(room, args.automation.projectId, [
       "automations-changed",
       "automation-runs-changed",
     ]);
@@ -438,7 +504,7 @@ export async function executeScriptRun(
 }
 
 export async function closeAutomationRunForSettledThread(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
   args: {
     threadId: string;
@@ -446,16 +512,18 @@ export async function closeAutomationRunForSettledThread(
     status: "idle" | "failed";
     error?: string | null;
     rateLimited?: boolean;
+    /** The provider refused the work: the run fails, and its retry goes to the other provider (fallback.ts). */
+    refused?: boolean;
   },
 ): Promise<void> {
   const runs = listRunningAutomationRunsByThread(db, args.threadId);
   const now = Date.now();
   const changedProjects = new Set<string>();
-  const error = args.error ?? "Turn failed";
+  const error = `${args.refused ? REFUSED : ""}${args.error ?? "Turn failed"}`;
   for (const run of runs) {
     const stopped =
       args.status === "idle" &&
-      (await stoppedRunSkip(bb, run, args.threadId, args.threadCreatedAt));
+      (await stoppedRunSkip(room, run, args.threadId, args.threadCreatedAt, true));
     // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause.
     const closed = stopped
       ? closeAutomationRun(db, {
@@ -484,7 +552,7 @@ export async function closeAutomationRunForSettledThread(
     if (automation) changedProjects.add(automation.projectId);
   }
   for (const projectId of changedProjects) {
-    publishAutomationChange(bb, projectId, [
+    publishAutomationChange(room, projectId, [
       "automations-changed",
       "automation-runs-changed",
     ]);
@@ -493,22 +561,71 @@ export async function closeAutomationRunForSettledThread(
 
 type TurnEvent = {
   type: string;
+  createdAt?: number;
   scope: { turnId?: string };
-  data: { status?: string; reason?: string; parentToolCallId?: string };
+  data: {
+    status?: string;
+    reason?: string;
+    parentToolCallId?: string;
+    clientRequestId?: string;
+    requestId?: string;
+    queuedMessageId?: string;
+    input?: unknown[];
+  };
 };
+
+/** A queued row's ID with a hash of its whole content, every block in order (keys sorted, so order can't differ). */
+const queuedSentId = (id: string, content: unknown[]) => {
+  const sorted = (_: string, v: unknown) =>
+    v && typeof v === "object" && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort()) : v;
+  return `${id}#${createHash("sha256").update(JSON.stringify(content, sorted)).digest("hex")}`;
+};
+
+/** The IDs of what the thread's current root turn took: each request Core accepted into it, and the queued row it
+ *  delivered with the content it carried (#1100). A loop stores one per run, so the turn its message started reports. */
+export async function currentTurnSentIds(
+  room: AgentRunApi,
+  threadId: string,
+): Promise<string[]> {
+  const events = (await room.sdk.threads.events
+    ?.list({
+      threadId,
+      types: ["turn/started", "turn/completed", "turn/input/accepted", "client/turn/requested"],
+      order: "desc",
+      limit: "100",
+    })
+    .catch(() => [])) as TurnEvent[] | undefined;
+  if (!events) return [];
+  const kids = new Set(events.filter((e) => e.data.parentToolCallId).map((e) => e.scope.turnId));
+  const turn = events.find((e) => e.type === "turn/started" && !kids.has(e.scope.turnId))?.scope.turnId;
+  if (!turn || events.some((e) => e.type === "turn/completed" && e.scope.turnId === turn)) return [];
+  const took = events.flatMap((e) =>
+    e.type === "turn/input/accepted" && e.scope.turnId === turn && e.data.clientRequestId ? [e.data.clientRequestId] : [],
+  );
+  const requests = new Map(
+    events.flatMap((e) => (e.type === "client/turn/requested" ? [[e.data.requestId, e.data] as const] : [])),
+  );
+  // A request read without its record could map to another run: incomplete evidence reports nothing.
+  if (took.some((id) => !requests.has(id))) return [];
+  return took.flatMap((id) => {
+    const { queuedMessageId, input = [] } = requests.get(id)!;
+    return queuedMessageId ? [id, queuedSentId(queuedMessageId, input)] : [id];
+  });
+}
 
 // Idle is not success when the user stopped the run (#911). Only on a thread
 // the run spawned is the newest root turn the run's own. One-way: this can
 // only turn a success into a skip, never into a failure.
 async function stoppedRunSkip(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   run: AutomationRunRow,
   threadId: string,
   threadCreatedAt: number | undefined,
+  live = false,
 ): Promise<ReconcileOutcome | null> {
   if ((threadCreatedAt ?? 0) < run.startedAt) return null;
   try {
-    const events = (await bb.sdk.threads.events!.list({
+    const events = (await room.sdk.threads.events!.list({
       threadId,
       types: ["turn/started", "turn/completed", "system/thread/interrupted"],
       order: "desc",
@@ -522,6 +639,10 @@ async function stoppedRunSkip(
     const reason =
       end?.data.status === "interrupted" ? stop?.data.reason : null;
     if (reason !== "manual-stop" && reason !== "memory-limit") return null;
+    const archived =
+      live && reason === "manual-stop" &&
+      (await archiveAfterReport(room, run.id, threadId, stop?.createdAt));
+    if (archived) return null;
     return {
       status: "skipped",
       skipReason: `interrupted: ${reason}`,
@@ -533,18 +654,41 @@ async function stoppedRunSkip(
   }
 }
 
+/** The stop came from archiving the thread (#1561): archive marks it archived, then stops it, so `archivedAt` is at
+ *  or before the stop. And the run's own report (ADR 0298) is saved, by run ID. Unreadable or over 3 s: false. */
+async function archiveAfterReport(
+  room: AgentRunApi,
+  runId: string,
+  threadId: string,
+  stoppedAt: number | undefined,
+): Promise<boolean> {
+  const check = async () => {
+    const thread = sdkThreadSchema.parse(await room.sdk.threads.get({ threadId }));
+    if (thread.deletedAt !== null || thread.archivedAt === null) return false;
+    if (stoppedAt === undefined || thread.archivedAt > stoppedAt) return false;
+    return (await savedReports(room, [runId], [])).runs.has(runId);
+  };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<false>((resolve) => (timer = setTimeout(resolve, 3_000, false)));
+  try {
+    return await Promise.race([check().catch(() => false), late]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 type ReconcileOutcome =
   | { status: "succeeded" }
   | { status: "failed"; error: string }
   | { status: "skipped"; skipReason: string; keepFailureStreak?: boolean };
 
 export async function reconcileRunningAutomationRuns(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
 ): Promise<void> {
   const changedProjects = new Set<string>();
   for (const run of listRunningAutomationRuns(db)) {
-    const outcome = await reconcileOutcome(bb, run);
+    const outcome = await reconcileOutcome(room, run);
     if (outcome === null) continue;
     const closed = closeAutomationRun(db, {
       runId: run.id,
@@ -554,7 +698,7 @@ export async function reconcileRunningAutomationRuns(
     if (!closed) continue;
     const automation = getAutomation(db, closed.automationId);
     if (automation) changedProjects.add(automation.projectId);
-    bb.log.info(
+    room.log.info(
       `Automation run ${run.id} settled as ${outcome.status} on startup: ${
         outcome.status === "succeeded"
           ? "its thread is idle"
@@ -565,7 +709,7 @@ export async function reconcileRunningAutomationRuns(
     );
   }
   for (const projectId of changedProjects) {
-    publishAutomationChange(bb, projectId, [
+    publishAutomationChange(room, projectId, [
       "automations-changed",
       "automation-runs-changed",
     ]);
@@ -573,7 +717,7 @@ export async function reconcileRunningAutomationRuns(
 }
 
 async function reconcileOutcome(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   run: AutomationRunRow,
 ): Promise<ReconcileOutcome | null> {
   if (run.runMode === "script") {
@@ -593,7 +737,7 @@ async function reconcileOutcome(
   let thread: SdkThread;
   try {
     thread = sdkThreadSchema.parse(
-      await bb.sdk.threads.get({ threadId: run.threadId }),
+      await room.sdk.threads.get({ threadId: run.threadId }),
     );
   } catch (error) {
     if (isThreadGoneError(error)) {
@@ -602,7 +746,7 @@ async function reconcileOutcome(
         skipReason: `interrupted: thread ${run.threadId} no longer exists`,
       };
     }
-    bb.log.warn(
+    room.log.warn(
       `Could not check thread ${run.threadId} for running automation run ${run.id}; leaving it running: ${errorMessage(error)}`,
     );
     return null;
@@ -618,7 +762,7 @@ async function reconcileOutcome(
   switch (thread.status) {
     case "idle":
       return (
-        (await stoppedRunSkip(bb, run, run.threadId, thread.createdAt)) ?? {
+        (await stoppedRunSkip(room, run, run.threadId, thread.createdAt)) ?? {
           status: "succeeded",
         }
       );
@@ -639,7 +783,7 @@ async function reconcileOutcome(
 }
 
 export function resumeAutomationsForUnarchivedThread(
-  bb: Pick<BbPluginApi, "realtime" | "log">,
+  room: Pick<BbPluginApi, "realtime" | "log">,
   db: Db,
   threadId: string,
 ): void {
@@ -663,9 +807,9 @@ export function resumeAutomationsForUnarchivedThread(
         lastError: null,
         resetConsecutiveFailures: true,
       });
-      publishAutomationChange(bb, automation.projectId, "automations-changed");
+      publishAutomationChange(room, automation.projectId, "automations-changed");
     } catch (error) {
-      bb.log.warn(
+      room.log.warn(
         `Loop ${automation.id} not resumed after its thread was unarchived: ${errorMessage(error)}`,
       );
     }
@@ -673,27 +817,27 @@ export function resumeAutomationsForUnarchivedThread(
 }
 
 export async function reconcileArchivePausedAutomations(
-  bb: AgentRunApi,
+  room: AgentRunApi,
   db: Db,
 ): Promise<void> {
   for (const threadId of listArchivePausedThreadIds(db)) {
     try {
       const thread = sdkThreadSchema.parse(
-        await bb.sdk.threads.get({ threadId }),
+        await room.sdk.threads.get({ threadId }),
       );
       if (thread.deletedAt !== null)
-        disableAutomationsForDeletedThreadEvent(bb, db, threadId);
+        disableAutomationsForDeletedThreadEvent(room, db, threadId);
       else if (thread.archivedAt === null)
-        resumeAutomationsForUnarchivedThread(bb, db, threadId);
+        resumeAutomationsForUnarchivedThread(room, db, threadId);
     } catch (error) {
       if (isThreadGoneError(error))
-        disableAutomationsForDeletedThreadEvent(bb, db, threadId);
+        disableAutomationsForDeletedThreadEvent(room, db, threadId);
     }
   }
 }
 
 export function disableAutomationsForDeletedThreadEvent(
-  bb: Pick<BbPluginApi, "realtime">,
+  room: Pick<BbPluginApi, "realtime">,
   db: Db,
   threadId: string,
 ): void {
@@ -702,6 +846,6 @@ export function disableAutomationsForDeletedThreadEvent(
     now: Date.now(),
   });
   for (const automation of disabled) {
-    publishAutomationChange(bb, automation.projectId, "automations-changed");
+    publishAutomationChange(room, automation.projectId, "automations-changed");
   }
 }

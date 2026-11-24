@@ -8,8 +8,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { tmpdir, userInfo } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { MachineExecutor } from "@get-bb/plugin-sdk";
 import type { MachineEnrollments, EnrollmentBootstrap } from "./enrollments.js";
@@ -92,9 +92,11 @@ describe("machine bootstrap", () => {
         "node",
         `#!/bin/sh\nif env | grep -q private-relay-key; then echo "$*" >>"${dir}/node-env-leaks"; fi\nexec "${process.execPath}" "$@"\n`,
       );
+      write("sleep", "#!/bin/sh\n");
+      // The first download is cut off without a curl error: it must be retried, never run.
       write(
         "curl",
-        `#!/bin/sh\ncat >"${dir}/curl-config"\ncat <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nEOF\n`,
+        `#!/bin/sh\ncat >"${dir}/curl-config"\nwhile [ "$1" != --output ]; do shift; done\nif [ ! -e "${dir}/cut" ]; then touch "${dir}/cut"; echo 'touch "${dir}/ran-partial"' >"$2"; exit 0; fi\ncat >"$2" <<'EOF'\nprintf '%s %s' "$BB_ENROLLMENT" "$*" >"${dir}/installer-input"\nprintf '%s' "$0" >"${dir}/installer-path"\n# end of install.sh\nEOF\n`,
       );
       const result = spawnSync(command[0]!, command.slice(1), {
         input: stdin,
@@ -109,6 +111,14 @@ describe("machine bootstrap", () => {
         `${stdin} --bootstrap-env BB_ENROLLMENT`,
       );
       expect(existsSync(join(dir, "node-env-leaks"))).toBe(false);
+      expect(existsSync(join(dir, "ran-partial"))).toBe(false);
+      // sh runs the installer outside any sandbox, so it waits in the home
+      // folder (found without HOME here), never the OS temp folder, and is
+      // gone afterwards.
+      const installer = readFileSync(join(dir, "installer-path"), "utf8");
+      expect(dirname(installer)).toBe(userInfo().homedir);
+      expect(basename(installer)).toMatch(/^\.bb-machine-install\./u);
+      expect(existsSync(installer)).toBe(false);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -138,9 +148,16 @@ describe("machine bootstrap", () => {
     expect(error.message).not.toContain("line 5\n");
   });
 
-  it("redacts transport failures and clears pending enrollment", async () => {
-    const h = harness();
-    h.exec.mockRejectedValue(new Error(bootstrap.credential));
+  it("keeps a redacted transport failure reason and clears pending enrollment", async () => {
+    const h = harness({
+      ...bootstrap,
+      headers: { relay: "private-relay-key" },
+    });
+    h.exec.mockRejectedValue(
+      new Error(
+        `spawn ssh ENOENT ${bootstrap.credential} private-relay-key\nmore`,
+      ),
+    );
     await expect(
       h.api.bootstrap({
         key: "key",
@@ -148,7 +165,9 @@ describe("machine bootstrap", () => {
         report: h.report,
         signal: new AbortController().signal,
       }),
-    ).rejects.toThrow(/^Machine bootstrap command failed$/);
+    ).rejects.toThrow(
+      /^Bootstrapping machine: Machine bootstrap command failed: spawn ssh ENOENT \[redacted\] \[redacted\]$/,
+    );
     expect(h.enrollments.waitForConnection).not.toHaveBeenCalled();
     expect(h.enrollments.clearPending).toHaveBeenCalledWith("key");
   });

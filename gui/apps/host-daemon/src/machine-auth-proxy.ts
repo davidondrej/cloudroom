@@ -6,8 +6,11 @@ import {
   type CallerProofIssuer,
   createCallerProofIssuer,
   isOpenWithoutCallerProof,
+  MACHINE_PROXY_URL_FILE_NAME,
   SERVER_CALLER_PROOF_PATH,
 } from "@cloudroom/config/caller-proof";
+import { randomUUID } from "node:crypto";
+import { rename, rm, writeFile } from "node:fs/promises";
 import http, {
   type IncomingHttpHeaders,
   type IncomingMessage,
@@ -15,6 +18,7 @@ import http, {
 } from "node:http";
 import https from "node:https";
 import type { AddressInfo, Socket } from "node:net";
+import { join } from "node:path";
 import type { Duplex } from "node:stream";
 
 const LOOPBACK_HOST = "127.0.0.1";
@@ -148,15 +152,16 @@ function parseTarget(target: string): URL | null {
 }
 
 // The Mac trusts every request that arrives with the machine key, so this is
-// the only place that can tell a sandboxed agent from the user. It applies
-// the Mac server's own rule: a caller token, or one of the open requests.
+// the only place that can tell a sandboxed agent from the user, or from
+// another OS account on this machine. It applies the Mac server's own rule:
+// a caller token, or one of the open requests from this OS user.
 // The rule runs on the normalized path, and only that path is forwarded, so
 // `..` or `%2e%2e` can't make a checked path reach a different route.
-function decide(
+async function decide(
   request: IncomingMessage,
   boundPort: number | null,
   callerProofs: CallerProofIssuer,
-): ProxyDecision {
+): Promise<ProxyDecision> {
   const rejectedStatus = rejectedProxyStatus(request, boundPort);
   if (rejectedStatus !== null) {
     return { action: "reject", status: rejectedStatus };
@@ -178,7 +183,7 @@ function decide(
   const token = Array.isArray(header) ? header.join(", ") : header;
   if (
     !callerProofs.verify(token) &&
-    !isOpenWithoutCallerProof(method, url.pathname)
+    !(await isOpenWithoutCallerProof(method, url.pathname, request.socket))
   ) {
     return {
       action: "require-proof",
@@ -271,15 +276,19 @@ function openUpstreamRequest(
   });
 }
 
-function proxyRequest(args: {
+async function proxyRequest(args: {
   boundPort: number | null;
   callerProofs: CallerProofIssuer;
   serverHeaders: Record<string, string>;
   request: IncomingMessage;
   response: ServerResponse;
   target: URL;
-}): void {
-  const decision = decide(args.request, args.boundPort, args.callerProofs);
+}): Promise<void> {
+  const decision = await decide(
+    args.request,
+    args.boundPort,
+    args.callerProofs,
+  );
   switch (decision.action) {
     case "reject":
       args.response.writeHead(decision.status).end();
@@ -312,6 +321,8 @@ function proxyRequest(args: {
     case "forward":
       break;
   }
+  // The caller may have left while its OS user was checked.
+  if (args.request.socket.destroyed) return;
 
   const upstream = openUpstreamRequest(
     args.request,
@@ -336,7 +347,7 @@ function proxyRequest(args: {
   args.request.pipe(upstream);
 }
 
-function proxyUpgrade(args: {
+async function proxyUpgrade(args: {
   boundPort: number | null;
   callerProofs: CallerProofIssuer;
   clientSocket: Duplex;
@@ -344,8 +355,15 @@ function proxyUpgrade(args: {
   serverHeaders: Record<string, string>;
   request: IncomingMessage;
   target: URL;
-}): void {
-  const decision = decide(args.request, args.boundPort, args.callerProofs);
+}): Promise<void> {
+  // Node hands the socket over without an error listener; a client reset
+  // while the caller is checked would crash the daemon.
+  args.clientSocket.on("error", () => args.clientSocket.destroy());
+  const decision = await decide(
+    args.request,
+    args.boundPort,
+    args.callerProofs,
+  );
   if (decision.action === "reject") {
     writeRejectedSocket(args.clientSocket, decision.status);
     return;
@@ -360,6 +378,7 @@ function proxyUpgrade(args: {
     writeRejectedSocket(args.clientSocket, 400);
     return;
   }
+  if (args.clientSocket.destroyed) return;
 
   const upstreamRequest = openUpstreamRequest(
     args.request,
@@ -392,9 +411,20 @@ function proxyUpgrade(args: {
     writeRejectedSocket(args.clientSocket, 400),
   );
   upstreamRequest.on("error", () => args.clientSocket.destroy());
-  args.clientSocket.on("error", () => args.clientSocket.destroy());
   args.clientSocket.on("close", () => upstreamRequest.destroy());
   upstreamRequest.end();
+}
+
+// Best effort and owner-only: without the file, room-cli outside a thread
+// behaves as before.
+async function publishProxyUrl(path: string, url: string): Promise<void> {
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporary, `${url}\n`, { flag: "wx", mode: 0o600 });
+    await rename(temporary, path);
+  } catch {
+    await rm(temporary, { force: true }).catch(() => undefined);
+  }
 }
 
 export async function startMachineAuthProxy(
@@ -411,19 +441,22 @@ export async function startMachineAuthProxy(
   });
   const sockets = new Set<Socket>();
   let boundPort: number | null = null;
-  const server = http.createServer((request, response) =>
-    proxyRequest({
+  const server = http.createServer((request, response) => {
+    void proxyRequest({
       boundPort,
       callerProofs,
       serverHeaders: options.serverHeaders,
       request,
       response,
       target,
-    }),
-  );
+    }).catch(() => {
+      if (!response.headersSent) response.writeHead(500);
+      response.end();
+    });
+  });
   server.on("connect", (_request, socket) => writeRejectedSocket(socket, 405));
-  server.on("upgrade", (request, socket, head) =>
-    proxyUpgrade({
+  server.on("upgrade", (request, socket, head) => {
+    void proxyUpgrade({
       boundPort,
       callerProofs,
       clientSocket: socket,
@@ -431,8 +464,8 @@ export async function startMachineAuthProxy(
       serverHeaders: options.serverHeaders,
       request,
       target,
-    }),
-  );
+    }).catch(() => socket.destroy());
+  });
   server.on("connection", (socket) => {
     sockets.add(socket);
     socket.on("close", () => sockets.delete(socket));
@@ -454,9 +487,13 @@ export async function startMachineAuthProxy(
 
   const address = server.address() as AddressInfo;
   boundPort = address.port;
+  const serverUrl = `http://${LOOPBACK_HOST}:${address.port}`;
+  const urlFile = join(options.dataDir, MACHINE_PROXY_URL_FILE_NAME);
+  await publishProxyUrl(urlFile, serverUrl);
   return {
-    serverUrl: `http://${LOOPBACK_HOST}:${address.port}`,
+    serverUrl,
     async close(): Promise<void> {
+      await rm(urlFile, { force: true }).catch(() => undefined);
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));
         for (const socket of sockets) socket.destroy();

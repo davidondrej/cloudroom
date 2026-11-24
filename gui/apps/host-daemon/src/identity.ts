@@ -47,6 +47,8 @@ async function resolveHostId(options: ResolveHostIdOptions): Promise<string> {
 const defaultExecFile: ExecFileFn = async (file, args = []) => {
   const result = await execFileAsync(file, [...args], {
     env: sanitizeInheritedChildProcessEnv({ env: process.env }),
+    // Without this, Windows flashes a console window at every app start.
+    windowsHide: true,
   });
   return {
     stderr: result.stderr,

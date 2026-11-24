@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { execPortableFile } from "@cloudroom/process-utils";
+import { ensureDataTempDir, execPortableFile } from "@cloudroom/process-utils";
 import { ApiError } from "../../errors.js";
 import {
   hasSupportedFrontmatterDelimiter,
@@ -26,6 +25,8 @@ const REGISTRY_SKILLS_CLI_VERSION = "1.5.19";
 
 interface InstallCommandResult {
   ok: boolean;
+  /** npx itself is not on PATH: Node.js with npm is missing. */
+  missingNpx?: boolean;
   stderr: string;
   stdout: string;
 }
@@ -42,7 +43,7 @@ function registrySkillsCliInvocation(args: {
 }): {
   args: string[];
   command: string;
-  options: { cwd: string; env: NodeJS.ProcessEnv };
+  options: { cwd: string; env: NodeJS.ProcessEnv; windowsHide: true };
 } {
   const allowedKeys =
     process.platform === "win32"
@@ -66,6 +67,8 @@ function registrySkillsCliInvocation(args: {
     const value = process.env[key];
     if (value !== undefined) env[key] = value;
   }
+  // The CLI clones the skill into TMPDIR before it copies it here, so that stays private too (Windows keeps its TEMP).
+  if (process.platform !== "win32") env.TMPDIR = args.cwd;
   return {
     command: process.platform === "win32" ? "npx.cmd" : "npx",
     args: [
@@ -80,7 +83,7 @@ function registrySkillsCliInvocation(args: {
       "--copy",
       "--yes",
     ],
-    options: { cwd: args.cwd, env },
+    options: { cwd: args.cwd, env, windowsHide: true },
   };
 }
 
@@ -100,8 +103,11 @@ async function runRegistrySkillsCli(args: {
       timeoutMs: SKILLS_INSTALL_TIMEOUT_MS,
     }).then(
       ({ stdout, stderr }) => ({ ok: true, stdout, stderr }),
-      (error: { message?: string; stderr?: string; stdout?: string }) => ({
+      (
+        error: NodeJS.ErrnoException & { stderr?: string; stdout?: string },
+      ) => ({
         ok: false,
+        missingNpx: error.code === "ENOENT",
         stdout: error.stdout ?? "",
         stderr: error.stderr || (error.message ?? String(error)),
       }),
@@ -134,7 +140,12 @@ async function runRegistrySkillsCli(args: {
     });
     child.on("error", (error) => {
       clearTimeout(timer);
-      finish({ ok: false, stdout, stderr: stderr || error.message });
+      finish({
+        ok: false,
+        missingNpx: (error as NodeJS.ErrnoException).code === "ENOENT",
+        stdout,
+        stderr: stderr || error.message,
+      });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -145,6 +156,39 @@ async function runRegistrySkillsCli(args: {
       });
     });
   });
+}
+
+/**
+ * Whether the installer's PATH (the server's own) has the `node` an npx shim runs. Errs toward "yes" (main's 502):
+ * relative and empty entries resolve against the installer's cwd, and Windows drops the quotes around an entry.
+ */
+async function nodeOnPath(cwd: string): Promise<boolean> {
+  const extensions =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";")
+      : [""];
+  const files = (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .map((directory) =>
+      path.resolve(
+        cwd,
+        process.platform === "win32"
+          ? directory.replaceAll('"', "")
+          : directory,
+      ),
+    )
+    .flatMap((directory) =>
+      extensions.map((extension) => path.join(directory, `node${extension}`)),
+    );
+  const found = await Promise.all(
+    files.map((file) =>
+      fs.access(file, fs.constants.X_OK).then(
+        () => true,
+        () => false,
+      ),
+    ),
+  );
+  return found.includes(true);
 }
 
 async function validateSkillFile(
@@ -313,6 +357,7 @@ function installConflict(skillId: string): ApiError {
 }
 
 export async function installServerRegistrySkill(args: {
+  dataDir: string;
   userSkillsRootPath: string;
   packageRef: string;
   registrySkillId: string;
@@ -325,8 +370,10 @@ export async function installServerRegistrySkill(args: {
       "Registry skill id is invalid",
     );
   }
+  // In the data folder, never the OS temp folder, where Read-only Mac commands and sandboxed agents could plant an
+  // `.npmrc` that npx obeys outside any sandbox, or change the skill before it is copied.
   const extractionRoot = await fs.mkdtemp(
-    path.join(os.tmpdir(), "bb-registry-skill-"),
+    path.join(ensureDataTempDir(args.dataDir), "bb-registry-skill-"),
   );
   const skillsRootPath = args.userSkillsRootPath;
   await fs.mkdir(skillsRootPath, { recursive: true });
@@ -364,6 +411,13 @@ export async function installServerRegistrySkill(args: {
     });
     if (!result.ok) {
       const detail = result.stderr.trim() || result.stdout.trim();
+      if (result.missingNpx || !(await nodeOnPath(extractionRoot))) {
+        throw new ApiError(
+          424,
+          "registry_install_requires_npm",
+          `Installing registry skills needs Node.js with npm (${detail || "npx failed"}). Install Node.js from https://nodejs.org, restart Cloudroom, then try again.`,
+        );
+      }
       throw new ApiError(
         502,
         "registry_install_failed",

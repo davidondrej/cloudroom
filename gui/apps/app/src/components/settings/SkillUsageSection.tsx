@@ -1,11 +1,8 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { SystemSkillUsageResponse } from "@cloudroom/server-contract";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@cloudroom/shared-ui/toggle-group";
+import { RangeToggle, Stat } from "@/components/settings/UsageSection";
 import { SettingsSection } from "@/components/ui/settings-section.js";
 import { useProjectSkills } from "@/hooks/queries/skills-queries";
 import { useSkillUsage } from "@/hooks/queries/system-queries";
@@ -18,9 +15,9 @@ const RANGES: { value: Range; label: string }[] = [
   { value: "90", label: "90d" },
   { value: "365", label: "1y" },
 ];
-const ROW_PX = 30;
+const ROW_PX = 31;
 /** How many rows tall a ridge at the overall peak is. */
-const OVERLAP = 2.2;
+const OVERLAP = 2.35;
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /** `plugin:name` → `name`, matching the server's run names. */
@@ -72,66 +69,54 @@ export function busiestWeekday(
   return best > 0 ? WEEKDAYS[totals.indexOf(best)]! : null;
 }
 
-/** The ridge's top line, and the closed area under it. */
+/** Monotone cubic ridge line and closed cutout area, scaled into a 1000×100 viewBox. */
 function ridgePaths(
   values: readonly number[],
   peak: number,
-): { line: string; area: string } {
-  const last = Math.max(values.length - 1, 1);
-  const line = values
-    .map(
-      (value, x) =>
-        `${x ? "L" : "M"}${x} ${(100 - (value / peak) * 100).toFixed(2)}`,
-    )
-    .join(" ");
-  return { line, area: `${line} L${last} 100 L0 100 Z` };
-}
+  scale = 1,
+): { line: string; area: string; maxRatio: number } {
+  const n = values.length;
+  const last = Math.max(n - 1, 1);
+  const xs = values.map((_, i) => (i / last) * 1000);
+  const ratios = values.map((value) => (value * scale) / peak);
+  // Leave 4 units of headroom so the highest summit never clips at y = 0.
+  const ys = ratios.map((ratio) => 100 - ratio * 96);
+  const maxRatio = Math.max(...ratios, 0);
+  if (n < 2) {
+    const line = "M0,100 L1000,100";
+    return { line, area: `${line} L1000,100 L0,100 Z`, maxRatio };
+  }
 
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex-1 border border-border px-3.5 py-3">
-      <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
-        {label}
-      </div>
-      <div className="mt-1 font-mono text-xl text-foreground tabular-nums">
-        {value}
-      </div>
-    </div>
-  );
-}
+  const dx: number[] = [];
+  const slopes: number[] = [];
+  for (let i = 0; i < n - 1; i += 1) {
+    dx[i] = xs[i + 1]! - xs[i]!;
+    slopes[i] = (ys[i + 1]! - ys[i]!) / dx[i]!;
+  }
+  const tangents = new Array<number>(n).fill(0);
+  tangents[0] = Math.abs(slopes[0]!) < 1e-6 ? 0 : slopes[0]!;
+  tangents[n - 1] = Math.abs(slopes[n - 2]!) < 1e-6 ? 0 : slopes[n - 2]!;
+  for (let i = 1; i < n - 1; i += 1) {
+    if (slopes[i - 1]! * slopes[i]! > 0) {
+      const avg = (slopes[i - 1]! + slopes[i]!) / 2;
+      const cap = 3 * Math.min(Math.abs(slopes[i - 1]!), Math.abs(slopes[i]!));
+      tangents[i] = Math.sign(avg) * Math.min(Math.abs(avg), cap);
+    }
+  }
 
-function RangeToggle({
-  value,
-  onChange,
-}: {
-  value: Range;
-  onChange: (next: Range) => void;
-}) {
-  return (
-    <ToggleGroup
-      type="single"
-      aria-label="Time range"
-      value={value}
-      onValueChange={(next) => {
-        if (next !== "") onChange(next as Range);
-      }}
-      className="h-8 gap-0.5 rounded-md border border-input bg-background p-0.5"
-    >
-      {RANGES.map((range) => (
-        <ToggleGroupItem
-          key={range.value}
-          value={range.value}
-          className="h-6 rounded-sm px-2.5 text-xs font-medium text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-state-active data-[state=on]:text-foreground data-[state=on]:hover:bg-state-active"
-        >
-          {range.label}
-        </ToggleGroupItem>
-      ))}
-    </ToggleGroup>
-  );
+  let line = `M${xs[0]!.toFixed(2)},${ys[0]!.toFixed(2)}`;
+  for (let i = 0; i < n - 1; i += 1) {
+    const h = dx[i]! / 3;
+    const c1y = Math.min(100, ys[i]! + tangents[i]! * h);
+    const c2y = Math.min(100, ys[i + 1]! - tangents[i + 1]! * h);
+    line += ` C${(xs[i]! + h).toFixed(2)},${c1y.toFixed(2)} ${(xs[i + 1]! - h).toFixed(2)},${c2y.toFixed(2)} ${xs[i + 1]!.toFixed(2)},${ys[i + 1]!.toFixed(2)}`;
+  }
+  return { line, area: `${line} L1000,100 L0,100 Z`, maxRatio };
 }
 
 const ROW_GRID = "grid grid-cols-[11rem_1fr_3.5rem] items-end gap-3";
 
+// Topographic contour ridgeline (design 1, David 2026-11-21).
 function SkillRidges({
   used,
   unused,
@@ -141,6 +126,7 @@ function SkillRidges({
   unused: readonly string[];
   days: number;
 }) {
+  const uid = useId();
   const curves = used.map((skill) => smoothSeries(skill.daily));
   const peak = Math.max(...curves.flat(), 0.0001);
   const ticks = [
@@ -165,9 +151,34 @@ function SkillRidges({
         </span>
         <span className="text-right">Runs</span>
       </div>
-      <div style={{ paddingTop: ROW_PX * (OVERLAP - 1) }}>
+      <div className="relative" style={{ paddingTop: ROW_PX * (OVERLAP - 1) }}>
+        {/* Interior vertical guides aligned with the two middle ticks. */}
+        <div
+          aria-hidden
+          className={cn(ROW_GRID, "pointer-events-none absolute inset-0")}
+        >
+          <span />
+          <span className="relative block h-full">
+            {[33.333, 66.667].map((pct) => (
+              <span
+                key={pct}
+                className="absolute inset-y-0 w-px border-l border-dashed border-foreground/[0.07]"
+                style={{ left: `${pct}%` }}
+              />
+            ))}
+          </span>
+          <span />
+        </div>
         {used.map((skill, index) => {
-          const ridge = ridgePaths(curves[index]!, peak);
+          const curve = curves[index]!;
+          const ridge = ridgePaths(curve, peak);
+          const echoHigh =
+            ridge.maxRatio > 0.16 ? ridgePaths(curve, peak, 0.64) : null;
+          const echoLow =
+            ridge.maxRatio > 0.32 ? ridgePaths(curve, peak, 0.34) : null;
+          const crestId = `${uid}-c-${index}`;
+          const innerId = `${uid}-i-${index}`;
+          const isHighPeak = ridge.maxRatio > 0.45;
           return (
             <div
               key={skill.name}
@@ -176,35 +187,145 @@ function SkillRidges({
               className={ROW_GRID}
               style={{ height: ROW_PX }}
             >
-              <span className="truncate pb-1 text-right font-mono text-xs text-foreground">
+              <span
+                className={cn(
+                  "truncate pb-1 text-right font-mono text-xs",
+                  isHighPeak ? "text-foreground" : "text-foreground/78",
+                )}
+              >
                 {skill.name}
               </span>
               <span className="relative h-full">
                 <svg
                   aria-hidden
-                  viewBox={`0 0 ${Math.max(skill.daily.length - 1, 1)} 100`}
+                  viewBox="0 0 1000 100"
                   preserveAspectRatio="none"
                   className="pointer-events-none absolute inset-x-0 bottom-0 w-full overflow-visible"
                   style={{ height: ROW_PX * OVERLAP }}
                 >
+                  <defs>
+                    {/* Height-mapped crest: summits glow primary, slopes cool to foreground, zeros fade into the baseline. */}
+                    <linearGradient
+                      id={crestId}
+                      gradientUnits="userSpaceOnUse"
+                      x1="0"
+                      y1="0"
+                      x2="0"
+                      y2="100"
+                    >
+                      <stop
+                        offset="0%"
+                        stopColor="var(--primary)"
+                        stopOpacity="1"
+                      />
+                      <stop
+                        offset="34%"
+                        stopColor="var(--primary)"
+                        stopOpacity="0.96"
+                      />
+                      <stop
+                        offset="60%"
+                        stopColor="var(--foreground)"
+                        stopOpacity="0.86"
+                      />
+                      <stop
+                        offset="95%"
+                        stopColor="var(--foreground)"
+                        stopOpacity="0.54"
+                      />
+                      <stop
+                        offset="98.6%"
+                        stopColor="var(--foreground)"
+                        stopOpacity="0"
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor="var(--foreground)"
+                        stopOpacity="0"
+                      />
+                    </linearGradient>
+                    {echoHigh ? (
+                      <linearGradient
+                        id={innerId}
+                        gradientUnits="userSpaceOnUse"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="100"
+                      >
+                        <stop
+                          offset="0%"
+                          stopColor="var(--primary)"
+                          stopOpacity="0.32"
+                        />
+                        <stop
+                          offset="48%"
+                          stopColor="var(--foreground)"
+                          stopOpacity="0.22"
+                        />
+                        <stop
+                          offset="94.5%"
+                          stopColor="var(--foreground)"
+                          stopOpacity="0.14"
+                        />
+                        <stop
+                          offset="98.4%"
+                          stopColor="var(--foreground)"
+                          stopOpacity="0"
+                        />
+                        <stop
+                          offset="100%"
+                          stopColor="var(--foreground)"
+                          stopOpacity="0"
+                        />
+                      </linearGradient>
+                    ) : null}
+                  </defs>
                   <path d={ridge.area} fill="var(--background)" />
-                  <path
-                    d={ridge.area}
-                    fill="var(--primary)"
-                    fillOpacity={
-                      0.08 + 0.5 * (1 - index / Math.max(used.length, 1))
-                    }
+                  <line
+                    x1="0"
+                    y1="100"
+                    x2="1000"
+                    y2="100"
+                    stroke="var(--foreground)"
+                    strokeOpacity={0.13}
+                    strokeWidth={1}
+                    vectorEffect="non-scaling-stroke"
                   />
+                  {echoHigh ? (
+                    <path
+                      d={echoHigh.line}
+                      fill="none"
+                      stroke={`url(#${innerId})`}
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ) : null}
+                  {echoLow ? (
+                    <path
+                      d={echoLow.line}
+                      fill="none"
+                      stroke={`url(#${innerId})`}
+                      strokeOpacity={0.65}
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  ) : null}
                   <path
                     d={ridge.line}
                     fill="none"
-                    stroke="var(--primary)"
+                    stroke={`url(#${crestId})`}
                     strokeWidth={1.5}
                     vectorEffect="non-scaling-stroke"
                   />
                 </svg>
               </span>
-              <span className="pb-1 text-right font-mono text-xs text-muted-foreground tabular-nums">
+              <span
+                className={cn(
+                  "pb-1 text-right font-mono text-xs tabular-nums",
+                  isHighPeak ? "text-foreground/90" : "text-muted-foreground",
+                )}
+              >
                 {skill.total.toLocaleString()}
               </span>
             </div>
@@ -248,13 +369,18 @@ export function SkillUsageSection() {
     installed.data?.skills.map((skill) => skill.name) ?? [],
   );
   const total = used.reduce((sum, skill) => sum + skill.total, 0);
-  const rangeLabel = RANGES.find((option) => option.value === range)!.label;
+  // Named after the data on screen: a new range shows the last one until it loads.
+  const rangeLabel =
+    RANGES.find((option) => option.value === String(data?.days ?? range))
+      ?.label ?? "";
 
   return (
     <SettingsSection
       title="Skills"
       description="Every skill, most used first. Each ridge is one skill's daily runs. Scroll down for the least used."
-      action={<RangeToggle value={range} onChange={setRange} />}
+      action={
+        <RangeToggle value={range} options={RANGES} onChange={setRange} />
+      }
       plain
     >
       {usage.isError ? (

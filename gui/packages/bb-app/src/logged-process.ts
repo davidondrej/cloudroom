@@ -49,6 +49,7 @@ export function spawnLoggedProcess(args: SpawnLoggedProcessArgs): ChildProcess {
       cwd: process.cwd(),
       env: args.env,
       stdio: ["ignore", fd, fd],
+      windowsHide: true,
     });
   } finally {
     closeSync(fd);

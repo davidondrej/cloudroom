@@ -435,7 +435,7 @@ describe("delta assembler", () => {
       key: { providerItemId: "agent-parent-1" },
       item: { type: "tool", tool: "task", args: {} },
     });
-    const parentBbId =
+    const parentRoomId =
       parentStarted[0]?.type === "item/started" ? parentStarted[0].item.id : "";
     const childStarted = assemble(assembler, {
       kind: "item.open",
@@ -444,7 +444,7 @@ describe("delta assembler", () => {
     });
     expect(childStarted[0]).toMatchObject({
       type: "item/started",
-      item: { parentToolCallId: parentBbId },
+      item: { parentToolCallId: parentRoomId },
     });
   });
 
@@ -514,7 +514,7 @@ describe("delta assembler", () => {
     const assembler = createAssembler();
     assemble(assembler, { kind: "turn.open" });
     const started = assemble(assembler, bashOpen("tc-1"));
-    const bbItemId =
+    const roomItemId =
       started[0]?.type === "item/started" ? started[0].item.id : "";
     const events = assemble(assembler, {
       kind: "command.outputSnapshot",
@@ -522,10 +522,10 @@ describe("delta assembler", () => {
       text: "OUT\n",
     });
     expect(events).toEqual([
-      expect.objectContaining({ itemId: bbItemId, delta: "OUT\n" }),
+      expect.objectContaining({ itemId: roomItemId, delta: "OUT\n" }),
     ]);
-    expect(assembler.getBbItemId(THREAD_ID, "tc-1")).toBe(bbItemId);
-    expect(assembler.getProviderItemId(THREAD_ID, bbItemId)).toBe("tc-1");
+    expect(assembler.getBbItemId(THREAD_ID, "tc-1")).toBe(roomItemId);
+    expect(assembler.getProviderItemId(THREAD_ID, roomItemId)).toBe("tc-1");
   });
 
   it("drops snapshots for items it never saw open", () => {

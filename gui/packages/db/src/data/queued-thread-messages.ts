@@ -67,6 +67,12 @@ export interface CreateQueuedThreadMessageInput {
   /** Non-null only for one of core's own system notices. */
   systemNotice: QueuedMessageSystemNotice | null;
   hardQueue?: boolean;
+  /** A put-back row's old place in the queue; new rows go last. */
+  sortKey?: string;
+  /** A put-back request's time: it goes before every row queued since. */
+  queuedAt?: number;
+  /** Holds the row from automatic sends, in the same insert as the wait. */
+  failureReason?: string;
 }
 
 export interface UpdateQueuedThreadMessageInput {
@@ -290,6 +296,22 @@ function resolveQueuedThreadMessageNeighbor(
   return neighbor;
 }
 
+function orderKeyQueuedAt(
+  tx: DbTransaction,
+  input: CreateQueuedThreadMessageInput,
+): string | null {
+  const { queuedAt } = input;
+  if (queuedAt === undefined) return null;
+  const rows = listQueuedThreadMessages(tx, input.threadId);
+  const next = rows.findIndex((row) => row.createdAt >= queuedAt);
+  const previousKey = rows[next - 1]?.sortKey ?? null;
+  const nextKey = rows[next]?.sortKey;
+  return nextKey === undefined ||
+    (previousKey !== null && previousKey >= nextKey)
+    ? null
+    : createOrderKeyBetween({ previousKey, nextKey });
+}
+
 export function createQueuedThreadMessageInTransaction(
   tx: DbTransaction,
   input: CreateQueuedThreadMessageInput,
@@ -297,9 +319,12 @@ export function createQueuedThreadMessageInTransaction(
   const now = Date.now();
   const id = createQueuedThreadMessageId();
   const lastQueuedMessage = getLastQueuedThreadMessage(tx, input.threadId);
-  const sortKey = lastQueuedMessage
-    ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
-    : createOrderKeyBetween({ previousKey: null, nextKey: null });
+  const sortKey =
+    input.sortKey ??
+    orderKeyQueuedAt(tx, input) ??
+    (lastQueuedMessage
+      ? createOrderKeyAfter({ previousKey: lastQueuedMessage.sortKey })
+      : createOrderKeyBetween({ previousKey: null, nextKey: null }));
   return tx
     .insert(queuedThreadMessages)
     .values({
@@ -319,6 +344,8 @@ export function createQueuedThreadMessageInTransaction(
       systemNotice:
         input.systemNotice === null ? null : JSON.stringify(input.systemNotice),
       payloadKind: input.payload.kind,
+      fromComposer:
+        input.payload.kind === "inline" && input.payload.fromComposer === true,
       retryOfTurnRequestId:
         input.payload.kind === "retry"
           ? input.payload.retryOfTurnRequestId
@@ -327,6 +354,7 @@ export function createQueuedThreadMessageInTransaction(
         input.payload.kind === "retry" ? input.payload.attempt : null,
       retryReason: input.payload.kind === "retry" ? input.payload.reason : null,
       hardQueue: input.hardQueue ?? false,
+      failureReason: input.failureReason ?? null,
       claimedAt: null,
       claimToken: null,
       sortKey,
@@ -348,6 +376,22 @@ export function createQueuedThreadMessage(
   );
   notifier.notifyThread(input.threadId, ["queue-changed"]);
   return row;
+}
+
+/**
+ * A notice the user edited or sent is theirs: drop its interaction ID so the
+ * drain never discards it as stale (#2452). Unreadable JSON stays as it is.
+ */
+function noticeKeptForUser() {
+  const notice = queuedThreadMessages.systemNotice;
+  return sql`CASE WHEN json_valid(${notice}) THEN json_remove(${notice}, '$.interactionId') ELSE ${notice} END`;
+}
+
+export function keepQueuedThreadNoticeForUser(db: DbConnection, id: string) {
+  db.update(queuedThreadMessages)
+    .set({ systemNotice: noticeKeptForUser() })
+    .where(eq(queuedThreadMessages.id, id))
+    .run();
 }
 
 export function updateQueuedThreadMessage(
@@ -372,6 +416,7 @@ export function updateQueuedThreadMessage(
         .update(queuedThreadMessages)
         .set({
           content: JSON.stringify(input.content),
+          systemNotice: noticeKeptForUser(),
           updatedAt: Math.max(Date.now(), existing.updatedAt + 1),
         })
         .where(eq(queuedThreadMessages.id, input.id))
@@ -517,7 +562,7 @@ export function listIdleThreadsWithQueuedMessages(
     .leftJoin(environments, eq(environments.id, threads.environmentId))
     .where(
       and(
-        inArray(threads.status, ["idle", "pending"]),
+        inArray(threads.status, ["idle", "pending", "error"]),
         isNull(threads.archivedAt),
         isNull(threads.deletedAt),
         or(
@@ -968,6 +1013,25 @@ export function listQueuedThreadMessagesForApi(
     )
     .orderBy(asc(queuedThreadMessages.createdAt), asc(queuedThreadMessages.id))
     .all();
+}
+
+/** Rows a drain has claimed and is dispatching right now (#1111). */
+export function countClaimedQueuedThreadMessages(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  return (
+    db
+      .select({ n: count() })
+      .from(queuedThreadMessages)
+      .where(
+        and(
+          eq(queuedThreadMessages.threadId, threadId),
+          isNotNull(queuedThreadMessages.claimedAt),
+        ),
+      )
+      .get()?.n ?? 0
+  );
 }
 
 export interface QueuedThreadMessageCounts {

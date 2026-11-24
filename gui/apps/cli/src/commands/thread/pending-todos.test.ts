@@ -3,7 +3,7 @@ import type { ThreadTimelinePendingTodos } from "@cloudroom/domain";
 import type { ThreadTimelineResponse } from "@cloudroom/server-contract";
 import {
   BbRequestTimeoutError,
-  createNodeBbSdk,
+  createNodeRoomSdk,
   type BbSdk,
   type FetchImplementation,
 } from "@cloudroom/sdk/node";
@@ -143,7 +143,7 @@ describe("fetchThreadPendingTodos", () => {
     };
     return {
       requestUrls,
-      sdk: createNodeBbSdk({ baseUrl: "http://bb.test", fetch: fetchMock }),
+      sdk: createNodeRoomSdk({ baseUrl: "http://bb.test", fetch: fetchMock }),
     };
   }
 

@@ -34,9 +34,35 @@ import { ServerResponseError } from "./server-client.js";
 
 export type { CreateReconnectingWebSocket } from "./server-connection-support.js";
 
-interface InvalidServerMessageArgs {
-  data: unknown;
-  error: Error;
+const serverMessageTypes = new Set<unknown>(
+  hostDaemonServerWsMessageSchema.options.map(
+    (option) => option.shape.type.value,
+  ),
+);
+
+// Log only fixed values: the payload, its keys, and parse error text can hold env values or terminal output.
+function invalidServerMessageLogFields(
+  payloadLength: number,
+  decoded?: unknown,
+  error?: z.ZodError,
+) {
+  const message = decoded as {
+    type?: unknown;
+    command?: { type?: unknown } | null;
+  } | null;
+  const commandType = hostDaemonRpcCommandTypeSchema.safeParse(
+    message?.command?.type,
+  );
+  return {
+    commandType: commandType.success ? commandType.data : null,
+    issueCodes: error
+      ? [...new Set(error.issues.map((issue) => issue.code))]
+      : null,
+    messageType: serverMessageTypes.has(message?.type)
+      ? (message?.type as string)
+      : null,
+    payloadLength,
+  };
 }
 
 const STARTUP_TIMEOUT_TICK_MS = 1_000;
@@ -49,12 +75,6 @@ const invalidHostRpcRequestEnvelopeSchema = z
     command: z.object({ type: hostDaemonRpcCommandTypeSchema }).passthrough(),
   })
   .passthrough();
-
-interface ServerMessagePayloadSummary {
-  payloadLength: number;
-  payloadPreview: string;
-  payloadTruncated: boolean;
-}
 
 export type ServerSessionInvalidationSource =
   | "callTool"
@@ -75,10 +95,10 @@ type SessionCloseHandler = (
   reason: HostDaemonSessionCloseReason,
 ) => void | Promise<void>;
 
-const SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS = 512;
 const TERMINAL_SOCKET_HIGH_WATER_BYTES = 1024 * 1024;
 const TERMINAL_SOCKET_MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 const TERMINAL_SOCKET_DRAIN_POLL_MS = 10;
+const MAX_ERROR_RECONNECT_DELAY_MS = 60_000;
 
 interface PendingTerminalSocketPayload {
   bytes: number;
@@ -120,17 +140,6 @@ function isTerminalDaemonLifecycleMessage(
   }
 }
 
-function summarizeServerMessagePayload(
-  data: unknown,
-): ServerMessagePayloadSummary {
-  const text = decodeWebSocketMessageData(data);
-  return {
-    payloadLength: text.length,
-    payloadPreview: text.slice(0, SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS),
-    payloadTruncated: text.length > SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS,
-  };
-}
-
 export class ServerConnection {
   private readonly createWebSocket: CreateReconnectingWebSocket;
   private readonly startupTimeoutMs: number;
@@ -151,6 +160,9 @@ export class ServerConnection {
     [];
   private terminalSocketDrainTimeout: ReturnType<typeof setTimeout> | null =
     null;
+  private connectionOpenedAt = 0;
+  private errorReconnectDelayMs = 0;
+  private errorReconnectTimeout: ReturnType<typeof setTimeout> | null = null;
   private readonly pendingRecoverableMessages = new Map<
     string,
     HostDaemonDaemonWsMessage
@@ -178,6 +190,10 @@ export class ServerConnection {
     this.sessionInvalidationInProgress = false;
     this.clearHeartbeat();
     this.clearSession();
+    if (this.errorReconnectTimeout !== null) {
+      clearTimeout(this.errorReconnectTimeout);
+      this.errorReconnectTimeout = null;
+    }
 
     if (this.websocket) {
       const websocket = this.websocket;
@@ -226,13 +242,39 @@ export class ServerConnection {
         { ...runtimeErrorLogFields(error), type: parsed.type },
         "Failed to send websocket message",
       );
-      websocket.close(1013, "send-failed");
+      this.reconnectAfterError(websocket, "send-failed");
       return false;
     }
     if (recoverableKey !== null) {
       this.pendingRecoverableMessages.delete(recoverableKey);
     }
     return true;
+  }
+
+  // close() stops the socket for good and its reconnect() retries at once, so
+  // drop the socket now and reconnect after our own growing delay. A connection
+  // that stayed up for the longest delay counts as healthy and resets it.
+  private reconnectAfterError(
+    websocket: ReconnectingWebSocketLike,
+    reason: string,
+  ): void {
+    if (Date.now() - this.connectionOpenedAt >= MAX_ERROR_RECONNECT_DELAY_MS) {
+      this.errorReconnectDelayMs = 0;
+    }
+    this.errorReconnectDelayMs = Math.min(
+      Math.max(this.errorReconnectDelayMs * 2, 1_000),
+      MAX_ERROR_RECONNECT_DELAY_MS,
+    );
+    websocket.close(1013, reason);
+    if (this.errorReconnectTimeout !== null) {
+      return;
+    }
+    this.errorReconnectTimeout = setTimeout(() => {
+      this.errorReconnectTimeout = null;
+      if (!this.stopped && this.websocket === websocket) {
+        websocket.reconnect(1013, reason);
+      }
+    }, this.errorReconnectDelayMs);
   }
 
   private enqueueTerminalSocketPayload(payload: string): boolean {
@@ -249,7 +291,9 @@ export class ServerConnection {
         "Terminal websocket output queue exceeded its limit",
       );
       this.clearTerminalSocketPayloads();
-      this.websocket?.close(1013, "terminal-backpressure");
+      if (this.websocket) {
+        this.reconnectAfterError(this.websocket, "terminal-backpressure");
+      }
       return false;
     }
     this.pendingTerminalSocketPayloads.push({ bytes, payload });
@@ -290,7 +334,7 @@ export class ServerConnection {
           { ...runtimeErrorLogFields(error) },
           "Failed to drain terminal websocket output",
         );
-        websocket.close(1013, "send-failed");
+        this.reconnectAfterError(websocket, "send-failed");
         this.clearTerminalSocketPayloads();
         return;
       }
@@ -488,6 +532,7 @@ export class ServerConnection {
 
         const handleOpen = async () => {
           hasOpened = true;
+          this.connectionOpenedAt = Date.now();
           this.sessionInvalidationInProgress = false;
           clearInterval(startupTimer);
           this.resetHeartbeat();
@@ -571,25 +616,25 @@ export class ServerConnection {
     let decoded: unknown;
     try {
       decoded = JSON.parse(text);
-    } catch (error) {
-      this.handleInvalidServerMessage({
-        data,
-        error: normalizeCaughtError(error),
-      });
+    } catch {
+      this.handleInvalidServerMessage(
+        invalidServerMessageLogFields(text.length),
+      );
       return;
     }
 
     const message = hostDaemonServerWsMessageSchema.safeParse(decoded);
     if (!message.success) {
+      const logFields = invalidServerMessageLogFields(
+        text.length,
+        decoded,
+        message.error,
+      );
       const invalidRpcRequest =
         invalidHostRpcRequestEnvelopeSchema.safeParse(decoded);
       if (invalidRpcRequest.success) {
         this.options.logger.warn(
-          {
-            commandType: invalidRpcRequest.data.command.type,
-            err: message.error,
-            requestId: invalidRpcRequest.data.requestId,
-          },
+          logFields,
           "Rejected invalid host RPC command",
         );
         this.sendMessage({
@@ -602,7 +647,7 @@ export class ServerConnection {
         });
         return;
       }
-      this.handleInvalidServerMessage({ data, error: message.error });
+      this.handleInvalidServerMessage(logFields);
       return;
     }
 
@@ -721,12 +766,11 @@ export class ServerConnection {
     );
   }
 
-  private handleInvalidServerMessage(args: InvalidServerMessageArgs): void {
+  private handleInvalidServerMessage(
+    logFields: ReturnType<typeof invalidServerMessageLogFields>,
+  ): void {
     this.options.logger.error(
-      {
-        err: args.error,
-        ...summarizeServerMessagePayload(args.data),
-      },
+      logFields,
       "Invalid server websocket message; closing connection",
     );
 

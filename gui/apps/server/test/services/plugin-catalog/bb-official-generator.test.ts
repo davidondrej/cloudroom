@@ -7,11 +7,11 @@ import { promisify } from "node:util";
 import { PLUGIN_CATALOG_CATEGORIES } from "@cloudroom/domain";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  generateBbOfficialMarketplace,
-  parseBbOfficialCatalogFields,
+  generateRoomOfficialMarketplace,
+  parseRoomOfficialCatalogFields,
   readBundledPluginOverview,
   readPluginGitDates,
-} from "../../../scripts/generate-bb-official-marketplace.js";
+} from "../../../scripts/generate-official-marketplace.js";
 import {
   BUNDLED_MARKETPLACE_NAME,
   isBundledMarketplaceEntry,
@@ -47,7 +47,7 @@ describe("bb-official marketplace generator", () => {
       raw,
       "generated marketplace",
     );
-    const fields = parseBbOfficialCatalogFields(
+    const fields = parseRoomOfficialCatalogFields(
       JSON.parse(
         await readFile(
           new URL("../../../../../plugins/bb-official.json", import.meta.url),
@@ -99,10 +99,10 @@ describe("bb-official marketplace generator", () => {
     const block = { category: "utilities", screenshots: [] };
 
     expect(() =>
-      parseBbOfficialCatalogFields({ alpha: block }, plugins),
+      parseRoomOfficialCatalogFields({ alpha: block }, plugins),
     ).toThrow(/missing bundled plugin blocks: beta/u);
     expect(() =>
-      parseBbOfficialCatalogFields(
+      parseRoomOfficialCatalogFields(
         { alpha: block, beta: block, gamma: block },
         plugins,
       ),
@@ -153,7 +153,7 @@ describe("bb-official marketplace generator", () => {
     cleanup.push(root);
 
     expect(() => loadBundledMarketplace([], root)).toThrow(
-      "pnpm exec turbo run generate:bb-official-marketplace --filter=@cloudroom/server",
+      "pnpm exec turbo run generate:official-marketplace --filter=@cloudroom/server",
     );
   });
 
@@ -251,7 +251,7 @@ describe("bb-official marketplace generator", () => {
     const warnings: string[] = [];
     const outputPath = path.join(checkout, "marketplace.json");
 
-    await generateBbOfficialMarketplace({
+    await generateRoomOfficialMarketplace({
       repositoryRoot: checkout,
       catalogFieldsPath: path.join(checkout, "plugins", "bb-official.json"),
       outputPath,

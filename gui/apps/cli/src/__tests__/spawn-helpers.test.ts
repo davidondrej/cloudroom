@@ -1,8 +1,13 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Command } from "commander";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS } from "@cloudroom/sdk";
 import {
   buildSpawnEnvironment,
   looksLikePath,
+  registerSpawnCommand,
   requireHostId,
 } from "../commands/thread/spawn.js";
 import {
@@ -287,6 +292,15 @@ describe("parseThreadWaitTimeoutSeconds", () => {
       "non-negative number",
     );
   });
+
+  it.each(["1abc", "1.2.3", "1e", "", " "])(
+    "throws for malformed numeric input %j",
+    (value) => {
+      expect(() => parseThreadWaitTimeoutSeconds(value)).toThrow(
+        "non-negative number",
+      );
+    },
+  );
 });
 
 describe("parseThreadWaitPollIntervalMs", () => {
@@ -301,6 +315,15 @@ describe("parseThreadWaitPollIntervalMs", () => {
       "positive integer",
     );
   });
+
+  it.each(["1abc", "1.5", "1.2.3", "1e", "", " "])(
+    "throws for malformed integer input %j",
+    (value) => {
+      expect(() => parseThreadWaitPollIntervalMs(value)).toThrow(
+        "positive integer",
+      );
+    },
+  );
 });
 
 describe("parseServiceTier", () => {
@@ -320,5 +343,37 @@ describe("parsePermissionMode", () => {
     expect(() => parsePermissionMode("readonly")).toThrow(
       "Invalid permission mode 'readonly'. Expected accept-edits, auto, or full.",
     );
+  });
+});
+
+describe("thread spawn --prompt-file (#974)", () => {
+  const text = "--script=echo x\r\n---\nquotes \"a\" & | ^ %PATH% $(x)\n";
+  it.each([
+    ["file text, BOM dropped", ["--prompt-file", "FILE"], text],
+    ["--prompt value that names the flag", ["--prompt", "--prompt-file"], "--prompt-file"],
+    ["--prompt=value that names the flag", ["--prompt=--prompt-file"], "--prompt-file"],
+    ["--title value that names the flag", ["--prompt", "p", "--title", "--prompt-file"], "p"],
+    ["flag after --", ["--prompt", "p", "--", "--prompt-file", "FILE"], "too many arguments"],
+    ["both flags", ["--prompt", "p", "--prompt-file", "FILE"], "error: choose only one"],
+    ["not UTF-8", ["--prompt-file", "UTF16"], "not UTF-8 text"],
+  ])("%s", async (_label, args, expected) => {
+    const dir = await mkdtemp(join(tmpdir(), "room-cli-prompt-file-"));
+    try {
+      await writeFile(join(dir, "p.txt"), `\uFEFF${text}`);
+      await writeFile(join(dir, "u16.txt"), Buffer.from(`\uFEFF${text}`, "utf16le"));
+      const program = new Command().exitOverride().configureOutput({ writeErr: () => {} });
+      registerSpawnCommand(program, () => "http://127.0.0.1:1");
+      const spawn = program.commands[0]!.exitOverride();
+      let prompt: unknown;
+      spawn.action((opts: { prompt: string }) => void (prompt = opts.prompt));
+      const argv = args.map((arg) => arg === "FILE" ? join(dir, "p.txt") : arg === "UTF16" ? join(dir, "u16.txt") : arg);
+      const outcome = await program
+        .parseAsync(["spawn", "--project", "p", ...argv], { from: "user" })
+        .then(() => prompt, (error: Error) => error.message);
+      expect(outcome).toEqual(expect.stringContaining(expected));
+      if (expected === text) expect(outcome).toBe(text);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

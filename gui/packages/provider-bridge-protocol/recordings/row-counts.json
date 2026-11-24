@@ -79,7 +79,7 @@
   },
   "claude-code/auth-failure": {
     "events": 9,
-    "rows": 2,
+    "rows": 1,
     "unhandled": 0,
     "grammarDrops": 0
   },

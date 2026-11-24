@@ -3,17 +3,24 @@ import { z } from "zod";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
+  deleteAutomation,
   listDueAutomations,
+  listFinishedOnceAutomations,
   retryPausedAutomations,
   parseAutomationExecution,
   parseAutomationTrigger,
   setAutomationEnabled,
   lastRunFinishedAt,
+  listAutomationRuns,
+  recoverableRun,
+  recoverFailedRun,
   type AutomationRow,
   type AutomationRunRow,
   type Db,
 } from "./data.js";
 import { publishAutomationChange } from "./realtime.js";
+import { deleteAutomationScriptDir } from "./script-files.js";
+import { savedReports } from "./review.js";
 import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
   errorMessage,
@@ -23,10 +30,33 @@ import {
 } from "./run.js";
 
 const DUE_AUTOMATION_BATCH_SIZE = 100;
+// As long as Review shows a run.
+const FINISHED_ONCE_KEEP_MS = 7 * 86_400_000;
 export const SWEEP_INTERVAL_MS = 10_000;
 export const OVERDUE_MS = 2 * 60_000;
 export const OVERDUE_SPACING_MS = 60_000;
-const lastOverdueStart = new WeakMap<Db, number>();
+// Wall and monotonic time of the last overdue start: a minute on either clock frees the next one, so a wall clock that
+// steps back can't hold missed loops (#1588), and a monotonic clock paused by a Linux suspend can't either.
+const lastOverdueStart = new WeakMap<Db, { wall: number; mono: number }>();
+export const RECOVERY_WAIT_MS = 6 * 60 * 60_000;
+const busyThreadSchema = z
+  .object({ status: z.enum(["starting", "active"]), archivedAt: z.null(), deletedAt: z.null() })
+  .passthrough();
+const idleThreadSchema = z
+  .object({ status: z.literal("idle"), deletedAt: z.null() })
+  .passthrough();
+const liveThreadSchema = z
+  .object({ archivedAt: z.null(), deletedAt: z.null(), dispatchingMessageCount: z.number().optional() })
+  .passthrough();
+const queuedRowsSchema = z.array(
+  z
+    .object({
+      threadId: z.string(),
+      failureReason: z.string().nullish(),
+      payload: z.object({ kind: z.string(), reason: z.string().nullish() }).passthrough(),
+    })
+    .passthrough(),
+);
 
 const hostListSchema = z.array(
   z.object({ status: z.enum(["connected", "disconnected"]) }).passthrough(),
@@ -51,12 +81,21 @@ type ProjectListApi = {
   };
 };
 type SweepApi = AgentRunApi &
-  ProjectListApi & { sdk: { hosts: { list(): Promise<unknown> } } };
+  ProjectListApi & {
+    sdk: {
+      hosts: { list(): Promise<unknown> };
+      threads: {
+        queue?: {
+          list(args: Parameters<BbPluginApi["sdk"]["threads"]["queue"]["list"]>[0]): Promise<unknown>;
+        };
+      };
+    };
+  };
 
-export async function listLiveProjects(bb: ProjectListApi) {
+export async function listLiveProjects(room: ProjectListApi) {
   const [visible, hidden] = await Promise.all([
-    bb.sdk.projects.list({ includePersonal: true }),
-    bb.sdk.projects.list({ hidden: true }),
+    room.sdk.projects.list({ includePersonal: true }),
+    room.sdk.projects.list({ hidden: true }),
   ]);
   return [
     ...projectListSchema.parse(visible),
@@ -80,8 +119,87 @@ function buildScheduleFailureHandler(
   };
 }
 
+/** A run closes on its thread's first idle or failure, but the thread can work on: provider-retry (#887), a child
+ *  reporting back, or a person continuing it. Until it settles, for 6 hours at most, the loop's next run waits instead
+ *  of starting a second thread beside it (#1279). A failed thread that is idle again ran and finished since, maybe
+ *  archiving itself: its run is recovered, not retried, unless its saved report says it failed; an unreadable report
+ *  counts as none, as in Review (#1443). The website is read only for a run the local checks would recover. Any other
+ *  doubt runs, as before. */
+async function lastThreadHolds(
+  room: SweepApi,
+  db: Db,
+  automation: AutomationRow,
+  now: number,
+  oneAgent: boolean,
+): Promise<boolean> {
+  const [last] = listAutomationRuns(db, {
+    automationId: automation.id,
+    limit: 1,
+  });
+  if (!last?.threadId || now - (last.finishedAt ?? 0) > RECOVERY_WAIT_MS)
+    return oneAgent && (await failedStreakWorksOn(room, db, automation, now));
+  const thread = await room.sdk.threads.get({ threadId: last.threadId }).catch(() => null);
+  if (
+    last.status === "failed" &&
+    idleThreadSchema.safeParse(thread).success &&
+    recoverableRun(db, last.id) !== null &&
+    (await savedReports(room, [last.id], [])).runs.get(last.id)?.status !==
+      "failed" &&
+    recoverFailedRun(db, last.id, now)
+  ) {
+    publishAutomationChange(room, automation.projectId, [
+      "automations-changed",
+      "automation-runs-changed",
+    ]);
+    return true;
+  }
+  return (
+    busyThreadSchema.safeParse(thread).success ||
+    (oneAgent && (await failedStreakWorksOn(room, db, automation, now)))
+  );
+}
+
+/** A failed run's thread can run the slot's work again on its own: a retry internet-watch or provider-retry queued, or
+ *  one a drain is sending right now. Then the loop's retry waits instead of starting a second thread (#2454). Every
+ *  failed run of the current failure streak counts, not only the last. A queued row whose send failed, or an archived
+ *  or deleted thread, never sends, so it holds nothing; an unreadable thread or queue holds nothing, as before. Loops
+ *  that take turns between agents, and provider-retry's limit retries, are left out: the loop's next run cancels those
+ *  retries and hands off to another agent (fallback.ts), as before. */
+async function failedStreakWorksOn(
+  room: SweepApi,
+  db: Db,
+  automation: AutomationRow,
+  now: number,
+): Promise<boolean> {
+  const runs = listAutomationRuns(db, {
+    automationId: automation.id,
+    limit: Math.max(automation.consecutiveFailures, 1),
+  }).filter(
+    (run) => run.status === "failed" && run.threadId && now - (run.finishedAt ?? 0) <= RECOVERY_WAIT_MS,
+  );
+  if (runs.length === 0) return false;
+  const rows = queuedRowsSchema.safeParse(await room.sdk.threads.queue?.list({}).catch(() => null));
+  const retrying = new Set(
+    (rows.data ?? []).flatMap((row) =>
+      row.payload.kind === "retry" && !row.failureReason && row.payload.reason !== "Rate limited" ? [row.threadId] : [],
+    ),
+  );
+  for (const run of runs) {
+    const thread = await room.sdk.threads.get({ threadId: run.threadId! }).catch(() => null);
+    const live = liveThreadSchema.safeParse(thread);
+    if (
+      live.success &&
+      (busyThreadSchema.safeParse(thread).success ||
+        (live.data.dispatchingMessageCount ?? 0) > 0 ||
+        retrying.has(run.threadId!))
+    )
+      return true;
+  }
+  return false;
+}
+
 async function processDueAutomation(
-  bb: SweepApi,
+  room: SweepApi,
   db: Db,
   args: {
     pluginDataDir: string;
@@ -107,7 +225,7 @@ async function processDueAutomation(
             timezone: trigger.timezone,
           });
   } catch (error) {
-    bb.log.error(
+    room.log.error(
       `Skipping due automation ${args.automation.id} with invalid stored configuration: ${errorMessage(error)}`,
     );
     return false;
@@ -116,6 +234,12 @@ async function processDueAutomation(
   if (execution.mode === "agent" && !args.agentHostsAvailable) {
     return false;
   }
+  if (
+    execution.mode === "agent" &&
+    args.automation.targetThreadId === null &&
+    (await lastThreadHolds(room, db, args.automation, args.now, (execution.agents?.length ?? 0) <= 1))
+  )
+    return false;
 
   const claim = claimAutomationScheduledRun(db, {
     automationId: args.automation.id,
@@ -124,7 +248,7 @@ async function processDueAutomation(
     now: args.now,
   });
   if (!claim.advanced) return false;
-  publishAutomationChange(bb, args.automation.projectId, [
+  publishAutomationChange(room, args.automation.projectId, [
     "automations-changed",
     "automation-runs-changed",
   ]);
@@ -132,14 +256,14 @@ async function processDueAutomation(
     run: claim.run,
   });
   if (execution.mode === "agent") {
-    await executeAgentRun(bb, db, {
+    await executeAgentRun(room, db, {
       automation: args.automation,
       run: claim.run,
       execution,
       onFailure,
     });
   } else {
-    void executeScriptRun(bb, db, {
+    void executeScriptRun(room, db, {
       pluginDataDir: args.pluginDataDir,
       automation: args.automation,
       run: claim.run,
@@ -147,7 +271,7 @@ async function processDueAutomation(
       onFailure,
       serverUrl: args.serverUrl,
     }).catch((error: unknown) => {
-      bb.log.error(
+      room.log.error(
         `Detached script automation ${args.automation.id} failed unexpectedly: ${errorMessage(error)}`,
       );
     });
@@ -156,16 +280,16 @@ async function processDueAutomation(
 }
 
 async function hasConnectedHost(
-  bb: Pick<BbPluginApi, "log"> & {
+  room: Pick<BbPluginApi, "log"> & {
     sdk: { hosts: { list(): Promise<unknown> } };
   },
 ): Promise<boolean> {
   try {
     return hostListSchema
-      .parse(await bb.sdk.hosts.list())
+      .parse(await room.sdk.hosts.list())
       .some((host) => host.status === "connected");
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list hosts for automation sweep: ${errorMessage(error)}`,
     );
     return false;
@@ -173,11 +297,11 @@ async function hasConnectedHost(
 }
 
 // Empty when the list fails, so a failed lookup never pauses anything.
-async function liveProjectIds(bb: SweepApi): Promise<Set<string>> {
+async function liveProjectIds(room: SweepApi): Promise<Set<string>> {
   try {
-    return new Set((await listLiveProjects(bb)).map((project) => project.id));
+    return new Set((await listLiveProjects(room)).map((project) => project.id));
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list projects for automation sweep: ${errorMessage(error)}`,
     );
     return new Set();
@@ -185,7 +309,7 @@ async function liveProjectIds(bb: SweepApi): Promise<Set<string>> {
 }
 
 export async function sweepDueAutomations(
-  bb: SweepApi,
+  room: SweepApi,
   db: Db,
   args: {
     pluginDataDir: string;
@@ -196,17 +320,29 @@ export async function sweepDueAutomations(
   const now = args.now ?? Date.now();
   const startedAt = Date.now();
   for (const projectId of retryPausedAutomations(db, now))
-    publishAutomationChange(bb, projectId, "automations-changed");
+    publishAutomationChange(room, projectId, "automations-changed");
+  // A timer or reminder that did its job leaves the list a week later.
+  for (const finished of listFinishedOnceAutomations(db, now - FINISHED_ONCE_KEEP_MS)) {
+    deleteAutomation(db, finished);
+    await deleteAutomationScriptDir({
+      dataDir: args.pluginDataDir,
+      automationId: finished.automationId,
+    }).catch(() => undefined);
+    publishAutomationChange(room, finished.projectId, "automations-changed");
+  }
   const due = listDueAutomations(db, {
     now,
     limit: DUE_AUTOMATION_BATCH_SIZE,
     overdueBefore: now - OVERDUE_MS,
   });
   if (due.length === 0) return;
-  const projectIds = await liveProjectIds(bb);
-  const agentHostsAvailable = await hasConnectedHost(bb);
+  const projectIds = await liveProjectIds(room);
+  const agentHostsAvailable = await hasConnectedHost(room);
+  const last = lastOverdueStart.get(db);
   let overdueStarted =
-    now - (lastOverdueStart.get(db) ?? -Infinity) < OVERDUE_SPACING_MS;
+    last !== undefined &&
+    now - last.wall < OVERDUE_SPACING_MS &&
+    performance.now() - last.mono < OVERDUE_SPACING_MS;
   for (const automation of due) {
     const nextRunAt = automation.nextRunAt ?? now;
     const overdue =
@@ -223,13 +359,13 @@ export async function sweepDueAutomations(
         nextRunAt: null,
         lastError: "Paused because its project was deleted",
       });
-      bb.log.warn(
+      room.log.warn(
         `Paused automation ${automation.id}: project ${automation.projectId} was deleted`,
       );
       continue;
     }
     try {
-      const started = await processDueAutomation(bb, db, {
+      const started = await processDueAutomation(room, db, {
         pluginDataDir: args.pluginDataDir,
         automation,
         now,
@@ -238,10 +374,13 @@ export async function sweepDueAutomations(
       });
       if (overdue && started) {
         overdueStarted = true;
-        lastOverdueStart.set(db, now + Date.now() - startedAt);
+        lastOverdueStart.set(db, {
+          wall: now + Date.now() - startedAt,
+          mono: performance.now(),
+        });
       }
     } catch (error) {
-      bb.log.error(
+      room.log.error(
         `Failed to process due automation ${automation.id}: ${errorMessage(error)}`,
       );
     }

@@ -34,7 +34,7 @@ import {
   derivePrefix,
   Field,
 } from "./shared.js";
-import { BbProjectLinkPicker } from "./bb-project-link.js";
+import { RoomProjectLinkPicker } from "./project-link.js";
 
 const NO_FOLDER = "__none__";
 const NEW_FOLDER = "__new__";
@@ -66,11 +66,11 @@ export function NewProjectDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const bbProjects = useTasksQuery(
+  const roomProjects = useTasksQuery(
     async (rpc) => (await rpc.call("listBbProjects")).bbProjects,
     [],
   );
-  const bbProjectList = bbProjects.data ?? [];
+  const roomProjectList = roomProjects.data ?? [];
 
   useEffect(() => {
     if (!open) return;
@@ -269,10 +269,10 @@ export function NewProjectDialog({
             label="Linked Cloudroom project"
             hint="Optional. Linking a Cloudroom project enables dispatching to agents."
           >
-            <BbProjectLinkPicker
+            <RoomProjectLinkPicker
               value={linkedBbProjectId}
               onChange={setLinkedBbProjectId}
-              bbProjects={bbProjectList}
+              bbProjects={roomProjectList}
             />
           </Field>
         </div>

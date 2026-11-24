@@ -56,6 +56,15 @@ describe("selected Claude skills", () => {
     ]);
   });
 
+  it("loads ~/.claude/skills when the account's CLAUDE_CONFIG_DIR lacks them", async () => {
+    const env = { HOME: home, CLAUDE_CONFIG_DIR: join(home, "account") };
+    const output = await expandClaudeSkillInput(tagged("/plain it", "plain"), {
+      ...options,
+      env,
+    } as SdkSessionOptions);
+    expect((output[0] as { text: string }).text).toContain("Do plain for it.");
+  });
+
   it("loads plain skills and refuses settings skills later in the message", async () => {
     const output = await expandClaudeSkillInput(
       tagged("/plain the tests", "plain"),

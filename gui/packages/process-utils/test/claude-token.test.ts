@@ -30,6 +30,14 @@ describe("readClaudeToken", () => {
     expect(readClaudeToken(conpty, true)).toBe(TOKEN);
   });
 
+  it("bounds cursor coordinates from malformed terminal sequences", () => {
+    expect(screenText("\x1b[926361970Gx")).toHaveLength(1_000);
+    expect(screenText(`${"\x1b[1000C".repeat(1_000)}x`)).toHaveLength(1_001);
+    expect(screenText(`${"\x1b[1000B".repeat(1_000)}x`)).toHaveLength(1_001);
+    expect(screenText("\x1b[926361970Bx")).toBe(`${"\n".repeat(1_000)}x`);
+    expect(screenText("\x1b[1;926361970Hx", true)).toHaveLength(1_000);
+  });
+
   it("reads nothing before the token is on screen", () => {
     expect(readClaudeToken(intro)).toBeUndefined();
   });

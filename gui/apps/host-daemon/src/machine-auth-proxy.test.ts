@@ -2,15 +2,16 @@ import {
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
   proveLocalCaller,
+  readMachineProxyUrl,
   SERVER_CALLER_PROOF_PATH,
 } from "@cloudroom/config/caller-proof";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, stat } from "node:fs/promises";
 import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   startMachineAuthProxy,
@@ -465,6 +466,38 @@ describe("startMachineAuthProxy", () => {
     }
   });
 
+  // Linux and macOS tell which user owns each loopback connection. Here the proxy
+  // takes another uid as its own, so this test's process is the other user.
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
+    "refuses open reads from another OS user on this machine",
+    async () => {
+      const received: string[] = [];
+      const upstream = http.createServer((request, response) => {
+        received.push(request.url ?? "");
+        response.end("{}");
+      });
+      const { proxy, token } = await startProxy(await listen(upstream));
+      vi.spyOn(process, "getuid").mockReturnValue(process.getuid!() + 1);
+      try {
+        const refused = await fetch(`${proxy.serverUrl}/api/v1/threads`);
+        expect(refused.status).toBe(401);
+        expect(refused.headers.get(CALLER_PROOF_STATUS_HEADER)).toBe(
+          "required",
+        );
+        expect(await refused.json()).toMatchObject({
+          code: "caller_proof_required",
+        });
+        const proven = await fetch(`${proxy.serverUrl}/api/v1/threads`, {
+          headers: { [CALLER_TOKEN_HEADER]: token },
+        });
+        expect(proven.status).toBe(200);
+      } finally {
+        vi.restoreAllMocks();
+      }
+      expect(received).toEqual(["/api/v1/threads"]);
+    },
+  );
+
   it("gives a token only to a caller that writes the proof file", async () => {
     let upstreamRequests = 0;
     const upstream = http.createServer((_request, response) => {
@@ -516,6 +549,22 @@ describe("startMachineAuthProxy", () => {
     }
     // An unhandled socket error would have crashed the daemon before this.
     expect(await rawStatus(proxyUrl, "/api/v1/threads")).toBe(200);
+  });
+
+  it("publishes its URL owner-only for room-cli outside a thread (#1564)", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "machine-auth-proxy-"));
+    const proxy = await startMachineAuthProxy({
+      dataDir,
+      serverHeaders: { "x-bb-connect-machine": "bbcm_machine" },
+      serverUrl: "http://server.test",
+    });
+    expect(readMachineProxyUrl(dataDir)).toBe(proxy.serverUrl);
+    if (process.platform !== "win32") {
+      const { mode } = await stat(join(dataDir, "machine-proxy-url"));
+      expect(mode & 0o777).toBe(0o600);
+    }
+    await proxy.close();
+    expect(readMachineProxyUrl(dataDir)).toBeNull();
   });
 
   it("rejects loudly when its loopback port cannot be bound", async () => {

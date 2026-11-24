@@ -109,6 +109,8 @@ export function resolveThreadWorkspaceOpenPath(
   if (!args.canOpenWorkspace || !args.hasWorkspaceOpenTargets) {
     return null;
   }
+  // A parked worktree's folder is gone until the next message.
+  if (args.environment?.lifecycle.phase === "parked") return null;
 
   return args.environment?.path ?? null;
 }

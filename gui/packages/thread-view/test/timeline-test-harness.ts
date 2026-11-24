@@ -24,35 +24,59 @@ import type {
   TurnRequestTarget,
 } from "@cloudroom/domain";
 import type { TimelineRow } from "@cloudroom/server-contract";
-import type {
-  BuildEventProjectionOptions,
-  EventProjection,
-  EventProjectionMessage,
-} from "../src/event-projection-types.js";
+import type { ActiveThinking, Thread, ThreadEventScope } from "@cloudroom/domain";
+import type { TimelineWorkflowWorkRow } from "@cloudroom/server-contract";
 import {
   buildThreadTimelineFromEvents,
   formatThreadTimelineText,
+  type ThreadEventWithMeta,
 } from "../src/index.js";
-import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/accepted-client-request-context.js";
-import { getProjectionEntryMessages } from "../src/event-projection-flatten.js";
-import { buildEventProjection } from "../src/build-event-projection.js";
-import type { ThreadEventWithMeta } from "../src/build-event-projection.js";
+import {
+  EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
+  orderEvents,
+} from "../src/events.js";
+import { foldEvents } from "../src/fold.js";
+
+export interface HarnessProjectionOptions {
+  includeDiagnosticOperations?: boolean;
+  providerDisplayName?: string;
+  threadName?: string;
+  threadStatus?: Thread["status"];
+  turnMessageDetail: "summary" | "full";
+}
+
+export interface ProjectedRowView {
+  kind: string;
+  id: string;
+  threadId: string;
+  sourceSeqStart: number;
+  sourceSeqEnd: number;
+  createdAt: number;
+  startedAt: number;
+  scope: ThreadEventScope;
+  detail?: string | null;
+  [key: string]: unknown;
+}
 
 export interface RenderTimelineFixtureArgs {
   completedTurnDisplay?: CompletedTurnDisplay;
   events: ThreadEventRow[];
   includeNestedRows?: boolean;
-  projectionOptions: Omit<BuildEventProjectionOptions, "threadName"> & {
-    threadName?: string;
-  };
+  projectionOptions: HarnessProjectionOptions;
   verbose?: boolean;
 }
 
 export interface RenderedTimelineFixture {
   pendingTodos: ThreadTimelinePendingTodos | null;
   events: ThreadEventRow[];
-  messages: EventProjectionMessage[];
-  projection: EventProjection;
+  messages: ProjectedRowView[];
+  projection: {
+    state: {
+      activeThinking: ActiveThinking | null;
+      activeWorkflows: TimelineWorkflowWorkRow[];
+      activeBackgroundCommands: TimelineWorkflowWorkRow[];
+    };
+  };
   rows: TimelineRow[];
   text: string;
   turnRows: Extract<TimelineRow, { kind: "turn" }>[];
@@ -478,39 +502,66 @@ export function decodeThreadEventRow(row: ThreadEventRow): ThreadEventWithMeta {
   };
 }
 
-function flattenEventProjectionMessages(
-  projection: EventProjection,
-): EventProjectionMessage[] {
-  const messages: EventProjectionMessage[] = [];
-  for (const entry of projection.entries) {
-    messages.push(...getProjectionEntryMessages(entry));
-  }
-  return messages;
-}
-
-function flattenEventProjectionMessageListDeep(
-  rootMessages: readonly EventProjectionMessage[],
-): EventProjectionMessage[] {
-  const messages: EventProjectionMessage[] = [];
-  for (const message of rootMessages) {
-    messages.push(message);
-    if (message.kind === "delegation") {
-      messages.push(
-        ...flattenEventProjectionMessageListDeep(
-          flattenEventProjectionMessages(message.childProjection),
-        ),
-      );
+function rowToProjectedView(
+  row: TimelineRow,
+  parentToolCallId?: string,
+): ProjectedRowView | null {
+  const scope = row.turnId ? turnScope(row.turnId) : threadScope();
+  const parent = parentToolCallId ? { parentToolCallId } : {};
+  if (row.kind === "turn") return null;
+  if (row.kind === "conversation") {
+    if (
+      row.role === "user" &&
+      row.turnRequest.kind === "steer" &&
+      row.turnRequest.status === "pending"
+    ) {
+      return null;
     }
+    return {
+      ...row,
+      ...parent,
+      kind: row.role === "user" ? "user" : "assistant-text",
+      scope,
+    };
   }
-  return messages;
-}
-
-function flattenEventProjectionMessagesDeep(
-  projection: EventProjection,
-): EventProjectionMessage[] {
-  return flattenEventProjectionMessageListDeep(
-    flattenEventProjectionMessages(projection),
-  );
+  if (row.kind === "work") {
+    const kind =
+      row.workKind === "tool"
+        ? "tool-call"
+        : row.workKind === "file-change"
+          ? "file-edit"
+          : row.workKind === "approval"
+            ? row.approvalKind === "file-edit"
+              ? "file-edit"
+              : "permission-grant-lifecycle"
+            : row.workKind === "question"
+              ? "user-question-lifecycle"
+              : row.workKind;
+    return { ...row, ...parent, kind, scope };
+  }
+  if (row.systemKind === "operation") {
+    const opType =
+      row.operationKind === "parent-change" || row.operationKind === "generic"
+        ? "operation"
+        : row.operationKind;
+    return {
+      kind: "operation",
+      id: row.id,
+      threadId: row.threadId,
+      sourceSeqStart: row.sourceSeqStart,
+      sourceSeqEnd: row.sourceSeqEnd,
+      createdAt: row.createdAt,
+      startedAt: row.startedAt,
+      completedAt: row.completedAt,
+      scope,
+      opType,
+      title: row.title,
+      ...parent,
+      ...(row.detail !== null ? { detail: row.detail } : {}),
+      ...(row.status !== null ? { status: row.status } : {}),
+    };
+  }
+  return { ...row, ...parent, kind: "error", scope };
 }
 
 export function fromRows(rows: ThreadEventRow[]): ThreadEventWithMeta[] {
@@ -1471,18 +1522,12 @@ export function renderTimelineFixture(
 ): RenderedTimelineFixture {
   const decodedEvents = args.events.map((row) => decodeThreadEventRow(row));
   const includeNestedRows = args.includeNestedRows ?? true;
-  const projection = buildEventProjection(decodedEvents, {
-    ...args.projectionOptions,
-    threadName: args.projectionOptions.threadName ?? "",
-    turnMessageDetail: includeNestedRows
-      ? "full"
-      : args.projectionOptions.turnMessageDetail,
-  });
   const commonProjectionOptions = {
     completedTurnDisplay: args.completedTurnDisplay ?? "collapse",
     includeDiagnosticOperations:
       args.projectionOptions.includeDiagnosticOperations ?? false,
     isLatestPage: true,
+    providerDisplayName: args.projectionOptions.providerDisplayName,
     threadStatus: args.projectionOptions.threadStatus ?? "idle",
     threadName: args.projectionOptions.threadName ?? "",
     workspaceRoot: null,
@@ -1500,7 +1545,38 @@ export function renderTimelineFixture(
     },
   });
   const rows = timeline.rows;
-  const messages = flattenEventProjectionMessagesDeep(projection);
+  const orderedEvents = orderEvents(decodedEvents);
+  const folded = foldEvents(orderedEvents, {
+    acceptedClientRequestContext: EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
+    includeActiveThinking: true,
+    includeDiagnosticOperations:
+      commonProjectionOptions.includeDiagnosticOperations,
+    providerDisplayName: commonProjectionOptions.providerDisplayName,
+    threadName: commonProjectionOptions.threadName,
+    threadStatus: commonProjectionOptions.threadStatus,
+    workspaceRoot: commonProjectionOptions.workspaceRoot,
+  });
+  const turnStartSeq = new Map<string, number>();
+  for (const { event, meta } of orderedEvents) {
+    if (event.type === "turn/started" && event.scope.kind === "turn") {
+      if (!turnStartSeq.has(event.scope.turnId)) {
+        turnStartSeq.set(event.scope.turnId, meta.seq);
+      }
+    }
+  }
+  const orderedFoldedRows = folded.rows
+    .map((row, idx) => ({
+      row,
+      idx,
+      key:
+        (row.turnId ? turnStartSeq.get(row.turnId) : undefined) ??
+        row.sourceSeqStart,
+    }))
+    .sort((a, b) => a.key - b.key || a.idx - b.idx)
+    .map((entry) => entry.row);
+  const messages = orderedFoldedRows
+    .map((row) => rowToProjectedView(row, folded.parentByRow.get(row)))
+    .filter((v): v is ProjectedRowView => v !== null);
   const text = formatThreadTimelineText(rows, {
     color: false,
     verbose: args.verbose ?? true,
@@ -1513,7 +1589,13 @@ export function renderTimelineFixture(
     events: args.events,
     messages,
     pendingTodos: timeline.pendingTodos,
-    projection,
+    projection: {
+      state: {
+        activeThinking: timeline.activeThinking,
+        activeWorkflows: timeline.activeWorkflows,
+        activeBackgroundCommands: timeline.activeBackgroundCommands,
+      },
+    },
     rows,
     text,
     turnRows,
@@ -1521,7 +1603,7 @@ export function renderTimelineFixture(
 }
 
 export function messageKinds(
-  messages: readonly EventProjectionMessage[],
+  messages: readonly ProjectedRowView[],
 ): string[] {
   return messages.map((message) => message.kind);
 }

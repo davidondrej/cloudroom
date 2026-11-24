@@ -12,9 +12,12 @@ import { describe, expect, it } from "vitest";
 import type { PromptInput, RuntimePermissionPolicy } from "@cloudroom/domain";
 import {
   buildCodexConfig,
+  buildPrivateDataDenyConfig,
+  codexManagedPolicyError,
   combineWorkspaceWriteRoots,
   gitWritableRootsForWorkspace,
   keepShellEnvironmentSetKeys,
+  shareThreadIdentityWithMcpServers,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
@@ -22,6 +25,7 @@ import {
   toCodexServiceTier,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
+  usesPrivateDataDenyProfile,
 } from "./session-params.js";
 import type { CodexSessionOptions } from "./session-params.js";
 
@@ -601,6 +605,77 @@ describe("codex permission settings", () => {
   });
 });
 
+describe("codexManagedPolicyError", () => {
+  const ON_REQUEST_USER_ONLY = {
+    allowedApprovalPolicies: ["on-request"],
+    allowedApprovalsReviewers: ["user"],
+  };
+  const SOL_NEEDS_AUTO_REVIEW = {
+    autoReview: { requiredOnModels: ["gpt-6.1-sol"] },
+  };
+  it.each([
+    [FULL_OPTIONS, null, null, null],
+    [FULL_OPTIONS, { allowedApprovalPolicies: null }, null, null],
+    [WORKSPACE_ASK_OPTIONS, ON_REQUEST_USER_ONLY, null, null],
+    [
+      FULL_OPTIONS,
+      ON_REQUEST_USER_ONLY,
+      null,
+      `does not allow approval_policy "never" (allowed: "on-request"). Switch this thread's permission mode to Manual.`,
+    ],
+    [
+      AUTO_ASK_OPTIONS,
+      ON_REQUEST_USER_ONLY,
+      null,
+      `does not allow approvals_reviewer "auto_review" (allowed: "user"). Switch this thread's permission mode to Manual.`,
+    ],
+    // Codex 0.136 reports auto_review as guardian_subagent.
+    [
+      AUTO_ASK_OPTIONS,
+      { allowedApprovalsReviewers: ["guardian_subagent"] },
+      null,
+      null,
+    ],
+    [
+      FULL_OPTIONS,
+      { allowedSandboxModes: ["workspace-write"] },
+      null,
+      `does not allow sandbox_mode "danger-full-access" (allowed: "workspace-write"). Switch this thread's permission mode to Manual or Auto.`,
+    ],
+    [
+      WORKSPACE_ASK_OPTIONS,
+      { allowedSandboxModes: ["read-only"] },
+      null,
+      "No Cloudroom permission mode fits it; ask your Codex admin.",
+    ],
+    [
+      WORKSPACE_ASK_OPTIONS,
+      SOL_NEEDS_AUTO_REVIEW,
+      "gpt-6.1-sol",
+      `does not allow model "gpt-6.1-sol" with approvals_reviewer "user" (allowed: "auto_review"). Switch this thread's permission mode to Auto.`,
+    ],
+    // Codex strips one provider prefix before matching.
+    [
+      WORKSPACE_ASK_OPTIONS,
+      SOL_NEEDS_AUTO_REVIEW,
+      "openai/gpt-6.1-sol",
+      `does not allow model "openai/gpt-6.1-sol" with approvals_reviewer "user"`,
+    ],
+    [WORKSPACE_ASK_OPTIONS, SOL_NEEDS_AUTO_REVIEW, "gpt-5.5", null],
+    // Codex's default model may need auto review, so Manual is not suggested.
+    [
+      FULL_OPTIONS,
+      { ...SOL_NEEDS_AUTO_REVIEW, allowedApprovalPolicies: ["on-request"] },
+      null,
+      `(allowed: "on-request"). Switch this thread's permission mode to Auto.`,
+    ],
+  ])("%o under %o on %s", (options, requirements, model, expected) => {
+    const error = codexManagedPolicyError(options, requirements, model);
+    if (expected === null) expect(error).toBeNull();
+    else expect(error).toContain(expected);
+  });
+});
+
 function configFor(options: CodexSessionOptions) {
   return buildCodexConfig({
     threadId: "bb-thread-1",
@@ -685,6 +760,25 @@ describe("buildCodexConfig", () => {
     ).toEqual({});
   });
 
+  it("gives stdio MCP servers the thread identity, not URL servers or other keys", () => {
+    const config = configFor({
+      ...FULL_OPTIONS,
+      envVars: { ROOM_THREAD_STORAGE: "/s", PATH: "/bin" },
+    })!;
+    expect(
+      shareThreadIdentityWithMcpServers(config, {
+        ctx: { command: "node" },
+        web: { command: null },
+        "bad.name": { command: "x" },
+        own: { command: "x", env: { ROOM_THREAD_ID: "mine" } },
+      }),
+    ).toEqual({
+      "mcp_servers.ctx.env.ROOM_THREAD_ID": "bb-thread-1",
+      "mcp_servers.ctx.env.ROOM_THREAD_STORAGE": "/s",
+      "mcp_servers.own.env.ROOM_THREAD_STORAGE": "/s",
+    });
+  });
+
   it("maps the reasoning level onto model_reasoning_effort", () => {
     expect(
       configFor({ ...FULL_OPTIONS, reasoningLevel: "high" }),
@@ -734,6 +828,60 @@ describe("resolveCodexInstructionOverrides", () => {
       baseInstructions: "Use this as the complete base prompt.",
       developerInstructions: PLAIN_CHAT,
     });
+  });
+
+  it("warns only workspace threads about read-only .agents and .codex (#1294)", () => {
+    for (const instructionMode of ["append", "replace"] as const) {
+      const developerInstructions = (permissionScope: "workspace" | "full") =>
+        resolveCodexInstructionOverrides({
+          instructionMode,
+          options: { instructions: "Base.", permissionScope },
+        }).developerInstructions;
+      expect(developerInstructions("workspace")).toContain(PLAIN_CHAT);
+      expect(developerInstructions("workspace")).toContain(
+        "git status --porcelain",
+      );
+      expect(developerInstructions("full")).not.toContain("git status");
+    }
+  });
+
+  it("tells only Windows workspace threads to escalate an unfound room-cli (#1805)", () => {
+    const developerInstructions = (
+      platform: NodeJS.Platform,
+      permissionScope: "workspace" | "full",
+    ) =>
+      resolveCodexInstructionOverrides({
+        instructionMode: "append",
+        platform,
+        options: { permissionScope },
+      }).developerInstructions;
+    expect(developerInstructions("win32", "workspace")).toContain(
+      "room-cli.cmd is \"not recognized\"",
+    );
+    expect(developerInstructions("win32", "full")).not.toContain("room-cli");
+    expect(developerInstructions("darwin", "workspace")).not.toContain(
+      "room-cli",
+    );
+  });
+
+  it("tells only never-asking sessions how to get past a prompt rule (#1456)", () => {
+    const developerInstructions = (
+      options: typeof FULL_OPTIONS | typeof WORKSPACE_ASK_OPTIONS,
+    ) =>
+      resolveCodexInstructionOverrides({
+        approvalPolicy: toCodexThreadPermissionSettings(options).approvalPolicy,
+        instructionMode: "append",
+        options,
+      }).developerInstructions;
+    expect(developerInstructions(FULL_OPTIONS)).toContain(
+      "AskForApproval is set to Never",
+    );
+    expect(developerInstructions(FULL_OPTIONS)).toContain(
+      "switch this thread to Manual",
+    );
+    expect(developerInstructions(WORKSPACE_ASK_OPTIONS)).not.toContain(
+      "AskForApproval",
+    );
   });
 });
 
@@ -811,5 +959,37 @@ describe("toCodexUserInput", () => {
         text_elements: [],
       },
     ]);
+  });
+});
+
+describe("private data deny profile", () => {
+  const envVars = { ROOM_DATA_DIR: "/data" };
+
+  it("denies the data folder's secrets to sandboxed commands", () => {
+    const config = buildCodexConfig({
+      threadId: "bb-thread-1",
+      additionalWorkspaceWriteRoots: [],
+      gitWritableRoots: [],
+      options: { ...WORKSPACE_ASK_OPTIONS, envVars },
+    });
+    expect(usesPrivateDataDenyProfile(config)).toBe(process.platform !== "win32");
+    if (process.platform === "win32") return;
+    expect(config?.["permissions.cloudroom.filesystem"]).toMatchObject({
+      ":root": "read",
+      ":workspace_roots": { ".": "write" },
+      "/data/auth.json": "deny",
+      "/data/cloudroom.json": "deny",
+    });
+  });
+
+  it("adds nothing on Windows or without a data folder", () => {
+    expect(buildPrivateDataDenyConfig(envVars, "win32")).toEqual({});
+    expect(buildPrivateDataDenyConfig({}, "darwin")).toEqual({});
+    expect(usesPrivateDataDenyProfile(buildCodexConfig({
+      threadId: "bb-thread-1",
+      additionalWorkspaceWriteRoots: [],
+      gitWritableRoots: [],
+      options: WORKSPACE_ASK_OPTIONS,
+    }))).toBe(false);
   });
 });

@@ -8,6 +8,7 @@ import type {
   WorkspacePathListResponse,
 } from "@cloudroom/server-contract";
 import {
+  buildDirectMediaFilePreview,
   buildFilePreview,
   normalizeFilePreviewMimeType,
   type FilePreview,
@@ -269,6 +270,21 @@ export function useProjectFilePreview(
         hookName: "useProjectFilePreview",
         argName: "path",
       });
+      const url = buildProjectFileContentUrl(requiredProjectId, requiredPath, {
+        ...(routing.environmentId !== null
+          ? { environmentId: routing.environmentId }
+          : routing.hostId !== null
+            ? { hostId: routing.hostId }
+            : {}),
+      });
+      const directMedia = buildDirectMediaFilePreview({
+        name: requiredPath.split("/").at(-1),
+        path: requiredPath,
+        url,
+      });
+      if (directMedia !== null) {
+        return directMedia;
+      }
       const content = await sdk.projects.fileContent({
         projectId: requiredProjectId,
         path: requiredPath,
@@ -288,13 +304,7 @@ export function useProjectFilePreview(
         mimeType: normalizeFilePreviewMimeType(content.mimeType),
         name: requiredPath.split("/").at(-1),
         path: requiredPath,
-        url: buildProjectFileContentUrl(requiredProjectId, requiredPath, {
-          ...(routing.environmentId !== null
-            ? { environmentId: routing.environmentId }
-            : routing.hostId !== null
-              ? { hostId: routing.hostId }
-              : {}),
-        }),
+        url,
       });
     },
     enabled,

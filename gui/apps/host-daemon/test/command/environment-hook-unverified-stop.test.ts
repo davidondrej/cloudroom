@@ -1,11 +1,11 @@
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { dispatchOnlineRpcCommand } from "../../src/command-dispatch.js";
 import {
   cleanupTempDirs,
   createHarness,
+  HOOK_TEST_ENVIRONMENT_ID,
   makeTempDir,
+  saveHooks,
 } from "./dispatch-helpers.js";
 
 vi.mock("../../src/environment-lifecycle-script.js", async (importOriginal) => {
@@ -17,13 +17,15 @@ vi.mock("../../src/environment-lifecycle-script.js", async (importOriginal) => {
     ...actual,
     runSetupScript: (args: { signal?: AbortSignal }) =>
       new Promise((_resolve, reject) => {
-        args.signal?.addEventListener("abort", () =>
+        const fail = () =>
           reject(
             new actual.LifecycleScriptTerminationUnverifiedError(
               ".bb-env-setup.sh",
             ),
-          ),
-        );
+          );
+        // The cancel can land while the saved hooks are still being read.
+        if (args.signal?.aborted) fail();
+        args.signal?.addEventListener("abort", fail);
       }),
   };
 });
@@ -32,7 +34,7 @@ afterEach(cleanupTempDirs);
 
 it("answers unknown when a cancelled hook's processes could not be confirmed stopped", async () => {
   const path = await makeTempDir("bb-hook-unverified-");
-  await writeFile(join(path, ".bb-env-setup.sh"), "sleep 120\n");
+  await saveHooks(path, { setup: "sleep 120\n" });
   const options = createHarness().dispatchOptions({ dataDir: path });
   const run = dispatchOnlineRpcCommand(
     {
@@ -40,6 +42,7 @@ it("answers unknown when a cancelled hook's processes could not be confirmed sto
       contributedEnv: [],
       resumeOnly: false,
       operationId: "hook-unverified",
+      environmentId: HOOK_TEST_ENVIRONMENT_ID,
       path,
       kind: "setup",
       timeoutMs: 5000,

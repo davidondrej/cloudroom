@@ -8,7 +8,10 @@ import {
   type ReactNode,
 } from "react";
 import { defaultAppSettings, type PromptInput } from "@cloudroom/domain";
-import type { SendMessageDelivery } from "@cloudroom/server-contract";
+import type {
+  SendMessageDelivery,
+  ThreadTimelineResponse,
+} from "@cloudroom/server-contract";
 import type {
   AttachmentsConfig,
   HistoryConfig,
@@ -52,6 +55,7 @@ import {
   useThread,
   useThreadPendingInteractions,
   useThreadQueuedMessages,
+  useThreadTimeline,
 } from "@/hooks/queries/thread-queries";
 import { useThreadDefaultExecutionOptions } from "@/hooks/queries/thread-default-execution-options-query";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
@@ -60,7 +64,7 @@ import {
   useSendThreadMessage,
   useStopThread,
 } from "@/hooks/mutations/thread-runtime-mutations";
-import { useMarkThreadRead } from "@/hooks/mutations/thread-state-mutations";
+import { useMarkThreadRead, useSaveThreadModel } from "@/hooks/mutations/thread-state-mutations";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
 import { showMutationErrorToast } from "@/lib/mutation-errors";
@@ -78,6 +82,10 @@ import { useComposerTypeahead } from "./useComposerTypeahead";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
 import { useInlineQueuedMessageEditing } from "./useInlineQueuedMessageEditing";
 import { useQueuedMessageActions } from "./useQueuedMessageActions";
+import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
+
+const selectContextWindowUsage = (timeline: ThreadTimelineResponse) =>
+  timeline.contextWindowUsage ?? null;
 
 function reportQueuedSendDelivery(delivery: SendMessageDelivery): void {
   if (delivery !== "queued") {
@@ -196,6 +204,7 @@ function EmbeddedThreadChatHostedFooter({
   return (
     <div
       data-thread-window=""
+      data-wallpaper="thread"
       className="flex h-full min-h-0 min-w-0 flex-col overflow-clip"
     >
       <PageShell
@@ -241,6 +250,10 @@ function EmbeddedThreadChatWithComposer({
   const sendThreadMessage = useSendThreadMessage();
   const createQueuedMessage = useCreateThreadQueuedMessage();
   const threadQuery = useThread(threadId);
+  // Shares the timeline query the panel already loads; no extra request.
+  const contextWindowUsage =
+    useThreadTimeline(threadId, { select: selectContextWindowUsage }).data ??
+    null;
   const pendingInteractionsQuery = useThreadPendingInteractions(threadId);
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
@@ -270,6 +283,7 @@ function EmbeddedThreadChatWithComposer({
   );
   const defaultExecutionOptions = executionOptionsQuery.data;
   const threadCreationOptions = useThreadCreationOptions({
+    cloud: threadQuery.data?.executionTarget === "cloud",
     enabled: true,
     scope: "component-local",
     environmentId: composer.executionEnvironmentId,
@@ -298,17 +312,20 @@ function EmbeddedThreadChatWithComposer({
     activeModel,
     modelOptions,
     moreModelOptions,
+    modelCatalogIsVerified,
     modelLoadFailed,
     modelLoadError,
     reasoningOptions,
     permissionModeOptions,
     supportsPermissionModeSelection,
     supportsServiceTier,
+    supportsUltraFast,
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     isLoadingModels,
   } = threadCreationOptions;
-  const selectedExecutionModel = activeModel?.model ?? selectedModel;
+  const { save: saveModel, pendingModel } = useSaveThreadModel(threadId, setSelectedModel);
+  const selectedExecutionModel = pendingModel ?? activeModel?.model ?? selectedModel;
   const selectedExecutionServiceTier = supportsServiceTier
     ? serviceTier
     : undefined;
@@ -321,6 +338,7 @@ function EmbeddedThreadChatWithComposer({
   const displayStatus = threadQuery.data?.runtime.displayStatus ?? "idle";
   // A Cloud thread keeps its starting model and full permissions (ADR 0189).
   const isCloud = threadQuery.data?.executionTarget === "cloud";
+  const canPickLocalModel = threadQuery.data?.executionTarget === "local";
   const executionRequestFields = useMemo(
     () => ({
       ...(selectedExecutionModel.length > 0
@@ -699,6 +717,7 @@ function EmbeddedThreadChatWithComposer({
     inlineEditingQueuedMessage?.draft ?? null,
   );
   const setStoredPromptDraft = promptDraft.setDraft;
+  const getStoredPromptDraft = promptDraft.getCurrent;
   const bottomPluginComposerHost = useMemo<PluginComposerHost | null>(() => {
     if (bottomScope === null) return null;
     const identity = bottomComposerHostIdentity;
@@ -706,9 +725,10 @@ function EmbeddedThreadChatWithComposer({
     return {
       scope: bottomScope,
       textEffectKey: identity,
+      // The store, not the last render: typing reaches React only after paint.
       getCurrent: () =>
         activeBottomComposerIdentityRef.current === identity
-          ? currentPromptDraftRef.current
+          ? getStoredPromptDraft()
           : initialDraft,
       subscribeDraft: subscribeBottomDraft,
       setDraft: (draft) => {
@@ -725,6 +745,7 @@ function EmbeddedThreadChatWithComposer({
   }, [
     bottomComposerHostIdentity,
     bottomScope,
+    getStoredPromptDraft,
     setStoredPromptDraft,
     subscribeBottomDraft,
   ]);
@@ -916,21 +937,23 @@ function EmbeddedThreadChatWithComposer({
   const bottomExecutionConfig = useMemo<ExecutionControlsProps>(
     () => ({
       providerRouting: executionOptionsRouting,
-      lockModelSelection: isCloud,
+      lockModelSelection: !canPickLocalModel,
+      disabled: Boolean(pendingModel),
+      selectModel: ({ providerId, model }) => saveModel(model, providerId),
       provider: {
         options: providerOptions,
         selectedId: selectedProviderId,
         hasMultiple: hasMultipleProviders && !isCloud,
       },
       model: {
-        active: activeModel,
+        active: pendingModel ? { model: pendingModel } : activeModel,
         selected: selectedModel,
         options: modelOptions,
         moreOptions: moreModelOptions,
         loadError: modelLoadError,
         isLoading: isLoadingModels,
         loadFailed: modelLoadFailed,
-        onChange: setSelectedModel,
+        onChange: (model) => { void saveModel(model).catch(() => {}); },
       },
       serviceTier: {
         value: serviceTier,
@@ -938,6 +961,7 @@ function EmbeddedThreadChatWithComposer({
         supported: supportsServiceTier,
         supportByProvider: serviceTierSupportByProvider,
         fastLabel: serviceTierFastLabel,
+        ultraFast: supportsUltraFast,
       },
       reasoning: {
         value: reasoningLevel,
@@ -947,6 +971,7 @@ function EmbeddedThreadChatWithComposer({
     }),
     [
       activeModel,
+      canPickLocalModel,
       executionOptionsRouting,
       hasMultipleProviders,
       isCloud,
@@ -963,9 +988,11 @@ function EmbeddedThreadChatWithComposer({
       serviceTier,
       serviceTierSupportByProvider,
       setReasoningLevel,
-      setSelectedModel,
+      saveModel,
+      pendingModel,
       setServiceTier,
       supportsServiceTier,
+      supportsUltraFast,
       serviceTierFastLabel,
     ],
   );
@@ -985,6 +1012,7 @@ function EmbeddedThreadChatWithComposer({
               supported: supportsServiceTier,
               supportByProvider: serviceTierSupportByProvider,
               fastLabel: serviceTierFastLabel,
+              ultraFast: supportsUltraFast,
             },
             reasoning: {
               ...bottomExecutionConfig.reasoning,
@@ -998,6 +1026,7 @@ function EmbeddedThreadChatWithComposer({
       serviceTierSupportByProvider,
       setServiceTier,
       supportsServiceTier,
+      supportsUltraFast,
       serviceTierFastLabel,
     ],
   );
@@ -1051,30 +1080,35 @@ function EmbeddedThreadChatWithComposer({
       queuedMessageIndex: inlineEditingQueuedMessage.queuedMessageIndex,
       onDismiss: dismissInlineQueuedMessageEditor,
       content: (
-        <FollowUpPromptBox
-          attachments={inlineAttachmentsConfig}
-          stack={null}
-          composer={inlineComposerConfig}
-          pluginComposerHost={queuedPluginComposerHost}
-          pluginComposerScope={queuedPluginComposerHost?.scope ?? null}
-          textEffects={queuedComposerTextEffects}
-          environmentSummary={null}
-          contextWindowUsage={null}
-          execution={inlineExecutionConfig}
-          executionReadOnly
-          permission={inlinePermissionConfig}
-          permissionReadOnly
-          permissionInToolbar
-          typeahead={typeaheadConfig}
-          promptActions={promptActions}
-          collapseResetKey={`${surfaceKey}:queued-message:${inlineEditingQueuedMessage.queuedMessageId}`}
-          focusEndKey={`${inlineEditingQueuedMessage.editSessionId}:${inlineComposerFocusNonce}`}
-          isPrimaryComposer={false}
-          showScrollToBottomButton={false}
-        />
+        <PromptDraftContextsContext.Provider
+          value={activeComposerDraft.contexts}
+        >
+          <FollowUpPromptBox
+            attachments={inlineAttachmentsConfig}
+            stack={null}
+            composer={inlineComposerConfig}
+            pluginComposerHost={queuedPluginComposerHost}
+            pluginComposerScope={queuedPluginComposerHost?.scope ?? null}
+            textEffects={queuedComposerTextEffects}
+            environmentSummary={null}
+            contextWindowUsage={null}
+            execution={inlineExecutionConfig}
+            executionReadOnly
+            permission={inlinePermissionConfig}
+            permissionReadOnly
+            permissionInToolbar
+            typeahead={typeaheadConfig}
+            promptActions={promptActions}
+            collapseResetKey={`${surfaceKey}:queued-message:${inlineEditingQueuedMessage.queuedMessageId}`}
+            focusEndKey={`${inlineEditingQueuedMessage.editSessionId}:${inlineComposerFocusNonce}`}
+            isPrimaryComposer={false}
+            showScrollToBottomButton={false}
+          />
+        </PromptDraftContextsContext.Provider>
       ),
     };
   }, [
+    activeComposerDraft.contexts,
     dismissInlineQueuedMessageEditor,
     inlineAttachmentsConfig,
     inlineComposerConfig,
@@ -1147,7 +1181,9 @@ function EmbeddedThreadChatWithComposer({
     <div className={cn("relative", surfaceClassName)}>
       <OverflowFade placement="above" tone={surfaceTone} />
       <div className="px-4 pb-4 pt-2">
+        <PromptDraftContextsContext.Provider value={currentPromptDraft.contexts}>
         <FollowUpPromptBox
+          threadProviderId={canPickLocalModel && modelCatalogIsVerified && selectedProviderId === threadQuery.data?.providerId ? selectedProviderId : undefined}
           attachments={bottomAttachmentsConfig}
           stack={queuedMessagesStack}
           pendingInteraction={pendingInteractionBanner}
@@ -1156,7 +1192,7 @@ function EmbeddedThreadChatWithComposer({
           pluginComposerScope={bottomPluginComposerHost?.scope ?? null}
           textEffects={bottomComposerTextEffects}
           environmentSummary={composer.environmentSummary}
-          contextWindowUsage={null}
+          contextWindowUsage={contextWindowUsage}
           execution={bottomExecutionConfig}
           permission={
             isCloud
@@ -1170,6 +1206,7 @@ function EmbeddedThreadChatWithComposer({
           focusEndKey={`${composerFocusNonce}:${composer.focusRequestKey ?? ""}:${pendingInteractionsInitialLoading}`}
           isPrimaryComposer={false}
         />
+        </PromptDraftContextsContext.Provider>
       </div>
     </div>
   );

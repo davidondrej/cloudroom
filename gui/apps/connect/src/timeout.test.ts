@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { deleteMachine, machineByCredential, serverByHandle, sha256Hex } from "./store";
 import { RelayTimeout, timedDb } from "./timeout";
 
 const never = () => new Promise<never>(() => {});
@@ -26,5 +27,33 @@ describe("timedDb", () => {
     const fake = fakeDb([never, () => Promise.resolve(null)]);
     await expect(timedDb(fake.db, 20).prepare("DELETE FROM code WHERE code_hash = ?").bind("x").first()).rejects.toBeInstanceOf(RelayTimeout);
     expect(fake.calls()).toBe(1);
+  });
+});
+
+describe("serverByHandle", () => {
+  // A canceled request's lookup never answers. Sharing it froze every later request for that Mac (2026-11-10).
+  it("starts its own lookup when another request's lookup never answers", async () => {
+    const fake = fakeDb([never, () => Promise.resolve({ id: "s1", handle: "mac1" })]);
+    void serverByHandle(fake.db, "mac1");
+    await expect(serverByHandle(fake.db, "mac1")).resolves.toMatchObject({ id: "s1" });
+  });
+});
+
+describe("machineByCredential", () => {
+  // The lookup started before the host was removed and answered after. Saving it kept the host working for 15 s.
+  it("forgets a removed host even when a lookup of it was under way", async () => {
+    const hash = await sha256Hex("key1");
+    let answerLate!: (row: unknown) => void;
+    const fake = fakeDb([
+      () => new Promise((resolve) => (answerLate = resolve)),
+      () => Promise.resolve({ handle: "host1", credential_hash: hash }),
+      () => Promise.resolve(null),
+    ]);
+    const early = machineByCredential(fake.db, "key1");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await deleteMachine(fake.db, "mac1", "m1");
+    answerLate({ id: "m1", handle: "host1", credential_hash: hash, owner_server_id: "mac1" });
+    await early;
+    await expect(machineByCredential(fake.db, "key1")).resolves.toBeNull();
   });
 });

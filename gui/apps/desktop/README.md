@@ -46,7 +46,7 @@ Node runtime:
 pnpm exec turbo run start --filter=@cloudroom/desktop
 ```
 
-Electron is pinned to `44.10.0`. macOS builds require macOS 13 (Ventura) or
+Electron is pinned to `44.11.5`. macOS builds require macOS 13 (Ventura) or
 newer. The bundled `bb-app` runtime uses `better-sqlite3@13.0.3`, whose N-API
 binaries work with Electron without an ABI-specific rebuild. The packaging
 hook opens an in-memory database with Electron before accepting the packaged
@@ -277,7 +277,10 @@ Cloudroom releases are built, signed, and notarized by GitHub Actions (see the
 `release` skill). The [signing wrapper](scripts/run-electron-builder.mjs)
 signs and notarizes when `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`,
 `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are all set, then notarizes
-and staples the DMG too. A partial set fails before packaging. Locally,
+and staples the DMG too. A partial set fails before packaging. Releases set
+`CLOUDROOM_NOTARIZE_LATER=1` instead: the wrapper only signs, and
+[notarize-once.sh](scripts/notarize-once.sh) sends just the DMG to Apple, whose
+ticket covers the app inside it. Locally,
 `APPLE_KEYCHAIN_PROFILE=<notarytool profile>` does the same with the Keychain's
 Developer ID identity. Local builds with neither sign via keychain
 auto-discovery and skip notarization.
@@ -296,6 +299,14 @@ On Mac, Squirrel.Mac cancels the install ("App Still Running") if the old versio
 e.g. from the Dock right after **Restart to update**. That old version quits once and lets it finish. A restart that
 still leaves the old version shows "The last update didn't install" with Restart and the website **Download**,
 and that run never restarts by itself when idle; a click here, in a browser, or on a phone still does.
+
+When this Mac user can't write the app, **Restart to update** first asks for the Mac password. An unanswered
+prompt closes after 2 minutes and the button works again. An app opened from the disk image or translocated
+from Downloads is read-only, so Squirrel.Mac can never replace it: it skips the in-app update. So does an app on
+another disk than Applications: Squirrel.Mac's swap across disks can fail halfway and delete it (#2511). A pop-up over
+the app (and over setup) offers **Move to Applications** (`app.moveToApplicationsFolder()`), which stops Local
+agents, copies the app, and reopens it from Applications; the agents resume. **Not now** hides it until the
+next launch, and the update banner still asks to move it.
 
 Windows reads `latest.yml` from the same release, downloads the `.exe` in the
 background, and runs it silently on quit. **Restart to update** keeps Cloudroom

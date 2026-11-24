@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { fetchWithAppSurface } from "./app-surface";
-import { getBbDesktopInfo } from "./bb-desktop";
+import { getRoomDesktopInfo } from "./room-desktop";
 
 type PerfMetric =
   | "app_ready"
@@ -72,6 +72,67 @@ function afterNextPaint(callback: () => void): void {
   requestAnimationFrame(() => setTimeout(callback, 0));
 }
 
+// Long animation frame entries (Chromium 123+). Not in TypeScript's DOM lib yet.
+interface FrameScript {
+  duration: number;
+  invoker: string;
+  sourceCharPosition: number;
+  sourceFunctionName: string;
+  sourceURL: string;
+}
+
+interface LongFrame extends PerformanceEntry {
+  scripts: readonly FrameScript[];
+  styleAndLayoutStart: number;
+}
+
+const lastPathPart = (value: string) =>
+  value.split("/").pop()?.split("?")[0] ?? "";
+
+// Names what froze the UI, e.g. "MessagePort.onmessage Bp@Split-x.js:180895 240ms | layout 30ms | /projects/:id".
+function describeFreeze(frame: LongFrame): string {
+  const scripts = [...frame.scripts]
+    .sort((a, b) => b.duration - a.duration)
+    .slice(0, 2)
+    .map((s) => {
+      const where = s.sourceURL
+        ? ` ${s.sourceFunctionName || "?"}@${lastPathPart(s.sourceURL)}:${s.sourceCharPosition}`
+        : "";
+      return `${lastPathPart(s.invoker)}${where} ${Math.round(s.duration)}ms`;
+    });
+  const layoutMs =
+    frame.styleAndLayoutStart > 0
+      ? frame.startTime + frame.duration - frame.styleAndLayoutStart
+      : 0;
+  const route = location.pathname.replace(/\/[a-z]+_[\w-]+/g, "/:id");
+  return [...scripts, `layout ${Math.round(layoutMs)}ms`, route]
+    .join(" | ")
+    .slice(0, 300);
+}
+
+// Prefer long animation frames: they name the script behind a freeze. Fall back to long tasks (Safari has neither).
+function watchFreezes(): void {
+  const supported = PerformanceObserver.supportedEntryTypes;
+  const type = supported.includes("long-animation-frame")
+    ? "long-animation-frame"
+    : supported.includes("longtask")
+      ? "longtask"
+      : null;
+  if (type === null) return;
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      if (entry.duration < UI_FREEZE_THRESHOLD_MS) continue;
+      recordPerf({
+        metric: "ui_freeze",
+        ms: entry.duration,
+        ...("scripts" in entry
+          ? { detail: describeFreeze(entry as LongFrame) }
+          : {}),
+      });
+    }
+  }).observe({ buffered: true, type });
+}
+
 export function installPerfMonitor(): void {
   const rememberInput = (event: Event) => {
     lastInputAt = event.timeStamp;
@@ -84,16 +145,8 @@ export function installPerfMonitor(): void {
     capture: true,
     passive: true,
   });
-  if (PerformanceObserver.supportedEntryTypes.includes("longtask")) {
-    new PerformanceObserver((list) => {
-      for (const entry of list.getEntries()) {
-        if (entry.duration >= UI_FREEZE_THRESHOLD_MS) {
-          recordPerf({ metric: "ui_freeze", ms: entry.duration });
-        }
-      }
-    }).observe({ buffered: true, type: "longtask" });
-  }
-  getBbDesktopInfo()?.onTopRightWindowDrag?.((position) => {
+  watchFreezes();
+  getRoomDesktopInfo()?.onTopRightWindowDrag?.((position) => {
     recordPerf({ metric: "top_right_window_drag", ms: 0, detail: position });
   });
   window.setInterval(flushPerf, FLUSH_INTERVAL_MS);

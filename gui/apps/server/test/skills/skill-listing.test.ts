@@ -146,14 +146,14 @@ describe("assembleSkillList", () => {
   }
 
   it("de-dupes a bb skill discovered under both providers", () => {
-    const bb = discovered(
+    const room = discovered(
       "shared",
       "bb-data-dir",
       "/data/skills/shared/SKILL.md",
     );
     const result = assembleSkillList([
-      { provider: "claude-code", skills: [bb] },
-      { provider: "codex", skills: [bb] },
+      { provider: "claude-code", skills: [room] },
+      { provider: "codex", skills: [room] },
     ]);
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({

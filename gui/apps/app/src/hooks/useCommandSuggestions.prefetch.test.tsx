@@ -139,3 +139,33 @@ describe("useCommandSuggestions catalog prefetch", () => {
     });
   });
 });
+
+it("keeps a user's /plan command reachable over the Plan action (#2156)", async () => {
+  mockPointer(false);
+  const own = {
+    name: "plan",
+    source: "command",
+    origin: "user",
+    description: "Mine",
+    argumentHint: null,
+  } as const;
+  vi.mocked(sdk.projects.commands).mockResolvedValue({ commands: [own] });
+  const plan = {
+    text: "/plan ",
+    command: { trigger: "/", name: "plan", trailingText: " " },
+  } as const;
+  const { result } = renderHook(
+    () =>
+      useCommandSuggestions({
+        ...BASE_ARGS,
+        query: "plan",
+        promptActions: [plan],
+      }),
+    { wrapper: createQueryClientTestHarness().wrapper },
+  );
+  await waitFor(() => {
+    expect(result.current.suggestions).toEqual([
+      { kind: "command", ...own, insertAsText: true },
+    ]);
+  });
+});

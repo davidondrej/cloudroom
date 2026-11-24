@@ -3,6 +3,7 @@ import type {
   ExperimentalProviderModelPickerProps,
   ExperimentalProviderModelPickerValue,
 } from "@get-bb/plugin-sdk";
+import type { ServiceTier } from "@cloudroom/domain";
 import { ModelReasoningPicker } from "@/components/pickers/ModelReasoningPicker";
 import {
   formatModelLabel,
@@ -23,7 +24,9 @@ export function PluginProviderModelPicker({
   value,
   onChange,
   routing,
+  cloud,
   allowProviderChange = true,
+  extraChoice,
   align = "start",
   disabled,
   className,
@@ -34,6 +37,7 @@ export function PluginProviderModelPicker({
   );
   const controlledKey = `${resolvedRouting.key}\0${selectionKey(value)}`;
   const controller = useThreadCreationOptions({
+    cloud,
     scope: "component-local",
     initialProviderId: value.providerId,
     initialModel: value.model,
@@ -99,8 +103,8 @@ export function PluginProviderModelPicker({
     },
     [controller, emit],
   );
-  const handleFastModeChange = useCallback(
-    (enabled: boolean) => {
+  const handleServiceTierChange = useCallback(
+    (serviceTier: ServiceTier) => {
       if (
         !controller.modelCatalogIsVerified ||
         !controller.supportsServiceTier
@@ -111,7 +115,7 @@ export function PluginProviderModelPicker({
         providerId: controller.selectedProviderId,
         model: controller.selectedModel,
         reasoningLevel: controller.reasoningLevel,
-        serviceTier: enabled ? "fast" : "default",
+        serviceTier,
       });
     },
     [controller, emit],
@@ -157,11 +161,13 @@ export function PluginProviderModelPicker({
       reasoningValue={controller.reasoningLevel}
       reasoningOptions={controller.reasoningOptions}
       onReasoningChange={handleReasoningChange}
-      fastModeEnabled={controller.serviceTier === "fast"}
-      onFastModeChange={handleFastModeChange}
-      showFastModeToggle={controller.supportsServiceTier}
+      serviceTier={controller.serviceTier}
+      onServiceTierChange={handleServiceTierChange}
+      showServiceTiers={controller.supportsServiceTier}
+      showUltraFast={controller.supportsUltraFast}
       serviceTierSupportByProvider={controller.serviceTierSupportByProvider}
       commandShortcutsEnabled={false}
+      extraChoice={allowProviderChange ? extraChoice : undefined}
       align={align}
       disabled={disabled}
       className={className}

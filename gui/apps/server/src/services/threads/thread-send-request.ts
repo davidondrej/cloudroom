@@ -1,5 +1,9 @@
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
-import { isStandaloneBuiltinClearCommand, type Thread } from "@cloudroom/domain";
+import {
+  createStandaloneBuiltinCompactCommandInput,
+  isStandaloneBuiltinClearCommand,
+  type Thread,
+} from "@cloudroom/domain";
 import type {
   SendMessageRequest,
   SendMessageResponse,
@@ -22,6 +26,34 @@ export async function acceptThreadSendRequest(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: AcceptThreadSendRequestArgs,
 ): Promise<SendMessageResponse> {
+  // A bare `/compact` from the CLI, a paste, or the queue has no command chip; compact as the chip would (#913).
+  const [only, ...rest] = args.payload.input;
+  if (
+    only?.type === "text" &&
+    rest.length === 0 &&
+    only.mentions.length === 0 &&
+    only.text.trim() === "/compact" &&
+    deps.providerRegistry.supportsManualCompaction(args.thread.providerId)
+  ) {
+    args = {
+      ...args,
+      payload: {
+        ...args.payload,
+        input: createStandaloneBuiltinCompactCommandInput(),
+      },
+    };
+  }
+  // An archived target refuses it below; log both IDs so the next report can be traced (#1276).
+  if (args.thread.archivedAt !== null && args.payload.senderThreadId) {
+    deps.logger.warn(
+      {
+        threadId: args.thread.id,
+        senderThreadId: args.payload.senderThreadId,
+        archivedAt: args.thread.archivedAt,
+      },
+      "Agent message sent to an archived thread",
+    );
+  }
   if (isCloudThread(args.thread)) {
     const sentAt = Date.now();
     const response = await cloudroom(deps).send(args.thread, args.payload);
@@ -43,21 +75,28 @@ export async function acceptThreadSendRequest(
     return { ok: true, delivery: "sent" };
   }
 
+  // The last attempt's request: a rolled-back one never reaches a turn.
+  let requestId: string | undefined;
   const outcome = await attemptDispatch(deps, {
     thread: args.thread,
     payload: args.payload,
     source: { kind: "inline" },
-    queuePayload: { kind: "inline" },
+    queuePayload: args.payload.fromComposer
+      ? { kind: "inline", fromComposer: true }
+      : { kind: "inline" },
     pluginSubmission: args.payload.pluginSubmission ?? null,
     origin: null,
     originPluginId: null,
     startedOnBehalfOf: null,
     trigger: "user",
     onStartSettled: args.onStartSettled,
-    beforeDispatch: args.beforeDispatch,
+    beforeDispatch: (id) => {
+      requestId = id;
+      args.beforeDispatch?.();
+    },
   });
   if (outcome.kind === "dispatched") {
-    return { ok: true, delivery: "sent" };
+    return { ok: true, delivery: "sent", ...(requestId ? { requestId } : {}) };
   }
   return {
     ok: true,

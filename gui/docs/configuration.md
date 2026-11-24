@@ -36,29 +36,7 @@ Launcher status output is plain when stdout is redirected, including in CI.
 Set `FORCE_COLOR=1` to request color or `NO_COLOR=1` to disable it; `NO_COLOR`
 takes precedence. In-place progress updates require a stdout TTY.
 
-The packaged `npx bb-app` flow stores persistent package settings under
-`~/.bb/config.json`, provider environment values under `~/.bb/env.json`, and
-client SSH target mappings under `~/.bb/client.json`.
-
-Use `bb-app config` for non-secret bb settings:
-
-```bash
-npx bb-app config set BB_APP_URL https://<machine>.<tailnet>.ts.net
-npx bb-app config set BB_INFERENCE codex/gpt-5.6-luna
-npx bb-app config set BB_INFERENCE_FALLBACK codex/gpt-5.4-mini
-npx bb-app config set BB_TRANSCRIPTION codex/gpt-transcribe
-npx bb-app config list
-npx bb-app config unset BB_APP_URL
-npx bb-app config refresh
-```
-
-Use `bb-app env` for provider credentials and provider-specific environment:
-
-```bash
-npx bb-app env set OPENAI_API_KEY <key>
-npx bb-app env list
-npx bb-app env unset OPENAI_API_KEY
-```
+The data folder holds saved settings: `config.json` (non-secret settings, and the server a joined machine uses), `env.json` (provider credentials and environment), and `client.json` (SSH targets for opening a remote machine's files in local editors). The launcher applies them at startup. Edit them by hand; there is no command for them.
 
 ## Repository worktree hooks
 
@@ -68,32 +46,21 @@ removes that worktree. See [Worktrees, setup scripts, and teardown
 scripts](worktrees.md) for the lifecycle, environment, timeout, and failure
 contracts.
 
-`bb-app config list` shows non-secret values. `bb-app env list` redacts every
-value and only shows whether a key is set.
-
 The Add machine installer may also store a `machineCredential` and its
 `connectMachineId` beside `serverUrl` in `config.json`. The credential is a
 secret managed by bb connect: do not copy, edit, or commit it. Both fields are
-intentionally omitted from `bb-app config list`. At runtime the standalone host daemon reads
+installer-managed. At runtime the standalone host daemon reads
 `machineCredential` from this file and sends it to the server as the
 `x-bb-connect-machine` header, and agents reach the server through the daemon's
 local proxy, which adds it; `connectMachineId` is only stored. These are
 installer-managed transport details, not user configuration knobs; re-add the
 machine instead of setting them by hand.
 
-Use `bb-app client ssh-target` to let a local helper open files from a remote
-bb server in local editors. The SSH target is the value that works after
-`ssh`, such as `devbox`, `user@devbox`, or a `Host` entry from `~/.ssh/config`:
+`client.json` maps a server and machine to the value that works after `ssh`, such as `devbox`, `user@devbox`, or a `Host` entry from `~/.ssh/config`:
 
-```bash
-npx bb-app client ssh-target set https://bb.example.test devbox --host-id host_abc
-npx bb-app client ssh-target list
-npx bb-app client ssh-target remove https://bb.example.test --host-id host_abc
+```json
+{ "servers": { "https://bb.example.test": { "hosts": { "host_abc": { "sshAuthority": "devbox" } } } } }
 ```
-
-Use `--host-id` when the server has more than one machine; copy the ID from
-`bb machine list`. Omit it to preserve the single-machine auto-selection for
-`set`, or to remove every mapping for that server with `remove`.
 
 ## Precedence
 
@@ -101,85 +68,42 @@ Configuration is resolved in this order:
 
 1. Explicit launcher flags, such as `--data-dir`, `--server-port`, or
    `--server-bind-host`.
-2. Persistent `bb-app config`, `bb-app env`, and client values.
+2. Saved `config.json`, `env.json`, and `client.json` values in the data folder.
 3. Ambient shell environment.
 4. Built-in defaults.
-
-For the packaged app, prefer `bb-app config`, `bb-app env`, and launcher flags
-over shell variables. The environment remains the internal and deployment
-substrate, and source-development commands still load `.env` files.
 
 `CLOUDROOM_CONNECT_URL` points the server at another Cloudroom Connect relay
 than `https://cloudroom.run`, for development. Dev copies (`pnpm dev`) connect
 only when it is set, because they serve no app for phones to open.
 
-After `bb-app config` writes `~/.bb/config.json` or `bb-app env` writes
-`~/.bb/env.json`, it asks the running local server to reload. If bb is not
-running, the new values apply on the next start. If you edit either file by
-hand, run `npx bb-app config refresh` to apply the files to a running server.
+After editing `config.json` or `env.json`, restart the app. Changing or removing
+`BB_SERVER_BIND_HOST` does not close an existing `0.0.0.0` listener until then.
 
-The live reload applies config keys such as `BB_APP_URL`, `BB_INFERENCE`,
-`BB_INFERENCE_FALLBACK`, and `BB_TRANSCRIPTION`, plus env values explicitly
-consumed at runtime such as `OPENAI_API_KEY`. If one of those config keys is
-stored with `bb-app env` instead, it is startup-only; use `bb-app config` when
-you need a live change.
+## The runtime record
 
-`BB_LOG_LEVEL` is the startup-only `bb-app config` key. The complete current
-set of startup-only server or launcher env entries is:
-
-- `BB_APP_SURFACE`, `BB_APP_URL`, `BB_DATA_DIR`, `BB_DEV_APP_PORT`, and
-  `BB_EXTERNAL_URL`
-- `BB_HOST_DAEMON_PORT`, `BB_INFERENCE`,
-  `BB_INFERENCE_FALLBACK`, and `BB_INHERITED_SKILLS_ROOTS`
-- `BB_LOG_LEVEL`, `BB_MANAGED_DEV_BUILTIN_PLUGIN_HOT_RELOAD`,
-  `BB_MARKETPLACE_URL`, `BB_POSTHOG_API_KEY`, and `BB_TELEMETRY`
-- `BB_SERVER_BIND_HOST`, `BB_SERVER_PORT`, `BB_TRANSCRIPTION`, and all
-  `BB_FF_*` feature flags
-
-Setting or unsetting one still runs the reload for any other pending changes,
-but the running processes keep their current values. Apply it with a full
-launcher restart (`bb-app stop && bb-app start`) or by restarting the desktop
-app. In particular, changing or unsetting `BB_SERVER_BIND_HOST` does not close
-an existing `0.0.0.0` listener until that restart.
-
-`bb-app config refresh` also notes any startup-only keys currently present in
-`config.json` or `env.json`; those values apply on the next full restart.
-
-When targeting a non-default running instance, pass the same `--data-dir` and
-`--server-port` to `bb-app config` or `bb-app env` commands so they write the
-right file and refresh the right server.
-
-## Stopping A Running bb
-
-A running `bb-app start` writes `<dataDir>/bb-app-runtime.json` and removes the
-file when it exits. The file records the launcher process id, the server URL,
-the version, the start time, and how bb was started. Do not edit it.
-
-Two things read that file:
-
-- `npx bb-app stop` stops the bb that owns the data directory. Pass the same
-  `--data-dir` you started with when it is not the default `~/.bb/`.
-- The macOS desktop app asks before it uses a bb it did not start, and offers to
-  stop that copy for you.
-
-Both confirm that the recorded process really is a bb launcher before they
-signal it, so a stale file left by a crash cannot stop an unrelated process.
+A running launcher writes `<dataDir>/bb-app-runtime.json` and removes the file
+when it exits. It records the launcher process id, the server URL, the version,
+the start time, and how the app was started. Do not edit it. The macOS desktop
+app reads it, asks before it uses a copy it did not start, and offers to stop
+that copy. It confirms the recorded process really is a launcher before it
+signals it, so a stale file left by a crash cannot stop an unrelated process.
 
 ## Common Keys
 
 | Key                            | Command                                            | When to set             | Used for                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------ | -------------------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `BB_APP_URL`                   | `bb-app config`                                    | Optional for remote use | Human-facing app URL used for generated links and allowed browser origins. Leave empty for local-only use.                                                                                                                                                                                                                                                                                                     |
-| `BB_INFERENCE`                 | `bb-app config`                                    | Optional                | Primary server-side helper model in `<service>/<model>` format, where `<service>` is an AI service a loaded plugin registers (`bb settings ai-services` lists them; `codex` comes with the codex plugin and uses the codex CLI's credentials with no reasoning) or a pi-ai provider the server calls directly with its API key. Defaults to `codex/gpt-5.6-luna`.                                              |
-| `BB_INFERENCE_FALLBACK`        | `bb-app config`                                    | Optional                | Helper model used after a transient primary timeout, rate limit, or service-unavailable failure. Defaults to `codex/gpt-5.6-luna`.                                                                                                                                                                                                                                                                             |
-| `BB_TRANSCRIPTION`             | `bb-app config`                                    | Optional                | Voice transcription model in `<service>/<model>` format: a plugin-registered AI service (`codex` with the codex plugin; audio up to 5MB) or `openai/<model>` with `OPENAI_API_KEY`. Defaults to `codex/gpt-transcribe`.                                                                                                                                                                                        |
-| `BB_MARKETPLACE_URL`           | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` plugin marketplace. It defaults to `https://getbb.app/marketplace/v2/marketplace.json`. If the default v2 request returns 404, the server requests v1. Set another URL to test catalog refreshes. The server requests that URL without fallback. It changes only `bb-community`. Add other marketplaces with `bb marketplace add`. Restart the app after a change. |
-| `BB_SERVER_URL`                | `bb-app config`                                    | Remote CLI/host use     | Server URL for standalone `bb` CLI and `host-daemon` commands on the current machine. The CLI defaults to `http://127.0.0.1:38886` when unset.                                                                                                                                                                                                                                                                 |
-| `BB_SERVER_BIND_HOST`          | `bb-app env`, environment, or `--server-bind-host` | Startup-only            | Server listener host. Defaults to `127.0.0.1`; accepts only `127.0.0.1` or `0.0.0.0`. A full launcher or desktop app restart is required; until then, a previous `0.0.0.0` listener remains exposed. This is not a `bb-app config` key.                                                                                                                                                                        |
-| `BB_SERVER_PORT`               | `bb-app env`, environment, or `--server-port`      | Startup-only            | HTTP listener port. Defaults to `38886`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                                   |
-| `BB_HOST_DAEMON_PORT`          | `bb-app env`, environment, or `--host-daemon-port` | Startup-only            | Local host-daemon API port. Defaults to `38887`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                           |
-| `BB_LOG_LEVEL`                 | `bb-app config`                                    | Startup-only debugging  | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `fatal`. A full launcher or desktop app restart is required.                                                                                                                                                                                                                                                                                          |
-| `OPENAI_API_KEY`               | `bb-app env`                                       | OpenAI opt-in routes    | Required only when selecting explicit OpenAI provider routes such as `openai/gpt-4o-mini` or `openai/gpt-transcribe`.                                                                                                                                                                                                                                                                                          |
+| `BB_APP_URL`                   | `config.json`                                      | Optional for remote use | Human-facing app URL used for generated links and allowed browser origins. Leave empty for local-only use.                                                                                                                                                                                                                                                                                                     |
+| `BB_INFERENCE`                 | `config.json`                                      | Optional                | Primary server-side helper model in `<service>/<model>` format, where `<service>` is an AI service a loaded plugin registers (`bb settings ai-services` lists them; `codex` comes with the codex plugin and uses the codex CLI's credentials with no reasoning) or a pi-ai provider the server calls directly with its API key. Defaults to `codex/gpt-5.6-luna`.                                              |
+| `BB_INFERENCE_FALLBACK`        | `config.json`                                      | Optional                | Helper model used after a transient primary timeout, rate limit, or service-unavailable failure. Defaults to `codex/gpt-5.6-luna`.                                                                                                                                                                                                                                                                             |
+| `BB_TRANSCRIPTION`             | `config.json`                                      | Optional                | Voice transcription model in `<service>/<model>` format: a plugin-registered AI service (`codex` with the codex plugin; audio up to 5MB) or `openai/<model>` with `OPENAI_API_KEY`. Defaults to `codex/gpt-transcribe`.                                                                                                                                                                                        |
+| `BB_MARKETPLACE_URL`           | `env.json`, or environment                         | Startup-only testing    | Manifest URL of the reserved `bb-community` plugin marketplace. It defaults to `https://getbb.app/marketplace/v2/marketplace.json`. If the default v2 request returns 404, the server requests v1. Set another URL to test catalog refreshes. The server requests that URL without fallback. It changes only `bb-community`. Add other marketplaces with `bb marketplace add`. Restart the app after a change. |
+| `BB_SERVER_URL`                | `config.json`                                      | Remote CLI/host use     | Server URL for standalone `bb` CLI and `host-daemon` commands on the current machine. The CLI defaults to `http://127.0.0.1:38886` when unset.                                                                                                                                                                                                                                                                 |
+| `BB_ALLOW_INSECURE_SERVER_URL` | `env.json`, or environment                         | Compatibility only      | Set to `1` to allow a non-loopback `http://` server URL: on the server, for machine install commands; on a machine, for enrollment and its host daemon. Keys and session traffic then travel unencrypted, so use it only on a trusted network. Without it they refuse. |
+| `BB_SERVER_BIND_HOST`          | `env.json`, environment, or `--server-bind-host`   | Startup-only            | Server listener host. Defaults to `127.0.0.1`; accepts only `127.0.0.1` or `0.0.0.0`. A full launcher or desktop app restart is required; until then, a previous `0.0.0.0` listener remains exposed.                                                                                                                                                                        |
+| `BB_SERVER_PORT`               | `env.json`, environment, or `--server-port`        | Startup-only            | HTTP listener port. Defaults to `38886`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                                   |
+| `BB_HOST_DAEMON_PORT`          | `env.json`, environment, or `--host-daemon-port`   | Startup-only            | Local host-daemon API port. Defaults to `38887`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                           |
+| `BB_LOG_LEVEL`                 | `config.json`                                      | Startup-only debugging  | Log level: `trace`, `debug`, `info`, `warn`, `error`, or `fatal`. A full launcher or desktop app restart is required.                                                                                                                                                                                                                                                                                          |
+| `OPENAI_API_KEY`               | `env.json`                                         | OpenAI opt-in routes    | Required only when selecting explicit OpenAI provider routes such as `openai/gpt-4o-mini` or `openai/gpt-transcribe`.                                                                                                                                                                                                                                                                                          |
 
 By default, helper inference and voice transcription use Codex credentials from
 the host daemon. Run `codex login` on the host for the default path. Set
@@ -195,7 +119,7 @@ API key instead: `codex login --with-api-key`, or set `BB_TRANSCRIPTION` to
 
 The microphone picker in Settings → Voice Input is client-local. It stores the
 selected browser `MediaDevices` device id in localStorage as
-`bb.voiceInput.audioInputDeviceId`; it does not change `bb-app config` or the
+`bb.voiceInput.audioInputDeviceId`; it does not change `config.json` or the
 server-side transcription model.
 
 The built-in Push notifications plugin has two booleans, `webEnabled` and
@@ -207,25 +131,39 @@ permission. Settings → Notifications offers permission and test controls.
 `bb push-notifications test <web|desktop>` broadcasts a test to connected,
 permitted clients; it does not confirm OS display.
 
-The builtin Keep Awake plugin has one autosaving configuration page with an
-enable switch and an all-or-selected host picker. On selected macOS hosts it
-runs `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while enabled, keeping the
-display and system awake while bb is running (`-s` applies on power only).
+The builtin Keep Awake plugin has one autosaving configuration page with a
+level picker and an all-or-selected host picker. Levels:
+
+- `off`: the computer sleeps as usual.
+- `working` (default): while a Local thread runs on a host, and for 10 minutes
+  after, macOS runs `/usr/bin/caffeinate -i -s -w <worker-pid>`. The screen can
+  still turn off. The plugin checks running threads on every thread status
+  change and once a minute. A thread waiting over an hour on a question or
+  approval stops counting. If the check fails, awake hosts stay awake.
+- `always`: `/usr/bin/caffeinate -d -i -s -w <worker-pid>` while Cloudroom runs,
+  so the screen stays on too.
+
+`-s` applies on power only. Linux helpers keep the screen on at both levels.
+Old saved settings upgrade once: the old switch's "on" becomes `always`, "off"
+becomes `working` (an earlier migration saved "off" for every install).
 Closing a laptop lid or choosing Sleep manually still sleeps the Mac. Configure it from an agent or
 terminal with:
 
 ```sh
-bb keep-awake status [--json]
-bb keep-awake enable [--json]
-bb keep-awake disable [--json]
-bb keep-awake hosts all
-bb keep-awake hosts <host-id>...
+room-cli keep-awake status [--json]
+room-cli keep-awake level <off|working|always> [--json]
+room-cli keep-awake enable [--json]    # same as: level always
+room-cli keep-awake disable [--json]   # same as: level off
+room-cli keep-awake hosts all
+room-cli keep-awake hosts <host-id>...
 ```
 
 The **Remove AI co-authors** toggle in Settings → Defaults defaults to on. Cloudroom
 adds a Git config hook to every process it starts, so commits drop agent
 `Co-authored-by` lines (Claude, Cursor, Codex, Copilot, Gemini, and similar) and
-keep human ones. It also turns off Claude Code's own commit and PR attribution.
+keep human ones. It also turns off Claude Code's own commit attribution, and
+ends the pull requests Claude Code opens with `Built with [Cloudroom](https://cloudroom.dev)`
+in place of Claude's own line ([ADR](../../docs/adr/20261117-113618-built-with-cloudroom-pr-footer.md)).
 The hook needs Git 2.54 or newer; older Git ignores it. When it removes a line,
 it prints one line to stderr naming the setting below. In Cloud it only touches
 real repositories: the session's own (any worktree or submodule), `/repos/<name>`,
@@ -293,22 +231,26 @@ Archiving a thread saves its worktree's work to its branch and removes the
 folder; unarchiving the thread or sending it a message brings it back. There
 is no setting. See [Worktrees](worktrees.md#cleanup).
 
-Settings → Agents → Harness lists every registered agent provider in picker order.
-Move a provider up or down to change the order and choose the default for new
-threads. Both are persisted preferences: `providerOrder` is the list of ids
-that lead the picker (ids not listed follow in plugin install order, and an id
-that names no registered provider is ignored) and `defaultProviderId` is the
-provider new threads use when neither the caller nor the project chose one
-(`null` means the first available provider in picker order). Set them with
-`bb settings general providerOrder '["claude-code","codex"]'` and
-`bb settings general defaultProviderId claude-code` (or `null`).
+Settings → Agents → Harness lists every registered agent provider in picker order:
+the default first, then the providers you started the most threads with in the
+last 72 hours, then the rest in plugin install order. Drag a row to set your own
+order instead (`customProviderOrder`; Picker order → Most used, or `[]`, goes
+back). `defaultProviderId` is the provider new threads use when neither the
+caller nor the project chose one (`null` means the first available provider in
+picker order). Set it with `bb settings general defaultProviderId claude-code`
+(or `null`).
 
 Each provider row also shows its login on this Mac and in the Cloud (Log in or
 Connect when missing), its CLI version, the Auto-update switch
-(`providerAutoUpdate`), and its update status (Update, Retry, or a check).
-With Auto-update on, Cloudroom checks every 10 minutes and updates at once,
-even while threads run; a failed update retries after an hour. Native Claude
-Code installs compare against Claude's own release channel, not npm.
+(`providerAutoUpdate`), and its update status.
+With Auto-update on, Cloudroom checks connected machines on startup, on
+reconnect, and every two minutes. It installs updates as soon as it finds them,
+even while threads run. Settings shows progress. A failed update retries
+on the first check at least two minutes later. After two failures, the sidebar
+offers Retry and automatic checks retry that version hourly. Standalone Codex and native Claude Code use their
+own release channels.
+The switch is off by default and shows for agents whose newest version
+Cloudroom can read: npm CLIs and Cursor (from its install script).
 Agents that can be installed but are not appear under "Not installed" with an
 Install button. Settings → Updates covers Cloudroom itself and other machines'
 CLIs; it links here for this Mac's agents.
@@ -411,7 +353,7 @@ delayed shortcut badges without disabling any shortcuts.
 | --------- | ----------------------------------------- | --------------------------------- | ------------------------ |
 | Palette   | Quick palette                             | `Mod+Shift+P`                     | All clients              |
 | Threads   | New thread                                | `Mod+N` / `Mod+Shift+O`           | Desktop / web            |
-| Threads   | Search threads                            | `Mod+K`                           | All clients              |
+| Threads   | Search threads                            | `Mod+K` / `Mod+F`                 | All clients              |
 | Threads   | Rename focused thread                     | Unassigned                        | Thread view              |
 | Threads   | Archive focused thread                    | `Mod+W`                           | Thread view              |
 | Threads   | Previous / next thread                    | Surface defaults above            | Desktop / web            |
@@ -490,8 +432,8 @@ CLI is on PATH and can be launched as `grok agent stdio`, and
 `openclaw` CLI is on PATH (it runs through the host's OpenClaw Gateway), `acp-devin` when
 Devin's `devin` CLI is on PATH, `acp-droid` when Factory's `droid` CLI is on PATH
 (launched as `droid exec --output-format acp`), `acp-kilo` when Kilo Code's `kilo` CLI is on PATH
-(launched as `kilo acp`), and `acp-cline` when the `cline` CLI is on PATH (launched as
-`cline --acp`). `acp-cursor` is always listed.
+(launched as `kilo acp`), `acp-cline` when the `cline` CLI is on PATH (launched as
+`cline --acp`), `acp-kimi` when Kimi Code's `kimi` CLI is on PATH (launched as `kimi acp`), and `acp-agent-zero` when Agent Zero's `a0` CLI is on PATH (launched as `a0 acp`; it bridges to your Agent Zero server). `acp-cursor` is always listed.
 
 Add your own agent through the ACP providers plugin's `customAgents` setting,
 which holds a JSON array. In the app it is the multi-line editor on the
@@ -507,7 +449,7 @@ Each entry needs `id` (lowercase letters, digits and dashes), `displayName`,
 and `command`. bb derives the provider id `acp-<id>`; it never changes once a
 thread has used it. An id bb always lists (`cursor`) is reserved; an id bb
 lists only where the agent is installed (`opencode`, `omp`, `grok`,
-`hermes-agent`, `devin`, `droid`, `kilo`, `cline`) is not, so an entry with that id REPLACES the shipped agent.
+`hermes-agent`, `devin`, `droid`, `kilo`, `cline`, `kimi`, `agent-zero`) is not, so an entry with that id REPLACES the shipped agent.
 A replacing entry keeps the shipped agent's `nativeSkillRoots` unless it sets
 its own, and bb still lists the roots that agent's host config names (its
 config directory, compat trees, configured paths, plugins) either way.
@@ -547,7 +489,7 @@ it reads the old array. A setting entry wins over a config entry with the same
 Register extra picker models by editing top-level `customModels` in
 `~/.bb/config.json`. Use this for a model the provider accepts but does not
 list, such as a non-public preview id. This list has no set/unset CLI surface:
-edit the JSON, then run `npx bb-app config refresh` or restart bb. `bb-app config list` prints the entries.
+edit the JSON, then restart the app.
 
 ```json
 {
@@ -704,8 +646,9 @@ and strong ETag. That package contains the daemon, its workers and native
 dependencies, and the bundled `bb` CLI; it omits the server and web app. The
 installer verifies the digest and skips the download and npm install when its
 recorded installed digest receives `304 Not Modified`. If the package route
-fails, installation stops with an error; it never falls back to npm or a
-`bb-app` on PATH. It installs the package under
+fails, installation stops with an error and prints the server's reason (`503
+host_package_unavailable` when the server can't build the package); it never
+falls back to npm or a `bb-app` on PATH. It installs the package under
 the machine's bb data directory rather than npm's system-wide prefix, so
 enrollment needs neither `sudo` nor a global npm configuration.
 Installed services enable `--auto-update`; remove that flag from the launchd
@@ -748,7 +691,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
-| `defaults.startingMachine`        | `last` (default: where the project's last new thread started) or `cloud` |
+| `defaults.startingMachine`        | `last` (default: Cloud, except a project where Local was picked in the last 24 hours) or `cloud` |
 | `defaults.showUltraEfforts`       | `true` adds Claude Ultracode and Codex Ultra to the effort menu (default `false`) |
 
 By project (`project`) is the default for `sidebar.organizationMode` when no
@@ -789,7 +732,8 @@ window size.
 
 ### Thread naming
 
-Settings → Thread naming chooses the primary model, fallback model, and naming rules.
+Settings → General → Thread naming chooses the model. The naming rules are in Settings → Prompts → Feature prompts.
+A Claude model names threads on the account in use (Settings → Agents → Accounts), or on this machine's own Claude login when no account is added.
 Local and Cloud threads retry failed naming automatically. Each model gets 30 seconds.
 Retries wait 10 seconds, 30 seconds, 1 minute, 2 minutes, then 5 minutes between attempts.
 Pending names survive app restarts. Setting a name manually cancels automatic naming.
@@ -859,14 +803,16 @@ persistently restores undimmed splits.
 
 ## Accounts
 
-The builtin Accounts plugin is always on (ADR 0194). Connect up to 10 Claude
-Code and 10 Codex subscriptions at the top of Settings → Agents → Claude Code
+The builtin Accounts plugin is always on (ADR 0194). Connect up to 30 Claude
+Code and 30 Codex subscriptions at the top of Settings → Agents → Claude Code
 or Codex. The machine's own CLI login is the first entry and is never copied, so
 the CLI and Cloudroom never refresh the same token.
 
 Every Local and Cloud thread, old and new, uses the selected account from its
 next turn (ADR 0197). **Use** selects another; nothing switches automatically. A
-turn that hits a subscription limit marks the account "Limit hit". The sidebar
+turn that hits a subscription limit marks the account "Limit hit". The mark goes
+at the reset time or when that limit lifts. Reload checks Claude again after a
+plan upgrade. A new successful turn also clears a general account limit. The sidebar
 usage box shows each provider's in-use account in a chip; with several accounts,
 the chip's dropdown switches between them.
 
@@ -878,10 +824,13 @@ Keychain entry. Then `claude setup-token` gives Cloud a one-year token, kept in
 organization. Local Claude Code runs with `CLAUDE_CONFIG_DIR` set to the folder,
 so claude.ai connectors load, and rebuilds its session silently on a switch. The
 folder links chat history, settings, skills, and plugins to `~/.claude` and gets
-a copy of the user's MCP servers before each turn. Accounts added before full
-logins keep running on `CLAUDE_CODE_OAUTH_TOKEN` until **Sign in again**. Once a Claude account is added, the machine's own login stays
-listed but can't be picked, because Cloud needs a one-year token. **Add Terminal
-login** adds it as an account, labeled with the Mac's email, and selects it. The
+a copy of the user's MCP servers and their OAuth sign-ins (`mcpOAuth` from the
+main Keychain entry or `.credentials.json`; unexpired access tokens only, no
+refresh tokens) before each turn. Accounts added before full
+logins keep running on `CLAUDE_CODE_OAUTH_TOKEN` until **Sign in again**. Adding
+an account never switches; the machine's own login stays a tile. Once Cloud is on
+another account, the first **Use** on it asks for one `setup-token` approval so
+Cloud can follow it. The
 selected Claude account becomes the Cloud Claude login through
 `POST /api/v1/cloudroom/account/claude/token`.
 
@@ -922,6 +871,9 @@ foreground client and no pairing step.
   signed in to this Mac can open a share. `unexpose` and `shares` use the same
   host resolution; their JSON rows include `hostId`, `hostName`, `port`, and
   `url`, and `shares --json` also includes the resolved `host`.
+- A shared app sees a loopback `Host` and no `X-Forwarded-Host`. Rails and
+  Django need a small dev-only setup to build share URLs and pass CSRF. The
+  `share-server-links` skill has the recipe.
 - Remote hosts from Settings → Machines get their own relay credential, sent as
   `x-bb-connect-machine`. The relay forwards their `/internal` and `/api/v1`
   calls as a machine and refuses host-management changes. Removing the machine
@@ -1163,7 +1115,10 @@ Dependency resolution and bundling run on install and update-apply only —
 never on an update check, which reads the manifest and stops. An omitted npm
 spec tracks the newest compatible stable release, ranges track within the
 range, dist-tags track the tag, and exact versions are pinned. A bare HTTP(S)
-Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`; an
+Git repository URL or `git:<url>[@<ref|semver-range>]` requires `git`. Git
+URLs must not embed a username, password, or token; private repositories sign
+in through Git's credential helper. A marketplace listing's Git URL login is
+dropped. An
 omitted ref tracks the repository's default branch, explicit branches track
 their head, and tags and commits are pinned. A semver range
 (`git:<url>@^1.2.0`, or `@semver:<range>` to state the intent explicitly)
@@ -1212,8 +1167,8 @@ The server listens on `127.0.0.1` by default. Set
 trusted network boundary must reach the listener directly. The public API is
 unauthenticated and permits command execution and file reads, so never expose a
 wildcard-bound server to an untrusted network. The only accepted bind hosts are
-`127.0.0.1` and `0.0.0.0`; this startup-only setting is not available through
-`bb-app config`.
+`127.0.0.1` and `0.0.0.0`; this startup-only setting is not available in
+`config.json`.
 
 The startup `Server listening` and `app` lines show the actual listener address.
 With wildcard binding they show `http://0.0.0.0:<port>`, while bb's health check
@@ -1321,12 +1276,11 @@ For isolated development smoke tests only, `DEV_BROWSER_SMOKE_BINARY` selects th
 
 ## Agent guidance plugin settings
 
-BB guide is installed and enabled by default. In Settings → Plugins
-→ BB guide, `introduction` controls the BB introduction, `skills` controls all
-three bundled skills, and `bbCli`, `pluginAuthoring`, and `skillCreator` control
-individual skills. All default to true. Disabling BB guide removes its
-introduction and skills; other plugins and independently installed skill
-copies retain their own configuration.
+Cloudroom guide (`cloudroom-guide`) is installed and enabled by default. In
+Settings → Prompts → Cloudroom guide, `skills` controls all three bundled
+skills, and `roomCli`, `pluginAuthoring`, and `skillCreator` control individual
+skills. All default to true. Disabling Cloudroom guide removes its skills; other
+plugins and independently installed skill copies retain their own configuration.
 
 Connect's `sendRemoteInstructions` setting ("Tell agents about remote access")
 defaults to true. When false it suppresses Connect's active/recent remote-use
@@ -1340,7 +1294,11 @@ agent configuration is next assembled, not retroactively to existing text.
 
 Machines settings expose **Server URL reachable by machines** (`machineServerUrl`)
 and **Default machine access** (`defaultMachineAccess`). The URL must be HTTP
-or HTTPS without embedded credentials. An unset URL falls back to
+or HTTPS without embedded credentials. A non-loopback `http://` URL would send
+machine keys unencrypted, so adding a machine fails unless the server's
+`env.json` sets `BB_ALLOW_INSECURE_SERVER_URL=1` (trusted networks only). Its
+install commands then pass the opt-in on, and the machine saves it in its own
+`env.json`. An unset URL falls back to
 `BB_EXTERNAL_URL`. The URL input appears when Manual is selected. An unset access provider selects
 bb connect, even when unpaired; Machines settings links to its setup. Choose
 Manual (`direct`) explicitly to use your own URL. An explicit provider must
@@ -1417,7 +1375,7 @@ rewrites for github.com, and author/committer identity. The helper expands
 store is installed. Private email uses `<id>+<login>@users.noreply.github.com`.
 A user `GH_TOKEN` overrides the built-in token, and the row shows overridden.
 Tokens obtained from gh are never persisted by the server. Image construction
-and Modal filesystem snapshot settings do not receive these contributions.
+does not receive these contributions.
 
 Use `bb machine env list --json`, `bb machine env set NAME [--note
 text] --json`, and `bb machine env unset NAME --json`. Set reads its value from
@@ -1437,38 +1395,6 @@ server gh credentials to machines; `true` enables them again. In Machines →
 Advanced settings, the automatic GH_TOKEN switch controls the same setting.
 This does not log the server out or suppress an explicit custom GH_TOKEN.
 Changes apply to new turns, setup commands and terminals.
-
-## Modal machines
-
-The optional Modal sandbox plugin builds/reuses named tools images for new
-machines. Its plugin page keeps the bundled Standard Dockerfile as the first
-image and can add named Dockerfiles, existing Modal image IDs, and named CPU/memory
-presets. CLI: `bb modal image show`, `bb modal image set --file PATH`, and
-`bb modal image reset` (append `--json`). Typed plugin RPCs `image.definition`,
-`image.set({dockerfile})`, and `image.reset` expose the same persistent definition.
-Supported instructions are one FROM followed by RUN, ENV, WORKDIR, and USER; no
-build context or multi-stage builds. Saving does not build or modify existing
-machines. The next new machine uses the saved definition. BB installs the daemon
-on demand, then clones the project and runs its setup hook.
-
-Configure `tokenId` and `tokenSecret` in secret plugin settings; `appName` defaults
-to `bb-sandboxes`. With no size preset, Modal's CPU and memory defaults apply.
-`idleMinutes` defaults to 15 (0 disables idle suspension), and `timeoutMinutes`
-defaults to 1440 with an allowed range of 1–1440. Existing machines use current idle
-policy; running compute keeps its vendor deadline and restored compute uses the
-current lifetime. Resource reservations stay pinned across restore.
-
-There is no automatic retention removal. Use `bb machine remove MACHINE --yes`
-for explicit cleanup. Manual and idle pauses save a filesystem snapshot before
-terminating compute. There is no pre-expiry scheduler: a sandbox that stays active
-until its configured timeout can lose changes since its last successful pause.
-Provider details expose expiry and saved-image status; missing compute never
-silently restores stale state. Open terminals prevent idle suspension.
-
-`bb modal account inspect --json` tests credentials without allocating resources.
-Create with `bb machine create --provider modal-sandbox --project PROJECT --json`.
-See [modal-sandboxes](../plugins/environment-modal-sandbox/skills/modal-sandboxes/SKILL.md)
-for prerequisites and lifecycle commands.
 
 ## Repository build caches
 

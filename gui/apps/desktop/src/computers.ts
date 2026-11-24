@@ -18,7 +18,7 @@ const RELAY_HOST = new URL(
 const OPEN_TIMEOUT_MS = 5_000;
 // A Mac that blinks offline (a relay hiccup, a reconnect) is still the one you picked, so keep trying this long before
 // opening this Mac instead.
-export const OPEN_RETRY_MS = 30_000;
+const OPEN_RETRY_MS = 10_000;
 const LIST_TIMEOUT_MS = 10_000;
 
 const computerSchema = z.object({
@@ -305,6 +305,8 @@ const SYNC_INTERVAL_MS = 10 * 60_000;
 // While this Mac stands in for an offline one, check every minute so "Switch back" shows up soon.
 const FALLBACK_SYNC_INTERVAL_MS = 60_000;
 const MIN_LIST_INTERVAL_MS = 60_000;
+// While standing in, a refresh the page asks for (Settings, the chip, a finished sign-in) may run this often.
+const FALLBACK_MIN_LIST_INTERVAL_MS = 10_000;
 // The Connect plugin registers this Mac a few seconds after the server starts.
 const STARTUP_RETRY_MS = 5_000;
 const STARTUP_RETRIES = 6;
@@ -323,6 +325,7 @@ export function createComputersSync(args: {
   let inFlight: Promise<void> | null = null;
   let lastAttemptAt = 0;
   let retries = 0;
+  let fallback = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const schedule = (ms: number) => {
@@ -354,87 +357,65 @@ export function createComputersSync(args: {
   return {
     syncNow,
     onListRequested() {
-      if (Date.now() - lastAttemptAt >= MIN_LIST_INTERVAL_MS) void syncNow();
+      if (Date.now() - lastAttemptAt < (fallback ? FALLBACK_MIN_LIST_INTERVAL_MS : MIN_LIST_INTERVAL_MS)) return;
+      // Right after a sign-in the Connect plugin needs a few seconds for its key, so keep trying for a bit.
+      if (fallback) retries = 0;
+      void syncNow();
     },
     onRuntimeReady() {
       retries = 0;
       void syncNow();
     },
     setFallback(on) {
+      fallback = on;
       schedule(on ? FALLBACK_SYNC_INTERVAL_MS : SYNC_INTERVAL_MS);
     },
   };
 }
 
-// The relay marks answers from a Mac that dropped off: 503 plus one of these headers set to "1".
-const OFFLINE_MARKS = ["x-bb-tunnel-offline", "x-cloudroom-offline"];
+// A closed-lid Mac wakes for a few seconds every few minutes. Only a Mac still online this long after the first list
+// that showed it counts as back, so a brief wake never pulls this Mac's window over (ADR 20261113-210101).
+export const BACK_CHECK_MS = 30_000;
 
-export function hasOfflineMark(status: number, header: (name: string) => string | null | undefined): boolean {
-  return status === 503 && OFFLINE_MARKS.some((name) => header(name) === "1");
-}
-
-// While this window shows another Mac, ask it every 10 seconds if it's still there.
-export const OTHER_MAC_PING_MS = 10_000;
-const OTHER_MAC_PING_TIMEOUT_MS = 15_000;
-/** Marks the ping, so a 401 on it never counts as "your sign-in to that Mac expired". */
-export const OTHER_MAC_PING_PATH = "/health?from=desktop-ping";
-
-export function watchOtherMac(args: {
-  /** The other Mac's address while this window shows it, else null. */
-  viewing: () => string | null;
-  fetch: (url: string, init: { signal: AbortSignal }) => Promise<Response>;
-  onOffline: () => void;
-}): () => void {
-  let busy = false;
-  const timer = setInterval(() => {
-    const url = args.viewing();
-    if (url === null || busy) return;
-    busy = true;
-    void args
-      .fetch(new URL(OTHER_MAC_PING_PATH, url).href, { signal: AbortSignal.timeout(OTHER_MAC_PING_TIMEOUT_MS) })
-      .then((response) => {
-        if (args.viewing() === url && hasOfflineMark(response.status, (name) => response.headers.get(name))) args.onOffline();
-      })
-      .catch(() => {})
-      .finally(() => {
-        busy = false;
-      });
-  }, OTHER_MAC_PING_MS);
-  timer.unref();
-  return () => clearInterval(timer);
+/** Reads each Mac list while this Mac stands in, and says when the picked Mac is back for real. */
+export function createReturnWatch(now: () => number = Date.now) {
+  let seenAt: number | null = null;
+  return {
+    /** "check-again": first seen online, look again in BACK_CHECK_MS. "return": still online since then. */
+    next(live: boolean): "wait" | "check-again" | "return" {
+      if (!live) {
+        seenAt = null;
+        return "wait";
+      }
+      if (seenAt === null) {
+        seenAt = now();
+        return "check-again";
+      }
+      return now() - seenAt >= BACK_CHECK_MS ? "return" : "wait";
+    },
+    reset() {
+      seenAt = null;
+    },
+  };
 }
 
 /**
- * Keeps trying a Mac that dropped while this Mac shows the "Lost MacBook Air" dialog. True once its page is on screen.
- * `deadline` is null once the user picked "Use this Mac now". `current` is false once something newer owns the window.
+ * Opens another Mac when the app starts or the user picks it. While the relay says it's offline, tries again for
+ * 10 seconds. After that the window never leaves that Mac by itself: its page shows "Reconnecting…" and recovers.
  */
-export async function reconnectOtherMac<Opened>(args: {
+export async function openWithRetries<Opened>(args: {
   current: () => boolean;
-  deadline: () => number | null;
   /** One try to open the Mac on the relay. */
-  open: () => Promise<Opened | null>;
-  /** Loads its page in the window. False when the page didn't load. */
-  load: (opened: Opened) => Promise<boolean>;
-  /** Puts this Mac's own app back on screen. */
-  showThisMac: () => Promise<unknown>;
+  open: () => Promise<ComputersResult<Opened>>;
   sleep?: (ms: number) => Promise<void>;
-}): Promise<boolean> {
+}): Promise<Opened | null> {
   const sleep = args.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  const trying = () => args.current() && args.deadline() !== null;
-  let retryDelayMs = 1_000;
-  for (;;) {
-    if (!trying()) return false;
+  const deadline = Date.now() + OPEN_RETRY_MS;
+  for (let retryDelayMs = 1_000; ; retryDelayMs *= 2) {
     const opened = await args.open();
-    if (opened !== null && trying()) {
-      const loaded = await args.load(opened);
-      if (!args.current()) return false;
-      if (loaded && args.deadline() !== null) return true;
-      // The page failed, or the user stopped while it loaded: this Mac goes back on screen.
-      await args.showThisMac();
-    }
-    const until = args.deadline();
-    if (!args.current() || until === null || Date.now() + retryDelayMs > until) return false;
+    if (!args.current()) return null;
+    if (opened.ok) return opened.value;
+    if (opened.reason !== "offline" || Date.now() + retryDelayMs > deadline) return null;
     await sleep(retryDelayMs);
-    retryDelayMs = Math.min(retryDelayMs * 2, 8_000);
   }
 }

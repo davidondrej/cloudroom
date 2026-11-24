@@ -2,6 +2,7 @@ import { shortcutsConflict } from "./plugin-command-keybindings";
 import {
   APP_COMMAND_IDS,
   QUESTION_SELECT_APP_COMMAND_IDS,
+  areAppShortcutsEqual,
   isAppKeybindingAvailableForClient,
   isMacKeyboardPlatform,
   normalizeAppShortcutInputKey,
@@ -45,19 +46,7 @@ export function appShortcutFromInput(
   };
 }
 
-export function areAppShortcutsEqual(
-  left: AppShortcut,
-  right: AppShortcut,
-): boolean {
-  return (
-    left.key.toLowerCase() === right.key.toLowerCase() &&
-    left.mod === right.mod &&
-    left.meta === right.meta &&
-    left.control === right.control &&
-    left.alt === right.alt &&
-    left.shift === right.shift
-  );
-}
+export { areAppShortcutsEqual };
 
 export function canAssignAppShortcut(
   command: KeyboardCommandId,

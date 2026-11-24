@@ -1,4 +1,4 @@
-import { matchPath } from "react-router-dom";
+import { matchPath } from "react-router";
 import {
   PLUGIN_DETAIL_ROUTE_PATH,
   PLUGINS_ROUTE_PATH,
@@ -10,6 +10,7 @@ import {
   SKILL_DETAIL_ROUTE_PATH,
   SKILLS_ROUTE_PATH,
   TOOLS_ROUTE_PATH,
+  getSettingsRoutePath,
   stripRoutePathSuffix,
 } from "@cloudroom/client-core";
 
@@ -77,6 +78,8 @@ export {
   getThreadRoutePath,
 } from "@cloudroom/client-core";
 export type { ThreadRoutePathArgs } from "@cloudroom/client-core";
+
+export const CLOUD_CREDITS_SETTINGS_PATH = `${getSettingsRoutePath("analytics")}?tab=credits`;
 
 export function getPluginPanelRoutePluginId(pathname: string): string | null {
   return matchPath(PLUGIN_PANEL_ROUTE_PATH, pathname)?.params.pluginId ?? null;
@@ -155,7 +158,11 @@ export function resolveRouteHref({
     return null;
   }
 
-  if (url.origin !== currentOrigin || !isRoutePath({ path: url.pathname })) {
+  if (
+    url.origin !== currentOrigin ||
+    url.pathname.startsWith("//") ||
+    !isRoutePath({ path: url.pathname })
+  ) {
     return null;
   }
 

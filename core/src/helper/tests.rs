@@ -140,7 +140,13 @@ async fn browser_path_streaming_upload_readiness_and_privacy() {
         assert_eq!(request(port, get("/", extra), b"").await.0, 403);
     }
     let attacker = "GET / HTTP/1.1\r\nHost: attacker.example\r\n\r\n".to_owned();
-    assert_eq!(request(port, attacker, b"").await.0, 403);
+    let (status, _, body) = request(port, attacker, b"").await;
+    assert!(status == 403 && !String::from_utf8_lossy(&body).contains(&host));
+    // Only a plain loopback visit learns the preview's address (#1879).
+    let loopback = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let (status, head, body) = request(port, loopback, b"").await;
+    assert!(status == 403 && head.starts_with("HTTP/1.1 403 Preview origin is not allowed\r\n"));
+    assert!(String::from_utf8_lossy(&body).contains(&format!("http://{host}/")));
     assert_eq!(request(port, get("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"), b"").await.0, 200);
     let chunked = format!("POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n");
     assert_eq!(request(port, chunked, b"").await.0, 411);
@@ -151,10 +157,17 @@ async fn browser_path_streaming_upload_readiness_and_privacy() {
 fn ask_first_popup_shows_agent_text_as_text() {
     // Security sweep: line breaks in a folder name could push the command out of view in the Ask first popup.
     let stdin: String = (0..25).map(|n| format!("echo {n}\r\n")).collect();
-    let job = json!({"id": "job", "command": "bash -s\necho two\u{202e}", "cwd": format!("/tmp/a\nb{}", "c".repeat(300)), "write": true, "stdin": super::hex(stdin.as_bytes())});
+    let job = json!({"id": "job", "command": "bash -s\necho two\u{202e}", "cwd": format!("/opt/a\nb{}", "c".repeat(300)), "write": true, "stdin": super::hex(stdin.as_bytes())});
     let text = jobs::popup_text(&job, Path::new("/unused"));
-    let lines: Vec<&str> = text.split('\n').collect();
-    let folder = format!("Folder: /tmp/a\\nb{}…", "c".repeat(191));
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(
+        lines.drain(2..4).collect::<Vec<_>>(),
+        [
+            "Warning: 109 more characters of the folder are not shown.",
+            ""
+        ]
+    );
+    let folder = format!("Folder: /opt/a\\nb{}…", "c".repeat(191));
     let expected = [
         "Warning: 44 more characters of its input are not shown, and will also run.",
         "",
@@ -180,6 +193,61 @@ fn ask_first_popup_shows_agent_text_as_text() {
         jobs::visible(&"\0".repeat(300), 600, 10),
         ("\\x00".repeat(150), 150)
     );
+}
+
+#[tokio::test]
+async fn ask_first_popup_shows_the_folder_the_command_runs_in() {
+    // #2470: `.` and `..` in the agent's folder text could show a project folder while the command ran in a temp folder.
+    let raw = format!(
+        "/Users/me/code/{}{}private/tmp/b",
+        "./".repeat(100),
+        "../".repeat(30)
+    );
+    let cwd = jobs::realpath(Path::new(&raw));
+    assert_eq!(cwd, Path::new("/private/tmp/b"));
+    let job = json!({"id": "job", "command": "make", "cwd": cwd, "write": true});
+    let text = jobs::popup_text(&job, Path::new("/Users/me"));
+    assert!(text.contains("Warning: the command uses files in a temp folder."));
+    assert!(text.ends_with("Folder: /private/tmp/b"));
+    let home = json!({"id": "job", "command": "make", "cwd": "/Users/me/code", "write": true});
+    assert!(jobs::popup_text(&home, Path::new("/Users/me")).ends_with("\n\nFolder: ~/code"));
+    // `..` never skips a missing part or a file, which the OS would refuse to start in.
+    let base = folder("real-folder");
+    std::fs::create_dir(base.join("code")).unwrap();
+    std::fs::write(base.join("file"), "").unwrap();
+    std::os::unix::fs::symlink(base.join("code"), base.join("link")).unwrap();
+    let (real, id) = jobs::real_folder(&base.join("link/.")).unwrap();
+    assert_eq!(real, base.join("code").to_string_lossy());
+    assert!(jobs::real_folder(&base.join("missing/../code")).is_err());
+    assert!(jobs::real_folder(&base.join("file/../code")).is_err());
+    // The approved command runs in that folder. Swapped after Allow, it no longer matches, so it does not start.
+    let _alone = FORKS.lock().await;
+    let jobs = jobs::Jobs::new(std::sync::Arc::new(super::net::Shared::new(base.clone())));
+    let job =
+        json!({"id": "run", "command": "pwd", "cwd": real, "approvedFolder": id, "write": true});
+    let ran = jobs.run(&job, None, &base, None, None).await;
+    let stdout = super::unhex(ran["stdout"].as_str().unwrap()).unwrap();
+    assert_eq!(String::from_utf8(stdout).unwrap().trim(), real);
+    std::fs::rename(base.join("code"), base.join("old")).unwrap();
+    std::fs::create_dir(base.join("code")).unwrap();
+    assert_eq!(jobs.run(&job, None, &base, None, None).await["code"], 126);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_folder_uses_the_letter_case_on_disk() {
+    // #2470: realpath keeps a typed ~/CODE, while the shell's `pwd -P` shows ~/code, so the approved folder never matched.
+    let base = folder("disk-case");
+    std::fs::create_dir(base.join("code")).unwrap();
+    if base.join("CODE").exists() {
+        let real = base.join("code").to_string_lossy().into_owned();
+        assert_eq!(
+            jobs::real_folder(&base.join("CODE")).map(|found| found.0),
+            Ok(real)
+        );
+    }
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -266,7 +334,7 @@ async fn push_places_only_its_named_item() {
         if let Some(refused) = super::jobs::as_copy(&mut job, &home, &[]) {
             return (126, String::new(), refused);
         }
-        let result = jobs.run(&job, false, &root, None).await;
+        let result = jobs.run(&job, None, &root, None, None).await;
         let text = |key: &str| {
             String::from_utf8(super::unhex(result[key].as_str().unwrap()).unwrap()).unwrap()
         };
@@ -380,7 +448,7 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
         "<?xml version=\"1.0\"?><plist><dict>",
     )
     .unwrap();
-    let args = jobs::read_only(&data, &home);
+    let args = jobs::read_only(&data, &home, &["helper.read-only", "helper.read-only.job"]);
     let params: Vec<(String, PathBuf)> = args
         .iter()
         .enumerate()
@@ -441,6 +509,10 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
     .collect();
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]));
     assert!(profile.ends_with(&format!(" {})", jobs::READ_ONLY_OLD_KEYS)));
+    // The marks that let the helper end everything the command starts (jobs::end).
+    assert!(profile.contains(
+        r#"(deny mach-lookup (global-name "helper.read-only") (global-name "helper.read-only.job"))"#
+    ));
     std::fs::remove_dir_all(home).unwrap();
 }
 
@@ -489,6 +561,170 @@ fn each_account_keeps_its_own_key_and_device() {
 }
 
 #[tokio::test]
+#[cfg(target_os = "macos")]
+async fn read_only_command_leaves_nothing_running() {
+    let _alone = FORKS.lock().await;
+    // Security fix: as client.py's test of the same name, with the real macOS sandbox. Nothing a read-only command starts
+    // outlives it, its stop, its sandbox's stream, or its helper, even after setsid and a double fork, or as a chain of
+    // processes that each fork and end at once. Full commands keep theirs (dev servers), and others run on.
+    use std::sync::Arc;
+    let (root, beats) = (folder("read-only-ends"), folder("read-only-beats"));
+    let jobs = Arc::new(jobs::Jobs::new(Arc::new(super::net::Shared::new(
+        root.clone(),
+    ))));
+    let core = ("http://core".to_owned(), "token".to_owned());
+    jobs.wanted.lock().unwrap().insert(core.clone());
+    // Each process rewrites its own file every 0.1 s: one in the command's process group, and one that left it with
+    // setsid after a fork, then forked again. The chain writes every 50th process and stops by itself after 30 s.
+    let each = r#"for ($n = 0;; $n++) { open(F, ">", $ARGV[0]); print F "$$ $n"; close F; select(undef, undef, undef, .1) }"#;
+    let chain = r#"for ($n = 0;; $n++) { exit if fork or time - $^T > 30; next if $n % 50; open(F, ">", $ARGV[0]); print F "0 $n"; close F }"#;
+    let b = beats.display().to_string();
+    let leaves = |name: &str, chained: bool| {
+        let mut files = vec![format!("{b}/{name}-group"), format!("{b}/{name}-left")];
+        let mut command = format!(
+            "perl -e '{each}' {} & perl -MPOSIX -e 'if (fork) {{ exit }} POSIX::setsid(); if (fork) {{ exit }} {each}' {}; ",
+            files[0], files[1]
+        );
+        if chained {
+            files.push(format!("{b}/{name}-chain"));
+            command += &format!("perl -e '{chain}' {} & ", files[2]);
+        }
+        let waits: Vec<String> = files
+            .iter()
+            .map(|file| format!("[ ! -s {file} ]"))
+            .collect();
+        command + &format!("while {}; do sleep .05; done", waits.join(" || "))
+    };
+    let running = async |names: &[&str]| {
+        let read = |name: &&str| std::fs::read_to_string(beats.join(name)).unwrap();
+        let before: Vec<String> = names.iter().map(read).collect();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        names
+            .iter()
+            .zip(before)
+            .map(|(name, text)| read(name) != text)
+            .collect::<Vec<_>>()
+    };
+    let run = async |command: String, sandbox: Option<&(String, String)>| {
+        jobs.run(
+            &json!({"id": "job", "command": command}),
+            sandbox,
+            &root,
+            None,
+            None,
+        )
+        .await["code"]
+            .clone()
+    };
+    // A read-only command that keeps running: its task, once it runs.
+    #[allow(clippy::async_yields_async)]
+    let start = async |name: &str| {
+        let (jobs, root, core) = (jobs.clone(), root.clone(), core.clone());
+        let (id, command) = (name.to_owned(), leaves(name, false) + "; sleep 30");
+        let task = tokio::spawn(async move {
+            jobs.run(
+                &json!({"id": id, "command": command}),
+                Some(&core),
+                &root,
+                None,
+                None,
+            )
+            .await["code"]
+                .clone()
+        });
+        for _ in 0..200 {
+            if beats.join(format!("{name}-left")).exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        task
+    };
+    // Others run on: what an earlier run of this helper left (until the first check), another helper's read-only command
+    // (a dev build), and another sandbox.
+    let mark = format!("{}.read-only", super::label(&root));
+    let marks = [
+        vec![mark.clone(), format!("{mark}.0"), format!("{mark}.0.job")],
+        vec!["other.read-only".into(), "other.read-only.job".into()],
+    ];
+    let mut others = Vec::new();
+    for (marks, name) in marks.iter().zip(["old", "other"]) {
+        let marks: Vec<&str> = marks.iter().map(String::as_str).collect();
+        let argv = jobs::read_only(&root, &super::home(), &marks);
+        let loop_ = format!("perl -e '{each}' {b}/{name}");
+        others.push(
+            std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .args(["sh", "-c", &loop_])
+                .spawn()
+                .unwrap(),
+        );
+    }
+    others.push(
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                "(version 1)(allow default)(deny mach-lookup)",
+                "sh",
+                "-c",
+            ])
+            .arg(format!("perl -e '{each}' {b}/denies-all"))
+            .spawn()
+            .unwrap(),
+    );
+    // Full keeps what it leaves running; read-only ends it all with the command.
+    assert_eq!(run(leaves("full", false), None).await, json!(0));
+    assert_eq!(running(&["full-group", "full-left"]).await, [true, true]);
+    assert_eq!(run(leaves("read", true), Some(&core)).await, json!(0));
+    assert_eq!(
+        running(&["read-group", "read-left", "read-chain"]).await,
+        [false; 3]
+    );
+    // A running read-only command survives another one's end and the check that ends what earlier runs left.
+    let first = start("first").await;
+    assert_eq!(run("true".into(), Some(&core)).await, json!(0));
+    jobs.end_unwanted().await;
+    assert_eq!(
+        running(&["first-group", "first-left", "old"]).await,
+        [true, true, false]
+    );
+    // The agent's stop, its sandbox's stream ending (Off here), and the helper's stop each end it all.
+    jobs.cancel("first");
+    assert_eq!(first.await.unwrap(), json!(-15));
+    let second = start("second").await;
+    jobs.wanted.lock().unwrap().clear();
+    jobs.end_unwanted().await;
+    assert_eq!(second.await.unwrap(), json!(-9));
+    jobs.wanted.lock().unwrap().insert(core.clone());
+    let third = start("third").await;
+    jobs.close().await;
+    assert_eq!(third.await.unwrap(), json!(-9));
+    let names =
+        ["first", "second", "third"].map(|name| [format!("{name}-group"), format!("{name}-left")]);
+    let names: Vec<&str> = names.iter().flatten().map(String::as_str).collect();
+    assert_eq!(running(&names).await, [false; 6]);
+    // After the stop nothing new starts, and the others still run.
+    assert_eq!(run("true".into(), None).await, json!(126));
+    assert_eq!(running(&["other", "denies-all"]).await, [true, true]);
+    for process in &mut others {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    for beat in std::fs::read_dir(&beats).unwrap().flatten() {
+        let text = std::fs::read_to_string(beat.path()).unwrap_or_default();
+        let pid = text.split(' ').next().unwrap_or_default();
+        if pid.parse::<i32>().is_ok_and(|pid| pid > 0) {
+            // Chains write 0 and stop by themselves.
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid])
+                .status();
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(beats).unwrap();
+}
+
+#[tokio::test]
 async fn background_process_outlives_its_result() {
     let _alone = FORKS.lock().await;
     // A process the command left running kept writing to its output after the result went back; with the pipe closed,
@@ -501,7 +737,13 @@ async fn background_process_outlives_its_result() {
         marker.display()
     );
     let result = jobs
-        .run(&json!({"id": "bg", "command": command}), false, &root, None)
+        .run(
+            &json!({"id": "bg", "command": command}),
+            None,
+            &root,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         (&result["code"], &result["stdout"]),
@@ -517,5 +759,167 @@ async fn background_process_outlives_its_result() {
         marker.exists(),
         "the background process died writing its output"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn nested_room_cli_reaches_the_app_that_owns_the_helper() {
+    let _alone = FORKS.lock().await;
+    // #1243, #1290: a stale ROOM_SERVER_URL from the helper's or the login shell's environment, or none, sent the
+    // Mac's room-cli to a dead port or another app. The app's own server comes last, after the login setup.
+    let root = folder("server");
+    let jobs = jobs::Jobs::new(std::sync::Arc::new(super::net::Shared::new(root.clone())));
+    let job = json!({"id": "url", "command": "printf %s \"$ROOM_SERVER_URL\""});
+    let result = jobs
+        .run(&job, None, &root, None, Some("http://127.0.0.1:41000"))
+        .await;
+    assert_eq!(
+        result["stdout"],
+        json!(super::hex(b"http://127.0.0.1:41000"))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn a_fake_core_gets_no_more_kept_than_core_sends() {
+    // Security fix: a sandbox's agent has root, so it can answer the helper in place of Core, with jobs and input of any
+    // size. The helper keeps no more than a real Core sends.
+    let root = folder("limits");
+    let config = root.join("config.json");
+    let access = |level: &str| {
+        std::fs::write(&config, json!({"macAccess": level}).to_string()).unwrap();
+        std::fs::set_permissions(&config, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
+    // The fake Core: one job stream, results it keeps, and a confirmation for the streamed job it never answers.
+    tokio::spawn({
+        let seen = seen.clone();
+        async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let (mut data, mut chunk) = (Vec::new(), [0u8; 65536]);
+                    let end = loop {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        data.extend_from_slice(&chunk[..read]);
+                        if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break end;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&data[..end]).to_lowercase();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .map_or(0, |value| value.trim().parse().unwrap());
+                    let mut body = data[end + 4..].to_vec();
+                    while body.len() < length {
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        body.extend_from_slice(&chunk[..read]);
+                    }
+                    let line = head.lines().next().unwrap_or_default().to_owned();
+                    let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                    seen.lock().unwrap().push((line.clone(), body));
+                    if line.starts_with("get /v1/mac/jobs?") {
+                        // The longest job a real Core sends (up to 0.1.75, with its input inside), then a line longer
+                        // than any job.
+                        let longest = json!({"id": "streamed", "command": "\u{1}".repeat(65536),
+                            "cwd": "\u{1}".repeat(4096), "stdin": "00".repeat(jobs::LIMIT)});
+                        let events = format!(
+                            "event: job\ndata: {longest}\n\ndata: {}\n",
+                            "x".repeat(jobs::LINE)
+                        );
+                        let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(head.as_bytes()).await;
+                        let _ = stream.write_all(events.as_bytes()).await;
+                    } else if line.starts_with("post /v1/mac/results/streamed") {
+                        std::future::pending::<()>().await;
+                    } else {
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+                            .await;
+                    }
+                });
+            }
+        }
+    });
+    let jobs = std::sync::Arc::new(jobs::Jobs::new(std::sync::Arc::new(
+        super::net::Shared::new(root.clone()),
+    )));
+    let core = super::net::Core {
+        url: url.clone(),
+        headers: Vec::new(),
+        sandbox: false,
+        thread: None,
+        key: (url.clone(), String::new()),
+        config: Value::Null,
+        connection: Value::Null,
+    };
+    // Input over Core's own 16 MiB, or a size no Core sends, is refused without a download. So is any input once Mac
+    // access is Off.
+    let unusable = "The Mac could not download this command's input from the cloud, so it did not run. Try again.";
+    let mut expected = Vec::new();
+    for (level, job, refused) in [
+        (
+            "off",
+            json!({"id": "off", "stdin_bytes": 5}),
+            "Mac access is off.",
+        ),
+        (
+            "full",
+            json!({"id": "big", "stdin_bytes": jobs::LIMIT + 1}),
+            unusable,
+        ),
+        (
+            "full",
+            json!({"id": "negative", "stdin_bytes": -2}),
+            unusable,
+        ),
+        (
+            "full",
+            json!({"id": "inline", "stdin": "00".repeat(jobs::LIMIT + 1)}),
+            unusable,
+        ),
+    ] {
+        access(level);
+        let mut job = job;
+        job["command"] = json!("true");
+        jobs.clone().execute(core.clone(), "mac".into(), job).await;
+        expected.push((json!(126), json!(super::hex(refused.as_bytes()))));
+    }
+    let done: Vec<(Value, Value)> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(_, body)| body["state"] == "done")
+        .map(|(_, body)| (body["code"].clone(), body["stderr"].clone()))
+        .collect();
+    assert_eq!(done, expected);
+    assert!(
+        !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(line, _)| line.contains("/stdin"))
+    );
+    // The longest real job is taken, and a line longer than any job ends the stream.
+    let ended = jobs.stream(&core, "mac", &mut false).await;
+    assert!(matches!(ended, Err(super::net::Error::Value(text)) if text == "Mac job is too large"));
+    let taken = || {
+        seen.lock().unwrap().iter().any(|(line, body)| {
+            line.starts_with("post /v1/mac/results/streamed") && body["state"] == "running"
+        })
+    };
+    for _ in 0..100 {
+        if taken() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(taken());
     std::fs::remove_dir_all(root).unwrap();
 }

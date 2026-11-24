@@ -5,14 +5,14 @@ import type {
   SdkResponseLike,
 } from "./response.js";
 
-export type BbSdkRuntime = "node" | "browser";
+export type RoomSdkRuntime = "node" | "browser";
 
-export interface BbSdkTransport {
+export interface RoomSdkTransport {
   api: ApiClient["api"];
   baseUrl: string;
   fetch: FetchImplementation;
   realtimeUrl?: string;
-  runtime: BbSdkRuntime;
+  runtime: RoomSdkRuntime;
   readJson<TResponse extends SdkResponseLike>(
     response: Promise<TResponse>,
   ): Promise<JsonBodyOf<TResponse>>;
@@ -22,31 +22,31 @@ export interface BbSdkTransport {
   resolve<TResponse extends SdkResponseLike>(
     response: Promise<TResponse>,
   ): Promise<TResponse>;
-  websocket?: BbRealtimeSocketFactory;
+  websocket?: RoomRealtimeSocketFactory;
 }
 
-export interface BbRealtimeSocketMessageEvent {
+export interface RoomRealtimeSocketMessageEvent {
   data: unknown;
 }
 
-export interface BbRealtimeSocket {
+export interface RoomRealtimeSocket {
   close(): void;
   onclose: (() => void) | null;
   onerror: (() => void) | null;
-  onmessage: ((event: BbRealtimeSocketMessageEvent) => void) | null;
+  onmessage: ((event: RoomRealtimeSocketMessageEvent) => void) | null;
   onopen: (() => void) | null;
   readyState: number;
   send(data: string): void;
 }
 
-export type BbRealtimeSocketFactory = (url: string) => BbRealtimeSocket;
+export type RoomRealtimeSocketFactory = (url: string) => RoomRealtimeSocket;
 
-export interface BbSdkContext {}
+export interface RoomSdkContext {}
 
 export interface CreateHttpTransportArgs {
   baseUrl?: string;
   fetch?: FetchImplementation;
   realtimeUrl?: string;
-  runtime: BbSdkRuntime;
-  websocket?: BbRealtimeSocketFactory;
+  runtime: RoomSdkRuntime;
+  websocket?: RoomRealtimeSocketFactory;
 }

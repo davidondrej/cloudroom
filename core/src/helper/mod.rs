@@ -2,7 +2,7 @@
 //! (ADR 0113, 0186). A Rust port of `src/preview/client.py` for macOS. While both ship, they read and write the
 //! same files under the same LaunchAgent label, so the app can switch between them, and they must behave the same.
 
-mod jobs;
+pub(crate) mod jobs;
 mod net;
 #[cfg(test)]
 mod tests;
@@ -493,6 +493,10 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
         .ok()
         .filter(|path| !path.is_empty())
         .or_else(|| text(&old, "shellPath").map(str::to_owned));
+    // The app's own loopback server, so a nested room-cli in a Mac job reaches this app (#1243, #1290).
+    let server_url = std::env::var("CLOUDROOM_SERVER_URL")
+        .ok()
+        .filter(|url| !url.is_empty());
     let program_text = program.to_string_lossy().into_owned();
     let unchanged = old["binding"] == binding
         && text(&old, "connectionFile") == connection_file.to_str()
@@ -503,6 +507,7 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
         && old["ownThreads"].as_bool().unwrap_or(false) == setup.own
         && old["website"].as_str() == website.as_deref()
         && old["shellPath"].as_str() == shell_path.as_deref()
+        && old["serverUrl"].as_str() == server_url.as_deref()
         && old["program"].as_str() == Some(program_text.as_str());
     if setup.activate
         && !setup.restart
@@ -544,6 +549,9 @@ fn configure(folder: &Path, connection_file: &Path, setup: Setup) -> Result<()> 
     if let Some(website) = website {
         config.insert("website".into(), json!(website));
     }
+    if let Some(url) = server_url {
+        config.insert("serverUrl".into(), json!(url));
+    }
     save(&folder.join("config.json"), &Value::Object(config))?;
     net::identity(folder)?;
     if setup.activate {
@@ -571,14 +579,24 @@ async fn stop(folder: &Path, pause: bool) -> Result<()> {
     }
     let mut config = private_json(&folder.join("config.json"))?;
     if !config["revoked"].as_bool().unwrap_or(false) {
-        // Best effort: a sleeping sandbox or an archived VM must never block sign-out.
-        let shared = Shared::new(folder.to_owned());
-        let device = text(&config, "device").unwrap_or_default().to_owned();
-        for core in net::cores(&shared, &config).await.unwrap_or_default() {
-            let _ = core
-                .request(&shared, &format!("/device/{device}"), None, Some("DELETE"))
-                .await;
-        }
+        // Best effort: a sleeping sandbox or an archived VM must never block sign-out. Ask 32 cores at a time, so
+        // open files stay far below macOS's 256, and stop waiting after 12 s, inside the app's 20 s (#1691).
+        let shared = Arc::new(Shared::new(folder.to_owned()));
+        let path = format!("/device/{}", text(&config, "device").unwrap_or_default());
+        let revoke = async {
+            let mut asks = tokio::task::JoinSet::new();
+            for mut core in net::cores(&shared, &config).await.unwrap_or_default() {
+                if asks.len() >= 32 {
+                    asks.join_next().await;
+                }
+                // Closed after its answer, as client.py's are: reqwest would keep one open file per core.
+                core.headers.push(("Connection".into(), "close".into()));
+                let (shared, path) = (shared.clone(), path.clone());
+                asks.spawn(async move { core.request(&shared, &path, None, Some("DELETE")).await });
+            }
+            asks.join_all().await
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(12), revoke).await;
         config["revoked"] = json!(true);
         save(&folder.join("config.json"), &config)?;
     }
@@ -629,7 +647,6 @@ async fn run(folder: PathBuf) -> Result<()> {
     let lock = lock_file(&folder, "lock")?;
     claim(&lock, Duration::from_secs(5)).await?; // Before Mac jobs, so a second helper never takes any.
     let shared = Arc::new(Shared::new(folder.clone()));
-    tokio::spawn(jobs::serve(shared.clone()));
     let ports_file = folder.join("ports.json");
     let ports = if ports_file.exists() {
         private_json(&ports_file)?
@@ -658,11 +675,15 @@ async fn run(folder: PathBuf) -> Result<()> {
         previews.troubled = Instant::now().checked_sub(PROBLEM);
     }
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // After every step that can fail, so the helper never leaves without closing Mac jobs.
+    let jobs = Arc::new(jobs::Jobs::new(previews.shared.clone()));
+    tokio::spawn(jobs::serve(jobs.clone()));
     tokio::select! {
         _ = async { loop { let wait = previews.pass().await; rest(&folder, wait).await; } } => {}
         _ = terminate.recv() => {}
         _ = tokio::signal::ctrl_c() => {}
     }
+    jobs.close().await;
     for tunnel in previews.tunnels.values_mut() {
         tunnel.close().await;
     }
@@ -893,6 +914,8 @@ impl Previews {
                 let error = match () {
                     _ if ready => None,
                     _ if !alive => Some(if info.relay { "Tunnel unavailable" } else { "SSH connection unavailable" }),
+                    // Nothing came back through the tunnel, so this says nothing about the app (#1798, #2016).
+                    _ if info.refused() => Some("Tunnel unavailable"),
                     _ if info.reachable() => Some("Cloud HTTP server unavailable"),
                     _ => None,
                 };

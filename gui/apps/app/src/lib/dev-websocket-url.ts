@@ -52,8 +52,13 @@ export function buildDevWebSocketUrl(
 }
 
 export function buildBrowserWebSocketUrl(path: string): string {
-  return (
-    buildDevWebSocketUrl({ path }) ??
-    `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${path}`
-  );
+  const devUrl = buildDevWebSocketUrl({ path });
+  if (devUrl !== undefined) {
+    return devUrl;
+  }
+
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = new URL(`${protocol}//${window.location.host}`);
+  url.pathname = path;
+  return url.toString();
 }

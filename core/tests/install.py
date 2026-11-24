@@ -285,6 +285,53 @@ class UpgradePreviewTests(unittest.TestCase):
             self.assertEqual(command('account-id', None), (state,))
             self.assertEqual(command('account-id', {'tunnel': True}), (state,))
 
+    def test_verify_waits_while_the_core_loads_history(self):
+        spec = importlib.util.spec_from_file_location('updater', Path(__file__).resolve().parents[1] / 'install/update.py')
+        update = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(update)
+        def verify(ready_at, ticks, status=200, restarts=0):
+            """Whether verify passed, and after how many seconds. Before `ready_at` the core accepts TCP but never replies."""
+            clock = [0.0]
+            def urlopen(request, timeout):
+                if clock[0] + timeout < ready_at:
+                    clock[0] += timeout
+                    raise update.urllib.error.URLError(TimeoutError())
+                clock[0] = max(clock[0], ready_at)  # The reply arrives while the probe waits.
+                if status != 200:
+                    raise update.urllib.error.HTTPError(request.full_url, status, 'no', {}, None)
+                return SimpleNamespace(close=lambda: None)
+            def sessions(*_):
+                if clock[0] < ready_at or status != 200:
+                    raise update.urllib.error.URLError('timed out')
+                return {'runtime': {'ready': True}}, {}
+            sleep = lambda s: clock.__setitem__(0, clock[0] + s)
+            with patch.object(update.urllib.request, 'urlopen', urlopen), patch.object(update, 'sessions', sessions), \
+                    patch.object(update, 'restarts', lambda: restarts), patch.object(update, 'api', lambda *_: {}), \
+                    patch.object(update, 'run', lambda *_: '1'), patch.object(update, 'sha', lambda _: 'new'), \
+                    patch.object(update, 'cpu_time', lambda: ('1', ticks(clock[0]))), \
+                    patch.object(update.time, 'monotonic', lambda: clock[0]), patch.object(update.time, 'sleep', sleep):
+                try:
+                    update.verify({'CLOUDROOM_TOKEN': 'fake'}, {}, 'new', [], 0)
+                except (OSError, RuntimeError):
+                    return False, clock[0]
+            return True, clock[0]
+        busy, flat = int, lambda _: 5
+        def within(result, passed, low, high):
+            self.assertEqual(result[0], passed)
+            self.assertTrue(low <= result[1] <= high, result)
+        within(verify(0, flat), True, 0, 0)  # A quick core passes as before.
+        within(verify(26 * 60, busy), True, 26 * 60, 27 * 60)  # A slow core that keeps working passes.
+        within(verify(26 * 60, flat), False, 290, 300)  # A stalled core still fails at 300 s.
+        within(verify(10 * 3600, busy), False, 7200, 7200)  # Busy forever stops at the limit.
+        within(verify(0, busy, status=404), False, 300, 303)  # Any HTTP reply ends the extra time: main's 300 s.
+        within(verify(99, busy, status=404), False, 300, 303)  # Also after the core worked first.
+        within(verify(299.5, flat), True, 299.5, 299.5)  # A reply up to the deadline counts, as on main.
+        within(verify(300.5, flat), False, 300, 300)
+        within(verify(10 ** 6, lambda now: int(now * 100)), False, 7200, 7200)  # Sampling never passes the limit.
+        within(verify(0, flat, restarts=1), False, 0, 0)  # A crash and automatic restart never pass.
+        count = {'n': 1}  # A manual start resets the count from an earlier crash.
+        with patch.object(update, 'run', lambda *a, **_: count.update(n=0) if 'start' in a else str(count['n'])):
+            self.assertEqual(update.start(), 0)
 
 if __name__ == '__main__':
     unittest.main()

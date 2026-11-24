@@ -166,9 +166,9 @@ async function main() {
   );
   const manager = createDesktopBrowserViewManager({
     partition: `smoke-${randomBytes(12).toString("hex")}`,
-    dispatchAppCommand: () => {},
+    dispatchAppShortcut: () => {},
+    findShortcutCandidates: () => null,
     focusHostWebContents: () => {},
-    resolveAppCommand: () => null,
   });
   const scopeA = {
     hostWebContentsId: window.webContents.id,

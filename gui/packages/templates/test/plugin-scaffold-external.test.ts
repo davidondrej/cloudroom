@@ -32,7 +32,6 @@ const dependencyRequire = createRequire(join(pluginSdkRoot, "package.json"));
 
 const EXTERNAL_DEPENDENCIES = [
   "@hugeicons/core-free-icons",
-  "@hugeicons/react",
   "@radix-ui/react-dialog",
   "@radix-ui/react-slot",
   "@testing-library/react",
@@ -476,10 +475,10 @@ describe("external plugin scaffold types", () => {
         join(installedSdk, entry.types.replace(/^\.\//u, "")),
         "utf8",
       );
-      const bbImports = [
+      const roomImports = [
         ...declarations.matchAll(/from ['"](@(?:get-)?bb\/[^'"]+)['"]/gu),
       ].map((match) => match[1]);
-      expect(new Set(bbImports)).toEqual(new Set(["@get-bb/plugin-sdk"]));
+      expect(new Set(roomImports)).toEqual(new Set(["@get-bb/plugin-sdk"]));
       expect(declarations).not.toContain("@cloudroom/sdk");
       expect(declarations).not.toContain("@cloudroom/server-contract");
     }

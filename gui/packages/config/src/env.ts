@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { resolveRuntimeMode, type BbRuntimeMode } from "./runtime.js";
+import { resolveRuntimeMode, type RoomRuntimeMode } from "./runtime.js";
 
 interface EnvReaderContext {
   homeDir: string;
@@ -20,13 +20,13 @@ export interface EnvVarDefinition<TValue> {
 export interface EnvLoaderArgs {
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
-  mode?: BbRuntimeMode;
+  mode?: RoomRuntimeMode;
 }
 
 interface ResolvedEnvLoader {
   context: EnvReaderContext;
   env: NodeJS.ProcessEnv;
-  mode: BbRuntimeMode;
+  mode: RoomRuntimeMode;
 }
 
 interface ReadEnvVarArgs<TValue> {

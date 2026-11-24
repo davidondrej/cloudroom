@@ -1,6 +1,7 @@
 import type { ThreadListEntry } from "@cloudroom/domain";
 import { useAtom, useAtomValue } from "jotai";
 import { useCallback, useMemo } from "react";
+import { reuseSameMembers, useStableValue } from "@/hooks/useStableValue";
 import {
   collapseChildThreadsAtom,
   collapsedThreadIdsAtom,
@@ -35,15 +36,19 @@ export function useThreadCollapse(threads: readonly ParentLink[]) {
   const collapseChildThreads = useAtomValue(collapseChildThreadsAtom);
   const [collapsedIds, setCollapsedIds] = useAtom(collapsedThreadIdsAtom);
   const [expandedIds, setExpandedIds] = useAtom(expandedThreadIdsAtom);
-  const collapsedThreadIds = useMemo(
-    () =>
-      getCollapsedThreadIds({
-        collapseChildThreads,
-        collapsedIds,
-        expandedIds,
-        threads,
-      }),
-    [collapseChildThreads, collapsedIds, expandedIds, threads],
+  // `threads` changes on every agent event; keep the Set identity until its contents change.
+  const collapsedThreadIds = useStableValue(
+    useMemo(
+      () =>
+        getCollapsedThreadIds({
+          collapseChildThreads,
+          collapsedIds,
+          expandedIds,
+          threads,
+        }),
+      [collapseChildThreads, collapsedIds, expandedIds, threads],
+    ),
+    reuseSameMembers,
   );
   const toggleThreadCollapsed = useCallback(
     (threadId: string) => {

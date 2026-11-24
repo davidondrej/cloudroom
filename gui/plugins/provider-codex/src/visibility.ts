@@ -20,6 +20,7 @@ interface CodexNotificationRawEvent {
 
 interface CodexMcpStartupStatusRawEvent {
   kind: "mcp-startup-status";
+  status: string | undefined;
 }
 
 interface CodexRemoteControlStatusRawEvent {
@@ -28,6 +29,11 @@ interface CodexRemoteControlStatusRawEvent {
 
 interface CodexThreadSettingsUpdatedRawEvent {
   kind: "thread-settings-updated";
+}
+
+// Codex 0.167+ marks local threads read or unread; Cloudroom ignores it.
+interface CodexThreadReadStateChangedRawEvent {
+  kind: "thread-read-state-changed";
 }
 
 interface CodexUnknownRawEvent {
@@ -40,6 +46,7 @@ type CodexRawEvent =
   | CodexMcpStartupStatusRawEvent
   | CodexRemoteControlStatusRawEvent
   | CodexThreadSettingsUpdatedRawEvent
+  | CodexThreadReadStateChangedRawEvent
   | CodexUnknownRawEvent;
 
 const CODEX_SERVER_NOTIFICATION_METHODS = {
@@ -150,7 +157,7 @@ const CODEX_NOTIFICATION_COVERAGE = {
   "item/fileChange/outputDelta": "normalized",
   "item/mcpToolCall/progress": "normalized",
   "item/plan/delta": "normalized",
-  "item/reasoning/summaryPartAdded": "unknown",
+  "item/reasoning/summaryPartAdded": "noise",
   "item/reasoning/summaryTextDelta": "normalized",
   "item/reasoning/textDelta": "normalized",
   "item/started": "normalized",
@@ -216,6 +223,9 @@ function parseCodexRawEvent(event: JsonRpcMessage): CodexRawEvent {
   if (event.method === "mcpServer/startupStatus/updated") {
     return {
       kind: "mcp-startup-status",
+      status: isRecord(event.params)
+        ? getStringProperty(event.params, "status")
+        : undefined,
     };
   }
 
@@ -229,6 +239,10 @@ function parseCodexRawEvent(event: JsonRpcMessage): CodexRawEvent {
     return {
       kind: "thread-settings-updated",
     };
+  }
+
+  if (event.method === "thread/readState/changed") {
+    return { kind: "thread-read-state-changed" };
   }
 
   if (isCodexServerNotificationMethod(event.method)) {
@@ -250,13 +264,19 @@ function describeParsedCodexRawEvent(
 ): ProviderRawEventDescription {
   switch (event.kind) {
     case "mcp-startup-status":
-      return { kind: "mcpServer/startupStatus/updated", coverage: "noise" };
+      return {
+        kind: "mcpServer/startupStatus/updated",
+        coverage: event.status === "failed" ? "normalized" : "noise",
+      };
 
     case "remote-control-status":
       return { kind: "remoteControl/status/changed", coverage: "noise" };
 
     case "thread-settings-updated":
       return { kind: "thread/settings/updated", coverage: "noise" };
+
+    case "thread-read-state-changed":
+      return { kind: "thread/readState/changed", coverage: "noise" };
 
     case "notification":
       if (

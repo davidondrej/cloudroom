@@ -50,6 +50,11 @@ import {
 } from "./markdown-katex-loader.js";
 import { CopyButton } from "./copy-button.js";
 import { useClipboardCopy } from "@/lib/clipboard";
+import {
+  DraftEditor,
+  useDraftMessage,
+} from "@/components/thread/timeline/DraftEditor";
+import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { usePortalScopeProps } from "@cloudroom/shared-ui/lib/portal-scope";
 import { usePersistentOverlayFocus } from "@cloudroom/shared-ui/responsive-overlay";
@@ -280,6 +285,7 @@ type MarkdownImageRenderAttributes = Omit<
   "alt" | "children" | "className" | "node" | "src"
 >;
 type MarkdownListItemProps = ComponentPropsWithoutRef<"li"> & ExtraProps;
+type MarkdownInputProps = ComponentPropsWithoutRef<"input"> & ExtraProps;
 type MarkdownOrderedListProps = ComponentPropsWithoutRef<"ol"> & ExtraProps;
 type MarkdownParagraphProps = ComponentPropsWithoutRef<"p"> & ExtraProps;
 type MarkdownPreProps = ComponentPropsWithoutRef<"pre"> & ExtraProps;
@@ -755,17 +761,28 @@ function MarkdownCode({
   const codeText = String(children ?? "").replace(/\n$/, "");
   const language = getMarkdownCodeLanguage({ className: codeClassName });
   const isBlock = isMarkdownCodeBlock({ codeText, language });
+  const draftMessage = useDraftMessage();
+  const isDraft = isBlock && language === "draft" && draftMessage !== null;
   const highlightedHtml = useMemo(
     () =>
-      isBlock && language !== "mermaid"
+      isBlock && !isDraft && language !== "mermaid"
         ? highlightMarkdownCode({ code: codeText, language })
         : null,
-    [isBlock, language, codeText],
+    [isBlock, isDraft, language, codeText],
   );
   const highlightedMarkup = useMemo(
     () => (highlightedHtml === null ? null : { __html: highlightedHtml }),
     [highlightedHtml],
   );
+  if (isDraft) {
+    return (
+      <DraftEditor
+        block={String(_node?.position?.start.offset ?? 0)}
+        code={codeText}
+        message={draftMessage}
+      />
+    );
+  }
   if (isBlock) {
     if (language === "mermaid" && imagePolicy === "render") {
       return (
@@ -848,9 +865,7 @@ function MarkdownCodeCopyButton({ codeText }: { codeText: string }) {
           <button
             type="button"
             aria-label="Copy code"
-            onClick={() => {
-              void copy();
-            }}
+            onClick={copy}
             className="absolute right-2 top-0 inline-flex size-5.5 cursor-pointer items-center justify-center rounded-md border border-transparent bg-surface-recessed-solid text-subtle-foreground transition-[width,height,color,background-color,border-color,box-shadow] duration-200 ease-out group-hover/codeblock:size-7 group-hover/codeblock:border-border group-hover/codeblock:text-muted-foreground group-hover/codeblock:shadow-sm hover:bg-muted hover:text-foreground pointer-coarse:size-7 pointer-coarse:border-border pointer-coarse:shadow-sm"
           >
             <Icon
@@ -888,7 +903,7 @@ function MarkdownInlineCode({
         ) {
           return;
         }
-        void copy();
+        void copy(event);
       }}
     >
       {children}
@@ -975,6 +990,17 @@ function MarkdownParagraph({
   );
 }
 
+// GFM task lists ("- [ ] item"): a checkbox replaces the bullet.
+function isTaskListItem(node: MarkdownHastNode | undefined): boolean {
+  const first = node?.children?.find((child) => child.type === "element");
+  if (first?.tagName === "input") return true;
+  return (
+    first?.tagName === "p" &&
+    first.children?.find((child) => child.type === "element")?.tagName ===
+      "input"
+  );
+}
+
 function MarkdownUnorderedList({ children }: MarkdownUnorderedListProps) {
   return <ul className="mb-2 list-disc pl-5 text-foreground">{children}</ul>;
 }
@@ -1005,8 +1031,31 @@ function MarkdownOrderedList({
   );
 }
 
-function MarkdownListItem({ children }: MarkdownListItemProps) {
-  return <li className="mb-1 text-foreground">{children}</li>;
+function MarkdownListItem({ children, node }: MarkdownListItemProps) {
+  return (
+    <li
+      className={cn(
+        "mb-1 text-foreground",
+        // Only a checkbox item drops its bullet; the box sits in the
+        // bullet's column and wrapped lines hang under the text.
+        isTaskListItem(node) && "-ml-5 list-none pl-6 -indent-6",
+      )}
+    >
+      {children}
+    </li>
+  );
+}
+
+function MarkdownInput({ node: _node, ...inputProps }: MarkdownInputProps) {
+  if (inputProps.type !== "checkbox") return <input {...inputProps} />;
+  return (
+    <Checkbox
+      checked={Boolean(inputProps.checked)}
+      disabled
+      aria-label={inputProps.checked ? "Done" : "Not done"}
+      className="mr-2 inline-flex align-[-3px] indent-0 disabled:cursor-default disabled:opacity-100"
+    />
+  );
 }
 
 function MarkdownBlockquote({ children }: MarkdownBlockquoteProps) {
@@ -1636,6 +1685,7 @@ function buildMarkdownComponents({
     h6: MarkdownH6,
     hr: MarkdownHr,
     img: MarkdownImage,
+    input: MarkdownInput,
     li: MarkdownListItem,
     ol: MarkdownOrderedList,
     p: MarkdownParagraph,

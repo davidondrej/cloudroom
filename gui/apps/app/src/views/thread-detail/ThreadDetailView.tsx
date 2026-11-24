@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
   type ReactNode,
@@ -16,7 +15,7 @@ import { moveThreadDetailBootstrap } from "@/hooks/cache-owners/thread-detail-ca
 import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
 import { useSystemProviderInfo } from "@/hooks/queries/system-queries";
 import { useCloudroomConnection, cloudFeatureSupported, useOpenCloudFile, useCloudroomThread, useCloudroomThreadWorkspace } from "@/hooks/queries/cloudroom-queries";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAtom, useSetAtom } from "jotai";
 import { findPane, replacePaneContent } from "@/lib/split-layout";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
@@ -41,8 +40,10 @@ import { ThreadProviderContext } from "@/components/thread/thread-provider-conte
 import {
   cloudGitEnvironmentId,
   defaultAppSettings,
+  isBackgroundCommandTaskType,
   isStopHeldReport,
   resolveEnvironmentMergeBaseBranch,
+  type PromptInput,
   type ThreadListEntry,
   type ThreadWithRuntime,
 } from "@cloudroom/domain";
@@ -50,12 +51,15 @@ import type {
   PullRequestMergeMethod,
   TerminalSession,
   TimelineRow,
+  TimelineUserConversationRow,
 } from "@cloudroom/server-contract";
 import type { WorkspaceOpenTarget } from "@cloudroom/host-daemon-contract";
 import { appToast } from "@/components/ui/app-toast";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import { useThreadOpenTiming, watchPanelOpen } from "@/lib/perf";
-import type { ThreadSecondaryPanel as ThreadSecondaryPanelTab } from "@/lib/thread-secondary-panel";
+import type {
+  ThreadSecondaryPanel as ThreadSecondaryPanelTab,
+} from "@/components/right-panel/store/tab-model";
 import {
   PluginDetailPanelContext,
   usePluginDetailPanelState,
@@ -124,7 +128,6 @@ import {
   useCreateThreadTerminal,
   useThreadTerminals,
 } from "@/hooks/queries/thread-terminal-queries";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 import {
   findEnvironmentDisplayProvider,
   getEnvironmentSummaryChrome,
@@ -155,10 +158,7 @@ import {
   promptInputToDraft,
   type PromptDraftState,
 } from "@cloudroom/client-core";
-import {
-  createLocalStorageEnumStorage,
-  withLocalStorage,
-} from "@/lib/browser-storage";
+import { createLocalStorageEnumStorage } from "@/lib/browser-storage";
 import {
   getProjectComposeRoutePath,
   getRootComposeRoutePath,
@@ -166,24 +166,30 @@ import {
   isRoutePath,
   type ThreadRoutePathArgs,
 } from "@/lib/route-paths";
-import { useGitDiffPanel } from "@/components/secondary-panel/git-diff/useGitDiffPanel";
+import {
+  useEnvironmentMergeBase,
+  useGitDiffPanel,
+} from "@/components/diff/diff-panel-hooks";
 import {
   createGitDiffFixedTabDestination,
   GIT_DIFF_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/git-diff/git-diff-fixed-tab-navigation";
+  resolveGitDiffTabStatus,
+} from "@/components/diff/diff-store";
 import {
   createThreadInfoFixedTabDestination,
   THREAD_INFO_FIXED_TAB_REFERENCE,
-} from "@/components/secondary-panel/thread-info-fixed-tab-navigation";
+} from "@/components/right-panel/tabs/thread-info";
 import { ThreadDetailHeader } from "./ThreadDetailHeader";
+import { SubagentBar } from "./SubagentBar";
 import {
   ThreadDetailPromptArea,
   type ThreadDetailSentMessageEdit,
 } from "./ThreadDetailPromptArea";
+import { type ContextBannerMergeBaseConfig } from "@/components/promptbox/banner/ThreadPromptContextBanner";
 import {
-  type ContextBannerMergeBaseConfig,
-  type ThreadPromptParentThreadSection,
-} from "@/components/promptbox/banner/ThreadPromptContextBanner";
+  ThreadOriginMarker,
+  type ThreadOrigin,
+} from "@/components/thread/timeline/ThreadOriginMarker";
 import { ThreadDetailSecondaryContent } from "./ThreadDetailSecondaryContent";
 import {
   useThreadSecondaryPanelDrawerVisibility,
@@ -197,9 +203,9 @@ import type { HostConnectionNotice } from "@/components/thread/timeline/ThreadTi
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
-} from "@/components/secondary-panel/useThreadStorageViewer";
-import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
-import { BrowserTabLifecycleObserver } from "@/components/secondary-panel/BrowserTabDeck";
+} from "@/components/right-panel/tabs/thread-storage";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
+import { BrowserTabLifecycleObserver } from "@/components/right-panel/tabs/browser-visibility";
 import {
   LazyBrowserTabDeck,
   LazyHostFilePreviewTabContent,
@@ -207,15 +213,14 @@ import {
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
   LazyWorkspaceFilePreviewTabContent,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { BrowserAddressFocusRequest } from "@/components/right-panel/tabs/browser-tab";
 import {
   SIDE_CHAT_PLUGIN_ID,
   SIDE_CHAT_PLUGIN_PANEL_ACTION_ID,
 } from "@/lib/side-chat-plugin";
-import { RightPanelFileTabIcon } from "@/components/secondary-panel/RightPanelFileTabIcon";
-import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
-import { PluginIcon } from "@/components/plugin/PluginIcon";
+import { buildSecondaryPanelTabs } from "@/components/right-panel/shell/buildSecondaryPanelTabs";
+import { WorkspaceFileTabIcon } from "@/components/right-panel/tabs/agent-file-edit";
 import {
   PluginPanelTabContent,
   usePluginPanelActions,
@@ -227,14 +232,19 @@ import {
 } from "@/components/plugin/plugin-thread-panel-navigation";
 import { ThreadTimelineNavigationProvider } from "@/components/thread/timeline/ThreadTimelineNavigationContext";
 import { usePluginSlots } from "@/lib/plugin-slots";
-import { getFileExtension } from "@/lib/plugin-slot-resolvers";
+import { getFileExtension, isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
+import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
+import { PendingClaudeSignInRow } from "@/components/thread/timeline/AuthFailureRow";
+import { BackgroundCommandBubbles } from "@/components/thread/timeline/BackgroundCommandBubble";
+import { findLatestCloudLoginRowId } from "@/components/thread/timeline/CloudLoginRow";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import {
   openUrlByPreference,
   useOpenLinksInAppBrowserPreference,
@@ -255,23 +265,18 @@ import {
   toFilePreviewLineRange,
 } from "@/lib/live-file-navigation";
 import { getFilePreviewLineRangeStart } from "@cloudroom/client-core";
-import { getBrowserUrlHost } from "@/lib/browser-url";
 import {
   useThreadStorageBrowser,
   type ThreadStoragePathSelectHandler,
-} from "@/components/secondary-panel/useThreadStorageBrowser";
+} from "@/components/right-panel/tabs/thread-storage";
 import {
   useThreadFileTabs,
   type FileSearchSelection,
-} from "@/components/secondary-panel/useThreadFileTabs";
-import { isSecondaryFileTab } from "@cloudroom/client-core";
-import { useThreadOpenFileSignal } from "@/components/secondary-panel/useThreadOpenFileSignal";
+} from "@/components/right-panel/store/use-panel-tabs";
+import { isSecondaryFileTab } from "@/components/right-panel/store/tab-ops";
+import { useThreadOpenFileSignal } from "@/components/right-panel/tabs/thread-storage";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
-import type {
-  SecondaryPanelFixedTab,
-  SecondaryPanelRenderableTab,
-} from "@/components/secondary-panel/ThreadSecondaryPanel";
-import { useEnvironmentMergeBase } from "@/components/secondary-panel/git-diff/useEnvironmentMergeBase";
+import type { SecondaryPanelFixedTab } from "@/components/right-panel/shell/panel-shell";
 import { useThreadGitActions } from "./useThreadGitActions";
 import { useSendSideChatMessageToMain } from "./useSendSideChatMessageToMain";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
@@ -281,7 +286,7 @@ import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
-} from "@/components/secondary-panel/terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import {
   buildOpenInEditorHandler,
   resolveEnvironmentOpenContext,
@@ -305,14 +310,13 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   createGitDiffFixedPanelTab,
   createNewTabFixedPanelTab,
   createThreadInfoFixedPanelTab,
   type SecondaryFileFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
-import { resolveGitDiffTabStatus } from "@/components/secondary-panel/gitDiffTabEligibility";
+} from "@/components/right-panel/store/tab-model";
 import { isRootThread } from "./threadParentSelectorOptions";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
@@ -372,6 +376,14 @@ interface SentMessageEditSession {
   threadId: string;
 }
 
+interface PendingSentMessageEdit {
+  input: PromptInput[];
+  operationId: string;
+  row: TimelineUserConversationRow;
+  settled: boolean;
+  threadId: string;
+}
+
 function hasTimelineRowId(
   rows: readonly TimelineRow[],
   rowId: string,
@@ -383,6 +395,54 @@ function hasTimelineRowId(
         row.children !== null &&
         hasTimelineRowId(row.children, rowId)),
   );
+}
+
+function findFirstUserRow(
+  rows: readonly TimelineRow[],
+): TimelineUserConversationRow | null {
+  for (const row of rows) {
+    if (row.kind === "conversation" && row.role === "user") return row;
+    if (row.kind === "turn" && row.children !== null) {
+      const userRow = findFirstUserRow(row.children);
+      if (userRow !== null) return userRow;
+    }
+  }
+  return null;
+}
+
+function hasLandedSentMessageEdit(
+  rows: readonly TimelineRow[],
+  edit: PendingSentMessageEdit,
+): boolean {
+  return (
+    !hasTimelineRowId(rows, edit.row.id) &&
+    rows.some(
+      (row) =>
+        row.kind === "conversation" &&
+        row.role === "user" &&
+        row.sourceSeqStart >= edit.row.sourceSeqStart,
+    )
+  );
+}
+
+function showPendingSentMessageEdit(
+  rows: TimelineRow[],
+  edit: PendingSentMessageEdit,
+): TimelineRow[] {
+  if (hasLandedSentMessageEdit(rows, edit)) {
+    return rows;
+  }
+  const text = edit.input.flatMap((item) =>
+    item.type === "text" && item.visibility !== "agent-only" ? [item] : [],
+  );
+  return [
+    ...rows.filter((row) => row.sourceSeqStart < edit.row.sourceSeqStart),
+    {
+      ...edit.row,
+      text: text.map((item) => item.text).join("\n\n"),
+      mentions: text.length === 1 ? text[0]!.mentions : [],
+    },
+  ];
 }
 
 function getPullRequestMergeLoadingTitle(
@@ -678,8 +738,14 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     pendingInteractionsQuery.data,
     pendingInteractionsQuery.isFetching,
   );
-  const hasPendingInteraction =
-    getLatestPendingInteraction(pendingInteractions) !== null;
+  const latestPendingInteraction = getLatestPendingInteraction(pendingInteractions);
+  const hasPendingInteraction = latestPendingInteraction !== null;
+  // A GPU request is a card at the end of the chat, not a form in place of the composer.
+  const chatCardInteraction =
+    latestPendingInteraction?.origin?.kind === "plugin" &&
+    isChatCardPluginInteraction(latestPendingInteraction.origin.pluginId)
+      ? latestPendingInteraction
+      : null;
   const { data: queuedMessagesForEditEligibility = [] } =
     useThreadQueuedMessages(thread?.id ?? "", {
       enabled: threadQueryState.status === "ready" && Boolean(thread?.id),
@@ -1015,10 +1081,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     }),
     [thread?.providerId, threadProviderPluginId],
   );
-  const isForkAvailable = isThreadForkable(
-    thread ?? null,
-    threadProviderInfo?.capabilities.supportsFork ?? false,
-  );
+  const isForkAvailable = isThreadForkable(thread ?? null);
   const pluginPanelActions = usePluginPanelActions({
     forkAvailable: isForkAvailable,
     openPluginPanel,
@@ -1074,7 +1137,44 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     sentMessageEditSession?.threadId === thread?.id
       ? sentMessageEditSession
       : null;
-  const canEditSentMessages =
+  const [pendingSentMessageEdit, setPendingSentMessageEdit] =
+    useState<PendingSentMessageEdit | null>(null);
+  const activePendingSentMessageEdit =
+    pendingSentMessageEdit?.threadId === thread?.id
+      ? pendingSentMessageEdit
+      : null;
+  const displayedTimelineRows = useMemo(
+    () =>
+      activePendingSentMessageEdit
+        ? showPendingSentMessageEdit(timelineRows, activePendingSentMessageEdit)
+        : timelineRows,
+    [activePendingSentMessageEdit, timelineRows],
+  );
+  const pendingSentMessageEditLanded =
+    activePendingSentMessageEdit?.settled === true &&
+    hasLandedSentMessageEdit(timelineRows, activePendingSentMessageEdit);
+  useEffect(() => {
+    if (pendingSentMessageEditLanded) {
+      setPendingSentMessageEdit(null);
+    }
+  }, [pendingSentMessageEditLanded]);
+  const settledPendingSentMessageEditId = pendingSentMessageEdit?.settled
+    ? pendingSentMessageEdit.operationId
+    : null;
+  useEffect(() => {
+    if (settledPendingSentMessageEditId === null) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      setPendingSentMessageEdit((current) =>
+        current?.operationId === settledPendingSentMessageEditId
+          ? null
+          : current,
+      );
+    }, 15_000);
+    return () => clearTimeout(timer);
+  }, [settledPendingSentMessageEditId]);
+  const canOfferSentMessageEdit =
     thread !== undefined &&
     (thread.executionTarget === "cloud"
       ? cloudFeatureSupported(cloudConnection.data, thread.providerId, "rewind")
@@ -1083,6 +1183,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     thread.deletedAt === null &&
     !hasPendingInteraction &&
     sentMessageEditSession === null &&
+    pendingSentMessageEdit === null &&
     !sendMessage.isPending &&
     !createQueuedMessage.isPending &&
     !editMessage.isPending &&
@@ -1091,10 +1192,16 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     // (#821). Cloud has no such hold, so any queued row blocks it there.
     (thread.executionTarget === "cloud"
       ? queuedMessagesForEditEligibility.length === 0
-      : queuedMessagesForEditEligibility.every(isStopHeldReport)) &&
-    activeWorkflows.length === 0 &&
-    thread.activeBackgroundAgentCount === 0 &&
-    activeBackgroundCommands.length === 0;
+      : queuedMessagesForEditEligibility.every(isStopHeldReport));
+  const waitingCommands = activeBackgroundCommands.filter((row) =>
+    isBackgroundCommandTaskType(row.taskType),
+  );
+  const sentMessageEditWaitsForBackgroundWork =
+    activeWorkflows.length > 0 ||
+    (thread?.activeBackgroundAgentCount ?? 0) > 0 ||
+    activeBackgroundCommands.length > 0;
+  const canEditSentMessages =
+    canOfferSentMessageEdit && !sentMessageEditWaitsForBackgroundWork;
   const sentMessageEditEntryRef = useRef({ canEditSentMessages, thread });
   sentMessageEditEntryRef.current = { canEditSentMessages, thread };
   const handleEditSentMessage = useCallback<ThreadTimelineEditMessageHandler>(
@@ -1168,6 +1275,20 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       }
       const session = activeSentMessageEditSession;
       const execution = target.execution;
+      const row = timelineRows.find(
+        (candidate) => candidate.id === session.target.messageId,
+      );
+      const optimistic = row?.kind === "conversation" && row.role === "user";
+      if (optimistic) {
+        setPendingSentMessageEdit({
+          input: target.input,
+          operationId: session.operationId,
+          row,
+          settled: false,
+          threadId: session.threadId,
+        });
+        closeSentMessageEdit(session.operationId);
+      }
       void editMessage
         .mutateAsync({
           id: session.threadId,
@@ -1188,8 +1309,22 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         })
         .then(() => {
           closeSentMessageEdit(session.operationId);
+          setPendingSentMessageEdit((current) =>
+            current?.operationId === session.operationId
+              ? { ...current, settled: true }
+              : current,
+          );
         })
         .catch((error) => {
+          if (optimistic) {
+            setPendingSentMessageEdit((current) =>
+              current?.operationId === session.operationId ? null : current,
+            );
+            setSentMessageEditHostElement(null);
+            setSentMessageEditSession(
+              (current) => current ?? { ...session, operationId: randomId() },
+            );
+          }
           showMutationErrorToast({
             error,
             fallbackMessage: "Failed to edit the message",
@@ -1197,7 +1332,12 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
           });
         });
     },
-    [activeSentMessageEditSession, closeSentMessageEdit, editMessage],
+    [
+      activeSentMessageEditSession,
+      closeSentMessageEdit,
+      editMessage,
+      timelineRows,
+    ],
   );
   const activeSentMessageEditTargetMessageId =
     activeSentMessageEditSession?.target.messageId ?? null;
@@ -1697,7 +1837,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onAppCommand !== undefined ||
@@ -1717,7 +1857,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         threadId,
         cols: DEFAULT_TERMINAL_COLS,
         rows: DEFAULT_TERMINAL_ROWS,
-        ...takeTerminalStartRequest(),
       })
       .then((session) => {
         closeTab(newTab.id);
@@ -1824,7 +1963,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     if (!isFocused) {
       return;
     }
-    const desktopInfo = getBbDesktopInfo();
+    const desktopInfo = getRoomDesktopInfo();
     if (
       desktopInfo === null ||
       desktopInfo.onCloseWindowRequest === undefined
@@ -2040,69 +2179,53 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     enabled: threadOpenContext !== null,
     ...(threadOpenContext ? { openContext: threadOpenContext } : {}),
   });
-  const parentBannerDismissKey = `cloudroom.parentBanner.dismissed.${thread?.id}`;
-  const [, rerenderParentBanner] = useReducer((count: number) => count + 1, 0);
-  const dismissParentBanner = useCallback(() => {
-    withLocalStorage(
-      (storage) => storage.setItem(parentBannerDismissKey, "1"),
-      undefined,
-    );
-    rerenderParentBanner();
-  }, [parentBannerDismissKey]);
-  const parentBannerDismissed = withLocalStorage(
-    (storage) => storage.getItem(parentBannerDismissKey) === "1",
-    false,
-  );
-  const parentThreadSection: ThreadPromptParentThreadSection | null =
-    useMemo(() => {
-      const relatedThreadId =
-        threadOriginKind !== null
-          ? threadSourceThreadId
-          : thread?.parentThreadId;
-      if (!thread || !relatedThreadId || parentBannerDismissed) return null;
-      const relationship = isSideChatThread
-        ? "side-chat"
-        : threadOriginKind === "fork"
-          ? "fork"
-          : "parent";
-      const relatedThread =
-        relationship === "parent" ? parentThread : sourceThread;
-      const href = getThreadRoutePath({
-        projectId: relatedThread?.projectId ?? thread.projectId,
-        threadId: relatedThreadId,
-      });
-      if (relatedThread === undefined) {
-        return {
-          parentThreadTitle: relatedThreadId.slice(0, 8),
-          href,
-          relationship,
-          onDismiss: dismissParentBanner,
-        };
-      }
-      if (
-        relatedThread.archivedAt !== null ||
-        relatedThread.deletedAt !== null ||
-        (relationship !== "parent" &&
-          relatedThread.projectId !== thread.projectId)
-      ) {
-        return null;
-      }
-      return {
-        parentThreadTitle: getThreadDisplayTitle(relatedThread),
-        href,
-        relationship,
-        onDismiss: dismissParentBanner,
-      };
-    }, [
-      dismissParentBanner,
-      isSideChatThread,
-      parentBannerDismissed,
-      parentThread,
-      sourceThread,
-      thread,
-      threadOriginKind,
-      threadSourceThreadId,
-    ]);
+  const threadOrigin: ThreadOrigin | null = useMemo(() => {
+    const relatedThreadId =
+      threadOriginKind !== null ? threadSourceThreadId : thread?.parentThreadId;
+    if (!thread || !relatedThreadId) return null;
+    // Show the marker only at the real start of the timeline. Skip it when the
+    // first message came from the related thread: that message already names it.
+    if (
+      hasOlderTimelineRows ||
+      (timelineLoading && timelineRows.length === 0) ||
+      findFirstUserRow(timelineRows)?.senderThreadId === relatedThreadId
+    ) {
+      return null;
+    }
+    const relationship = isSideChatThread
+      ? "side-chat"
+      : threadOriginKind === "fork"
+        ? "fork"
+        : "parent";
+    const relatedThread =
+      relationship === "parent" ? parentThread : sourceThread;
+    const href = getThreadRoutePath({
+      projectId: relatedThread?.projectId ?? thread.projectId,
+      threadId: relatedThreadId,
+    });
+    if (relatedThread === undefined) {
+      return { title: relatedThreadId.slice(0, 8), href, relationship };
+    }
+    if (
+      relatedThread.archivedAt !== null ||
+      relatedThread.deletedAt !== null ||
+      (relationship !== "parent" &&
+        relatedThread.projectId !== thread.projectId)
+    ) {
+      return null;
+    }
+    return { title: getThreadDisplayTitle(relatedThread), href, relationship };
+  }, [
+    hasOlderTimelineRows,
+    isSideChatThread,
+    parentThread,
+    sourceThread,
+    thread,
+    threadOriginKind,
+    threadSourceThreadId,
+    timelineLoading,
+    timelineRows,
+  ]);
   const pendingChildThreads: readonly ChildThreadPendingAttentionSource[] =
     useMemo(
       () =>
@@ -2276,7 +2399,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     ],
   );
   const handleAutoOpenImage = useCallback(
-    (link: ThreadTimelineLocalFileLink) => {
+    (link: ThreadTimelineLocalFileLink): boolean => {
       const { kind } = resolveThreadLocalFileLink({
         hostFileLinksAvailable,
         link,
@@ -2288,8 +2411,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         kind === "open-thread-storage-path" ||
         kind === "open-host-path"
       ) {
-        handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
+        return handleOpenTimelineLocalFileLink(link, { viewer: "builtin" });
       }
+      return false;
     },
     [
       handleOpenTimelineLocalFileLink,
@@ -2300,13 +2424,16 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   );
   useAutoOpenGeneratedImages({
     enabled: isFocused && !renderSecondaryPanelAsDrawer,
-    isTurnRunning:
-      thread !== undefined &&
-      isRunningThreadRuntimeDisplayStatus(thread.runtime.displayStatus),
+    isThreadStatusFresh:
+      hasThreadDetailBootstrapSettled &&
+      !threadDetailBootstrapQuery.isFetching &&
+      !isFetching &&
+      !isPlaceholderData,
     openImage: handleAutoOpenImage,
     rows: timelineLoading ? null : timelineRows,
     threadId,
-    workspaceRootPath: workspacePreviewRootPath,
+    threadStatus: thread?.runtime.displayStatus ?? null,
+    workspaceRootPath: timelineWorkspaceRootPath ?? null,
   });
   const handleOpenTimelineLink = useCallback<ThreadTimelineLinkHandler>(
     ({ href }) => handleOpenUrlByPreference(href),
@@ -2625,6 +2752,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         hasMultipleMachines,
         host: resolvedThreadEnvironmentHost,
         machineProviders: registeredMachineProviders,
+        isWorktree: environment?.isWorktree,
       })
     : undefined;
   const isThreadOnReusableEnvironment =
@@ -2656,6 +2784,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     error: workspaceStatusError,
     workspaceUnavailable,
     workspaceDeleted: isWorkspaceDeleted,
+    workspaceParked: environment?.lifecycle.phase === "parked",
   });
   const threadTitle = getThreadDisplayTitle(thread);
   const workspaceOpenActions: ThreadActionsMenuResponsiveAction[] =
@@ -2811,7 +2940,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       modelFallback={modelFallback}
       activeWorkflows={activeWorkflows}
       activeBackgroundCommands={activeBackgroundCommands}
-      parentThreadSection={parentThreadSection}
       childPendingInteractions={childPendingInteractions}
       pullRequest={pullRequest}
       thread={thread}
@@ -2973,118 +3101,19 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       }
     }
   };
-  const filenameOfPanelTab = (path: string) => path.split("/").at(-1) ?? path;
-  const panelTabs: readonly SecondaryPanelRenderableTab[] =
-    syncedOrderedSecondaryFileTabs.map((tab): SecondaryPanelRenderableTab => {
-      const pluginAction =
-        tab.kind === "plugin-panel"
-          ? pluginThreadPanelActions.find(
-              (action) =>
-                action.pluginId === tab.pluginId && action.id === tab.actionId,
-            )
-          : undefined;
-      const shared = {
-        contentFillsRegion:
-          tab.kind === "plugin-panel" &&
-          (tab.fileOpenerOwner !== undefined ||
-            pluginAction?.layout === "flush"),
-        onClose: () => closeTab(tab.id),
-        renderContent: () => renderSecondaryTabContent(tab),
-        tab,
-      };
-      switch (tab.kind) {
-        case "browser": {
-          const browserLabel =
-            tab.title ?? (tab.url.length > 0 ? getBrowserUrlHost(tab.url) : "");
-          return {
-            ...shared,
-            label: browserLabel.length > 0 ? browserLabel : "Browser",
-            leadingVisual: (
-              <Icon
-                name="Globe"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        }
-        case "terminal": {
-          const session = terminalsById.get(tab.terminalId);
-          return {
-            ...shared,
-            label: session?.title ?? "Terminal",
-            leadingVisual: (
-              <Icon
-                name="Terminal"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel:
-              session === undefined || session.status === "running"
-                ? null
-                : session.status,
-            onSelect: () => handleActivateTerminalTab(tab.terminalId),
-            onClose: () => handleCloseTerminalTab(tab.terminalId),
-          };
-        }
-        case "workspace-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: tab.statusLabel,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "host-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "thread-storage-file-preview":
-          return {
-            ...shared,
-            label: filenameOfPanelTab(tab.path),
-            isPinned: tab.isPinned,
-            leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "new-tab":
-          return {
-            ...shared,
-            label: "New tab",
-            leadingVisual: (
-              <Icon
-                name="NewTab"
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                aria-hidden
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-        case "plugin-panel":
-          return {
-            ...shared,
-            label: tab.title,
-            leadingVisual: (
-              <PluginIcon
-                pluginId={tab.pluginId}
-                icon={pluginAction?.icon ?? null}
-                className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-              />
-            ),
-            statusLabel: null,
-            onSelect: () => handleActivateFileTab(tab.id),
-          };
-      }
-    });
+  const panelTabs = buildSecondaryPanelTabs({
+    tabs: syncedOrderedSecondaryFileTabs,
+    pluginActions: pluginThreadPanelActions,
+    terminalsById,
+    activateTab: handleActivateFileTab,
+    closeTab,
+    activateTerminal: handleActivateTerminalTab,
+    closeTerminal: handleCloseTerminalTab,
+    renderContent: renderSecondaryTabContent,
+    renderWorkspaceFileIcon: (path) => (
+      <WorkspaceFileTabIcon path={path} threadId={threadId} />
+    ),
+  });
   const threadDetailContent = (
     <MarkdownLocalFileContextMenuContext.Provider
       value={getLocalFileContextMenuItems}
@@ -3101,7 +3130,15 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         <AppNavigationHostProvider capabilities={appNavigationCapabilities}>
           <ThreadDetailSecondaryContent
             footer={composerFooter}
-            header={timelineHeader}
+            header={
+              <>
+                {timelineHeader}
+                <SubagentBar
+                  childThreads={childThreadSubsetQuery.data ?? []}
+                  reserveRight={!isSideChatThread && sideChatAction != null}
+                />
+              </>
+            }
             isMetadataLoading={environmentQuery.isLoading}
             isSecondaryPanelOpen={isSecondaryPanelOpen}
             isConversationCollapsed={isConversationCollapsed}
@@ -3198,13 +3235,66 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               threadOriginKind,
               hasOlderTimelineRows,
               hostConnectionNotice,
+              leadingContent: threadOrigin ? (
+                <ThreadOriginMarker origin={threadOrigin} />
+              ) : undefined,
+              trailingContent:
+                waitingCommands.length > 0 ||
+                chatCardInteraction ||
+                cloudThreadState.data?.usageLimit ||
+                (thread.providerId === "claude-code" &&
+                  thread.archivedAt === null &&
+                  ((!isCloudThread && thread.status === "pending") ||
+                    (isCloudThread &&
+                      cloudThreadState.data?.authRequired === true &&
+                      !providerAuthFailed &&
+                      !findLatestCloudLoginRowId(displayedTimelineRows)))) ? (
+                  <>
+                    {/* Running background commands: the agent continues by itself when each ends. */}
+                    <BackgroundCommandBubbles rows={waitingCommands} />
+                    {/* Out of Cloud Credits: a row where the work stopped (ADR 20261118-214337). */}
+                    {cloudThreadState.data?.usageLimit && (
+                      <CloudUsageLimitNotice
+                        launchCap={cloudThreadState.data.launchCap}
+                        className="mt-1 px-2"
+                      />
+                    )}
+                    {thread.providerId === "claude-code" &&
+                      thread.archivedAt === null &&
+                      ((!isCloudThread && thread.status === "pending") ||
+                        (isCloudThread &&
+                          cloudThreadState.data?.authRequired === true &&
+                          !providerAuthFailed &&
+                          !findLatestCloudLoginRowId(displayedTimelineRows))) && (
+                        <PendingClaudeSignInRow
+                          threadId={thread.id}
+                          isCloud={isCloudThread}
+                          hostId={environment?.hostId}
+                          environmentId={thread.environmentId}
+                          className="mt-1 px-2"
+                        />
+                      )}
+                    {chatCardInteraction && (
+                      <div className="pt-2">
+                        <ThreadPendingInteractionBanner
+                          interaction={chatCardInteraction}
+                          threadId={thread.id}
+                        />
+                      </div>
+                    )}
+                  </>
+                ) : undefined,
               isLoadingOlderTimelineRows,
               isThreadTimelinePending,
               timelineError: Boolean(timelineError),
               onForkMessage: isForkAvailable ? handleForkMessage : undefined,
-              onEditMessage: canEditSentMessages
+              onEditMessage: canOfferSentMessageEdit
                 ? handleEditSentMessage
                 : undefined,
+              editMessageBlockedReason:
+                canOfferSentMessageEdit && sentMessageEditWaitsForBackgroundWork
+                  ? "Wait for background work to finish to edit"
+                  : undefined,
               inlineMessageEditor,
               onMessageAddToChat: handleSelectionAddToChat,
               onSendToMainMessage: handleSendToMainMessage,
@@ -3217,18 +3307,21 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
               projectId,
               resolveMentionLink,
               showOngoingIndicator:
-                thread.status !== "stopping" &&
-                !hasPendingInteraction &&
-                isRunningThreadRuntimeDisplayStatus(
-                  thread.runtime.displayStatus,
-                ) &&
+                (activePendingSentMessageEdit !== null ||
+                  (thread.status !== "stopping" &&
+                    !hasPendingInteraction &&
+                    isRunningThreadRuntimeDisplayStatus(
+                      thread.runtime.displayStatus,
+                    ))) &&
                 !isThreadTimelinePending,
               ongoingIndicatorLabel:
                 thread.runtime.displayStatus === "host-reconnecting"
                   ? "Waiting for reconnection"
                   : undefined,
-              timelineRows,
-              isStopping: thread.status === "stopping",
+              timelineRows: displayedTimelineRows,
+              isStopping:
+                thread.status === "stopping" &&
+                activePendingSentMessageEdit === null,
               stoppingAnchorAt: thread.updatedAt,
               threadId: thread.id,
               threadRuntimeDisplayStatus: thread.runtime.displayStatus,

@@ -1,10 +1,11 @@
+import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
 import {
   ClaudeConnectionButton,
   useClaudeConnection,
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
-import { arrayMove } from "@dnd-kit/sortable";
+import { useNavigate } from "react-router";
+import { arrayMove } from "@/lib/sortable";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";
@@ -38,9 +39,13 @@ import {
   SettingsRow,
   SettingsRowList,
   SettingsSection,
+  SettingsWithControl,
 } from "@/components/ui/settings-section";
 import {
+  autoUpdateProgress,
+  withAutoUpdateSetting,
   buildProviderCliIssue,
+  canAutoUpdateProviderCli,
   hasProviderCliAction,
   useProviderCliInstallRunner,
   type ProviderCliInstallTarget,
@@ -71,6 +76,10 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { ProviderIconMark } from "./ProviderIconMark";
 import { ProviderLoginButton } from "./ProviderLoginButton";
 import {
+  SETTINGS_DROPDOWN_CONTENT_CLASS,
+  SETTINGS_DROPDOWN_TRIGGER_CLASS,
+} from "./settings-dropdown";
+import {
   SortableSettingsRowList,
   useSortableSettingsRow,
 } from "./sortable-settings-rows";
@@ -91,37 +100,17 @@ const CELL = {
 
 const TABLE_BUTTON = "h-7 px-2.5 text-xs";
 
-function applyProviderOrder(
+/** Shows a just-dragged order at once, before the server's list catches up. */
+function inOrder(
   providers: readonly ProviderInfo[],
   ids: readonly string[] | null,
 ): readonly ProviderInfo[] {
-  if (
-    ids === null ||
-    providers.length !== ids.length ||
-    providers.some((provider) => !ids.includes(provider.id))
-  ) {
-    return providers;
-  }
-  const providersById = new Map(
-    providers.map((provider) => [provider.id, provider]),
-  );
-  return ids.flatMap((id) => {
-    const provider = providersById.get(id);
-    return provider === undefined ? [] : [provider];
-  });
-}
-
-export function reorderProviderIds(
-  ids: readonly string[],
-  activeId: string,
-  overId: string,
-): string[] | null {
-  const activeIndex = ids.indexOf(activeId);
-  const overIndex = ids.indexOf(overId);
-  if (activeIndex === -1 || overIndex === -1 || activeIndex === overIndex) {
-    return null;
-  }
-  return arrayMove([...ids], activeIndex, overIndex);
+  if (ids === null) return providers;
+  const at = (id: string) => {
+    const index = ids.indexOf(id);
+    return index === -1 ? ids.length : index;
+  };
+  return [...providers].sort((a, b) => at(a.id) - at(b.id));
 }
 
 function withProviderCompletedTurnDisplay(
@@ -286,7 +275,6 @@ function MacLogin({
       <ClaudeConnectionButton
         target="local"
         hostId={hostId}
-        presentation="inline"
         className={TABLE_BUTTON}
         text="Log in"
         onConnected={onChange}
@@ -312,7 +300,6 @@ function ClaudeCloudLogin() {
   return (
     <ClaudeConnectionButton
       target="cloud"
-      presentation="inline"
       className={TABLE_BUTTON}
       text="Connect"
     />
@@ -344,6 +331,7 @@ function CodexCloudLogin() {
 }
 
 function CloudLogin({ provider }: { provider: ProviderInfo }) {
+  if (provider.id === "acp-antigravity") return <AntigravityCloudLogin />;
   if (provider.id === "claude-code") return <ClaudeCloudLogin />;
   if (provider.id === "codex") return <CodexCloudLogin />;
   // Pi, opencode, Hermes, fx, and Devin have no Cloud sign-in: the Cloud reuses this Mac's login (ADR 0130).
@@ -370,7 +358,7 @@ function AutoUpdateSwitch({
   provider: ProviderInfo;
   status: ProviderCliStatus | undefined;
 }) {
-  if (status?.npmPackageName == null) return DASH;
+  if (status === undefined || !canAutoUpdateProviderCli(status)) return DASH;
   const autoUpdate = generalSettings.providerAutoUpdate ?? [];
   return (
     <Switch
@@ -415,10 +403,15 @@ function UpdateStatus({
   if (status === undefined) return null;
   const issue = buildProviderCliIssue({ provider: provider.id, status });
   if (busy) return <RowStateControl live state="in-progress" />;
+  const progress = autoUpdateProgress(status);
+  if (progress) return (
+    <span role="status" className="text-xs text-muted-foreground">{progress}</span>
+  );
   if (issue === null) return <RowStateControl state="up-to-date" />;
   if (hostId === null || !hasProviderCliAction(issue))
     return <RowStateControl state="update-manually" />;
-  const failed = failure?.issueFingerprint === issue.fingerprint;
+  const failed = status.autoUpdateState === "failed" ||
+    failure?.issueFingerprint === issue.fingerprint;
   return (
     <TableButton
       label={`${failed ? "Retry" : "Update"} ${provider.displayName}`}
@@ -620,7 +613,7 @@ interface ProviderRowProps {
   status: ProviderCliStatus | undefined;
 }
 
-function SortableProviderRow({
+function ProviderRow({
   canRemove,
   disabled,
   generalSettings,
@@ -631,8 +624,11 @@ function SortableProviderRow({
   provider,
   showCloud,
   state,
-  status,
+  status: hostStatus,
 }: ProviderRowProps) {
+  const status = hostStatus && withAutoUpdateSetting(
+    hostStatus, generalSettings.providerAutoUpdate?.includes(provider.id) ?? false,
+  );
   const { setNodeRef, style, isDragging, handle } = useSortableSettingsRow({
     id: provider.id,
     disabled,
@@ -819,6 +815,81 @@ function NotInstalledRow({
   );
 }
 
+const PICKER_ORDER_OPTIONS = [
+  { label: "Most used", custom: false },
+  { label: "Custom", custom: true },
+] as const;
+
+/** Most used (the default first, then usage) or the order the user dragged. */
+function PickerOrderSetting({
+  custom,
+  disabled,
+  onChange,
+}: {
+  custom: boolean;
+  disabled: boolean;
+  onChange: (custom: boolean) => void;
+}) {
+  return (
+    <SettingsWithControl
+      label="Picker order"
+      description={
+        custom
+          ? "Your own order in the model picker."
+          : "Default first, then the harnesses you started the most threads with in the last 72 hours. Drag to set your own."
+      }
+    >
+      <div className="flex items-center gap-1.5">
+        {custom ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 text-xs text-muted-foreground"
+            disabled={disabled}
+            onClick={() => onChange(false)}
+          >
+            Reset
+          </Button>
+        ) : null}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="outline"
+              size="sm"
+              className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
+              aria-label="Picker order"
+              disabled={disabled}
+            >
+              {custom ? "Custom" : "Most used"}
+              <Icon name="ChevronDown" className="size-3.5 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className={SETTINGS_DROPDOWN_CONTENT_CLASS}>
+            {PICKER_ORDER_OPTIONS.map((option) => (
+              <DropdownMenuItem
+                key={option.label}
+                onSelect={() => {
+                  if (option.custom !== custom) onChange(option.custom);
+                }}
+              >
+                {option.label}
+                <Icon
+                  name="Check"
+                  className={cn(
+                    "ml-auto",
+                    custom !== option.custom && "opacity-0",
+                    COARSE_POINTER_ICON_SIZE_CLASS,
+                  )}
+                />
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+    </SettingsWithControl>
+  );
+}
+
 function TableHeader({ showCloud }: { showCloud: boolean }) {
   return (
     <div className="mb-2.5 hidden items-center gap-3 border-b border-border pb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground sm:flex">
@@ -905,14 +976,13 @@ export function ProvidersSettingsSection({
   const hiddenInstallable = useInstallableProviders({ hostId }).data ?? [];
   const showCloud = useCloudroomAccount().data?.ready === true;
   const serverProviders: ProviderInfo[] = providersQuery.data ?? [];
+  // The server lists the user's own order, or the default first, then the most used.
   const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
-  const allProviders = applyProviderOrder(serverProviders, optimisticOrder);
-  const allIds = allProviders.map((provider) => provider.id);
+  const allProviders = inOrder(serverProviders, optimisticOrder);
   const hidden = new Set(generalSettings.hiddenProviderIds);
   const providers = allProviders.filter(
     (provider) => isInstalled(provider) && !hidden.has(provider.id),
   );
-  const ids = providers.map((provider) => provider.id);
   const defaultProviderId =
     generalSettings.defaultProviderId ?? allProviders[0]?.id ?? null;
   const statesQuery = useSystemProviderStates({
@@ -958,39 +1028,47 @@ export function ProvidersSettingsSection({
       hidden.has(provider.id) &&
       list.findIndex((entry) => entry.id === provider.id) === index,
   );
-
+  // An older server may not send the field yet.
+  const customOrder = (generalSettings.customProviderOrder ?? []).length > 0;
+  const saveOrder = (order: string[]): void => {
+    setOptimisticOrder(order.length > 0 ? order : null);
+    Promise.resolve(
+      onGeneralSettingsChange({ ...generalSettings, customProviderOrder: order }),
+    ).catch(() => setOptimisticOrder(null));
+  };
   const handleReorder = (activeId: string, overId: string): void => {
-    const reordered = reorderProviderIds(ids, activeId, overId);
-    if (reordered === null) return;
-    const next = [
-      ...reordered,
-      ...allIds.filter((id) => !reordered.includes(id)),
-    ];
-    setOptimisticOrder(next);
-    let write: Promise<unknown> | void;
-    try {
-      write = onGeneralSettingsChange({
-        ...generalSettings,
-        providerOrder: next,
-      });
-    } catch {
-      setOptimisticOrder(null);
-      return;
-    }
-    void Promise.resolve(write)
-      .catch(() => undefined)
-      .finally(() => setOptimisticOrder(null));
+    const ids = providers.map((provider) => provider.id);
+    const from = ids.indexOf(activeId);
+    const to = ids.indexOf(overId);
+    if (from === -1 || to === -1 || from === to) return;
+    const moved = arrayMove(ids, from, to);
+    // Keep not-installed and removed harnesses in the saved order too.
+    saveOrder([
+      ...moved,
+      ...allProviders.map((p) => p.id).filter((id) => !moved.includes(id)),
+    ]);
   };
 
   return (
     <SettingsSection
       title="Harness"
-      description="Your agents: logins, versions, updates, and the default. Provider-specific settings are in the tabs above."
+      description="Your agents: logins, versions, updates, the default, and their order in the model picker. Provider-specific settings are in the tabs above."
     >
       {providersQuery.isPending ? (
         <p className="text-sm text-muted-foreground">Loading providers…</p>
       ) : (
         <>
+          {providers.length > 1 || customOrder ? (
+            <div className="mb-5">
+              <PickerOrderSetting
+                custom={customOrder}
+                disabled={disabled}
+                onChange={(custom) =>
+                  saveOrder(custom ? allProviders.map((p) => p.id) : [])
+                }
+              />
+            </div>
+          ) : null}
           <TableHeader showCloud={showCloud} />
           {cliStatusQuery.isError ? (
             <p className="flex items-center gap-2 pb-2.5 text-xs text-destructive">
@@ -1012,12 +1090,12 @@ export function ProvidersSettingsSection({
             </p>
           ) : (
             <SortableSettingsRowList
-              ids={ids}
+              ids={providers.map((provider) => provider.id)}
               disabled={disabled}
               onReorder={handleReorder}
             >
               {providers.map((provider) => (
-                <SortableProviderRow
+                <ProviderRow
                   key={provider.id}
                   canRemove={providers.length > 1}
                   disabled={disabled}

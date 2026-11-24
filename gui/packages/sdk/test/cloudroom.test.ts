@@ -1,10 +1,10 @@
 import { expect, it } from "vitest";
-import { createBbSdk } from "../src/core.js";
+import { createRoomSdk } from "../src/core.js";
 import { createHttpTransport } from "../src/transport-http.js";
 
 it("exposes account status, sign-in, cancellation and local logout over the same API", async () => {
   const calls: { path: string; method: string; body: unknown }[] = [];
-  const sdk = createBbSdk({ transport: createHttpTransport({ runtime: "node", baseUrl: "http://localhost:1234", fetch: async (input, init) => {
+  const sdk = createRoomSdk({ transport: createHttpTransport({ runtime: "node", baseUrl: "http://localhost:1234", fetch: async (input, init) => {
     calls.push({ path: new URL(String(input)).pathname, method: init?.method ?? "GET", body: init?.body ? JSON.parse(String(init.body)) : null });
     return Response.json(calls.length === 1 ? { account: null, ready: false } : calls.length === 2 ? { url: "https://www.cloudroom.dev/desktop" } : { ok: true });
   } }) });

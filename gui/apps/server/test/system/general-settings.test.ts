@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getAppSettings } from "@cloudroom/db";
 import { appSettingsSchema, defaultAppSettings } from "@cloudroom/domain";
 import { systemConfigResponseSchema } from "@cloudroom/server-contract";
+import { z } from "zod";
 import { readJson } from "../helpers/json.js";
 import { withTestHarness } from "../helpers/test-app.js";
 
@@ -14,6 +15,7 @@ describe("general settings", () => {
       expect(body.generalSettings).toEqual({
         ...defaultAppSettings,
         showUnhandledProviderEvents: false,
+        providerOrder: [],
       });
       expect(body.generalSettings.steerActiveThreadOnEnter).toBe(false);
       expect(body.primaryHostId).toBeNull();
@@ -29,6 +31,7 @@ describe("general settings", () => {
           ...defaultAppSettings,
           showKeyboardHints: false,
           steerActiveThreadOnEnter: true,
+          // Older apps still send the retired manual order; it is ignored.
           providerOrder: ["pi", "codex"],
           defaultProviderId: "pi",
         }),
@@ -39,21 +42,21 @@ describe("general settings", () => {
           .extend({
             showUnhandledProviderEvents:
               appSettingsSchema.shape.showDiagnosticEvents,
+            providerOrder: z.array(z.string()),
           })
           .parse(await readJson(put)),
       ).toEqual({
         ...defaultAppSettings,
         showKeyboardHints: false,
         steerActiveThreadOnEnter: true,
-        providerOrder: ["pi", "codex"],
         defaultProviderId: "pi",
         showUnhandledProviderEvents: false,
+        providerOrder: [],
       });
       expect(getAppSettings(harness.db)).toEqual({
         ...defaultAppSettings,
         showKeyboardHints: false,
         steerActiveThreadOnEnter: true,
-        providerOrder: ["pi", "codex"],
         defaultProviderId: "pi",
       });
 
@@ -66,8 +69,8 @@ describe("general settings", () => {
         showUnhandledProviderEvents: false,
         showKeyboardHints: false,
         steerActiveThreadOnEnter: true,
-        providerOrder: ["pi", "codex"],
         defaultProviderId: "pi",
+        providerOrder: [],
       });
     });
   });
@@ -113,6 +116,7 @@ it("accepts old SDK payloads and round-trips edits through either setting name",
         .extend({
           showUnhandledProviderEvents:
             appSettingsSchema.shape.showDiagnosticEvents,
+          providerOrder: z.array(z.string()),
         })
         .parse(await readJson(response));
     };

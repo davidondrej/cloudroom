@@ -90,6 +90,10 @@
       "type": "registry:ui"
     },
     {
+      "name": "hugeicons-icon",
+      "type": "registry:ui"
+    },
+    {
       "name": "icon",
       "type": "registry:ui"
     },
@@ -115,6 +119,10 @@
     },
     {
       "name": "label",
+      "type": "registry:ui"
+    },
+    {
+      "name": "lucide-icons",
       "type": "registry:ui"
     },
     {

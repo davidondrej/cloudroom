@@ -19,6 +19,7 @@ import {
   runProviderCliInstall,
 } from "../services/system/provider-installations.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
+import { observeProviderUpdates } from "../services/system/provider-auto-update.js";
 import { COMMAND_TIMEOUT_MS } from "../constants.js";
 import { ApiError } from "../errors.js";
 import { reportCliInstall } from "../services/cloudroom/setup-telemetry.js";
@@ -352,8 +353,11 @@ export function registerHostRoutes(
 
   get(routes.providerCliStatus, async (context) => {
     const hostId = context.req.param("id");
-    assertUsableHostId(deps, { hostId });
+    const host = requireNonDestroyedHostWithStatus(deps, hostId);
     const result = await getProviderInstallations(deps, { hostId });
+    if (host.type === "persistent" && host.lifecycle.phase === "active" && host.status === "connected") {
+      observeProviderUpdates(deps, hostId, result);
+    }
     return context.json(result);
   });
 

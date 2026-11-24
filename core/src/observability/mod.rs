@@ -28,6 +28,8 @@ const CAPACITY: usize = 1024;
 const LOCAL_BYTES: u64 = 8 * 1024 * 1024;
 const SUMMARY_INTERVAL: Duration = Duration::from_secs(60);
 const CPU_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the sampler glances at `/proc` between CPU minutes, so short commands keep their names.
+const GLANCE_INTERVAL: Duration = Duration::from_secs(2);
 const SLOW_API_MS: u64 = 1000;
 const STDERR_CAPACITY: usize = 32;
 const STDERR_BATCH: usize = 8;
@@ -100,6 +102,14 @@ pub(crate) enum Signal {
         outcome: String,
         effect: Option<String>,
         duration_ms: u64,
+    },
+    /// Tokens one session spent since its last usage reading, about once a turn (session/tokens.rs). Counts only.
+    Tokens {
+        harness: Kind,
+        model: Option<String>,
+        child: bool,
+        #[serde(flatten)]
+        tokens: crate::session::Tokens,
     },
     Diagnostics {
         dropped: u64,
@@ -275,7 +285,9 @@ impl Observability {
         let mut pending = VecDeque::new();
         let mut sampler = system::Sampler::default();
         let mut sample_at = Instant::now();
+        let mut glance_at = Instant::now();
         let (mut cpu_at, mut cpu_since_ms, mut busy) = (Instant::now(), now_ms(), false);
+        let mut idle_minutes = 0;
         let mut summaries = BTreeMap::new();
         let mut summary_at = Instant::now() + SUMMARY_INTERVAL;
         let mut upload_at = Instant::now() + config.diagnostic_upload;
@@ -296,6 +308,10 @@ impl Observability {
                     Err(_) => break,
                 }
             }
+            if !stopping && Instant::now() >= glance_at {
+                sampler.glance();
+                glance_at = Instant::now() + GLANCE_INTERVAL;
+            }
             if !stopping && Instant::now() >= sample_at {
                 let mut resources = sampler.sample(&config).await;
                 let counts = agents();
@@ -304,7 +320,10 @@ impl Observability {
                     || counts.queued > 0
                     || counts.last_activity.is_some_and(|at| at >= cpu_since_ms);
                 if Instant::now() >= cpu_at {
-                    resources.cpu_minute = sampler.minute(busy);
+                    resources.cpu_minute = sampler.minute(busy).map(Box::new);
+                    idle_minutes = resources.cpu_minute.as_mut().map_or(0, |minute| {
+                        minute.idle(idle_minutes, &config, counts.preview_at)
+                    });
                     let directory = config.state_dir.clone();
                     resources.journal_bytes =
                         tokio::task::spawn_blocking(move || system::journal_bytes(&directory))
@@ -344,10 +363,10 @@ impl Observability {
                     eprintln!("Cloudroom diagnostic file write failed");
                 }
                 for record in batch {
-                    // The Mac helper reports once a minute: a good report stays in the local files only, so it adds
-                    // no website rows (db-load-budget).
+                    // The Mac helper reports, and a copy's heartbeat beats (#2168), once a minute: a good one stays in the
+                    // local files only, so it adds no website rows (db-load-budget).
                     if matches!(&record.signal, Signal::Api { method, route, status, duration_ms }
-                        if *method == "POST" && route == "/v1/mac/helper" && (200..400).contains(status) && *duration_ms < SLOW_API_MS)
+                        if *method == "POST" && matches!(route.as_str(), "/v1/mac/helper" | "/v1/workspaces/{id}/alive") && (200..400).contains(status) && *duration_ms < SLOW_API_MS)
                     {
                         continue;
                     }
@@ -358,13 +377,15 @@ impl Observability {
                         status,
                         duration_ms,
                     } = &record.signal
-                        && (*method == "GET"
+                        && ((*method == "GET"
                             || (*method == "POST"
                                 && matches!(
                                     route.as_str(),
                                     "/v1/sync" | "/v1/previews/device" | "/v1/previews/report"
                                 )))
-                        && (200..400).contains(status)
+                            && (200..400).contains(status)
+                            // `mac status` checks the Mac with a job Core never keeps, so its confirm gets 404 (#608).
+                            || (*method == "POST" && route == "/v1/mac/results/{id}" && *status == 404))
                         && *duration_ms < SLOW_API_MS
                     {
                         let summary = summaries

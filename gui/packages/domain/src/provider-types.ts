@@ -31,6 +31,8 @@ export const availableModelSchema = z.object({
   supportedReasoningEfforts: z.array(modelReasoningEffortSchema),
   defaultReasoningEffort: reasoningLevelSchema,
   isDefault: z.boolean(),
+  /** Speeds this model offers beside the standard one. Missing: not known. */
+  serviceTiers: z.array(serviceTierSchema).optional(),
 });
 export type AvailableModel = z.infer<typeof availableModelSchema>;
 
@@ -46,6 +48,8 @@ const providerCapabilitiesSchema = z.object({
   supportsNativeUserQuestion: z.boolean(),
   supportsFork: z.boolean(),
   supportsSessionRewind: z.boolean(),
+  /** Local only: the agent takes a manual `/compact`. Cloud asks Core. */
+  supportsManualCompaction: z.boolean().optional(),
   permissionModes: z.array(permissionModeSchema).min(1),
   modelCatalogScope: providerModelCatalogScopeSchema,
 });

@@ -1,6 +1,7 @@
 import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import { randomUUID } from "node:crypto";
-import { dirname } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
 import { loadHostDaemonStartConfig } from "@cloudroom/config/host-daemon";
 import {
   createHostWatcher,
@@ -9,7 +10,7 @@ import {
 } from "@cloudroom/host-watcher";
 import { createLogger } from "@cloudroom/logger";
 import { createHostDaemonApp } from "./app.js";
-import { installBrowserHarnessShim } from "./browser-harness.js";
+import { createBrowserHarnessShimInstaller } from "./browser-harness.js";
 import {
   readHostAuthState,
   resolveServerUrl,
@@ -17,6 +18,7 @@ import {
 } from "./auth-state.js";
 import type { HostDaemon } from "./daemon.js";
 import { enrollDaemonHost } from "./enroll.js";
+import { assertSecureServerUrl } from "./server-client.js";
 import { loadHostIdentity, persistHostId } from "./identity.js";
 import { acquireDaemonLock } from "./lock.js";
 import { resolveHostDaemonLocalApiConfig } from "./local-api-config.js";
@@ -25,8 +27,8 @@ import {
   prepareRuntimeShellEnv,
   providerEnvFromUserShell,
   resolvePowerShellExecutionPolicyDefault,
-  resolveBbExecutablePathInDirectory,
-  resolveLocalBbExecutablePath,
+  resolveRoomExecutablePathInDirectory,
+  resolveLocalRoomExecutablePath,
 } from "./runtime-shell-env.js";
 import type { HostDaemonLogger } from "./logger.js";
 import {
@@ -82,13 +84,17 @@ export async function startHostDaemon(
       providedHostName: options.hostName,
     });
     const instanceId = randomUUID();
-    const serverFetch = createCallerProofFetch(fetch);
+    // A redirect could carry the key or session bodies to another origin or to plain HTTP (#2194).
+    const serverFetch = createCallerProofFetch((input, init) =>
+      fetch(input, { ...init, redirect: "error" }),
+    );
     const serverUrl = resolveServerUrl({
       providedServerUrl: hostDaemonConfig.BB_SERVER_URL,
     });
     if (!serverUrl) {
       throw new Error("Host daemon server URL is required");
     }
+    assertSecureServerUrl(serverUrl);
 
     if (persistedAuth && persistedAuth.hostId !== identity.hostId) {
       throw new Error(
@@ -126,11 +132,11 @@ export async function startHostDaemon(
     const localApiConfig = resolveHostDaemonLocalApiConfig({
       hostDaemonPort: hostDaemonConfig.BB_HOST_DAEMON_PORT,
     });
-    const bbExecutablePath =
+    const roomExecutablePath =
       options.bbExecutableDirectory !== undefined
-        ? resolveBbExecutablePathInDirectory(options.bbExecutableDirectory)
-        : await resolveLocalBbExecutablePath();
-    const bbExecutableDirectory = dirname(bbExecutablePath);
+        ? resolveRoomExecutablePathInDirectory(options.bbExecutableDirectory)
+        : await resolveLocalRoomExecutablePath();
+    const roomExecutableDirectory = dirname(roomExecutablePath);
     const logger = createLogger({
       component: "host-daemon",
       base: { serverUrl },
@@ -158,11 +164,8 @@ export async function startHostDaemon(
       }),
     );
     const hostWatcher = createHostWatcher();
-    const toolsDirectory = await installBrowserHarnessShim(dataDir).catch(
-      (error: unknown) => {
-        logger.warn({ error }, "Could not write the browser-harness shim");
-        return undefined;
-      },
+    const installShim = createBrowserHarnessShimInstaller(dataDir, (error) =>
+      logger.warn({ error }, "Could not write the browser-harness shim"),
     );
     const resolveUserShellEnv = createUserShellEnvResolver();
     let powershellExecutionPolicy: string | null = null;
@@ -178,15 +181,22 @@ export async function startHostDaemon(
       if (userShellEnv !== null) {
         providerUserEnv = providerEnvFromUserShell(userShellEnv);
       }
+      const deepapiDir = join(homedir(), ".deepapi");
+      const basePath = userShellEnv?.PATH ?? process.env.PATH ?? "";
+      const inheritedPath = basePath.split(delimiter).includes(deepapiDir)
+        ? basePath
+        : basePath
+          ? `${basePath}${delimiter}${deepapiDir}`
+          : deepapiDir;
       return prepareRuntimeShellEnv({
-        bbExecutableDirectory,
-        bbExecutablePath,
+        bbExecutableDirectory: roomExecutableDirectory,
+        bbExecutablePath: roomExecutablePath,
         dataDir,
         hostDaemonPort: localApiConfig.port,
-        inheritedPath: userShellEnv?.PATH ?? process.env.PATH,
+        inheritedPath,
         powershellExecutionPolicy,
         serverUrl: machineAuthProxy?.serverUrl ?? serverUrl,
-        toolsDirectory,
+        toolsDirectory: await installShim(),
       });
     };
     const runtimeShellEnv = await resolveRuntimeShellEnv();

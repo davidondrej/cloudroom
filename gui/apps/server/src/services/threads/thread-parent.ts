@@ -48,7 +48,9 @@ export function isHardQueueHeld(
   thread: Pick<Thread, "id" | "status">,
 ): boolean {
   return (
-    (thread.status !== "idle" && thread.status !== "pending") ||
+    (thread.status !== "idle" &&
+      thread.status !== "pending" &&
+      thread.status !== "error") ||
     listQueuedThreadMessages(db, thread.id).some(
       (row) => row.systemNotice !== null,
     ) ||

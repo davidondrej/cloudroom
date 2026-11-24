@@ -78,11 +78,11 @@ export const sideChatRpcContract = defineRpcContract({
   },
 });
 
-export default async function plugin(bb: BbPluginApi) {
-  bb.rpc.register(sideChatRpcContract, {
+export default async function plugin(room: BbPluginApi) {
+  room.rpc.register(sideChatRpcContract, {
     async createSideChat({ sourceThreadId, anchorText }) {
       const seedText = resolveReplySeedText(anchorText);
-      const fork = await bb.sdk.threads.fork({
+      const fork = await room.sdk.threads.fork({
         sourceThreadId,
         fresh: true,
         visibility: "hidden",
@@ -102,7 +102,7 @@ export default async function plugin(bb: BbPluginApi) {
       return { threadId: fork.id };
     },
     async sendToMain({ sourceThreadId, senderThreadId, text }) {
-      await bb.sdk.threads.queuedMessages.create({
+      await room.sdk.threads.queuedMessages.create({
         threadId: sourceThreadId,
         input: [{ type: "text", text, mentions: [] }],
         senderThreadId,
@@ -111,16 +111,16 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.background.schedule("empty-fork-cleanup", "13 * * * *", async () => {
+  room.background.schedule("empty-fork-cleanup", "13 * * * *", async () => {
     const now = Date.now();
-    const keptKeys = new Set(await bb.storage.kv.list(KEPT_FORK_KEY_PREFIX));
+    const keptKeys = new Set(await room.storage.kv.list(KEPT_FORK_KEY_PREFIX));
     const stillLive = new Set<string>();
     let offset = 0;
     for (;;) {
-      const page = await bb.sdk.threads.list({
+      const page = await room.sdk.threads.list({
         includeHidden: true,
         originKind: "fork",
-        originPluginId: bb.pluginId,
+        originPluginId: room.pluginId,
         archived: false,
         limit: EMPTY_FORK_SWEEP_PAGE_SIZE,
         offset,
@@ -128,7 +128,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (page.length === 0) break;
       let retained = 0;
       for (const thread of page) {
-        if (!isOwnLiveHiddenFork(thread, bb.pluginId)) {
+        if (!isOwnLiveHiddenFork(thread, room.pluginId)) {
           retained += 1;
           continue;
         }
@@ -145,7 +145,7 @@ export default async function plugin(bb: BbPluginApi) {
         const outcome = await sweepEmptyFork(thread.id, thread.createdAt);
         if (outcome === "archived") continue;
         if (outcome === "kept") {
-          await bb.storage.kv.set(keptKey, true);
+          await room.storage.kv.set(keptKey, true);
           stillLive.add(keptKey);
         }
         retained += 1;
@@ -154,7 +154,7 @@ export default async function plugin(bb: BbPluginApi) {
       offset += retained;
     }
     for (const key of keptKeys) {
-      if (!stillLive.has(key)) await bb.storage.kv.delete(key);
+      if (!stillLive.has(key)) await room.storage.kv.delete(key);
     }
   });
 
@@ -163,13 +163,13 @@ export default async function plugin(bb: BbPluginApi) {
     createdAt: number,
   ): Promise<"archived" | "kept" | "skipped"> {
     try {
-      const timeline = await bb.sdk.threads.timeline({
+      const timeline = await room.sdk.threads.timeline({
         threadId,
         includeNestedRows: "true",
       });
       if (timelineRowsContainUserMessage(timeline.rows)) return "kept";
     } catch (error) {
-      bb.log.warn(
+      room.log.warn(
         `empty-fork sweep skipped ${threadId} (timeline read failed: ${
           error instanceof Error ? error.message : String(error)
         })`,
@@ -177,10 +177,10 @@ export default async function plugin(bb: BbPluginApi) {
       return "skipped";
     }
     try {
-      const queued = await bb.sdk.threads.queuedMessages.list({ threadId });
+      const queued = await room.sdk.threads.queuedMessages.list({ threadId });
       if (queued.length > 0) return "kept";
     } catch (error) {
-      bb.log.warn(
+      room.log.warn(
         `empty-fork sweep skipped ${threadId} (queued-message read failed: ${
           error instanceof Error ? error.message : String(error)
         })`,
@@ -188,14 +188,14 @@ export default async function plugin(bb: BbPluginApi) {
       return "skipped";
     }
     try {
-      await bb.sdk.threads.archive({ threadId });
-      bb.log.info(
+      await room.sdk.threads.archive({ threadId });
+      room.log.info(
         `empty-fork sweep archived ${threadId} (no user messages, ` +
           `created ${new Date(createdAt).toISOString()})`,
       );
       return "archived";
     } catch (error) {
-      bb.log.warn(
+      room.log.warn(
         `empty-fork sweep failed to archive ${threadId}: ${
           error instanceof Error ? error.message : String(error)
         }`,

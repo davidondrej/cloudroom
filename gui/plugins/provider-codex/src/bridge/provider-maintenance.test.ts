@@ -123,12 +123,75 @@ describe("Codex provider maintenance", () => {
         ],
       },
     });
+    // A broken npm Codex is reinstalled into the prefix that owns it.
+    expect(
+      __testing.buildProviderInstallationRun(
+        {
+          ...installationStatus(),
+          installed: false,
+          installSource: "notInstalled",
+          currentVersion: null,
+          installAction: {
+            kind: "install",
+            label: "Install",
+            command: "npm install -g @openai/codex@latest",
+          },
+          needsUpdate: false,
+        },
+        "install",
+        "/Users/me/.local",
+      ),
+    ).toMatchObject({
+      available: true,
+      command: {
+        command: "npm",
+        args: [
+          "install",
+          "-g",
+          "--prefix",
+          "/Users/me/.local",
+          "@openai/codex@latest",
+        ],
+      },
+      verification: { kind: "installed" },
+    });
     expect(
       __testing.buildProviderInstallationRun(installationStatus(), "install"),
     ).toEqual({
       available: false,
-      message: "Codex install is no longer available on this host.",
+      message:
+        "Codex install is not available on this host: Codex 1.0.0 is installed. Run update instead.",
     });
+  });
+
+  it("runs Windows' install.ps1 so the user Path keeps its REG_EXPAND_SZ kind", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const run = __testing.buildProviderInstallationRun(
+        installationStatus(),
+        "update",
+      );
+      const fallback = run.available ? run.fallback : undefined;
+      expect(fallback).toMatchObject({
+        command: "powershell.exe",
+        displayCommand:
+          "$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex",
+      });
+      const script = fallback?.args.at(-1) ?? "";
+      // Raw Path and its kind before, written back with that kind after.
+      expect(script).toContain(
+        "$p = $k.GetValue('Path', $null, 'DoNotExpandEnvironmentNames')",
+      );
+      expect(script).toContain("$k.SetValue('Path', $p, $t)");
+      expect(script).toContain(
+        "-Command '$env:CODEX_NON_INTERACTIVE=''1''; irm https://chatgpt.com/codex/install.ps1 | iex'",
+      );
+      // Windows command lines escape double quotes in ways PowerShell misreads.
+      expect(script).not.toContain('"');
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 });
 
@@ -215,14 +278,15 @@ describe("Codex credential health and usage", () => {
     });
   });
 
-  it("reports expired when the ChatGPT access token has passed its exp", async () => {
-    await writeChatGptAuth(
-      createAccessToken({
-        accountId: "account-123",
-        email: "codex@example.com",
-        expSeconds: Math.floor(Date.now() / 1000) - 60,
-      }),
-    );
+  it("reports expired usage only when no refresh token can renew the access token", async () => {
+    const accessToken = createAccessToken({
+      accountId: "account-123",
+      email: "codex@example.com",
+      expSeconds: Math.floor(Date.now() / 1000) - 60,
+    });
+    await writeChatGptAuth(accessToken);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(getCodexProviderHealth()).resolves.toMatchObject({
       health: {
@@ -231,6 +295,15 @@ describe("Codex credential health and usage", () => {
         installedVersion: "0.150.0",
       },
     });
+    // Codex renews it on its next request, so usage is unread, not a sign-in.
+    await expect(getCodexProviderUsage()).resolves.toMatchObject({
+      usage: { status: "error", accountEmail: "codex@example.com" },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await writeAuthJson(
+      JSON.stringify({ tokens: { access_token: accessToken } }),
+    );
     await expect(getCodexProviderUsage()).resolves.toEqual({
       supported: true,
       usage: { status: "expired" },
@@ -254,6 +327,38 @@ describe("Codex credential health and usage", () => {
         planLabel: null,
         accountEmail: null,
       },
+    });
+
+    // A launcher whose native binary is gone must not look ready (#907)...
+    const codex = path.join(homeDir, "bin", "codex");
+    await fs.writeFile(
+      codex,
+      "#!/bin/sh\necho 'Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: pnpm add -g @openai/codex@latest' >&2\nexit 1\n",
+    );
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: {
+        status: "unknown",
+        statusMessage: expect.stringContaining(
+          "Reinstall Codex: pnpm add -g @openai/codex@latest",
+        ),
+      },
+    });
+    // Only this fake bin on PATH, so no real npm runs.
+    vi.stubEnv("PATH", path.dirname(codex));
+    // ...and offers a reinstall instead of looking installed.
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: false,
+      executablePath: codex,
+      installAction: { kind: "install" },
+    });
+    // ...but an unclear probe failure keeps it ready and installed.
+    await fs.writeFile(codex, "#!/bin/sh\nexit 1\n");
+    await expect(getCodexProviderHealth()).resolves.toMatchObject({
+      health: { status: "ready" },
+    });
+    await expect(getCodexProviderInstallationStatus()).resolves.toMatchObject({
+      installed: true,
+      installAction: null,
     });
   });
 
@@ -332,7 +437,10 @@ describe("Codex credential health and usage", () => {
         });
         vi.stubEnv("PATH", `${path.dirname(safe)}${path.delimiter}${binDir}`);
         await expect(getCodexProviderHealth()).resolves.toMatchObject({
-          health: { status: "unauthenticated", loginCommand: `'${safe}' login` },
+          health: {
+            status: "unauthenticated",
+            loginCommand: `'${safe}' login`,
+          },
         });
         expect(await bundledRan()).toBe(false);
       } finally {

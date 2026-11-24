@@ -21,6 +21,7 @@
     "packages/plugin-build/src/generated/",
     "packages/db/drizzle/meta/",
     "*.snapshot.json",
-    "packages/templates/src/templates/"
+    "packages/templates/src/templates/",
+    "apps/app/src/components/ui/tw-animate.css"
   ]
 }

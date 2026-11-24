@@ -1,6 +1,6 @@
 import { getEnvironment, getThread } from "@cloudroom/db";
 import type { EnvironmentRow } from "@cloudroom/db";
-import { PERSONAL_PROJECT_ID, type PromptInput, type Thread } from "@cloudroom/domain";
+import { CLOUD_NATIVE_FORK_PROVIDERS, PERSONAL_PROJECT_ID, type PromptInput, type Thread } from "@cloudroom/domain";
 import type { CreateThreadEnvironmentArgs, ForkThreadRequest } from "@cloudroom/server-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -31,19 +31,6 @@ function requireForkSourceThread(
     );
   }
   return sourceThread;
-}
-
-function requireForkCapableProvider(
-  deps: Pick<ThreadForkDeps, "providerRegistry">,
-  sourceThread: Thread,
-): void {
-  if (!deps.providerRegistry.supportsFork(sourceThread.providerId)) {
-    throw new ApiError(
-      400,
-      "invalid_request",
-      `Provider ${sourceThread.providerId} does not support thread forks`,
-    );
-  }
 }
 
 function requireSourceEnvironment(
@@ -164,6 +151,10 @@ export async function createThreadForkFromRequest(
       : "local");
   // A fork without a first message (a side chat) stays in its source's sandbox, like a Local one (ADR 0189, 0273).
   if (target === "cloud" && isCloudThread(sourceThread) && !request.input) {
+    // Only a fresh side chat, or a copy of a Claude Code or Codex session, starts without a first message.
+    if (!request.fresh && !CLOUD_NATIVE_FORK_PROVIDERS.includes(sourceThread.providerId)) {
+      throw new ApiError(400, "invalid_request", "A Cloud fork needs a first message");
+    }
     const thread = await cloudroom(deps).sideChat(sourceThread, request);
     deps.telemetry.capture({ name: "thread_created", properties: { execution: cloudExecution(deps, thread.id), is_child_thread: false, provider: thread.providerId } });
     return thread;
@@ -174,7 +165,6 @@ export async function createThreadForkFromRequest(
   if (isCloudThread(sourceThread)) {
     return createLocalForkOfCloudFromRequest(deps, sourceThread, request);
   }
-  if (!request.fresh) requireForkCapableProvider(deps, sourceThread);
   const sourceEnvironment = requireSourceEnvironment(deps, sourceThread);
   const sourceExecution = getLastExecutionOptions(deps, sourceThread.id);
   const visibleInput = request.input ?? [];

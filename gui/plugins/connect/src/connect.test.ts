@@ -251,8 +251,8 @@ describe("ShareRegistry", () => {
         },
       },
     });
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
-    const hostResolver = new ShareHostResolver(() => pluginBb.sdk);
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const hostResolver = new ShareHostResolver(() => pluginRoom.sdk);
     const serverHost = {
       id: "host-server",
       name: "Server",
@@ -260,11 +260,11 @@ describe("ShareRegistry", () => {
     };
     const registry = new ShareRegistry({
       kv: store,
-      hosts: pluginBb.hosts,
+      hosts: pluginRoom.hosts,
       hostResolver,
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => credential,
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
     await registry.load();
 
@@ -279,11 +279,11 @@ describe("ShareRegistry", () => {
 
     const reloaded = new ShareRegistry({
       kv: store,
-      hosts: pluginBb.hosts,
+      hosts: pluginRoom.hosts,
       hostResolver,
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => credential,
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
     await reloaded.load();
     expect(await reloaded.list()).toEqual([
@@ -313,7 +313,7 @@ describe("ShareRegistry", () => {
       [SHARES_KV_KEY, { "3000": { port: 3000, createdAt: 123 } }],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const registry = new ShareRegistry({
       kv: {
         async get<T>(key: string) {
@@ -326,15 +326,15 @@ describe("ShareRegistry", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => ({
         serverUrl: "https://sawyer.cloudroom.run",
         handle: "sawyer",
         credential: "bbcred_x",
       }),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -368,7 +368,7 @@ describe("ShareRegistry", () => {
       ],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const registry = new ShareRegistry({
       kv: {
         async get<T>(key: string) {
@@ -381,11 +381,11 @@ describe("ShareRegistry", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => null,
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -415,7 +415,7 @@ describe("ShareRegistry", () => {
       [SHARES_KV_KEY, { "3000": { port: 3000, createdAt: 123 } }],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const registry = new ShareRegistry({
       kv: {
         async get<T>(key: string) {
@@ -428,15 +428,15 @@ describe("ShareRegistry", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => ({
         serverUrl: "https://sawyer.cloudroom.run",
         handle: "sawyer",
         credential: "bbcred_x",
       }),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -465,7 +465,7 @@ describe("ShareRegistry", () => {
       [SHARES_KV_KEY, { "3000": { port: 3000, createdAt: 123 } }],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const registry = new ShareRegistry({
       kv: {
         async get<T>(key: string) {
@@ -478,15 +478,15 @@ describe("ShareRegistry", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => ({
         serverUrl: "https://sawyer.cloudroom.run",
         handle: "sawyer",
         credential: "bbcred_x",
       }),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -522,7 +522,7 @@ describe("ShareRegistry", () => {
       ],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const registry = new ShareRegistry({
       kv: {
         async get<T>(key: string) {
@@ -535,15 +535,15 @@ describe("ShareRegistry", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => ({
         serverUrl: "https://sawyer.cloudroom.run",
         handle: "sawyer",
         credential: "bbcred_x",
       }),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -590,7 +590,7 @@ describe("ShareRegistry", () => {
       ],
     ]);
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const ensureIdentity = vi.fn(async () => {
       throw Object.assign(new Error("host is offline"), {
         body: { code: "connect_host_offline" },
@@ -610,16 +610,16 @@ describe("ShareRegistry", () => {
       },
       hosts: {
         ensureSharedPortTunnel: ensureIdentity,
-        declareSharedPorts: pluginBb.hosts.declareSharedPorts,
+        declareSharedPorts: pluginRoom.hosts.declareSharedPorts,
       },
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => ({
         serverUrl: "https://sawyer.cloudroom.run",
         handle: "sawyer",
         credential: "bbcred_x",
       }),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await registry.load();
@@ -674,7 +674,7 @@ describe("ConnectTunnel share activation", () => {
         },
       },
     });
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const credential = {
       serverUrl: "http://127.0.0.1:1",
       handle: "sawyer",
@@ -704,11 +704,11 @@ describe("ConnectTunnel share activation", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => credential,
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
     const tunnel = new ConnectTunnel({
       store: {
@@ -720,7 +720,7 @@ describe("ConnectTunnel share activation", () => {
       onCredentialRejected: () => {},
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getLoopbackHeaders: () => ({}),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await tunnel.start();
@@ -739,7 +739,7 @@ describe("ConnectTunnel share activation", () => {
 
   it("keeps persisted shares visible in status after an unpaired restart", async () => {
     const fakeHost = createConnectFakeHost();
-    const pluginBb = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
+    const pluginRoom = fakeHost.bb as unknown as Parameters<typeof plugin>[0];
     const kv = new Map<string, unknown>([
       [
         SHARES_KV_KEY,
@@ -765,11 +765,11 @@ describe("ConnectTunnel share activation", () => {
           kv.delete(key);
         },
       },
-      hosts: pluginBb.hosts,
-      hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+      hosts: pluginRoom.hosts,
+      hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getCredential: () => null,
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
     const tunnel = new ConnectTunnel({
       store: {
@@ -781,7 +781,7 @@ describe("ConnectTunnel share activation", () => {
       onCredentialRejected: () => {},
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
       getLoopbackHeaders: () => ({}),
-      log: pluginBb.log,
+      log: pluginRoom.log,
     });
 
     await tunnel.start();

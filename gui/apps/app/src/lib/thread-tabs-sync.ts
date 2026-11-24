@@ -1,4 +1,4 @@
-import { closeSecondaryPanelTabInState } from "@cloudroom/client-core";
+import { closeSecondaryPanelTabInState } from "@/components/right-panel/store/tab-ops";
 import type { QueryClient } from "@tanstack/react-query";
 import {
   threadTabsSchema,
@@ -16,7 +16,7 @@ import {
   areFixedPanelTabsEquivalent,
   type FixedPanelTab,
   type FixedPanelTabsState,
-} from "./fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 
 interface ThreadTabsSyncArgs {
   queryClient: QueryClient;

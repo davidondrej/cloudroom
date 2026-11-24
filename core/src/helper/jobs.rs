@@ -7,13 +7,17 @@ use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub(super) const LEVELS: [&str; 4] = ["off", "read-only", "ask", "full"];
-const LIMIT: usize = 16 * 1024 * 1024;
+pub(super) const LIMIT: usize = 16 * 1024 * 1024;
+// A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
+// longest job line comes from cores up to 0.1.75, which send a job's input inside it as hex, beside a 64 KiB command
+// that JSON escaping can make 6 times longer.
+pub(super) const LINE: usize = 2 * LIMIT + 1024 * 1024;
 // Hex characters per result request: some sandbox proxies drop requests over about 8 MB,
 // and each part must upload within POST on a slow home connection.
 const PART: usize = 1024 * 1024;
@@ -23,21 +27,105 @@ const SCRIPT_TYPES: [&str; 10] = [
 ];
 // Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
 pub(super) const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+const NOT_APPROVED: &str =
+    "The user did not approve this command on their Mac. Do not retry it unless they ask you to.";
+const CHANGED: &str = "The folder changed after it was approved, so this command did not run.";
+
+/// The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..` never
+/// skips a missing part, and its real path must be that same folder. The error is the one starting there would give.
+pub(super) fn real_folder(path: &Path) -> std::result::Result<(String, [u64; 2]), String> {
+    use std::os::unix::fs::MetadataExt;
+    let info = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !info.is_dir() {
+        return Err(std::io::Error::from_raw_os_error(20).to_string()); // ENOTDIR
+    }
+    let real = disk_path(path).unwrap_or_else(|| realpath(path));
+    match std::fs::metadata(&real) {
+        Ok(same) if (same.dev(), same.ino()) == (info.dev(), info.ino()) => Ok((
+            real.to_string_lossy().into_owned(),
+            [info.dev(), info.ino()],
+        )),
+        _ => {
+            Err("The folder changed while the Mac checked it, so this command did not run.".into())
+        }
+    }
+}
+
+/// macOS: an open folder's real path in the letter case stored on disk, as `pwd -P` shows it (F_GETPATH). realpath
+/// keeps the typed case, such as ~/CODE for ~/code. None if it can't tell.
+#[cfg(target_os = "macos")]
+pub(super) fn disk_path(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawFd};
+    unsafe extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    const F_GETPATH: i32 = 50;
+    // Only a folder: a FIFO swapped in at this path would block the open forever.
+    const O_DIRECTORY: i32 = 0x100000;
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY)
+        .open(path)
+        .ok()?;
+    let mut buffer = [0u8; 1024]; // MAXPATHLEN
+    if unsafe { fcntl(folder.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let end = buffer.iter().position(|&byte| byte == 0)?;
+    (end > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..end])))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn disk_path(_: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same folder,
+/// such as other letter case, still counts.
+pub(super) fn in_temp(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let id = |path: &Path| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|info| (info.dev(), info.ino()))
+    };
+    let roots: Vec<_> = TEMP_FOLDERS
+        .iter()
+        .filter_map(|root| id(Path::new(root)))
+        .collect();
+    folder.ancestors().any(|path| {
+        TEMP_FOLDERS.iter().any(|root| path == Path::new(root))
+            || id(path).is_some_and(|path| roots.contains(&path))
+    })
+}
 // A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when PATH puts GNU tar first.
 const COPY_TAR: &str = if cfg!(target_os = "macos") {
     "/usr/bin/tar"
 } else {
     "tar"
 };
+// Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
+const COPY_MODE: &str = if cfg!(target_os = "macos") {
+    "/usr/bin/stat -Lf %OLp"
+} else {
+    "stat -Lc %a"
+};
+// Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
+// attributes hides that +, so also its entries, each on its own line.
+const COPY_ACL: &str = if cfg!(target_os = "macos") {
+    "/bin/ls -ldeL"
+} else {
+    "ls -ldL"
+};
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
 
 // Read-only commands (ADR 0186): no file writes outside temp folders, no signals to other processes, and no tools that
 // drive apps or system settings. Beyond those named tools, they cannot run programs from the writable temp folders, open
-// apps or URLs through Launch Services, send Apple Events, create background jobs, or write preferences through cfprefsd.
-// They also cannot reach this Mac's own servers and sockets or read Cloudroom's folders beyond its tools, so they cannot
-// act through the app or its tokens (ADR 0260). The internet works. Seatbelt's localhost misses IPv4-mapped IPv6, so
-// IPv6 is blocked outright and clients fall back to IPv4.
+// apps or URLs through Launch Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
+// Nothing they start outlives them (end). They also cannot reach this Mac's own servers and sockets or read Cloudroom's
+// folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works. Seatbelt's
+// localhost misses IPv4-mapped IPv6, so IPv6 is blocked outright and clients fall back to IPv4.
 const READ_ONLY: &str = r##"(version 1)(allow default)(deny file-write*)(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))(deny signal (target others))(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/open") (literal "/usr/bin/shortcuts") (literal "/usr/bin/automator") (literal "/bin/launchctl") (literal "/usr/bin/tccutil") (literal "/usr/bin/defaults"))(deny process-exec (subpath "/private/tmp") (subpath "/private/var/folders"))(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents") (global-name "com.apple.lsd.open") (global-name "com.apple.lsd.openurl") (global-name "com.apple.lsd.modifydb"))(deny appleevent-send)(deny job-creation)(deny user-preference-write)(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))(allow network-outbound (literal "/private/var/run/mDNSResponder"))"##;
 // Cloudroom's own tools stay readable in its hidden data folder.
 pub(super) const READ_ONLY_TOOLS: &str = r#"(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))"#;
@@ -49,6 +137,8 @@ const OFF: &str = "Mac access is off.";
 const LIMITED: &str = "This sandbox has only the API keys picked for its Cloud loop, so it can't use the Mac. Do not retry. If the loop needs the Mac, the user can give it all secrets in its Secrets row. That applies from its next run.";
 const UNCONFIRMED_KEYS: &str = "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again.";
 const BAD_COPY: &str = "This copy has a name or place the Mac cannot use, so nothing was copied.";
+const UNCONTAINED: &str =
+    "This Mac can't make sure a read-only command leaves nothing running, so it did not run.";
 
 type Key = (String, String);
 
@@ -137,7 +227,7 @@ fn expanduser(text: &str, home: &Path) -> PathBuf {
 }
 
 /// Python's `shlex.quote`.
-pub(super) fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     if text.is_empty() {
         return "''".into();
     }
@@ -262,20 +352,30 @@ pub(super) fn popup_text(job: &Value, home: &Path) -> String {
     } else {
         String::new()
     };
+    // The folder is the real path the command runs in (refusal resolves it), so `.`, `..` and links can't hide it.
+    let cwd = job["cwd"]
+        .as_str()
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or("~");
+    let shown = match Path::new(cwd).strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        _ => cwd.to_owned(),
+    };
+    let (folder, cut) = visible(&shown, 200, 1);
+    if cut > 0 {
+        warnings += &format!(
+            "Warning: {} more characters of the folder are not shown.\n\n",
+            thousands(cut)
+        );
+    }
     if ["/tmp", "/var/folders", "TMPDIR"]
         .iter()
         .any(|word| raw.contains(word))
+        || in_temp(Path::new(cwd))
     {
         warnings += "Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n";
     }
-    let (folder, cut) = visible(
-        job["cwd"]
-            .as_str()
-            .filter(|cwd| !cwd.is_empty())
-            .unwrap_or("~"),
-        200,
-        1,
-    );
     let mut text = format!(
         "Command:\n{}\n\nFolder: {folder}{}",
         block(&command),
@@ -412,11 +512,38 @@ pub(super) fn copy_command(
     command += r#"[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc '\000' | wc -c) )) = 1 ]; }; "#;
     command += r#"then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; "#;
     command += "if [ $c = 0 ]; then ";
-    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there.
+    // The sandbox makes every file private, so its modes never count (#1066). New files and folders get this Mac's own
+    // (its umask), and executables stay executable. Any failed stat or chmod fails the push before it places anything.
+    command += r#"[ -L "$x/i/$n" ] || chmod -R '=rwX' "$x/i/$n" || { clean; exit 1; }; "#;
+    // A hard-linked file that replaces one here first gets its own copy, so its modes can't reach a linked file.
+    command += r#"find "$x/i/$n" -type f -links +1 -exec sh -c 'h=$1/h p=$2 t=$3; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += r#"[ ! -e "$d" ] || { cp -p -- "$f" "$h" && mv -f -- "$h" "$f"; } || exit; done' sh "$x" "$x/i/$n" "$to" {} + "#;
+    // A file that replaces one here, even through a link, gets its modes, so it is never more readable. The owner can
+    // always read, and an executable runs wherever readable. One stat for each batch, then one chmod per mode for the
+    // files whose mode changes. One with an ACL stops the push, named: the new file would drop it, and its group bits,
+    // which on Linux show the ACL's mask, would let its whole group read it. One listing for each batch.
+    command += r#"|| { clean; exit 1; }; find "$x/i/$n" -type f -exec sh -c 'x=$1 p=$2 t=$3 e="^.{10}[+]|^ [0-9]+: "; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += &format!(
+        r#"if [ -f "$d" ]; then printf "%s\0" "$d" >&3; else d=$f; fi; printf "%s\0" "$d" "$f"; done 3>"$x/r" | xargs -0 {COPY_MODE} >"$x/s" || exit; "#
+    );
+    command += &format!(
+        r#"[ ! -s "$x/r" ] || {{ xargs -0 {COPY_ACL} <"$x/r" >"$x/a" || exit; ! grep -Eq "$e" "$x/a" || for f; do d=$t${{f#"$p"}}; "#
+    );
+    command += &format!(
+        r#"[ -f "$d" ] && {COPY_ACL} "$d" | grep -Eq "$e" && {{ printf "%s has an access control list (ACL) that replacing it would drop, so nothing was copied\n" "$d" >&2; exit 1; }}; done; }}; "#
+    );
+    command += r#"for f; do read -r m && read -r o || exit; "#;
+    command += r#"m=$((0$m & 0777 | 0400)); [ -x "$f" ] && m=$((m | (m & 0444) >> 2)); [ $m = $((0$o)) ] || printf "%s\0" "$f" >>"$x/m$m"; "#;
+    command += r#"done <"$x/s"; for g in "$x"/m*; do [ -f "$g" ] || break; xargs -0 chmod "$(printf %o "${g#"$x"/m}")" <"$g" || exit; done; rm -f "$x"/m*' "#;
+    command += r#"sh "$x" "$x/i/$n" "$to" {} + || { clean; exit 1; }; "#;
+    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there, and
+    // unpacked with exactly its modes, under umask 0 in a subshell, so the login shell's exit hooks keep the user's. A
+    // push never changes a folder already there, sticky and setgid bits included: bsdtar (macOS, some Linux) leaves it as
+    // is without -p and ignores TAR_OPTIONS; GNU tar does only with both of these options.
     if inside {
         command += r#"{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; } || { (cd -- "$x/i" && "#;
         command += &format!(
-            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && {COPY_TAR} -xf "$x/p.tar" -C "$b"; }}; "#
+            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && (umask 0 && TAR_OPTIONS="--no-overwrite-dir -p" {COPY_TAR} -xf "$x/p.tar" -C "$b"); }}; "#
         );
     } else {
         command += &format!(r#"{taken} && mv -- "$x/i/$n" "$to"; "#);
@@ -495,8 +622,9 @@ fn hidden_folders(data: &Path, home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     )
 }
 
-/// sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens.
-pub(super) fn read_only(data: &Path, home: &Path) -> Vec<String> {
+/// sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens. The sandbox
+/// denies the `marks`, names no Mach service has, so `end` can find all the command started.
+pub(super) fn read_only(data: &Path, home: &Path, marks: &[&str]) -> Vec<String> {
     let data = realpath(data); // Seatbelt matches real paths.
     let (folders, machines) = hidden_folders(&data, home);
     let mut params = vec![
@@ -521,9 +649,19 @@ pub(super) fn read_only(data: &Path, home: &Path) -> Vec<String> {
             .map(|n| format!(" (subpath (param \"{name}_{n}\"))"))
             .collect::<String>()
     };
+    // Labels and hex only, so nothing to escape.
+    let names: String = marks
+        .iter()
+        .map(|mark| format!(" (global-name \"{mark}\")"))
+        .collect();
+    let names = if names.is_empty() {
+        names
+    } else {
+        format!("(deny mach-lookup{names})")
+    };
     // Machine installs come last, after the tools and temp-folder exceptions, so neither can reopen them.
     let profile = format!(
-        "{READ_ONLY}(deny file-read*{}){READ_ONLY_TOOLS}(deny file-read* file-write*{} {READ_ONLY_OLD_KEYS})",
+        "{READ_ONLY}{names}(deny file-read*{}){READ_ONLY_TOOLS}(deny file-read* file-write*{} {READ_ONLY_OLD_KEYS})",
         subpaths("FOLDER", folders.len()),
         subpaths("MACHINE", machines.len())
     );
@@ -550,6 +688,34 @@ struct Passwd {
     shell: *mut c_char,
     #[cfg(target_os = "macos")]
     expire: i64,
+}
+
+/// This computer's name as the user knows it, as client.py's computer_name (#608).
+fn computer_name() -> String {
+    unsafe extern "C" {
+        fn gethostname(name: *mut c_char, length: usize) -> i32;
+    }
+    let scutil = cfg!(target_os = "macos")
+        .then(|| {
+            let output = std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+                .ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+        .flatten()
+        .filter(|name| !name.is_empty());
+    let name = scutil.unwrap_or_else(|| {
+        let mut buffer = [0 as c_char; 256];
+        let code = unsafe { gethostname(buffer.as_mut_ptr(), buffer.len() - 1) };
+        if code != 0 {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    });
+    name.chars().take(64).collect()
 }
 
 /// This user's login shell, as `pwd.getpwuid(os.getuid()).pw_shell`.
@@ -587,6 +753,139 @@ fn login_shell() -> Option<String> {
 unsafe extern "C" {
     fn setsid() -> i32;
     fn killpg(group: i32, signal: i32) -> i32;
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn proc_listallpids(buffer: *mut i32, size: i32) -> i32;
+    fn sandbox_check(pid: i32, operation: *const c_char, kind: i32, ...) -> i32;
+    fn dlsym(handle: *mut std::ffi::c_void, symbol: *const c_char) -> *mut std::ffi::c_void;
+}
+
+/// libSystem's process list and sandbox check, as client.py's `sandbox_checks`. No process carries a mark off macOS,
+/// where read-only commands never run.
+struct Checks {
+    #[cfg(target_os = "macos")]
+    kind: i32,
+}
+
+impl Checks {
+    /// An error when this Mac can't tell.
+    #[cfg(target_os = "macos")]
+    fn new() -> std::io::Result<Checks> {
+        // SANDBOX_FILTER_GLOBAL_NAME, and SANDBOX_CHECK_NO_REPORT (looked up, as it is not public) so checks aren't
+        // logged.
+        let report = unsafe { dlsym(-2isize as *mut _, c"SANDBOX_CHECK_NO_REPORT".as_ptr()) };
+        if report.is_null() {
+            return Err(std::io::Error::other("This Mac cannot check sandboxes"));
+        }
+        Ok(Checks {
+            kind: 2 | unsafe { *report.cast::<i32>() },
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn new() -> std::io::Result<Checks> {
+        Ok(Checks {})
+    }
+
+    /// Every PID.
+    #[cfg(target_os = "macos")]
+    fn list(&self) -> std::io::Result<Vec<i32>> {
+        let mut size = usize::try_from(unsafe { proc_listallpids(std::ptr::null_mut(), 0) })
+            .unwrap_or(0)
+            + 256;
+        loop {
+            let mut pids = vec![0i32; size];
+            let bytes = i32::try_from(size * 4).map_err(std::io::Error::other)?;
+            let found = unsafe { proc_listallpids(pids.as_mut_ptr(), bytes) };
+            // 0 is an error too: the list always holds launchd and this helper.
+            let found = usize::try_from(found)
+                .ok()
+                .filter(|found| *found > 0)
+                .ok_or_else(|| std::io::Error::other("This Mac cannot list its processes"))?;
+            if found < size {
+                pids.truncate(found);
+                pids.retain(|pid| *pid > 0);
+                return Ok(pids);
+            }
+            size *= 2; // A full list may have left some out.
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn list(&self) -> std::io::Result<Vec<i32>> {
+        Ok(Vec::new())
+    }
+
+    /// Whether this process's sandbox denies names[0] (a mark, `read_only`) but allows names[1].
+    #[cfg(target_os = "macos")]
+    fn covered(&self, pid: i32, names: &[std::ffi::CString; 2]) -> bool {
+        let denied = |name: &std::ffi::CString| unsafe {
+            sandbox_check(pid, c"mach-lookup".as_ptr(), self.kind, name.as_ptr())
+        };
+        denied(&names[0]) == 1 && denied(&names[1]) == 0
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn covered(&self, _: i32, _: &[std::ffi::CString; 2]) -> bool {
+        false
+    }
+}
+
+/// The names for `Checks::covered`: the mark, and one its processes' sandbox allows, by default a random one beside it.
+/// Many other sandboxes deny every name, and so do processes that have ended, so those never count.
+fn marks(mark: &str, allowed: Option<&str>) -> std::io::Result<[std::ffi::CString; 2]> {
+    let allowed = match allowed {
+        Some(allowed) => allowed.to_owned(),
+        None => format!("{mark}.{}", &super::uuid4()?[..16]),
+    };
+    Ok([
+        std::ffi::CString::new(mark)?,
+        std::ffi::CString::new(allowed)?,
+    ])
+}
+
+/// This user's live processes in a read-only sandbox with this mark (`read_only`). They can leave their process group,
+/// session, or parent, never their sandbox. An error when this Mac can't tell. As client.py's `marked`.
+fn marked(mark: &str, allowed: Option<&str>) -> std::io::Result<Vec<i32>> {
+    let (checks, names) = (Checks::new()?, marks(mark, allowed)?);
+    let mut pids = checks.list()?;
+    pids.retain(|pid| checks.covered(*pid, &names));
+    Ok(pids)
+}
+
+/// Ends every process `marked` would find, each as soon as it is found. One may start another and end before its own
+/// check, so the list is taken again until 20 lists in a row show none alive; after the first, only processes new to
+/// the list, and those killed but not gone yet, need a check. SIGKILL, since it only read and a handler could start
+/// more. A PID is killed right after its check, and macOS hands out new PIDs in order, so it is still that process's.
+/// True once none is left; false if some still run after 5 s, or if this Mac can't tell. Blocks, as client.py's `end`.
+pub(super) fn end(mark: &str, allowed: Option<&str>) -> bool {
+    let (Ok(checks), Ok(names)) = (Checks::new(), marks(mark, allowed)) else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (mut previous, mut alive, mut clean) = (HashSet::new(), HashSet::new(), 0);
+    while clean < 20 {
+        let Ok(pids) = checks.list() else {
+            return false;
+        };
+        let mut found = HashSet::new();
+        let fresh = pids.iter().filter(|pid| !previous.contains(*pid));
+        for &pid in alive.iter().chain(fresh) {
+            if checks.covered(pid, &names) {
+                unsafe { kill(pid, SIGKILL) };
+                found.insert(pid);
+            }
+        }
+        clean = if found.is_empty() { clean + 1 } else { 0 };
+        if !found.is_empty() && Instant::now() > deadline {
+            return false;
+        }
+        (previous, alive) = (pids.into_iter().collect(), found);
+    }
+    true
 }
 
 /// A new session for each command and popup, so a stop ends everything it started.
@@ -614,13 +913,38 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 #[derive(Default)]
 struct Processes {
     running: HashMap<String, u32>,
-    /// Jobs the agent stopped before they started; execute skips them.
+    /// How many jobs taken from the streams are not finished, by ID (two sandboxes' Cores can use the same one), and
+    /// which of those IDs the agent stopped before they started; execute skips those. A stop for any other job is
+    /// dropped, so a sandbox's Core can't fill this.
+    taken: HashMap<String, usize>,
     cancelled: HashSet<String>,
+    /// Each mark to end (`read_only`); `end_unwanted` ends each until nothing carries it, starting with what earlier runs
+    /// left.
+    sandboxes: HashMap<String, Sandbox>,
+    /// The helper is stopping: no command starts any more.
+    stopping: bool,
+}
+
+/// A mark to end: the core whose stream keeps it (None: none), the name its processes must allow (`marked`), and its
+/// running shell.
+#[derive(Clone, Default)]
+struct Sandbox {
+    core: Option<Key>,
+    allowed: Option<String>,
+    shell: Option<u32>,
 }
 
 pub(super) struct Jobs {
     shared: Arc<Shared>,
     folder: PathBuf,
+    /// This computer's name, sent with the job stream so `mac run` and `mac status` say which Mac runs commands (#608).
+    name: String,
+    /// Read-only commands carry this helper's mark (from its folder, as its LaunchAgent label: a dev build's helper has
+    /// another), this run's (`boot`), and their own (`read_only`).
+    mark: String,
+    boot: String,
+    /// `end` was seen to work on this Mac (`containable`).
+    contained: AtomicBool,
     processes: Mutex<Processes>,
     /// Ask first: one popup at a time.
     asking: tokio::sync::Mutex<()>,
@@ -630,22 +954,22 @@ pub(super) struct Jobs {
     /// Whether each sandbox core has a key list, asked once per wake, one question at a time.
     lists: Mutex<HashMap<Key, bool>>,
     checking: tokio::sync::Mutex<()>,
-    wanted: Mutex<HashSet<Key>>,
+    pub(super) wanted: Mutex<HashSet<Key>>,
     /// Each Mac command also goes to the website's Jev check (ADR 0224). It never delays the job: at most four reports
-    /// in flight, a repeated command is skipped for an hour, and failures are dropped.
-    reviews: Mutex<HashMap<(String, String), Instant>>,
+    /// in flight, a repeated command is skipped for an hour, and failures are dropped. Commands are kept as fixed-size
+    /// hashes, at most 4,096 of them, so a sandbox's many long commands can't fill memory.
+    reviews: Mutex<HashMap<String, Instant>>,
     slots: AtomicUsize,
 }
 
-pub(super) async fn serve(shared: Arc<Shared>) {
-    let jobs = Arc::new(Jobs::new(shared.clone()));
+pub(super) async fn serve(jobs: Arc<Jobs>) {
     let mut streams: HashMap<Key, tokio::task::JoinHandle<()>> = HashMap::new();
     // One job stream per reachable core: the VM's, and each awake sandbox's while it stays awake.
     loop {
         let config = jobs.enabled();
         jobs.track(level(config.as_ref().unwrap_or(&Value::Null)));
         let listed = match &config {
-            Some(config) => net::cores(&shared, config).await.ok(),
+            Some(config) => net::cores(&jobs.shared, config).await.ok(),
             None => Some(Vec::new()),
         };
         if let Some(listed) = listed {
@@ -668,16 +992,32 @@ pub(super) async fn serve(shared: Arc<Shared>) {
             }
         }
         streams.retain(|_, stream| !stream.is_finished());
+        jobs.end_unwanted().await; // Also when the list failed: it ends only what no listed stream keeps.
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
 impl Jobs {
     pub(super) fn new(shared: Arc<Shared>) -> Jobs {
+        let mark = format!("{}.read-only", super::label(&shared.folder));
+        // Marks stay short, well below Mach's 128-byte names.
+        let boot = format!("{mark}.{}", shared.boot.get(..16).unwrap_or(&shared.boot));
+        let earlier = Sandbox {
+            allowed: Some(boot.clone()),
+            ..Sandbox::default()
+        };
+        let processes = Processes {
+            sandboxes: HashMap::from([(mark.clone(), earlier)]),
+            ..Processes::default()
+        };
         Jobs {
             folder: shared.folder.clone(),
+            name: computer_name(),
+            mark,
+            boot,
+            contained: AtomicBool::new(false),
             shared,
-            processes: Mutex::default(),
+            processes: Mutex::new(processes),
             asking: tokio::sync::Mutex::new(()),
             trust: Mutex::default(),
             lists: Mutex::default(),
@@ -715,6 +1055,125 @@ impl Jobs {
         }
     }
 
+    /// Ends each read-only command whose core's stream ended (Mac access Off, sign-out, or a sandbox no longer awake),
+    /// and what earlier runs or a failed `end` left, until nothing carries its mark.
+    pub(super) async fn end_unwanted(&self) {
+        let wanted = self.wanted.lock().unwrap().clone();
+        let unwanted: Vec<(String, Sandbox)> = (self.processes.lock().unwrap().sandboxes.iter())
+            .filter(|(_, sandbox)| (sandbox.core.as_ref()).is_none_or(|key| !wanted.contains(key)))
+            .map(|(mark, sandbox)| (mark.clone(), sandbox.clone()))
+            .collect();
+        if unwanted.is_empty() {
+            return;
+        }
+        let unwanted_count = unwanted.len();
+        let ended = tokio::task::spawn_blocking(move || {
+            (unwanted.into_iter())
+                .filter(|(mark, sandbox)| {
+                    if let Some(shell) = sandbox.shell {
+                        // Its sandbox may not be set up yet. `run` drops the PID once it reaps the shell, and macOS
+                        // hands out new PIDs in order, so it is still this shell's.
+                        unsafe { kill(shell as i32, SIGKILL) };
+                    }
+                    end(mark, sandbox.allowed.as_deref())
+                })
+                .map(|(mark, _)| mark)
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        let mut processes = self.processes.lock().unwrap();
+        for mark in &ended {
+            processes.sandboxes.remove(mark);
+        }
+        if ended.len() < unwanted_count {
+            // The next read-only command checks again first (`containable`).
+            self.contained.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether `end` works on this Mac and spares other sandboxes, tried on two `sleep`s: `marked` must find one whose
+    /// sandbox denies a test mark, and not one whose sandbox denies every name but one, as apps' sandboxes do. Checked
+    /// once per run, and again after a failure. Without it, read-only commands don't run. As client.py's `containable`.
+    async fn containable(&self) -> bool {
+        if self.contained.load(Ordering::SeqCst) {
+            return true;
+        }
+        let mark = format!("{}.check", self.boot);
+        let contained = tokio::task::spawn_blocking(move || {
+            let open = format!("{mark}.open");
+            let rules = [
+                format!("(deny mach-lookup (global-name \"{mark}\"))"),
+                format!("(deny mach-lookup)(allow mach-lookup (global-name \"{open}\"))"),
+            ];
+            let mut tests = Vec::new();
+            for rule in rules {
+                let test = std::process::Command::new("/usr/bin/sandbox-exec")
+                    .args([
+                        "-p",
+                        &format!("(version 1)(allow default){rule}"),
+                        "/bin/sleep",
+                        "10",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                if let Ok(test) = test {
+                    tests.push(test);
+                }
+            }
+            let mut contained = false;
+            if let [ours, apps] = &tests[..] {
+                let (ours, apps) = (ours.id() as i32, apps.id() as i32);
+                let has = |pid, allowed| marked(&mark, allowed).map(|pids| pids.contains(&pid));
+                for _ in 0..200 {
+                    // Until both sandboxes are set up.
+                    match (has(ours, None), has(apps, Some(&open))) {
+                        (Ok(true), Ok(true)) => {
+                            contained = has(apps, None).is_ok_and(|found| !found);
+                            break;
+                        }
+                        (Ok(_), Ok(_)) => std::thread::sleep(Duration::from_millis(10)),
+                        _ => break,
+                    }
+                }
+            }
+            for test in &mut tests {
+                let _ = test.kill();
+                let _ = test.wait();
+            }
+            contained
+        })
+        .await
+        .unwrap_or(false);
+        if contained {
+            self.contained.store(true, Ordering::SeqCst);
+        }
+        contained
+    }
+
+    /// The helper is stopping: no command starts any more, and none of its read-only commands outlives it.
+    pub(super) async fn close(&self) {
+        let shells: Vec<u32> = {
+            let mut processes = self.processes.lock().unwrap();
+            processes.stopping = true;
+            processes
+                .sandboxes
+                .values()
+                .filter_map(|sandbox| sandbox.shell)
+                .collect()
+        };
+        let mark = self.mark.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            for shell in shells {
+                unsafe { kill(shell as i32, SIGKILL) }; // As in `end_unwanted`.
+            }
+            end(&mark, None)
+        })
+        .await;
+    }
+
     async fn follow(self: Arc<Self>, core: Core, device: String) {
         let mut delay = 2;
         while self.wanted.lock().unwrap().contains(&core.key) {
@@ -748,10 +1207,17 @@ impl Jobs {
         }
     }
 
-    async fn stream(self: &Arc<Self>, core: &Core, device: &str, opened: &mut bool) -> Result<()> {
+    pub(super) async fn stream(
+        self: &Arc<Self>,
+        core: &Core,
+        device: &str,
+        opened: &mut bool,
+    ) -> Result<()> {
         let url = format!(
-            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true",
-            core.url, self.shared.boot
+            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true&name={}",
+            core.url,
+            self.shared.boot,
+            quote_url(&self.name)
         );
         let mut request = self
             .shared
@@ -779,9 +1245,15 @@ impl Jobs {
             .map_err(|_| timeout())?
             .map_err(net::network_error)?
         {
+            // What was kept holds no line break, so only the new bytes are searched.
+            let mut from = buffer.len();
             buffer.extend_from_slice(&chunk);
-            while let Some(end) = buffer.iter().position(|byte| *byte == b'\n') {
-                let line: Vec<u8> = buffer.drain(..=end).collect();
+            while let Some(end) = buffer[from..].iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = buffer.drain(..=from + end).collect();
+                from = 0;
+                if line.len() > LINE {
+                    return Err(Error::value("Mac job is too large"));
+                }
                 let line = String::from_utf8_lossy(&line);
                 let line = line.trim_end_matches(['\r', '\n']);
                 if let Some(name) = line.strip_prefix("event:") {
@@ -790,13 +1262,7 @@ impl Jobs {
                     let data: Value = serde_json::from_str(data)
                         .map_err(|error| Error::value(error.to_string()))?;
                     match event.as_deref() {
-                        Some("job") => {
-                            tokio::spawn(self.clone().execute(
-                                core.clone(),
-                                device.to_owned(),
-                                data,
-                            ));
-                        }
+                        Some("job") => self.take(core, device, data),
                         Some("cancel") => self.cancel(data["id"].as_str().unwrap_or_default()),
                         _ => {}
                     }
@@ -807,16 +1273,47 @@ impl Jobs {
                     return Ok(());
                 }
             }
+            if buffer.len() > LINE {
+                return Err(Error::value("Mac job is too large"));
+            }
         }
         Ok(())
     }
 
+    /// Starts a job from the stream. Until it ends, a stop for it is kept (see cancel).
+    fn take(self: &Arc<Self>, core: &Core, device: &str, job: Value) {
+        let id = job["id"].as_str().unwrap_or_default().to_owned();
+        *self
+            .processes
+            .lock()
+            .unwrap()
+            .taken
+            .entry(id.clone())
+            .or_default() += 1;
+        let (jobs, core, device) = (self.clone(), core.clone(), device.to_owned());
+        tokio::spawn(async move {
+            jobs.clone().execute(core, device, job).await;
+            let mut processes = jobs.processes.lock().unwrap();
+            if let Some(count) = processes.taken.get_mut(&id) {
+                *count -= 1;
+                if *count == 0 {
+                    processes.taken.remove(&id);
+                    processes.cancelled.remove(&id);
+                }
+            }
+        });
+    }
+
     /// A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
-    /// Older cores send it inside the job instead. None if it can't be downloaded.
+    /// Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit.
     async fn stdin(&self, core: &Core, device: &str, job: &Value) -> Option<String> {
-        let size = job["stdin_bytes"].as_u64().unwrap_or(0) as usize;
+        let size = match &job["stdin_bytes"] {
+            Value::Null => 0,
+            size => size.as_u64().filter(|size| *size <= LIMIT as u64)? as usize,
+        };
         if size == 0 {
-            return Some(job["stdin"].as_str().unwrap_or_default().to_owned());
+            let stdin = job["stdin"].as_str().unwrap_or_default();
+            return (stdin.len() <= 2 * LIMIT).then(|| stdin.to_owned());
         }
         let url = format!(
             "{}/v1/mac/jobs/{}/stdin?device={}",
@@ -834,7 +1331,8 @@ impl Jobs {
                 Ok(mut response) => {
                     let mut data = Vec::new();
                     while let Ok(Some(chunk)) = response.chunk().await {
-                        data.extend_from_slice(&chunk);
+                        // At most one byte past the size, as client.py reads.
+                        data.extend_from_slice(&chunk[..chunk.len().min(size + 1 - data.len())]);
                         if data.len() > size {
                             break;
                         }
@@ -904,15 +1402,25 @@ impl Jobs {
         limited.then(|| LIMITED.into())
     }
 
-    /// Why this job may not run as asked, or None. Everything else that is not full access runs read-only.
-    pub(super) async fn refusal(&self, core: &Core, job: &mut Value) -> Option<String> {
+    /// The access level, and why this sandbox may not use the Mac at all now (Off or a key list), or None.
+    async fn closed(&self, core: &Core) -> (&'static str, Option<String>) {
         let current = level(&self.enabled().unwrap_or(Value::Null));
         self.track(current);
         if current == "off" {
-            return Some(OFF.into());
+            return (current, Some(OFF.into()));
         }
-        if let Some(limited) = self.limited(core).await {
-            return Some(limited);
+        (current, self.limited(core).await)
+    }
+
+    /// Why this job may not run as asked, or None. Everything else that is not full access runs read-only.
+    pub(super) async fn refusal(&self, core: &Core, job: &mut Value) -> Option<String> {
+        // Only Ask first's own check below approves a folder, never the job itself.
+        if let Some(fields) = job.as_object_mut() {
+            fields.remove("approvedFolder");
+        }
+        let (current, closed) = self.closed(core).await;
+        if closed.is_some() {
+            return closed;
         }
         // After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
         if let Some(unusable) = as_copy(job, &home(), &TEMP_FOLDERS) {
@@ -930,7 +1438,23 @@ impl Jobs {
         if current == "read-only" {
             return Some("Mac access is Read-only, so this command cannot change the Mac. The user can switch it to Ask first or Full in the Cloudroom sidebar.".into());
         }
-        if current == "ask" && self.approve(core, job).await {
+        if current != "ask" {
+            return Some(NOT_APPROVED.into());
+        }
+        // Ask first shows, and then runs in, the same real folder: never the agent's text, whose `..` or links could point
+        // elsewhere, such as a temp folder it filled.
+        let cwd = job["cwd"]
+            .as_str()
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or("~");
+        match real_folder(&home().join(expanduser(cwd, &home()))) {
+            Ok((real, id)) => {
+                job["cwd"] = json!(real);
+                job["approvedFolder"] = json!(id);
+            }
+            Err(error) => return Some(error),
+        }
+        if self.approve(core, job).await {
             // The user may have lowered Mac access while the popup was open.
             let now = level(&self.enabled().unwrap_or(Value::Null));
             return if ["ask", "full"].contains(&now) {
@@ -939,7 +1463,7 @@ impl Jobs {
                 Some("Mac access was lowered, so this command did not run.".into())
             };
         }
-        Some("The user did not approve this command on their Mac. Do not retry it unless they ask you to.".into())
+        Some(NOT_APPROVED.into())
     }
 
     async fn approve(&self, core: &Core, job: &Value) -> bool {
@@ -985,10 +1509,13 @@ impl Jobs {
             return;
         };
         let command = job["command"].as_str().unwrap_or_default().to_owned();
-        let key = (core.url.clone(), command.clone());
+        let key = super::sha256(format!("{}\0{command}", core.url).as_bytes());
         {
             let mut sent = self.reviews.lock().unwrap();
             sent.retain(|_, at| at.elapsed() <= Duration::from_secs(3600));
+            if sent.len() >= 4096 {
+                sent.clear();
+            }
             if sent.contains_key(&key) || self.slots.fetch_add(1, Ordering::SeqCst) >= 4 {
                 if !sent.contains_key(&key) {
                     self.slots.fetch_sub(1, Ordering::SeqCst);
@@ -1055,19 +1582,21 @@ impl Jobs {
             }
         }
         // Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
-        let stdin = if confirmed {
-            self.stdin(&core, &device, &job).await
+        // Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
+        let mut refused = if confirmed {
+            self.closed(&core).await.1
         } else {
-            Some(String::new())
-        };
-        job["stdin"] = json!(stdin);
-        let refused = if !confirmed {
             Some("The Mac could not confirm this command with the cloud, so it did not run. Try again.".to_owned())
-        } else if stdin.is_none() {
-            Some("The Mac could not download this command's input from the cloud, so it did not run. Try again.".to_owned())
-        } else {
-            self.refusal(&core, &mut job).await
         };
+        if refused.is_none() {
+            refused = match self.stdin(&core, &device, &job).await {
+                Some(stdin) => {
+                    job["stdin"] = json!(stdin);
+                    self.refusal(&core, &mut job).await
+                }
+                None => Some("The Mac could not download this command's input from the cloud, so it did not run. Try again.".to_owned()),
+            };
+        }
         // Refused commands are checked too, but a script file is read only for a command that will run.
         self.review(
             &core,
@@ -1077,8 +1606,12 @@ impl Jobs {
         );
         let full = level(&self.enabled().unwrap_or(Value::Null)) == "full";
         // A push into a temp folder runs read-only even once approved, since agents can swap paths there.
-        let sandboxed =
+        let mut sandboxed =
             refused.is_none() && (!truthy(&job["write"]) || truthy(&job["sandbox"])) && !full;
+        if sandboxed && !self.containable().await {
+            refused = Some(UNCONTAINED.to_owned());
+            sandboxed = false;
+        }
         let data = Path::new(text(&core.config, "connectionFile").unwrap_or("/"))
             .parent()
             .unwrap_or(Path::new("/"))
@@ -1088,8 +1621,15 @@ impl Jobs {
                 json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(reason.as_bytes()), "truncated": false})
             }
             None => {
-                self.run(&job, sandboxed, &data, text(&core.config, "shellPath"))
-                    .await
+                let sandbox = sandboxed.then_some(&core.key);
+                self.run(
+                    &job,
+                    sandbox,
+                    &data,
+                    text(&core.config, "shellPath"),
+                    text(&core.config, "serverUrl"),
+                )
+                .await
             }
         };
         // The result survives disconnects: retry until Core accepts it, forgets the job, or an hour passes.
@@ -1102,15 +1642,25 @@ impl Jobs {
         }
     }
 
-    /// Runs one approved job as this user, through the login shell, and returns its result.
+    /// Runs one approved job as this user, through the login shell, and returns its result. With `sandbox`, the key of
+    /// the core that sent it, it runs read-only, and everything it starts ends with it or with that core's stream.
     pub(super) async fn run(
         &self,
         job: &Value,
-        sandboxed: bool,
+        sandbox: Option<&Key>,
         data: &Path,
         saved_path: Option<&str>,
+        server: Option<&str>,
     ) -> Value {
         let id = job["id"].as_str().unwrap_or_default().to_owned();
+        let sandboxed = sandbox.is_some();
+        // Never the job's ID, which a sandbox can pick.
+        let mark = match sandbox.map(|_| super::uuid4()).transpose() {
+            Ok(token) => token.map(|token| format!("{}.{}", self.boot, &token[..16])),
+            Err(error) => {
+                return json!({"state": "done", "code": 127, "stdout": "", "stderr": hex(error.to_string().as_bytes()), "truncated": false});
+            }
+        };
         let login = login_shell().unwrap_or_else(|| "/bin/zsh".into());
         let fish = login.ends_with("/fish");
         // As in Local threads, Cloudroom's own tools come first, then the PATH the app read from an interactive login
@@ -1123,26 +1673,57 @@ impl Jobs {
             tools += if fish { " " } else { ":" };
             tools += &quote(saved);
         }
-        let path = if fish {
+        let mut path = if fish {
             format!("set -gx PATH {tools} $PATH; ")
         } else {
             format!("PATH={tools}:\"$PATH\"; ")
         };
+        // A nested room-cli reaches the app that owns this helper, not a ROOM_SERVER_URL left in the helper's or the
+        // login shell's environment, nor the default port of another app such as a Dev build (#1243, #1290).
+        if let Some(server) = server {
+            path += &if fish {
+                format!("set -gx ROOM_SERVER_URL {}; ", quote(server))
+            } else {
+                format!("export ROOM_SERVER_URL={}; ", quote(server))
+            };
+        }
         let raw = job["command"].as_str().unwrap_or_default();
         // Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
-        // hands the unchanged command to sh.
-        let line = if fish {
-            format!(
-                "exec /bin/sh -c '{}'",
-                raw.replace('\\', "\\\\").replace('\'', "\\'")
-            )
+        // hands the unchanged command to sh. Inside fish's '…' only \ and ' are special.
+        let fish_quote =
+            |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+        let mut line = if fish {
+            format!("exec /bin/sh -c {}", fish_quote(raw))
         } else {
             raw.to_owned()
         };
-        let mut argv = if sandboxed {
-            read_only(data, &home())
-        } else {
-            Vec::new()
+        // An approved command must start in its folder, whatever the login files did: builtins, so their functions can't
+        // pose as cd, and the folder checked once there (#2470). zsh's `command` skips builtins; dash and ksh have no
+        // `builtin`, so other shells use `command`.
+        let approved = job["cwd"]
+            .as_str()
+            .filter(|_| !job["approvedFolder"].is_null());
+        if let Some(cwd) = approved {
+            line = if fish {
+                let (cwd, changed) = (fish_quote(cwd), fish_quote(CHANGED));
+                format!(
+                    "builtin cd {cwd}; and builtin test (builtin pwd -P) = {cwd}; or begin; builtin echo {changed} >&2; builtin exit 126; end; {line}"
+                )
+            } else {
+                let (cwd, changed) = (quote(cwd), quote(CHANGED));
+                let b = if login.ends_with("/zsh") {
+                    "builtin"
+                } else {
+                    "command"
+                };
+                format!(
+                    "{b} cd -- {cwd} && {b} test \"$({b} pwd -P)\" = {cwd} || {{ {b} echo {changed} >&2; {b} exit 126; }}; {line}"
+                )
+            };
+        }
+        let mut argv = match &mark {
+            Some(mark) => read_only(data, &home(), &[&self.mark, &self.boot, mark]),
+            None => Vec::new(),
         };
         argv.extend([login, "-lc".into(), path + &line]);
         let folder = home().join(expanduser(
@@ -1152,16 +1733,38 @@ impl Jobs {
                 .unwrap_or("~"),
             &home(),
         ));
+        // The folder the user approved must still be the same folder, at the same real path.
+        if let Some(cwd) = approved
+            && real_folder(&folder)
+                != Ok((
+                    cwd.to_owned(),
+                    serde_json::from_value(job["approvedFolder"].clone()).unwrap_or_default(),
+                ))
+        {
+            return json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(CHANGED.as_bytes()), "truncated": false});
+        }
         let mut result =
             json!({"state": "done", "code": 127, "stdout": "", "stderr": "", "truncated": false});
         let spawned = {
             // A stop that arrives while the command starts either skips or kills it.
             let mut processes = self.processes.lock().unwrap();
-            if processes.cancelled.remove(&id) {
+            let denied = |reason| {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
-                    "The agent stopped this command before it started, so it did not run.",
+                    reason,
                 ))
+            };
+            if processes.cancelled.remove(&id) {
+                denied("The agent stopped this command before it started, so it did not run.")
+            } else if processes.stopping {
+                denied(
+                    "Cloudroom on the Mac is stopping, so this command did not run. Try again in a minute.",
+                )
+            } else if sandbox.is_some_and(|key| !self.wanted.lock().unwrap().contains(key)) {
+                // end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
+                denied(
+                    "The Mac stopped taking commands from this sandbox, so this command did not run.",
+                )
             } else {
                 let spawned = command(&argv[0])
                     .args(&argv[1..])
@@ -1174,6 +1777,14 @@ impl Jobs {
                     && let Some(pid) = child.id()
                 {
                     processes.running.insert(id.clone(), pid);
+                    if let (Some(mark), Some(key)) = (&mark, sandbox) {
+                        let running = Sandbox {
+                            core: Some(key.clone()),
+                            allowed: None,
+                            shell: Some(pid),
+                        };
+                        processes.sandboxes.insert(mark.clone(), running);
+                    }
                 }
                 spawned
             }
@@ -1220,6 +1831,11 @@ impl Jobs {
             });
         }
         let status = child.wait().await;
+        if let Some(mark) = &mark
+            && let Some(sandbox) = self.processes.lock().unwrap().sandboxes.get_mut(mark)
+        {
+            sandbox.shell = None; // Reaped: never signal its PID again.
+        }
         let code = status.map(|status| {
             use std::os::unix::process::ExitStatusExt;
             status
@@ -1227,11 +1843,29 @@ impl Jobs {
                 .unwrap_or_else(|| -status.signal().unwrap_or(1))
         });
         result["code"] = json!(code.unwrap_or(127));
+        // A read-only command leaves nothing running, so its output ends here too.
+        let ended = match mark.clone() {
+            Some(mark) => {
+                (tokio::task::spawn_blocking(move || end(&mark, None)).await).unwrap_or(false)
+            }
+            None => false,
+        };
         for task in [out_task, err_task] {
             // A background process may keep the pipe open: stop waiting after 2 s, but never stop reading.
             let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
         }
-        self.processes.lock().unwrap().running.remove(&id);
+        {
+            let mut processes = self.processes.lock().unwrap();
+            processes.running.remove(&id);
+            if let Some(mark) = mark {
+                if ended {
+                    processes.sandboxes.remove(&mark);
+                } else {
+                    processes.sandboxes.insert(mark, Sandbox::default()); // end_unwanted keeps ending it.
+                    self.contained.store(false, Ordering::SeqCst);
+                }
+            }
+        }
         let (out, mut err) = (
             stdout.lock().unwrap().take().unwrap_or_default(),
             stderr.lock().unwrap().take().unwrap_or_default(),
@@ -1268,13 +1902,15 @@ impl Jobs {
         result
     }
 
-    fn cancel(&self, id: &str) {
+    pub(super) fn cancel(&self, id: &str) {
         let pid = {
             let mut processes = self.processes.lock().unwrap();
             match processes.running.get(id) {
                 Some(pid) => Some(*pid as i32),
                 None => {
-                    processes.cancelled.insert(id.to_owned());
+                    if processes.taken.contains_key(id) {
+                        processes.cancelled.insert(id.to_owned());
+                    }
                     None
                 }
             }

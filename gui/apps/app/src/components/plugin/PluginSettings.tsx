@@ -19,8 +19,12 @@ import {
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
-import { Link } from "react-router-dom";
-import { SettingsWithControl } from "@/components/ui/settings-section.js";
+import { Link } from "react-router";
+import { ScopedInstructionRules } from "@/components/settings/ScopedInstructionRules";
+import {
+  SettingsSection,
+  SettingsWithControl,
+} from "@/components/ui/settings-section.js";
 import { getPluginDetailRoutePath } from "@/lib/route-paths";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { Switch } from "@cloudroom/shared-ui/switch";
@@ -45,6 +49,7 @@ import {
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
+import { BbHttpError } from "@cloudroom/sdk/browser";
 import { PluginMachineServerAccessNotice } from "@/components/machines/MachineServerAccessNotice";
 import { invalidateMachineProviders } from "@/hooks/cache-owners/system-cache-effects";
 import {
@@ -312,6 +317,8 @@ function AutosavingPluginSetting({
   settingKey,
   storedValue,
 }: AutosavingPluginSettingProps) {
+  const globalInstructions =
+    pluginId === "custom-instructions" && settingKey === "instructions";
   const queryClient = useQueryClient();
   const messageId = useId();
   const initialDraft = initialSettingDraft(descriptor, storedValue);
@@ -365,6 +372,7 @@ function AutosavingPluginSetting({
   function saveDraft(
     event: FocusEvent<HTMLInputElement | HTMLTextAreaElement>,
   ): void {
+    if (globalInstructions) return;
     if (descriptor.type !== "string" && descriptor.type !== "number") return;
     if (descriptor.type === "number" && event.currentTarget.validity.badInput) {
       setDraftState({ value: initialDraft, hasNewerDraft: false });
@@ -407,6 +415,50 @@ function AutosavingPluginSetting({
       })
     : null;
   const isDirty = draft !== storedValue || save.isError;
+  const control = (
+    <div className="space-y-1">
+      <PluginSettingField
+        ariaDescribedBy={saveError !== null ? messageId : undefined}
+        ariaInvalid={saveError !== null}
+        descriptor={
+          globalInstructions
+            ? { ...descriptor, label: "Global default" }
+            : descriptor
+        }
+        storedValue={storedValue}
+        draft={draft}
+        onBlur={saveDraft}
+        onChange={changeDraft}
+      />
+      {saveError !== null ? (
+        <p id={messageId} className="text-xs text-destructive" role="alert">
+          {saveError}
+        </p>
+      ) : null}
+      {isMultilineSetting(descriptor) ? (
+        <div className="flex justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!isDirty || save.isPending}
+            onClick={saveMultiline}
+          >
+            {save.isPending ? "Saving…" : isDirty ? "Save" : "Saved"}
+          </Button>
+        </div>
+      ) : null}
+    </div>
+  );
+  if (globalInstructions) {
+    return (
+      <SettingsSection
+        title="Global default"
+        description="Applies to every harness and model on this host."
+      >
+        {control}
+      </SettingsSection>
+    );
+  }
   return (
     <SettingsWithControl
       label={descriptor.label}
@@ -420,42 +472,40 @@ function AutosavingPluginSetting({
         ? { description: descriptor.description }
         : {})}
     >
-      <div className="space-y-1">
-        <PluginSettingField
-          ariaDescribedBy={saveError !== null ? messageId : undefined}
-          ariaInvalid={saveError !== null}
-          descriptor={descriptor}
-          storedValue={storedValue}
-          draft={draft}
-          onBlur={saveDraft}
-          onChange={changeDraft}
-        />
-        {saveError !== null ? (
-          <p id={messageId} className="text-xs text-destructive" role="alert">
-            {saveError}
-          </p>
-        ) : null}
-        {isMultilineSetting(descriptor) ? (
-          <div className="flex justify-end">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={!isDirty || save.isPending}
-              onClick={saveMultiline}
-            >
-              {save.isPending ? "Saving…" : isDirty ? "Save" : "Saved"}
-            </Button>
-          </div>
-        ) : null}
-      </div>
+      {control}
     </SettingsWithControl>
   );
 }
 
+const SETTINGS_LOAD_FAILED = "Could not load this plugin's settings.";
+
 export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const viewQuery = usePluginSettingsView(pluginId, { enabled: true });
-  const view = viewQuery.data ?? null;
-  if (view === null || Object.keys(view.schema).length === 0) return null;
+  const view = viewQuery.data;
+  if (view === undefined && viewQuery.isError) {
+    return (
+      <div className="flex items-center justify-between gap-3" role="alert">
+        <p className="min-w-0 break-words text-xs text-destructive">
+          {viewQuery.error instanceof BbHttpError
+            ? getMutationErrorMessage({
+                error: viewQuery.error,
+                fallbackMessage: SETTINGS_LOAD_FAILED,
+              }).slice(0, 300)
+            : SETTINGS_LOAD_FAILED}
+        </p>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={viewQuery.isFetching}
+          onClick={() => void viewQuery.refetch()}
+        >
+          Retry
+        </Button>
+      </div>
+    );
+  }
+  if (view === undefined) return <PluginSettingsFieldSkeleton />;
+  if (Object.keys(view.schema).length === 0) return null;
 
   return (
     <div className="space-y-4">
@@ -474,6 +524,9 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
 
 // Connect renders its whole settings page, its one setting included, in tabs.
 const CONNECT_PLUGIN_ID = "connect";
+
+// Accounts is always on and its tab already names the page, so it shows only its own content.
+const ACCOUNTS_PLUGIN_ID = "accounts";
 
 const PLUGIN_STATUSES_WITH_SETTINGS = [
   "running",
@@ -522,7 +575,10 @@ function PluginSettingsPageSkeleton() {
           <ResourceDetailConfigurationSection
             label={<Skeleton className="h-3.5 w-24" />}
           >
-            <ResourceDetailPanel surface="recessed" className="border-0 bg-surface-recessed px-3 py-3">
+            <ResourceDetailPanel
+              surface="recessed"
+              className="border-0 bg-surface-recessed px-3 py-3"
+            >
               <div className="space-y-4">
                 <PluginSettingsFieldSkeleton />
                 <PluginSettingsFieldSkeleton />
@@ -555,7 +611,10 @@ export function PluginSettingsPage({
       (entry: PluginListItem) => entry.id === pluginId,
     ) ?? null;
   if (listQuery.data === undefined && !listQuery.isError) {
-    return <PluginSettingsPageSkeleton />;
+    // Accounts has no header, so its skeleton would flash one.
+    return pluginId === ACCOUNTS_PLUGIN_ID ? null : (
+      <PluginSettingsPageSkeleton />
+    );
   }
   if (listQuery.data === undefined && listQuery.isError) {
     return (
@@ -608,6 +667,17 @@ function PluginSettingsContent({
   const hasAvailableSettings =
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
+  if (
+    plugin.id === ACCOUNTS_PLUGIN_ID &&
+    plugin.enabled &&
+    PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status)
+  ) {
+    return (
+      <div className="mx-auto w-full max-w-5xl">
+        <PluginSettingsSections pluginId={plugin.id} showHeadings={false} />
+      </div>
+    );
+  }
   return (
     <div className="mx-auto w-full max-w-5xl">
       <header className="flex items-center justify-between gap-4">
@@ -646,6 +716,13 @@ function PluginSettingsContent({
         plugin.id === CONNECT_PLUGIN_ID &&
         PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status) ? (
           <PluginSettingsSections pluginId={plugin.id} />
+        ) : plugin.id === "custom-instructions" && enabled && plugin.enabled ? (
+          <PluginSettingsDetail plugin={plugin} />
+        ) : plugin.id === "custom-instructions" && !enabled ? (
+          <p className="text-sm text-subtle-foreground">
+            Custom instructions are off. Turn them on to use your saved
+            instructions.
+          </p>
         ) : enabled && plugin.enabled && hasAvailableSettings ? (
           <ResourceDetailConfigurationSection label="Configuration">
             <PluginSettingsDetail plugin={plugin} />
@@ -684,11 +761,22 @@ export function PluginSettingsDetail({ plugin }: { plugin: PluginListItem }) {
   const settingsAvailable =
     plugin.enabled && PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status);
   if (!plugin.hasSettings && !hasSettingsSections) return null;
+  if (plugin.id === "custom-instructions" && settingsAvailable) {
+    return (
+      <div className="space-y-6">
+        <PluginSettingsForm pluginId={plugin.id} />
+        <ScopedInstructionRules />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" data-testid={`plugin-detail-${plugin.id}`}>
       {plugin.hasSettings || !settingsAvailable ? (
-        <ResourceDetailPanel surface="recessed" className="border-0 bg-surface-recessed px-3 py-3">
+        <ResourceDetailPanel
+          surface="recessed"
+          className="border-0 bg-surface-recessed px-3 py-3"
+        >
           {settingsAvailable ? (
             <PluginSettingsForm key={plugin.id} pluginId={plugin.id} />
           ) : (

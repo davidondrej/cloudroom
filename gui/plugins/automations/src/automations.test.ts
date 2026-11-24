@@ -4,14 +4,16 @@ import {
   mkdir,
   readFile,
   readdir,
+  realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import Database from "better-sqlite3";
 import type { PluginCliRegistration } from "@get-bb/plugin-sdk";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
@@ -24,9 +26,11 @@ import {
   listDueAutomations,
   listAutomationRuns,
   migrations,
+  addReviewThread,
   setAutomationEnabled,
   setAutomationRunThread,
   AUTOMATION_RETRY_DELAYS_MS,
+  REFUSED,
   type Db,
 } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
@@ -36,7 +40,7 @@ import {
   validateOnceDefinition,
 } from "./schedule-helpers.js";
 import {
-  bbBinaryCandidates,
+  roomBinaryCandidates,
   executeStoredScript,
   isWakeAgentSuppressed,
   mapScriptResultToRun,
@@ -47,9 +51,10 @@ import {
   executeAgentRun,
   reconcileRunningAutomationRuns,
 } from "./run.js";
-import { sweepDueAutomations } from "./sweep.js";
-import { loopAgent, type FallbackSdk } from "./fallback.js";
+import { RECOVERY_WAIT_MS, sweepDueAutomations } from "./sweep.js";
+import type { FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
+import { buildReview } from "./review.js";
 import { registerAutomationCli } from "./cli.js";
 import { automationScriptDir } from "./script-files.js";
 
@@ -63,6 +68,7 @@ function createScheduledAutomation(
   db: Db,
   nextRunAt: number,
   id = "auto_test",
+  cron = "* * * * *",
 ) {
   return createAutomation(db, {
     id,
@@ -71,7 +77,7 @@ function createScheduledAutomation(
     enabled: true,
     trigger: {
       triggerType: "schedule",
-      cron: "* * * * *",
+      cron,
       timezone: "UTC",
     },
     runMode: "agent",
@@ -164,7 +170,7 @@ function legacyAutomationRow(
   };
 }
 
-function createAutomationServiceBb() {
+function createAutomationServiceRoom() {
   return {
     sdk: {
       projects: {
@@ -303,17 +309,18 @@ describe("data migrations", () => {
 });
 
 describe("startup reconciliation", () => {
-  function reconcileBb(threads: {
+  function reconcileRoom(threads: {
     get: (args: { threadId: string }) => Promise<unknown>;
     events?: (args: {
       threadId: string;
       types?: readonly string[];
     }) => Promise<unknown>;
-  }) {
+  }, cloudroom?: FallbackSdk["cloudroom"]) {
     const published: unknown[] = [];
     return {
       bb: {
         sdk: {
+          cloudroom,
           threads: {
             get: threads.get,
             events: { list: threads.events ?? (async () => []) },
@@ -363,7 +370,7 @@ describe("startup reconciliation", () => {
     const type = named[token] ?? (status ? "turn/completed" : "turn/started");
     const parentToolCallId = turn === "k+" ? "c1" : undefined;
     const data = { status, reason: "manual-stop", parentToolCallId };
-    return { type, scope: { turnId: turn!.replace("+", "") }, data };
+    return { type, createdAt: 1500, scope: { turnId: turn!.replace("+", "") }, data };
   }
 
   it("settles ghost script runs and threadless agent runs as interrupted", async () => {
@@ -380,7 +387,7 @@ describe("startup reconciliation", () => {
       runMode: "agent",
       now: 1000,
     }).run;
-    const { bb, published } = reconcileBb({
+    const { bb, published } = reconcileRoom({
       get: async () => {
         throw new Error("no thread should be asked about");
       },
@@ -442,7 +449,7 @@ describe("startup reconciliation", () => {
       setAutomationRunThread(db, { runId: run.id, threadId });
       threads.set(threadId, testCase.thread);
     }
-    const { bb } = reconcileBb({
+    const { bb } = reconcileRoom({
       get: async ({ threadId }) => {
         const value = threads.get(threadId);
         if (value === null) {
@@ -476,21 +483,40 @@ describe("startup reconciliation", () => {
       ["unreadable", "idle", "boom", "outcome unavailable: boom", 2],
       ["target", "idle", "r+ stop r:interrupted", "succeeded", 0],
       ["follow_up_failed", "failed", "r+ r:failed", "failed", 3],
+      // Archived after its report (#1561): succeeded. A Stop, a Stop then archive, a thread read over 3 s, or the
+      // startup check stays as before.
+      ["archived_reported", "idle", "r+ out stop r:interrupted", "succeeded", 0],
+      ["stop_reported", "idle", "r+ out stop r:interrupted", stopped, 2],
+      ["stop_then_archived_reported", "idle", "r+ out stop r:interrupted", stopped, 2],
+      ["archived_slow_reported", "idle", "r+ out stop r:interrupted", stopped, 2],
+      ["archived_late_reported", "restart", "r+ stop r:interrupted", "interrupted: thread archived_late_reported was archived", 0],
     ] as const;
     // A loop's target thread predates its runs; a spawned thread does not.
     const createdAt = (id: string) => (id === "target" ? 0 : 1000);
-    const { bb } = reconcileBb({
-      get: async ({ threadId }) => ({
-        ...thread(threadId, "idle"),
-        createdAt: createdAt(threadId),
-      }),
+    const runThread = new Map<string, string>();
+    const reports = async ({ runs }: { runs: string[] }) => ({
+      reports: runs
+        .filter((id) => runThread.get(id)?.endsWith("_reported"))
+        .map((id) => ({ request: id, thread_id: runThread.get(id)!, outcome: "done", reason: "ok" })),
+    });
+    const { bb } = reconcileRoom({
+      // Archive's own stop comes at or after `archivedAt`; the stop events are at 1500.
+      get: ({ threadId }) =>
+        threadId === "archived_slow_reported"
+          ? new Promise(() => {})
+          : Promise.resolve({
+              ...thread(threadId, "idle", {
+                archivedAt: threadId.startsWith("archived") ? 1500 : threadId.startsWith("stop_then") ? 2000 : null,
+              }),
+              createdAt: createdAt(threadId),
+            }),
       events: async ({ threadId, types }) => {
         const tokens = cases.find(([id]) => id === threadId)![2];
         if (tokens === "boom") throw new Error("boom");
         const events = tokens.split(" ").map(ev);
         return events.filter((e) => types?.includes(e.type)).reverse();
       },
-    });
+    }, { automations: reports as never });
     for (const [id] of cases) {
       createScheduledAutomation(db, 0, id);
       const run = createManualRun(db, {
@@ -499,13 +525,18 @@ describe("startup reconciliation", () => {
         now: 1000,
       }).run;
       setAutomationRunThread(db, { runId: run.id, threadId: id });
+      runThread.set(run.id, id);
     }
     db.exec("UPDATE automations SET consecutive_failures = 2");
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    onTestFinished(() => void vi.useRealTimers());
     for (const [threadId, status] of cases) {
       if (status === "restart") continue;
       const threadCreatedAt = createdAt(threadId);
       const args = { threadId, threadCreatedAt, status };
-      await closeAutomationRunForSettledThread(bb, db, args);
+      const closing = closeAutomationRunForSettledThread(bb, db, args);
+      await vi.advanceTimersByTimeAsync(3_000);
+      await closing;
     }
     await reconcileRunningAutomationRuns(bb, db);
     const settled = cases.map(([id]) => {
@@ -696,6 +727,27 @@ describe("automation data access", () => {
     }
   });
 
+  it("never pauses for a refused run: it fails, retries, and keeps the failure count (ADR 20261119-091500)", () => {
+    const db = createTestDb();
+    const automation = createScheduledAutomation(db, 1000);
+    let expectedNextRunAt = 1000;
+    for (const error of ["dispatch failed 1", "dispatch failed 2", `${REFUSED}flagged`]) {
+      const claim = claimAutomationScheduledRun(db, {
+        automationId: automation.id,
+        expectedNextRunAt,
+        newNextRunAt: expectedNextRunAt + 60_000,
+        now: expectedNextRunAt,
+      });
+      if (!claim.advanced) throw new Error(`claim for ${error} failed`);
+      closeAutomationRun(db, { runId: claim.run.id, status: "failed", error, now: expectedNextRunAt + 1 });
+      expectedNextRunAt = getAutomation(db, automation.id)!.nextRunAt!;
+    }
+    const current = getAutomation(db, automation.id);
+    expect(current?.consecutiveFailures).toBe(2);
+    expect(current?.enabled).toBe(true);
+    expect(current?.nextRunAt).not.toBeNull();
+  });
+
   it("applies the same backoff and pause policy to settled script failures", () => {
     const db = createTestDb();
     const automation = createScheduledAutomation(db, 1000);
@@ -879,7 +931,7 @@ describe("automation data access", () => {
   it("does not claim due agent automations when no host is connected", async () => {
     const db = createTestDb();
     const automation = createScheduledAutomation(db, 1000);
-    const bb = {
+    const room = {
       sdk: {
         projects: { list: async () => [] },
         hosts: {
@@ -915,7 +967,7 @@ describe("automation data access", () => {
       },
     };
 
-    await sweepDueAutomations(bb, db, {
+    await sweepDueAutomations(room, db, {
       pluginDataDir: "/tmp",
       serverUrl: "http://127.0.0.1:38886",
       now: 1000,
@@ -928,6 +980,8 @@ describe("automation data access", () => {
   });
 
   it("starts overdue loops one a minute without delaying on-time ones (#609)", async () => {
+    vi.useFakeTimers({ toFake: ["performance"] });
+    onTestFinished(() => void vi.useRealTimers());
     const db = createTestDb();
     const now = 10 * 3_600_000;
     const overdue = Array.from({ length: 120 }, (_, i) => `auto_old_${i}`);
@@ -950,7 +1004,7 @@ describe("automation data access", () => {
     const notExpected = async () => {
       throw new Error("not expected");
     };
-    const bb = {
+    const room = {
       sdk: {
         projects: { list: async () => [{ id: "proj_test" }] },
         hosts: {
@@ -988,22 +1042,161 @@ describe("automation data access", () => {
       listAutomationRuns(db, { automationId: id, limit: 5 }).length;
     const overdueStarted = () =>
       overdue.reduce((total, id) => total + runs(id), 0);
-    const sweep = (at: number) =>
-      sweepDueAutomations(bb, db, {
+    // The spacing counts real elapsed time, so the wall clock (`at`) can step back after a wake (#1588).
+    const sweep = (at: number, elapsed: number) => {
+      vi.advanceTimersByTime(elapsed);
+      return sweepDueAutomations(room, db, {
         pluginDataDir: "/tmp",
         serverUrl: "http://127.0.0.1:38886",
         now: at,
       });
+    };
 
-    await sweep(now);
+    await sweep(now, 0);
     expect(runs("auto_on_time")).toBe(1);
     expect(runs("auto_slow")).toBe(2);
     expect(overdueStarted()).toBe(1);
-    await sweep(now + 30_000);
-    expect(overdueStarted()).toBe(1);
-    await sweep(now + 90_000);
-    expect(overdueStarted()).toBe(2);
+    for (const [at, elapsed, started] of [
+      [now + 30_000, 30_000, 1],
+      [now + 90_000, 60_000, 2],
+      [now + 60_000, 10_000, 2],
+      [now + 30_000, 50_000, 3],
+      // A Linux suspend pauses the monotonic clock: the wall clock's minute still frees the next one.
+      [now + 2 * 3_600_000, 0, 4],
+    ] as const) {
+      await sweep(at, elapsed);
+      expect(overdueStarted()).toBe(started);
+    }
   });
+
+  // A failed loop thread can come back on its own: provider-retry re-runs a turn an app restart cut 5 s later (#887).
+  it.each([
+    ["still active", "active", 0, ["thr_1"]],
+    ["active past the cap", "active", RECOVERY_WAIT_MS, ["thr_1", "thr_2"]],
+    ["idle", "idle", 0, ["thr_1", "thr_2"]],
+    ["error", "error", 0, ["thr_1", "thr_2"]],
+    // A failed thread with a queued retry (internet-watch, provider-retry) will run again on its own (#2454).
+    ["error with a queued retry", "error+retry", 0, ["thr_1"]],
+    ["error with a retry mid-send", "error+sending", 0, ["thr_1"]],
+    ["error with a retry whose send failed", "error+retry+failed", 0, ["thr_1", "thr_2"]],
+    ["archived with a queued retry", "error+retry+archived", 0, ["thr_1", "thr_2"]],
+    // Agents that take turns, or a limit retry the loop hands to the other provider: the next run goes, as before.
+    ["error with a queued retry, agents taking turns", "error+retry+rotating", 0, ["thr_1", "thr_2"]],
+    ["error with a limit retry", "error+retry+limit", 0, ["thr_1", "thr_2"]],
+    // A finished run's thread can work on too: a child reports back or a person continues it (#1279).
+    ["active after a finished run", "active", 0, ["thr_1"], "idle"],
+    // A failed run's thread that came back and finished did its slot's work: a daily loop's retry would redo it (#1443).
+    [
+      "back after a failure, before the next slot",
+      "active",
+      0,
+      ["thr_1"],
+      "failed",
+      "0 9 * * *",
+    ],
+    // Unless that thread reported that it failed: then its retry runs, as before (#1443).
+    [
+      "back after a failure it reported",
+      "active",
+      0,
+      ["thr_1"],
+      "failed",
+      "0 9 * * *",
+      "failed",
+    ],
+  ] as const)(
+    "a loop's next run when its last run's thread is %s (#887, #1279)",
+    async (
+      _name,
+      status,
+      wait,
+      atRetry,
+      ended: "idle" | "failed" = "failed",
+      cron?: string,
+      reported?: string,
+    ) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(1000);
+      onTestFinished(() => void vi.useRealTimers());
+      const db = createTestDb();
+      const automation = createScheduledAutomation(db, 1000, "auto_test", cron);
+      if (status.includes("rotating")) {
+        const agents = [{ providerId: "codex", model: "gpt-5", reasoningLevel: "medium" }, { providerId: "codex", model: "gpt-6.1-sol", reasoningLevel: "medium" }];
+        db.prepare("UPDATE automations SET execution = json_set(execution, '$.agents', json(?))").run(JSON.stringify(agents));
+      }
+      const spawned: string[] = [];
+      let threadStatus: string = "active";
+      const room = {
+        sdk: {
+          projects: { list: async () => [{ id: "proj_test" }] },
+          hosts: { list: async () => [{ id: "host_test", status: "connected" }] },
+          threads: {
+            get: async ({ threadId }: { threadId: string }) => ({
+              id: threadId,
+              status: threadStatus.split("+")[0],
+              archivedAt: threadStatus.includes("archived") ? 1 : null,
+              deletedAt: null,
+              dispatchingMessageCount: threadStatus.includes("sending") ? 1 : 0,
+            }),
+            queue: {
+              list: async () =>
+                threadStatus.includes("retry")
+                  ? [
+                      {
+                        id: "q_1",
+                        threadId: "thr_1",
+                        failureReason: threadStatus.includes("failed") ? "Could not send." : null,
+                        payload: { kind: "retry", reason: threadStatus.includes("limit") ? "Rate limited" : "Internet dropped" },
+                      },
+                    ]
+                  : [],
+            },
+            send: async () => {
+              throw new Error("not expected");
+            },
+            spawn: async () => {
+              spawned.push(`thr_${spawned.length + 1}`);
+              return { id: spawned.at(-1), status: "active", archivedAt: null, deletedAt: null };
+            },
+          },
+          cloudroom: {
+            automations: async ({ runs }: { runs: string[] }) => ({
+              reports: reported
+                ? runs.map((request) => ({
+                    request,
+                    thread_id: "thr_1",
+                    outcome: reported,
+                    reason: null,
+                  }))
+                : [],
+            }),
+          } as never,
+        },
+        realtime: { publish: () => undefined },
+        log: { debug: () => undefined, error: () => undefined, info: () => undefined, warn: () => undefined },
+      };
+      const sweep = (now: number) =>
+        sweepDueAutomations(room, db, { pluginDataDir: "/tmp", serverUrl: "http://127.0.0.1:38886", now });
+
+      await sweep(1000);
+      await closeAutomationRunForSettledThread(room, db, {
+        threadId: "thr_1",
+        status: ended,
+        error: "host daemon restarted",
+      });
+      threadStatus = status;
+      const retryAt = getAutomation(db, automation.id)!.nextRunAt! + wait;
+      await sweep(retryAt);
+      expect(spawned).toEqual(atRetry);
+
+      // Once the old thread settles, the waiting retry runs as before, unless it redoes a recovered run's slot.
+      threadStatus = "idle";
+      await sweep(retryAt + 10_000);
+      expect(spawned).toEqual(
+        cron && !reported ? ["thr_1"] : ["thr_1", "thr_2"],
+      );
+    },
+  );
 
   it("keeps automations of hidden projects and pauses those of deleted ones", async () => {
     const db = createTestDb();
@@ -1012,7 +1205,7 @@ describe("automation data access", () => {
     const notExpected = async () => {
       throw new Error("not expected");
     };
-    const bb = {
+    const room = {
       sdk: {
         projects: {
           list: async ({ hidden }: { hidden?: boolean }) =>
@@ -1030,7 +1223,7 @@ describe("automation data access", () => {
       },
     };
     const sweep = () =>
-      sweepDueAutomations(bb, db, {
+      sweepDueAutomations(room, db, {
         pluginDataDir: "/tmp",
         serverUrl: "http://127.0.0.1:38886",
         now: 1000,
@@ -1183,7 +1376,7 @@ describe("automation data access", () => {
 describe("automation service", () => {
   it("validates project availability before creating an automation", async () => {
     const db = createTestDb();
-    const bb = {
+    const room = {
       sdk: {
         projects: {
           get: async () => {
@@ -1218,7 +1411,7 @@ describe("automation service", () => {
       },
     };
     const service = createAutomationService({
-      bb,
+      bb: room,
       db,
       pluginDataDir: "/tmp",
       serverUrl: "http://127.0.0.1:38886",
@@ -1245,6 +1438,50 @@ describe("automation service", () => {
     expect(listAutomationsForProject(db, "proj_missing")).toHaveLength(0);
   });
 
+  it("rejects a Personal project loop in a folder thread creation would reject", async () => {
+    const db = createTestDb();
+    const room = createAutomationServiceRoom();
+    const getProject = room.sdk.projects.get;
+    room.sdk.projects.get = async (args) => ({
+      ...(await getProject(args)),
+      kind: "personal" as never,
+    });
+    const service = createAutomationService({
+      bb: room,
+      db,
+      pluginDataDir: "/tmp",
+      serverUrl: "http://127.0.0.1:38886",
+    });
+    const create = (environment: never) =>
+      service.create({
+        projectId: "proj_personal",
+        name: "Personal",
+        enabled: true,
+        trigger: oneShotTrigger(),
+        execution: {
+          mode: "agent",
+          prompt: "hello",
+          providerId: "codex",
+          model: "gpt-5",
+          reasoningLevel: "medium",
+          permissionMode: "accept-edits",
+          environment,
+        },
+        origin: "agent",
+      });
+
+    await expect(
+      create({
+        type: "host",
+        hostId: "host_1",
+        workspace: { type: "unmanaged", path: "/Users/me/app" },
+      } as never),
+    ).rejects.toThrow("Personal project loops must use the personal workspace");
+    expect(listAutomationsForProject(db, "proj_personal")).toHaveLength(0);
+    await create({ type: "project-default" } as never);
+    expect(listAutomationsForProject(db, "proj_personal")).toHaveLength(1);
+  });
+
   it("removes a stored script directory after switching to agent execution", async () => {
     const db = createTestDb();
     const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-auto-service-"));
@@ -1268,7 +1505,7 @@ describe("automation service", () => {
     await mkdir(scriptDir, { recursive: true });
     await writeFile(join(scriptDir, "old.sh"), "echo old\n");
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1319,7 +1556,7 @@ describe("automation service", () => {
     await writeFile(join(scriptDir, "old.sh"), "echo old\n");
     await writeFile(join(scriptDir, "keep.txt"), "keep\n");
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1377,7 +1614,7 @@ describe("automation service", () => {
         SELECT RAISE(ABORT, 'update rejected');
       END`);
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1433,7 +1670,7 @@ describe("automation service", () => {
         SELECT RAISE(ABORT, 'update rejected');
       END`);
     const service = createAutomationService({
-      bb: createAutomationServiceBb(),
+      bb: createAutomationServiceRoom(),
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:38886",
@@ -1474,37 +1711,120 @@ describe("automation service", () => {
       const automation = createScheduledAutomation(db, 1000);
       const { run } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 1 });
       const prompts: string[] = [];
-      const base = createAutomationServiceBb();
+      const base = createAutomationServiceRoom();
       const thread = { id: "thr_run", archivedAt: null, deletedAt: null, status: "active" };
       const spawn = async (input: { prompt?: string }) => (prompts.push(input.prompt!), thread as never);
-      const cloudroom = { automations: async () => ({}), status: status as never };
-      const bb = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
-      await executeAgentRun(bb, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
+      const cloudroom = { automations: async () => ({ reports: [] }), status: status as never };
+      const room = { ...base, sdk: { ...base.sdk, cloudroom, threads: { ...base.sdk.threads, spawn } } };
+      await executeAgentRun(room, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
       expect(prompts[0]!.includes("room-cli loop report")).toBe(ask);
-      const report = createAutomationService({ bb, db, pluginDataDir: "/tmp", serverUrl: "" })
-        .report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
-      await (ask ? expect(report).resolves.toEqual({ reported: true }) : expect(report).rejects.toThrow("need a Cloudroom sign-in"));
+      const service = createAutomationService({ bb: room, db, pluginDataDir: "/tmp", serverUrl: "" });
+      const report = () => service.report({ threadId: "thr_run", outcome: "done", confidence: "high", reason: "ok", actions: [] });
+      await (ask ? expect(report()).resolves.toEqual({ reported: true }) : expect(report()).rejects.toThrow("need a Cloudroom sign-in"));
+      if (status !== rows[1]!.status) continue;
+      // A retried or continued turn still reports its run after the thread failed or went idle early (#1293).
+      await closeAutomationRunForSettledThread(room, db, { threadId: "thr_run", status: "failed" });
+      await expect(report()).resolves.toEqual({ reported: true });
+      // Once another run used the thread, a late report can't tell which run it is for, so it never overwrites one.
+      const { run: next } = createManualRun(db, { automationId: automation.id, runMode: "agent", now: 2 });
+      setAutomationRunThread(db, { runId: next.id, threadId: "thr_run" });
+      closeAutomationRun(db, { runId: next.id, status: "succeeded", now: 3 });
+      await expect(report()).rejects.toThrow("Nothing to report");
+    }
+  });
+
+  it("a same-thread loop reports from the turn Core put its message in, after the turn before it settled (#1100)", async () => {
+    // Core's rows, newest first: turn "t" accepted these requests, then the records of the requests ("q" = the queued row).
+    const turn = (t: string, took: string[], done = false) => [
+      ...(done ? [{ type: "turn/completed", scope: { turnId: t }, data: { status: "completed" } }] : []),
+      ...took.map((id) => ({ type: "turn/input/accepted", scope: { turnId: t }, data: { clientRequestId: id } })),
+      { type: "turn/started", scope: { turnId: t }, data: {} },
+    ];
+    const req = (requestId: string, q?: string, ...texts: string[]) =>
+      ({ type: "client/turn/requested", scope: {}, data: { requestId, queuedMessageId: q, input: (texts.length ? texts : ["status?"]).map((text) => ({ text, type: "text" })) } });
+    const sent = { ok: true, delivery: "sent", requestId: "req_a" };
+    const queued = { ok: true, delivery: "queued", queuedMessage: { id: "q_b", content: [{ type: "text", text: "loop b" }] } };
+    const rows = [
+      { name: "direct send", settled: "idle" as const, sends: [sent], events: [...turn("t1", ["req_a"]), req("req_a")], reported: true },
+      { name: "queued send, user steer", settled: "failed" as const, sends: [queued], events: [...turn("t1", ["req_user", "req_q"]), req("req_user"), req("req_q", "q_b", "loop b")], reported: true },
+      { name: "edited queued message", settled: "idle" as const, sends: [queued], events: [...turn("t1", ["req_q"]), req("req_q", "q_b", "other work")], reported: false },
+      { name: "edit that appends a block", settled: "idle" as const, sends: [queued], events: [...turn("t1", ["req_q"]), req("req_q", "q_b", "loop b", "other work")], reported: false },
+      { name: "forged header", settled: "idle" as const, sends: [sent], events: [...turn("t1", ["req_user"]), req("req_user", undefined, "[room-cli automation due:auto_a]")], reported: false },
+      { name: "two loop messages", settled: "idle" as const, sends: [sent, queued], events: [...turn("t1", ["req_a", "req_q"]), req("req_a"), req("req_q", "q_b", "loop b")], reported: false },
+      { name: "record outside the window", settled: "idle" as const, sends: [sent, queued], events: [...turn("t1", ["req_a", "req_q"]), req("req_a")], reported: false },
+      { name: "later user turn", settled: "idle" as const, sends: [sent], events: [...turn("t2", ["req_user"]), req("req_user"), ...turn("t1", ["req_a"], true), req("req_a")], reported: false },
+    ];
+    for (const row of rows) {
+      const db = createTestDb();
+      const replies = [...row.sends];
+      const base = createAutomationServiceRoom();
+      const threads = {
+        ...base.sdk.threads,
+        get: async () => ({ id: "thr_loop", archivedAt: null, deletedAt: null, status: "active" }),
+        send: async () => replies.shift(),
+        events: { list: async () => row.events },
+      };
+      const cloudroom = { automations: async () => ({ reports: [] }), status: async () => ({ signedOut: false }) };
+      const room = { ...base, sdk: { ...base.sdk, cloudroom, threads } } as never;
+      for (const id of row.sends.map((_, i) => `auto_${"ab"[i]}`)) {
+        const automation = createAutomation(db, {
+          id, projectId: "proj_test", name: id, enabled: true, origin: "human", createdByThreadId: null, nextRunAt: 1,
+          trigger: { triggerType: "schedule", cron: "0 * * * *", timezone: "UTC" }, runMode: "agent",
+          execution: { mode: "agent", prompt: "do it", providerId: "codex", model: "gpt-5", reasoningLevel: "medium", permissionMode: "full", environment: { type: "project-default" }, targetThreadId: "thr_loop" },
+        } as never);
+        const { run } = createManualRun(db, { automationId: id, runMode: "agent", now: 1 });
+        await executeAgentRun(room, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
+      }
+      // The busy turn the loop's message did not join ends first and closes the run.
+      await closeAutomationRunForSettledThread(room, db, { threadId: "thr_loop", status: row.settled });
+      const service = createAutomationService({ bb: room, db, pluginDataDir: "/tmp", serverUrl: "" });
+      const report = service.report({ threadId: "thr_loop", outcome: "done", confidence: "high", reason: "ok", actions: [] });
+      await (row.reported ? expect(report, row.name).resolves.toEqual({ reported: true }) : expect(report, row.name).rejects.toThrow("Nothing to report"));
     }
   });
 });
 
+it("a Cloud loop update refuses --target-thread instead of claiming it moved (#2361)", async () => {
+  const automations = vi.fn();
+  let cli: PluginCliRegistration | undefined;
+  registerAutomationCli({ bb: { sdk: { cloudroom: { automations } } as never, cli: { register: (r) => void (cli = r) } }, service: {} as never });
+  expect(await cli!.run(["update", "00000000-0000-4000-8000-000000000000", "--target-thread", "thr_x"], {})).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("Cloud loop can't move") });
+  expect(automations).not.toHaveBeenCalled();
+});
+
+it("room-cli wake says it made a loop, shows it in loop list, and how to cancel it (#2485)", async () => {
+  const room = createAutomationServiceRoom();
+  const threads = { ...room.sdk.threads, get: async () => ({ projectId: "proj_test", providerId: "codex" }), defaultExecutionOptions: async () => ({ model: "gpt-5", permissionMode: "full" }) };
+  const sdk = { ...room.sdk, threads, cloudroom: { automations: () => Promise.reject(new Error("Sign in")) } } as never;
+  let cli: PluginCliRegistration | undefined;
+  const service = createAutomationService({ bb: { ...room, sdk }, db: createTestDb(), pluginDataDir: "/tmp", serverUrl: "" });
+  registerAutomationCli({ bb: { sdk, cli: { register: (r) => void (cli = r) } }, service });
+  const list = async () => (await cli!.run(["list", "--project", "proj_test"], {})).stdout;
+  const woke = (await cli!.run(["wake", "5m", "check\nthe deploy"], { threadId: "thr_me" })).stdout ?? "";
+  const id = /^Loop created: (auto_\S+)\n/.exec(woke)?.[1];
+  expect(await list()).toContain(`${id}  Wake: check the deploy `);
+  const cancel = /\nCancel it: room-cli loop (delete .+)\n$/.exec(woke)?.[1] ?? "";
+  expect(await cli!.run(cancel.split(" "), {})).toMatchObject({ exitCode: 0 });
+  expect(await list()).toBe("No Local loops found\n");
+});
+
 describe("automation CLI --script-file", () => {
-  type FileReadCall = { hostId: string | undefined; path: string };
+  type FileReadCall = { hostId: string | undefined; path: string; rootPath?: string };
 
   async function setup() {
     const db = createTestDb();
     const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-1649-data-"));
     const srcDir = await mkdtemp(join(tmpdir(), "bb-1649-src-"));
     const reads: FileReadCall[] = [];
-    const serviceBb = createAutomationServiceBb();
+    const serviceRoom = createAutomationServiceRoom();
     const service = createAutomationService({
-      bb: serviceBb,
+      bb: serviceRoom,
       db,
       pluginDataDir,
       serverUrl: "http://127.0.0.1:1",
     });
     const sdk = {
-      ...serviceBb.sdk,
+      ...serviceRoom.sdk,
       hosts: {
         list: async () => [
           { id: "host_server", name: "server" },
@@ -1512,15 +1832,30 @@ describe("automation CLI --script-file", () => {
         ],
       },
       threads: {
-        ...serviceBb.sdk.threads,
+        ...serviceRoom.sdk.threads,
         get: async ({ threadId }: { threadId: string }) =>
           threadId === "thr_env"
             ? { id: threadId, environment: { hostId: "host_laptop" } }
-            : { id: threadId, environment: null },
+            : threadId === "thr_ws"
+              ? { id: threadId, environment: { hostId: "host_laptop", path: join(srcDir, "ws-link") } }
+              : threadId === "thr_far"
+                ? { id: threadId, environment: { hostId: "host_server", path: join(srcDir, "root-link") } }
+                : { id: threadId, environment: null },
+        defaultExecutionOptions: async ({
+          threadId,
+        }: {
+          threadId: string;
+        }) => ({
+          permissionMode:
+            { thr_manual: "accept-edits", thr_auto: "auto", thr_ws: "auto", thr_far: "auto" }[threadId] ??
+            "full",
+        }),
       },
+      system: { config: async () => ({ primaryHostId: "host_laptop" }) },
       files: {
-        read: async ({ hostId, path }: { hostId?: string; path: string }) => {
-          reads.push({ hostId, path });
+        read: async ({ hostId, path, rootPath }: { hostId?: string; path: string; rootPath?: string }) => {
+          reads.push({ hostId, path, ...(rootPath !== undefined ? { rootPath } : {}) });
+          if (path.endsWith("stalled.md")) throw new Error("HTTP 504: Timed out waiting for command result");
           const content = await readFile(path, "utf8");
           return {
             path,
@@ -1756,6 +2091,167 @@ describe("automation CLI --script-file", () => {
       );
       expect(hostOnly.exitCode).toBe(1);
       expect(hostOnly.stderr).toContain("--host requires --script-file");
+
+      // An agent loop's path is on the caller's host, not the list's first one (#1757).
+      const agentPath =
+        "create --project proj_test --name path --in 30m --prompt hi --provider codex --model gpt-5 --environment /work --json".split(
+          " ",
+        );
+      const pathInThread = await t.cli.run(agentPath, { threadId: "thr_env" });
+      expect(
+        JSON.parse(pathInThread.stdout!).execution.environment.hostId,
+      ).toBe("host_laptop");
+      expect((await t.cli.run(agentPath, {})).stderr).toContain(
+        "More than one machine is connected",
+      );
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("--agent, repeated, saves agents that take turns; one --agent ends them", async () => {
+    const t = await setup();
+    const base = ["--project", "proj_test", "--json"];
+    try {
+      const created = await t.cli.run(
+        ["create", ...base, "--name", "turns", "--in", "30m", "--prompt", "p", "--agent", "codex,gpt-5,high", "--agent", "codex,gpt-6.1-sol"],
+        {},
+      );
+      expect(created.stderr ?? "").toBe("");
+      const { id, execution } = JSON.parse(created.stdout!);
+      expect(execution).toMatchObject({
+        providerId: "codex",
+        model: "gpt-5",
+        reasoningLevel: "high",
+        agents: [{ providerId: "codex", model: "gpt-5", reasoningLevel: "high" }, { providerId: "codex", model: "gpt-6.1-sol" }],
+      });
+      const one = await t.cli.run(["update", id, ...base, "--agent", "codex,gpt-6.1-sol,low"], {});
+      expect(JSON.parse(one.stdout!).execution).toMatchObject({ model: "gpt-6.1-sol", reasoningLevel: "low" });
+      expect(JSON.parse(one.stdout!).execution.agents).toBeUndefined();
+      expect((await t.cli.run(["update", id, ...base, "--agent", "codex"], {})).stderr).toContain("use PROVIDER,MODEL[,REASONING]");
+      expect((await t.cli.run(["update", id, ...base, "--agent", "codex,gpt-5", "--model", "x"], {})).stderr).toContain("not both");
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("a thread below Full Access makes, changes and runs only loops within its own mode (#2093)", async () => {
+    const t = await setup();
+    const loop = "--project proj_test --name a --in 30m --json";
+    const agent = `create ${loop} --prompt hi --provider codex --model gpt-5`;
+    const script = ["create", ...loop.split(" "), "--script", "echo hi"];
+    const run = (argv: string[] | string, threadId?: string) =>
+      t.cli.run(
+        typeof argv === "string" ? argv.split(" ") : argv,
+        threadId ? { threadId } : {},
+      );
+    const refused = "so it can't make, change, run or turn on this loop";
+    try {
+      // Auto gets an Auto loop; Manual gets one only when it asks, since it waits for approvals.
+      const auto = JSON.parse((await run(agent, "thr_auto")).stdout!);
+      expect(auto.execution.permissionMode).toBe("auto");
+      expect((await run(agent, "thr_manual")).stderr).toContain(
+        "This thread runs in Manual, so a loop it makes would run in Manual and wait for approvals.",
+      );
+      const manual = `${agent} --permission-mode accept-edits`;
+      const capped = JSON.parse((await run(manual, "thr_manual")).stdout!);
+      expect(capped.execution.permissionMode).toBe("accept-edits");
+      const higher = await run(`${agent} --permission-mode full`, "thr_manual");
+      expect(higher.stderr).toContain(`${refused}: it runs in Full Access.`);
+      expect((await run(script, "thr_manual")).stderr).toContain(
+        `${refused}: its script would run outside this thread's sandbox.`,
+      );
+      // The user's own and a Full Access thread's loops are unchanged, and out of a Manual thread's reach.
+      const full = JSON.parse((await run(agent)).stdout!);
+      expect(full.execution.permissionMode).toBe("full");
+      const scripted = JSON.parse((await run(script, "thr_env")).stdout!);
+      for (const id of [full.id, scripted.id]) {
+        for (const command of ["run", "resume", "update --name x"]) {
+          const [verb, ...rest] = command.split(" ");
+          const argv = `${verb} ${id} --project proj_test ${rest.join(" ")}`;
+          expect((await run(argv.trim(), "thr_manual")).stderr).toContain(
+            refused,
+          );
+        }
+      }
+      const own = `update ${capped.id} --project proj_test`;
+      expect(
+        (await run(`${own} --permission-mode full`, "thr_manual")).stderr,
+      ).toContain(refused);
+      expect((await run(`${own} --name y`, "thr_manual")).exitCode).toBe(0);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("a Manual or Auto thread reads --prompt-file and --script-file only in its own folder (#2096)", async () => {
+    const t = await setup();
+    await writeFile(join(t.srcDir, "p.md"), "hi");
+    // Its folder is a symlink: the daemon gets the real folder, as it refuses a symlinked root.
+    await symlink(t.srcDir, join(t.srcDir, "ws-link"));
+    const create = "create --project proj_test --name p --in 30m --provider codex --model gpt-5 --permission-mode auto".split(" ");
+    try {
+      // The daemon refuses a path outside rootPath, after resolving symlinks.
+      expect((await t.cli.run([...create, "--prompt-file", "p.md"], { cwd: t.srcDir, threadId: "thr_ws" })).exitCode).toBe(0);
+      expect(t.reads).toEqual([{ hostId: "host_laptop", path: join(t.srcDir, "p.md"), rootPath: await realpath(t.srcDir) }]);
+      // On another machine, a local symlink at the same path (here to /) is never followed: the stored path is sent.
+      await symlink("/", join(t.srcDir, "root-link"));
+      expect((await t.cli.run([...create, "--prompt-file", "p.md"], { cwd: t.srcDir, threadId: "thr_far" })).exitCode).toBe(0);
+      expect(t.reads[1]).toEqual({ hostId: "host_server", path: join(t.srcDir, "p.md"), rootPath: join(t.srcDir, "root-link") });
+      const cloud = ["create", "--cloud", "--project", "proj_test", "--name", "c", "--in", "30m", "--prompt", "x", "--script-file", "/etc/hosts"];
+      for (const [argv, threadId] of [[[...cloud, "--host", "server"], "thr_ws"], [cloud, "thr_manual"]] as const) {
+        expect((await t.cli.run([...argv], { threadId })).stderr).toContain("must be a file in its own folder on its own machine");
+      }
+      expect(t.reads).toHaveLength(2);
+    } finally {
+      await t.cleanup();
+    }
+  });
+
+  it("--prompt-file keeps option-like and multiline text as the agent prompt (#974)", async () => {
+    const t = await setup();
+    const prompt = "--script=echo review-only\r\n---\ntitle: x\n---\n\"q\" & | ^ %PATH%\n";
+    const update = "---\nsecond\n";
+    await writeFile(join(t.srcDir, "p.md"), `\uFEFF${prompt}`);
+    await writeFile(join(t.srcDir, "u.md"), update);
+    const agent = ["--provider", "codex", "--model", "gpt-5", "--json"];
+    try {
+      const created = await t.cli.run(
+        ["create", "--project", "proj_test", "--name", "p", "--in", "30m", "--prompt-file", "p.md", ...agent],
+        { cwd: t.srcDir },
+      );
+      expect(created.stderr ?? "").toBe("");
+      const id = JSON.parse(created.stdout!).id as string;
+      expect(JSON.parse(created.stdout!).execution).toMatchObject({ mode: "agent", prompt });
+      const updated = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt-file", join(t.srcDir, "u.md"), "--json"],
+        {},
+      );
+      expect(JSON.parse(updated.stdout!).execution).toMatchObject({ mode: "agent", prompt: update });
+      // A read the host never answered names the stage and says nothing was saved (#1653).
+      const stalled = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt-file", "stalled.md"],
+        { cwd: t.srcDir, threadId: "thr_env" },
+      );
+      expect(stalled.stderr).toBe(
+        "Could not read --prompt-file on host host_laptop, so nothing was saved and a retry is safe: HTTP 504: Timed out waiting for command result\n",
+      );
+      const shown = await t.cli.run(["show", id, "--project", "proj_test", "--json"], {});
+      expect(JSON.parse(shown.stdout!).execution).toMatchObject({ prompt: update });
+      const both = await t.cli.run(
+        ["update", id, "--project", "proj_test", "--prompt", "x", "--prompt-file", "u.md"],
+        { cwd: t.srcDir },
+      );
+      expect(both.stderr).toContain("Choose only one of --prompt and --prompt-file.");
+      // The 1 MB limit counts the file's bytes, BOM included, not characters.
+      for (const big of ["\u00e9".repeat(786_432), `\uFEFF${"a".repeat(1024 * 1024 - 1)}`]) {
+        await writeFile(join(t.srcDir, "big.md"), big);
+        const tooBig = await t.cli.run(
+          ["update", id, "--project", "proj_test", "--prompt-file", "big.md"],
+          { cwd: t.srcDir },
+        );
+        expect(tooBig.stderr).toContain("--prompt-file is larger than 1 MB.");
+      }
     } finally {
       await t.cleanup();
     }
@@ -1800,40 +2296,40 @@ describe("automation CLI --script-file", () => {
 describe("room CLI injection for script runs", () => {
   it("prefers the env pointers over PATH and macOS install locations", () => {
     expect(
-      bbBinaryCandidates({
+      roomBinaryCandidates({
         ROOM_CLI: "/daemon/bundle/room-cli",
         BB_CLI_DIR: "/other/dir",
       })[0],
     ).toBe("/daemon/bundle/room-cli");
-    expect(bbBinaryCandidates({ BB_CLI_DIR: "/daemon/bundle" })[0]).toBe(
+    expect(roomBinaryCandidates({ BB_CLI_DIR: "/daemon/bundle" })[0]).toBe(
       "/daemon/bundle/room-cli",
     );
   });
 
   it("expands PATH itself so every candidate is absolute", () => {
-    expect(bbBinaryCandidates({ PATH: "/usr/bin:/opt/tools" })).toEqual([
+    expect(roomBinaryCandidates({ PATH: "/usr/bin:/opt/tools" })).toEqual([
       "/usr/bin/room-cli",
       "/opt/tools/room-cli",
       "/opt/homebrew/bin/room-cli",
       "/usr/local/bin/room-cli",
     ]);
     expect(
-      bbBinaryCandidates({ PATH: "/usr/bin" }).every((c) => c.startsWith("/")),
+      roomBinaryCandidates({ PATH: "/usr/bin" }).every((c) => c.startsWith("/")),
     ).toBe(true);
   });
 
   it("drops entries that would resolve against the wrong directory", () => {
-    expect(bbBinaryCandidates({ PATH: "/usr/bin::/bin" })).toEqual([
+    expect(roomBinaryCandidates({ PATH: "/usr/bin::/bin" })).toEqual([
       "/usr/bin/room-cli",
       "/bin/room-cli",
       "/opt/homebrew/bin/room-cli",
       "/usr/local/bin/room-cli",
     ]);
     expect(
-      bbBinaryCandidates({ ROOM_CLI: "  ", BB_CLI_DIR: "", PATH: "" }),
+      roomBinaryCandidates({ ROOM_CLI: "  ", BB_CLI_DIR: "", PATH: "" }),
     ).toEqual(["/opt/homebrew/bin/room-cli", "/usr/local/bin/room-cli"]);
     expect(
-      bbBinaryCandidates({
+      roomBinaryCandidates({
         ROOM_CLI: "./room",
         BB_CLI_DIR: "rel/dir",
         PATH: "",
@@ -1972,7 +2468,7 @@ describe("legacy import", () => {
       }),
     );
     const kv = new Map<string, unknown>();
-    const bb = {
+    const room = {
       storage: {
         kv: {
           get: async <T>(key: string) => kv.get(key) as T | undefined,
@@ -1984,8 +2480,8 @@ describe("legacy import", () => {
       log: { info: () => undefined },
     };
 
-    await ingestLegacyImport({ bb, db, pluginDataDir });
-    await ingestLegacyImport({ bb, db, pluginDataDir });
+    await ingestLegacyImport({ bb: room, db, pluginDataDir });
+    await ingestLegacyImport({ bb: room, db, pluginDataDir });
 
     const imported = getAutomation(db, "auto_legacy");
     expect(imported).not.toBeNull();
@@ -2036,7 +2532,7 @@ describe("legacy import", () => {
           }),
         );
         const kv = new Map<string, unknown>();
-        const bb = {
+        const room = {
           storage: {
             kv: {
               get: async <T>(key: string) => kv.get(key) as T | undefined,
@@ -2049,7 +2545,7 @@ describe("legacy import", () => {
         };
 
         await expect(
-          ingestLegacyImport({ bb, db, pluginDataDir }),
+          ingestLegacyImport({ bb: room, db, pluginDataDir }),
           testCase.name,
         ).rejects.toThrow(/does not match/u);
       } finally {
@@ -2060,6 +2556,12 @@ describe("legacy import", () => {
 });
 
 describe("loop fallback", () => {
+  // fallback.ts caches usage per provider for the whole process: a fresh copy keeps other tests' mocks out.
+  let loopAgent: typeof import("./fallback.js").loopAgent;
+  beforeEach(async () => {
+    vi.resetModules();
+    ({ loopAgent } = await import("./fallback.js"));
+  });
   // Codex usage shows on a Mac with only a Cloud login and no CLI, so usage alone can't pick it.
   it("switches to the other agent only when it is ready on the loop's machine", async () => {
     let codexHealth = "not_installed";
@@ -2087,7 +2589,7 @@ describe("loop fallback", () => {
     const automation = {
       lastRunStatus: "failed",
       lastRunThreadId: null,
-    } as unknown as Parameters<typeof loopAgent>[1];
+    } as unknown as Parameters<typeof loopAgent>[2];
     const execution = {
       mode: "agent",
       providerId: "claude-code",
@@ -2098,9 +2600,33 @@ describe("loop fallback", () => {
         hostId: "host-mac",
         workspace: { type: "personal" },
       },
-    } as unknown as Parameters<typeof loopAgent>[2];
+    } as unknown as Parameters<typeof loopAgent>[3];
+    // A plan limit skips the run (ADR 0344), and only that skip checks usage like a failed run (#1807).
+    const db = createTestDb();
+    const skipped = {
+      ...createScheduledAutomation(db, 1),
+      lastRunStatus: "skipped",
+    } as typeof automation;
+    const skip = (now: number, skipReason: string) =>
+      closeAutomationRun(db, {
+        runId: createManualRun(db, {
+          automationId: skipped.id,
+          runMode: "agent",
+          now,
+        }).run.id,
+        status: "skipped",
+        skipReason,
+        now,
+      });
+    skip(1, "stopped");
+    const usageLimits = vi.spyOn(sdk.system!, "usageLimits");
+    expect(await loopAgent(sdk, db, skipped, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    expect(usageLimits).not.toHaveBeenCalled();
+    skip(2, "plan limit: weekly");
 
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    expect(await loopAgent(sdk, db, skipped, execution)).toMatchObject({
       providerId: "claude-code",
     });
     // Only Codex is checked, with a bounded wait, so an unrelated slow agent can't hold the loop.
@@ -2121,14 +2647,149 @@ describe("loop fallback", () => {
           signal.addEventListener("abort", () => reject(signal.reason));
         }),
     );
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    expect(await loopAgent(sdk, db, automation, execution)).toMatchObject({
       providerId: "claude-code",
     });
     expect(timeout).toHaveBeenCalledWith(5_000);
     timeout.mockRestore();
-    expect(await loopAgent(sdk, automation, execution)).toMatchObject({
+    // Switching Stops the last run's idle or failed thread, cancelling its retries, as after a failed run.
+    let status = "active";
+    sdk.threads.get = async () => ({ status, dispatchingMessageCount: 0 });
+    const stop = vi.fn(async () => ({}));
+    sdk.threads.stop = stop;
+    const last = { ...automation, lastRunThreadId: "thr_last" };
+    // A busy thread may already run a retry, so the loop keeps its agent this run.
+    expect(await loopAgent(sdk, db, last, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    status = "error";
+    // A webhook run's retry holds its own events, so the switch leaves it.
+    const webhook = { ...last, triggerType: "webhook" as const };
+    expect(await loopAgent(sdk, db, webhook, execution)).toMatchObject({
+      providerId: "codex",
+    });
+    expect(stop).not.toHaveBeenCalled();
+    expect(await loopAgent(sdk, db, last, execution)).toMatchObject({
       providerId: "codex",
       model: "gpt-6-astra",
     });
+    expect(stop).toHaveBeenCalledWith({ threadId: "thr_last" });
+    // An unknown reset ends the 10-minute memory, but a loop that switched keeps checking, so it doesn't go back (#1807).
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 3_600_000);
+    const succeeded = { ...automation, lastRunStatus: "succeeded" as const };
+    expect(await loopAgent(sdk, db, succeeded, execution)).toMatchObject({
+      providerId: "codex",
+    });
+    // Turning the Switch off applies to a loop that already switched too.
+    sdk.cloudroom = { automations: async () => ({ fallback: false }) } as never;
+    expect(await loopAgent(sdk, db, succeeded, execution)).toMatchObject({
+      providerId: "claude-code",
+    });
+    vi.useRealTimers();
+  });
+
+  it("gives each run the next of a loop's agents, past one at its plan limit or not ready", async () => {
+    const fable = { providerId: "claude-code", model: "claude-fable-5-2", reasoningLevel: "xhigh" as const };
+    const gemini = { providerId: "acp-cursor", model: "gemini-4-carbon", reasoningLevel: "high" as const };
+    let claudeFull = false;
+    const sdk = {
+      system: {
+        usageLimits: async ({ providerId }: { providerId: string }) => ({
+          [providerId]: {
+            status: "ok",
+            windows: [{ label: "Weekly limit", usedPercent: providerId === "claude-code" && claudeFull ? 100 : 10, resetsAt: null }],
+          },
+        }),
+        providerStates: async ({ providerId }: { providerId: string }) => ({ providers: [{ providerId, status: "ready" }] }),
+      },
+      threads: {},
+    } as unknown as FallbackSdk;
+    const execution = {
+      mode: "agent",
+      providerId: "claude-code",
+      model: "claude-fable-5-2",
+      reasoningLevel: "xhigh",
+      agents: [fable, gemini],
+      environment: { type: "host", hostId: "host-mac", workspace: { type: "personal" } },
+    } as unknown as Parameters<typeof loopAgent>[3];
+    const db = createTestDb();
+    // Runs get the loop as it was before they count, so the first run sees 0.
+    const run = (runCount: number) =>
+      loopAgent(sdk, db, { runCount, lastRunStatus: "succeeded" } as Parameters<typeof loopAgent>[2], execution);
+    expect([await run(0), await run(1), await run(2)]).toEqual([fable, gemini, fable]);
+    // A failed last run is stopped before the next agent takes over, so its retries never redo the work.
+    let stopped = true;
+    const stop = vi.fn(async () => (stopped ? {} : Promise.reject(new Error("busy"))));
+    sdk.threads = { get: async () => ({ status: "error", dispatchingMessageCount: 0 }), stop } as never;
+    const afterFailure = { runCount: 1, lastRunStatus: "failed", lastRunThreadId: "thr_last", triggerType: "schedule" } as Parameters<typeof loopAgent>[2];
+    expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(gemini);
+    expect(stop).toHaveBeenCalledWith({ threadId: "thr_last" });
+    // If it can't be stopped, this run stays on the last run's agent.
+    stopped = false;
+    expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(fable);
+    // Usage is read again after its one-minute cache.
+    claudeFull = true;
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 120_000);
+    expect(await run(0)).toEqual(gemini);
+    vi.useRealTimers();
+  });
+});
+
+describe("loop review", () => {
+  it("shows each run's saved report over its thread's summary (#1078)", async () => {
+    const now = Date.now();
+    const db = createTestDb();
+    createScheduledAutomation(db, now + 60_000);
+    const { run } = createManualRun(db, { automationId: "auto_test", runMode: "agent", now: now - 4_000 });
+    setAutomationRunThread(db, { runId: run.id, threadId: "thr_local" });
+    closeAutomationRun(db, { runId: run.id, status: "succeeded", now: now - 3_000 });
+    for (const [threadId, at] of [["thr_cloud", 1], ["thr_busy", 2], ["thr_quiet", 3]] as const)
+      addReviewThread(db, { threadId, automationId: null, runId: null, loopName: "PR loop", createdAt: now - at * 1_000 });
+    const thread = (id: string) => ({
+      id, projectId: "proj_test", title: id, titleFallback: "Loop run", purpose: { text: "Work has not started" },
+      status: id === "thr_busy" ? "active" : "idle", archivedAt: null, deletedAt: null, createdAt: now - 5_000, executionTarget: "cloud",
+    });
+    // The website's rows. This app's server swaps each Cloud thread for the request that started it, and the website
+    // answers only the requested runs: a same-thread run on a child session or a Local run sharing the thread never matches.
+    const starts: Record<string, string> = { thr_cloud: "auto_c_1", thr_busy: "auto_b_1", thr_quiet: "auto_q_1" };
+    const rows = [
+      { request: "auto_child_9", thread_id: "thr_cloud", outcome: "done", reason: "A child session's same-thread run" },
+      { request: "arun_other", thread_id: "thr_cloud", outcome: "acted", reason: "A Local run on this thread" },
+      { request: "auto_c_1", thread_id: "thr_cloud", outcome: "needs_you", reason: "PR #12 needs a decision" },
+      { request: "auto_b_1", thread_id: "thr_busy", outcome: "done", reason: "Merged #13" },
+      { request: run.id, thread_id: "thr_local", outcome: "failed", reason: "Tests broke" },
+    ];
+    const website = (extra: object[]) => async (input: { runs?: string[]; threads?: string[] }) => {
+      const asked = [...(input.runs ?? []), ...(input.threads ?? []).map((id) => starts[id])];
+      return { reports: [...rows.filter((row) => asked.includes(row.request)), ...extra] };
+    };
+    const stale = { status: "needs-you", report: "Work has not started" };
+    const before = {
+      "thread:thr_cloud": stale,
+      "thread:thr_busy": { status: "running", report: "Work has not started" },
+      "thread:thr_quiet": stale,
+      [`run:${run.id}`]: stale,
+    };
+    for (const [answer, expected] of [
+      [website([]), {
+        "thread:thr_cloud": { status: "needs-you", report: "PR #12 needs a decision" },
+        "thread:thr_busy": { status: "running", report: "Merged #13" },
+        "thread:thr_quiet": stale,
+        [`run:${run.id}`]: { status: "failed", report: "Tests broke" },
+      }],
+      // One unexpected row, or an older website that refuses the lookup: Review shows what the threads say, as before.
+      [website([{ request: "auto_q_1", thread_id: "thr_quiet", outcome: "skipped", reason: null }]), before],
+      [async () => { throw new Error("Invalid automation request."); }, before],
+    ] as const) {
+      const automations = vi.fn(answer);
+      const review = await buildReview({
+        log: { warn: vi.fn() } as never,
+        sdk: { threads: { get: async ({ threadId }) => thread(threadId) as never }, projects: { list: async () => [] }, cloudroom: { automations } as never },
+      }, db, now);
+      expect(Object.fromEntries(review.items.map((item) => [item.id, { status: item.status, report: item.report }]))).toEqual(expected);
+      expect(automations).toHaveBeenCalledWith({ action: "reports", runs: [run.id], threads: ["thr_cloud", "thr_busy", "thr_quiet"] });
+    }
   });
 });

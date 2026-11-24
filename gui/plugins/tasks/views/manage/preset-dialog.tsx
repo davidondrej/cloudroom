@@ -118,7 +118,9 @@ export async function savePresetDraft(
     providerId: draft.providerId.trim(),
     modelId: draft.modelId.trim(),
     reasoningLevel: draft.reasoningLevel,
-    serviceTier: draft.serviceTier ?? null,
+    // Presets store Standard or Fast only, so Ultra Fast saves as Fast.
+    serviceTier:
+      draft.serviceTier === "ultrafast" ? "fast" : (draft.serviceTier ?? null),
     permissionMode: draft.permissionMode,
     environmentKind: draft.environmentKind,
     baseBranch: worktree && baseBranch !== "" ? baseBranch : null,

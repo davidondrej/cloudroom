@@ -123,8 +123,9 @@ async function switchThenResend(
     if (run.late) throw switchTimeout();
     const thread = requireSwitchableThread(deps, threadId);
     run.cloud = isCloudThread(thread);
-    const prepare = async () => {
-      const seed = await historySeed(
+    // A Core that switches the conversation itself builds the history (#237): no seed then.
+    const prepare = async (seeded = true) => {
+      const seed = !seeded ? [] : await historySeed(
         deps,
         thread,
         `[Cloudroom] This conversation started with another agent (${thread.providerId}). You are now continuing it as ${target.providerId}.`,
@@ -158,6 +159,7 @@ async function switchThenResend(
     }
     const override = await resolveHarnessSwitchOverride(deps, thread, target);
     if (run.late) throw switchTimeout();
+    requireReady(deps, thread, target);
     const environment = thread.environmentId
       ? getEnvironment(deps.db, thread.environmentId)
       : null;
@@ -183,7 +185,7 @@ async function switchThenResend(
     return thread;
   });
   // A queued retry replays the old harness's model, so it can only fail now.
-  cancelRetriesForExplicitStop(deps, threadId);
+  cancelRetriesForExplicitStop(deps, threadId, { chosen: false });
   deps.hub.notifyThread(threadId, ["execution-options-changed"], {
     projectId: from.projectId,
   });
@@ -199,6 +201,28 @@ async function switchThenResend(
   return options.resend
     ? resendAfterSwitch(deps, threadId, replyBy, () => run.late)
     : null;
+}
+
+/** An agent that can't build its launch options (say Cloudroom Agent, signed out) says why before the current one stops. */
+function requireReady(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  thread: Thread,
+  target: HarnessSwitch,
+): void {
+  try {
+    deps.providerRegistry.get(target.providerId)?.deriveProviderOptions({
+      threadId: thread.id,
+      projectId: thread.projectId,
+      model: target.model,
+      permissionMode: "full",
+    });
+  } catch (error) {
+    throw new ApiError(
+      409,
+      "harness_switch_not_ready",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /** A hidden nudge, sent like any message so it carries the earlier conversation. */
@@ -218,7 +242,7 @@ async function resendAfterSwitch(
   };
   // Cloud adds the earlier conversation only to messages that don't start hidden.
   const seed = isCloudThread(thread)
-    ? (resolveDeferredFirstTurnContext(deps.db, threadId)?.input ?? [])
+    ? (resolveDeferredFirstTurnContext(deps.db, thread)?.input ?? [])
     : [];
   let settle: (error: Error | null) => void = () => {};
   const settled = new Promise<Error | null>((resolve) => (settle = resolve));
@@ -257,7 +281,7 @@ async function resendAfterSwitch(
     : { delivery: "started" };
 }
 
-function requireSwitchableThread(
+export function requireSwitchableThread(
   deps: LoggedPendingInteractionWorkSessionDeps,
   threadId: string,
 ): Thread {

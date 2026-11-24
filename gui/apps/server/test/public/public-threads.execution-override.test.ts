@@ -104,12 +104,18 @@ describe("PATCH /threads/:id execution override", () => {
           provider.model,
         );
 
+        const rejected = await patchThread(harness, thread.id, { idleSessionOnly: true, providerId: "other", model: provider.model });
+        expect(rejected.status).toBe(409);
         const response = await patchThread(harness, thread.id, {
+          idleSessionOnly: true,
+          providerId: provider.id,
           model: provider.model,
           reasoningLevel: "high",
         });
 
         expect(response.status).toBe(200);
+        const reopened = await harness.app.request(`/api/v1/threads/${thread.id}/default-execution-options`);
+        expect(await reopened.json()).toMatchObject({ model: provider.model, reasoningLevel: "high" });
         expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
           modelOverride: provider.model,
           reasoningLevelOverride: "high",

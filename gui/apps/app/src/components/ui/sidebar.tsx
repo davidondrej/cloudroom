@@ -726,17 +726,22 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           data-sidebar="gap"
           style={widthStyle}
           className={cn(
-            "relative hidden h-full w-(--sidebar-width) bg-transparent transition-[width] duration-200 ease-linear md:block",
+            // Pushes the page to the card's right edge (6px short of the slot), so the chat centers in the free space.
+            // The width snaps so the page re-lays out once; animating it re-wrapped every chat on every frame.
+            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
+            "bb-zoom relative hidden h-full w-[calc(var(--sidebar-width)-0.375rem)] md:block",
             "group-data-[collapsible=offcanvas]:w-0",
           )}
         />
         <div
           data-sidebar="panel"
           className={cn(
-            "fixed inset-y-0 z-10 flex h-(--bb-shell-height) w-(--sidebar-width) select-none flex-col bg-sidebar text-sidebar-foreground [transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_0s]",
-            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:[transition:left_200ms_linear,right_200ms_linear,width_200ms_linear,visibility_0s_linear_200ms]",
-            "left-0 group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)]",
-            "border-border-seam group-data-[side=left]:border-r",
+            // A floating card, inset from the window edge. It sits above the page (z-40) so its popups spill over the chat.
+            // Slide and fade with translate and opacity only: the GPU animates them without layout or paint.
+            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
+            "bb-zoom fixed top-2 left-2 z-40 flex h-[calc(var(--bb-shell-height)-1rem)] w-[calc(var(--sidebar-width)-0.875rem)] select-none flex-col rounded-[14px] bg-sidebar text-sidebar-foreground shadow-message [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_0s] motion-reduce:transition-none!",
+            // Closing: slide past the inset, then move truly off-screen so no hidden drag region stays at the left edge.
+            "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] group-data-[collapsible=offcanvas]:translate-x-[calc(-100%-1rem)] group-data-[collapsible=offcanvas]:opacity-0 group-data-[collapsible=offcanvas]:[transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_220ms,left_0s_linear_220ms]",
             className,
           )}
           style={{ ...widthStyle, ...style }}
@@ -744,7 +749,7 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
         >
           <div
             data-sidebar="sidebar"
-            className="flex h-full w-full flex-col bg-sidebar pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
+            className="flex h-full w-full flex-col rounded-[inherit] bg-sidebar pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
           >
             {children}
           </div>

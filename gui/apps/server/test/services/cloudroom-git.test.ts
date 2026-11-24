@@ -4,7 +4,8 @@ import { createServer } from "node:http";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { fileURLToPath } from "node:url";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { cloudGitEnvironmentId } from "@cloudroom/domain";
 import { cloudroomThreads, createThread } from "@cloudroom/db";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
@@ -16,11 +17,20 @@ import { CloudGitError, cloudGitBranches, cloudGitDiffFiles, cloudGitDiffPatch, 
 let repo: string;
 let origin: string;
 
+// The sandbox runs Core's `cloudroom git` (core/src/git.rs); here, this checkout's own build.
+const SANDBOX_CORE = "/usr/local/lib/cloudroom/cloudroom";
+const coreDir = fileURLToPath(new URL("../../../../../core/", import.meta.url));
+const localCore = join(process.env.CARGO_TARGET_DIR ?? join(coreDir, "target"), "debug", "cloudroom");
+const inSandbox = (script: string) => script.replaceAll(SANDBOX_CORE, localCore);
+beforeAll(() => {
+  execFileSync("cargo", ["build", "--quiet", "--locked", "--manifest-path", join(coreDir, "Cargo.toml")], { stdio: "inherit" });
+}, 600_000);
+
 const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
 const write = (path: string, text: string) => writeFileSync(join(repo, path), text);
 // Runs the script the way Core's /v1/vm/run does: bash, in the checkout, stdin piped.
 const runIn = (cwd: () => string): CloudGitRun => async (script, stdin) => {
-  const result = spawnSync("/bin/bash", ["-c", script], { cwd: cwd(), input: stdin ?? Buffer.alloc(0), maxBuffer: 64 << 20 });
+  const result = spawnSync("/bin/bash", ["-c", inSandbox(script)], { cwd: cwd(), input: stdin ?? Buffer.alloc(0), maxBuffer: 64 << 20 });
   if (result.status !== 0) throw new CloudGitError(result.stderr.toString().trim() || `exit ${result.status} ${result.signal ?? ""}`, result.status);
   return result.stdout;
 };
@@ -213,6 +223,23 @@ describe("cloud git", () => {
     }
   });
 
+  it("uses the bash version only when the sandbox's Core has no `git` command", async () => {
+    const scripts: string[] = [];
+    // Core before `cloudroom git`: its answer to an unknown command, behind a login shell's warning.
+    const oldCore: CloudGitRun = async (script) => {
+      scripts.push(script);
+      if (script.includes(SANDBOX_CORE)) throw new CloudGitError("bash: warning: setlocale\nUnknown command git.\n\nUsage: room-cli [command]", 2);
+      throw new CloudGitError("the bash version ran", 8);
+    };
+    await expect(cloudGitStatus(oldCore)).rejects.toThrow("the bash version ran");
+    await expect(cloudGitStatus(oldCore)).rejects.toThrow("the bash version ran");
+    expect(scripts.map((script) => script.includes(SANDBOX_CORE)), "Core is asked once").toEqual([true, false, false]);
+
+    // A newer Core's usage error is an error, not a reason to fall back.
+    const newCore: CloudGitRun = async () => { throw new CloudGitError("Unknown target x.", 2); };
+    await expect(cloudGitDiffFiles(newCore, { type: "uncommitted" })).rejects.toThrow("Unknown target x.");
+  });
+
   it("reports a folder that is not a Git repository", async () => {
     rmSync(join(repo, ".git"), { recursive: true, force: true });
     await expect(cloudGitStatus(run)).rejects.toMatchObject({ exitCode: 3 });
@@ -235,7 +262,7 @@ it("serves a Cloud thread's Git status and diff through the environment API, and
       let text = "";
       for await (const chunk of req) text += chunk;
       const input = JSON.parse(text) as { command: string; stdin: string; cwd: string };
-      const result = spawnSync("/bin/bash", ["-lc", input.command], { cwd: input.cwd, input: Buffer.from(input.stdin, "hex"), maxBuffer: 64 << 20 });
+      const result = spawnSync("/bin/bash", ["-lc", inSandbox(input.command)], { cwd: input.cwd, input: Buffer.from(input.stdin, "hex"), maxBuffer: 64 << 20 });
       return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
     }
     json({}, 404);

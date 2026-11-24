@@ -1,4 +1,4 @@
-import type { IconSvgElement } from "@hugeicons/react";
+import type { IconSvgElement } from "./hugeicons-icon";
 import {
   AiBrain01Icon,
   ServerStack01Icon,
@@ -35,6 +35,7 @@ import {
   CloudOffIcon,
   Coffee02Icon,
   CollapseIcon,
+  CpuIcon,
   CreditCardIcon,
   Cursor01Icon,
   DashedLine02Icon,
@@ -315,6 +316,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   LogOut: Logout03Icon,
   Mail: Mail02Icon,
   Memory: RamMemoryIcon,
+  Cpu: CpuIcon,
   MailOpen: MailOpen01Icon,
   Maximize2: ExpandIcon,
   Mic: Mic02Icon,

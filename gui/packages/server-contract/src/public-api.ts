@@ -5,6 +5,9 @@ import {
   systemSkillUsageQuerySchema,
   type SystemSkillUsageQuery,
   type SystemSkillUsageResponse,
+  systemUsageAnalyticsQuerySchema,
+  type SystemUsageAnalyticsQuery,
+  type SystemUsageAnalyticsResponse,
   type SystemWorktreeStorageResponse,
 } from "./api/system.js";
 import {
@@ -47,6 +50,7 @@ import type {
   ProjectExecutionDefaults,
   ProjectSource,
   ResolvedThreadExecutionOptions,
+  SystemThreadInterruptedEventData,
   ThreadEventRow,
   ThreadQueuedMessage,
 } from "@cloudroom/domain";
@@ -98,7 +102,10 @@ import type {
   DeleteThreadSectionRequest,
   DeleteThreadRequest,
   ThreadArchiveAllQuery,
+  ThreadStopQuery,
+  ThreadCompactRequest,
   ThreadUnarchiveQuery,
+  ThreadUnarchiveResponse,
   EnvironmentActionApiError,
   EnvironmentActionRequest,
   EnvironmentActionResponse,
@@ -172,6 +179,8 @@ import type {
   ReorderPinnedThreadRequest,
   MoveThreadRequest,
   MoveThreadResponse,
+  MoveThreadToWorktreeRequest,
+  MoveThreadToWorktreeResponse,
   ReorderProjectRequest,
   ReorderQueuedMessageRequest,
   ResolvePendingInteractionRequest,
@@ -207,6 +216,8 @@ import type {
   SystemVersionQuery,
   SystemVersionResponse,
   SystemVoiceTranscriptionForm,
+  SystemVoiceTranscriptionJobResponse,
+  SystemVoiceTranscriptionJobStartResponse,
   SystemVoiceTranscriptionResponse,
   TerminalListResponse,
   ThemeCatalogResponse,
@@ -305,6 +316,8 @@ import {
   threadPluginMetadataQuerySchema,
   deleteThreadRequestSchema,
   threadArchiveAllQuerySchema,
+  threadStopQuerySchema,
+  threadCompactRequestSchema,
   threadUnarchiveQuerySchema,
   environmentActionRequestSchema,
   environmentDiffBranchesQuerySchema,
@@ -342,6 +355,7 @@ import {
   promptHistoryQuerySchema,
   reorderPinnedThreadRequestSchema,
   moveThreadRequestSchema,
+  moveThreadToWorktreeRequestSchema,
   reorderProjectRequestSchema,
   reorderQueuedMessageRequestSchema,
   resolvePendingInteractionRequestSchema,
@@ -1337,13 +1351,17 @@ export const publicApiRoutes = {
     stop: defineRoute({
       path: "/threads/:id/stop",
       method: "post",
-      request: noRequest<PathId>(),
+      request: optionalQueryRequest<PathId, ThreadStopQuery>(
+        threadStopQuerySchema,
+      ),
       response: jsonResponse<{ ok: true; cancelledRetries: number }>(),
     }),
     compact: defineRoute({
       path: "/threads/:id/compact",
       method: "post",
-      request: noRequest<PathId>(),
+      request: jsonRequest<PathId, ThreadCompactRequest>(
+        threadCompactRequestSchema,
+      ),
       response: jsonResponse<{ ok: true }>(),
     }),
     clearContext: defineRoute({
@@ -1427,6 +1445,14 @@ export const publicApiRoutes = {
       request: jsonRequest<PathId, MoveThreadRequest>(moveThreadRequestSchema),
       response: jsonResponse<MoveThreadResponse>(),
     }),
+    worktree: defineRoute({
+      path: "/threads/:id/worktree",
+      method: "post",
+      request: jsonRequest<PathId, MoveThreadToWorktreeRequest>(
+        moveThreadToWorktreeRequestSchema,
+      ),
+      response: jsonResponse<MoveThreadToWorktreeResponse>(),
+    }),
     interactions: defineRoute({
       path: "/threads/:id/interactions",
       method: "get",
@@ -1477,7 +1503,7 @@ export const publicApiRoutes = {
       request: optionalQueryRequest<PathId, ThreadUnarchiveQuery>(
         threadUnarchiveQuerySchema,
       ),
-      response: jsonResponse<{ ok: true }>(),
+      response: jsonResponse<ThreadUnarchiveResponse>(),
     }),
     read: defineRoute({
       path: "/threads/:id/read",
@@ -1523,7 +1549,7 @@ export const publicApiRoutes = {
       path: "/threads/:id/output",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<{ output: string | null; error?: string | null }>(),
+      response: jsonResponse<{ output: string | null; error?: string | null; interruption?: SystemThreadInterruptedEventData | null }>(),
     }),
     events: defineRoute({
       path: "/threads/:id/events",
@@ -1540,6 +1566,12 @@ export const publicApiRoutes = {
         threadEventWaitQuerySchema,
       ),
       response: jsonResponse<ThreadEventRow | null>(),
+    }),
+    messageForkPoint: defineRoute({
+      path: "/threads/:id/fork-point/:sequence",
+      method: "get",
+      request: noRequest<{ param: { id: string; sequence: string } }>(),
+      response: jsonResponse<{ exact: boolean; sequence: number | null }>(),
     }),
     defaultExecutionOptions: defineRoute({
       path: "/threads/:id/default-execution-options",
@@ -1667,7 +1699,10 @@ export const publicApiRoutes = {
         appSettingsUpdateSchema,
       ),
       response: jsonResponse<
-        AppSettings & { showUnhandledProviderEvents?: boolean }
+        AppSettings & {
+          showUnhandledProviderEvents?: boolean;
+          providerOrder?: string[];
+        }
       >(),
     }),
     keyboardSettings: defineRoute({
@@ -1767,6 +1802,14 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<SystemSkillUsageResponse>(),
     }),
+    usageAnalytics: defineRoute({
+      path: "/system/usage-analytics",
+      method: "get",
+      request: queryRequest<EmptyInput, SystemUsageAnalyticsQuery>(
+        systemUsageAnalyticsQuerySchema,
+      ),
+      response: jsonResponse<SystemUsageAnalyticsResponse>(),
+    }),
     worktreeStorage: defineRoute({
       path: "/system/worktree-storage",
       method: "get",
@@ -1848,6 +1891,20 @@ export const publicApiRoutes = {
       method: "post",
       request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
       response: jsonResponse<SystemVoiceTranscriptionResponse>(),
+    }),
+    startVoiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs",
+      method: "post",
+      request: formRequest<EmptyInput, SystemVoiceTranscriptionForm>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobStartResponse, 202>({
+        status: 202,
+      }),
+    }),
+    voiceTranscriptionJob: defineRoute({
+      path: "/system/voice-transcription/jobs/:id",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<SystemVoiceTranscriptionJobResponse>(),
     }),
     version: defineRoute({
       path: "/system/version",

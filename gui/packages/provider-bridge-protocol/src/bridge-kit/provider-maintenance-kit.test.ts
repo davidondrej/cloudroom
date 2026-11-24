@@ -1,19 +1,59 @@
 import { chmod, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { execPortableFile } from "@cloudroom/process-utils";
+import { describe, expect, it, vi } from "vitest";
 import {
   compareVersions,
   downloadedInstallerCommand,
   formatCommand,
   installationVerification,
   npmGlobalInstallSource,
+  probeCliVersion,
   readCliVersion,
   selectResolvedExecutable,
   versionFrom,
 } from "./provider-maintenance-kit.js";
 
+// The real one runs unless a test queues an answer.
+vi.mock("@cloudroom/process-utils", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@cloudroom/process-utils")>();
+  return { ...actual, execPortableFile: vi.fn(actual.execPortableFile) };
+});
+
 describe("provider maintenance kit", () => {
+  // A broken install says why in this output; Windows used to drop it (#1232).
+  it("keeps the output of a failed --version on Windows", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const stderr =
+        "Error: Missing optional dependency @openai/codex-win32-x64. Reinstall Codex: npm install -g @openai/codex@latest";
+      vi.mocked(execPortableFile).mockRejectedValueOnce(
+        Object.assign(new Error("codex.cmd exited with code 1"), {
+          code: 1,
+          stdout: "",
+          stderr,
+        }),
+      );
+      expect(await probeCliVersion("codex.cmd")).toEqual({
+        version: null,
+        failedOutput: `\n${stderr}`,
+      });
+      // A timeout has no output to keep.
+      vi.mocked(execPortableFile).mockRejectedValueOnce(
+        new Error("codex.cmd timed out after 5000ms"),
+      );
+      expect(await probeCliVersion("codex.cmd")).toEqual({
+        version: null,
+        failedOutput: null,
+      });
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "reads the version of a CLI that keeps reading stdin until EOF",
     async () => {

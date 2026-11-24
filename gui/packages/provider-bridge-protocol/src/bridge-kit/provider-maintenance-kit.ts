@@ -61,6 +61,7 @@ export async function resolveExecutablePath(
     const lookup = process.platform === "win32" ? "where" : "which";
     const { stdout } = await execFileAsync(lookup, [command], {
       timeout: CLI_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     return selectResolvedExecutable({
       candidates: stdout.split(/\r?\n/u),
@@ -114,6 +115,13 @@ function runCliProbe(
     // execFile can't run npm `.cmd` shims on Windows.
     return execPortableFile(command, args, { timeoutMs }).then(
       ({ stdout, stderr }) => `${stdout}\n${stderr}`,
+      // Keep a failed exit's output, like the Unix branch: it names a broken install (#1232).
+      (error: unknown) => {
+        const { stdout, stderr } = (error ?? {}) as Record<string, unknown>;
+        throw typeof stdout === "string" && typeof stderr === "string"
+          ? Object.assign(error as Error, { output: `${stdout}\n${stderr}` })
+          : error;
+      },
     );
   }
   endProbesWithProcess();
@@ -121,6 +129,7 @@ function runCliProbe(
     const child = spawn(command, [...args], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     liveProbes.add(child);
     const output = { stdout: "", stderr: "" };
@@ -165,7 +174,13 @@ function runCliProbe(
       if (!timedOut) liveProbes.delete(child);
       clearTimeout(timer);
       if (code === 0) resolve(`${output.stdout}\n${output.stderr}`);
-      else reject(new Error(`${command} exited with code ${String(code)}`));
+      else
+        reject(
+          Object.assign(
+            new Error(`${command} exited with code ${String(code)}`),
+            { output: `${output.stdout}\n${output.stderr}` },
+          ),
+        );
     });
   });
 }
@@ -184,20 +199,37 @@ export async function commandOutput(
 }
 
 export function versionFrom(value: string | null): string | null {
-  const candidate = value?.match(/\bv?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)/u)?.[1];
+  // Date versions such as Cursor's 2026.11.05 are only valid without the zero.
+  const candidate = value
+    ?.match(/\bv?(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)/u)?.[1]
+    ?.replace(/^(\d+)\.0*(\d+)\.0*(\d+)/u, "$1.$2.$3");
   return candidate !== undefined && semverValid(candidate) !== null
     ? candidate
     : null;
 }
 
-export async function readCliVersion(command: string): Promise<string | null> {
+/** readCliVersion, plus the output of a `--version` that exited non-zero (null on a timeout). */
+export async function probeCliVersion(
+  command: string,
+): Promise<{ version: string | null; failedOutput: string | null }> {
   try {
-    return versionFrom(
-      await runCliProbe(command, ["--version"], CLI_PROBE_TIMEOUT_MS),
+    const output = await runCliProbe(
+      command,
+      ["--version"],
+      CLI_PROBE_TIMEOUT_MS,
     );
-  } catch {
-    return null;
+    return { version: versionFrom(output), failedOutput: null };
+  } catch (error) {
+    const output = (error as { output?: unknown } | null)?.output;
+    return {
+      version: null,
+      failedOutput: typeof output === "string" ? output : null,
+    };
   }
+}
+
+export async function readCliVersion(command: string): Promise<string | null> {
+  return (await probeCliVersion(command)).version;
 }
 
 export function compareVersions(left: string, right: string): number {
@@ -326,6 +358,30 @@ export function installationVerification(
           kind: "version_changed",
           previousVersion: status.currentVersion ?? "unknown",
         };
+}
+
+/** Refuses an install or update the host no longer offers, saying what it has now. */
+export function installationRunUnavailable(
+  name: string,
+  action: "install" | "update",
+  status: Pick<
+    ProviderInstallationStatus,
+    "installed" | "currentVersion" | "installAction"
+  >,
+): { available: false; message: string } {
+  const current = !status.installed
+    ? `${name} is not installed`
+    : status.currentVersion === null
+      ? `${name} is installed (version unknown)`
+      : `${name} ${status.currentVersion} is installed`;
+  const next =
+    status.installAction === null || status.installAction.kind === action
+      ? "Cloudroom has no install or update to run."
+      : `Run ${status.installAction.kind} instead.`;
+  return {
+    available: false,
+    message: `${name} ${action} is not available on this host: ${current}. ${next}`,
+  };
 }
 
 export function downloadedInstallerCommand(

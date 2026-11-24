@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import {
@@ -13,7 +13,7 @@ import {
 import { SettingsSidebarContent } from "./SettingsSidebar";
 
 const pluginEntries = [
-  "bb-guide",
+  "cloudroom-guide",
   "connect",
   "custom-instructions",
   "keep-awake",
@@ -22,7 +22,6 @@ const pluginEntries = [
   "provider-claude-code",
   "provider-codex",
   "provider-retry",
-  "provider-usage",
   "push-notifications",
 ].map((id) => ({ id, label: id, icon: null }));
 
@@ -86,7 +85,7 @@ describe("SettingsSidebarContent navigation", () => {
       "Account",
       "General",
       "Agents",
-      "Instructions",
+      "Prompts",
       "Cloud",
       "Machines",
       "Projects",
@@ -96,7 +95,7 @@ describe("SettingsSidebarContent navigation", () => {
       "Updates",
     ]);
     expect(
-      screen.getByRole("link", { name: "Instructions" }).getAttribute("href"),
+      screen.getByRole("link", { name: "Prompts" }).getAttribute("href"),
     ).toBe("/settings/plugins/custom-instructions");
   });
 
@@ -138,7 +137,7 @@ describe("SettingsSidebarContent navigation", () => {
       sections: SETTINGS_NAV_SECTIONS.filter(({ id }) => id !== "files"),
     });
     expect(
-      screen.getByRole("link", { name: "Instructions" }).getAttribute("href"),
+      screen.getByRole("link", { name: "Prompts" }).getAttribute("href"),
     ).toBe("/settings/system-prompt");
   });
 

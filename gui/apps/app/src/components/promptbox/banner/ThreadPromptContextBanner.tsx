@@ -1,5 +1,9 @@
-import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
-import { NavLink } from "react-router-dom";
+import {
+  forwardRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type ReactNode,
+} from "react";
 import type {
   EnvironmentStatus,
   GitBranchRefClassification,
@@ -28,6 +32,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import {
   getPullRequestAttentionDisplay,
+  getPullRequestFix,
   getPullRequestGithubCheckStatus,
   PULL_REQUEST_STATE_DISPLAY,
 } from "@/lib/pull-request-display";
@@ -35,7 +40,6 @@ import { PullRequestStatusPill } from "@/components/pull-request/PullRequestStat
 import { AnimatedBody } from "@/components/promptbox/banner/AnimatedBody";
 import {
   BannerActionSlot,
-  PROMPT_BANNER_ACTION_FILL_CLASS,
   PROMPT_BANNER_ACTION_SEGMENT_CLASS,
   PromptBannerActionButton,
 } from "@/components/promptbox/banner/prompt-banner-actions";
@@ -65,13 +69,6 @@ export interface ThreadPromptGitSection {
   onPromptBannerFileClick: (selection: WorkspaceChangedFileSelection) => void;
 }
 
-export interface ThreadPromptParentThreadSection {
-  parentThreadTitle: string;
-  href: string;
-  relationship: "parent" | "fork" | "side-chat";
-  onDismiss?: () => void;
-}
-
 export interface ThreadPromptPullRequestSection {
   pullRequest: ThreadPullRequest;
   actions?: {
@@ -79,6 +76,8 @@ export interface ThreadPromptPullRequestSection {
     onMarkReady?: () => void;
     onMerge?: (method: PullRequestMergeMethod) => void;
     onConvertToDraft?: () => void;
+    /** Sends `prompt` to the thread's agent, for "Fix checks" and "Address review". */
+    onFix?: (prompt: string) => Promise<void> | void;
     selectedMergeMethod?: PullRequestMergeMethod;
   };
 }
@@ -93,16 +92,13 @@ export interface ThreadPromptEnvironmentGoneSection {
   status: Extract<EnvironmentStatus, "destroyed">;
 }
 
-export type ThreadPromptContextBannerExpandedSection =
-  | "git"
-  | "parentThread";
+export type ThreadPromptContextBannerExpandedSection = "git";
 
 interface ThreadPromptContextBannerProps {
   gitSection: ThreadPromptGitSection | null;
   gitSectionPending: boolean;
   archivedSection: ThreadPromptArchivedSection | null;
   environmentGoneSection: ThreadPromptEnvironmentGoneSection | null;
-  parentThreadSection: ThreadPromptParentThreadSection | null;
   pullRequestSection: ThreadPromptPullRequestSection | null;
   expandedSection: ThreadPromptContextBannerExpandedSection | null;
   onToggleSection: (section: ThreadPromptContextBannerExpandedSection) => void;
@@ -128,10 +124,6 @@ const ENVIRONMENT_GONE_STATUS_COPY: Record<
 };
 
 const SECTION_IDS = {
-  parentThread: {
-    toggle: "thread-prompt-banner-parent-thread-toggle",
-    body: "thread-prompt-banner-parent-thread-body",
-  },
   git: {
     toggle: "thread-prompt-banner-git-toggle",
     body: "thread-prompt-banner-git-body",
@@ -140,8 +132,8 @@ const SECTION_IDS = {
 
 const SEGMENT_SHRINK_CLASS = "min-w-0 overflow-hidden";
 const CONTEXT_BANNER_CARD_CLASS = cn(
-  "relative z-10 ml-auto mr-3 w-fit overflow-hidden sm:mr-4",
-  "[[data-app-composer]_&:last-child]:-mb-5 [[data-app-composer]_&:last-child]:rounded-b-none [[data-app-composer]_&:last-child]:border-b-0 [[data-app-composer]_&:last-child]:pb-3",
+  "relative z-10 ml-auto mr-3 w-fit overflow-hidden rounded-xl border-0 bg-composer p-0.5 sm:mr-4",
+  "[[data-app-composer]_&:last-child]:-mb-5 [[data-app-composer]_&:last-child]:rounded-b-none [[data-app-composer]_&:last-child]:pb-3",
 );
 const CONTEXT_BANNER_ROW_CLASS =
   "flex items-center gap-0.5 p-0.5 text-xs text-muted-foreground";
@@ -218,42 +210,6 @@ function SectionToggleButton({
   );
 }
 
-const PARENT_SECTION_COPY: Record<
-  ThreadPromptParentThreadSection["relationship"],
-  { verb: string; bodyLead: string; ariaPrefix: string }
-> = {
-  parent: {
-    verb: "Parent",
-    bodyLead: "This thread is a child of ",
-    ariaPrefix: "Parent thread",
-  },
-  fork: {
-    verb: "Forked from",
-    bodyLead: "This thread was forked from ",
-    ariaPrefix: "Forked from",
-  },
-  "side-chat": {
-    verb: "Side chat of",
-    bodyLead: "This thread is a side chat of ",
-    ariaPrefix: "Side chat of",
-  },
-};
-
-const PARENT_SECTION_ICON: Record<
-  ThreadPromptParentThreadSection["relationship"],
-  IconName
-> = {
-  parent: "UserRound",
-  fork: "Fork",
-  "side-chat": "SideChat",
-};
-
-function parentSectionAriaLabel(
-  section: ThreadPromptParentThreadSection,
-): string {
-  return `${PARENT_SECTION_COPY[section.relationship].ariaPrefix} ${section.parentThreadTitle}`;
-}
-
 function shouldShowPullRequestAttentionLabel(
   pullRequest: ThreadPullRequest,
 ): boolean {
@@ -266,71 +222,8 @@ function shouldShowPullRequestAttentionLabel(
   );
 }
 
-function ParentThreadSectionToggle({
-  section,
-  isExpanded,
-  onToggle,
-}: {
-  section: ThreadPromptParentThreadSection;
-  isExpanded: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <SectionToggleButton
-      id={SECTION_IDS.parentThread.toggle}
-      controlsId={SECTION_IDS.parentThread.body}
-      ariaLabel={parentSectionAriaLabel(section)}
-      icon={
-        <Icon
-          name={PARENT_SECTION_ICON[section.relationship]}
-          className="size-3.5 shrink-0"
-          aria-hidden="true"
-        />
-      }
-      label={null}
-      isExpanded={isExpanded}
-      onToggle={onToggle}
-    />
-  );
-}
-
-function ParentThreadSectionBody({
-  section,
-  isExpanded,
-}: {
-  section: ThreadPromptParentThreadSection;
-  isExpanded: boolean;
-}) {
-  return (
-    <AnimatedBody
-      collapsedBorder="reserve"
-      id={SECTION_IDS.parentThread.body}
-      labelledBy={SECTION_IDS.parentThread.toggle}
-      isExpanded={isExpanded}
-    >
-      <div className="px-3 pb-2 pt-1.5 text-xs leading-relaxed text-muted-foreground">
-        {PARENT_SECTION_COPY[section.relationship].bodyLead}
-        <NavLink
-          to={section.href}
-          className="text-foreground/90 underline underline-offset-2"
-        >
-          {section.parentThreadTitle}
-        </NavLink>
-        .
-      </div>
-    </AnimatedBody>
-  );
-}
-
 const PromptBannerActionGroup = ({ children }: { children: ReactNode }) => (
-  <div
-    className={cn(
-      "inline-flex overflow-hidden rounded border border-border",
-      PROMPT_BANNER_ACTION_FILL_CLASS,
-    )}
-  >
-    {children}
-  </div>
+  <div className="inline-flex overflow-hidden rounded">{children}</div>
 );
 
 const PromptBannerActionSegmentButton = forwardRef<
@@ -366,9 +259,37 @@ function PendingBannerActionButton({
   onClick: () => void;
 }) {
   return (
-    <PromptBannerActionButton onClick={onClick} disabled={pending}>
+    <PromptBannerActionButton
+      onClick={onClick}
+      disabled={pending}
+      className="border-transparent bg-transparent shadow-none"
+    >
       {pending ? pendingLabel : label}
     </PromptBannerActionButton>
+  );
+}
+
+/** The one solid control in the banner: sends the agent a prompt to fix what blocks the pull request. */
+function PullRequestFixButton({
+  label,
+  onFix,
+}: {
+  label: string;
+  onFix: () => Promise<void> | void;
+}) {
+  const [sending, setSending] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={sending}
+      onClick={() => {
+        setSending(true);
+        void Promise.resolve(onFix()).finally(() => setSending(false));
+      }}
+      className="cursor-pointer whitespace-nowrap rounded-full bg-foreground px-2.5 py-0.5 text-xs font-medium text-background transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+    >
+      {label}
+    </button>
   );
 }
 
@@ -409,7 +330,7 @@ function PullRequestMergeSplitButton({
           <PromptBannerActionSegmentButton
             disabled={Boolean(disabled)}
             className={cn(
-              "inline-flex items-center border-l border-border px-1 data-[state=open]:bg-state-active data-[state=open]:text-foreground",
+              "inline-flex items-center px-1 data-[state=open]:bg-state-active data-[state=open]:text-foreground",
             )}
             aria-label="Choose pull request merge method"
           >
@@ -606,36 +527,21 @@ interface ReadOnlyContextBannerProps {
   iconName: IconName;
   statusAriaLabel: string;
   statusLabel: string;
-  parentThreadSection: ThreadPromptParentThreadSection | null;
   statusAction: ReactNode;
-  expandedSection: ThreadPromptContextBannerExpandedSection | null;
-  onToggleSection: (section: ThreadPromptContextBannerExpandedSection) => void;
 }
 
 function ReadOnlyContextBanner({
   iconName,
   statusAriaLabel,
   statusLabel,
-  parentThreadSection,
   statusAction,
-  expandedSection,
-  onToggleSection,
 }: ReadOnlyContextBannerProps) {
-  const isParentThreadExpanded =
-    expandedSection === "parentThread" && parentThreadSection !== null;
   return (
     <PromptStackCard
       ariaLabel="Thread context before sending"
       className={CONTEXT_BANNER_CARD_CLASS}
     >
       <div className={CONTEXT_BANNER_ROW_CLASS}>
-        {parentThreadSection ? (
-          <ParentThreadSectionToggle
-            section={parentThreadSection}
-            isExpanded={isParentThreadExpanded}
-            onToggle={() => onToggleSection("parentThread")}
-          />
-        ) : null}
         <div
           className={cn(
             "flex min-w-0 items-center gap-1.5 text-xs",
@@ -657,12 +563,6 @@ function ReadOnlyContextBanner({
           <BannerActionSlot>{statusAction}</BannerActionSlot>
         ) : null}
       </div>
-      {parentThreadSection ? (
-        <ParentThreadSectionBody
-          section={parentThreadSection}
-          isExpanded={isParentThreadExpanded}
-        />
-      ) : null}
     </PromptStackCard>
   );
 }
@@ -672,7 +572,6 @@ export function ThreadPromptContextBanner({
   gitSectionPending,
   archivedSection,
   environmentGoneSection,
-  parentThreadSection,
   pullRequestSection,
   expandedSection,
   onToggleSection,
@@ -704,9 +603,6 @@ export function ThreadPromptContextBanner({
               />
             ) : null
           }
-          parentThreadSection={parentThreadSection}
-          expandedSection={expandedSection}
-          onToggleSection={onToggleSection}
         />
       </>
     );
@@ -715,19 +611,15 @@ export function ThreadPromptContextBanner({
     return leading ?? null;
   }
   const showGit = gitSection !== null;
-  const showParentThread = parentThreadSection !== null;
   const showPullRequest = pullRequestSection !== null;
-  if (!showGit && !showParentThread && !showPullRequest) {
+  if (!showGit && !showPullRequest) {
     return leading ?? null;
   }
-  const visibleSegmentCount =
-    Number(showParentThread) + Number(showPullRequest) + Number(showGit);
+  const visibleSegmentCount = Number(showPullRequest) + Number(showGit);
   const hasSingleVisibleSegment = visibleSegmentCount === 1;
   const isPullRequestAndGitOnly =
     showPullRequest && showGit && visibleSegmentCount === 2;
   const isGitExpanded = expandedSection === "git" && showGit;
-  const isParentThreadExpanded =
-    expandedSection === "parentThread" && showParentThread;
   const gitTally = showGit
     ? toChangeTally(gitSection.changedFiles.stats)
     : null;
@@ -742,35 +634,45 @@ export function ThreadPromptContextBanner({
       </>
     ) : null;
 
-  const isParentThreadOnly = showParentThread && !showGit && !showPullRequest;
-
   const pullRequest = pullRequestSection?.pullRequest ?? null;
   const showPullRequestLabel =
     hasSingleVisibleSegment || isPullRequestAndGitOnly;
   const pullRequestActions = pullRequestSection?.actions;
-  const pullRequestAction =
+  const pullRequestFix = pullRequest ? getPullRequestFix(pullRequest) : null;
+  const onPullRequestFix = pullRequestActions?.onFix;
+  const pullRequestFixButton =
+    pullRequestFix && onPullRequestFix ? (
+      <PullRequestFixButton
+        label={pullRequestFix.label}
+        onFix={() => onPullRequestFix(pullRequestFix.prompt)}
+      />
+    ) : null;
+  const pullRequestStateButton =
     pullRequest && pullRequestActions ? (
       pullRequest.state === "draft" && pullRequestActions.onMarkReady ? (
-        <BannerActionSlot>
-          <PendingBannerActionButton
-            pending={Boolean(pullRequestActions.isPending)}
-            label="Mark ready"
-            pendingLabel="Marking..."
-            onClick={pullRequestActions.onMarkReady}
-          />
-        </BannerActionSlot>
+        <PendingBannerActionButton
+          pending={Boolean(pullRequestActions.isPending)}
+          label="Mark ready"
+          pendingLabel="Marking..."
+          onClick={pullRequestActions.onMarkReady}
+        />
       ) : pullRequest.state === "open" &&
         pullRequest.mergeability.state === "mergeable" &&
         pullRequestActions.onMerge ? (
-        <BannerActionSlot>
-          <PullRequestMergeSplitButton
-            disabled={pullRequestActions.isPending}
-            onConvertToDraft={pullRequestActions.onConvertToDraft}
-            onMerge={pullRequestActions.onMerge}
-            selectedMethod={pullRequestActions.selectedMergeMethod ?? "merge"}
-          />
-        </BannerActionSlot>
+        <PullRequestMergeSplitButton
+          disabled={pullRequestActions.isPending}
+          onConvertToDraft={pullRequestActions.onConvertToDraft}
+          onMerge={pullRequestActions.onMerge}
+          selectedMethod={pullRequestActions.selectedMergeMethod ?? "merge"}
+        />
       ) : null
+    ) : null;
+  const pullRequestAction =
+    pullRequestFixButton || pullRequestStateButton ? (
+      <BannerActionSlot>
+        {pullRequestFixButton}
+        {pullRequestStateButton}
+      </BannerActionSlot>
     ) : null;
 
   const compactContextBanner =
@@ -787,47 +689,6 @@ export function ThreadPromptContextBanner({
         className={CONTEXT_BANNER_CARD_CLASS}
       >
         <div className={CONTEXT_BANNER_ROW_CLASS}>
-          {showParentThread && parentThreadSection && isParentThreadOnly ? (
-            <div
-              className={cn(
-                "flex min-w-0 items-center gap-1.5 text-xs",
-                PROMPT_STACK_INLAY_SEGMENT_CLASS,
-              )}
-              title={parentSectionAriaLabel(parentThreadSection)}
-            >
-              <Icon
-                name={PARENT_SECTION_ICON[parentThreadSection.relationship]}
-                className="size-3.5 shrink-0"
-                aria-hidden="true"
-              />
-              <span className="min-w-0 truncate">
-                {PARENT_SECTION_COPY[parentThreadSection.relationship].verb}{" "}
-                <NavLink
-                  to={parentThreadSection.href}
-                  className="text-foreground/90 underline underline-offset-2"
-                >
-                  {parentThreadSection.parentThreadTitle}
-                </NavLink>
-              </span>
-              {parentThreadSection.onDismiss ? (
-                <button
-                  type="button"
-                  aria-label="Dismiss"
-                  className="ml-1 shrink-0 cursor-pointer text-muted-foreground/70 transition-colors hover:text-foreground"
-                  onClick={parentThreadSection.onDismiss}
-                >
-                  <Icon name="CircleX" className="size-3.5" aria-hidden />
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {showParentThread && parentThreadSection && !isParentThreadOnly ? (
-            <ParentThreadSectionToggle
-              section={parentThreadSection}
-              isExpanded={isParentThreadExpanded}
-              onToggle={() => onToggleSection("parentThread")}
-            />
-          ) : null}
           {showPullRequest && pullRequest ? (
             <PullRequestBannerLink
               pullRequest={pullRequest}
@@ -857,12 +718,6 @@ export function ThreadPromptContextBanner({
           ) : null}
           {pullRequestAction}
         </div>
-        {showParentThread && parentThreadSection && !isParentThreadOnly ? (
-          <ParentThreadSectionBody
-            section={parentThreadSection}
-            isExpanded={isParentThreadExpanded}
-          />
-        ) : null}
         {showGit ? (
           <AnimatedBody
             collapsedBorder="reserve"

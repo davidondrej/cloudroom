@@ -1,7 +1,7 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain";
 import { useEffect } from "react";
 import { useQueries } from "@tanstack/react-query";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { pluginSettingsViewQueryOptions } from "@/hooks/queries/plugin-settings-queries";
 import { APP_COMMAND_GROUPS } from "@/lib/app-command-metadata";
 import { fetchWithAppSurface } from "@/lib/app-surface";
@@ -37,6 +37,8 @@ interface SettingsSearchState {
   activeSection: SettingsSectionId | null;
   pluginEntries: readonly PluginSettingsEntry[];
   sections: readonly SettingsNavSection[];
+  /** False when the DeepAPI section hides itself (see DeepapiSettingsSection). */
+  deepapiShown?: boolean;
 }
 
 const entries = (
@@ -50,11 +52,17 @@ const entries = (
       : { page, heading, label: item[0], keywords: item[1] },
   );
 
+const DEEPAPI_SEARCH_ENTRIES = entries("general", "DeepAPI", [
+  ["DeepAPI", "web search research scrape agents"],
+  ["Pay with Cloud Credits", "deepapi cloud credits charge cost"],
+]);
+
 const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Threads & editing", [
     ["Navigate to threads on creation", "open jump new thread"],
     ["Markdown formatting in prompt box", "rich text composer editor"],
     ["Prompt suggestions", "predict next prompt ghost text tab autocomplete"],
+    ["Skill suggestions", "save as skill card repeat workflow hint nudge"],
     ["Default thread followup behavior", "queue steer enter follow up message"],
   ]),
   ...entries("general", "Links", [
@@ -68,7 +76,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("general", "Thread naming", [
     ["Thread naming", "title rename name"],
     ["Model", "thread naming llm harness provider fallback"],
-    ["Rules", "thread naming title"],
     ["Rename vague titles", "thread naming"],
   ]),
   ...entries("general", "Thread purpose", [
@@ -80,6 +87,8 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Wrong-project hint", "project nudge suggest switch jev"],
     ["Confidence", "wrong project hint nudge sensitivity percent"],
   ]),
+  ...entries("general", "Smart search", [["Smart search", "cmd k jev find thread search"]]),
+  ...DEEPAPI_SEARCH_ENTRIES,
   ...entries("general", "Voice Input", [
     ["Voice Input", "dictation speech talk"],
     ["Microphone", "mic audio dictation voice"],
@@ -92,7 +101,6 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("push-notifications", undefined, [["Notifications", "alerts push"]]),
   ...entries("keep-awake", undefined, [["Keep Awake", "sleep caffeinate"]]),
-  ...entries("provider-usage", undefined, [["Usage", "limits quota tokens"]]),
   ...entries("custom-instructions", undefined, [
     ["Custom instructions", "agents.md prompt rules"],
   ]),
@@ -115,12 +123,15 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Diffs", "changes renderer"],
     ["Theme", "dark mode light mode system color scheme"],
     ["Corners", "rounded sharp radius"],
+    ["Show Cloudroom name", "logo brand wordmark title top bar video"],
     ["Palette", "colors custom theme"],
     ["Favicon color", "icon dock tab"],
+    ["Cloud icon", "electric lime crisp white monochrome color sidebar composer"],
     ["Fade inactive splits", "dim split panes"],
     ["Sidebar footer", "buttons reorder"],
     ["Question cards", "agent questions ask"],
-    ["Always show one-click prompts", "starter prompts new thread security pills"],
+    ["Wallpaper", "background image photo picture gif"],
+    ["Always show one-click scans", "workflow cyber scan new thread loops"],
   ]),
   ...entries("keyboard", undefined, [
     ["Keyboard shortcuts", "hotkeys keybindings keys"],
@@ -145,6 +156,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Show Ultra effort levels", "ultracode ultra reasoning effort thinking parallel agents codex claude"],
   ]),
   ...entries("cloud-environment", "Cloud environment", [
+    ["Auth my agents in the cloud automatically", "copy logins claude codex auth credentials mac"],
     ["GitHub", "account token gh push pr"],
     ["API keys", "secrets environment variables env tokens"],
     ["Skills", "cloud skills"],
@@ -153,13 +165,13 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Setup script", "install sandbox startup cli clis tools"],
   ]),
   ...entries("auto-delete", "Auto-delete", [
-    ["Delete unused cloud threads", "retention delete old cloud threads sessions history days year never"],
+    ["Delete unused cloud threads after", "retention delete old cloud threads sessions history days year never"],
   ]),
   ...entries("projects", undefined, [
     ["Projects", "repos folders rename delete"],
     ["Hidden projects", "hide unhide restore sidebar removed"],
   ]),
-  ...entries("import", undefined, [["Import chats", "history migrate"]]),
+  ...entries("import", undefined, [["Import chats", "history migrate conductor export"]]),
   ...entries("export", undefined, [["Export chats", "history backup download markdown json"]]),
   ...entries("archived", undefined, [["Archived threads", "restore unarchive"]]),
   ...entries("account", undefined, [
@@ -170,6 +182,11 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("analytics", undefined, [
+    ["Cloud Credits", "analytics usage credits used when hour by hour threads wave busiest day left"],
+    ["Agent hours", "analytics agents working hours time leverage local cloud your hours"],
+    ["Models", "analytics models most used share of prompts top model local cloud"],
+    ["Tokens", "analytics tokens written read cache usage threads wave"],
+    ["Prompts", "analytics prompts hours of the week streak busiest hour punch card"],
     ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
   ]),
   ...entries("machines", undefined, [
@@ -193,6 +210,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ]),
   ...entries("system-prompt", undefined, [
     ["Cloudroom system prompt", "instructions agents"],
+  ]),
+  ...entries("feature-prompts", undefined, [
+    ["Thread naming", "feature prompts edit rules title rename name"],
+    ["Prompt suggestions prompt", "feature prompts edit predict next prompt"],
   ]),
   ...entries("experiments", "Experiments", [
     ["Changelog preview", "beta release notes"],
@@ -331,6 +352,7 @@ function buildDocuments(
   for (const entry of [...SETTINGS_SEARCH_ENTRIES, ...pluginEntries]) {
     const page = pages.get(entry.page);
     if (!page) continue;
+    if (state.deepapiShown === false && DEEPAPI_SEARCH_ENTRIES.includes(entry)) continue;
     const path = [page.group, page.label, entry.heading]
       .filter((part, index, all): part is string =>
         part !== undefined && part !== entry.label && all.indexOf(part) === index,

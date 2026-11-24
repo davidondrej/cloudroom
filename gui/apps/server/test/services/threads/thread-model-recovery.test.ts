@@ -1,6 +1,9 @@
 import { getThreadExecutionOverride, setThreadExecutionOverride } from "@cloudroom/db";
 import { describe, expect, it } from "vitest";
-import { recoverThreadModelOverride } from "../../../src/services/threads/thread-execution-override.js";
+import {
+  recoverThreadModelOverride,
+  resolveHarnessSwitchOverride,
+} from "../../../src/services/threads/thread-execution-override.js";
 import { buildExecutionOptions } from "../../../src/services/threads/thread-commands.js";
 import { availableModelFixture } from "../../helpers/available-models.js";
 import { registerProviderHostRpcResponder } from "../../helpers/host-rpc.js";
@@ -124,8 +127,23 @@ describe("stale model recovery", () => {
         recoverThreadModelOverride(harness.deps, recovery),
       ).rejects.toMatchObject({
         status: 503,
-        body: { code: "model_catalog_unavailable" },
+        body: {
+          code: "model_catalog_unavailable",
+          // The real cause, not "Try again once the host is connected" (#1291).
+          message: expect.stringContaining("failed to list its models"),
+        },
       });
+      // A switch still accepts the built-in fallback models (Marko, 2026-11-10).
+      const fallback =
+        harness.deps.providerRegistry.get("claude-code")!.fallbackModels[0]!
+          .model;
+      await expect(
+        resolveHarnessSwitchOverride(harness.deps, thread, {
+          providerId: "claude-code",
+          model: fallback,
+          reasoningLevel: null,
+        }),
+      ).resolves.toMatchObject({ modelOverride: fallback });
       temporaryFailure.unregister();
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,

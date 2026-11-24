@@ -65,7 +65,13 @@ export interface AgentRuntimeOptions {
   threadStorageRootPath?: string;
 
   bridgeBundleDir?: string;
-  turnStartWatchdog?: { thresholdMs?: number; intervalMs?: number };
+  turnStartWatchdog?: {
+    thresholdMs?: number;
+    intervalMs?: number;
+    stopAfterMs?: number;
+  };
+  /** Checked on the turn-start watchdog's interval. */
+  turnSilenceWatchdog?: { thresholdMs?: number };
   rateLimitRetry?: { delaysMs?: readonly number[] };
   threadCreation?: { requestTimeoutMs?: number };
 
@@ -137,6 +143,8 @@ export interface StartThreadArgs {
     sourceProviderThreadId: string;
     sourceProviderCheckpointId?: string;
   };
+  /** A message edit replaces this native session and keeps its Goal (#857). */
+  replacesProviderThreadId?: string;
 }
 
 export interface StartThreadResult {
@@ -219,6 +227,8 @@ export type SteerTurnResult = SteerTurnAppliedResult | SteerTurnStaleResult;
 
 export interface StopThreadArgs {
   threadId: string;
+  /** The provider may stay alive, ready for the thread's next turn. */
+  keepSession?: boolean;
 }
 
 export interface StopThreadResult {
@@ -364,12 +374,21 @@ export interface AgentRuntime {
 
   hasThread(threadId: string): boolean;
 
-  /** Tells the thread's bridge that a Stop or Archive waits behind its current command. */
-  notifyThreadStopRequested?(threadId: string): void;
+  /**
+   * Tells the thread's bridge that a Stop or Archive waits behind its current
+   * command. `stop`: a Stop, so a turn that reaches the bridge first must not run.
+   */
+  notifyThreadStopRequested?(threadId: string, stop?: boolean): void;
+
+  /** Whether a keep-session stop also ends a turn that was sent but has not opened yet. */
+  stopsUnopenedTurns?(threadId: string): boolean;
 
   getLiveThreadIds(): string[];
 
   hasOpenBackgroundWork(): boolean;
+
+  /** A message edit's staged copy of the thread's agent, until it is discarded (#607). */
+  hasStagedRewind?(threadId: string): boolean;
 
   shutdown(): Promise<void>;
 }

@@ -9,7 +9,7 @@ import { Switch } from "@cloudroom/shared-ui/switch";
 import type { loopFallbackRpcContract } from "./server.js";
 
 const MATCHING_MODELS = [
-  ["Fable 5.1", "GPT-6 Astra"],
+  ["Fable 5.2", "GPT-6 Astra"],
   ["Opus 5.5", "GPT-6.1 Sol"],
   ["Sonnet 5.5", "GPT-6.1 Terra"],
   ["Haiku 5.5", "GPT-6 Luna"],

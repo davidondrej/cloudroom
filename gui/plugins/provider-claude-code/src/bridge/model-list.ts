@@ -1,8 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { type AvailableModel } from "@get-bb/plugin-sdk/provider-bridge";
+import {
+  experimental_compareVersions as compareVersions,
+  experimental_readCliVersion as readCliVersion,
+  type AvailableModel,
+} from "@get-bb/plugin-sdk/provider-bridge";
 import { query, type Options } from "@anthropic-ai/claude-agent-sdk";
+import { CLAUDE_CODE_ACTIVE_CATALOG } from "../model-catalog.js";
 import {
   applyClaudeEffortSettings,
   buildClaudeCodeModels,
@@ -69,6 +74,28 @@ export async function listClaudeCodeBridgeModels(
   } finally {
     session.close();
   }
+}
+
+// Executables already new enough for a minimum. A failed check isn't kept, so an update unblocks the next turn.
+const newEnoughClaudeClis = new Set<string>();
+
+/** Why this computer's Claude Code is too old for `model`, or null. Only Local threads run here, and a
+ *  model stays listed because Cloud picks from this list too (#2235). Unknown version: null. */
+export async function claudeModelCliVersionError(
+  model: string | undefined,
+  executable: string | undefined,
+): Promise<string | null> {
+  const entry = CLAUDE_CODE_ACTIVE_CATALOG.find((e) => e.model === model);
+  const minimum = entry?.minimumCliVersion;
+  if (!entry || !minimum || !executable) return null;
+  const key = `${executable}\n${minimum}`;
+  if (newEnoughClaudeClis.has(key)) return null;
+  const version = await readCliVersion(executable);
+  if (version === null || compareVersions(version, minimum) >= 0) {
+    if (version !== null) newEnoughClaudeClis.add(key);
+    return null;
+  }
+  return `${entry.displayName} needs Claude Code ${minimum} or newer; this computer has ${version}. Update Claude Code, or run this thread in Cloud.`;
 }
 
 interface ClaudeCodeBridgeModelListMemoOptions {

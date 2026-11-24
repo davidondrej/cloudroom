@@ -374,6 +374,17 @@ describe("Windows drive paths", () => {
     });
   });
 
+  it("rejects network paths that Windows would open over SMB", () => {
+    for (const href of [
+      "/\\attacker.example\\share\\pixel.png",
+      "/%5Cattacker.example%5Cshare%5Cpixel.png",
+      "file:///%5Cattacker.example%5Cshare%5Cnotes.txt",
+      "\\\\attacker.example\\share\\pixel.png",
+    ]) {
+      expect(parseLocalFileHref({ absoluteLinks: trusted, href })).toBeNull();
+    }
+  });
+
   it("rejects drive roots, directories, and drive-relative text", () => {
     for (const href of ["C:\\", "C:/src/repo/", "C:notes.md", "C:"]) {
       expect(parseLocalFileHref({ absoluteLinks: trusted, href })).toBeNull();

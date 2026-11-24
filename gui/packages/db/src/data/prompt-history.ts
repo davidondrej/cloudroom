@@ -148,6 +148,8 @@ export function listPromptHistoryCommandUses(
       json_each(entry.input) AS item,
       json_each(item.value, '$.mentions') AS mention
     WHERE entry.created_at >= ${since}
+      -- Cheap text check first: most prompts have no command, so skip parsing their JSON.
+      AND instr(entry.input, '"kind":"command"') > 0
       AND json_extract(mention.value, '$.resource.kind') = 'command'
   `);
 }

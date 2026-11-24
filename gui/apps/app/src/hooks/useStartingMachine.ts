@@ -13,13 +13,26 @@ export function useStartingMachine() {
   return useAtom(startingMachineAtom);
 }
 
-// Where the last new thread started, per project, with the app-wide value as the fallback for a project's first thread.
+// A picked Local sticks to its project for 24 hours, then its new threads start in Cloud again. A project with no
+// pick starts in Cloud. The app-wide value only serves composers outside the new-thread screen.
 // The old cloudroom.executionTarget key saved picks and went stale.
 const LAST_STARTED_KEY = "cloudroom.lastStartedMachine";
+const LOCAL_STICKS_MS = 24 * 60 * 60_000;
+const projectKey = (projectId: string) => `${LAST_STARTED_KEY}:${projectId}`;
+
+// A value saved before the 24-hour rule has no time, so it never sticks. Either side of now, so a clock that
+// jumped back can't keep Local for more than 48 hours.
+function localSticks(projectId: string | null | undefined): boolean {
+  const saved = projectId ? localStorage.getItem(projectKey(projectId)) : null;
+  const pickedAt = saved?.startsWith("local:") ? Number(saved.slice(6)) : NaN;
+  return Math.abs(Date.now() - pickedAt) < LOCAL_STICKS_MS;
+}
 
 export function saveStartedMachine(target: "local" | "cloud", projectId?: string | null) {
   localStorage.setItem(LAST_STARTED_KEY, target);
-  if (projectId) localStorage.setItem(`${LAST_STARTED_KEY}:${projectId}`, target);
+  // The 24 hours are a fixed window: another Local pick inside them keeps the first pick's time.
+  if (!projectId || (target === "local" && localSticks(projectId))) return;
+  localStorage.setItem(projectKey(projectId), target === "local" ? `local:${Date.now()}` : target);
 }
 
 export function saveNewThreadMachine(
@@ -27,21 +40,23 @@ export function saveNewThreadMachine(
   seeded: boolean,
   chosen: "local" | "cloud",
   started: "local" | "cloud",
+  pickedLocal: boolean,
 ) {
-  if (!seeded && chosen === started) saveStartedMachine(started, projectId);
+  // Only a pick starts Local's 24 hours: a thread that starts on the remembered Local doesn't extend them.
+  if (!seeded && chosen === started && (started === "cloud" || pickedLocal)) {
+    saveStartedMachine(started, projectId);
+  }
 }
 
 export function startingExecutionTarget(
   newThread: boolean,
   projectId?: string | null,
 ): "local" | "cloud" {
-  const lastUsed =
-    (projectId ? localStorage.getItem(`${LAST_STARTED_KEY}:${projectId}`) : null) ??
-    localStorage.getItem(LAST_STARTED_KEY);
-  const startInCloud =
-    newThread &&
-    (getDefaultStore().get(startingMachineAtom) !== "last" || lastUsed === null);
-  return startInCloud || lastUsed === "cloud" ? "cloud" : "local";
+  if (!newThread) {
+    const project = projectId ? localStorage.getItem(projectKey(projectId)) : null;
+    return (project ?? localStorage.getItem(LAST_STARTED_KEY)) === "cloud" ? "cloud" : "local";
+  }
+  return getDefaultStore().get(startingMachineAtom) === "last" && localSticks(projectId) ? "local" : "cloud";
 }
 
 export function agentExecutionTarget(
