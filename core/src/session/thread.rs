@@ -990,6 +990,15 @@ async fn output(
     Query(query): Query<OutputQuery>,
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread output")?;
+    output_for(&m, &parent, &id, query.all).await
+}
+
+async fn output_for(
+    m: &Manager,
+    parent: &str,
+    id: &str,
+    all: bool,
+) -> Result<Json<Value>, Failure> {
     if id.starts_with("thr_") {
         // A child in its own sandbox: its saved chat, through the website, which checks this thread started it (ADR 0256).
         let Some(api) = &m.history.api else {
@@ -997,15 +1006,15 @@ async fn output(
                 json!({"id":id,"note":"This child runs in its own sandbox. Its replies arrive as messages when its turns end."}),
             ));
         };
-        let all = if query.all { "1" } else { "0" };
-        let failed = start_error(&m, &parent, &id);
-        let known = relay::started_here(&m, &parent, &id);
-        return match api.get("chat", &[("thread", &id), ("all", all)]).await {
+        let all = if all { "1" } else { "0" };
+        let failed = start_error(m, parent, id);
+        let known = relay::started_here(m, parent, id);
+        return match api.get("chat", &[("thread", id), ("all", all)]).await {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
-                if starting(&m, &parent, true).contains(&id) =>
+                if starting(m, parent, true).iter().any(|c| c == id) =>
             {
-                let why = relay::waiting_start(&m, &parent, &id).map(|why| format!("{why} "));
+                let why = relay::waiting_start(m, parent, id).map(|why| format!("{why} "));
                 let why = why.unwrap_or_default();
                 let note = format!(
                     "Its sandbox is still starting. {why}Its replies arrive as messages when its turns end."
@@ -1038,10 +1047,10 @@ async fn output(
         })
         .map_err(|error| website_failure(error, "read the child's chat"));
     }
-    m.own_child(&parent, &id).map_err(session_failure)?;
-    let mut answer = m.children(&parent, Some(&id), true).await["children"][0].clone();
+    m.own_child(parent, id).map_err(session_failure)?;
+    let mut answer = m.children(parent, Some(id), true).await["children"][0].clone();
     // Core keeps only the latest reply of a child in this sandbox, so `thread log` and `--all` say so.
-    if query.all && answer.is_object() {
+    if all && answer.is_object() {
         answer["note"] =
             json!("A child in this sandbox keeps only its latest reply, not its whole chat.");
     }
@@ -1955,8 +1964,8 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain, session_id};
-    use serde_json::json;
+    use super::*;
+    use crate::session::Local;
 
     // #2271: `thread show`'s moved-child check puts the ID in a request path, so only a whole session ID gets there.
     #[test]
@@ -2055,6 +2064,92 @@ mod tests {
             let children = answer["children"].as_array().unwrap();
             let shown: Vec<bool> = children.iter().map(|c| c["waited"] == true).collect();
             assert_eq!((children.len(), &shown[..]), (3, marked));
+        }
+    }
+
+    // #149: `thread output` falls back to what Core last heard on 403/404 only for a child this thread started;
+    // any other target (including one known only through `child_states`) keeps the website's refusal.
+    #[tokio::test]
+    async fn thread_output_falls_back_only_for_started_children_on_403_and_404() {
+        for status in [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            let app = Router::new().route(
+                "/api/core/chat",
+                get(move || async move {
+                    (
+                        status,
+                        Json(json!({"error":"Not a subagent of this thread"})),
+                    )
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let api_url = format!("http://{}/api/core", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let dir = std::env::temp_dir().join(format!(
+                "cloudroom-output-{}-{}",
+                status.as_u16(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            let mut local = Local::open(&dir).unwrap();
+            for (kind, data) in [
+                (
+                    "child_start",
+                    json!({"request_id":"r1","body":{"prompt":"go"}}),
+                ),
+                (
+                    "child_start_state",
+                    json!({"request_id":"r1","child":"thr_kid","done":true}),
+                ),
+                ("child_state", json!({"child":"thr_kid","state":"idle"})),
+                (
+                    "child_state",
+                    json!({"child":"thr_known","state":"running"}),
+                ),
+            ] {
+                local.append("cr_parent", kind, data, None).unwrap();
+            }
+            drop(local);
+            let config = crate::config::Config {
+                listen: "127.0.0.1:0".parse().unwrap(),
+                token: "t".repeat(32),
+                state_dir: dir.clone(),
+                repository: dir.clone(),
+                api_url: Some(api_url),
+                store: "test".into(),
+                instance: None,
+                account_home: dir.clone(),
+                default_harness: crate::runtime::Kind::Codex,
+                harnesses: [(
+                    crate::runtime::Kind::Codex,
+                    crate::config::HarnessConfig {
+                        binary: "/bin/false".into(),
+                        home: dir.clone(),
+                        model: "fixture".into(),
+                        provider: None,
+                    },
+                )]
+                .into(),
+                storage: None,
+                rpc_timeout: Duration::from_secs(30),
+                diagnostic_upload: Duration::from_secs(3600),
+                previous_exit_wait: Duration::ZERO,
+            };
+            let m = Manager::open(config).unwrap();
+            let kid = output_for(&m, "cr_parent", "thr_kid", false)
+                .await
+                .unwrap()
+                .0;
+            assert_eq!(kid["id"], "thr_kid");
+            assert_eq!(kid["state"], "idle");
+            assert_eq!(kid["note"], relay::UNLINKED);
+            for target in ["thr_known", "thr_other"] {
+                let (err_status, _) = output_for(&m, "cr_parent", target, false)
+                    .await
+                    .expect_err(target);
+                assert_eq!(err_status, status, "{target}");
+            }
+            server.abort();
+            std::fs::remove_dir_all(&dir).unwrap();
         }
     }
 }

@@ -1195,7 +1195,7 @@ mod tests {
 
     /// A fake website that has lost this sandbox's links: it lists no children and refuses every command for them,
     /// as Cloud did after a Cloudroom restart. Answers `GET children` and `POST relay`.
-    async fn forgetful_website() -> String {
+    async fn forgetful_website_with(status: StatusCode) -> String {
         let app = Router::new()
             .route(
                 "/api/core/children",
@@ -1203,9 +1203,9 @@ mod tests {
             )
             .route(
                 "/api/core/relay",
-                post(|| async {
+                post(move || async move {
                     (
-                        StatusCode::FORBIDDEN,
+                        status,
                         Json(json!({"error":"Not a subagent of this thread"})),
                     )
                 }),
@@ -1219,6 +1219,13 @@ mod tests {
     /// A Core whose top-level thread `cr_parent` started `thr_kid` in a sandbox of its own (no longer `starting`),
     /// reopened from its journal as after a restart.
     async fn restarted_parent(name: &str) -> (Arc<Manager>, std::path::PathBuf) {
+        restarted_parent_with(name, StatusCode::FORBIDDEN).await
+    }
+
+    async fn restarted_parent_with(
+        name: &str,
+        status: StatusCode,
+    ) -> (Arc<Manager>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("cloudroom-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let mut local = Local::open(&dir).unwrap();
@@ -1241,7 +1248,7 @@ mod tests {
             token: "t".repeat(32),
             state_dir: dir.clone(),
             repository: dir.clone(),
-            api_url: Some(forgetful_website().await),
+            api_url: Some(forgetful_website_with(status).await),
             store: "test".into(),
             instance: None,
             account_home: dir.clone(),
@@ -1344,6 +1351,49 @@ mod tests {
         }
         assert_eq!(states, [vec![], vec![json!("archived")]]);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A target known only through `child_states` (never in `started`) keeps the website's 403/404 refusal, emits no
+    /// `child_command`, and is not added to `thread list` (#149).
+    #[tokio::test]
+    async fn a_thread_known_only_in_child_states_keeps_the_refusal_and_stays_unlisted() {
+        for status in [StatusCode::FORBIDDEN, StatusCode::NOT_FOUND] {
+            let (m, dir) =
+                restarted_parent_with(&format!("state-only-{}", status.as_u16()), status).await;
+            note_child(&m, "cr_parent", "thr_known", "running", &Value::Null);
+            for action in ["archive", "stop", "tell"] {
+                let text = (action == "tell").then_some("hi");
+                let answer =
+                    command(&m, "cr_parent", "thr_known", action, text, false, false).await;
+                let (err_status, _) = answer.expect_err(action);
+                assert_eq!(err_status, status, "{action}");
+            }
+            let records = m.records("cr_parent", 0).await.unwrap();
+            let sent: Vec<&Value> = (records.iter())
+                .filter(|r| r.kind == "child_command")
+                .map(|r| &r.data["id"])
+                .collect();
+            assert!(sent.is_empty(), "{sent:?}");
+            for archived in [false, true] {
+                let mut answer = m.children("cr_parent", None, archived).await;
+                own_children(
+                    &m,
+                    "cr_parent",
+                    archived,
+                    &mut answer,
+                    Duration::from_secs(5),
+                )
+                .await;
+                let ids: Vec<&str> = answer["children"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|c| c["id"].as_str())
+                    .collect();
+                assert_eq!(ids, ["thr_kid"], "{answer}");
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
