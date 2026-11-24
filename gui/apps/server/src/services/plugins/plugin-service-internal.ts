@@ -158,7 +158,7 @@ export interface PluginAgentToolContribution {
 
 export interface PluginInstructionContribution {
   pluginId: string;
-  provider: (ctx: { threadId: string; projectId: string }) => string | null;
+  provider: (ctx: import("@get-bb/plugin-sdk").PluginInstructionContext) => string | null;
 }
 
 export interface PluginResolvedAgentConfiguration {

@@ -9,6 +9,10 @@ import {
   exportLegacyAutomationsForPluginImport,
   hasLegacyAutomationsToExport,
 } from "./legacy-automations-export.js";
+import { noteBlockingEventLoopWork } from "./services/system/event-loop-work.js";
+
+/** Enough SQL to name the query on a stall line; the full text is on its "Slow DB query" line. */
+const SQL_LABEL_LENGTH = 120;
 
 type InitDbLogger = MigrationWarningLogger &
   SlowDbQueryLogger &
@@ -23,8 +27,17 @@ export function initDb(
   databasePath: string,
   options: InitDbOptions = {},
 ): DbConnection {
+  const logger = options.logger;
   const db = createConnection(databasePath, {
-    slowQueryLogger: options.logger,
+    slowQueryLogger: logger && {
+      info: (fields, message) => {
+        noteBlockingEventLoopWork(
+          `db:${fields.operation} ${fields.sql.slice(0, SQL_LABEL_LENGTH)}`,
+          fields.durationMs,
+        );
+        logger.info(fields, message);
+      },
+    },
   });
   try {
     if (options.dataDir !== undefined && options.logger !== undefined) {

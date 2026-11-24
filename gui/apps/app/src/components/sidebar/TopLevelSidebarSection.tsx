@@ -30,6 +30,11 @@ import {
 } from "./sidebarRowClasses";
 import type { SidebarSortableDragBindings } from "./sortableMotion";
 import {
+  encodeSidebarWindowedNavigationEntries,
+  SIDEBAR_COLLAPSED_NAV_ATTRIBUTE,
+  type SidebarWindowedNavigationEntry,
+} from "./sidebarThreadShortcuts";
+import {
   NO_COLLAPSED_CHILD_ACTIVITY,
   type CollapsedChildActivity,
 } from "@cloudroom/client-core";
@@ -67,6 +72,8 @@ export interface TopLevelSidebarSectionProps {
   collapseControl?: TopLevelSidebarSectionCollapseControl;
   collapsedActivity?: CollapsedChildActivity;
   collapsedThreads?: readonly ThreadSplitIndicatorTarget[];
+  /** Threads Cmd+1–9 still reaches while this section is collapsed, in order. */
+  collapsedNavigation?: readonly SidebarWindowedNavigationEntry[];
   dragBindings?: SidebarSortableDragBindings;
   sectionRef?: (element: HTMLDivElement | null) => void;
   sectionStyle?: CSSProperties;
@@ -88,6 +95,7 @@ export function TopLevelSidebarSection({
   collapseControl,
   collapsedActivity,
   collapsedThreads = EMPTY_SPLIT_INDICATOR_THREADS,
+  collapsedNavigation,
   dragBindings,
   sectionRef,
   sectionStyle,
@@ -167,6 +175,12 @@ export function TopLevelSidebarSection({
       ref={sectionRef}
       style={sectionStyle}
       data-sidebar-section-id={sectionId}
+      {...(collapseControl?.isCollapsed && collapsedNavigation?.length
+        ? {
+            [SIDEBAR_COLLAPSED_NAV_ATTRIBUTE]:
+              encodeSidebarWindowedNavigationEntries(collapsedNavigation),
+          }
+        : undefined)}
       className={cn(
         "group/sidebar-section min-w-0 rounded-md transition-colors",
         isDropTargetActive && "bg-sidebar-accent/60",

@@ -22,3 +22,44 @@ index 9a69042fd48f4759a1c697bf23fa5b44f2da2366..637cc19f525c6ee3479b377cac4c6c78
      }
      return {
          keychainFile,
+diff --git a/templates/nsis/include/extractAppPackage.nsh b/templates/nsis/include/extractAppPackage.nsh
+index f5470bf52e923dc47266cea4684c76ef78ced451..0f2cc523eee69df1579540596dab44ef8ff4011f 100644
+--- a/templates/nsis/include/extractAppPackage.nsh
++++ b/templates/nsis/include/extractAppPackage.nsh
+@@ -90,6 +90,36 @@
+ !macroend
+ 
+ !macro extractUsing7za FILE
++  !ifdef ONE_CLICK
++    # Cloudroom: an empty folder (a fresh install, or an update after the old uninstaller emptied it) has
++    # nothing to lock, so extract straight into place. Going through a temp folder writes and virus-scans
++    # every file twice, while the progress bar sits nearly full. Anything else takes the copy below.
++    StrCpy $R1 ""
++    FindFirst $R0 $R2 "$OUTDIR\*"
++    ${DoUntil} $R2 == ""
++      ${If} $R2 != "."
++      ${AndIf} $R2 != ".."
++      ${AndIf} $R2 != "uninstallerIcon.ico"
++        StrCpy $R1 "1"
++        ${ExitDo}
++      ${EndIf}
++      FindNext $R0 $R2
++    ${Loop}
++    FindClose $R0
++    ClearErrors
++    ${If} $R1 == ""
++      Nsis7z::Extract "${FILE}"
++      # Nsis7z reports no errors, so stop here rather than register a broken install.
++      ${IfNot} ${FileExists} "$OUTDIR\${APP_EXECUTABLE_FILENAME}"
++      ${OrIfNot} ${FileExists} "$OUTDIR\resources\app.asar"
++        MessageBox MB_OK|MB_ICONSTOP "Cloudroom couldn't finish installing. Check that the disk has free space, then run the installer again." /SD IDOK
++        SetErrorLevel 2
++        Quit
++      ${EndIf}
++      Goto DoneExtract7za
++    ${EndIf}
++  !endif
++
+   Push $OUTDIR
+   CreateDirectory "$PLUGINSDIR\7z-out"
+   ClearErrors

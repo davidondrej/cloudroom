@@ -10,27 +10,42 @@ export function extractErrorMessage(
   value: unknown,
   opts?: { legacyKeys?: readonly string[] },
 ): string | null {
-  if (typeof value === "string") {
-    const normalized = value.replace(/\s+/g, " ").trim();
-    if (normalized.length === 0) return null;
-    return normalized;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const message = extractErrorMessage(item, opts);
-      if (message) return message;
+  const pending: unknown[] = [value];
+  const visited = new Set<object>();
+
+  // Walk iteratively so deeply nested API errors cannot overflow the call stack.
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current === "string") {
+      const normalized = current.replace(/\s+/g, " ").trim();
+      if (normalized.length > 0) return normalized;
+      continue;
     }
-    return null;
-  }
-  const record = toRecord(value);
-  if (!record) return null;
-  if (typeof record.message === "string") {
-    const message = extractErrorMessage(record.message, opts);
-    if (message) return message;
-  }
-  for (const key of opts?.legacyKeys ?? ["detail"]) {
-    const message = extractErrorMessage(record[key], opts);
-    if (message) return message;
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      visited.has(current)
+    ) {
+      continue;
+    }
+    visited.add(current);
+
+    if (Array.isArray(current)) {
+      for (let index = current.length - 1; index >= 0; index--) {
+        pending.push(current[index]);
+      }
+      continue;
+    }
+
+    const record = toRecord(current);
+    if (!record) continue;
+    const keys = [
+      ...(typeof record.message === "string" ? ["message"] : []),
+      ...(opts?.legacyKeys ?? ["detail"]),
+    ];
+    for (let index = keys.length - 1; index >= 0; index--) {
+      pending.push(record[keys[index]]);
+    }
   }
   return null;
 }

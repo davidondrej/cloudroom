@@ -63,9 +63,9 @@ export function readCachedStreamerMode(
     ?.generalSettings.streamerMode;
 }
 
-export function readCachedProviderOrder(
+export function readCachedDefaultProviderId(
   queryClient: QueryClient,
-): readonly string[] | undefined {
+): string | null | undefined {
   return queryClient.getQueryData<SystemConfigResponse>(systemConfigQueryKey())
-    ?.generalSettings.providerOrder;
+    ?.generalSettings.defaultProviderId;
 }

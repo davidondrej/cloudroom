@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
-import { matchPath, useLocation } from "react-router-dom";
+import { matchPath, useLocation } from "react-router";
 import { AppPageHeader } from "@/components/layout/AppPageHeader";
 import { SettingsAccountMenu } from "@/components/settings/SettingsAccountMenu";
 import { SettingsSidebarContent } from "@/components/settings/SettingsSidebar";
@@ -67,7 +67,7 @@ export function SettingsStoryChrome({
       style={{ "--bb-shell-height": "100vh" } as CSSProperties}
     >
       <SettingsSidebarContent
-        account={<SettingsAccountMenu usagePage={false} />}
+        account={<SettingsAccountMenu />}
         appRoutePath="/"
         isResizing={false}
         navigation={{

@@ -44,35 +44,39 @@ function parseStoredBackgroundTaskItem(
   }
 }
 
+/** Tasks this settlement ended while still running, by thread. */
+export type LostBackgroundTasks = Map<
+  string,
+  { itemId: string; description: string }[]
+>;
+
+/** Settles the host's open background tasks. */
 export function settleDanglingBackgroundTasks(
   deps: SettleDanglingBackgroundTasksDeps,
   args: SettleDanglingBackgroundTasksArgs,
-): void {
+): LostBackgroundTasks {
   const rows = listOpenBackgroundTaskItemRowsForHost(deps.db, {
     hostId: args.hostId,
   });
   if (rows.length === 0) {
-    return;
+    return new Map();
   }
 
-  const settledThreadIds = new Set<string>();
-  deps.db.transaction(
-    (tx) => {
-      for (const threadId of appendDanglingBackgroundTaskCompletions(
+  const settled = deps.db.transaction(
+    (tx) =>
+      appendDanglingBackgroundTaskCompletions(
         { db: tx, logger: deps.logger },
         rows,
-      )) {
-        settledThreadIds.add(threadId);
-      }
-    },
+      ),
     { behavior: "immediate" },
   );
 
-  for (const threadId of settledThreadIds) {
+  for (const threadId of settled.keys()) {
     deps.hub.notifyThread(threadId, ["events-appended"], {
       eventTypes: ["item/backgroundTask/completed"],
     });
   }
+  return settled;
 }
 
 export function settleDanglingBackgroundTasksForStoppedThreadInTransaction(
@@ -80,8 +84,8 @@ export function settleDanglingBackgroundTasksForStoppedThreadInTransaction(
   args: { threadId: string },
 ): void {
   const rows = listOpenBackgroundTaskItemRowsForThread(deps.db, args);
-  const settledThreadIds = appendDanglingBackgroundTaskCompletions(deps, rows);
-  for (const threadId of settledThreadIds) {
+  const settled = appendDanglingBackgroundTaskCompletions(deps, rows);
+  for (const threadId of settled.keys()) {
     deps.hub.notifyThread(threadId, ["events-appended"], {
       eventTypes: ["item/backgroundTask/completed"],
     });
@@ -91,8 +95,8 @@ export function settleDanglingBackgroundTasksForStoppedThreadInTransaction(
 function appendDanglingBackgroundTaskCompletions(
   deps: Pick<SettleDanglingBackgroundTasksTransactionDeps, "db" | "logger">,
   rows: readonly OpenBackgroundTaskItemRow[],
-): Set<string> {
-  const settledThreadIds = new Set<string>();
+): LostBackgroundTasks {
+  const settled: LostBackgroundTasks = new Map();
   for (const row of rows) {
     const item = parseStoredBackgroundTaskItem(row);
     if (!item) {
@@ -103,9 +107,8 @@ function appendDanglingBackgroundTaskCompletions(
       continue;
     }
     const providerThreadId = row.providerThreadId ?? "";
-    const taskStatus = isSettledBackgroundTaskStatus(item.taskStatus)
-      ? item.taskStatus
-      : "stopped";
+    const finished = isSettledBackgroundTaskStatus(item.taskStatus);
+    const taskStatus = finished ? item.taskStatus : "stopped";
     appendThreadEventsInTransaction(deps.db, [
       {
         threadId: row.threadId,
@@ -123,7 +126,12 @@ function appendDanglingBackgroundTaskCompletions(
         },
       },
     ]);
-    settledThreadIds.add(row.threadId);
+    settled.set(row.threadId, [
+      ...(settled.get(row.threadId) ?? []),
+      ...(finished
+        ? []
+        : [{ itemId: row.itemId, description: item.description }]),
+    ]);
   }
-  return settledThreadIds;
+  return settled;
 }

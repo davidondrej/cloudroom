@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { ProjectSource } from "@cloudroom/domain";
 import type { SystemEnvironmentProvider } from "@cloudroom/server-contract";
-import modalLogoUrl from "../../../../../plugins/environment-modal-sandbox/modal-logo.svg?url";
 import { EnvironmentPickerUI } from "./EnvironmentPicker";
 import { ProjectSelector } from "./ProjectSelector";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
@@ -63,6 +62,7 @@ export function LocalAndCloud() {
           selected: cloudSelected,
           unavailableReason: null,
           onSelect: () => setCloudSelected(true),
+          onAddMachine: noop,
         }}
         onSelectProvider={(provider) => {
           setCloudSelected(false);
@@ -355,7 +355,7 @@ const modalComposition: SystemEnvironmentProvider = {
   displayName: "Modal Sandbox",
   description: "Create a project checkout in a new Modal sandbox.",
   icon: "Box",
-  logoUrl: modalLogoUrl,
+  logoUrl: null,
   pluginId: "environment-modal-sandbox",
   acceptsEmptyInputs: true,
   machineAvailability: {},

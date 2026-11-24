@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
 import { createAutomationService } from "./service.js";
+import { THREAD_ARCHIVED_ERROR } from "./data.js";
+import { reconcileArchivePausedAutomations } from "./run.js";
 
 const PROJECT_ID = "proj_test";
 const THREAD_ID = "thr_target";
@@ -181,6 +183,87 @@ describe("target thread sends", () => {
     await vi.waitFor(() => expect(sent).toHaveLength(1));
     expect(sent[0]).not.toHaveProperty("permissionMode");
 
+    await host.harness.dispose();
+  });
+});
+
+describe("archived target threads (#609)", () => {
+  async function setup() {
+    const thread = {
+      id: THREAD_ID,
+      status: "idle",
+      archivedAt: 1 as number | null,
+      deletedAt: null,
+    };
+    const host = await createHost(thread);
+    const service = createService(host);
+    const loop = await createTargetAutomation(service, "Target");
+    const state = () =>
+      service.get({ projectId: PROJECT_ID, automationId: loop.id });
+    const unarchive = () => {
+      thread.archivedAt = null;
+      return host.harness.emitThreadEvent("thread.unarchived", {
+        thread: thread as never,
+      });
+    };
+    const runWhileArchived = async () => {
+      thread.archivedAt = 1;
+      await service.run({ projectId: PROJECT_ID, automationId: loop.id });
+      await vi.waitFor(async () =>
+        expect(await state()).toMatchObject({
+          enabled: false,
+          lastError: THREAD_ARCHIVED_ERROR,
+        }),
+      );
+    };
+    return { thread, host, service, loop, state, unarchive, runWhileArchived };
+  }
+
+  it("pauses on archive and resumes on unarchive, or at startup if it was missed", async () => {
+    const { thread, host, state, unarchive, runWhileArchived } = await setup();
+    await runWhileArchived();
+    await unarchive();
+    expect(await state()).toMatchObject({ enabled: true, lastError: null });
+
+    await runWhileArchived();
+    thread.archivedAt = null;
+    await reconcileArchivePausedAutomations(
+      host.bb as never,
+      host.bb.storage.database() as never,
+    );
+    expect(await state()).toMatchObject({ enabled: true, lastError: null });
+    await host.harness.dispose();
+  });
+
+  it("keeps the archive reason through Run now, but a manual Pause stays paused", async () => {
+    const { host, service, loop, state, unarchive, runWhileArchived } =
+      await setup();
+    await runWhileArchived();
+    await runWhileArchived();
+    await unarchive();
+    expect(await state()).toMatchObject({ enabled: true });
+
+    await runWhileArchived();
+    service.pause({ projectId: PROJECT_ID, automationId: loop.id });
+    await unarchive();
+    expect(await state()).toMatchObject({ enabled: false, lastError: null });
+    await host.harness.dispose();
+  });
+
+  it("runs a one-time loop right after unarchive when its time passed", async () => {
+    const { host, state, unarchive, runWhileArchived } = await setup();
+    await runWhileArchived();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 120_000);
+      await unarchive();
+      expect(await state()).toMatchObject({
+        enabled: true,
+        nextRunAt: Date.now(),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
     await host.harness.dispose();
   });
 });

@@ -2,12 +2,12 @@ import { useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
-import { sdk } from "@/lib/sdk";
 import { wsManager } from "@/lib/ws";
 
 const PLUGIN = "accounts";
-const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor"]);
+const PROVIDERS = new Set(["claude-code", "codex", "acp-cursor", "acp-antigravity"]);
 const QUERY_KEY = "plan-limit-accounts";
 
 const accountsSchema = z.array(
@@ -19,7 +19,11 @@ const accountsSchema = z.array(
     needsSignIn: z.boolean().optional(),
     limitedUntil: z.number().nullish(),
     windows: z.array(
-      z.object({ usedPercent: z.number(), resetsAt: z.number().nullish() }),
+      z.object({
+        usedPercent: z.number(),
+        resetsAt: z.number().nullish(),
+        model: z.string().nullish(),
+      }),
     ),
   }),
 );
@@ -32,24 +36,37 @@ export interface PlanLimitAccount {
   windows: AccountView["windows"];
 }
 
-/** Checked against the clock each time, since a card can stay open past a reset. */
-export function atLimit(account: PlanLimitAccount, now = Date.now()): boolean {
+/**
+ * Checked against the clock each time, since a card can stay open past a reset.
+ * One model's full bar ("7d fable") only counts for a thread on that model.
+ */
+export function atLimit(
+  account: PlanLimitAccount,
+  model: string,
+  now = Date.now(),
+): boolean {
   return (
     (account.limitedUntil ?? 0) > now ||
     account.windows.some(
       (window) =>
         window.usedPercent >= 100 &&
-        (window.resetsAt == null || window.resetsAt > now),
+        (window.resetsAt == null || window.resetsAt > now) &&
+        (!window.model || model.toLowerCase().includes(window.model)),
     )
   );
 }
 
-/** The first account with room, else the first one: it may still have credits. */
+/** The first account with room for the thread's model, else the first one: it may still have credits. */
 export function nextAccount(
   others: readonly PlanLimitAccount[],
+  model: string,
 ): PlanLimitAccount | null {
   const now = Date.now();
-  return others.find((account) => !atLimit(account, now)) ?? others[0] ?? null;
+  return (
+    others.find((account) => !atLimit(account, model, now)) ??
+    others[0] ??
+    null
+  );
 }
 
 /** The thread agent's accounts (ADR 0194). Every other signed-in account is offered, even at its limit. */
@@ -64,7 +81,7 @@ export function usePlanLimitAccounts(providerId: string) {
       }
     });
   }, [enabled, queryClient]);
-  const { data } = useQuery({
+  const { data, isFetched } = useQuery({
     queryKey: [QUERY_KEY, providerId],
     queryFn: async () =>
       accountsSchema.parse(
@@ -93,12 +110,28 @@ export function usePlanLimitAccounts(providerId: string) {
   return {
     inUse: accounts.find((account) => account.inUse) ?? null,
     others: accounts.filter((account) => !account.inUse),
+    loaded: !enabled || isFetched,
   };
 }
 
+/** The card showed (`limit_card` telemetry). The server sends it once per limit row per app run. */
+export function reportLimitCardViewed(card: {
+  key: string;
+  provider: string;
+  execution: "local" | "cloud_sandbox";
+  can_switch_account: boolean;
+  other_agents: number;
+}): void {
+  void fetchWithAppSurface("/api/v1/cloudroom/limit-card", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(card),
+  }).catch(() => {});
+}
+
 /**
- * Picks the account every thread uses (ADR 0197), then continues this thread on it.
- * Cloud threads continue on their own: Core sends "keep working" after a new login (ADR 0117).
+ * Picks the account every thread uses (ADR 0197). The plugin then continues every Local thread the old account's limit
+ * stopped, this one included (ADR 20261107-082836); Core does the same for Cloud threads after the new login (ADR 0117).
  */
 export async function switchAccount(args: {
   providerId: string;
@@ -109,28 +142,8 @@ export async function switchAccount(args: {
   await callPluginRpc(fetch, PLUGIN, "accounts.use", {
     provider: args.providerId,
     id: args.accountId,
+    where: "limit_card",
     cloud: args.isCloud,
+    ...(args.isCloud ? {} : { threadId: args.threadId }),
   });
-  if (args.isCloud) return;
-  try {
-    await sdk.threads.retry({
-      threadId: args.threadId,
-      reason: "Switched account",
-    });
-  } catch (error) {
-    if (Reflect.get(Object(error), "code") !== "retry_already_queued") {
-      throw error;
-    }
-    const queued = await sdk.threads.queuedMessages.list({
-      threadId: args.threadId,
-    });
-    const retry = queued.find((row) => row.payload.kind === "retry");
-    if (retry) {
-      await sdk.threads.queuedMessages.send({
-        threadId: args.threadId,
-        queuedMessageId: retry.id,
-        mode: "auto",
-      });
-    }
-  }
 }

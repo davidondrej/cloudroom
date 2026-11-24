@@ -8,7 +8,7 @@ import {
   type PaneContextValue,
 } from "@/views/thread-detail/PaneContext";
 import { beginSplitDrag, decideThreadDrop } from "@/lib/split-drag";
-import { SecondaryPanelLayout } from "./SecondaryPanelLayout";
+import { SecondaryPanelLayout } from "@/components/right-panel/shell/responsive-panel-host";
 
 const noop = () => {};
 const context: PaneContextValue = {

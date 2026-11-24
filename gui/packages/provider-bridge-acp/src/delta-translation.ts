@@ -12,6 +12,7 @@ import type {
   ProviderRuntimeEvent,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
 import type {
+  ProviderErrorCategory,
   ThreadEventItemStatus,
   ThreadEventPlanStep,
   ThreadEventTurnStatus,
@@ -103,6 +104,13 @@ const ACP_PLAN_STEP_STATUS_BY_ENTRY_STATUS = {
 } as const;
 
 const PLAN_STEPS_CHANNEL = "planSteps";
+// The agent's HTTP status says whose problem it is: the user's login, plan balance, or limit, not ours.
+const HTTP_STATUS_CATEGORY: Partial<Record<number, ProviderErrorCategory>> = {
+  401: "unauthorized",
+  402: "billing",
+  403: "unauthorized",
+  429: "rate-limit",
+};
 const RATE_LIMIT_PATTERN =
   /\b429\b|rate[ _-]?limit|too many requests|usage limit|free limit reached|clinepass limit|FreeUsageLimitError|PROMOTION_MODEL_LIMIT_REACHED|free-models-per-day|USAGE_LIMIT|hit your limit|out of usage|weekly (?:usage|pool)/iu;
 
@@ -177,6 +185,9 @@ export function createAcpDeltaTranslator(
   let injectedToolsByName = new Map<string, AcpInjectedTool>();
   const injectedToolBindings = new Map<string, AcpInjectedTool>();
   const pendingInjectedCalls = new Map<string, AcpInjectedTool[]>();
+  const turnErrors = new Map<string, string>();
+  // The message so far, for agents whose chunks repeat it (`cumulativeText`).
+  const messageSoFar = new Map<string, string>();
 
   function callKey(
     context: AcpDeltaTranslationContext | undefined,
@@ -459,6 +470,7 @@ export function createAcpDeltaTranslator(
   }
 
   function closeAssistantStream(): ThreadDelta {
+    messageSoFar.clear();
     return {
       kind: "item.textClose",
       key: { channel: ASSISTANT_STREAM_KEY },
@@ -613,13 +625,26 @@ export function createAcpDeltaTranslator(
         if (dialect.isNotice?.(text)) {
           return [];
         }
+        const turnError = dialect.errorMessages?.[text.trim()];
+        if (turnError !== undefined) {
+          turnErrors.set(context?.threadId ?? "", turnError);
+        }
+        // A chunk that doesn't continue the message so far starts a new one. Closing a message forgets it.
+        const thread = context?.threadId ?? "";
+        const sofar = messageSoFar.get(thread);
+        const continues = sofar !== undefined && text.startsWith(sofar);
+        const restart = dialect.cumulativeText && sofar !== undefined && !continues ? [closeAssistantStream()] : [];
+        if (dialect.cumulativeText) messageSoFar.set(thread, text);
+        const delta = dialect.cumulativeText && continues ? text.slice(sofar.length) : text;
+        if (delta === "") return [];
         return [
           closeThoughtStream(),
+          ...restart,
           {
             kind: "item.textDelta",
             key: { channel: ASSISTANT_STREAM_KEY },
             channel: "agentMessage",
-            text,
+            text: turnError ?? delta,
             noTurnFallback: noTurnFallbackFor(rawEvent),
           },
         ];
@@ -833,13 +858,20 @@ export function createAcpDeltaTranslator(
     context: AcpDeltaTranslationContext | undefined,
   ): ThreadDelta[] {
     const status = turnStatusForStopReason(stopReason);
+    const turnError = turnErrors.get(context?.threadId ?? "");
+    turnErrors.delete(context?.threadId ?? "");
+    messageSoFar.delete(context?.threadId ?? "");
     return [
       ...flushOpenTurnWork(context, itemStatusForTurnStatus(status)),
       {
         kind: "turn.boundary",
         status,
         ...(status === "failed"
-          ? { error: { message: `Agent stopped the turn: ${stopReason}` } }
+          ? {
+              error: {
+                message: turnError ?? `Agent stopped the turn: ${stopReason}`,
+              },
+            }
           : {}),
         claimIfIdle: true,
       },
@@ -854,19 +886,19 @@ export function createAcpDeltaTranslator(
     if (errorEnvelope.success) {
       clearThreadCalls(context);
       const detail = errorEnvelope.data.params?.message ?? "unknown error";
+      const status = errorEnvelope.data.params?.httpStatus;
+      const httpStatusCode = typeof status === "number" ? status : null;
+      const category =
+        (httpStatusCode === null ? undefined : HTTP_STATUS_CATEGORY[httpStatusCode]) ??
+        (RATE_LIMIT_PATTERN.test(detail) ? "rate-limit" : undefined) ??
+        (httpStatusCode === null ? undefined : "unknown");
       return [
         {
           kind: "provider.error",
           message: "Provider error",
           detail,
-          ...(RATE_LIMIT_PATTERN.test(detail)
-            ? {
-                errorInfo: {
-                  category: "rate-limit",
-                  providerCode: null,
-                  httpStatusCode: null,
-                },
-              }
+          ...(category
+            ? { errorInfo: { category, providerCode: null, httpStatusCode } }
             : {}),
           settlesTurn: true,
         },

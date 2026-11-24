@@ -1,8 +1,8 @@
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
-  BbHttpError,
+  RoomHttpError,
   createRequestTimeoutFetch,
-  DEFAULT_BB_REQUEST_TIMEOUT_MS,
+  DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
   readJsonResponse,
   readVoidResponse,
 } from "../src/response.js";
@@ -218,8 +218,8 @@ describe("readJsonResponse()", () => {
       (caught: unknown) => caught,
     );
 
-    expect(error).toBeInstanceOf(BbHttpError);
-    if (!(error instanceof BbHttpError)) {
+    expect(error).toBeInstanceOf(RoomHttpError);
+    if (!(error instanceof RoomHttpError)) {
       throw new Error("Expected a BbHttpError");
     }
     expect(error.message).toBe("HTTP 404: Thread thread-1 not found");
@@ -251,6 +251,25 @@ describe("readJsonResponse()", () => {
     await expect(readJson(response)).rejects.toThrow(
       "HTTP 404: Thread not found",
     );
+  });
+
+  it("extracts messages from deeply nested JSON error bodies", async () => {
+    const depth = 10_000;
+    const body =
+      '{"detail":['.repeat(depth) +
+      '{"message":"failure"}' +
+      "]}".repeat(depth);
+    const response = new Response(body, {
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    await expect(readJson(response)).rejects.toMatchObject({
+      body: expect.any(Object),
+      message: "HTTP 500: failure",
+      name: "BbHttpError",
+    });
   });
 
   it("carries the parsed JSON error body for structured consumers", async () => {
@@ -347,7 +366,7 @@ describe("createRequestTimeoutFetch()", () => {
 
   it("uses the default timeout when creating the node transport", async () => {
     useImmediateTimeoutSignalFor({
-      timeoutMs: DEFAULT_BB_REQUEST_TIMEOUT_MS,
+      timeoutMs: DEFAULT_ROOM_REQUEST_TIMEOUT_MS,
     });
     mockPendingFetchUntilAbort();
     const transport = createNodeTransport({ baseUrl: "http://server" });

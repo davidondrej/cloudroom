@@ -2,10 +2,10 @@ import type {
   SystemExecutionOptionsQuery,
   SystemExecutionOptionsResponse,
 } from "@cloudroom/server-contract";
-import type { BbSdkTransport } from "../transport.js";
+import type { RoomSdkTransport } from "../transport.js";
 
 export interface CreateSdkAreaArgs {
-  transport: BbSdkTransport;
+  transport: RoomSdkTransport;
 }
 
 type SignalRequestOptions = { init: { signal: AbortSignal } };
@@ -17,7 +17,7 @@ export function signalRequestArgs(
 }
 
 export async function readExecutionOptions(
-  transport: BbSdkTransport,
+  transport: RoomSdkTransport,
   input: SystemExecutionOptionsQuery & { signal?: AbortSignal },
 ): Promise<SystemExecutionOptionsResponse> {
   return transport.readJson(
@@ -27,6 +27,7 @@ export async function readExecutionOptions(
           environmentId: input.environmentId,
           hostId: input.hostId,
           providerId: input.providerId,
+          projectId: input.projectId,
         },
       },
       ...signalRequestArgs(input.signal),

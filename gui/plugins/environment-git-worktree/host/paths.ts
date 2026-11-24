@@ -129,3 +129,29 @@ export function resolveWorktreeChildPath(args: {
   }
   return path.join(resolveWorktreeAttemptRoot(args), args.childName);
 }
+
+export const SPARE_DIR_PREFIX = ".spare-";
+
+/** Where the next worktree of this checkout is prebuilt; a thread's path key never starts with a dot. */
+export function resolveSpareWorktreePath(args: {
+  dataDir: string;
+  sourcePath: string;
+}): string {
+  const key = createHash("sha256")
+    .update(args.sourcePath, "utf8")
+    .digest("hex")
+    .slice(0, REPO_DIR_HASH_LENGTH);
+  return sparePathIn(
+    path.join(resolveWorktreesRoot(args.dataDir), `${SPARE_DIR_PREFIX}${key}`),
+  );
+}
+
+/** The spare checkout inside one `.spare-*` folder. */
+export function sparePathIn(spareDir: string): string {
+  return path.join(spareDir, "checkout");
+}
+
+/** Exists once the spare is fully built and safe to claim. */
+export function spareReadyPath(sparePath: string): string {
+  return path.join(path.dirname(sparePath), "ready");
+}

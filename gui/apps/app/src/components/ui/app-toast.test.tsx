@@ -73,4 +73,26 @@ describe("AppToastContent", () => {
 
     expect(onDismiss).toHaveBeenCalledOnce();
   });
+
+  it("renders extraActions alongside primary and cancel actions", () => {
+    const onDownload = vi.fn((event: { preventDefault(): void }) =>
+      event.preventDefault(),
+    );
+    render(
+      <AppToastContent
+        action={{ label: "Retry", onClick: vi.fn() }}
+        extraActions={[{ label: "Download", onClick: onDownload }]}
+        cancel={{ label: "Discard", onClick: vi.fn() }}
+        description="Recording saved locally"
+        title="Voice input failed"
+        tone="error"
+      />,
+    );
+
+    screen.getByRole("button", { name: "Download" }).click();
+
+    expect(onDownload).toHaveBeenCalledOnce();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "Discard" })).toBeDefined();
+  });
 });

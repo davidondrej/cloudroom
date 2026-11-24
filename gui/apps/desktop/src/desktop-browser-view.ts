@@ -1,44 +1,50 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import { captureDesktopBrowserPage } from "./desktop-browser-capture.js";
 import {
+  BaseWindow,
   BrowserWindow,
   Menu,
   WebContentsView,
   session,
   type BrowserWindowConstructorOptions,
+  type FilesystemPermissionRequest,
   type Session,
   type WebContents,
   type WebPreferences,
 } from "electron";
 import {
-  BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH,
-  BB_DESKTOP_BROWSER_MAX_URL_LENGTH,
-  clampBbDesktopBrowserViewBounds,
-  type BbDesktopBrowserAttachRequest,
-  type BbDesktopBrowserFindInPageRequest,
-  type BbDesktopBrowserFindResult,
-  type BbDesktopBrowserNavigateRequest,
-  type BbDesktopBrowserOpenTabRequest,
-  type BbDesktopBrowserScopedOpenTabRequest,
-  type BbDesktopBrowserSetBoundsRequest,
-  type BbDesktopBrowserSetVisibleRequest,
-  type BbDesktopBrowserSnapshot,
-  type BbDesktopBrowserState,
-  type BbDesktopBrowserControlState,
-  type BbDesktopBrowserRevealRequest,
-  type BbDesktopBrowserTabRef,
-  type BbDesktopBrowserStopFindInPageRequest,
-  type BbDesktopBrowserViewportBounds,
-  type BbDesktopBrowserViewBounds,
+  ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH,
+  ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH,
+  clampRoomDesktopBrowserViewBounds,
+  type RoomDesktopBrowserAttachRequest,
+  type RoomDesktopBrowserFindInPageRequest,
+  type RoomDesktopBrowserFindResult,
+  type RoomDesktopBrowserNavigateRequest,
+  type RoomDesktopBrowserOpenTabRequest,
+  type RoomDesktopBrowserScopedOpenTabRequest,
+  type RoomDesktopBrowserSetBoundsRequest,
+  type RoomDesktopBrowserSetVisibleRequest,
+  type RoomDesktopBrowserSnapshot,
+  type RoomDesktopBrowserState,
+  type RoomDesktopBrowserControlState,
+  type RoomDesktopBrowserRevealRequest,
+  type RoomDesktopBrowserTabRef,
+  type RoomDesktopBrowserStopFindInPageRequest,
+  type RoomDesktopBrowserViewportBounds,
+  type RoomDesktopBrowserViewBounds,
 } from "@cloudroom/desktop-contract";
-import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
+import type { AppShortcutInput } from "@cloudroom/domain";
+import type { DesktopBrowserShortcut } from "./desktop-browser-shortcuts.js";
 import {
-  BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
-  BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_FOCUSED_CHANNEL,
-  BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
-  BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
-  BB_DESKTOP_BROWSER_STATE_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL,
+  ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL,
+  ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
 } from "./desktop-browser-ipc.js";
 import {
   evaluatePopupRate,
@@ -133,7 +139,8 @@ function guardMainFrameNavigation(
   });
 }
 
-const BB_BROWSER_PARTITION = "persist:bb-browser";
+const ROOM_BROWSER_PARTITION = "persist:bb-browser";
+const AUTOMATION_PARTITION_PREFIX = "bb-browser-automation-";
 
 const ERR_ABORTED = -3;
 
@@ -141,7 +148,7 @@ export type DesktopBrowserTabProfile =
   | { kind: "personal" }
   | { kind: "automation"; id: string };
 
-export interface DesktopBrowserNativeTab extends BbDesktopBrowserState {
+export interface DesktopBrowserNativeTab extends RoomDesktopBrowserState {
   threadId: string;
   generation: string;
   profile: DesktopBrowserTabProfile;
@@ -168,7 +175,7 @@ interface BrowserViewEntry {
   profile: DesktopBrowserTabProfile;
   partition: string;
   lastErrorText: string | null;
-  desiredBounds: BbDesktopBrowserViewBounds;
+  desiredBounds: RoomDesktopBrowserViewBounds;
   popupTimestamps: number[];
   popupWindows: Set<BrowserWindow>;
   rendererRecoveryAttempts: number;
@@ -180,14 +187,14 @@ interface BrowserViewEntry {
 }
 
 export type DesktopBrowserHostWebContentsPayload =
-  | BbDesktopBrowserControlState
-  | BbDesktopBrowserRevealRequest
-  | BbDesktopBrowserState
-  | BbDesktopBrowserOpenTabRequest
-  | BbDesktopBrowserScopedOpenTabRequest
-  | BbDesktopBrowserSnapshot
-  | BbDesktopBrowserTabRef
-  | BbDesktopBrowserFindResult;
+  | RoomDesktopBrowserControlState
+  | RoomDesktopBrowserRevealRequest
+  | RoomDesktopBrowserState
+  | RoomDesktopBrowserOpenTabRequest
+  | RoomDesktopBrowserScopedOpenTabRequest
+  | RoomDesktopBrowserSnapshot
+  | RoomDesktopBrowserTabRef
+  | RoomDesktopBrowserFindResult;
 
 export interface DesktopBrowserHostContentBounds {
   height: number;
@@ -209,19 +216,21 @@ export interface DesktopBrowserHostWindow {
   contentView: DesktopBrowserHostContentView;
   getContentBounds(): DesktopBrowserHostContentBounds;
   isDestroyed(): boolean;
+  isMinimized?(): boolean;
   webContents: DesktopBrowserHostWebContents;
 }
 
-interface DispatchDesktopBrowserAppCommandArgs {
-  command: AppCommandId;
-  hostWebContentsId: number;
-}
-
 export interface CreateDesktopBrowserViewManagerArgs {
-  dispatchAppCommand: (args: DispatchDesktopBrowserAppCommandArgs) => void;
+  dispatchAppShortcut: (
+    args: DesktopBrowserShortcut & { hostWebContentsId: number },
+  ) => void;
+  findShortcutCandidates: (
+    input: AppShortcutInput,
+  ) => DesktopBrowserShortcut | null;
   focusHostWebContents: (hostWebContentsId: number) => void;
   partition?: string;
-  resolveAppCommand: (input: AppShortcutInput) => AppCommandId | null;
+  /** Electron's sessionData path; when set, automation partitions left by earlier runs are deleted. */
+  sessionDataPath?: string;
 }
 
 interface HostScopedRequestArgs<TRequest> {
@@ -235,7 +244,7 @@ interface HostScopedTabArgs {
 }
 
 interface CreateEntryArgs {
-  desiredBounds: BbDesktopBrowserViewBounds;
+  desiredBounds: RoomDesktopBrowserViewBounds;
   hostWindow: DesktopBrowserHostWindow;
   tabId: string;
   threadId: string;
@@ -247,7 +256,7 @@ interface HostWindowViewportBoundsArgs {
 }
 
 interface SetEntryDesiredBoundsArgs {
-  bounds: BbDesktopBrowserViewBounds;
+  bounds: RoomDesktopBrowserViewBounds;
   entry: BrowserViewEntry;
   hostWindow: DesktopBrowserHostWindow;
 }
@@ -259,7 +268,7 @@ export interface DesktopBrowserViewManager {
     threadId: string;
     url: string;
     profile: DesktopBrowserTabProfile;
-    viewport: BbDesktopBrowserViewportBounds;
+    viewport: RoomDesktopBrowserViewportBounds;
   }): DesktopBrowserNativeTab;
   listTabs(args: NativeTabScope): DesktopBrowserNativeTab[];
   closeTab(args: NativeTabRef): void;
@@ -276,28 +285,28 @@ export interface DesktopBrowserViewManager {
   }): Array<{ tabId: string; webContents: WebContents }>;
   subscribeAutomationTabs(listener: () => void): () => void;
   profileSession(profile: DesktopBrowserTabProfile): Session;
-  attach(args: HostScopedRequestArgs<BbDesktopBrowserAttachRequest>): void;
+  attach(args: HostScopedRequestArgs<RoomDesktopBrowserAttachRequest>): void;
   detach(args: HostScopedTabArgs): void;
   focus(args: HostScopedTabArgs): void;
-  navigate(args: HostScopedRequestArgs<BbDesktopBrowserNavigateRequest>): void;
+  navigate(args: HostScopedRequestArgs<RoomDesktopBrowserNavigateRequest>): void;
   goBack(args: HostScopedTabArgs): void;
   goForward(args: HostScopedTabArgs): void;
   reload(args: HostScopedTabArgs): void;
   stop(args: HostScopedTabArgs): void;
   setBounds(
-    args: HostScopedRequestArgs<BbDesktopBrowserSetBoundsRequest>,
+    args: HostScopedRequestArgs<RoomDesktopBrowserSetBoundsRequest>,
   ): void;
   setVisible(
-    args: HostScopedRequestArgs<BbDesktopBrowserSetVisibleRequest>,
+    args: HostScopedRequestArgs<RoomDesktopBrowserSetVisibleRequest>,
   ): void;
   setVisibleWithoutFocus(
-    args: HostScopedRequestArgs<BbDesktopBrowserSetVisibleRequest>,
+    args: HostScopedRequestArgs<RoomDesktopBrowserSetVisibleRequest>,
   ): void;
   findInPage(
-    args: HostScopedRequestArgs<BbDesktopBrowserFindInPageRequest>,
+    args: HostScopedRequestArgs<RoomDesktopBrowserFindInPageRequest>,
   ): void;
   stopFindInPage(
-    args: HostScopedRequestArgs<BbDesktopBrowserStopFindInPageRequest>,
+    args: HostScopedRequestArgs<RoomDesktopBrowserStopFindInPageRequest>,
   ): void;
   beginWindowResize(hostWindow: DesktopBrowserHostWindow): void;
   endWindowResize(hostWindow: DesktopBrowserHostWindow): void;
@@ -326,7 +335,7 @@ function send(
 
 function hostWindowViewportBounds(
   args: HostWindowViewportBoundsArgs,
-): BbDesktopBrowserViewportBounds {
+): RoomDesktopBrowserViewportBounds {
   const contentBounds = args.hostWindow.getContentBounds();
   return {
     width: contentBounds.width,
@@ -339,7 +348,7 @@ function applyEntryDesiredBounds(
   hostWindow: DesktopBrowserHostWindow,
 ): void {
   entry.view.setBounds(
-    clampBbDesktopBrowserViewBounds({
+    clampRoomDesktopBrowserViewBounds({
       bounds: entry.desiredBounds,
       viewport: hostWindowViewportBounds({ hostWindow }),
     }),
@@ -354,25 +363,25 @@ function setEntryDesiredBounds(args: SetEntryDesiredBoundsArgs): void {
 function buildBrowserState(
   tabId: string,
   entry: BrowserViewEntry,
-): BbDesktopBrowserState {
+): RoomDesktopBrowserState {
   const webContents = entry.webContents;
   const url = webContents.getURL();
   const rawTitle = webContents.getTitle();
   const title = rawTitle.length > 0 && rawTitle !== url ? rawTitle : null;
   return {
     tabId,
-    url: truncate(url, BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: truncate(url, ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
     title:
       title === null
         ? null
-        : truncate(title, BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH),
+        : truncate(title, ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH),
     isLoading: webContents.isLoadingMainFrame(),
     canGoBack: webContents.navigationHistory.canGoBack(),
     canGoForward: webContents.navigationHistory.canGoForward(),
     errorText:
       entry.lastErrorText === null
         ? null
-        : truncate(entry.lastErrorText, BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH),
+        : truncate(entry.lastErrorText, ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH),
   };
 }
 
@@ -380,15 +389,98 @@ export function isAllowedBrowserPermission(permission: string): boolean {
   return permission === "clipboard-sanitized-write";
 }
 
+function readableFilePath(
+  permission: string,
+  details: Partial<FilesystemPermissionRequest>,
+): string | null {
+  return permission === "fileSystem" &&
+    details.fileAccessType === "readable" &&
+    details.filePath
+    ? details.filePath
+    : null;
+}
+
+function webOrigin(url: string | undefined): string | null {
+  if (url === undefined || !URL.canParse(url)) return null;
+  const origin = new URL(url).origin;
+  return origin === "null" ? null : origin;
+}
+
+/**
+ * Permission handlers for one browser session (#2367). A page may read a folder, and anything
+ * inside it, only if the user picked it in the native dialog during this app run, on that origin.
+ * Saved handles (IndexedDB) from an earlier run and dropped folders stay denied until the user
+ * picks the folder again. Writes are always denied.
+ */
+export function createBrowserPermissionHandlers() {
+  // Electron 44 calls the request handler for a file handle only right after a picker pick.
+  // Every later use, including a saved handle's, only asks the check handler.
+  const pickedFolders = new Map<string, Set<string>>();
+  return {
+    request: (
+      _webContents: unknown,
+      permission: string,
+      callback: (granted: boolean) => void,
+      details: Partial<FilesystemPermissionRequest>,
+    ): void => {
+      const folder = readableFilePath(permission, details);
+      const origin = folder === null ? null : webOrigin(details.requestingUrl);
+      if (folder === null || origin === null) {
+        callback(isAllowedBrowserPermission(permission));
+        return;
+      }
+      pickedFolders.set(
+        origin,
+        (pickedFolders.get(origin) ?? new Set()).add(folder),
+      );
+      callback(true);
+    },
+    check: (
+      _webContents: unknown,
+      permission: string,
+      requestingOrigin: string,
+      details: Partial<FilesystemPermissionRequest>,
+    ): boolean => {
+      const path = readableFilePath(permission, details);
+      if (path === null) return isAllowedBrowserPermission(permission);
+      const folders = pickedFolders.get(webOrigin(requestingOrigin) ?? "");
+      return [...(folders ?? [])].some((folder) => {
+        const inside = relative(folder, path);
+        return (
+          inside === "" || !(inside.startsWith("..") || isAbsolute(inside))
+        );
+      });
+    },
+  };
+}
+
 export function createDesktopBrowserViewManager(
   args: CreateDesktopBrowserViewManagerArgs,
 ): DesktopBrowserViewManager {
-  const partition = args.partition ?? BB_BROWSER_PARTITION;
+  const partition = args.partition ?? ROOM_BROWSER_PARTITION;
   const entries = new Map<string, BrowserViewEntry>();
   const automationTabListeners = new Set<() => void>();
   const popupWindows = new Set<BrowserWindow>();
   const resizingHostIds = new Set<number>();
   const hardenedSessions = new Map<string, Session>();
+  // Automation profile ids are random per created tab and never stored, so a partition can't be
+  // reopened once its last tab closes or the app restarts. Listed before this run makes any (#1672).
+  if (args.sessionDataPath !== undefined) {
+    const root = join(args.sessionDataPath, "Partitions");
+    let stale: string[] = [];
+    try {
+      stale = readdirSync(root).filter((name) =>
+        name.startsWith(AUTOMATION_PARTITION_PREFIX),
+      );
+    } catch {}
+    void (async () => {
+      for (const name of stale) {
+        await rm(join(root, name), { recursive: true, force: true }).catch(
+          () => {},
+        );
+      }
+    })();
+  }
 
   function notifyAutomationTabs(): void {
     for (const listener of automationTabListeners) {
@@ -480,7 +572,7 @@ export function createDesktopBrowserViewManager(
         const dataUrl = `data:image/jpeg;base64,${image
           .toJPEG(RESIZE_SNAPSHOT_JPEG_QUALITY)
           .toString("base64")}`;
-        send(hostWindow, BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL, {
+        send(hostWindow, ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL, {
           tabId,
           dataUrl,
         });
@@ -493,9 +585,10 @@ export function createDesktopBrowserViewManager(
   }
 
   function partitionForProfile(profile: DesktopBrowserTabProfile): string {
+    // 16 hex chars: Windows IndexedDB fails past 260-char paths, and long preview hostnames already use most of them (#1843).
     return profile.kind === "personal"
       ? partition
-      : `persist:bb-browser-automation-${createHash("sha256").update(profile.id).digest("hex")}`;
+      : `persist:${AUTOMATION_PARTITION_PREFIX}${createHash("sha256").update(profile.id).digest("hex").slice(0, 16)}`;
   }
 
   function ensureHardenedSession(tabPartition: string): Session {
@@ -504,15 +597,19 @@ export function createDesktopBrowserViewManager(
       return existing;
     }
     const browserSession = session.fromPartition(tabPartition);
-    browserSession.setPermissionRequestHandler((_wc, permission, callback) => {
-      callback(isAllowedBrowserPermission(permission));
-    });
-    browserSession.setPermissionCheckHandler((_wc, permission) =>
-      isAllowedBrowserPermission(permission),
-    );
+    const permissions = createBrowserPermissionHandlers();
+    browserSession.setPermissionRequestHandler(permissions.request);
+    browserSession.setPermissionCheckHandler(permissions.check);
     browserSession.on("will-download", (event) => {
       event.preventDefault();
     });
+    // Chromium-blocked folders (Home, Downloads, ~/Library, %LOCALAPPDATA%) wait for this answer; without it the picker hangs.
+    browserSession.on(
+      "file-system-access-restricted",
+      (_event, _details, callback) => {
+        callback("deny");
+      },
+    );
     hardenedSessions.set(tabPartition, browserSession);
     return browserSession;
   }
@@ -527,7 +624,7 @@ export function createDesktopBrowserViewManager(
     }
     send(
       hostWindow,
-      BB_DESKTOP_BROWSER_STATE_CHANNEL,
+      ROOM_DESKTOP_BROWSER_STATE_CHANNEL,
       buildBrowserState(tabId, entry),
     );
   }
@@ -619,28 +716,31 @@ export function createDesktopBrowserViewManager(
         entry.suppressNextFocusNotification = false;
         return;
       }
-      send(hostWindow, BB_DESKTOP_BROWSER_FOCUSED_CHANNEL, { tabId });
+      send(hostWindow, ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL, { tabId });
     });
 
     webContents.on("before-input-event", (event, input) => {
       if (input.type !== "keyDown" || input.isAutoRepeat || input.isComposing) {
         return;
       }
-      const command = args.resolveAppCommand({
+      const shortcut: AppShortcutInput = {
         altKey: input.alt,
         code: input.code,
         ctrlKey: input.control,
         key: input.key,
         metaKey: input.meta,
         shiftKey: input.shift,
-      });
-      if (command === null) return;
+      };
+      const target = args.findShortcutCandidates(shortcut);
+      if (target === null) return;
       event.preventDefault();
-      if (command === "browser.focusLocation" || command === "browser.find") {
+      // Reload keeps the page focused. Every other command acts on app UI,
+      // which only gets the next keystrokes once the host window has focus.
+      if (!("command" in target) || target.command !== "browser.reload") {
         args.focusHostWebContents(hostWindow.webContents.id);
       }
-      args.dispatchAppCommand({
-        command,
+      args.dispatchAppShortcut({
+        ...target,
         hostWebContentsId: hostWindow.webContents.id,
       });
     });
@@ -676,10 +776,10 @@ export function createDesktopBrowserViewManager(
             createPopupWindow(options, details.url, entry),
         };
       }
-      send(hostWindow, BB_DESKTOP_BROWSER_OPEN_TAB_CHANNEL, {
+      send(hostWindow, ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL, {
         url: details.url,
       });
-      send(hostWindow, BB_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL, {
+      send(hostWindow, ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL, {
         tabId,
         url: details.url,
       });
@@ -717,7 +817,7 @@ export function createDesktopBrowserViewManager(
       if (result.requestId !== entry.activeFindRequestId) {
         return;
       }
-      send(hostWindow, BB_DESKTOP_BROWSER_FIND_RESULT_CHANNEL, {
+      send(hostWindow, ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL, {
         tabId,
         requestId: result.requestId,
         activeMatchOrdinal: result.activeMatchOrdinal,
@@ -811,7 +911,31 @@ export function createDesktopBrowserViewManager(
       activeFindRequestId: null,
     };
     wireWebContents(args.hostWindow, args.tabId, entry);
-    args.hostWindow.contentView.addChildView(view);
+    let stage: BaseWindow | null = null;
+    if (process.platform === "win32" && args.hostWindow.isMinimized?.()) {
+      // Windows never paints a view first added to a minimized window, so every screenshot
+      // of it times out (#1771). Showing it once in a never-shown window fixes that for good.
+      try {
+        stage = new BaseWindow({ show: false });
+        stage.contentView.addChildView(view);
+        view.setBounds({
+          x: 0,
+          y: 0,
+          width: Math.max(1, args.desiredBounds.width),
+          height: Math.max(1, args.desiredBounds.height),
+        });
+        view.setVisible(true);
+        view.setVisible(false);
+      } catch {}
+    }
+    try {
+      args.hostWindow.contentView.addChildView(view);
+    } catch (error) {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+      throw error;
+    } finally {
+      stage?.destroy();
+    }
     entries.set(browserViewKey(args.hostWindow, args.tabId), entry);
     return entry;
   }
@@ -839,6 +963,20 @@ export function createDesktopBrowserViewManager(
     entry.popupWindows.clear();
     if (!entry.webContents.isDestroyed()) {
       entry.webContents.close();
+    }
+    const browserSession = hardenedSessions.get(entry.partition);
+    if (
+      entry.profile.kind === "automation" &&
+      browserSession !== undefined &&
+      ![...entries.values()].some(
+        (other) => other.partition === entry.partition,
+      )
+    ) {
+      // Its last tab is gone, so nothing can reopen it: free its disk now (#1672).
+      void Promise.all([
+        browserSession.clearCache(),
+        browserSession.clearStorageData(),
+      ]).catch(() => {});
     }
     notifyAutomationTabs();
   }
@@ -920,7 +1058,7 @@ export function createDesktopBrowserViewManager(
     {
       hostWindow,
       request,
-    }: HostScopedRequestArgs<BbDesktopBrowserSetVisibleRequest>,
+    }: HostScopedRequestArgs<RoomDesktopBrowserSetVisibleRequest>,
     focusOnShow: boolean,
   ): void {
     withEntry({ hostWindow, tabId: request.tabId }, (entry) => {
@@ -1178,7 +1316,7 @@ export function createDesktopBrowserViewManager(
           applyEntryDesiredBounds(entry, hostWindow);
         }
         applyEntryVisibility(entry, hostWindow);
-        send(hostWindow, BB_DESKTOP_BROWSER_SNAPSHOT_CHANNEL, {
+        send(hostWindow, ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL, {
           tabId: key.slice(prefix.length),
           dataUrl: null,
         });

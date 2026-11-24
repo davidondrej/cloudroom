@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { COMPUTER } from "@cloudroom/domain";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { useCloudroomConnection } from "@/hooks/queries/cloudroom-queries";
-import { LAPTOP_HINT_PROMPT, laptopHintKind, useLaptopHint, type LaptopHint } from "@/lib/laptop-hints";
+import { LAPTOP_HINT_PROMPT, useLaptopHint, type LaptopHint } from "@/lib/laptop-hints";
 import { reportUpgradePromptClick, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
 
 const SHOWN_AT_KEY = "cloudroom.tryCloudHint.shownAt";
@@ -10,8 +10,12 @@ const DAY = 86_400_000;
 const MIN_DRAFT_LENGTH = 20;
 const OWN_MACHINE = `In Cloud this one gets its own machine, so your ${COMPUTER} stays fast.`;
 
-function laptopCopy(hint: LaptopHint, battery: number | null, diskFreeGb: number | null, drops: number): { icon: IconName; title: string; body: string } {
+function laptopCopy(hint: LaptopHint, battery: number | null, diskFreeGb: number | null, drops: number, working: number): { icon: IconName; title: string; body: string } {
   switch (hint) {
+    // A new thread was never paused: these two only show on a running thread.
+    case "slept":
+    case "quit":
+    case "crowded": return { icon: "Laptop", title: `${working} agents are working on your ${COMPUTER}`, body: OWN_MACHINE };
     case "battery": return { icon: "Battery", title: `${battery}% battery left`, body: `Run this one in Cloud. It won't drain your battery, and keeps going if your ${COMPUTER} dies.` };
     case "memory": return { icon: "Memory", title: `Your ${COMPUTER} is low on memory`, body: OWN_MACHINE };
     case "heat": return { icon: "Memory", title: `Your ${COMPUTER} is running hot`, body: OWN_MACHINE };
@@ -34,11 +38,11 @@ export function TryCloudHint({ draftLength, github, onUseCloud }: { draftLength:
   useEffect(() => {
     if (show || laptop.hint) localStorage.setItem(SHOWN_AT_KEY, String(Date.now()));
   }, [show, laptop.hint]);
-  const where = laptop.hint ? LAPTOP_HINT_PROMPT[laptopHintKind(laptop.hint)] : show ? "new_thread_cloud" : null;
+  const where = laptop.hint ? LAPTOP_HINT_PROMPT[laptop.hint] : show ? "new_thread_cloud" : null;
   useUpgradePromptViewed(where);
   if (!where) return null;
   const copy = laptop.hint
-    ? laptopCopy(laptop.hint, laptop.vitals?.battery ?? null, laptop.vitals?.diskFreeGb ?? null, laptop.drops)
+    ? laptopCopy(laptop.hint, laptop.vitals?.battery ?? null, laptop.vitals?.diskFreeGb ?? null, laptop.drops, laptop.working)
     : { icon: null, title: "Run this one in Cloud?", body: "It keeps going when you close your laptop." };
   const close = () => {
     setClosed(true);

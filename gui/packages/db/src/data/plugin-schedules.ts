@@ -2,16 +2,7 @@ import { and, asc, eq, lte, notInArray } from "drizzle-orm";
 import type { DbConnection } from "../connection.js";
 import { pluginSchedules } from "../schema.js";
 
-export interface PluginScheduleRow {
-  pluginId: string;
-  name: string;
-  cron: string;
-  nextRunAt: number;
-  lastRunAt: number | null;
-  lastStatus: "running" | "ok" | "error" | null;
-  lastError: string | null;
-  updatedAt: number;
-}
+export type PluginScheduleRow = typeof pluginSchedules.$inferSelect;
 
 export function upsertPluginSchedule(
   db: DbConnection,

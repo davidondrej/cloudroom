@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Editor, isNodeSelection, type ChainedCommands } from "@tiptap/core";
 import { BubbleMenuPlugin } from "@tiptap/extension-bubble-menu";
-import type { IconSvgElement } from "@hugeicons/react";
-import { HugeiconsIcon } from "@hugeicons/react";
+import type { IconSvgElement } from "@cloudroom/shared-ui/hugeicons-icon";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
 import {
   BubbleChatIcon,
   CheckListIcon,

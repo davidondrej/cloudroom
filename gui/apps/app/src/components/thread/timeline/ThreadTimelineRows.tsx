@@ -10,9 +10,9 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { CSSProperties, ReactNode } from "react";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import { useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { TimelineImageGallery } from "./TimelineImageGallery";
 import type {
   PromptInput,
@@ -82,7 +82,27 @@ import {
   MissingProviderCliRow,
   missingProviderCli,
 } from "./MissingProviderCliRow.js";
-import { PlanLimitRow, PlanLimitSwitchedRow } from "./PlanLimitRow.js";
+import {
+  PlanLimitAccountSwitchedRow,
+  PlanLimitPastRow,
+  PlanLimitRow,
+  PlanLimitSwitchedRow,
+} from "./PlanLimitRow.js";
+import { isBackgroundCommandTaskType } from "@cloudroom/domain";
+import { BackgroundCommandBubble } from "./BackgroundCommandBubble.js";
+import { LoopRunMarker, loopRun } from "./LoopRunMarker.js";
+import {
+  CloudLoginRow,
+  cloudLoginRowProvider,
+  findLatestCloudLoginRowId,
+  LatestCloudLoginRowIdContext,
+} from "./CloudLoginRow.js";
+import {
+  AuthFailureRow,
+  findLatestAuthFailureRowId,
+  isAuthFailureRow,
+  LatestAuthFailureRowIdContext,
+} from "./AuthFailureRow.js";
 import {
   LatestPlanLimitRowIdContext,
   findLatestPlanLimitRowId,
@@ -1017,6 +1037,10 @@ const ConversationRowContent = memo(function ConversationRowContent({
     rowConsumerActions.length === 0
       ? rowSlotActions
       : [...(rowSlotActions ?? []), ...rowConsumerActions];
+  const loop = row.role === "user" ? loopRun(row.text) : null;
+  if (loop !== null) {
+    return <LoopRunMarker run={loop} createdAt={row.createdAt} />;
+  }
   if (row.role === "user") {
     const senderThreadMetadata =
       row.senderThreadId === null
@@ -1562,16 +1586,53 @@ function TimelineRowView({
   );
   const staticLeadingIconUrl = useLeadingIconUrlForRow(row);
   const latestPlanLimitRowId = useContext(LatestPlanLimitRowIdContext);
+  const latestCloudLoginRowId = useContext(LatestCloudLoginRowIdContext);
+  const latestAuthFailureRowId = useContext(LatestAuthFailureRowIdContext);
 
-  const planLimitSwitch =
-    row.kind === "system" && row.systemKind === "error"
-      ? row.planLimitSwitch
-      : undefined;
+  const errorRow =
+    row.kind === "system" && row.systemKind === "error" ? row : null;
+  const planLimitSwitch = errorRow?.planLimitSwitch;
+  if (
+    row.kind === "system" &&
+    row.systemKind === "error" &&
+    row.planLimitAccountSwitch
+  ) {
+    return (
+      <PlanLimitAccountSwitchedRow
+        switched={row.planLimitAccountSwitch}
+        detail={row.detail ?? row.title}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (
+    spacing === "top-level" &&
+    row.kind === "work" &&
+    row.workKind === "workflow" &&
+    isBackgroundCommandTaskType(row.taskType)
+  ) {
+    return <BackgroundCommandBubble row={row} />;
+  }
+  const cloudLogin = cloudLoginRowProvider(row);
+  if (cloudLogin) {
+    return (
+      <CloudLoginRow
+        row={row}
+        provider={cloudLogin}
+        latest={row.id === latestCloudLoginRowId}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
   if (row.id === latestPlanLimitRowId) {
     return (
       <PlanLimitRow
+        rowId={row.id}
+        rowAt={row.createdAt}
         threadId={row.threadId}
         switched={planLimitSwitch}
+        refusal={errorRow?.refusal}
+        detail={errorRow?.detail ?? (errorRow?.refusal ? null : errorRow?.title)}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -1580,6 +1641,28 @@ function TimelineRowView({
     return (
       <PlanLimitSwitchedRow
         switched={planLimitSwitch}
+        refusal={errorRow?.refusal}
+        detail={errorRow?.detail ?? errorRow?.title}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (errorRow?.planLimit || errorRow?.refusal) {
+    return (
+      <PlanLimitPastRow
+        threadId={row.threadId}
+        rowAt={row.createdAt}
+        refusal={errorRow.refusal}
+        detail={errorRow.detail ?? (errorRow.refusal ? null : errorRow.title)}
+        className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
+      />
+    );
+  }
+  if (isAuthFailureRow(row)) {
+    return (
+      <AuthFailureRow
+        row={row}
+        latest={row.id === latestAuthFailureRowId}
         className={timelineRowHorizontalPaddingClassName(horizontalPadding)}
       />
     );
@@ -2221,6 +2304,14 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
     () => findLatestPlanLimitRowId(rows, scopeActive),
     [rows, scopeActive],
   );
+  const latestCloudLoginRowId = useMemo(
+    () => findLatestCloudLoginRowId(rows) ?? null,
+    [rows],
+  );
+  const latestAuthFailureRowId = useMemo(
+    () => findLatestAuthFailureRowId(rows, scopeActive),
+    [rows, scopeActive],
+  );
   const computedAutoExpansionRowIds = useMemo(
     () => collectTimelineAutoExpansionRowIds({ rows, scopeActive }),
     [rows, scopeActive],
@@ -2482,6 +2573,12 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                       value={props.timelineWindowingEnabled ?? false}
                     >
                       <AutoHeightContainer snapRevision={heightSnapRevision}>
+                        <LatestCloudLoginRowIdContext.Provider
+                          value={latestCloudLoginRowId}
+                        >
+                        <LatestAuthFailureRowIdContext.Provider
+                          value={latestAuthFailureRowId}
+                        >
                         <LatestPlanLimitRowIdContext.Provider
                           value={latestPlanLimitRowId}
                         >
@@ -2507,6 +2604,8 @@ function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
                             }
                           />
                         </LatestPlanLimitRowIdContext.Provider>
+                        </LatestAuthFailureRowIdContext.Provider>
+                        </LatestCloudLoginRowIdContext.Provider>
                       </AutoHeightContainer>
                     </TimelineWindowingEnabledContext.Provider>
                   </TimelineWindowingMeasurementsContext.Provider>

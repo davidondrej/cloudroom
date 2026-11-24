@@ -21,6 +21,7 @@ import * as clsx from "clsx";
 import * as tailwindMerge from "tailwind-merge";
 import * as classVarianceAuthority from "class-variance-authority";
 import * as sharedUiIcon from "@cloudroom/shared-ui/icon";
+import * as browserDimming from "@/hooks/useBrowserDimmingModal";
 import { createDebouncedCallbackScheduler } from "@cloudroom/domain";
 import { BbHttpError } from "@cloudroom/sdk/browser";
 import type { QueryClient } from "@tanstack/react-query";
@@ -178,7 +179,7 @@ async function loadOneBundle(
   }
 }
 
-interface BbPluginRuntime {
+interface RoomPluginRuntime {
   react: unknown;
   reactDom: unknown;
   reactDomClient: unknown;
@@ -204,9 +205,10 @@ interface BbPluginRuntime {
   classVarianceAuthority: unknown;
   sharedUiIcon: unknown;
   questionFormHost: typeof questionFormHost;
+  browserDimming: typeof browserDimming;
 }
 
-type RuntimeHost = typeof globalThis & { __bbPluginRuntime?: BbPluginRuntime };
+type RuntimeHost = typeof globalThis & { __bbPluginRuntime?: RoomPluginRuntime };
 
 export function installPluginRuntime(): void {
   const host = globalThis as RuntimeHost;
@@ -237,6 +239,7 @@ export function installPluginRuntime(): void {
     classVarianceAuthority,
     sharedUiIcon,
     questionFormHost,
+    browserDimming,
   };
 }
 

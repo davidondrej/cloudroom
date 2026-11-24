@@ -345,6 +345,7 @@ function toThreadResponseWithHost(
 }
 
 import { listThreadTransferProgress, localTeleports, projectCopyProgress, queuedPrompts as cloudQueuedPrompts, teleportProgress } from "../cloudroom/store.js";
+import { asleepSince } from "../cloudroom/cloud-sync.js";
 
 export function toThreadResponseFromThread(
   deps: ThreadRuntimeDisplayDeps,
@@ -354,15 +355,18 @@ export function toThreadResponseFromThread(
     ...args,
     environmentHostId: resolveThreadEnvironmentHostId(deps, args.thread),
   });
+  const [background] = listActiveBackgroundTaskCountsByThreadIds(deps.db, {
+    threadIds: [args.thread.id],
+  });
   return {
     ...threadWithRuntime,
     ...(teleportProgress(deps.db, args.thread.id) ? { teleport: teleportProgress(deps.db, args.thread.id)! } : {}),
     ...(localTeleports.has(args.thread.id) ? { teleportLocalStep: localTeleports.get(args.thread.id)! } : {}),
     ...(projectCopyProgress(deps.db, args.thread.id) ? { projectCopy: projectCopyProgress(deps.db, args.thread.id)! } : {}),
-    activeBackgroundAgentCount:
-      listActiveBackgroundTaskCountsByThreadIds(deps.db, {
-        threadIds: [args.thread.id],
-      })[0]?.activeBackgroundAgentCount ?? 0,
+    ...(asleepSince.has(args.thread.id) ? { asleepSince: asleepSince.get(args.thread.id)! } : {}),
+    activeBackgroundAgentCount: background?.activeBackgroundAgentCount ?? 0,
+    activeBackgroundCommandCount: background?.activeBackgroundCommandCount ?? 0,
+    activeWorkflowCount: background?.activeWorkflowCount ?? 0,
     canSpawnChild: args.thread.executionTarget !== "cloud" && canThreadSpawnChild(deps, { thread: args.thread }),
     queuedMessageCount: args.thread.executionTarget === "cloud"
       ? cloudQueuedPrompts(deps.db, args.thread.id).length

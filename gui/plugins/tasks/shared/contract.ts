@@ -514,9 +514,15 @@ export const tasksRpcContract = defineRpcContract({
     input: z
       .object({
         projectId: idSchema.optional(),
-        statuses: z.array(taskStatusSchema).optional(),
-        priorities: z.array(taskPrioritySchema).optional(),
-        labelIds: z.array(idSchema).optional(),
+        statuses: z
+          .array(taskStatusSchema)
+          .max(TASK_STATUSES.length)
+          .optional(),
+        priorities: z
+          .array(taskPrioritySchema)
+          .max(TASK_PRIORITIES.length)
+          .optional(),
+        labelIds: z.array(idSchema).max(1000).optional(),
         activeOnly: z.boolean().default(false),
         parentTaskId: idSchema.nullable().optional(),
         search: z.string().optional(),
@@ -760,7 +766,7 @@ export type TaskPullRequest = z.infer<typeof taskPullRequestSchema>;
 export type Preset = z.infer<typeof presetSchema>;
 export type TasksDomainError = z.infer<typeof tasksDomainErrorSchema>;
 export type TaskMutationResult = z.infer<typeof taskMutationResultSchema>;
-export type BbProjectOption = z.infer<
+export type RoomProjectOption = z.infer<
   (typeof tasksRpcContract)["listBbProjects"]["output"]
 >["bbProjects"][number];
 export type SidebarProjectSummary = z.infer<

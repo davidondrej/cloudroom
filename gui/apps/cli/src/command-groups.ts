@@ -159,6 +159,17 @@ export function selectCommandGroups(
   return match === undefined ? CORE_COMMAND_GROUPS : [match];
 }
 
+/** True for `room-cli`, `room-cli --help`, `room-cli -h` and `room-cli help`. */
+export function isTopLevelHelp(args: readonly string[]): boolean {
+  if (args.length === 0) return true;
+  return args.length === 1 && ["--help", "-h", "help"].includes(args[0]!);
+}
+
+/** True for the arguments of `room-cli PLUGIN --help` and `room-cli PLUGIN -h`. */
+export function isCommandHelp(args: readonly string[]): boolean {
+  return args.length === 1 && (args[0] === "--help" || args[0] === "-h");
+}
+
 export function pluginProxyCandidate(
   firstArg: string | undefined,
   knownCommandNames: ReadonlySet<string>,

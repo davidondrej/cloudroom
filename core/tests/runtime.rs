@@ -46,6 +46,7 @@ fn fixture() -> (Directory, Config) {
         storage: None,
         rpc_timeout: Duration::from_secs(30),
         diagnostic_upload: Duration::from_secs(1),
+        previous_exit_wait: Duration::ZERO,
     };
     (dir, config)
 }
@@ -325,6 +326,96 @@ async fn workload_cleanup_requires_confirmed_empty_group() {
         runtime::reconcile(&config).await.is_err(),
         "failed kill must not permit replacement"
     );
+}
+
+#[tokio::test]
+async fn a_cloud_app_key_never_replaces_the_saved_claude_login() {
+    let (dir, mut config) = fixture();
+    // Like Claude: bills an Anthropic key in its environment before the plan's token, its commands (CLAUDECODE=1)
+    // source CLAUDE_ENV_FILE, and it starts MCP servers (Python here) without a shell. With Core's agent helpers, CPU
+    // quota or not, Claude bills the plan, its commands and MCP servers keep the app key, and a server's own key stays
+    // (#1340). Without them (no /run/cloudroom/agent), nothing changes.
+    let claude = dir.0.join("claude");
+    let script = r#"tool=$(CLAUDECODE=1 bash -c '. "${CLAUDE_ENV_FILE:-/dev/null}"; printf %s "$ANTHROPIC_API_KEY"')
+key='import os; print(os.environ.get("ANTHROPIC_API_KEY", ""))'
+mcp=$(CLAUDECODE=1 python3 -c "$key") own=$(CLAUDECODE=1 ANTHROPIC_API_KEY=mine python3 -c "$key")
+case "${CLAUDE_ENV_FILE:+hook}|$ANTHROPIC_AUTH_TOKEN|$ANTHROPIC_API_KEY|$CLAUDE_CODE_OAUTH_TOKEN|$tool|$mcp|$own" in
+"hook|||plan|app|app|mine"|"|app|app|plan|app|app|mine") echo '{"is_error":false}' ;; *) echo '{"is_error":true}' ;; esac"#;
+    fs::write(&claude, format!("#!/bin/sh\n{script}\n")).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    config.harnesses.insert(
+        runtime::Kind::Claude,
+        cloudroom::config::HarnessConfig {
+            binary: claude,
+            home: dir.0.join(".claude"),
+            model: "haiku".into(),
+            provider: None,
+        },
+    );
+    let state = &config.state_dir;
+    fs::create_dir_all(state).unwrap();
+    fs::write(
+        state.join("environment"),
+        "ANTHROPIC_API_KEY=app\nANTHROPIC_AUTH_TOKEN=app\n",
+    )
+    .unwrap();
+    fs::write(state.join("claude-oauth-token"), "plan\nmax\n").unwrap();
+    runtime::probe(&config, runtime::Kind::Claude, "haiku", None)
+        .await
+        .unwrap();
+    // Removing the app key restarts an idle agent that started with it.
+    let (handle, _events) = runtime::Handle::spawn_guarded(
+        &config,
+        runtime::Kind::Claude,
+        None,
+        false,
+        false,
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    fs::write(state.join("environment"), "").unwrap();
+    assert!(handle.login_changed(&config));
+    handle.request_shutdown();
+}
+
+#[tokio::test]
+async fn internal_claude_probes_skip_user_hooks_but_sessions_keep_them() {
+    // #1014: model-list and Teleport probes ran the user's SessionStart/SessionEnd hooks.
+    let (dir, mut config) = fixture();
+    let (claude, log) = (dir.0.join("claude"), dir.0.join("args"));
+    let script = format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display());
+    fs::write(&claude, script).unwrap();
+    fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+    let profile = cloudroom::config::HarnessConfig {
+        binary: claude,
+        home: dir.0.join(".claude"),
+        model: "haiku".into(),
+        provider: None,
+    };
+    config.harnesses.insert(runtime::Kind::Claude, profile);
+    let _ = runtime::models(&config, runtime::Kind::Claude).await;
+    let _ = runtime::probe(&config, runtime::Kind::Claude, "haiku", None).await;
+    let (_handle, mut events) = runtime::Handle::spawn_guarded(
+        &config,
+        runtime::Kind::Claude,
+        None,
+        false,
+        false,
+        None,
+        Vec::new(),
+    )
+    .unwrap();
+    while !matches!(
+        events.recv().await,
+        Some(runtime::Event::Exited { .. }) | None
+    ) {}
+    let runs = fs::read_to_string(&log).unwrap();
+    let hooks_off: Vec<_> = runs
+        .lines()
+        .map(|run| run.contains(r#""disableAllHooks":true"#))
+        .collect();
+    assert_eq!(hooks_off, [true, true, false], "{runs}");
 }
 
 #[tokio::test]
@@ -630,10 +721,12 @@ for (const command of [
   "sudo -- rm -rf /",
   "command -- rm -rf /",
   "mke2fs /dev/sda",
+  "room-cli mac run 'rm -rf ~'",
+  "room-cli mac run \"diskutil eraseDisk APFS X disk2\"",
 ]) {
   if (checkCommand(command) === null) throw new Error(`Allowed dangerous command: ${command}`);
 }
-for (const command of ["command -v mkfs", "command -V mke2fs", "sudo " + "-- ".repeat(26) + "true"]) {
+for (const command of ["command -v mkfs", "command -V mke2fs", "rg -F \"mac run 'diskutil eraseDisk\" docs", "sudo " + "-- ".repeat(26) + "true"]) {
   const started = performance.now();
   if (checkCommand(command) !== null) throw new Error(`Blocked safe command: ${command}`);
   if (performance.now() - started > 1000) throw new Error(`Slow check: ${command}`);

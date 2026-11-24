@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CommandDispatchError,
   type CommandOf,
@@ -12,10 +12,15 @@ import {
 } from "../command-dispatch-support.js";
 import {
   browseHostDirectory,
+  isWindowsNetworkPath,
+  normalizeWindowsDrivePath,
+  readHostFile as legacyReadHostFile,
+} from "./host-files.js";
+import {
   readHostFile,
   readHostFileMetadata,
   readHostRelativeFile,
-} from "./host-files.js";
+} from "./files.js";
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -58,9 +63,10 @@ async function mountSubstDrive(target: string): Promise<string> {
 
 async function captureReadHostFileError(
   command: CommandOf<"host.read_file">,
+  read: typeof readHostFile = readHostFile,
 ): Promise<unknown> {
   try {
-    await readHostFile(command);
+    await read(command);
   } catch (error) {
     return error;
   }
@@ -217,6 +223,50 @@ describe("readHostFile (no ref — disk read)", () => {
     expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
 
+  it.each([
+    [
+      "darwin",
+      "EPERM",
+      "permission_denied",
+      "macOS blocked Cloudroom from reading this folder. Quit and reopen Cloudroom; if it keeps happening, check Cloudroom's access in System Settings > Privacy & Security.",
+    ],
+    ["linux", "EPERM", "permission_denied", "EPERM: denied"],
+    ["darwin", "EACCES", "permission_denied", "EACCES: denied"],
+    ["darwin", "EIO", "EIO", "EIO: denied"],
+  ])(
+    "maps a %s %s read failure to %s (#1127)",
+    async (platform, code, expectedCode, expectedMessage) => {
+      const dir = await makeTempDir("bb-host-files-denied-");
+      const platformDescriptor = Object.getOwnPropertyDescriptor(
+        process,
+        "platform",
+      )!;
+      Object.defineProperty(process, "platform", {
+        ...platformDescriptor,
+        value: platform,
+      });
+      const statSpy = vi
+        .spyOn(fs, "stat")
+        .mockRejectedValue(
+          Object.assign(new Error(`${code}: denied`), { code }),
+        );
+      try {
+        // Mocks Node's fs, so it checks the TypeScript fallback; Core maps the same errors in core/src/fs.rs.
+        const thrown = await captureReadHostFileError({
+          type: "host.read_file",
+          path: path.join(dir, "notes.md"),
+        }, legacyReadHostFile);
+        expect(thrown).toMatchObject({
+          code: expectedCode,
+          message: expectedMessage,
+        });
+      } finally {
+        statSpy.mockRestore();
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    },
+  );
+
   it("marks missing relative read roots as expected", async () => {
     const parentPath = await makeTempDir("bb-host-files-relative-root-");
     const rootPath = path.join(parentPath, "STATUS");
@@ -235,19 +285,40 @@ describe("readHostFile (no ref — disk read)", () => {
     expect(isExpectedCommandDispatchError(thrown)).toBe(true);
   });
 
-  it("rejects rootless directory paths", async () => {
+  it.each([
+    ["directory", "Path is a directory, not a file"],
+    ["FIFO", "Path is a FIFO, not a file"],
+  ])("rejects a rootless %s path before reading", async (kind, message) => {
+    if (kind === "FIFO" && process.platform === "win32") return;
     const repoPath = await initRepo();
+    const target = kind === "FIFO" ? path.join(repoPath, "pipe") : repoPath;
+    if (kind === "FIFO") await execFileAsync("mkfifo", [target]);
 
     await expect(
-      readHostFile({
-        type: "host.read_file",
-        path: repoPath,
-      }),
-    ).rejects.toMatchObject({
-      code: "invalid_path",
-      message: "Path is a directory, not a file",
-    });
+      readHostFile({ type: "host.read_file", path: target }),
+    ).rejects.toMatchObject({ code: "invalid_path", message });
   });
+});
+
+it.each([
+  ["win32", "/C:/Users/A B/x.png", "C:/Users/A B/x.png"],
+  ["win32", "/c:\\Users\\x.png", "c:\\Users\\x.png"],
+  ["win32", "/c/Users/x.png", "/c/Users/x.png"],
+  ["win32", "C:/Users/x.png", "C:/Users/x.png"],
+  ["darwin", "/C:/Users/x.png", "/C:/Users/x.png"],
+] as const)("normalizeWindowsDrivePath on %s: %s", (platform, input, output) => {
+  expect(normalizeWindowsDrivePath(input, platform)).toBe(output);
+});
+
+it.each([
+  ["win32", "/\\attacker.example\\share\\x.png", true],
+  ["win32", "\\\\attacker.example\\share\\x.png", true],
+  ["win32", "\\\\?\\UNC\\attacker.example\\share\\x.png", true],
+  ["win32", "C:\\Users\\x.png", false],
+  ["win32", "/C:/Users/x.png", false],
+  ["darwin", "/\\attacker.example\\share\\x.png", false],
+] as const)("isWindowsNetworkPath on %s: %s", (platform, input, refused) => {
+  expect(isWindowsNetworkPath(input, platform)).toBe(refused);
 });
 
 describe("readHostFileMetadata", () => {

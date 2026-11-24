@@ -8,6 +8,7 @@ import {
   hasLiveThreadStopInFlight,
   requestThreadStorageDeletion,
   requestThreadStopForCurrentState,
+  stopThreadForCurrentState,
 } from "../../src/services/threads/thread-lifecycle.js";
 import {
   internalAuthHeaders,
@@ -175,6 +176,49 @@ describe("thread stop dispatch", () => {
     });
   });
 
+  it("keeps a thread stopping and says so when one more stop can't confirm it (#917)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedActiveThreadStopFixture({
+        harness,
+        value: 9,
+      });
+      const stop = () =>
+        stopThreadForCurrentState(
+          harness.deps,
+          getThread(harness.db, thread.id)!,
+          environment,
+        ).catch((error: unknown) => error);
+      const failNextStop = async (immediate?: true) => {
+        const command = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.stop" &&
+            command.threadId === thread.id &&
+            command.immediate === immediate,
+        );
+        await reportQueuedCommandError(harness, command, {
+          errorCode: "command_timeout",
+          errorMessage: "Timed out waiting for command result",
+        });
+      };
+
+      const first = stop();
+      await failNextStop();
+      await failNextStop(true);
+      expect(await first).toMatchObject({
+        body: { code: "thread_stop_unconfirmed" },
+      });
+
+      // No turn has started, yet a later Stop still asks the host.
+      const second = stop();
+      await failNextStop(true);
+      expect(await second).toMatchObject({
+        body: { code: "thread_stop_unconfirmed" },
+      });
+      expect(getThread(harness.db, thread.id)?.status).toBe("stopping");
+    });
+  });
+
   it("settles a stopped thread when the host reports no runtime exists", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedActiveThreadStopFixture({
@@ -253,9 +297,13 @@ describe("thread stop dispatch", () => {
       const interrupted = listEvents(harness.db, {
         threadId: thread.id,
       }).filter((event) => event.type === "system/thread/interrupted");
-      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
-        ["memory-limit"],
-      );
+      // The banner shows what the guard measured (#1965).
+      expect(interrupted.map((event) => JSON.parse(event.data))).toEqual([
+        {
+          reason: "memory-limit",
+          memory: { usedBytes: 70 * 2 ** 30, totalBytes: 128 * 2 ** 30 },
+        },
+      ]);
     });
   });
 
@@ -284,9 +332,12 @@ describe("thread stop dispatch", () => {
       const interrupted = listEvents(harness.db, {
         threadId: thread.id,
       }).filter((event) => event.type === "system/thread/interrupted");
-      expect(interrupted.map((event) => JSON.parse(event.data).reason)).toEqual(
-        ["memory-limit"],
-      );
+      expect(interrupted.map((event) => JSON.parse(event.data))).toEqual([
+        {
+          reason: "memory-limit",
+          memory: { usedBytes: 70 * 2 ** 30, totalBytes: 128 * 2 ** 30 },
+        },
+      ]);
     });
   });
 

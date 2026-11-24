@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
 import {
   ArrowUp02Icon,
   AttachmentIcon,

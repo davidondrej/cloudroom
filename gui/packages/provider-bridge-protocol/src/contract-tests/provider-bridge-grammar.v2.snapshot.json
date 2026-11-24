@@ -80,6 +80,7 @@
     },
     "item.textClose": {
       "kind": "required",
+      "providerCheckpointId": "optional",
       "key": "required",
       "channel": "required",
       "text": "optional",
@@ -299,6 +300,7 @@
     "approvalEnforcedBy": "default",
     "grammarVersions": "default",
     "steerMode": "default",
+    "stopsUnopenedTurns": "default",
     "skills": "default"
   },
   "recoveryNotification": {

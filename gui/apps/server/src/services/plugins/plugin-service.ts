@@ -178,6 +178,7 @@ import type {
   PluginResolvedProviderEnvHealth,
 } from "./plugin-service-internal.js";
 import type { PluginMachineProviderBridge } from "./plugin-machine-provider-registry.js";
+import { cloudTurnsElsewhere } from "./plugin-thread-events.js";
 export type {
   PluginAgentToolContribution,
   PluginMentionResolveResult,
@@ -1259,6 +1260,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         emitThreadEvent("thread.idle", () => ({
           thread: buildThreadDto(thread),
           lastAssistantText: getLastThreadOutput(deps.db, thread.id),
+          ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
         }));
       },
       emitThreadFailed(thread) {
@@ -1270,6 +1272,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             error:
               failure.message ?? getLastThreadErrorMessage(deps.db, thread.id),
             errorInfo: failure.errorInfo,
+            ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
           };
         });
       },

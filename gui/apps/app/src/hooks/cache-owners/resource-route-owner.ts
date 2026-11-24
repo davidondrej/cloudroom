@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useSetAtom } from "jotai";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import type {
   ChangedMessage,
   EnvironmentChangedMessage,
@@ -10,10 +10,10 @@ import type {
 import {
   destroyPersistedBrowserViewsForEnvironment,
   destroyPersistedBrowserViewsForThread,
-} from "@/components/secondary-panel/browserViewVisibilityCoordinator";
+} from "@/components/right-panel/tabs/browser-visibility";
 import { collapsedProjectIdsAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import { getRootComposeRoutePath } from "@/lib/route-paths";
-import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { useRouteState } from "../useRouteState";
 
 type DeletedResourceRouteChangeHandler = (message: ChangedMessage) => void;

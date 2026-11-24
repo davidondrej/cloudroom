@@ -1,7 +1,7 @@
 # ACP providers
 
 First-party plugin for ACP (Agent Client Protocol) agent providers: Cursor,
-opencode, omp, Grok Build, Hermes Agent, Devin, Droid, Kilo Code and Cline.
+opencode, omp, Grok Build, Hermes Agent, Devin, Droid, Kilo Code, Cline, Kimi Code, Antigravity and Agent Zero.
 
 The plugin has no bridge of its own. Every agent it registers runs on the
 published ACP kit, `@get-bb/plugin-sdk/provider-bridge/acp`, which its
@@ -28,7 +28,8 @@ What lives here:
 - `src/declaration.ts` — one agent definition becomes one
   `bb.providers.register` declaration: ids, display names, icons,
   capabilities, and the bridge options it launches with (`acpLaunchSpec`,
-  `acpInstaller` for agents with an official install script, and `acpDialect`
+  `acpInstaller` for agents with an official install script (plus an optional
+  Windows PowerShell one, `powershellUrl`), and `acpDialect`
   for the agents whose vendor side channels the kit reads).
 - `src/legacy-config.ts` — reading the deprecated config array. Dies with the
   deprecation window.

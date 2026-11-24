@@ -1,4 +1,7 @@
-import { requestQueuedMachineReadiness } from "./queued-message-dispatch.js";
+import {
+  requestQueuedMachineReadiness,
+  requestQueuedMessageDispatch,
+} from "./queued-message-dispatch.js";
 import {
   cancelPreparingMachinePause,
   isMachineWaitingForExecution,
@@ -17,6 +20,7 @@ import {
 } from "@cloudroom/db";
 import {
   promptInputSchema,
+  type ClientTurnRequestId,
   type PromptInput,
   type QueuedMessagePayload,
   type QueuedMessageWaitingOn,
@@ -38,6 +42,7 @@ import { z } from "zod";
 import { ApiError } from "../../errors.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { requirePublicProject } from "../lib/entity-lookup.js";
+import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
 import {
   goneThreadEnvironmentDetails,
   throwThreadNotWritable,
@@ -55,6 +60,7 @@ import {
 import {
   createQueuedMessageAutoSendPausedError,
   createQueuedMessageClaimLostError,
+  holdUnconfirmedQueuedMessage,
   recordQueuedMessageWait,
   settleQueueRowDispatched,
   type QueuedDispatchMessage,
@@ -93,6 +99,7 @@ import { restoreInterruptedThreadStartupRequest } from "./thread-provisioning.js
 import { isHardQueueHeld } from "./thread-parent.js";
 import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { checkRepeatedMessage } from "./repeated-message-guard.js";
+import { failureHold } from "./turn-failed.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 
@@ -238,12 +245,15 @@ export interface DispatchAttemptArgs {
   pluginSubmission: MessageDispatchHookContext["experimental_submission"];
   /** Retry provenance, when this attempt re-submits a failed turn. */
   retryOf?: TurnRequestRetryMarker;
-  beforeDispatch?: () => void;
+  /** Gets the turn request's ID when this dispatch creates one. */
+  beforeDispatch?: (requestId?: string) => void;
   origin: ThreadCreateOrigin | null;
   originPluginId: string | null;
   startedOnBehalfOf: StartedOnBehalfOf | null;
   /** Execution defaults resolved by creation, which the thread row lacks. */
   executionDefaults?: Parameters<typeof buildExecutionOptions>[2];
+  /** See `sendThreadMessage`; not called when the message queues or cold-starts. */
+  onStartSettled?: (error: Error | null) => void;
   trigger: "auto-dispatch" | "user";
 }
 
@@ -298,18 +308,48 @@ export function attemptDispatch(
   args: DispatchAttemptArgs,
 ): Promise<DispatchAttemptOutcome> {
   requireNativeThread(args.thread);
-  return runDispatchAttempt(deps, args, false);
+  return runDispatchAttempt(deps, args, {
+    thread: false,
+    host: false,
+    error: false,
+  });
+}
+
+/**
+ * Re-decisions one attempt has used: one per cause, never more. `error` is a
+ * second thread change that lands on `error`, which a send restarts.
+ */
+interface Reattempts {
+  thread: boolean;
+  host: boolean;
+  error: boolean;
 }
 
 import { teleportBlocked } from "../cloudroom/store.js";
 
+function ensureLocalDispatchAllowed(
+  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "db">,
+  threadId: string,
+): void {
+  if (
+    teleportBlocked(deps.db, threadId) ||
+    getThread(deps.db, threadId)?.executionTarget === "cloud"
+  ) {
+    throw new ApiError(
+      409,
+      "teleport_in_progress",
+      "Local dispatch is blocked during or after Teleport.",
+    );
+  }
+}
+
 async function runDispatchAttempt(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: DispatchAttemptArgs,
-  reattempted: boolean,
+  reattempted: Reattempts,
 ): Promise<DispatchAttemptOutcome> {
   const { payload, thread } = args;
-  if (teleportBlocked(deps.db, thread.id) || getThread(deps.db, thread.id)?.executionTarget === "cloud") throw new ApiError(409, "teleport_in_progress", "Local dispatch is blocked during or after Teleport.");
+  ensureLocalDispatchAllowed(deps, thread.id);
   // A stopping thread is writable HERE and nowhere upstream: the checkpoint
   // below turns it into a core wait, which is a truthful "not yet" the row can
   // recover from, rather than the 409 that used to make a stop a dead end for
@@ -387,6 +427,73 @@ async function runDispatchAttempt(
     return { kind: "queued", entry };
   };
 
+  // A child can't wake a parent the user stopped: its message waits with the
+  // parent's held notices until the user sends or `queue send`s (#821).
+  const holdChildOfStoppedParent = (): DispatchAttemptOutcome | null => {
+    if (
+      claimed !== null ||
+      senderThreadId === null ||
+      getThread(deps.db, senderThreadId)?.parentThreadId !== thread.id ||
+      !isThreadQueueAutoSendPaused(deps.db, thread.id)
+    ) {
+      return null;
+    }
+    const held = waitOn({ kind: "thread-busy" }, null);
+    return held.kind === "queued"
+      ? { ...held, entry: { ...held.entry, pausedByStop: true } }
+      : held;
+  };
+
+  // A busy thread can change again under its one re-decision (#1341): then
+  // the message follows the live thread instead of failing. A sender still
+  // listening restarts a failed thread, as a fresh send would.
+  const reattempt = async (
+    current: Thread | null,
+    cause: keyof Reattempts = "thread",
+  ): Promise<DispatchAttemptOutcome> => {
+    if (current === null || !reattempted[cause]) {
+      return reattemptDispatchForThreadChange(
+        deps,
+        args,
+        current,
+        reattempted,
+        cause,
+      );
+    }
+    ensureLocalDispatchAllowed(deps, thread.id);
+    ensureThreadIsWritable(current, true);
+    if (
+      current.status === "error" &&
+      args.source.kind === "inline" &&
+      !reattempted.error
+    ) {
+      return reattemptDispatchForThreadChange(
+        deps,
+        args,
+        current,
+        reattempted,
+        "error",
+      );
+    }
+    if (current.status === "stopping") {
+      return (
+        holdChildOfStoppedParent() ??
+        waitOn(
+          { kind: respectManualStopPause ? "thread-busy" : "stopping" },
+          null,
+        )
+      );
+    }
+    const outcome = waitOn({ kind: "thread-busy" }, null);
+    if (current.status === "idle") {
+      requestQueuedMessageDispatch(deps, {
+        kind: "thread-ready",
+        threadId: thread.id,
+      });
+    }
+    return outcome;
+  };
+
   // --- 1. plugin policy ---------------------------------------------------
 
   const admitted: { value: PendingThreadAdmission | null } = {
@@ -407,24 +514,29 @@ async function runDispatchAttempt(
       return;
     }
 
-    // A child can't wake a parent the user stopped: its message waits with the
-    // parent's held notices until the user sends or `queue send`s (#821).
+    const held = holdChildOfStoppedParent();
+    if (held !== null) {
+      continued.outcome = held;
+      return;
+    }
+
+    // A message from another thread waits out a failed login instead of
+    // starting a turn that fails the same way and wakes the parent (#2019).
     if (
-      claimed === null &&
+      !sendNow &&
       senderThreadId !== null &&
-      getThread(deps.db, senderThreadId)?.parentThreadId === thread.id &&
-      isThreadQueueAutoSendPaused(deps.db, thread.id)
+      failureHold(deps.db, thread) === "sign-in"
     ) {
-      const held = waitOn({ kind: "thread-busy" }, null);
-      continued.outcome =
-        held.kind === "queued"
-          ? { ...held, entry: { ...held.entry, pausedByStop: true } }
-          : held;
+      continued.outcome = waitOn({ kind: "thread-busy" }, null);
       return;
     }
 
     if (thread.status === "stopping") {
-      continued.outcome = waitOn({ kind: "stopping" }, null);
+      // A Stop caught this older row; it must not gain permission to resume.
+      continued.outcome = waitOn(
+        { kind: respectManualStopPause ? "thread-busy" : "stopping" },
+        null,
+      );
       return;
     }
 
@@ -527,7 +639,8 @@ async function runDispatchAttempt(
       !sendNow &&
       !firstDispatch &&
       attempt === "start-turn" &&
-      args.queuePayload.kind === "inline"
+      args.queuePayload.kind === "inline" &&
+      !args.queuePayload.fromComposer
     ) {
       const repeat = checkRepeatedMessage(deps.db, {
         input: payload.input,
@@ -600,6 +713,18 @@ async function runDispatchAttempt(
       if (claimed !== null) {
         noteDispatchRequeued(thread.id);
       }
+      // No plugin hold may send before the sender's own time (#999). Until
+      // then the row waits on the clock, which no recheck, plugin removal or
+      // recovery releases; the due sweep re-asks the plugin then. A plugin
+      // submission (a draft) keeps its plugin hold: the row can't store it.
+      const sendAt = payload.sendAt ?? null;
+      if (
+        args.pluginSubmission === null &&
+        sendAt !== null &&
+        sendAt > Date.now()
+      ) {
+        return waitOn({ kind: "time" }, sendAt);
+      }
       return waitOn(
         {
           kind: "plugin",
@@ -617,12 +742,7 @@ async function runDispatchAttempt(
     return continued.outcome;
   }
   if (continued.reattemptThread !== null) {
-    return reattemptDispatchForThreadChange(
-      deps,
-      args,
-      continued.reattemptThread,
-      reattempted,
-    );
+    return reattempt(continued.reattemptThread);
   }
 
   // --- 2. dispatch --------------------------------------------------------
@@ -637,7 +757,7 @@ async function runDispatchAttempt(
       // for a thread that is gone. Reporting a dispatch here would tell the
       // caller their message went when it went nowhere.
       const current = getThread(deps.db, thread.id);
-      return reattemptDispatchForThreadChange(deps, args, current, reattempted);
+      return reattempt(current);
     }
     await launchAdmittedThread(deps, admission);
     return { kind: "dispatched" };
@@ -655,17 +775,38 @@ async function runDispatchAttempt(
     afterWait.deletedAt !== thread.deletedAt ||
     afterWait.environmentId !== thread.environmentId
   ) {
-    return reattemptDispatchForThreadChange(deps, args, afterWait, reattempted);
+    return reattempt(afterWait);
   }
+  let saving = false;
+  let savedRequestId: ClientTurnRequestId | undefined;
   try {
     await sendThreadMessage(deps, {
       environment,
       payload: resolvedPayload,
       thread,
       trigger: args.trigger,
+      onStartSettled: (error) => {
+        args.onStartSettled?.(error);
+        // The computer dropped after the turn was sent: it may still have it,
+        // so the consumed row comes back held, never sent by itself (#2279).
+        if (
+          claimed !== null &&
+          savedRequestId !== undefined &&
+          isHostUnavailableApiError(error)
+        ) {
+          holdUnconfirmedQueuedMessage(deps, {
+            claimed,
+            requestId: savedRequestId,
+            retryOf: args.retryOf,
+          });
+        }
+      },
       ...(args.retryOf !== undefined ? { retryOf: args.retryOf } : {}),
-      beforeAppendInTransaction: ({ tx }) => {
-        args.beforeDispatch?.();
+      ...(claimed !== null && !sendNow ? { queueDelivered: claimed.id } : {}),
+      beforeAppendInTransaction: ({ tx, requestId }) => {
+        saving = true;
+        savedRequestId = requestId;
+        args.beforeDispatch?.(requestId);
         if (getThread(tx, thread.id)?.status !== thread.status) {
           throw new DispatchThreadStatusChangedError();
         }
@@ -679,15 +820,29 @@ async function runDispatchAttempt(
       },
     });
   } catch (error) {
+    // The host dropped during the send's host reads, before anything was
+    // saved (#1283). Decide once more: a host still away queues the message
+    // for its reconnect, and one already back gets it now.
+    if (!saving && isHostUnavailableApiError(error)) {
+      if (!reattempted.host) {
+        return reattempt(getThread(deps.db, thread.id), "host");
+      }
+      // A drain keeps its row, so only a listening sender hears "not queued".
+      if (args.source.kind !== "inline") throw error;
+      const host =
+        dispatchEnvironmentAndHost(deps, thread.environmentId).host?.name ??
+        "the host";
+      throw new ApiError(
+        502,
+        "host_unavailable",
+        `Cloudroom couldn't reach ${host} before saving this message, so it was not sent or queued. Check that ${host} is connected, then send it again.`,
+        false,
+      );
+    }
     if (!(error instanceof DispatchThreadStatusChangedError)) {
       throw error;
     }
-    return reattemptDispatchForThreadChange(
-      deps,
-      args,
-      getThread(deps.db, thread.id),
-      reattempted,
-    );
+    return reattempt(getThread(deps.db, thread.id));
   }
   if (claimed !== null) {
     settleQueueRowDispatched({ row: claimed });
@@ -701,19 +856,17 @@ function reattemptDispatchForThreadChange(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: DispatchAttemptArgs,
   thread: Thread | null,
-  reattempted: boolean,
+  reattempted: Reattempts,
+  cause: keyof Reattempts = "thread",
 ): Promise<DispatchAttemptOutcome> {
   if (thread === null) {
     throw new ApiError(404, "thread_not_found", "Thread not found");
   }
-  if (reattempted) {
-    throw new ApiError(
-      500,
-      "internal_error",
-      `Thread ${thread.id} changed twice under one dispatch attempt`,
-    );
-  }
-  return runDispatchAttempt(deps, { ...args, thread }, true);
+  return runDispatchAttempt(
+    deps,
+    { ...args, thread },
+    { ...reattempted, [cause]: true },
+  );
 }
 
 /**
@@ -889,13 +1042,14 @@ function undeliveredStartInput(
   tx: DbTransaction,
   threadId: string,
 ): PromptInput[] {
-  if (getThread(tx, threadId)?.status !== "error") return [];
+  const thread = getThread(tx, threadId);
+  if (thread?.status !== "error") return [];
   const request = readThreadProvisionContext(tx, threadId)?.request;
   if (request?.carryInput !== true || request.inputCancelled) return [];
   const input = (
     request.input.length > 0
       ? request.input
-      : (resolveDeferredFirstTurnContext(tx, threadId)?.input ?? [])
+      : (resolveDeferredFirstTurnContext(tx, thread)?.input ?? [])
   ).filter(
     (block) => block.type !== "text" || block.text !== UNDELIVERED_START_NOTE,
   );

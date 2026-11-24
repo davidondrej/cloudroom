@@ -1,7 +1,18 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, maskStoredShellEnvValues } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import { and, asc, desc, eq, inArray, isNull, like, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  exists,
+  inArray,
+  isNull,
+  like,
+  ne,
+  sql,
+} from "drizzle-orm";
 import {
   cloudroomThreads,
   cloudroomCommands,
@@ -20,17 +31,22 @@ import type { PromptInput, Thread } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
-import { shortenWorktreeRetirement } from "../environments/environment-engine.js";
+import {
+  restoreParkedWorktree,
+  shortenWorktreeRetirement,
+} from "../environments/environment-engine.js";
 import {
   getLastExecutionOptions,
   getLastProviderThreadId,
 } from "../threads/thread-events.js";
 import { pendingImportFork } from "../threads/thread-fork-history.js";
 import { stopThreadForCurrentState } from "../threads/thread-lifecycle.js";
+import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "../threads/background-task-reconciliation.js";
+import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { resolveThreadRuntimeCommandConfig } from "../threads/thread-runtime-config.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
 import { cloudPromptLimit, cloudroom, promptPayload } from "./commands.js";
-import { copyProject, planProjectCopy } from "./project-copy.js";
+import { homeFolder, planProjectCopy } from "./project-copy.js";
 import { SANDBOX_PREFIX } from "./sandboxes.js";
 import {
   CloudroomError,
@@ -58,6 +74,7 @@ interface State {
     nativeId: string;
     harness: Harness;
     environmentId: string;
+    optional?: boolean;
   }[];
   attachments: string[];
   queuedIds: string[];
@@ -72,6 +89,8 @@ interface State {
   cancelRequested?: boolean;
   stopped?: boolean;
   activationRequested?: boolean;
+  /** Every moved session looked idle when Teleport took it: a hint only, so the handoff warns against redoing work (#1394). */
+  idle?: boolean;
 }
 // GUI provider ID → cloud core harness ID.
 const HARNESSES = {
@@ -80,6 +99,7 @@ const HARNESSES = {
   "claude-code": "claude-code",
   "acp-cursor": "cursor",
   "acp-opencode": "opencode",
+  "acp-antigravity": "antigravity",
 } as const;
 type Harness = (typeof HARNESSES)[keyof typeof HARNESSES];
 function harnessOf(providerId: string): Harness | undefined {
@@ -99,6 +119,7 @@ const openCloudChild = (child: { id: string; title: string | null }) =>
 const TEXT = ["native", "lineage", "context"];
 const HISTORY_LIMIT = 64 * 1024 * 1024;
 const HOST_MESSAGE_LIMIT = 96 * 1024 * 1024;
+const HERE = process.platform === "win32" ? "PC" : COMPUTER;
 const services = new WeakMap<AppDeps["db"], Teleport>();
 export function teleports(deps: AppDeps): Teleport {
   let service = services.get(deps.db);
@@ -157,7 +178,7 @@ class Teleport {
   ) {
     const harness = harnessOf(providerId)!;
     const separator = execution.model.indexOf("/");
-    const result = await (
+    const check = async () => (
       await cloudroom(this.deps).teleportClient(threadId)
     ).checkTeleport({
       harness,
@@ -167,6 +188,11 @@ class Teleport {
           : execution.model,
       reasoning: execution.reasoning,
       service_tier: execution.serviceTier,
+    });
+    // The check changes nothing, so a sandbox found asleep at its saved address is woken and checked once more (#1840).
+    const result = await check().catch((error: unknown) => {
+      if (!cloudroom(this.deps).forgetTeleportSandbox(threadId, error)) throw error;
+      return check();
     });
     if (!result.ok)
       throw new ApiError(
@@ -225,11 +251,18 @@ class Teleport {
         "teleport_unavailable",
         "Teleport requires a local parent thread with a workspace.",
       );
+    // Its files would be other projects' files and secrets, so none could go (#1120), and the agent would have nothing.
+    if (homeFolder(environment.path))
+      throw new ApiError(
+        409,
+        "teleport_unavailable",
+        `This thread's folder, ${environment.path}, is a home folder or holds one, so it would carry other projects' files and secrets to the cloud. Open a project folder instead, then Teleport.`,
+      );
     if (!harnessOf(thread.providerId) || thread.providerId === "acp-cursor")
       throw new ApiError(
         409,
         "teleport_unavailable",
-        "Teleport supports Codex, Pi, Claude Code, and opencode.",
+        "Teleport supports Codex, Pi, Claude Code, opencode, and Antigravity.",
       );
     const all = [thread];
     for (let i = 0; i < all.length; i++)
@@ -239,6 +272,40 @@ class Teleport {
         if (child.executionTarget !== "cloud") all.push(child);
         else if (blocksTeleport(this.deps, child)) throw openCloudChild(child);
       }
+    // Archived children the agent ever worked in: any item besides the user's own messages, in one read.
+    const archived = all.flatMap((source) =>
+      source.archivedAt ? [source.id] : [],
+    );
+    const worked = new Set(
+      archived.length
+        ? this.deps.db
+            .select({ id: threads.id })
+            .from(threads)
+            .where(
+              and(
+                inArray(threads.id, archived),
+                // EXISTS stops at each child's first item instead of reading its whole history.
+                exists(
+                  this.deps.db
+                    .select({ one: sql`1` })
+                    .from(events)
+                    .where(
+                      and(
+                        eq(events.threadId, threads.id),
+                        inArray(events.type, [
+                          "item/started",
+                          "item/completed",
+                        ]),
+                        ne(events.itemKind, "userMessage"),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .all()
+            .map((row) => row.id)
+        : [],
+    );
     const sessions = all.flatMap((source) => {
       const env = source.environmentId
         ? getEnvironment(this.deps.db, source.environmentId)
@@ -255,15 +322,25 @@ class Teleport {
             nativeId,
             harness: harnessOf(source.providerId)!,
             environmentId: env.id,
+            // An archived child that never started may have saved no conversation; the host then leaves it out (#1767).
+            ...(source.archivedAt && !worked.has(source.id)
+              ? { optional: true }
+              : {}),
           },
         ];
       if (source.id !== thread.id && source.archivedAt) return [];
+      // Name the prerequisite that failed; archived children are left out, so archiving is a child's way past it (#2248).
+      const name = source.title ?? source.id;
       throw new ApiError(
         409,
         "teleport_unavailable",
-        !nativeId && pendingImportFork(this.deps.db, source.id)
-          ? `Send ${source.title ?? "this imported chat"} a message first, then Teleport.`
-          : `Cannot capture the saved local conversation for ${source.title ?? source.id}.`,
+        env && env.hostId !== environment.hostId
+          ? `${name} runs on another computer, so Teleport can't take its conversation from this ${HERE}. Archive it to leave it out, then Teleport.`
+          : !harnessOf(source.providerId)
+            ? `${name} runs an agent Teleport can't take; it supports Codex, Pi, Claude Code, Cursor, opencode, and Antigravity. Archive it to leave it out, then Teleport.`
+            : !nativeId && pendingImportFork(this.deps.db, source.id)
+              ? `Send ${source.title ?? "this imported chat"} a message first, then Teleport.`
+              : `${name} has no saved conversation on this ${HERE} yet. Send it a message first${source.id === thread.id ? "" : ", or archive it to leave it out"}, then Teleport.`,
       );
     });
     const last = getLastExecutionOptions(this.deps, threadId);
@@ -331,7 +408,10 @@ class Teleport {
     const existing = teleportProgress(this.deps.db, threadId);
     if (existing && !["cancelled", "complete"].includes(existing.phase))
       throw new ApiError(409, "teleport_in_progress", "Teleport is already running for this thread.");
-    const { thread, environment, all, execution } = this.validate(threadId, choice);
+    const { thread, environment, all, sessions, execution } = this.validate(
+      threadId,
+      choice,
+    );
     try {
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
@@ -345,8 +425,17 @@ class Teleport {
       .all()
       .filter((other) => !all.some((source) => source.id === other.id)).length;
     const warnings = [
-      ...(all.length > 1 ? [`${all.length - 1} child thread(s) move to Cloud with it.`] : []),
-      ...(sharing ? [`${sharing} other open thread(s) use this folder; they stay on this ${process.platform === "win32" ? "PC" : COMPUTER}.`] : []),
+      // Only the parent moves; children stop and stay, and their history goes with it (docs/scopes/teleport.md, #2248).
+      ...(sessions.length > 1
+        ? [
+            `${sessions.length - 1} child thread(s) stop and stay on this ${HERE}; their history goes to Cloud with this thread.`,
+          ]
+        : []),
+      ...(sharing
+        ? [
+            `${sharing} other open thread(s) use this folder; they stay on this ${HERE}.`,
+          ]
+        : []),
     ];
     return { model: execution.model, reasoning: execution.reasoning, warnings };
   }
@@ -407,6 +496,14 @@ class Teleport {
     this.notify(threadId);
     this.checking.add(id);
     try {
+      // A parked worktree holds the files Teleport carries: bring it back first.
+      for (const source of all)
+        if (source.archivedAt === null && source.environmentId !== null)
+          await restoreParkedWorktree(
+            this.deps,
+            source.id,
+            source.environmentId,
+          );
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
       this.dropChecking(threadId, id);
@@ -499,6 +596,8 @@ class Teleport {
       queued,
       ...execution,
       ...(execution.model !== last.model ? { sourceModel: last.model } : {}),
+      // Read with no await before the transaction below blocks local sends.
+      idle: sessions.every((source) => getThread(this.deps.db, source.threadId)?.status === "idle"),
     };
     this.deps.db.transaction((tx) => {
       tx.insert(cloudroomThreads)
@@ -654,9 +753,15 @@ class Teleport {
       .catch((error) => {
         const progress = teleportProgress(this.deps.db, threadId);
         if (!progress || progress.phase === "cancelled") return;
-        const state = this.load(id);
+        // Missing saved state pauses this transfer for good, still blocked, instead of crashing the server (#2046).
+        let state: State | undefined;
+        try {
+          state = this.load(id);
+        } catch (missing) {
+          error = missing;
+        }
         if (
-          state.stopped &&
+          state?.stopped &&
           state.cancelRequested &&
           !state.activationRequested
         ) {
@@ -692,6 +797,12 @@ class Teleport {
         );
         this.notify(threadId);
       })
+      .catch((error: unknown) =>
+        this.deps.logger.error(
+          { threadId, transferId: id, error },
+          "Teleport failure handling failed",
+        ),
+      )
       .finally(() => this.active.delete(threadId));
     this.active.set(threadId, work);
   }
@@ -701,6 +812,8 @@ class Teleport {
       await Promise.all(
         state.sessions.map((source) => {
           const thread = getThread(this.deps.db, source.threadId);
+          // An archived child runs nothing; its trace still goes (#1554).
+          if (thread?.parentThreadId && thread.archivedAt) return;
           const environment = getEnvironment(
             this.deps.db,
             source.environmentId,
@@ -884,7 +997,10 @@ class Teleport {
             .where(eq(events.threadId, source.threadId))
             .orderBy(asc(events.sequence))
             .all()
-            .map((row) => ({ ...row, data: JSON.parse(row.data) })),
+            .map((row) => ({
+              ...row,
+              data: maskStoredShellEnvValues(row.type, JSON.parse(row.data)),
+            })),
         })),
         queued: state.queuedDisplay,
         goals,
@@ -970,7 +1086,11 @@ class Teleport {
               }
             : {}),
           ...(capability.system_prompt === true
-            ? { system_prompt: cloudroomSystemPrompt(this.deps.db) }
+            ? { system_prompt: cloudroomSystemPrompt(this.deps.db, "cloud") }
+            : {}),
+          // Core gives the agent's shells ROOM_THREAD_ID and ROOM_PROJECT_ID, like Local (#199).
+          ...(capability.room_ids === true
+            ? { thread_id: thread.id, project_id: thread.projectId }
             : {}),
           workspace: `bb_${thread.projectId}`,
           workspace_name:
@@ -980,14 +1100,14 @@ class Teleport {
               .slice(0, 80) || "project",
           files: capture.files,
           queued: state.queued,
-          handoff: `Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it. Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files); wait for missing files instead of recreating them. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
+          handoff: `${state.idle && !state.queued.length ? "This thread was idle when it moved to Cloud, so its last request may already be finished. Read the conversation first and don't repeat work that already succeeded, including laptop-side effects you can't see from here (threads, pushes, messages). If something is still unfinished (a child result, a queued message, a background job), continue only that. If nothing is left, say so in one line." : "Continue unfinished work in this same conversation; if the task is already complete, confirm that instead of redoing it."} Before working, read the preserved user and project instructions in gui-history.json and the instruction files in the index. If this project is new on the VM, Cloudroom is copying it into this folder now (a GitHub clone or an upload from the laptop, plus uncommitted edits and .env files): run \`room-cli files wait\` before touching project files. It returns once they land, or says the copy failed and where the files are; don't recreate missing files. Otherwise, use Git to match the local branch and commit in git-state.txt, which also lists uncommitted tracked edits that stayed on the laptop. Untracked files mentioned in the conversation were also copied. Other GUI history and child traces are reference context; read them as needed. Queued follow-ups will run separately after this continuation; do not execute them from the history file. Existing goals remain instructions, not automatic loops.\nActive goals: ${goals.join("\n") || "none"}.\nOld local workspace: ${state.workspacePath}.\nChildren: ${[...state.sessions.slice(1).map((s) => s.threadId), ...nativeChildren.keys()].join(", ") || "none"}.\nChildren's own worktrees, which stayed on the laptop with their commits and uncommitted edits (only this thread's code came to the cloud): ${childWorktrees.join("; ") || "none"}. To use that work, read or push it from the laptop with room-cli mac run if Mac access is on, or ask the user to push those branches; don't redo it.\nKnown unavailable local paths: ${(capture.omitted ?? []).join(", ") || "none"}.`,
         },
       };
       this.save(state);
     }
     const copy = await planProjectCopy(this.deps, client, state.threadId, state.manifest!.workspace, { localPath: state.workspacePath, teleport: true });
     let remote = await client.prepareTeleport(state.manifest!);
-    if (copy) copyProject(this.deps, client, copy);
+    if (copy) cloudroom(this.deps).copyInto(client, copy);
     // Bytes, not files, so one big chat file never sits at 0 until it lands. Before Cloud starts only the chat text
     // counts. `rate` is the upload speed of the last pieces alone, so a slow Core never reads as a slow connection.
     const sizes = state.manifest!.files.map((file) => file.size);
@@ -1146,6 +1266,8 @@ class Teleport {
       error: undefined,
     });
     if (complete) {
+      // A project copy an app restart cut off waited for the move to finish (#1970).
+      cloudroom(this.deps).resumeCopy(state.threadId, client);
       shortenWorktreeRetirement(this.deps, state.environmentId);
       for (const source of state.sessions.slice(1))
         saveTeleportProgress(this.deps.db, source.threadId, {
@@ -1166,7 +1288,13 @@ class Teleport {
     const latest = this.load(state.id);
     if (latest.cancelRequested)
       this.save({ ...latest, cancelRequested: false });
+    const hub = new NotificationBuffer();
     this.deps.db.transaction((tx) => {
+      // Background tasks still open died with the Mac's agent; Cloud would never close them (#1554).
+      settleDanglingBackgroundTasksForStoppedThreadInTransaction(
+        { db: tx, hub, logger: this.deps.logger },
+        { threadId: state.threadId },
+      );
       if (!binding(tx, state.threadId))
         tx.insert(cloudroomThreads)
           .values({
@@ -1218,6 +1346,7 @@ class Teleport {
         total: remote.files.length,
       });
     });
+    hub.flushInto(this.deps.hub);
     this.notify(state.threadId);
     if (getThread(this.deps.db, state.threadId)?.archivedAt) {
       cloudroom(this.deps).archive(state.threadId);

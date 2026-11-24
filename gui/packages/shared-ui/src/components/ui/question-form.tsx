@@ -10,11 +10,12 @@ import {
 import {
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
   type RefObject,
 } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -40,7 +41,6 @@ interface QuestionOptionRowProps {
   checked: boolean;
   label: string;
   description?: string;
-  multiSelect: boolean;
   onSelect: () => void;
   shortcut?: QuestionShortcut;
 }
@@ -67,7 +67,6 @@ function QuestionOptionRow({
   checked,
   label,
   description,
-  multiSelect,
   onSelect,
   shortcut,
 }: QuestionOptionRowProps) {
@@ -78,21 +77,26 @@ function QuestionOptionRow({
       aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
       onClick={onSelect}
       className={cn(
-        "flex w-full items-start gap-2.5 rounded-md px-2.5 py-1.5 text-left transition-colors",
+        "flex w-full items-start gap-3 rounded-md px-2 py-2 text-left transition-colors",
         checked ? "bg-surface-selected" : "hover:bg-state-hover",
       )}
     >
-      <span
+      {/* The key cap doubles as the radio or checkbox. */}
+      <kbd
+        aria-hidden="true"
         className={cn(
-          "mt-0.5 flex size-4 shrink-0 items-center justify-center border",
-          multiSelect ? "rounded" : "rounded-full",
+          "flex size-5 shrink-0 items-center justify-center rounded-md border font-sans text-xs font-medium",
           checked
-            ? "border-primary bg-primary text-primary-foreground"
-            : "border-input",
+            ? "border-primary bg-primary/10 text-primary-text"
+            : "border-foreground/15 text-muted-foreground",
         )}
       >
-        {checked ? <Icon name="Check" className="size-3" aria-hidden /> : null}
-      </span>
+        {shortcut ? (
+          shortcut.label
+        ) : checked ? (
+          <Icon name="Check" className="size-3" />
+        ) : null}
+      </kbd>
       <span className="min-w-0 flex-1">
         <span className="block text-sm font-medium text-foreground">
           {label}
@@ -103,14 +107,6 @@ function QuestionOptionRow({
           </span>
         ) : null}
       </span>
-      {shortcut ? (
-        <kbd
-          aria-hidden="true"
-          className="mt-0.5 shrink-0 text-xs font-normal text-subtle-foreground"
-        >
-          {shortcut.label}
-        </kbd>
-      ) : null}
     </button>
   );
 }
@@ -131,6 +127,7 @@ interface QuestionTabsProps {
   formState: QuestionFormState;
   onSelect: (index: number) => void;
   questions: readonly Question[];
+  trailing: ReactNode;
 }
 
 function QuestionTabs({
@@ -138,10 +135,11 @@ function QuestionTabs({
   formState,
   onSelect,
   questions,
+  trailing,
 }: QuestionTabsProps) {
   return (
-    <div className="mb-2 flex shrink-0 items-center gap-2">
-      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+    <div className="mb-3 flex shrink-0 items-center gap-3">
+      <div className="flex min-w-0 flex-1 items-center gap-4 overflow-x-auto">
         {questions.map((question, index) => {
           const answered = isQuestionAnswered(
             question,
@@ -149,39 +147,34 @@ function QuestionTabs({
           );
           const isActive = index === currentIndex;
           return (
-            <div
+            <button
               key={question.id}
+              type="button"
+              onClick={() => onSelect(index)}
+              aria-pressed={isActive}
+              title={question.prompt}
               className={cn(
-                "relative inline-flex h-7 shrink-0 items-center rounded-md",
+                "flex shrink-0 items-center gap-1 rounded-sm text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
                 isActive
-                  ? "bg-muted text-foreground"
-                  : "text-muted-foreground hover:bg-state-hover",
+                  ? "text-foreground"
+                  : "text-subtle-foreground hover:text-foreground",
               )}
             >
-              <button
-                type="button"
-                onClick={() => onSelect(index)}
-                aria-pressed={isActive}
-                title={question.prompt}
-                className="flex h-full min-w-0 items-center rounded-md px-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                <span
-                  className={cn(
-                    "truncate text-xs",
-                    answered ? "line-through" : undefined,
-                  )}
-                  style={{ maxWidth: "180px" }}
-                >
-                  {question.shortLabel}
-                </span>
-              </button>
-            </div>
+              {answered ? (
+                <Icon
+                  name="Check"
+                  className="size-3 text-primary-text"
+                  aria-hidden
+                />
+              ) : null}
+              <span className="truncate" style={{ maxWidth: "180px" }}>
+                {question.shortLabel}
+              </span>
+            </button>
           );
         })}
       </div>
-      <span className="shrink-0 text-xs text-muted-foreground">
-        {currentIndex + 1} of {questions.length}
-      </span>
+      {trailing}
     </div>
   );
 }
@@ -195,6 +188,7 @@ interface QuestionInputBlockProps {
   onFreeTextChange: (value: string) => void;
   onShortcutSubmit: () => void;
   shortcuts: ReadonlyMap<string, QuestionShortcut>;
+  trailing: ReactNode;
 }
 
 function QuestionInputBlock({
@@ -206,6 +200,7 @@ function QuestionInputBlock({
   onFreeTextChange,
   onShortcutSubmit,
   shortcuts,
+  trailing,
 }: QuestionInputBlockProps) {
   const freeTextRef = useRef<HTMLTextAreaElement>(null);
   const isPointerCoarse = usePointerCoarse();
@@ -214,6 +209,8 @@ function QuestionInputBlock({
     maxHeight: FREE_TEXT_MAX_HEIGHT,
   });
   const options = question.options;
+  // A note after the question itself reads lighter: "Pick one? It changes X."
+  const noteStart = question.prompt.indexOf("? ") + 1;
   const freeTextLabel = `${question.shortLabel} answer`;
 
   useLayoutEffect(() => {
@@ -238,10 +235,20 @@ function QuestionInputBlock({
   return (
     <fieldset disabled={disabled} className="min-w-0">
       <legend className="sr-only">{question.prompt}</legend>
-      <div className="text-sm font-semibold text-foreground">
-        {question.prompt}
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1 text-base font-semibold leading-snug text-foreground">
+          {noteStart > 0
+            ? question.prompt.slice(0, noteStart)
+            : question.prompt}
+          {noteStart > 0 ? (
+            <span className="font-normal text-muted-foreground">
+              {question.prompt.slice(noteStart)}
+            </span>
+          ) : null}
+        </div>
+        {trailing}
       </div>
-      <div className="mt-2 space-y-0.5">
+      <div className="mt-2.5 -mx-2 space-y-0.5">
         {options.map((option: QuestionOption, index) => {
           const checked = state.selected.includes(option.value);
           return (
@@ -250,7 +257,6 @@ function QuestionInputBlock({
                 checked={checked}
                 label={option.label}
                 description={option.description}
-                multiSelect={question.multiSelect}
                 onSelect={() => onToggleOption(option.value)}
                 shortcut={shortcuts.get(String(index))}
               />
@@ -264,7 +270,6 @@ function QuestionInputBlock({
           <QuestionOptionRow
             checked={state.otherSelected}
             label={OTHER_OPTION_LABEL}
-            multiSelect={question.multiSelect}
             onSelect={onSelectOther}
             shortcut={shortcuts.get(String(options.length))}
           />
@@ -318,94 +323,106 @@ export function QuestionForm({
 
   const totalQuestions = questions.length;
   const currentQuestion = questions[currentIndex] ?? null;
-  const isFirst = currentIndex === 0;
-  const isLast = currentIndex === totalQuestions - 1;
-  const allAnswered = useMemo(
-    () =>
-      totalQuestions > 0 &&
-      questions.every((question) =>
-        isQuestionAnswered(question, answerStateFor(formState, question)),
-      ),
-    [formState, questions, totalQuestions],
-  );
+  const isAnswered = (question: Question, state: QuestionFormState): boolean =>
+    isQuestionAnswered(question, answerStateFor(state, question));
+  const allAnswered =
+    totalQuestions > 0 &&
+    questions.every((question) => isAnswered(question, formState));
 
-  const updateQuestionState = useCallback(
-    (
-      question: Question,
-      update: (state: QuestionAnswerState) => QuestionAnswerState,
-    ): void => {
-      setFormState((current) => ({
-        ...current,
-        [question.id]: update(answerStateFor(current, question)),
-      }));
-    },
-    [],
-  );
-
-  const handleToggleOption = useCallback(
-    (question: Question, optionValue: string): void => {
-      updateQuestionState(question, (state) => {
-        if (question.multiSelect) {
-          const selected = state.selected.includes(optionValue)
-            ? state.selected.filter((value) => value !== optionValue)
-            : [...state.selected, optionValue];
-          return { ...state, selected };
-        }
-        return { ...state, selected: [optionValue], otherSelected: false };
-      });
-    },
-    [updateQuestionState],
-  );
-
-  const handleSelectOther = useCallback(
-    (question: Question): void => {
-      updateQuestionState(question, (state) =>
-        question.multiSelect
-          ? { ...state, otherSelected: !state.otherSelected }
-          : { ...state, selected: [], otherSelected: true },
-      );
-    },
-    [updateQuestionState],
-  );
-
-  const handleFreeTextChange = (question: Question, value: string): void => {
-    updateQuestionState(question, (state) => ({ ...state, otherText: value }));
-  };
-
-  const submitAnswer = (): void => {
-    if (disabled || !allAnswered) return;
-    onSubmit(buildQuestionAnswers(questions, formState));
-  };
-
-  const handleAdvance = (): void => {
-    if (isLast) {
-      submitAnswer();
+  // Submits once nothing is left, else moves to the next open question.
+  const advance = (state: QuestionFormState): void => {
+    if (disabled) return;
+    const open = questions.flatMap((question, index) =>
+      isAnswered(question, state) ? [] : [index],
+    );
+    if (open.length === 0) {
+      onSubmit(buildQuestionAnswers(questions, state));
       return;
     }
-    setCurrentIndex((index) => Math.min(index + 1, totalQuestions - 1));
+    setCurrentIndex(
+      open.find((index) => index > currentIndex) ?? open[0] ?? currentIndex,
+    );
   };
 
-  useEffect(() => {
-    if (disabled || currentQuestion === null) return;
-    return registerChoiceHandler((index) => {
-      const choice = resolveQuestionShortcutChoice(currentQuestion, index);
-      if (!choice) return false;
-      if (choice.kind === "option")
-        handleToggleOption(currentQuestion, choice.value);
-      else handleSelectOther(currentQuestion);
-      return true;
+  const pickOption = (question: Question, optionValue: string): void => {
+    const state = answerStateFor(formState, question);
+    const selected = !question.multiSelect
+      ? [optionValue]
+      : state.selected.includes(optionValue)
+        ? state.selected.filter((value) => value !== optionValue)
+        : [...state.selected, optionValue];
+    const next = {
+      ...formState,
+      [question.id]: {
+        ...state,
+        selected,
+        otherSelected: question.multiSelect && state.otherSelected,
+      },
+    };
+    setFormState(next);
+    // One key answers a plain single-select question. Anything the user may
+    // still want to adjust (several picks, a preview) waits for the button.
+    // A form that was already complete is only sent by the button.
+    if (
+      question.multiSelect ||
+      question.options.some((option) => option.preview) ||
+      allAnswered
+    ) {
+      return;
+    }
+    advance(next);
+  };
+
+  const selectOther = (question: Question): void => {
+    const state = answerStateFor(formState, question);
+    setFormState({
+      ...formState,
+      [question.id]: question.multiSelect
+        ? { ...state, otherSelected: !state.otherSelected }
+        : { ...state, selected: [], otherSelected: true },
     });
-  }, [
-    disabled,
-    currentQuestion,
-    registerChoiceHandler,
-    handleToggleOption,
-    handleSelectOther,
-  ]);
+  };
+
+  const onChoice = useEffectEvent((index: number): boolean => {
+    if (currentQuestion === null) return false;
+    const choice = resolveQuestionShortcutChoice(currentQuestion, index);
+    if (!choice) return false;
+    if (choice.kind === "option") pickOption(currentQuestion, choice.value);
+    else selectOther(currentQuestion);
+    return true;
+  });
+  useEffect(() => {
+    if (disabled) return;
+    return registerChoiceHandler((index) => onChoice(index));
+  }, [disabled, registerChoiceHandler]);
 
   if (!currentQuestion) return null;
 
   const currentState = answerStateFor(formState, currentQuestion);
+  const needsButton =
+    allAnswered ||
+    currentQuestion.multiSelect ||
+    currentState.otherSelected ||
+    currentQuestion.options.some((option) => option.preview);
+  const isLastOpen = questions.every(
+    (question, index) =>
+      index === currentIndex || isAnswered(question, formState),
+  );
+  const confirm = (): void => {
+    if (isAnswered(currentQuestion, formState)) advance(formState);
+  };
+  const cancelButton = (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      disabled={cancelDisabled}
+      onClick={onCancel}
+      className="-my-1 -mr-2 h-6 shrink-0 px-2 font-normal text-subtle-foreground"
+    >
+      Cancel
+    </Button>
+  );
 
   return (
     <div className="flex max-h-[calc(100dvh-6rem)] min-h-0 flex-col text-xs text-muted-foreground">
@@ -415,59 +432,47 @@ export function QuestionForm({
           formState={formState}
           onSelect={setCurrentIndex}
           questions={questions}
+          trailing={cancelButton}
         />
       ) : null}
-      <div className="min-h-0 touch-pan-y overflow-y-auto overscroll-contain">
+      <div className="min-h-0 touch-pan-y overflow-y-auto overscroll-contain px-2 -mx-2">
         <QuestionInputBlock
           disabled={disabled}
           question={currentQuestion}
           state={currentState}
           onToggleOption={(optionValue) =>
-            handleToggleOption(currentQuestion, optionValue)
+            pickOption(currentQuestion, optionValue)
           }
-          onSelectOther={() => handleSelectOther(currentQuestion)}
+          onSelectOther={() => selectOther(currentQuestion)}
           onFreeTextChange={(value) =>
-            handleFreeTextChange(currentQuestion, value)
+            setFormState({
+              ...formState,
+              [currentQuestion.id]: { ...currentState, otherText: value },
+            })
           }
-          onShortcutSubmit={handleAdvance}
+          onShortcutSubmit={confirm}
           shortcuts={shortcuts}
+          trailing={totalQuestions > 1 ? null : cancelButton}
         />
       </div>
-      <div className="mt-3 flex shrink-0 items-center justify-between gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant="ghost"
-          disabled={cancelDisabled}
-          onClick={onCancel}
-        >
-          Cancel
-        </Button>
-        <div className="flex items-center gap-2">
-          {!isFirst ? (
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={disabled}
-              onClick={() => setCurrentIndex((index) => Math.max(index - 1, 0))}
-            >
-              Back
-            </Button>
-          ) : null}
+      {needsButton ? (
+        <div className="mt-3 flex shrink-0 items-center justify-between gap-2">
+          <span>
+            {currentQuestion.multiSelect ? "Pick any that apply" : null}
+          </span>
           <Button
             type="button"
             size="sm"
-            disabled={disabled || (isLast && !allAnswered)}
-            onClick={handleAdvance}
+            disabled={disabled || !isAnswered(currentQuestion, formState)}
+            onClick={confirm}
           >
             {disabled ? (
               <Icon name="Spinner" className="size-3 animate-spin" />
             ) : null}
-            {isLast ? "Submit answer" : "Next"}
+            {isLastOpen ? "Submit" : "Next"}
           </Button>
         </div>
-      </div>
+      ) : null}
     </div>
   );
 }

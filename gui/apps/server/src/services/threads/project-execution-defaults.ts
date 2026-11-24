@@ -44,7 +44,7 @@ interface ResolveRequestedCreateExecutionValueArgs<TValue> {
   value: TValue | undefined;
 }
 
-function shouldRememberProjectExecutionDefaults(args: {
+export function shouldRememberProjectExecutionDefaults(args: {
   environment: ThreadCreateServiceRequest["environment"];
   origin: ThreadCreateServiceRequest["origin"];
   originKind?: ThreadCreateServiceRequest["originKind"];

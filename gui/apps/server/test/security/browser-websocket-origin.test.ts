@@ -1,5 +1,5 @@
 import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
-import { createNodeBbSdk } from "@cloudroom/sdk/node";
+import { createNodeRoomSdk } from "@cloudroom/sdk/node";
 import { createNodeWebsocketFactory } from "@cloudroom/sdk/node-websocket";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
@@ -142,7 +142,7 @@ describe("browser WebSocket origin boundary", () => {
 
   it("keeps absent-Origin Node SDK realtime and CLI terminal sockets working", async () => {
     server = await startTestServer();
-    const sdk = createNodeBbSdk({ baseUrl: server.baseUrl });
+    const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl });
 
     let stopTarget = (): void => {};
     let stopConnection = (): void => {};

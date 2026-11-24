@@ -43,6 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import {
+  formatModelName,
   formatAutomationTrigger,
   isCloudWebhook,
   formatOverviewScheduleMetadata,
@@ -56,6 +57,8 @@ import {
 } from "./lib/format-schedule.js";
 import { AutomationMetadataItem } from "./metadata.js";
 import { failurePause, type FailurePause } from "./lib/paused.js";
+import { cloudLoginTitle } from "@cloudroom/domain/cloud-login";
+import { loginOf, reconnect, useReconnectState } from "./paused-notice.js";
 import {
   LoopTemplatesView,
   type LoopTemplatesState,
@@ -76,6 +79,7 @@ import {
   type LoopDialogContext,
   type RunTick,
 } from "./loop-dialog.js";
+import { JEV_PROVIDER_ID, JevLabel } from "./jev-loop.js";
 import {
   LoopReviewView,
   OFFSCREEN_ROW_CLASSES,
@@ -226,26 +230,18 @@ function LoopPriorityMenu({
   );
 }
 
-function formatModelName(model: string): string {
-  const [, base = model, context] = /^(.+?)(?:\[(\w+)\])?$/u.exec(model) ?? [];
-  const name = (base.split("/").at(-1) ?? base)
-    .replace(/^claude-/u, "")
-    .split("-")
-    .map((part) =>
-      part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1),
-    )
-    .join(" ")
-    .replace(/(\d) (?=\d)/gu, "$1.")
-    .replace(/^GPT /u, "GPT-");
-  return context === undefined ? name : `${name} (${context.toUpperCase()})`;
-}
-
 function automationAgents(
   automation: AutomationResponse,
   scriptAgents: readonly AutomationAgentSummary[] | undefined,
 ): readonly AutomationAgentSummary[] {
   const { execution } = automation;
   if (execution.mode === "script") return scriptAgents ?? [];
+  if (execution.agents)
+    return execution.agents.map((agent) => ({
+      providerId: agent.providerId,
+      model: agent.model,
+      reasoningLevel: agent.reasoningLevel ?? null,
+    }));
   return [
     {
       providerId: execution.providerId,
@@ -267,6 +263,7 @@ function AutomationAgentLine({
   compact?: boolean;
   quiet?: boolean;
 }) {
+  if (agents[0]?.providerId === JEV_PROVIDER_ID) return <JevLabel />;
   if (agents.length === 0) {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
@@ -846,17 +843,26 @@ function LoopCard({
   actions?: ReactNode;
   toggle: ReactNode;
   onOpen: () => void;
-  /** Its own failures paused it: the card says why, when it tries again on its own, and offers Resume. */
-  paused?: FailurePause & { retryAt: number | null; now: number; onResume: () => void };
+  /** Its own failures paused it: the card shows only its name, why, and the one button that fixes it. */
+  paused?: FailurePause & { onResume: () => void };
 }) {
+  if (paused) {
+    return (
+      <PausedLoopCard
+        name={name}
+        cloud={cloud}
+        paused={paused}
+        actions={actions}
+        onOpen={onOpen}
+      />
+    );
+  }
   return (
     <div
       data-loop-card=""
       className={cn(
         "group/card relative flex min-w-0 flex-col rounded-xl border border-foreground/10 bg-surface-raised px-3.5 pt-3 pb-2.5 transition-colors hover:border-foreground/20 [contain-intrinsic-size:auto_150px] [content-visibility:auto]",
-        paused
-          ? "border-destructive/35 hover:border-destructive/55"
-          : muted && "opacity-60",
+        muted && "opacity-60",
       )}
     >
       <div className="flex items-start gap-3">
@@ -880,26 +886,17 @@ function LoopCard({
         <span className="inline-flex min-w-0 items-center rounded-full border border-foreground/10 bg-foreground/[0.06] py-0.5 pr-2 pl-1.5 text-[11.5px] font-medium text-foreground/85">
           {agent}
         </span>
-        {paused ? (
-          <span className="inline-flex shrink-0 items-center gap-1 self-center whitespace-nowrap rounded-full bg-destructive/10 px-2 py-0.5 text-2xs font-medium text-destructive-text">
-            <Icon name="Pause" className="size-2.5 fill-current" aria-hidden />
-            Paused · {paused.failures} failed runs
-          </span>
-        ) : (
-          badges
-        )}
+        {badges}
       </div>
       <p
         className={cn(
           "mt-2 line-clamp-2 text-[12.5px] leading-normal",
-          paused
-            ? "text-destructive-text"
-            : report === null
-              ? "italic text-subtle-foreground"
-              : "text-muted-foreground",
+          report === null
+            ? "italic text-subtle-foreground"
+            : "text-muted-foreground",
         )}
       >
-        {paused ? paused.reason : (report ?? "No reviewed runs yet.")}
+        {report ?? "No reviewed runs yet."}
       </p>
       <div className="flex-1" />
       <div className="mt-2 flex min-w-0 items-center gap-1.5 text-[11.5px] text-subtle-foreground">
@@ -909,36 +906,87 @@ function LoopCard({
       </div>
       <div className="mt-2 flex items-center gap-2 border-t border-foreground/[0.06] pt-2 text-[11.5px] text-subtle-foreground">
         <LoopRunDots runs={runs} />
-        {paused ? (
-          <span className="relative ml-auto flex items-center gap-2.5">
-            {paused.retryAt !== null ? (
-              <span className="whitespace-nowrap text-muted-foreground">
-                Retries {formatTimeUntil(paused.retryAt, paused.now)}
-              </span>
-            ) : null}
-            <button
-              type="button"
-              onClick={paused.onResume}
-              className="flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15"
-            >
-              <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
-              Resume
-            </button>
+        <span
+          className={cn(
+            "relative ml-auto whitespace-nowrap font-mono tabular-nums",
+            nextRun === "Running"
+              ? "font-sans font-medium text-primary-text"
+              : "text-muted-foreground",
+          )}
+          title={
+            nextRunAt === null ? undefined : formatScheduleRunTime(nextRunAt)
+          }
+        >
+          {nextRun}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** A paused loop: name, why it stopped, and one button. A loop Cloud refused for an agent's login gets Reconnect, which
+ *  fixes every loop waiting on it; Resume can't. No agent, schedule, runs, or retry time (David, 2026-11-09). */
+function PausedLoopCard({
+  name,
+  cloud,
+  paused,
+  actions,
+  onOpen,
+}: {
+  name: string;
+  cloud: boolean;
+  paused: FailurePause & { onResume: () => void };
+  actions?: ReactNode;
+  onOpen: () => void;
+}) {
+  const login = loginOf({ kind: cloud ? "cloud" : "local", reason: paused.reason });
+  const { waiting, code, error } = useReconnectState(login);
+  // The line under the name: a device code to enter, why the last Reconnect failed, or why the loop paused.
+  const line = waiting && code ? `Enter code ${code} on OpenAI's page` : error ?? (login ? cloudLoginTitle(login) : paused.reason);
+  const button =
+    "relative flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15 disabled:opacity-60";
+  return (
+    <div
+      data-loop-card=""
+      className="group/card relative flex min-w-0 flex-col rounded-xl border border-destructive/35 bg-surface-raised px-3.5 pt-3 pb-3 transition-colors hover:border-destructive/55"
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="min-w-0 flex-1 cursor-pointer text-left text-[14px] font-semibold leading-[1.35] tracking-[-0.005em] text-foreground after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-1 focus-visible:after:ring-ring"
+        >
+          <span className="block truncate">{name}</span>
+        </button>
+        {actions ? (
+          <span className="relative flex shrink-0 items-center opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100">
+            {actions}
           </span>
-        ) : (
-          <span
-            className={cn(
-              "relative ml-auto whitespace-nowrap font-mono tabular-nums",
-              nextRun === "Running"
-                ? "font-sans font-medium text-primary-text"
-                : "text-muted-foreground",
+        ) : null}
+      </div>
+      <div className="mt-2.5 flex min-w-0 items-center gap-2.5">
+        <p
+          className={cn("min-w-0 flex-1 truncate text-[12.5px] font-medium", waiting && code ? "text-foreground" : "text-destructive-text")}
+          title={error ?? paused.reason}
+        >
+          {line}
+        </p>
+        {login ? (
+          <button type="button" disabled={waiting} onClick={() => reconnect(login)} className={button}>
+            {waiting ? (
+              <>
+                <Icon name="Spinner" className="size-3 animate-spin" aria-hidden />
+                Waiting for sign-in
+              </>
+            ) : (
+              "Reconnect"
             )}
-            title={
-              nextRunAt === null ? undefined : formatScheduleRunTime(nextRunAt)
-            }
-          >
-            {nextRun}
-          </span>
+          </button>
+        ) : (
+          <button type="button" onClick={paused.onResume} className={button}>
+            <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
+            Resume
+          </button>
         )}
       </div>
     </div>
@@ -997,7 +1045,7 @@ export function OverviewRow({
       cloud={false}
       paused={
         paused
-          ? { ...paused, retryAt: automation.nextRunAt, now, onResume: () => setEnabled(true) }
+          ? { ...paused, onResume: () => setEnabled(true) }
           : undefined
       }
       agent={
@@ -1074,18 +1122,20 @@ export function CloudAutomationRow({
       cloud
       paused={
         paused
-          ? { ...paused, retryAt: nextRunAt, now, onResume: () => actions.onEnabledChange(automation, true) }
+          ? { ...paused, onResume: () => actions.onEnabledChange(automation, true) }
           : undefined
       }
       agent={
         <AutomationAgentLine
-          agents={[
-            automation.agent ?? {
-              providerId: null,
-              model: null,
-              reasoningLevel: null,
-            },
-          ]}
+          agents={
+            automation.agents ?? [
+              automation.agent ?? {
+                providerId: null,
+                model: null,
+                reasoningLevel: null,
+              },
+            ]
+          }
           providers={providers}
           compact
           quiet
@@ -1945,7 +1995,6 @@ export function AutomationOverviewView({
                 label="Paused"
                 count={pausedItems.length}
                 className="text-destructive-text"
-                hint="Stopped after failed runs"
               />
               {grid(pausedItems)}
             </section>
@@ -2139,6 +2188,7 @@ export function AutomationOverviewView({
       )}
       {openCloud && cloud ? (
         <CloudLoopDialog
+          key={openCloud.id}
           automation={openCloud}
           context={dialogContext(cloudKey(openCloud), openCloud.project_id, () =>
             setOpenCloudId(null),

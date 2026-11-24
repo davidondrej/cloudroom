@@ -1,4 +1,15 @@
-import { and, asc, desc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNull,
+  lt,
+  or,
+  sql,
+} from "drizzle-orm";
 import {
   events,
   findStoredEventRow,
@@ -44,6 +55,10 @@ export function threadMessages(
     )
     .orderBy(asc(events.sequence))
     .all();
+  return messagesFromRows(rows);
+}
+
+export function messagesFromRows(rows: readonly { type: string; data: string }[]): ThreadMessage[] {
   return rows.flatMap((row): ThreadMessage[] => {
     const data = JSON.parse(row.data) as {
       input?: unknown;
@@ -87,7 +102,7 @@ export const transcriptMarkdown = (
     )
     .join("\n\n");
 
-const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema) });
+const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema), carried: z.literal(true).optional() });
 
 /**
  * After a harness switch (ADR 0211) or a text-only chat import, the first turn carries the earlier conversation as
@@ -96,7 +111,27 @@ const switchMetadataSchema = z.object({ seed: z.array(promptInputSchema) });
 export function pendingHarnessSwitchSeed(
   db: DbQueryConnection,
   threadId: string,
-): { input: PromptInput[]; requestSequence: number } | null {
+): { input: PromptInput[]; requestSequence: number; carried?: true } | null {
+  const seed = latestOperationSeed(db, threadId, [
+    THREAD_HARNESS_SWITCH_OPERATION,
+    THREAD_IMPORT_OPERATION,
+  ]);
+  return seed &&
+    !findStoredEventRow(db, {
+      threadId,
+      type: "turn/started",
+      afterSequence: seed.requestSequence,
+    })
+    ? seed
+    : null;
+}
+
+/** The agent-only seed saved on the newest of these operations' events. */
+export function latestOperationSeed(
+  db: DbQueryConnection,
+  threadId: string,
+  operations: readonly string[],
+): { input: PromptInput[]; requestSequence: number; carried?: true } | null {
   const row = db
     .select({ sequence: events.sequence, data: events.data })
     .from(events)
@@ -104,25 +139,19 @@ export function pendingHarnessSwitchSeed(
       and(
         eq(events.threadId, threadId),
         eq(events.type, "system/operation"),
-        sql`json_extract(${events.data}, '$.operation') IN (${THREAD_HARNESS_SWITCH_OPERATION}, ${THREAD_IMPORT_OPERATION})`,
+        inArray(sql`json_extract(${events.data}, '$.operation')`, [
+          ...operations,
+        ]),
       ),
     )
     .orderBy(desc(events.sequence))
     .limit(1)
     .get();
-  if (
-    !row ||
-    findStoredEventRow(db, {
-      threadId,
-      type: "turn/started",
-      afterSequence: row.sequence,
-    })
-  )
-    return null;
+  if (!row) return null;
   const parsed = switchMetadataSchema.safeParse(
     (JSON.parse(row.data) as { metadata?: unknown }).metadata,
   );
   return parsed.success && parsed.data.seed.length > 0
-    ? { input: parsed.data.seed, requestSequence: row.sequence }
+    ? { input: parsed.data.seed, requestSequence: row.sequence, ...(parsed.data.carried ? { carried: true as const } : {}) }
     : null;
 }

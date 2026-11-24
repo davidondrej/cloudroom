@@ -1,8 +1,8 @@
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 
 interface MergeDesktopUpdateInfoArgs {
-  autoInfo: BbDesktopInfo | null;
-  feedInfo: BbDesktopInfo | null;
+  autoInfo: RoomDesktopInfo | null;
+  feedInfo: RoomDesktopInfo | null;
 }
 
 function latestCheckedAt(
@@ -20,7 +20,7 @@ function latestCheckedAt(
 
 export function mergeDesktopUpdateInfo(
   args: MergeDesktopUpdateInfoArgs,
-): BbDesktopInfo | null {
+): RoomDesktopInfo | null {
   const baseInfo = args.feedInfo ?? args.autoInfo;
   if (baseInfo === null) {
     return null;

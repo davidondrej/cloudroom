@@ -1,0 +1,504 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`shows Cloud 'acp-cursor' messages, reasoning, and tools like the desktop always has 1`] = `
+[
+  {
+    "item": {
+      "content": [],
+      "id": "t1:think",
+      "summary": [],
+      "type": "reasoning",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Plan",
+    "itemId": "t1:think",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/reasoning/textDelta",
+  },
+  {
+    "item": {
+      "content": [
+        "Plan",
+      ],
+      "id": "t1:think",
+      "summary": [],
+      "type": "reasoning",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Hello",
+    "itemId": "t1:msg",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/agentMessage/delta",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "Hello",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "arguments": {
+        "command": "pwd",
+      },
+      "id": "t1:tool",
+      "status": "pending",
+      "tool": "Run pwd",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "itemId": "t1:tool",
+    "message": "[{"type":"content","content":{"type":"text","text":"/co"}}]",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/toolCall/progress",
+  },
+  {
+    "item": {
+      "arguments": {
+        "command": "pwd",
+      },
+      "id": "t1:tool",
+      "result": {
+        "output": "/code",
+      },
+      "status": "completed",
+      "tool": "Run pwd",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "id": "t1:bad",
+      "result": null,
+      "status": "failed",
+      "tool": "edit",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "category": "general",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "summary": "Slow tool",
+    "threadId": "THREAD",
+    "type": "provider/warning",
+  },
+]
+`;
+
+exports[`shows Cloud 'claude-code' messages, reasoning, and tools like the desktop always has 1`] = `
+[
+  {
+    "item": {
+      "content": [],
+      "id": "t1:think",
+      "summary": [],
+      "type": "reasoning",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Plan",
+    "itemId": "t1:think",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/reasoning/textDelta",
+  },
+  {
+    "item": {
+      "content": [
+        "Plan",
+      ],
+      "id": "t1:think",
+      "summary": [],
+      "type": "reasoning",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Hello",
+    "itemId": "t1:msg",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/agentMessage/delta",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "Hello",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "arguments": {
+        "command": "pwd",
+      },
+      "id": "t1:tool",
+      "status": "pending",
+      "tool": "Bash",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "item": {
+      "id": "t1:tool",
+      "result": "/code",
+      "status": "completed",
+      "tool": "Bash",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "arguments": {
+        "command": "false",
+      },
+      "id": "t1:bad",
+      "status": "pending",
+      "tool": "Claude tool",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "item": {
+      "id": "t1:bad",
+      "result": null,
+      "status": "failed",
+      "tool": "Claude tool",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+]
+`;
+
+exports[`shows Cloud 'codex' messages, reasoning, and tools like the desktop always has 1`] = `
+[
+  {
+    "item": {
+      "approvalStatus": null,
+      "command": "pwd",
+      "cwd": "/code",
+      "id": "t1:cmd",
+      "status": "pending",
+      "type": "commandExecution",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "/code",
+    "itemId": "t1:cmd",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/commandExecution/outputDelta",
+  },
+  {
+    "item": {
+      "aggregatedOutput": "/code",
+      "approvalStatus": null,
+      "command": "pwd",
+      "cwd": "/code",
+      "durationMs": 5,
+      "exitCode": 0,
+      "id": "t1:cmd",
+      "status": "completed",
+      "type": "commandExecution",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "approvalStatus": null,
+      "changes": [
+        {
+          "diff": "",
+          "kind": "update",
+          "path": "a.ts",
+        },
+      ],
+      "id": "t1:edit",
+      "status": "pending",
+      "type": "fileChange",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "item": {
+      "approvalStatus": null,
+      "changes": [
+        {
+          "diff": "",
+          "kind": "update",
+          "path": "a.ts",
+        },
+      ],
+      "id": "t1:edit",
+      "status": "failed",
+      "type": "fileChange",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "id": "t1:odd",
+      "result": {
+        "detail": 1,
+        "id": "odd",
+        "type": "somethingNew",
+      },
+      "status": "pending",
+      "tool": "somethingNew",
+      "type": "toolCall",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Because",
+    "itemId": "t1:why",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/reasoning/summaryTextDelta",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/started",
+  },
+  {
+    "delta": "Done",
+    "itemId": "t1:msg",
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/agentMessage/delta",
+  },
+  {
+    "item": {
+      "id": "t1:msg",
+      "text": "Done",
+      "type": "agentMessage",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+  {
+    "item": {
+      "background": true,
+      "childRef": "child-thread",
+      "id": "t1:child",
+      "label": "explorer",
+      "status": "completed",
+      "type": "delegation",
+    },
+    "providerThreadId": "native",
+    "scope": {
+      "kind": "turn",
+      "turnId": "t1",
+    },
+    "threadId": "THREAD",
+    "type": "item/completed",
+  },
+]
+`;

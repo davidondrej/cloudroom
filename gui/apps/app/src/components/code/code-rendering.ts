@@ -4,7 +4,7 @@ import type {
   ExperimentalDiffFullFileContents,
   SourceCodeLineRange,
 } from "@get-bb/plugin-sdk";
-import type { ParsedGitDiffFile } from "@/components/git-diff/git-diff-parsing";
+import type { ParsedGitDiffFile } from "@/components/diff/patch-utils";
 
 export const DEFAULT_CODE_OVERFLOW: CodeOverflowMode = "scroll";
 export const DEFAULT_DIFF_VIEW: DiffViewMode = "unified";
@@ -20,7 +20,7 @@ export interface DiffPresentation {
   showLineNumbers: boolean;
 }
 
-export interface BbSourceCodeProps extends SourceCodePresentation {
+export interface RoomSourceCodeProps extends SourceCodePresentation {
   content: string;
   path: string;
   cacheKey?: string;
@@ -29,7 +29,7 @@ export interface BbSourceCodeProps extends SourceCodePresentation {
   onSelectionAddToChat?: (text: string) => void;
 }
 
-export interface BbDiffProps extends DiffPresentation {
+export interface RoomDiffProps extends DiffPresentation {
   file: ParsedGitDiffFile;
   patchText?: string;
   fullFileContents: ExperimentalDiffFullFileContents | null;

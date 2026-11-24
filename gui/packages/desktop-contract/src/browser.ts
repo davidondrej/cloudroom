@@ -6,52 +6,52 @@ import {
   type DesktopBrowserImportSource,
 } from "@cloudroom/host-daemon-contract";
 
-export const BB_DESKTOP_BROWSER_MAX_URL_LENGTH = 4096;
-export const BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH = 1024;
+export const ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH = 4096;
+export const ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH = 1024;
 
-export const bbDesktopBrowserTargetSchema = z
+export const roomDesktopBrowserTargetSchema = z
   .object({
     hostId: z.string().min(1),
     instanceId: z.string().min(1),
     generation: z.string().min(1),
   })
   .strict();
-export type BbDesktopBrowserTarget = z.infer<
-  typeof bbDesktopBrowserTargetSchema
+export type RoomDesktopBrowserTarget = z.infer<
+  typeof roomDesktopBrowserTargetSchema
 >;
 
-export const bbDesktopBrowserControlSchema = z
+export const roomDesktopBrowserControlSchema = z
   .object({
     leaseId: z.string().min(1),
     controllerLabel: z.string().min(1),
     expiresAt: z.number().int().positive(),
   })
   .strict();
-export type BbDesktopBrowserControl = z.infer<
-  typeof bbDesktopBrowserControlSchema
+export type RoomDesktopBrowserControl = z.infer<
+  typeof roomDesktopBrowserControlSchema
 >;
-export const bbDesktopBrowserControlStateSchema = z
+export const roomDesktopBrowserControlStateSchema = z
   .object({
     tabId: z.string().min(1),
     threadId: z.string().min(1),
-    control: bbDesktopBrowserControlSchema.nullable(),
+    control: roomDesktopBrowserControlSchema.nullable(),
   })
   .strict();
-export type BbDesktopBrowserControlState = z.infer<
-  typeof bbDesktopBrowserControlStateSchema
+export type RoomDesktopBrowserControlState = z.infer<
+  typeof roomDesktopBrowserControlStateSchema
 >;
-export const bbDesktopBrowserRevealRequestSchema = z
+export const roomDesktopBrowserRevealRequestSchema = z
   .object({
     tabId: z.string().min(1),
     threadId: z.string().min(1),
-    desktopTarget: bbDesktopBrowserTargetSchema,
+    desktopTarget: roomDesktopBrowserTargetSchema,
   })
   .strict();
-export type BbDesktopBrowserRevealRequest = z.infer<
-  typeof bbDesktopBrowserRevealRequestSchema
+export type RoomDesktopBrowserRevealRequest = z.infer<
+  typeof roomDesktopBrowserRevealRequestSchema
 >;
 
-const bbDesktopBrowserViewBoundsSchema = z
+const roomDesktopBrowserViewBoundsSchema = z
   .object({
     x: z.number().int(),
     y: z.number().int(),
@@ -59,11 +59,11 @@ const bbDesktopBrowserViewBoundsSchema = z
     height: z.number().int().nonnegative(),
   })
   .strict();
-export type BbDesktopBrowserViewBounds = z.infer<
-  typeof bbDesktopBrowserViewBoundsSchema
+export type RoomDesktopBrowserViewBounds = z.infer<
+  typeof roomDesktopBrowserViewBoundsSchema
 >;
 
-export interface BbDesktopBrowserViewportBounds {
+export interface RoomDesktopBrowserViewportBounds {
   width: number;
   height: number;
 }
@@ -74,18 +74,18 @@ interface ClampIntegerToRangeArgs {
   value: number;
 }
 
-interface ClampBbDesktopBrowserViewBoundsArgs {
-  bounds: BbDesktopBrowserViewBounds;
-  viewport: BbDesktopBrowserViewportBounds;
+interface ClampRoomDesktopBrowserViewBoundsArgs {
+  bounds: RoomDesktopBrowserViewBounds;
+  viewport: RoomDesktopBrowserViewportBounds;
 }
 
 function clampIntegerToRange(args: ClampIntegerToRangeArgs): number {
   return Math.min(Math.max(args.value, args.min), args.max);
 }
 
-export function clampBbDesktopBrowserViewBounds(
-  args: ClampBbDesktopBrowserViewBoundsArgs,
-): BbDesktopBrowserViewBounds {
+export function clampRoomDesktopBrowserViewBounds(
+  args: ClampRoomDesktopBrowserViewBoundsArgs,
+): RoomDesktopBrowserViewBounds {
   const viewportRight = Math.max(0, Math.round(args.viewport.width));
   const viewportBottom = Math.max(0, Math.round(args.viewport.height));
   const x = clampIntegerToRange({
@@ -117,131 +117,131 @@ export function clampBbDesktopBrowserViewBounds(
   };
 }
 
-export const bbDesktopBrowserAttachRequestSchema = z
+export const roomDesktopBrowserAttachRequestSchema = z
   .object({
     tabId: z.string().min(1),
     threadId: z.string().min(1),
-    url: z.string().max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: z.string().max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
     existingOnly: z.literal(true).optional(),
-    bounds: bbDesktopBrowserViewBoundsSchema,
+    bounds: roomDesktopBrowserViewBoundsSchema,
     visible: z.boolean(),
   })
   .strict();
-export type BbDesktopBrowserAttachRequest = z.infer<
-  typeof bbDesktopBrowserAttachRequestSchema
+export type RoomDesktopBrowserAttachRequest = z.infer<
+  typeof roomDesktopBrowserAttachRequestSchema
 >;
 
-export const bbDesktopBrowserNavigateRequestSchema = z
+export const roomDesktopBrowserNavigateRequestSchema = z
   .object({
     tabId: z.string().min(1),
-    url: z.string().min(1).max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: z.string().min(1).max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
   })
   .strict();
-export type BbDesktopBrowserNavigateRequest = z.infer<
-  typeof bbDesktopBrowserNavigateRequestSchema
+export type RoomDesktopBrowserNavigateRequest = z.infer<
+  typeof roomDesktopBrowserNavigateRequestSchema
 >;
 
-export const bbDesktopBrowserSetBoundsRequestSchema = z
+export const roomDesktopBrowserSetBoundsRequestSchema = z
   .object({
     tabId: z.string().min(1),
-    bounds: bbDesktopBrowserViewBoundsSchema,
+    bounds: roomDesktopBrowserViewBoundsSchema,
   })
   .strict();
-export type BbDesktopBrowserSetBoundsRequest = z.infer<
-  typeof bbDesktopBrowserSetBoundsRequestSchema
+export type RoomDesktopBrowserSetBoundsRequest = z.infer<
+  typeof roomDesktopBrowserSetBoundsRequestSchema
 >;
 
-export const bbDesktopBrowserSetVisibleRequestSchema = z
+export const roomDesktopBrowserSetVisibleRequestSchema = z
   .object({
     tabId: z.string().min(1),
     visible: z.boolean(),
   })
   .strict();
-export type BbDesktopBrowserSetVisibleRequest = z.infer<
-  typeof bbDesktopBrowserSetVisibleRequestSchema
+export type RoomDesktopBrowserSetVisibleRequest = z.infer<
+  typeof roomDesktopBrowserSetVisibleRequestSchema
 >;
 
-export const bbDesktopBrowserTabRefSchema = z
+export const roomDesktopBrowserTabRefSchema = z
   .object({
     tabId: z.string().min(1),
   })
   .strict();
-export type BbDesktopBrowserTabRef = z.infer<
-  typeof bbDesktopBrowserTabRefSchema
+export type RoomDesktopBrowserTabRef = z.infer<
+  typeof roomDesktopBrowserTabRefSchema
 >;
 
-export const bbDesktopBrowserStateSchema = z
+export const roomDesktopBrowserStateSchema = z
   .object({
     tabId: z.string().min(1),
-    url: z.string().max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
-    title: z.string().max(BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH).nullable(),
+    url: z.string().max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    title: z.string().max(ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH).nullable(),
     isLoading: z.boolean(),
     canGoBack: z.boolean(),
     canGoForward: z.boolean(),
-    errorText: z.string().max(BB_DESKTOP_BROWSER_MAX_TITLE_LENGTH).nullable(),
+    errorText: z.string().max(ROOM_DESKTOP_BROWSER_MAX_TITLE_LENGTH).nullable(),
   })
   .strict();
-export type BbDesktopBrowserState = z.infer<typeof bbDesktopBrowserStateSchema>;
+export type RoomDesktopBrowserState = z.infer<typeof roomDesktopBrowserStateSchema>;
 
-export const bbDesktopBrowserOpenTabRequestSchema = z
+export const roomDesktopBrowserOpenTabRequestSchema = z
   .object({
-    url: z.string().min(1).max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: z.string().min(1).max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
   })
   .strict();
-export type BbDesktopBrowserOpenTabRequest = z.infer<
-  typeof bbDesktopBrowserOpenTabRequestSchema
+export type RoomDesktopBrowserOpenTabRequest = z.infer<
+  typeof roomDesktopBrowserOpenTabRequestSchema
 >;
 
-export const bbDesktopBrowserScopedOpenTabRequestSchema = z
+export const roomDesktopBrowserScopedOpenTabRequestSchema = z
   .object({
     tabId: z.string().min(1),
-    url: z.string().min(1).max(BB_DESKTOP_BROWSER_MAX_URL_LENGTH),
+    url: z.string().min(1).max(ROOM_DESKTOP_BROWSER_MAX_URL_LENGTH),
   })
   .strict();
-export type BbDesktopBrowserScopedOpenTabRequest = z.infer<
-  typeof bbDesktopBrowserScopedOpenTabRequestSchema
+export type RoomDesktopBrowserScopedOpenTabRequest = z.infer<
+  typeof roomDesktopBrowserScopedOpenTabRequestSchema
 >;
 
-const BB_DESKTOP_BROWSER_MAX_SNAPSHOT_DATA_URL_LENGTH = 8_388_608;
+const ROOM_DESKTOP_BROWSER_MAX_SNAPSHOT_DATA_URL_LENGTH = 8_388_608;
 
-export const bbDesktopBrowserSnapshotSchema = z
+export const roomDesktopBrowserSnapshotSchema = z
   .object({
     tabId: z.string().min(1),
     dataUrl: z
       .string()
-      .max(BB_DESKTOP_BROWSER_MAX_SNAPSHOT_DATA_URL_LENGTH)
+      .max(ROOM_DESKTOP_BROWSER_MAX_SNAPSHOT_DATA_URL_LENGTH)
       .nullable(),
   })
   .strict();
-export type BbDesktopBrowserSnapshot = z.infer<
-  typeof bbDesktopBrowserSnapshotSchema
+export type RoomDesktopBrowserSnapshot = z.infer<
+  typeof roomDesktopBrowserSnapshotSchema
 >;
 
-export const BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH = 1024;
+export const ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH = 1024;
 
-export const bbDesktopBrowserFindInPageRequestSchema = z
+export const roomDesktopBrowserFindInPageRequestSchema = z
   .object({
     tabId: z.string().min(1),
-    text: z.string().min(1).max(BB_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH),
+    text: z.string().min(1).max(ROOM_DESKTOP_BROWSER_MAX_FIND_TEXT_LENGTH),
     forward: z.boolean(),
     newSession: z.boolean(),
   })
   .strict();
-export type BbDesktopBrowserFindInPageRequest = z.infer<
-  typeof bbDesktopBrowserFindInPageRequestSchema
+export type RoomDesktopBrowserFindInPageRequest = z.infer<
+  typeof roomDesktopBrowserFindInPageRequestSchema
 >;
 
-export const bbDesktopBrowserStopFindInPageRequestSchema = z
+export const roomDesktopBrowserStopFindInPageRequestSchema = z
   .object({
     tabId: z.string().min(1),
     action: z.enum(["clearSelection", "keepSelection", "activateSelection"]),
   })
   .strict();
-export type BbDesktopBrowserStopFindInPageRequest = z.infer<
-  typeof bbDesktopBrowserStopFindInPageRequestSchema
+export type RoomDesktopBrowserStopFindInPageRequest = z.infer<
+  typeof roomDesktopBrowserStopFindInPageRequestSchema
 >;
 
-export const bbDesktopBrowserFindResultSchema = z
+export const roomDesktopBrowserFindResultSchema = z
   .object({
     tabId: z.string().min(1),
     requestId: z.number().int(),
@@ -250,80 +250,80 @@ export const bbDesktopBrowserFindResultSchema = z
     finalUpdate: z.boolean(),
   })
   .strict();
-export type BbDesktopBrowserFindResult = z.infer<
-  typeof bbDesktopBrowserFindResultSchema
+export type RoomDesktopBrowserFindResult = z.infer<
+  typeof roomDesktopBrowserFindResultSchema
 >;
 
-export type BbDesktopBrowserStateHandler = (
-  state: BbDesktopBrowserState,
+export type RoomDesktopBrowserStateHandler = (
+  state: RoomDesktopBrowserState,
 ) => void;
-export type BbDesktopBrowserOpenTabHandler = (
-  request: BbDesktopBrowserOpenTabRequest,
+export type RoomDesktopBrowserOpenTabHandler = (
+  request: RoomDesktopBrowserOpenTabRequest,
 ) => void;
-export type BbDesktopBrowserScopedOpenTabHandler = (
-  request: BbDesktopBrowserScopedOpenTabRequest,
+export type RoomDesktopBrowserScopedOpenTabHandler = (
+  request: RoomDesktopBrowserScopedOpenTabRequest,
 ) => void;
-export type BbDesktopBrowserSnapshotHandler = (
-  snapshot: BbDesktopBrowserSnapshot,
+export type RoomDesktopBrowserSnapshotHandler = (
+  snapshot: RoomDesktopBrowserSnapshot,
 ) => void;
-export type BbDesktopBrowserFocusHandler = (tabId: string) => void;
-export type BbDesktopBrowserFindResultHandler = (
-  result: BbDesktopBrowserFindResult,
+export type RoomDesktopBrowserFocusHandler = (tabId: string) => void;
+export type RoomDesktopBrowserFindResultHandler = (
+  result: RoomDesktopBrowserFindResult,
 ) => void;
-export type BbDesktopBrowserUnsubscribe = () => void;
+export type RoomDesktopBrowserUnsubscribe = () => void;
 
-export const bbDesktopBrowserImportCookiesRequestSchema =
+export const roomDesktopBrowserImportCookiesRequestSchema =
   desktopBrowserImportSelectionSchema
     .extend({ profile: desktopBrowserProfileSchema })
     .strict();
-export type BbDesktopBrowserImportCookiesRequest = z.infer<
-  typeof bbDesktopBrowserImportCookiesRequestSchema
+export type RoomDesktopBrowserImportCookiesRequest = z.infer<
+  typeof roomDesktopBrowserImportCookiesRequestSchema
 >;
-export type BbDesktopBrowserImportSourcesResult = {
+export type RoomDesktopBrowserImportSourcesResult = {
   sources: DesktopBrowserImportSource[];
 };
-export type BbDesktopBrowserImportCookiesResult = DesktopBrowserImportOutcome;
+export type RoomDesktopBrowserImportCookiesResult = DesktopBrowserImportOutcome;
 
-export interface BbDesktopBrowserApi {
-  listImportSources?(): Promise<BbDesktopBrowserImportSourcesResult>;
+export interface RoomDesktopBrowserApi {
+  listImportSources?(): Promise<RoomDesktopBrowserImportSourcesResult>;
   importCookies?(
-    request: BbDesktopBrowserImportCookiesRequest,
-  ): Promise<BbDesktopBrowserImportCookiesResult>;
+    request: RoomDesktopBrowserImportCookiesRequest,
+  ): Promise<RoomDesktopBrowserImportCookiesResult>;
   openFullDiskAccessSettings?(): void;
-  getTarget?(): Promise<BbDesktopBrowserTarget | null>;
-  getControl?(tabId: string): Promise<BbDesktopBrowserControlState | null>;
+  getTarget?(): Promise<RoomDesktopBrowserTarget | null>;
+  getControl?(tabId: string): Promise<RoomDesktopBrowserControlState | null>;
   releaseControl?(tabId: string): void;
   onControl?(
-    listener: (state: BbDesktopBrowserControlState) => void,
-  ): BbDesktopBrowserUnsubscribe;
+    listener: (state: RoomDesktopBrowserControlState) => void,
+  ): RoomDesktopBrowserUnsubscribe;
   onReveal?(
-    listener: (request: BbDesktopBrowserRevealRequest) => void,
-  ): BbDesktopBrowserUnsubscribe;
-  attach(request: BbDesktopBrowserAttachRequest): void;
+    listener: (request: RoomDesktopBrowserRevealRequest) => void,
+  ): RoomDesktopBrowserUnsubscribe;
+  attach(request: RoomDesktopBrowserAttachRequest): void;
   detach(tabId: string): void;
-  navigate(request: BbDesktopBrowserNavigateRequest): void;
+  navigate(request: RoomDesktopBrowserNavigateRequest): void;
   goBack(tabId: string): void;
   goForward(tabId: string): void;
   reload(tabId: string): void;
   stop(tabId: string): void;
   focus?(tabId: string): void;
-  setBounds(request: BbDesktopBrowserSetBoundsRequest): void;
-  setVisible(request: BbDesktopBrowserSetVisibleRequest): void;
-  setVisibleWithoutFocus?(request: BbDesktopBrowserSetVisibleRequest): void;
-  onState(listener: BbDesktopBrowserStateHandler): BbDesktopBrowserUnsubscribe;
+  setBounds(request: RoomDesktopBrowserSetBoundsRequest): void;
+  setVisible(request: RoomDesktopBrowserSetVisibleRequest): void;
+  setVisibleWithoutFocus?(request: RoomDesktopBrowserSetVisibleRequest): void;
+  onState(listener: RoomDesktopBrowserStateHandler): RoomDesktopBrowserUnsubscribe;
   onOpenTab(
-    listener: BbDesktopBrowserOpenTabHandler,
-  ): BbDesktopBrowserUnsubscribe;
+    listener: RoomDesktopBrowserOpenTabHandler,
+  ): RoomDesktopBrowserUnsubscribe;
   onScopedOpenTab?(
-    listener: BbDesktopBrowserScopedOpenTabHandler,
-  ): BbDesktopBrowserUnsubscribe;
-  onFocus?(listener: BbDesktopBrowserFocusHandler): BbDesktopBrowserUnsubscribe;
+    listener: RoomDesktopBrowserScopedOpenTabHandler,
+  ): RoomDesktopBrowserUnsubscribe;
+  onFocus?(listener: RoomDesktopBrowserFocusHandler): RoomDesktopBrowserUnsubscribe;
   onSnapshot?(
-    listener: BbDesktopBrowserSnapshotHandler,
-  ): BbDesktopBrowserUnsubscribe;
-  findInPage?(request: BbDesktopBrowserFindInPageRequest): void;
-  stopFindInPage?(request: BbDesktopBrowserStopFindInPageRequest): void;
+    listener: RoomDesktopBrowserSnapshotHandler,
+  ): RoomDesktopBrowserUnsubscribe;
+  findInPage?(request: RoomDesktopBrowserFindInPageRequest): void;
+  stopFindInPage?(request: RoomDesktopBrowserStopFindInPageRequest): void;
   onFindResult?(
-    listener: BbDesktopBrowserFindResultHandler,
-  ): BbDesktopBrowserUnsubscribe;
+    listener: RoomDesktopBrowserFindResultHandler,
+  ): RoomDesktopBrowserUnsubscribe;
 }

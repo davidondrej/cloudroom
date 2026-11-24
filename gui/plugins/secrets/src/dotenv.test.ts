@@ -1,5 +1,5 @@
+import { parseEnv } from "node:util";
 import { describe, expect, it } from "vitest";
-import { parse } from "dotenv";
 import { assertNoDuplicateAssignments, reconcileDotenv } from "./dotenv.js";
 
 describe("dotenv reconciliation", () => {
@@ -18,7 +18,7 @@ describe("dotenv reconciliation", () => {
       updated: 1,
       unchanged: 0,
     });
-    expect(parse(result.content)).toMatchObject({
+    expect(parseEnv(result.content)).toMatchObject({
       API_KEY: "new secret",
       TOKEN: "tok\\en",
     });
@@ -31,7 +31,15 @@ describe("dotenv reconciliation", () => {
       SLASH_N: String.raw`it's\\not-a-newline`,
     };
     const result = reconcileDotenv("", values);
-    expect(parse(result.content)).toEqual(values);
+    expect(result.content).toBe(
+      [
+        `SINGLE="it's secret"`,
+        `BOTH=both ' and " quotes`,
+        String.raw`SLASH_N=it's\\not-a-newline`,
+        "",
+      ].join("\n"),
+    );
+    expect(parseEnv(result.content)).toEqual(values);
   });
 
   it("rejects duplicate active assignments before collecting secrets", () => {

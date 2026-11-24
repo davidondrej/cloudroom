@@ -2,14 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   extractShellCommandFromString,
   parseShellCommandIntents,
-} from "../src/tool-call-parsing.js";
+} from "../src/shell.js";
 
 describe("tool-call shell parsing", () => {
   it("treats quoted shell operators as literal arguments", () => {
     expect(parseShellCommandIntents('grep "a|b" "src > docs.txt"')).toEqual([
       {
         type: "search",
-        cmd: 'grep "a|b" "src > docs.txt"',
+        command: 'grep "a|b" "src > docs.txt"',
         query: "a|b",
         path: "src > docs.txt",
       },
@@ -17,7 +17,7 @@ describe("tool-call shell parsing", () => {
     expect(parseShellCommandIntents('cat ">"')).toEqual([
       {
         type: "read",
-        cmd: 'cat ">"',
+        command: 'cat ">"',
         name: "cat",
         path: ">",
       },
@@ -39,7 +39,7 @@ describe("tool-call shell parsing", () => {
     expect(parseShellCommandIntents(command)).toEqual([
       {
         type: "search",
-        cmd: 'grep "a|b" src/app.ts',
+        command: 'grep "a|b" src/app.ts',
         query: "a|b",
         path: "src/app.ts",
       },
@@ -55,7 +55,7 @@ describe("tool-call shell parsing", () => {
     expect(parseShellCommandIntents(command)).toEqual([
       {
         type: "search",
-        cmd: command,
+        command,
         query: "legacy-audit|timeline-replay",
         path: null,
       },

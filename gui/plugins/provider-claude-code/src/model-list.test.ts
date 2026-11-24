@@ -40,6 +40,7 @@ const DISCOVERED_MODELS: ModelInfo[] = [
 
 const CURATED_MODELS = [
   "claude-opus-5-5[1m]",
+  "claude-fable-5-2",
   "claude-fable-5-1",
   "claude-opus-5[1m]",
   "claude-opus-4-8[1m]",
@@ -65,6 +66,7 @@ describe("buildClaudeCodeModels", () => {
     ]);
     expect(result.models.map((model) => model.displayName)).toEqual([
       "Opus 5.5 (1M)",
+      "Fable 5.2",
       "Fable 5.1",
       "Opus 5 (1M)",
       "Opus 4.8 (1M)",

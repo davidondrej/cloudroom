@@ -1,35 +1,41 @@
-import { COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, type GitBranchSelection, type PromptInput } from "@cloudroom/domain";
+import { CLOUD_NATIVE_FORK_PROVIDERS as FORK_HARNESSES, COMPUTER, findLocalPathProjectSourceForHost, PERSONAL_PROJECT_ID, stripGitUrlCredentials, type GitBranchSelection, type PromptInput } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
-import { basename } from "node:path";
+import { basename, isAbsolute } from "node:path";
 import { promisify } from "node:util";
-import { and, asc, eq } from "drizzle-orm";
-import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection } from "@cloudroom/db";
-import type { Thread } from "@cloudroom/domain";
+import { and, asc, eq, gt, isNull, sql } from "drizzle-orm";
+import { events, findLastCompletedRootStoredTurn, findLastRootStoredTurnStarted, getEnvironment, getThread, listProjectSourcesByProjectIds, listStoredTurnCompletedRowsByTurnIds, type DbConnection, type EnvironmentRow } from "@cloudroom/db";
+import type { Thread, ThreadCreateOrigin } from "@cloudroom/domain";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import { gitShell, msysPathToWindows } from "@cloudroom/process-utils";
 import { z } from "zod";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
-import { resolveThreadForkPoint } from "../threads/thread-fork-history.js";
+import { checkTurnForkCutoff, messageForkPoint, nativeForkPoint, resolveThreadForkPoint } from "../threads/thread-fork-history.js";
 import { getLastExecutionOptions } from "../threads/thread-events.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
-import { worktreeProviderInputs } from "../threads/thread-environment-placement.js";
+import {
+  worktreeProviderInputs,
+  worktreeSourcePath,
+} from "../threads/thread-environment-placement.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient, type Harness, type TeleportManifest } from "./client.js";
 import { cloudroom } from "./commands.js";
 import { PIECE_TIMEOUT, retry, SKIPPED } from "./project-copy.js";
 import { binding, isDead } from "./store.js";
-import { codexLineage, download, findNative, vm } from "./teleport-local.js";
+import { allowance, codexLineage, conversationParser, download, findNative, vm } from "./teleport-local.js";
 
 /** A Cloud fork: a new Cloud thread, in its own sandbox, that continues another Cloud thread's conversation
  *  from a chosen turn, with that thread's code (docs/scopes/sandboxes.md). Saved in the fork's first message. */
 export const cloudForkSchema = z.object({
   source_thread_id: z.string(),
   end_sequence: z.number(),
+  through: z.string().min(1).optional(),
   before: z.string().optional(),
   last_turn_id: z.string().optional(),
   transfer: z.string().optional(),
@@ -41,6 +47,8 @@ export type CloudFork = z.infer<typeof cloudForkSchema>;
  *  commits a thin bundle leaves out. */
 type Code = { data: Buffer; origin: string; ref: string; full?: () => Promise<Buffer> };
 export const isFiles = (data: Buffer) => data[0] === 0x1f && data[1] === 0x8b;
+/** Untracked dependencies and caches a Git source leaves out, so a repo without a .gitignore fits the copy (#604). */
+const UNPACKED = ["node_modules", ".venv", "venv", "__pycache__", ".next", ".turbo", ".cache", "target"];
 const skippedNames = () => [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
 /** `applyForkCode`'s exit code when the folder lacks history the bundle needs. */
 const MISSING_HISTORY = 3;
@@ -83,8 +91,8 @@ for n in names:
     if os.path.isdir(p) and not os.path.islink(p): shutil.rmtree(p)
 `;
 
-export const FORK_HARNESSES: readonly string[] = ["claude-code", "codex"];
-export const FORK_HINT = "[Cloud fork]\nThis conversation was forked from another thread and now runs in its own new sandbox. Cloudroom is copying that thread's code (its commits and uncommitted changes) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
+export { FORK_HARNESSES };
+export const FORK_HINT = "[Cloud fork]\nThis conversation was forked from another thread and now runs in its own new sandbox. Cloudroom is copying that thread's code (its commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 // Core takes teleport uploads in 1 MB parts.
 const PART = 1024 * 1024;
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -100,32 +108,88 @@ export function codeFromOf(input: string | undefined): string | undefined {
   return input ? z.object({ code_from: z.string().optional() }).parse(JSON.parse(input)).code_from : undefined;
 }
 
-export function forkTurn(db: DbConnection, threadId: string, sourceSeqEnd: number | undefined): { turnId: string; endSequence: number } {
+export function forkTurn(db: DbConnection, threadId: string, sourceSeqEnd: number | undefined) {
   const started = sourceSeqEnd === undefined ? findLastCompletedRootStoredTurn(db, { threadId }) : findLastRootStoredTurnStarted(db, { threadId, atOrBeforeSequence: sourceSeqEnd });
   const completed = started && listStoredTurnCompletedRowsByTurnIds(db, { threadId, turnIds: [started.turnId] }).at(-1);
   if (!started || !completed) throw new ApiError(400, "fork_source_session_unavailable", "Fork from a message whose turn has finished.");
-  return { turnId: started.turnId, endSequence: completed.sequence };
+  if (sourceSeqEnd !== undefined) checkTurnForkCutoff(db, threadId, started.turnId, sourceSeqEnd, completed.sequence);
+  return { turnId: started.turnId, endSequence: completed.sequence, nativeId: completed.providerThreadId };
 }
 
-/** Keeps the turn holding `sourceSeqEnd` (or the last finished turn) and everything before it, like a Local fork. */
-export function cloudForkPoint(db: DbConnection, source: Thread, sourceSeqEnd: number | undefined): CloudFork {
-  const turn = forkTurn(db, source.id, sourceSeqEnd);
-  const completed = { sequence: turn.endSequence };
-  const started = { turnId: turn.turnId };
-  const checkpoints = db.select({ sequence: events.sequence, data: events.data }).from(events)
-    .where(and(eq(events.threadId, source.id), eq(events.type, "system/operation"))).orderBy(asc(events.sequence)).all()
-    .map((row) => ({ sequence: row.sequence, ...(JSON.parse(row.data) as { operation?: string; metadata?: { id?: unknown; request_id?: unknown } }) }))
-    .filter((event) => event.operation === "checkpoint" && typeof event.metadata?.id === "string");
-  const fork = { source_thread_id: source.id, end_sequence: completed.sequence };
-  // Codex checkpoints a turn when it ends. Claude checkpoints the user message that starts the next turn;
-  // with no next turn yet, the fork copies the whole conversation.
-  if (source.providerId === "codex") {
-    const own = checkpoints.find((event) => event.metadata?.request_id === started.turnId);
-    if (!own) throw new ApiError(400, "fork_source_session_unavailable", "That turn has no saved checkpoint to fork from.");
-    return { ...fork, last_turn_id: own.metadata!.id as string };
+export function textForkSequence(db: DbConnection, source: Thread, selected: number | undefined): number {
+  return selected !== undefined && messageForkPoint(db, source, selected)
+    ? selected : forkTurn(db, source.id, selected).endSequence;
+}
+
+/** A rewind can copy old messages under new UUIDs. Only accept a retained
+ * checkpoint if the active transcript still contains it. Return only the match from the VM. */
+async function retainedClaudeCheckpoint(
+  deps: Parameters<typeof cloudroom>[0], threadId: string, nativeId: string,
+  checkpoint: string, role: "assistant" | "user",
+) {
+  if (!/^[A-Za-z0-9_-]+$/.test(nativeId)) return false;
+  const client = await cloudroom(deps).threadClient(threadId);
+  const script = `import json, pathlib, sys
+root = pathlib.Path.home() / ".claude/projects"
+files = list(root.glob("*/" + sys.argv[1] + ".jsonl"))
+if len(files) == 1:
+    with files[0].open("rb") as rows:
+        for line in rows:
+            if not line.endswith(b"\\n") or not line.strip(): continue
+            row = json.loads(line)
+            if row.get("uuid") != sys.argv[2] or row.get("type") != sys.argv[3] or row.get("isSidechain"): continue
+            if sys.argv[3] == "assistant" or (not row.get("isMeta") and row.get("parentUuid")):
+                print("found")
+                sys.exit(0)`;
+  const match = await vm(client, `python3 -c ${quote(script)} ${quote(nativeId)} ${quote(checkpoint)} ${role}`);
+  if (binding(deps.db, threadId)?.nativeId !== nativeId) {
+    throw new ApiError(409, "fork_source_unavailable", "The source was edited again. Choose the reply again.");
   }
-  const next = checkpoints.find((event) => event.sequence > completed.sequence);
-  return next ? { ...fork, before: next.metadata!.id as string } : fork;
+  return match.toString().trim() === "found";
+}
+
+export async function cloudForkPoint(deps: Parameters<typeof cloudroom>[0], source: Thread, sourceSeqEnd: number | undefined): Promise<CloudFork> {
+  const { db } = deps;
+  const exact = messageForkPoint(db, source, sourceSeqEnd);
+  const nativeId = source.providerId === "claude-code" ? binding(db, source.id)?.nativeId : null;
+  if (exact && sourceSeqEnd !== undefined && nativeId) {
+    const through = exact.sourceProviderCheckpointId;
+    if (nativeId === exact.sourceProviderThreadId || await retainedClaudeCheckpoint(deps, source.id, nativeId, through, "assistant")) {
+      return { source_thread_id: source.id, end_sequence: sourceSeqEnd, through };
+    }
+  }
+  const turn = forkTurn(db, source.id, sourceSeqEnd);
+  const codex = source.providerId === "codex";
+  const previousSession = exact !== null || (source.providerId === "claude-code" && !!turn.nativeId && turn.nativeId !== nativeId);
+  const next = codex ? null : db.select({ turnId: events.turnId, nativeId: events.providerThreadId }).from(events).where(and(
+    eq(events.threadId, source.id), eq(events.type, "turn/started"), isNull(events.parentToolCallId), gt(events.sequence, turn.endSequence),
+  )).orderBy(asc(events.sequence)).limit(1).get();
+  // The prompt starting the very next turn is the exclusive cutoff. A later prompt would leak intervening work.
+  const checkpoint = db.select({ id: sql<string>`json_extract(${events.data}, '$.metadata.id')` })
+    .from(events)
+    .where(and(
+      eq(events.threadId, source.id),
+      eq(events.type, "system/operation"),
+      sql`json_extract(${events.data}, '$.operation') = 'checkpoint'`,
+      sql`json_type(${events.data}, '$.metadata.id') = 'text'`,
+      sql`json_extract(${events.data}, '$.metadata.request_id') = ${codex ? turn.turnId : next?.turnId ?? null}`,
+      codex ? undefined : gt(events.sequence, turn.endSequence),
+    ))
+    .orderBy(asc(events.sequence)).limit(1).get();
+  const fork = { source_thread_id: source.id, end_sequence: turn.endSequence };
+  if (codex) {
+    if (!checkpoint) throw new ApiError(400, "fork_source_session_unavailable", "That turn has no saved checkpoint to fork from.");
+    return { ...fork, last_turn_id: checkpoint.id };
+  }
+  if (checkpoint) {
+    const before = checkpoint.id;
+    if (!previousSession || (nativeId && nativeId === next?.nativeId)) return { ...fork, before };
+    if (nativeId && await retainedClaudeCheckpoint(deps, source.id, nativeId, before, "user")) return { ...fork, before };
+  }
+  if (previousSession || next) {
+    throw new ApiError(409, "fork_source_session_unavailable", "The next turn has no saved checkpoint yet.");
+  }
+  return fork;
 }
 
 type ForkFile = { path: string; kind: "native" | "lineage"; data: Buffer };
@@ -138,7 +202,12 @@ export function localForkPoint(deps: Pick<AppDeps, "db" | "providerRegistry">, s
   if (point?.history?.kind !== "thread" || !nativeId || !/^[A-Za-z0-9_-]+$/.test(nativeId))
     throw new ApiError(400, "fork_source_session_unavailable", "Fork from a message whose turn has finished.");
   const checkpoint = point.descriptor.sourceProviderCheckpointId;
-  return { source_thread_id: source.id, end_sequence: point.history.endSequence, local: { native_id: nativeId, ...(checkpoint ? { checkpoint } : {}) } };
+  return {
+    source_thread_id: source.id,
+    end_sequence: point.history.endSequence,
+    ...(source.providerId === "claude-code" && checkpoint ? { through: checkpoint } : {}),
+    local: { native_id: nativeId, ...(source.providerId === "codex" && checkpoint ? { checkpoint } : {}) },
+  };
 }
 
 /** Copies the source conversation into this thread's new sandbox and waits until its agent is ready. The code
@@ -169,8 +238,12 @@ export async function startCloudFork(
   const files = await source.files(transfer);
   if (files.some((entry) => entry.kind === "lineage") && (await client.capabilities()).teleport_lineage !== true)
     throw new ApiError(409, "fork_update", "Forking this Codex chat needs a newer cloud core. Try again after the next Cloudroom update.");
-  const native = files.find((entry) => entry.kind === "native")!.data;
-  save({ transfer, ...(fork.local ? corePoint(harness, native, fork.local.checkpoint) : {}) });
+  const native = files.find((entry) => entry.kind === "native")!;
+  // An older destination Core can fork at the tip too. Give it only the selected prefix.
+  const through = fork.through ?? (harness === "claude-code" ? fork.local?.checkpoint : undefined);
+  if (through) native.data = claudeTranscriptThrough(native.data, through);
+  const codexTurn = harness === "codex" ? fork.local?.checkpoint?.replace(/^bt[0-9a-f]{8}-\d+-/, "") : undefined;
+  save({ transfer, ...(codexTurn ? { last_turn_id: codexTurn } : {}) });
   const entries = files.map((entry) => ({ ...entry, sha256: createHash("sha256").update(entry.data).digest("hex") }));
   await client.prepareTeleport({
     ...start, request_id: transfer, harness: harness as Harness, native_id: source.nativeId, handoff: "", queued: [], fork: true,
@@ -198,12 +271,14 @@ async function cloudForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: 
     files: async () => {
       const path = (await vm(from, findNative(harness as "codex" | "claude-code", nativeId))).toString().trim();
       if (!path) throw new ApiError(409, "fork_source_unavailable", "The source conversation file was not found in its sandbox.");
-      const file = await download(from, path);
+      // The conversation and its parents are all held at once, so they share one allowance.
+      const allowed = allowance();
+      const file = await download(from, path, allowed);
       // The source may be writing its next turn; a partial last line is not part of the fork.
       const files: ForkFile[] = [{ path: basename(path), kind: "native", data: file.subarray(0, file.lastIndexOf(10) + 1) }];
       // A source that is itself a Codex fork (a rewind) needs its parent files too.
       for (const parent of harness === "codex" ? await codexLineage(from, path) : [])
-        files.push({ path: basename(parent), kind: "lineage", data: await download(from, parent) });
+        files.push({ path: basename(parent), kind: "lineage", data: await download(from, parent, allowed) });
       return files;
     },
   };
@@ -217,7 +292,11 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
   const target = { threadId: sourceId, environmentId: environment.id, workspaceContext: workspaceContextFromPath({ path }) };
   return {
     nativeId,
-    code: async (id) => hostId === resolvePrimaryHostId(deps as AppDeps) ? localCode(path, id) : null,
+    code: async (id) => {
+      if (hostId !== resolvePrimaryHostId(deps as AppDeps)) return null;
+      await restoreParkedWorktree(deps, sourceId, environment.id);
+      return localCode(path, id);
+    },
     files: async (transferId) => {
       const run = (command: { action: "capture" | "read"; sessions?: { threadId: string; nativeId: string; harness: "codex" | "claude-code" }[]; keepImages?: boolean; index?: number; offset?: number }) => runLiveHostCommand(deps as AppDeps, { hostId, timeoutMs: 120_000, command: { type: "thread.teleport", transferId, ...target, ...command } });
       const capture = await run({ action: "capture", keepImages: true, sessions: [{ threadId: sourceId, nativeId, harness: harness === "codex" ? "codex" : "claude-code" }] });
@@ -246,25 +325,21 @@ function localForkSource(deps: Parameters<typeof cloudroom>[0], sourceId: string
   };
 }
 
-const lines = (native: Buffer) => native.toString("utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
+const lines = (native: Buffer, parse = conversationParser()) => native.toString("utf8").split("\n").filter(Boolean).map((line) => parse(line) as { type?: string; uuid?: string; parentUuid?: string | null; isMeta?: boolean });
 const prompt = (entry: ReturnType<typeof lines>[number]) => entry.type === "user" && entry.isMeta !== true;
 
-export function corePoint(harness: string, native: Buffer, checkpoint: string | undefined): Pick<CloudFork, "before" | "last_turn_id"> {
-  if (!checkpoint) return {};
-  if (harness === "codex") return { last_turn_id: checkpoint.replace(/^bt[0-9a-f]{8}-\d+-/, "") };
-  const entries = lines(native);
-  const byId = new Map(entries.map((entry) => [entry.uuid, entry]));
-  if (!byId.has(checkpoint)) throw new ApiError(409, "fork_source_session_unavailable", "That message is not in the saved conversation.");
-  const after = entries.find((entry) => {
-    if (!prompt(entry)) return false;
-    for (let id = entry.parentUuid; id; id = byId.get(id)?.parentUuid) {
-      if (id === checkpoint) return true;
-      const parent = byId.get(id);
-      if (!parent || prompt(parent)) return false;
-    }
-    return false;
-  });
-  return after?.uuid ? { before: after.uuid } : {};
+export function claudeTranscriptThrough(native: Buffer, uuid: string): Buffer {
+  const parse = conversationParser();
+  for (let offset = 0; offset < native.length;) {
+    const newline = native.indexOf(10, offset);
+    if (newline < 0) break;
+    const line = native.toString("utf8", offset, newline);
+    offset = newline + 1;
+    if (!line.trim()) continue;
+    const entry = parse(line);
+    if (entry?.type === "assistant" && entry.uuid === uuid && !entry.isSidechain) return native.subarray(0, offset);
+  }
+  throw new ApiError(409, "fork_source_session_unavailable", "That message is missing from the saved Claude conversation.");
 }
 
 export function localCheckpoint(harness: string, native: Buffer, fork: Pick<CloudFork, "before" | "last_turn_id">): string | undefined {
@@ -275,12 +350,52 @@ export function localCheckpoint(harness: string, native: Buffer, fork: Pick<Clou
   return parent;
 }
 
+/** A row click promises the conversation through that message. Legacy turn checkpoints
+ * are equivalent only when no more messages or tool work followed it in that turn. */
+export async function previewMessageFork(deps: Parameters<typeof cloudroom>[0], source: Thread, sequence: number) {
+  const { db } = deps;
+  async function available(read: () => number | null | Promise<number | null>) {
+    try {
+      return await read();
+    } catch (error) {
+      if (error instanceof ApiError && error.body.code === "fork_source_session_unavailable") return null;
+      throw error;
+    }
+  }
+  async function cutoff(at: number) {
+    if (source.executionTarget === "cloud" && FORK_HARNESSES.includes(source.providerId)) {
+      const native = await available(async () => (await cloudForkPoint(deps, source, at)).end_sequence);
+      return native === null ? null : { sequence: native };
+    }
+    const local = source.executionTarget === "local" ? (await nativeForkPoint(deps, { sourceThread: source, sourceSeqEnd: at }))?.history : null;
+    if (local?.kind === "thread") return { sequence: local.endSequence };
+    const text = await available(() => textForkSequence(db, source, at));
+    return text === null ? null : { sequence: text };
+  }
+  const point = await cutoff(sequence);
+  if (point?.sequence === sequence) return { exact: true, ...point };
+  const turn = findLastRootStoredTurnStarted(db, { threadId: source.id, atOrBeforeSequence: sequence });
+  if (!turn) return { exact: false, sequence: null };
+  if (point && point.sequence > sequence) {
+    const finalReply = db.select({ id: events.id }).from(events).where(and(
+      eq(events.threadId, source.id), eq(events.sequence, sequence), eq(events.turnId, turn.turnId),
+      eq(events.type, "item/completed"), eq(events.itemKind, "agentMessage"), isNull(events.parentToolCallId),
+    )).get();
+    if (finalReply) return { exact: true, ...point };
+  }
+  const previous = findLastCompletedRootStoredTurn(db, { threadId: source.id, atOrBeforeSequence: turn.sequence - 1 });
+  const at = previous?.completedSequence;
+  const fallback = at !== undefined && at < sequence ? await cutoff(at) : null;
+  return { exact: false, ...(fallback && fallback.sequence === at ? fallback : { sequence: null }) };
+}
+
 export function forkModel(deps: Pick<AppDeps, "db">, threadId: string): string | undefined {
   return binding(deps.db, threadId)?.model ?? getLastExecutionOptions(deps, threadId)?.model;
 }
 
-export const CHILD_HINT = "[Cloud child]\nYou run in your own sandbox. Cloudroom is copying your parent thread's code (its commits and uncommitted changes) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
+export const CHILD_HINT = "[Cloud child]\nYou run in your own sandbox. Cloudroom is copying your parent thread's code (its commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history) into this folder. Run `room-cli files wait` before you read or change files; it returns once the code lands. Never recreate missing files.";
 
+const MAX_PACK_MB = 500;
 /** How long a parent's pack waits for siblings started in the same fan-out, so they share it. */
 export const GATHER_MS = 5_000;
 /** Per parent: the pack that children asking while another runs will share, and the last queued pack. */
@@ -318,7 +433,9 @@ async function parentCode(deps: Parameters<typeof cloudroom>[0], threadId: strin
     if (!source?.sessionId) {
       const environmentId = getThread(deps.db, threadId)?.environmentId;
       const environment = environmentId ? getEnvironment(deps.db, environmentId) : null;
-      return environment?.path && environment.hostId === resolvePrimaryHostId(deps as AppDeps) ? await localCode(environment.path, id) : null;
+      if (!environment?.path || environment.hostId !== resolvePrimaryHostId(deps as AppDeps)) return null;
+      await restoreParkedWorktree(deps, threadId, environment.id);
+      return await localCode(environment.path, id);
     }
     const from = await cloudroom(deps).threadClient(threadId);
     return await sourceCode(from, (await from.sessionWorkspace(source.sessionId)).path, id);
@@ -340,21 +457,30 @@ async function idle(client: CloudroomClient, sessionId: string): Promise<void> {
  *  history (a project not on GitHub) goes as its files instead, without dependencies or build output. The source is untouched. */
 export async function sourceCode(from: CloudroomClient, workspace: string, id: string): Promise<Code | null> {
   return packCode({
-    run: async (script) => (await vm(from, script, AbortSignal.timeout(PIECE_TIMEOUT))).toString(),
-    read: (path) => download(from, path, 500, (command) => retry(() => vm(from, command, AbortSignal.timeout(PIECE_TIMEOUT)))),
+    run: async (script, signal = AbortSignal.timeout(PIECE_TIMEOUT)) => (await vm(from, script, signal)).toString(),
+    read: (path) => download(from, path, MAX_PACK_MB, (command) => retry(() => vm(from, command, AbortSignal.timeout(PIECE_TIMEOUT)))).catch((error: unknown) => {
+      if (!(error instanceof ApiError) || error.body.code !== "cloud_file_too_large") throw error;
+      throw new ApiError(413, "cloud_file_too_large", `The code is over ${MAX_PACK_MB} MB, usually from large untracked files. Commit and push the source thread's branch, then fetch it`);
+    }),
     remove: (path) => vm(from, `rm -f ${quote(path)}`, AbortSignal.timeout(PIECE_TIMEOUT)),
   }, workspace, id);
 }
 
-/** Runs a script on this computer. Windows uses Git for Windows' shell, which prints MSYS paths such as `/c/Users/…`. */
+/** Runs a script on this computer, every `git` in it with `gitSafetyArgs` (#2189). Windows uses Git for Windows' shell,
+ *  which prints MSYS paths such as `/c/Users/…`. */
 async function localShell(script: string): Promise<string> {
-  if (process.platform !== "win32") return (await exec("sh", ["-c", script], { maxBuffer: 1024 * 1024 })).stdout;
+  const settings = gitSafetyArgs().filter((arg) => arg !== "-c");
+  const git = Object.fromEntries([["GIT_CONFIG_COUNT", String(settings.length)], ...settings.flatMap((setting, index) => {
+    const at = setting.indexOf("=");
+    return [[`GIT_CONFIG_KEY_${index}`, setting.slice(0, at)], [`GIT_CONFIG_VALUE_${index}`, setting.slice(at + 1)]];
+  })]);
+  if (process.platform !== "win32") return (await exec("sh", ["-c", script], { env: { ...process.env, ...git }, maxBuffer: 1024 * 1024 })).stdout;
   const shell = await gitShell();
-  return (await exec(shell.command, ["-c", script], { env: shell.env, maxBuffer: 1024 * 1024 })).stdout;
+  return (await exec(shell.command, ["-c", script], { env: { ...shell.env, ...git }, maxBuffer: 1024 * 1024, windowsHide: true })).stdout;
 }
 
 async function localCode(workspace: string, id: string): Promise<Code | null> {
-  if (await exec("git", ["-C", workspace, "rev-parse", "-q", "--verify", "HEAD"]).then(() => false, () => true)) return null;
+  if (await exec("git", [...gitSafetyArgs(), "-C", workspace, "rev-parse", "-q", "--verify", "HEAD"], { windowsHide: true }).then(() => false, () => true)) return null;
   const windows = process.platform === "win32";
   return packCode({
     run: localShell,
@@ -366,22 +492,93 @@ async function localCode(workspace: string, id: string): Promise<Code | null> {
 /** A Local fork in a new worktree starts from the source folder's code, uncommitted work included, so the two threads
  *  never edit the same files. Every Local fork (fork button, plugin, CLI) passes here. It falls back to the source's
  *  folder when a worktree can't hold that code: a personal thread, no Git commits, or a folder outside the project's
- *  repo. A named base branch or a source on another machine is left as asked. */
-export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, projectId: string, requested: CreateThreadEnvironmentArgs): Promise<{ environment: CreateThreadEnvironmentArgs; note: PromptInput | null }> {
+ *  repo. A named base branch is kept; CLI, SDK and plugin forks use the source's repo when it differs (#971).
+ *  A source on another machine is left as asked. */
+export async function prepareLocalForkWorktree(deps: AppDeps, source: Thread, projectId: string, requested: CreateThreadEnvironmentArgs, origin: ThreadCreateOrigin | null): Promise<{ environment: CreateThreadEnvironmentArgs; note: PromptInput | null }> {
   const base: GitBranchSelection | null = requested.type === "provider" && requested.environmentProviderId === DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree
     ? (requested.inputs as { branch?: GitBranchSelection } | null)?.branch ?? { kind: "default" }
     : requested.type === "host" && requested.workspace.type === "managed-worktree" ? requested.workspace.baseBranch : null;
+  // A fork starts from the source folder's code, so a parked one comes back first.
+  if (base && source.archivedAt === null && source.environmentId) await restoreParkedWorktree(deps, source.id, source.environmentId);
   const folder = source.environmentId ? getEnvironment(deps.db, source.environmentId) : null;
-  if (!base || base.kind === "named" || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
+  if (!base || !folder?.path || !folder.hostId || folder.hostId !== resolvePrimaryHostId(deps)) return { environment: requested, note: null };
   const checkout = projectId === PERSONAL_PROJECT_ID ? undefined
     : findLocalPathProjectSourceForHost(listProjectSourcesByProjectIds(deps.db, [projectId]), folder.hostId)?.path;
+  if (base.kind === "named") {
+    // The app's branch picker lists the project's branches, so keep resolving them in that repo.
+    if (origin === "app") return { environment: requested, note: null };
+    // `room-cli thread worktree` starts from the thread's own commit, so its worktree comes from the thread's checkout (#971).
+    const sourcePath = checkout
+      ? await forkWorktreeSource(folder, folder.path, checkout)
+      : undefined;
+    if (!sourcePath) return { environment: requested, note: null };
+    const inputs = worktreeProviderInputs(base, sourcePath);
+    return {
+      environment:
+        requested.type === "host"
+          ? {
+              type: "provider",
+              environmentProviderId:
+                DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+              machine: {
+                type: "existing",
+                hostId: requested.hostId ?? folder.hostId,
+              },
+              inputs,
+            }
+          : requested.type === "provider"
+            ? { ...requested, inputs }
+            : requested,
+      note: null,
+    };
+  }
   const branch = checkout ? await localForkBranch(folder.path, checkout) : null;
   if (!branch) return { environment: { type: "reuse", environmentId: folder.id }, note: null };
-  const named = { kind: "named", name: branch } as const;
+  // Start from the snapshot, but compare against the source's base like any other worktree, not the frozen snapshot.
+  const diffBase: GitBranchSelection = folder.mergeBaseBranch && !folder.mergeBaseBranch.startsWith("cloudroom/fork-") ? { kind: "named", name: folder.mergeBaseBranch } : { kind: "default" };
+  const inputs = worktreeProviderInputs({ kind: "named", name: branch }, undefined, diffBase);
   return {
-    environment: requested.type === "host" ? { ...requested, workspace: { type: "managed-worktree", baseBranch: named } } : requested.type === "provider" ? { ...requested, inputs: worktreeProviderInputs(named) } : requested,
+    environment: requested.type === "host"
+      ? { type: "provider", environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree, machine: { type: "existing", hostId: requested.hostId ?? folder.hostId }, inputs }
+      : requested.type === "provider" ? { ...requested, inputs } : requested,
     note: { type: "text", text: `[Local fork]\nThis fork runs in its own new worktree on branch ${branch}, not the source thread's folder. The last commit, "Cloudroom fork: uncommitted changes", holds the work the source thread had not committed.`, mentions: [], visibility: "agent-only" },
   };
+}
+
+/** The checkout a fork's worktree starts from when the source folder is in another Git repo than the project's
+ *  `checkout`: that repo's main checkout, or the one its own worktree came from. Undefined otherwise, so it uses the
+ *  project's. The main checkout, not the folder, so a removed subfolder or hand-made worktree can't break a restore. */
+async function forkWorktreeSource(
+  folder: EnvironmentRow,
+  path: string,
+  checkout: string,
+): Promise<string | undefined> {
+  const inherited = worktreeSourcePath(
+    folder.environmentProviderId,
+    folder.environmentProviderSelection?.inputs,
+  );
+  if (inherited || path === checkout) return inherited;
+  const repo = (dir: string) =>
+    exec("git", [
+      ...gitSafetyArgs(),
+      "-C",
+      dir,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-common-dir",
+    ], { windowsHide: true }).then(
+      ({ stdout }) => {
+        // Git before 2.31 prints the unknown --path-format flag back and exits 0: then act as before.
+        const commonDir = stdout.trim();
+        return commonDir.includes("\n") || !isAbsolute(commonDir)
+          ? null
+          : commonDir;
+      },
+      () => null,
+    );
+  const [own, project] = await Promise.all([repo(path), repo(checkout)]);
+  if (own === null || own === project) return undefined;
+  return own.endsWith("/.git") ? own.slice(0, -"/.git".length) : path;
 }
 
 /** The source folder's commits plus its uncommitted work as one extra commit, on a new branch. The source folder is
@@ -403,11 +600,17 @@ export async function localForkBranch(workspace: string, checkout: string): Prom
   }
 }
 
-async function packCode(at: { run: (script: string) => Promise<string>; read: (path: string) => Promise<Buffer>; remove: (path: string) => Promise<unknown> }, workspace: string, id: string): Promise<Code | null> {
+async function packCode(at: { run: (script: string, signal?: AbortSignal) => Promise<string>; read: (path: string) => Promise<Buffer>; remove: (path: string) => Promise<unknown> }, workspace: string, id: string): Promise<Code | null> {
   const pack = async (thin: boolean): Promise<Code | null> => {
-    const [path, origin = ""] = (await at.run(codeScript(workspace, id, thin))).trim().split("\n");
+    // A dropped request ends the script's shell, not always its tar, so the script's own cleanup may never run.
+    const output = await at.run(codeScript(workspace, id, thin)).catch(async (error: unknown) => {
+      await at.run(removeTransfer(id), AbortSignal.timeout(CLEANUP_TIMEOUT)).catch(() => {});
+      throw error;
+    });
+    const [path, origin = ""] = output.trim().split("\n");
     if (!path) return null;
-    try { return { data: await at.read(path), origin: origin.trim(), ref: id }; }
+    // The origin goes into the sandbox's command and `.git/config`: never its token (#2190).
+    try { return { data: await at.read(path), origin: stripGitUrlCredentials(origin.trim()), ref: id }; }
     finally { await at.remove(path).catch(() => {}); }
   };
   const code = await pack(true);
@@ -424,27 +627,39 @@ async function packCode(at: { run: (script: string) => Promise<string>; read: (p
 }
 
 /** Commits the folder's uncommitted work on top of HEAD to `ref`. A temporary index keeps the folder's own staging
- *  area as it was (an empty file is not a valid index). `keep: false` deletes the ref when the script exits. */
-function snapshotScript(ref: string, keep: boolean): string[] {
+ *  area as it was (an empty file is not a valid index). `keep: false` deletes the ref when the script exits. Untracked
+ *  files in folders named in `skip` stay out; tracked changes there still count. */
+function snapshotScript(ref: string, keep: boolean, skip: readonly string[] = []): string[] {
+  const add = skip.length
+    ? `git add -u -- :/ >/dev/null 2>&1 && GIT_INDEX_FILE="$index" git add -A -- :/ ${skip.map((name) => quote(`:(top,exclude,glob)**/${name}/**`)).join(" ")}`
+    : "git add -A";
   return [
     `index=$(mktemp) && rm -f "$index" && trap 'rm -f "$index"${keep ? "" : `; git update-ref -d ${ref} 2>/dev/null`}' EXIT`,
     `cp "$(git rev-parse --git-path index)" "$index" 2>/dev/null`,
-    `GIT_INDEX_FILE="$index" git add -A >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
+    `GIT_INDEX_FILE="$index" ${add} >/dev/null 2>&1 && tree=$(GIT_INDEX_FILE="$index" git write-tree) || exit 1`,
     `commit=$(git -c user.name=Cloudroom -c user.email=cloudroom@localhost commit-tree "$tree" -p HEAD -m 'Cloudroom fork: uncommitted changes') || exit 1`,
     `git update-ref ${ref} "$commit" || exit 1`,
   ];
 }
 
+/** How long a failed transfer's cleanup may hold its error, and the parent's next pack, when Core doesn't answer. */
+const CLEANUP_TIMEOUT = 15_000;
+/** Removes one transfer's files: its archive, the archive's file list, or its bundle (and the lock `git bundle` writes first). */
+const removeTransfer = (id: string) => `rm -f ${["tgz", "tgz.list", "bundle", "bundle.lock"].map((end) => `~/.cache/cloudroom/${id}.${end}`).join(" ")}`;
+/** Deletes transfer files a cut-off pack or landing left behind, once a day old, so no running transfer loses one (#2222). */
+const SWEEP = String.raw`find ~/.cache/cloudroom -maxdepth 1 -type f \( -name 'child_*' -o -name 'fork_*' \) \( -name '*.tgz' -o -name '*.tgz.list' -o -name '*.bundle' -o -name '*.bundle.lock' \) -mmin +1440 -delete >/dev/null 2>&1`;
+
 function codeScript(workspace: string, id: string, thin: boolean): string {
   const ref = `refs/cloudroom/${id}`;
   return [
+    SWEEP,
     `cd ${quote(workspace)} 2>/dev/null || exit 0`,
     `if ! git rev-parse -q --verify HEAD >/dev/null 2>&1; then f=~/.cache/cloudroom/${id}.tgz && mkdir -p ~/.cache/cloudroom || exit 1`,
     // Listed first, so a folder find can't read fails the copy instead of leaving files out. A file that changes or
     // vanishes while packing (a log) is only a warning: tar exits 1 for it.
     `  l="$f.list" && find . -mindepth 1 \\( ${skippedNames()} \\) -prune -o \\( -type f -o -type l \\) -print0 > "$l" && { tar -czf "$f" --ignore-failed-read --warning=no-file-changed --null -T "$l"; [ $? -le 1 ] && [ -s "$f" ]; } && echo "$f"; code=$?; rm -f "$l"; [ $code -eq 0 ] || rm -f "$f"; exit $code`,
     "fi",
-    ...snapshotScript(ref, false),
+    ...snapshotScript(ref, false, UNPACKED),
     "mkdir -p ~/.cache/cloudroom || exit 1",
     `f=~/.cache/cloudroom/${id}.bundle`,
     thin
@@ -459,21 +674,25 @@ function codeScript(workspace: string, id: string, thin: boolean): string {
 export async function uploadInParts(client: CloudroomClient, file: string, data: Buffer, signal?: AbortSignal): Promise<void> {
   for (let offset = 0; offset < data.length; offset += UPLOAD_PART) {
     const part = new Uint8Array(data.subarray(offset, offset + UPLOAD_PART));
-    const send = (wait?: AbortSignal) => client.runOnVm({ command: `mkdir -p ~/.cache/cloudroom && truncate -s ${offset} ~/${file} && cat >> ~/${file}` }, wait, part);
-    const result = await (signal ? send(signal) : retry(() => send(AbortSignal.timeout(PIECE_TIMEOUT))));
+    // Each part overwrites its own place and the file never grows past `data`, so a send that runs late or twice
+    // rewrites the same bytes. A busy or waking sandbox refuses for a few seconds: resend unless the caller gave up (#1314).
+    const send = (wait?: AbortSignal) => client.runOnVm({ command: `f=~/${file} && mkdir -p ~/.cache/cloudroom && dd of="$f" bs=${UPLOAD_PART} seek=${offset / UPLOAD_PART} conv=notrunc && truncate -s ${data.length} "$f"` }, wait, part);
+    const result = await retry(() => { signal?.throwIfAborted(); return send(signal ?? AbortSignal.timeout(PIECE_TIMEOUT)); });
     if (result.code !== 0) throw new Error(Buffer.from(result.stderr, "hex").toString().trim() || "The upload failed.");
   }
 }
 
 /** Puts the source's code in the fork's folder once its project copy landed. Returns why it could not, or null. */
-export async function landForkCode(client: CloudroomClient, started: { sessionId: string; transfer: string; code: Promise<Code | Error | null> | null }): Promise<string | null> {
+export async function landForkCode(client: CloudroomClient, started: { sessionId: string; transfer: string; code: Promise<Code | Error | null> | null }, stop?: AbortSignal): Promise<string | null> {
   const code = await started.code;
   if (!code) return "The source thread's code was not copied, since it has no project folder.";
   try {
     if (code instanceof Error) throw code;
-    await applyForkCode(client, (await client.sessionWorkspace(started.sessionId)).path, started.transfer, code);
+    await applyForkCode(client, (await client.sessionWorkspace(started.sessionId)).path, started.transfer, code, stop);
     return null;
   } catch (error) {
+    // A failed upload, or a dropped landing whose shell never reached its `rm`, leaves the archive behind.
+    if (!(code instanceof Error)) await vm(client, removeTransfer(started.transfer), AbortSignal.timeout(CLEANUP_TIMEOUT)).catch(() => {});
     return `The source thread's code could not be copied: ${error instanceof Error ? error.message : String(error)}.`;
   }
 }
@@ -482,7 +701,7 @@ export async function landForkCode(client: CloudroomClient, started: { sessionId
  *  the folder already has changes. A folder with no Git repository gets one. Plain files go on top of a GitHub clone
  *  and delete only symlinks in their way; with no clone they replace the folder's files, so files the source deleted are gone here too;
  *  dependencies, build output and `.cloudroom` stay. */
-async function applyForkCode(client: CloudroomClient, workspace: string, id: string, code: Code): Promise<void> {
+async function applyForkCode(client: CloudroomClient, workspace: string, id: string, code: Code, stop?: AbortSignal): Promise<void> {
   const files = isFiles(code.data);
   const file = `.cache/cloudroom/${id}.${files ? "tgz" : "bundle"}`;
   await uploadInParts(client, file, code.data);
@@ -491,7 +710,8 @@ async function applyForkCode(client: CloudroomClient, workspace: string, id: str
     await vm(client, `mkdir -p ${quote(workspace)} && cd ${quote(workspace)} && python3 -I -c ${quote(PRUNE)} . ~/${file} ${skipped} && tar -xzf ~/${file}; code=$?; rm -f ~/${file}; exit $code`, AbortSignal.timeout(PIECE_TIMEOUT));
     return;
   }
-  const land = () => client.runOnVm({
+  // Past the copy deadline, `files wait` said failed and the agent may have committed: no reset (#2023).
+  const land = () => stop?.aborted ? Promise.reject(new Error("The copy deadline passed, so it was not reset")) : client.runOnVm({
     command: [
       // The child of a project not on GitHub, or whose clone failed, has no repository yet.
       // Never on the default branch, so a push can't reach the user's main; the app renames it to the thread's room/ branch.

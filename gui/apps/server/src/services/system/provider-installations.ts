@@ -4,6 +4,7 @@ import type {
   ProviderCliStatusResponse,
 } from "@cloudroom/host-daemon-contract";
 import type { ProviderInfo } from "@cloudroom/domain";
+import { getAppSettings, getNonDestroyedHost } from "@cloudroom/db";
 import { ZodError } from "zod";
 import type { WorkSessionDeps } from "../../types.js";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
@@ -75,12 +76,21 @@ export async function getProviderInstallations(
   args: { hostId: string; providerIds?: readonly string[] },
 ): Promise<ProviderCliStatusResponse> {
   const deadline = Date.now() + PROVIDER_INSTALLATION_STATUS_TIMEOUT_MS;
-  const providers = (
-    await listSystemProviderInfos(deps, {
-      hostId: args.hostId,
-      capability: "installation",
-    })
-  ).filter((provider) => args.providerIds?.includes(provider.id) ?? true);
+  // A targeted check needs only these installation probes, not discovery of every CLI.
+  await deps.providerRegistry.whenRegistrationsSettled();
+  const providers = args.providerIds
+    ? deps.providerRegistry
+        .list()
+        .map((entry) => entry.info)
+        .filter(
+          (info) =>
+            info.maintenance.installation &&
+            args.providerIds?.includes(info.id),
+        )
+    : await listSystemProviderInfos(deps, {
+        hostId: args.hostId,
+        capability: "installation",
+      });
   return aggregateProviderInstallations(providers, {
     deadlineMs: deadline,
     now: Date.now,
@@ -171,6 +181,7 @@ export async function runProviderCliInstall(
     hostId: string;
     provider: string;
     actionKind: ProviderCliInstallActionKind;
+    automatic?: boolean;
   },
 ) {
   await deps.providerRegistry.whenProviderRegistered(args.provider);
@@ -190,17 +201,31 @@ export async function runProviderCliInstall(
       `Provider bridge is unavailable for ${args.provider}`,
     );
   }
-  const result = await serializeProviderInstallation(deps, args.hostId, () =>
-    callHostOnlineRpcForWork(deps, {
-      hostId: args.hostId,
-      timeoutMs: PROVIDER_CLI_INSTALL_TIMEOUT_MS,
-      command: {
-        type: "provider.installation.run",
-        providerId: args.provider,
-        action: args.actionKind,
-        bridgeLaunch,
-      },
-    }),
+  const result = await serializeProviderInstallation(
+    deps,
+    args.hostId,
+    async () => {
+      // A queued automatic install must respect opt-out and machine suspension.
+      if (args.automatic) {
+        const host = getNonDestroyedHost(deps.db, args.hostId);
+        if (
+          host?.phase !== "active" ||
+          !getAppSettings(deps.db).providerAutoUpdate.includes(args.provider)
+        ) {
+          return { events: [] };
+        }
+      }
+      return callHostOnlineRpcForWork(deps, {
+        hostId: args.hostId,
+        timeoutMs: PROVIDER_CLI_INSTALL_TIMEOUT_MS,
+        command: {
+          type: "provider.installation.run",
+          providerId: args.provider,
+          action: args.actionKind,
+          bridgeLaunch,
+        },
+      });
+    },
   );
   if (
     result.events.some((event) => event.type === "completed" && event.success)
@@ -214,6 +239,7 @@ export async function runProviderCliInstall(
       args.provider,
     );
   }
-  deps.hub.notifyHost(args.hostId, ["provider-cli-status-changed"]);
+  if (!args.automatic)
+    deps.hub.notifyHost(args.hostId, ["provider-cli-status-changed"]);
   return result.events;
 }

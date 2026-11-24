@@ -1,4 +1,5 @@
 import {
+  keepPreviousData,
   queryOptions,
   useQueries,
   useQuery,
@@ -11,10 +12,19 @@ import type {
   ProviderModelCatalogScope,
 } from "@cloudroom/domain";
 import { SYSTEM_EXECUTION_OPTIONS_QUERY_KEY } from "@/hooks/queries/query-keys";
-import { permissionModeValues } from "@cloudroom/domain";
+import {
+  permissionModeValues,
+  providerModelCatalogDependsOnWorkspace,
+} from "@cloudroom/domain";
+import { z } from "zod";
+import { systemUsageAnalyticsResponseSchema } from "@cloudroom/server-contract";
 import type {
   SystemCliSkillsStatusResponse,
+  SystemSkillUsageResponse,
+  SystemUsageAnalyticsQuery,
+  SystemUsageAnalyticsResponse,
   SystemWorktreeStorageResponse,
+  SystemExecutionOptionsQuery,
   SystemExecutionOptionsResponse,
   SystemProvidersQuery,
   SystemProviderStatesResponse,
@@ -27,6 +37,7 @@ import type {
 } from "@cloudroom/host-daemon-contract";
 import { BbHttpError, sdk } from "@/lib/sdk";
 import { isAbortLikeError } from "@/lib/mutation-errors";
+import { createLastKnownCache } from "@/lib/last-known-cache";
 import {
   modelCatalogCacheKey,
   readCachedModelCatalog,
@@ -47,6 +58,7 @@ import {
   hostProviderCliStatusQueryKey,
   systemCliSkillsQueryKey,
   systemSkillUsageQueryKey,
+  systemUsageAnalyticsQueryKey,
   systemWorktreeStorageQueryKey,
   systemConfigQueryKey,
   systemExecutionOptionsQueryKey,
@@ -65,17 +77,15 @@ import {
   SESSION_STATIC_QUERY_POLICY,
 } from "./query-policies";
 
-interface UseSystemExecutionOptionsArgs {
+interface UseSystemExecutionOptionsArgs extends SystemExecutionOptionsQuery {
   enabled?: boolean;
-  environmentId?: string;
-  hostId?: string;
-  providerId?: string;
 }
 
 interface SystemExecutionOptionsQueryArgs {
   environmentId: string | null;
   hostId: string | null;
   providerId: string | null;
+  projectId?: string | null;
   writeLastKnown: boolean;
 }
 
@@ -198,9 +208,17 @@ export function useKnownProviderModelCatalogScope(
   providerId: string,
 ): ProviderModelCatalogScope | undefined {
   const queryClient = useQueryClient();
-  if (providerId.length === 0) {
-    return undefined;
-  }
+  return providerId.length === 0
+    ? undefined
+    : findProviderModelCatalogScope(queryClient, providerId);
+}
+
+/** A provider's declared catalog scope, from a loaded provider list or, failing that, a remembered one. */
+function findProviderModelCatalogScope(
+  queryClient: QueryClient,
+  providerId: string,
+  rememberedListKey?: string,
+): ProviderModelCatalogScope | undefined {
   const scopeIn = (
     providers: readonly ProviderInfo[] | undefined,
   ): ProviderModelCatalogScope | undefined =>
@@ -222,7 +240,39 @@ export function useKnownProviderModelCatalogScope(
       return scope;
     }
   }
-  return undefined;
+  return rememberedListKey === undefined
+    ? undefined
+    : scopeIn(readCachedProviderList(rememberedListKey) ?? undefined);
+}
+
+/**
+ * The route a provider's models load on. A Local new thread's `projectId` stays only for a
+ * per-project list, so a machine-wide one (Claude Code, Codex) keeps its one cached list (#1236).
+ */
+export function providerModelsRoute(
+  queryClient: QueryClient,
+  routing: SystemExecutionOptionsQuery,
+  providerId: string | null,
+): {
+  environmentId: string | null;
+  hostId: string | null;
+  projectId: string | null;
+} {
+  const environmentId = routing.environmentId ?? null;
+  const hostId = routing.hostId ?? null;
+  const projectId =
+    routing.projectId === undefined ||
+    (providerId !== null &&
+      !providerModelCatalogDependsOnWorkspace(
+        findProviderModelCatalogScope(
+          queryClient,
+          providerId,
+          providerListCacheKey({ environmentId, hostId }),
+        ),
+      ))
+      ? null
+      : routing.projectId;
+  return { environmentId, hostId, projectId };
 }
 
 export function useSystemProviders(args: UseSystemProvidersArgs = {}) {
@@ -290,6 +340,7 @@ export function systemExecutionOptionsQueryOptions({
   environmentId,
   hostId,
   providerId,
+  projectId = null,
   writeLastKnown,
 }: SystemExecutionOptionsQueryArgs) {
   return queryOptions<SystemExecutionOptionsResponse>({
@@ -297,12 +348,14 @@ export function systemExecutionOptionsQueryOptions({
       environmentId,
       hostId,
       providerId,
+      projectId,
     }),
     queryFn: async ({ signal }) => {
       const response = await sdk.system.executionOptions({
         environmentId: environmentId ?? undefined,
         hostId: hostId ?? undefined,
         providerId: providerId ?? undefined,
+        projectId: projectId ?? undefined,
         signal,
       });
       if (writeLastKnown) {
@@ -316,7 +369,12 @@ export function systemExecutionOptionsQueryOptions({
             selectedOnlyModels: response.selectedOnlyModels,
           };
           writeCachedModelCatalog(
-            modelCatalogCacheKey({ environmentId, hostId, providerId }),
+            modelCatalogCacheKey({
+              environmentId,
+              hostId,
+              providerId,
+              projectId,
+            }),
             catalog,
           );
         }
@@ -331,13 +389,15 @@ export function systemExecutionOptionsQueryOptions({
 
 export function prefetchSystemExecutionOptions(
   queryClient: QueryClient,
-  args: { routing: SystemProvidersQuery; providerIds: readonly string[] },
+  args: {
+    routing: SystemExecutionOptionsQuery;
+    providerIds: readonly string[];
+  },
 ): void {
   for (const providerId of args.providerIds) {
     void queryClient.prefetchQuery(
       systemExecutionOptionsQueryOptions({
-        environmentId: args.routing.environmentId ?? null,
-        hostId: args.routing.hostId ?? null,
+        ...providerModelsRoute(queryClient, args.routing, providerId),
         providerId,
         writeLastKnown: false,
       }),
@@ -348,9 +408,13 @@ export function prefetchSystemExecutionOptions(
 export function useSystemExecutionOptions(
   args: UseSystemExecutionOptionsArgs = {},
 ) {
-  const environmentId = args.environmentId ?? null;
-  const hostId = args.hostId ?? null;
   const providerId = args.providerId ?? null;
+  const queryClient = useQueryClient();
+  const { environmentId, hostId, projectId } = providerModelsRoute(
+    queryClient,
+    args,
+    providerId,
+  );
   const enabled = args.enabled ?? true;
   useSystemRealtimeSubscription({ enabled });
   useHostListRealtimeSubscription({ enabled });
@@ -359,12 +423,14 @@ export function useSystemExecutionOptions(
     environmentId,
     hostId,
     providerId,
+    projectId,
   });
   return useQuery({
     ...systemExecutionOptionsQueryOptions({
       environmentId,
       hostId,
       providerId,
+      projectId,
       writeLastKnown: true,
     }),
     enabled,
@@ -434,16 +500,84 @@ export function useCliSkillsStatus(options?: QueryOptions) {
   });
 }
 
-/** Daily skill runs from thread history, in the user's time zone. */
+// The last result per range, so Analytics opens instantly, even after a restart.
+const skillUsageCache = createLastKnownCache<SystemSkillUsageResponse>({
+  prefix: "bb.skill-usage",
+  version: "1",
+  schema: z.object({
+    startDate: z.string(),
+    days: z.number(),
+    skills: z.array(
+      z.object({
+        name: z.string(),
+        total: z.number(),
+        daily: z.array(z.number()),
+      }),
+    ),
+  }),
+  maxEntries: 3,
+});
+
+/**
+ * Daily skill runs from thread history, in the user's time zone. Shows the
+ * last saved result at once, then refreshes it in the background.
+ */
 export function useSkillUsage(days: "30" | "90" | "365") {
+  const cacheKey = skillUsageCache.key(days);
   return useQuery({
     queryKey: systemSkillUsageQueryKey(days),
-    queryFn: ({ signal }) =>
-      sdk.system.skillUsage({
+    queryFn: async ({ signal }) => {
+      const usage = await sdk.system.skillUsage({
         days,
         utcOffsetMinutes: String(-new Date().getTimezoneOffset()),
         signal,
-      }),
+      });
+      skillUsageCache.write(cacheKey, usage);
+      return usage;
+    },
+    initialData: () => skillUsageCache.read(cacheKey) ?? undefined,
+    // A range never opened before keeps the last range on screen until it loads.
+    placeholderData: keepPreviousData,
+    // Saved data counts as stale, so every first visit refetches.
+    initialDataUpdatedAt: 0,
+    staleTime: 60_000,
+  });
+}
+
+// One saved result per metric and range: 4 metrics, 3 ranges each.
+const usageAnalyticsCache = createLastKnownCache<SystemUsageAnalyticsResponse>({
+  prefix: "bb.usage-analytics",
+  version: "1",
+  schema: systemUsageAnalyticsResponseSchema,
+  maxEntries: 12,
+});
+
+/**
+ * One Analytics metric from thread history, in the user's time zone. Shows
+ * the last saved result at once, then refreshes it in the background.
+ */
+export function useUsageAnalytics(
+  metric: SystemUsageAnalyticsQuery["metric"],
+  days: NonNullable<SystemUsageAnalyticsQuery["days"]>,
+) {
+  const cacheKey = usageAnalyticsCache.key(metric, days);
+  return useQuery({
+    queryKey: systemUsageAnalyticsQueryKey(metric, days),
+    queryFn: async ({ signal }) => {
+      const usage = await sdk.system.usageAnalytics({
+        metric,
+        days,
+        utcOffsetMinutes: String(-new Date().getTimezoneOffset()),
+        signal,
+      });
+      usageAnalyticsCache.write(cacheKey, usage);
+      return usage;
+    },
+    initialData: () => usageAnalyticsCache.read(cacheKey) ?? undefined,
+    // A range never opened before keeps the last range on screen until it loads.
+    placeholderData: keepPreviousData,
+    // Saved data counts as stale, so every first visit refetches.
+    initialDataUpdatedAt: 0,
     staleTime: 60_000,
   });
 }

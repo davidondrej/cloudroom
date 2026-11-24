@@ -10,8 +10,8 @@ import {
   buildThreadTimelineFromEvents,
   type ThreadEventWithMeta,
 } from "../src/index.js";
-import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/accepted-client-request-context.js";
-import type { ThreadTimelineFromEventsResult } from "../src/build-thread-timeline.js";
+import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/events.js";
+import type { ThreadTimelineFromEventsResult } from "../src/index.js";
 
 function withMeta(event: ThreadEvent, seq: number): ThreadEventWithMeta {
   return {

@@ -7,6 +7,7 @@ import {
   DAEMON_CALLER_PROOF_PATH,
   renewCallerToken,
 } from "@cloudroom/config/caller-proof";
+import { HUMAN_CLICK_HEADER } from "@cloudroom/config/human-click";
 import { isLoopbackHostname } from "@cloudroom/config/loopback";
 import { DEFAULT_HOST_DAEMON_LOCAL_BIND_HOST } from "@cloudroom/host-daemon-contract";
 
@@ -26,6 +27,8 @@ export interface CallerTokenTarget {
 }
 
 interface HeaderDetails {
+  frame?: { parent: unknown } | null;
+  method?: string;
   requestHeaders: Record<string, string>;
   url: string;
   webContentsId?: number;
@@ -53,6 +56,16 @@ function httpOrigin(url: string): string | null {
       : null;
   } catch {
     return null;
+  }
+}
+
+// The path as the server reads it: decoded, like Hono's.
+function serverPath(url: string): string {
+  const { pathname } = new URL(url);
+  try {
+    return decodeURI(pathname);
+  } catch {
+    return pathname;
   }
 }
 
@@ -115,6 +128,8 @@ export function createLocalCallerAuth(args: {
   isAppWebContents(id: number): boolean;
   localServerUrl(): string;
   reloadAppWindows(): void;
+  /** The human-click header for a request, or null when it needs none (ADR 0260). */
+  signHumanClick?(method: string, path: string): string | null;
 }) {
   let origins: LocalCallerOrigins = {
     app: null,
@@ -176,14 +191,34 @@ export function createLocalCallerAuth(args: {
         callback({ requestHeaders: details.requestHeaders });
         return;
       }
+      // A human click is only the app's own page asking the server: never a frame
+      // inside the page, a worker, or the daemon. Read now: a frame can be gone
+      // later. A request Electron can't place gets no signature.
+      let ownPage = false;
+      try {
+        ownPage =
+          target.proofPath === undefined &&
+          details.frame != null &&
+          details.frame.parent === null;
+      } catch {
+        ownPage = false;
+      }
       void tokenFor(target).then((token) => {
         const requestHeaders: Record<string, string> = {};
         for (const [name, value] of Object.entries(details.requestHeaders)) {
-          if (name.toLowerCase() !== CALLER_TOKEN_HEADER) {
+          const lower = name.toLowerCase();
+          if (lower !== CALLER_TOKEN_HEADER && lower !== HUMAN_CLICK_HEADER) {
             requestHeaders[name] = value;
           }
         }
         if (token !== null) requestHeaders[CALLER_TOKEN_HEADER] = token;
+        const click = ownPage
+          ? args.signHumanClick?.(
+              details.method ?? "GET",
+              serverPath(details.url),
+            )
+          : null;
+        if (click) requestHeaders[HUMAN_CLICK_HEADER] = click;
         callback({ requestHeaders });
       });
     },

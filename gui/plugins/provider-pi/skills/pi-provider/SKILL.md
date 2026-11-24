@@ -5,8 +5,8 @@ description: "Inspect Cloudroom Pi provider support for message editing and cont
 
 # Pi provider
 
-Pi supports editing and rerunning eligible user messages and compacting idle or
-errored threads through the core `room-cli thread edit-message` and `room-cli thread compact`
+Pi supports editing and rerunning eligible user messages and compacting
+threads through the core `room-cli thread edit-message` and `room-cli thread compact`
 commands. Inspect the thread first and use live command help for arguments.
 Provider confirmation determines whether the operation completed.
 

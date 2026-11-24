@@ -6,7 +6,7 @@ import {
   type ThreadOpenFile,
 } from "@cloudroom/server-contract";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import {
   resolveContextThreadId,
   resolveExplicitIdFlag,
@@ -34,7 +34,7 @@ interface ThreadOpenFileRequest {
   path: string;
 }
 
-type CliBbSdk = ReturnType<typeof createCliBbSdk>;
+type CliRoomSdk = ReturnType<typeof createCliRoomSdk>;
 
 export function registerOpenCommand(
   parent: Command,
@@ -73,7 +73,7 @@ export function registerOpenCommand(
           if (target.inputPath === null && lineNumber !== null) {
             throw new Error("--line requires a file path.");
           }
-          const sdk = createCliBbSdk(getUrl());
+          const sdk = createCliRoomSdk(getUrl());
           const file: ThreadOpenFile | null =
             target.inputPath === null
               ? null
@@ -214,7 +214,7 @@ function parseLineNumber(value: string | undefined): number | null {
 
 async function resolveThreadOpenFileRequest(args: {
   inputPath: string;
-  sdk: CliBbSdk;
+  sdk: CliRoomSdk;
   threadId: string;
 }): Promise<ThreadOpenFileRequest> {
   const inputPath = args.inputPath.trim();
@@ -260,7 +260,7 @@ async function resolveThreadOpenFileRequest(args: {
 }
 
 async function resolveThreadWorkspaceRoot(
-  sdk: CliBbSdk,
+  sdk: CliRoomSdk,
   threadId: string,
 ): Promise<string> {
   const thread = await sdk.threads.get({ threadId });

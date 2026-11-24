@@ -87,22 +87,20 @@ function compareRankedMentionCandidates(
   return byMatch !== 0 ? byMatch : left.inputIndex - right.inputIndex;
 }
 
-function compareRankedMentionCandidateGroups(
-  left: RankedMentionCandidateGroup,
-  right: RankedMentionCandidateGroup,
-): number {
-  const byBestMatch = left.bestMatchRank - right.bestMatchRank;
-  return byBestMatch !== 0 ? byBestMatch : left.inputIndex - right.inputIndex;
-}
+/** Exact, prefix, and substring identity matches all rank at or below this. */
+const SUBSTRING_MATCH_RANK = 2;
 
 /**
  * Rank intact source groups by their strongest row, and rank rows within each
  * group by exact identity, identity prefix, identity substring, then
  * supporting-text match. Original source order is the final tie-breaker.
+ * A `pinnedGroupKey` group with an exact, prefix, or substring match always
+ * comes first, so a stronger or later-loading group cannot push it down.
  */
 export function orderMentionCandidates(
   candidates: readonly MentionCandidate[],
   query: string,
+  pinnedGroupKey?: string,
 ): OrderedMentionSuggestions {
   const normalizedQuery = normalizeMentionTerm(query);
   const groupsByKey = new Map<string, RankedMentionCandidateGroup>();
@@ -132,9 +130,19 @@ export function orderMentionCandidates(
     });
   }
 
+  const groupRank = (group: RankedMentionCandidateGroup): number =>
+    normalizedQuery.length > 0 &&
+    group.key === pinnedGroupKey &&
+    group.bestMatchRank <= SUBSTRING_MATCH_RANK
+      ? -1
+      : group.bestMatchRank;
   let nextStartIndex = 0;
   const groups = [...groupsByKey.values()]
-    .sort(compareRankedMentionCandidateGroups)
+    .sort(
+      (left, right) =>
+        groupRank(left) - groupRank(right) ||
+        left.inputIndex - right.inputIndex,
+    )
     .map<OrderedMentionSuggestionGroup>((group) => {
       const suggestions = group.candidates
         .sort(compareRankedMentionCandidates)

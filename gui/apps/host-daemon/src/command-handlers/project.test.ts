@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -101,6 +103,44 @@ describe("project.clone", () => {
       `fatal: repository '${missingRemote}' does not exist`,
     );
   });
+
+  it.each([
+    { userinfo: "FAKE_TOKEN", file: "repo.git", secret: "FAKE_TOKEN" },
+    {
+      userinfo: "user:FAKE_TOKEN_WITH SPACE",
+      file: "repo$&.git",
+      secret: "FAKE_TOKEN_WITH SPACE",
+    },
+  ])(
+    "keeps a remote's token out of clone progress and errors (#2190): $userinfo",
+    async ({ userinfo, file, secret }) => {
+      const root = await tempDir();
+      // Token-only auth reaches the 401; a spaced password covers Git's raw argv error.
+      const server = http.createServer((_, response) => {
+        response.writeHead(401, { "www-authenticate": 'Basic realm="x"' });
+        response.end();
+      });
+      await new Promise<void>((resolve) =>
+        server.listen(0, "127.0.0.1", resolve),
+      );
+      const { port } = server.address() as AddressInfo;
+      const progress: string[] = [];
+      try {
+        const error = await cloneProject({
+          dataDir: path.join(root, "data"),
+          projectSlug: "project",
+          remoteUrl: `http://${userinfo}@127.0.0.1:${port}/${file}`,
+          env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+          onProgress: (line) => progress.push(line),
+        }).catch((caught) => caught);
+        const output = `${progress.join("\n")}\n${error.message}`;
+        expect(output).toContain(`http://127.0.0.1:${port}`);
+        expect(output).not.toContain(secret);
+      } finally {
+        server.close();
+      }
+    },
+  );
 
   it("derives the checkout convention without touching the filesystem", async () => {
     const root = await tempDir();

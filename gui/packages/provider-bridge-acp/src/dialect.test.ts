@@ -3,6 +3,7 @@ import {
   CURSOR_ACP_DIALECT,
   GENERIC_ACP_DIALECT,
   GROK_ACP_DIALECT,
+  KIMI_ACP_DIALECT,
   OMP_ACP_DIALECT,
   OPENCODE_ACP_DIALECT,
   resolveAcpDialect,
@@ -20,6 +21,13 @@ describe("resolveAcpDialect", () => {
     expect(resolveAcpDialect({ dialectId: "opencode", command: "node" })).toBe(
       OPENCODE_ACP_DIALECT,
     );
+    // On Windows the bridge launches Kimi by its full path (#1721).
+    expect(
+      resolveAcpDialect({
+        dialectId: "kimi",
+        command: "C:\\Users\\me\\.kimi-code\\bin\\kimi.exe",
+      }),
+    ).toBe(KIMI_ACP_DIALECT);
   });
 
   it("falls back to the launch executable's base name", () => {
@@ -36,6 +44,8 @@ describe("resolveAcpDialect", () => {
     expect(resolveAcpDialect({ command: "/usr/local/bin/opencode" })).toBe(
       OPENCODE_ACP_DIALECT,
     );
+    // The shipped acp-kimi launches `kimi`; its empty end_turn is a failed model request (#1721).
+    expect(resolveAcpDialect({ command: "kimi" })).toBe(KIMI_ACP_DIALECT);
   });
 
   it("is generic for a dialect id it does not ship", () => {

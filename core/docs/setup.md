@@ -180,13 +180,13 @@ Never use `tailscale funnel` for Core: it opens the API to the whole internet.
 
 ## Connect the desktop app
 
-In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
+In the [Cloudroom app](https://github.com/davidondrej/cloudroom/releases/latest), open **Settings → Cloudroom account → Connect your own Core** (v83 or newer). From v154, first-run setup also offers **Use my own Core** at the top right. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`; the whole `CLOUDROOM_TOKEN=…` line works too. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
 
 ## Your own server vs Cloudroom Cloud
 
 **Works on your own server:**
 
-- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, fx, and OpenClaw turn on once they are installed and signed in under the agent account.
+- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, Kimi Code, fx, OpenClaw, and Agent Zero's `a0` bridge turn on once they are installed and signed in under the agent account.
 - Cloud threads from the desktop app, with Mac access, web previews, secret requests, and synced skills and logins.
 - Saved history, kept on this machine.
 
@@ -211,7 +211,7 @@ sudo python3 core-$v/install/update.py upgrade "$PWD/core-$v"
 sudo cat /var/lib/cloudroom-update/state.json
 ```
 
-The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. A large history can take many minutes to load; the script keeps waiting while Core is busy loading it, for up to 2 hours. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
 
 Upgrades don't add accounts or change SSH when `CLOUDROOM_STORE=self-hosted`. Mac access, secret requests, and previews run over Core's own port. A server already on SSH previews keeps them untouched.
 
@@ -227,7 +227,7 @@ A failed readiness check usually means the journal or disk protection needs atte
 
 ## Machines without systemd
 
-Run `install/sandbox-start.sh` as root, detached, on every boot. It parses (never sources) `image.env` and `/etc/cloudroom/core.env`, creates the agents' cgroup, runs Core as `cloudroom` with only the capabilities it needs, and restarts it after a crash. Containers without cgroups run Core in [container mode](storage.md#containers). A second start is a no-op. The log is `/var/log/cloudroom/core.log`. With `"agent_sudo": true` in `storage.json`, agents keep sudo on that machine. Before a stop, `POST /v1/drain {"hold":true}` refuses new work and reports whether anything still runs; `{"hold":false}` reopens it.
+Run `install/sandbox-start.sh` as root, detached, on every boot. It parses (never sources) `image.env` and `/etc/cloudroom/core.env`, creates the agents' cgroup, runs Core as `cloudroom` with only the capabilities it needs, and restarts it after a crash. Containers without cgroups run Core in [container mode](storage.md#containers). A second start is a no-op. The log is `/var/log/cloudroom/core.log`. With `"agent_sudo": true` in `storage.json`, agents keep sudo on that machine. Before a stop, `POST /v1/drain {"hold":true}` refuses new work and reports whether anything still runs, plus the thread's lifetime prompt counts (`work`: `prompts`, `failed`) for the website's sleep event; `{"hold":false}` reopens it.
 
 ## Cloud folders
 

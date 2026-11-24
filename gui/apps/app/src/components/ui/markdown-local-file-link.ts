@@ -6,6 +6,7 @@ import {
   createFilePreviewLineRange,
   type FilePreviewLineRange,
 } from "@cloudroom/client-core";
+import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 
 export interface MarkdownPreviewLocalFileLink {
   lineRange: FilePreviewLineRange | null;
@@ -199,8 +200,8 @@ export function isWindowsDriveLocalFilePath(path: string): boolean {
 
 function isAbsoluteLocalFilePathStart(path: string): boolean {
   return (
-    (path.startsWith("/") && !path.startsWith("//")) ||
-    isWindowsDriveLocalFilePath(path)
+    (path.startsWith("/") || isWindowsDriveLocalFilePath(path)) &&
+    !isWindowsNetworkOrDevicePath(path)
   );
 }
 

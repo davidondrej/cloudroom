@@ -6,7 +6,7 @@ import type {
   ThreadTimelineResponse,
   ThreadWithIncludesResponse,
 } from "@cloudroom/server-contract";
-import { BbRequestTimeoutError } from "../response.js";
+import { RoomRequestTimeoutError } from "../response.js";
 import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export interface StatusGetArgs {
@@ -16,6 +16,7 @@ export interface StatusGetArgs {
 }
 
 export interface StatusThreadSummary {
+  archivedAt: number | null;
   environmentId: string | null;
   id: string;
   parentThreadId: string | null;
@@ -47,13 +48,14 @@ async function fetchSilent<TValue>(
   try {
     return await fn();
   } catch (error) {
-    if (error instanceof BbRequestTimeoutError) throw error;
+    if (error instanceof RoomRequestTimeoutError) throw error;
     return null;
   }
 }
 
 function summarizeThread(thread: StatusSourceThread): StatusThreadSummary {
   return {
+    archivedAt: thread.archivedAt ?? null,
     environmentId: thread.environmentId ?? null,
     id: thread.id,
     parentThreadId: thread.parentThreadId ?? null,

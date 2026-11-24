@@ -1,10 +1,8 @@
-import { getAppSettings, updateHost } from "@cloudroom/db";
-import { defaultAppSettings } from "@cloudroom/domain";
+import { countThreads, updateHost } from "@cloudroom/db";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { HostDaemonOnlineRpcRequestMessage } from "@cloudroom/host-daemon-contract";
 import {
-  systemConfigResponseSchema,
   systemExecutionOptionsResponseSchema,
   systemProviderInfoSchema,
 } from "@cloudroom/server-contract";
@@ -13,12 +11,17 @@ import { readJson } from "../helpers/json.js";
 import { registerHostRpcResponder } from "../helpers/host-rpc.js";
 import {
   seedEnvironment,
+  seedHost,
   seedHostSession,
   seedPrimaryHost,
   seedProjectWithSource,
+  seedThread,
 } from "../helpers/seed.js";
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
-import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
+import {
+  createProviderRegistryService,
+  createProviderUsageReader,
+} from "../../src/services/providers/provider-registry.js";
 import { listSystemProviderInfos } from "../../src/services/system/execution-options.js";
 
 function providerHostResponse(
@@ -268,18 +271,23 @@ describe("GET /api/v1/system/providers", () => {
   });
 });
 
-async function saveProviderOrder(harness: TestAppHarness, order: string[]) {
-  const response = await harness.app.request("/api/v1/settings/general", {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...defaultAppSettings, providerOrder: order }),
-  });
-  expect(response.status).toBe(200);
-  expect(getAppSettings(harness.db).providerOrder).toEqual(order);
-  const config = systemConfigResponseSchema.parse(
-    await readJson(await harness.app.request("/api/v1/system/config")),
+/** Starts threads so `order` becomes the most-used-first harness order. */
+function useProviderOrder(harness: TestAppHarness, order: string[]) {
+  const counts = new Map(
+    (countThreads(harness.db, { groupBy: "provider", includeArchived: true, includeHidden: true })
+      .groups ?? []).map(({ key, count }) => [key, count]),
   );
-  expect(config.generalSettings.providerOrder).toEqual(order);
+  const base = Math.max(0, ...counts.values());
+  const host = seedHost(harness.deps, { name: "Usage fixture" });
+  const { project } = seedProjectWithSource(harness.deps, {
+    hostId: host.id,
+    path: `/tmp/usage-${counts.size}-${base}`,
+  });
+  order.forEach((providerId, index) => {
+    const want = base + order.length - index - (counts.get(providerId) ?? 0);
+    for (let n = 0; n < want; n += 1)
+      seedThread(harness.deps, { projectId: project.id, providerId });
+  });
 }
 
 const interleavedProviderOrder = [
@@ -289,9 +297,10 @@ const interleavedProviderOrder = [
   "codex",
   "pi",
   "acp-cursor",
+  "acp-antigravity",
 ];
 
-describe("persisted provider ordering", () => {
+describe("usage-based provider ordering", () => {
   it("preserves interleaved order after saving with warm probes and after invalidation", async () => {
     await withTestHarness({}, async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
@@ -315,10 +324,10 @@ describe("persisted provider ordering", () => {
       await read();
       const probeCount = responder.requests.length;
       expect(probeCount).toBeGreaterThan(0);
-      await saveProviderOrder(harness, interleavedProviderOrder);
+      useProviderOrder(harness, interleavedProviderOrder);
       expect(await read()).toEqual(interleavedProviderOrder);
       const reversed = [...interleavedProviderOrder].reverse();
-      await saveProviderOrder(harness, reversed);
+      useProviderOrder(harness, reversed);
       expect(await read()).toEqual(reversed);
       expect(responder.requests).toHaveLength(probeCount);
       installed.delete("acp-omp");
@@ -374,7 +383,7 @@ describe("persisted provider ordering", () => {
             return providerHostResponse(request, "acp-opencode", "model");
           },
         });
-        await saveProviderOrder(harness, interleavedProviderOrder);
+        useProviderOrder(harness, interleavedProviderOrder);
         const hidden = ["not_installed", "unsupported", "failed"].includes(
           status,
         );
@@ -391,12 +400,12 @@ describe("persisted provider ordering", () => {
 
   it("preserves configured order with an offline host", async () => {
     await withTestHarness({}, async (harness) => {
-      await saveProviderOrder(harness, interleavedProviderOrder);
+      useProviderOrder(harness, interleavedProviderOrder);
       expect(
         await providerIds(
           await harness.app.request("/api/v1/system/providers"),
         ),
-      ).toEqual(["claude-code", "codex", "pi", "acp-cursor"]);
+      ).toEqual(["claude-code", "codex", "pi", "acp-cursor", "acp-antigravity"]);
     });
   });
 
@@ -407,7 +416,10 @@ describe("persisted provider ordering", () => {
         const { host, session } = seedHostSession(harness.deps);
         seedPrimaryHost(harness.deps, host.id);
         const registry = createProviderRegistryService({
-          readUserProviderPreferences: () => getAppSettings(harness.db),
+          readUserProviderPreferences: () => ({
+            defaultProviderId: null,
+            usage: createProviderUsageReader(harness.db, 0)(),
+          }),
         });
         for (const registration of harness.deps.providerRegistry.list()) {
           registry.register({
@@ -433,7 +445,7 @@ describe("persisted provider ordering", () => {
           handle: (request) =>
             providerHostResponse(request, "acp-opencode", "model"),
         });
-        await saveProviderOrder(harness, interleavedProviderOrder);
+        useProviderOrder(harness, interleavedProviderOrder);
         const registrations = harness.deps.providerRegistry.list();
         const expected = registrations.filter(
           (entry) =>
@@ -487,7 +499,10 @@ describe("persisted provider ordering", () => {
           .list()
           .filter((entry) => entry.visibility === visibility);
         const registry = createProviderRegistryService({
-          readUserProviderPreferences: () => getAppSettings(harness.db),
+          readUserProviderPreferences: () => ({
+            defaultProviderId: null,
+            usage: createProviderUsageReader(harness.db, 0)(),
+          }),
         });
         for (const registration of registrations)
           registry.register(registration);
@@ -504,7 +519,7 @@ describe("persisted provider ordering", () => {
             ),
         });
         const order = registrations.map((entry) => entry.info.id).reverse();
-        await saveProviderOrder(harness, order);
+        useProviderOrder(harness, order);
         expect(
           await providerIds(
             await harness.app.request("/api/v1/system/providers"),

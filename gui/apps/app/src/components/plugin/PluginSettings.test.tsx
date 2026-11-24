@@ -7,7 +7,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InstalledPlugin } from "@cloudroom/server-contract";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
@@ -130,6 +130,28 @@ describe("PluginSettingsForm", () => {
     expect((screen.getByLabelText("Greeting") as HTMLInputElement).value).toBe(
       "hi there",
     );
+  });
+
+  it("shows a failed schema fetch with Retry instead of a blank form", async () => {
+    let failNext = true;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        if (!failNext) return jsonOk(SETTINGS_VIEW);
+        failNext = false;
+        return jsonError("settings store unavailable");
+      }),
+    );
+
+    const { wrapper } = createQueryClientTestHarness();
+    render(<PluginSettingsForm pluginId="demo" />, { wrapper });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("settings store unavailable");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(await screen.findByLabelText("Greeting")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("refreshes machine providers after a save, so availability catches up", async () => {

@@ -25,10 +25,12 @@ describe("ReconnectBackoff", () => {
     expect(delay).toBe(DEFAULT_MAX_RECONNECT_DELAY_MS);
   });
 
-  it("resets attempt after a stable connection", () => {
+  it("redials at once after a stable connection, then backs off from the base", () => {
     const backoff = new ReconnectBackoff({ stableConnectionMs: 10_000 });
     expect(backoff.nextDelayAfterClose(0)).toBe(2_000);
-    expect(backoff.nextDelayAfterClose(10_001)).toBe(1_000);
+    expect(backoff.nextDelayAfterClose(10_001)).toBeLessThan(250);
+    expect(backoff.nextDelayAfterClose(0)).toBe(1_000);
+    expect(backoff.nextDelayAfterClose(0)).toBe(2_000);
   });
 
   it("does not reset at exactly the stable threshold", () => {

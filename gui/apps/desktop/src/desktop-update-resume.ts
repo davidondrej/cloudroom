@@ -172,6 +172,28 @@ export async function runningLocalThreadIds(
     .map(({ id }) => id);
 }
 
+const backgroundThreadsSchema = z.array(
+  threadSchema.extend({
+    activity: z.object({
+      activeBackgroundAgentCount: z.number(),
+      activeBackgroundCommandCount: z.number(),
+      activeWorkflowCount: z.number(),
+    }),
+  }),
+);
+
+/** True when an idle Local thread still waits on a background command, agent or workflow. */
+export async function hasLocalBackgroundWork(serverUrl: string): Promise<boolean> {
+  const threads = backgroundThreadsSchema.parse(
+    await requestJson(serverUrl, "/threads?archived=false&includeHidden=true"),
+  );
+  return threads.some(
+    ({ activity, ...thread }) =>
+      isLocalThread(thread) &&
+      activity.activeBackgroundAgentCount + activity.activeBackgroundCommandCount + activity.activeWorkflowCount > 0,
+  );
+}
+
 export async function stopThreadsForUpdate(
   args: UpdateResumeArgs,
 ): Promise<void> {

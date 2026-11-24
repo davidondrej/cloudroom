@@ -9,7 +9,7 @@ import { CHANGELOG_LINKS } from "./changelog-preview";
 
 const WEBSITE_URL = "https://www.cloudroom.dev";
 const GITHUB_REPO_URL = "https://github.com/davidondrej/cloudroom";
-const BB_CREDIT_URL = "https://github.com/get-bb/bb";
+const ROOM_CREDIT_URL = "https://github.com/get-bb/bb";
 
 interface CommunityLinkRowProps {
   description: string;
@@ -88,13 +88,13 @@ export function CommunitySettingsSection() {
         ) : null}
         <p className="text-xs text-muted-foreground">
           <a
-            href={BB_CREDIT_URL}
+            href={ROOM_CREDIT_URL}
             target="_blank"
             rel="noopener noreferrer"
             className="rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             onClick={(event) => {
               event.preventDefault();
-              openUrlInExternalBrowser(BB_CREDIT_URL);
+              openUrlInExternalBrowser(ROOM_CREDIT_URL);
             }}
           >
             Built on BB

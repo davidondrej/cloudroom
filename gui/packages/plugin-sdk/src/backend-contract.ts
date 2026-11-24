@@ -247,8 +247,8 @@ export interface PluginTurnFailedEvent {
    */
   inputAccepted: boolean;
   /**
-   * The most recent rate-limit snapshot this thread's provider reported, or
-   * null when the provider reports no windows.
+   * The most recent rate-limit snapshot from the failed request, or null when
+   * its provider reported none during that request.
    */
   rateLimits: ProviderRateLimitState | null;
   /**
@@ -312,8 +312,9 @@ export interface PluginThreadEventPayloads {
   /** Fired when a thread transitions into `active`. */
   "thread.active": { thread: ThreadResponse };
   /** Fired when a thread transitions into `idle`. `lastAssistantText` is
-   * assembled the same way GET /threads/:id/output is. */
-  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null };
+   * assembled the same way GET /threads/:id/output is. `notify: false`: another
+   * computer sent this Cloud turn and notifies for it. */
+  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null; notify?: false };
   /** Fired when a thread transitions into `error`. `error` is the failed
    * turn's provider error, else the latest system/error message. `errorInfo`
    * classifies it the same way `turn.failed` does (a rate limit, an auth
@@ -322,6 +323,7 @@ export interface PluginThreadEventPayloads {
     thread: ThreadResponse;
     error: string | null;
     errorInfo?: ProviderErrorInfo | null;
+    notify?: false;
   };
   /** Fired after a thread is archived (including cascade archives). */
   "thread.archived": { thread: ThreadResponse };
@@ -1336,6 +1338,10 @@ export interface PluginProviderCapabilities {
   /** The provider accepts an explicit context-compaction request — gates the
    * compact affordance. */
   supportsManualCompaction: boolean;
+  /** A saved session resumes in whatever folder it is started in, so a thread
+   * moved to another folder keeps its native session. Defaults to false: the
+   * moved thread then starts a fresh session with the chat as hidden context. */
+  resumesInNewFolder?: boolean;
   /** The provider keeps its own thread archive, so BB mirrors archive and
    * unarchive onto it instead of tracking the state only in bb's own rows. */
   supportsThreadArchive: boolean;
@@ -1445,9 +1451,9 @@ export interface PluginProviderFallbackModel {
   displayName: string;
   description: string;
   /** Reasoning levels this model supports, lowest to highest. Non-empty.
-   * `reasoningEffort` is a standard ladder entry or any provider-specific id
-   * the bridge accepts back as `reasoningLevel`; `label` names a
-   * provider-specific id in the picker. */
+   * Only standard ladder entries ({@link PluginProviderReasoningLevel}) are
+   * kept today: the host drops any other id, here and in the live
+   * `model/list`, and keeps the model. Map provider options onto the ladder. */
   supportedReasoningEfforts: readonly {
     reasoningEffort: PluginProviderReasoningLevel | (string & {});
     label?: string;
@@ -1555,7 +1561,7 @@ export interface PluginProviderDeclaration {
    * "Worked for" row and leaves the final answer visible. `"flat"` keeps
    * every row of a finished turn visible, as it was while the turn ran. This
    * is only the provider's default: the user can choose either display for
-   * each provider in Settings → Providers or with
+   * each provider in Settings → Agents → Harness or with
    * `bb settings completed-turns`, and that choice wins.
    */
   completedTurnDisplay?: PluginProviderCompletedTurnDisplay;
@@ -1667,6 +1673,13 @@ export interface PluginProviderDeclaration {
   ) => Readonly<Record<string, JsonValue>>;
 }
 
+export type PluginInstructionContext = {
+  threadId: string;
+  projectId: string;
+  /** Resolved target for user instructions on this message. */
+  experimental_execution?: { providerId: string; model: string | null };
+};
+
 export interface PluginAgents {
   /**
    * Select this plugin's statically registered tools and manifest skills for
@@ -1736,7 +1749,7 @@ export interface PluginAgents {
    * A repeated registration within one factory execution is rejected.
    */
   contributeInstructions(
-    provider: (ctx: { threadId: string; projectId: string }) => string | null,
+    provider: (ctx: PluginInstructionContext) => string | null,
   ): void;
 }
 
@@ -1782,8 +1795,9 @@ export interface PluginProviders {
 }
 
 export interface ExperimentalPluginProviderEnvContext {
-  threadId: string;
-  projectId: string;
+  /** The thread starting a turn. Absent for a helper call, such as thread naming, that runs the provider outside a thread. */
+  threadId?: string;
+  projectId?: string;
   hostId: string;
 }
 

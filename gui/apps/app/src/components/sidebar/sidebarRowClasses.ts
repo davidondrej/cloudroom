@@ -62,6 +62,9 @@ export const SIDEBAR_ROW_SELECTED_STATE_CLASS = `${CONTEXT_SELECTION_SURFACE_CLA
 export const SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS =
   "bb-sidebar-open-in-split-row";
 
+export const SIDEBAR_ROW_COMPUTER_USE_STATE_CLASS =
+  "bb-sidebar-computer-use-row";
+
 export const SIDEBAR_FOOTER_ACTION_CLASS = cn(
   COARSE_POINTER_CHILD_ICON_BUTTON_CLASS,
   "text-muted-foreground hover:text-sidebar-foreground [&>[data-icon-root]]:opacity-80",

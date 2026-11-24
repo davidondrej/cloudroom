@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { BbRequestTimeoutError } from "@cloudroom/sdk/node";
 import * as fixtures from "../helpers/command-output-fixtures.js";
 import {
   setupCommandOutputTestEnvironment,
@@ -50,58 +51,179 @@ describe("room-cli thread tell command output", () => {
     });
   });
 
-  it("room-cli thread tell names the typed reason a message queued for", async () => {
-    // The server says WHY, so the CLI stops inferring it from the flags it
-    // sent — which is what let the old four-way delivery enum collapse.
-    const post = vi.fn(async () => ({
-      ok: true,
-      delivery: "queued",
-      queuedMessage: {
-        id: "qm_1",
-        waitingOn: { kind: "interaction" },
-        sendAt: null,
+  const sendAt = Date.UTC(2026, 10, 8, 7);
+  it.each([
+    [
+      { kind: "interaction" },
+      null,
+      "waiting for a pending interaction); it dispatches once that is resolved. `room-cli thread interactions list thread-q` shows it, and `show` prints how to answer.",
+    ],
+    [
+      {
+        kind: "plugin",
+        pluginId: "concurrency-limit",
+        reason: "4 of 4 running",
       },
-    }));
-    stubTellApi({ "v1.threads.:id.send.$post": post });
+      null,
+      "concurrency-limit: 4 of 4 running); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-q qm_1`",
+    ],
+    [
+      { kind: "time" },
+      sendAt,
+      `scheduled for ${new Date(sendAt).toLocaleString()}); it dispatches at that time on its own. Do not run \`room-cli thread queue send thread-q qm_1\`: it sends the message now.`,
+    ],
+  ])(
+    "room-cli thread tell names the typed reason a message queued for (%j)",
+    async (waitingOn, rowSendAt, expected) => {
+      // The server says WHY, so the CLI stops inferring it from the flags it
+      // sent — which is what let the old four-way delivery enum collapse.
+      const post = vi.fn(async () => ({
+        ok: true,
+        delivery: "queued",
+        queuedMessage: { id: "qm_1", waitingOn, sendAt: rowSendAt },
+      }));
+      stubTellApi({ "v1.threads.:id.send.$post": post });
 
-    await runCommand(["thread", "tell", "thread-blocked", "hello"], register);
+      await runCommand(["thread", "tell", "thread-q", "hello"], register);
 
-    expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-blocked message queued (waiting for a pending interaction); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-blocked qm_1`",
-    );
-  });
+      expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
+        `Thread thread-q message queued (${expected}`,
+      );
+    },
+  );
 
-  it("room-cli thread tell names the plugin a message is waiting on", async () => {
-    const post = vi.fn(async () => ({
-      ok: true,
-      delivery: "queued",
-      queuedMessage: {
-        id: "qm_2",
-        waitingOn: {
-          kind: "plugin",
-          pluginId: "concurrency-limit",
-          reason: "4 of 4 running",
-        },
-        sendAt: null,
-      },
-    }));
-    stubTellApi({ "v1.threads.:id.send.$post": post });
-
-    await runCommand(["thread", "tell", "thread-limited", "hello"], register);
-
-    expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-limited message queued (concurrency-limit: 4 of 4 running); it dispatches when that clears unless Stop pauses the queue, then run `room-cli thread queue send thread-limited qm_2`",
-    );
-  });
-
-  it("room-cli thread tell keeps the steered wording for servers that only report ok", async () => {
+  it("room-cli thread tell does not claim the agent accepted a sent message (#1536)", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });
 
     await runCommand(["thread", "tell", "thread-legacy", "hello"], register);
 
     expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-legacy steered",
+      "Thread thread-legacy message sent; the agent has not confirmed it yet. If it fails, `room-cli thread show thread-legacy` shows status error and why.",
+    );
+  });
+
+  it.each([
+    [
+      "was not sent",
+      async () =>
+        new Response(JSON.stringify({ code: "caller_proof_required" }), {
+          status: 401,
+        }),
+      "Error: The message was not sent; sending it again is safe. HTTP 401",
+    ],
+    [
+      "was not sent when Cloudroom is down",
+      () =>
+        Promise.reject(
+          new TypeError("fetch failed", {
+            cause: Object.assign(new Error("connect ECONNREFUSED"), {
+              code: "ECONNREFUSED",
+            }),
+          }),
+        ),
+      "Error: The message was not sent; sending it again is safe. Cannot connect to Cloudroom server.",
+    ],
+    [
+      "may already have been sent",
+      () => Promise.reject(new TypeError("fetch failed")),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again.",
+    ],
+    [
+      "may already have been sent when Cloudroom never answers (#1832)",
+      () => Promise.reject(new BbRequestTimeoutError(75_000)),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (no answer within 75 seconds; it may be busy). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again. The server may still be handling it, so an empty log and queue don't prove it wasn't sent: wait a minute and check again before resending.",
+    ],
+    [
+      "may already have been sent after a tunnel timeout (#1513)",
+      async () =>
+        new Response("cloudroom: timed out waiting for the tunnel client\n", {
+          status: 504,
+        }),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 504: cloudroom: timed out waiting for the tunnel client).",
+    ],
+    [
+      "may already have been sent after a server error, with its error ID (#1341)",
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "Internal server error",
+            errorId: "ab12cd34",
+          }),
+          { status: 500 },
+        ),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 500: Internal server error, error ID ab12cd34). Check `room-cli thread log thread-x`",
+    ],
+  ])(
+    "room-cli thread tell says a failed message %s",
+    async (_, post, error) => {
+      stubTellApi({ "v1.threads.:id.send.$post": post });
+
+      await expect(
+        runCommand(["thread", "tell", "thread-x", "hello"], register),
+      ).rejects.toThrow("process.exit:1");
+      expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+        error,
+      );
+    },
+  );
+
+  it("room-cli thread tell keeps the request ID when a Cloud reply is lost", async () => {
+    const post = vi.fn(async () => new Response("", { status: 200 }));
+    stubTellApi({
+      "v1.threads.:id.$get": async () =>
+        fixtures.makeThread({
+          id: "thread-x",
+          projectId: "proj-local",
+          providerId: "codex",
+          executionTarget: "cloud",
+        }),
+      "v1.threads.:id.send.$post": post,
+    });
+
+    await expect(
+      runCommand(
+        ["thread", "tell", "thread-x", "hi", "--mode", "queue", "--json"],
+        register,
+      ),
+    ).rejects.toThrow("process.exit:1");
+    const { requestId } = (
+      post.mock.calls[0] as unknown as [{ json: { requestId: string } }]
+    )[0].json;
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])),
+    ).toMatchObject({ ok: false, unconfirmed: true, requestId });
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+      `--request-id ${requestId}`,
+    );
+  });
+
+  it("room-cli thread tell --json names the archived thread that refused it (#1276)", async () => {
+    const details = {
+      reason: "archived",
+      archivedAt: 1,
+      threadStatus: "idle",
+      threadId: "thread-x",
+    };
+    const message =
+      "Thread thread-x is archived (since 1970-01-01T00:00:00.001Z). Check the thread ID, or unarchive it first.";
+    stubTellApi({
+      "v1.threads.:id.send.$post": async () =>
+        new Response(
+          JSON.stringify({ code: "thread_not_writable", message, details }),
+          { status: 409 },
+        ),
+    });
+
+    await expect(
+      runCommand(["thread", "tell", "thread-x", "hi", "--json"], register),
+    ).rejects.toThrow("process.exit:1");
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])),
+    ).toMatchObject({ ok: false, threadId: "thread-x", details });
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+      `HTTP 409: ${message}`,
     );
   });
 
@@ -117,6 +239,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-queue-tell" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "hello", mentions: [] }],
         mode: "queue-if-active",
       },
@@ -135,6 +258,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-auto-tell" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "hello", mentions: [] }],
         mode: "auto",
       },
@@ -166,6 +290,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-execution-options" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "hello", mentions: [] }],
         mode: "steer-if-active",
         model: "gpt-5.5",
@@ -174,6 +299,38 @@ describe("room-cli thread tell command output", () => {
         permissionMode: "accept-edits",
       },
     });
+  });
+
+  it("room-cli thread tell --message-file sends a body too long for argv (#1220)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "room-cli-message-file-"));
+    try {
+      const text = 'Línea ✓ "quotes" $(x)\n'.repeat(10_000);
+      await writeFile(join(dir, "m.txt"), `\uFEFF${text}`);
+      const post = vi.fn(async () => ({ ok: true }));
+      stubTellApi({ "v1.threads.:id.send.$post": post });
+      const args = [
+        "thread",
+        "tell",
+        "t",
+        "--message-file",
+        join(dir, "m.txt"),
+      ];
+
+      await runCommand(args, register);
+      expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({
+          json: expect.objectContaining({
+            input: [{ type: "text", text, mentions: [] }],
+          }),
+        }),
+      );
+      await expect(runCommand([...args, "hi"], register)).rejects.toThrow(
+        "process.exit:1",
+      );
+      expect(post).toHaveBeenCalledTimes(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("room-cli thread tell forwards automatic review mode", async () => {
@@ -195,6 +352,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-auto-review" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "hello", mentions: [] }],
         mode: "steer-if-active",
         permissionMode: "auto",
@@ -222,6 +380,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-plan" },
       json: {
+        requestId: expect.any(String),
         input: [
           {
             type: "text",
@@ -325,6 +484,7 @@ describe("room-cli thread tell command output", () => {
         expect(post).toHaveBeenCalledWith({
           param: { id: "thread-attachments" },
           json: {
+            requestId: expect.any(String),
             input: [
               { type: "text", text: "review these", mentions: [] },
               { type: "localFile", path: "existing-report.pdf" },
@@ -352,6 +512,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-receiver" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "hello from sender", mentions: [] }],
         mode: "steer-if-active",
         senderThreadId: "thread-sender",
@@ -369,6 +530,7 @@ describe("room-cli thread tell command output", () => {
     expect(post).toHaveBeenCalledWith({
       param: { id: "thread-self" },
       json: {
+        requestId: expect.any(String),
         input: [{ type: "text", text: "self note", mentions: [] }],
         mode: "steer-if-active",
       },

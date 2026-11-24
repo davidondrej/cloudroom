@@ -171,7 +171,11 @@ export type QueuedMessagePayloadKind = z.infer<
 >;
 
 export const queuedMessagePayloadSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("inline") }),
+  z.object({
+    kind: z.literal("inline"),
+    /** Typed by a person in the app's message box: never held as a repeat (#264). */
+    fromComposer: z.literal(true).optional(),
+  }),
   z.object({
     kind: z.literal("retry"),
     /**
@@ -211,6 +215,16 @@ export type QueuedMessagePayload = z.infer<typeof queuedMessagePayloadSchema>;
 export const queuedMessageSystemNoticeSchema = z.object({
   kind: systemMessageKindSchema,
   subject: systemMessageSubjectSchema.nullable(),
+  /**
+   * A child turn report's own facts (#1208): when its turns ended, and each
+   * child's latest event sequence then, so a late delivery can say its age
+   * and which children wrote newer output. Absent on every other notice.
+   */
+  childReport: z
+    .object({ at: z.number(), sequences: z.record(z.string(), z.number()) })
+    .optional(),
+  /** A child's needs-attention notice: the interaction it reports (#2452). */
+  interactionId: z.string().optional(),
 });
 export type QueuedMessageSystemNotice = z.infer<
   typeof queuedMessageSystemNoticeSchema

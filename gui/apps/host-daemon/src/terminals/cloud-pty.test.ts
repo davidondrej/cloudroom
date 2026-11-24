@@ -63,6 +63,8 @@ async function fakeCore(steps: Step[]) {
       socket,
     };
     socket.on("data", (chunk: Buffer) => attach.received.push(chunk));
+    // The app may drop a connection mid-write (an oversize frame); that reset is expected.
+    socket.on("error", () => {});
     attaches.push(attach);
     step(attach);
   });
@@ -169,6 +171,30 @@ describe("cloud terminal connection", () => {
 
     expect(core.upgrades()).toBe(3);
     expect(state.exitCode).toBeUndefined();
+    cloud.pty.dispose();
+  });
+
+  it("drops a frame longer than Core sends, then reconnects and reads a full one", async () => {
+    const big = Buffer.alloc(1024 * 1024, "x");
+    const core = await fakeCore([
+      (attach) => attach.socket.write(hello(0)),
+      (attach) => {
+        const bytes = Buffer.concat([hello(0), frame(0, big)]);
+        for (let at = 0; at < bytes.length; at += 100_000)
+          attach.socket.write(bytes.subarray(at, at + 100_000));
+      },
+    ]);
+    const cloud = await core.open();
+    const state = watch(cloud);
+    const header = Buffer.alloc(5);
+    header.writeUInt32BE(2 ** 31, 1);
+    (await core.attached(1)).socket.write(
+      Buffer.concat([header, Buffer.alloc(64 * 1024)]),
+    );
+    await core.attached(2);
+    while (!state.output.endsWith(big.toString())) await wait(10);
+
+    expect(core.upgrades()).toBe(2);
     cloud.pty.dispose();
   });
 

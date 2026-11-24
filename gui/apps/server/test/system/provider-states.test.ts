@@ -38,6 +38,8 @@ const INSTALLED_ONLY_PROVIDER_IDS = new Set([
   "acp-droid",
   "acp-kilo",
   "acp-cline",
+  "acp-kimi",
+  "acp-agent-zero",
 ]);
 
 function healthForInstalledOnlyProvider(
@@ -67,10 +69,11 @@ describe("getProviderStates", () => {
       });
 
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
       ]);
       expect(result.providers).toEqual(
         expect.arrayContaining([
@@ -155,11 +158,13 @@ describe("getProviderStates", () => {
   it("asks each provider bridge and preserves model-picker order", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
+      const asked: string[] = [];
       registerHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
           if (request.command.type === "provider.health") {
+            asked.push(request.command.providerId);
             return {
               ok: true,
               result: {
@@ -180,16 +185,28 @@ describe("getProviderStates", () => {
       });
 
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
       ]);
       expect(result.providers[0]).toMatchObject({
-        providerId: "codex",
+        providerId: "claude-code",
         status: "ready",
       });
+
+      // One provider is asked alone, so a slow unrelated bridge can't delay it.
+      asked.length = 0;
+      const codex = await getProviderStates(harness.deps, {
+        hostId: host.id,
+        providerId: "codex",
+      });
+      expect(codex.providers.map((provider) => provider.providerId)).toEqual([
+        "codex",
+      ]);
+      expect(asked).toEqual(["codex"]);
     });
   });
 
@@ -321,13 +338,13 @@ describe("getProviderStates", () => {
         environmentId: environment.id,
       });
 
-      expect(result.providers[0]?.providerId).toBe("codex");
+      expect(result.providers[0]?.providerId).toBe("claude-code");
       expect(primaryCalls).toBe(0);
       expect(healthCwds.filter((cwd) => cwd === undefined)).toHaveLength(
         INSTALLED_ONLY_PROVIDER_IDS.size,
       );
       expect(healthCwds.filter((cwd) => cwd !== undefined)).toEqual(
-        Array(4).fill(environment.path),
+        Array(5).fill(environment.path),
       );
     });
   });

@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { PromptMentionResource, PromptTextMention } from "@cloudroom/domain";
 import type { TimelineTitleLink } from "@cloudroom/thread-view";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";

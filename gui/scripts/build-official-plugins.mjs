@@ -31,13 +31,13 @@ for (const plugin of selected) {
   }
 }
 
-const bbPackage = JSON.parse(
+const roomPackage = JSON.parse(
   await readFile(
     resolve(repositoryRoot, "packages/bb-app/package.json"),
     "utf8",
   ),
 );
-if (typeof bbPackage.version !== "string") {
+if (typeof roomPackage.version !== "string") {
   throw new Error("packages/bb-app/package.json is missing a version");
 }
 
@@ -50,14 +50,14 @@ for (const plugin of selected) {
 
   const server = await buildPluginServer(
     rootDirectory,
-    bbPackage.version,
+    roomPackage.version,
     toolchain,
   );
   const app = manifest.bb?.app
-    ? await buildPluginApp(rootDirectory, bbPackage.version, toolchain)
+    ? await buildPluginApp(rootDirectory, roomPackage.version, toolchain)
     : null;
   const host = manifest.bb?.host
-    ? await buildPluginHost(rootDirectory, bbPackage.version, toolchain)
+    ? await buildPluginHost(rootDirectory, roomPackage.version, toolchain)
     : null;
   const outputs = [server.jsPath, server.metaPath];
   if (app !== null) {

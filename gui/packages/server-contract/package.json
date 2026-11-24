@@ -12,8 +12,8 @@
   },
   "types": "./src/index.ts",
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
@@ -21,14 +21,13 @@
     "@cloudroom/host-daemon-contract": "workspace:*",
     "@cloudroom/hono-typed-routes": "workspace:*",
     "@cloudroom/provider-bridge-protocol": "workspace:*",
-    "hono": "^4.7.0",
+    "hono": "^4.13.16",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudroom/test-helpers": "workspace:*",
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

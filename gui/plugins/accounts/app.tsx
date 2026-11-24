@@ -1,7 +1,16 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
-import { useCallback, useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import {
   definePluginApp,
+  experimental_ProviderIcon as ProviderIcon,
+  experimental_useProviders as useProviders,
   useBbNavigate,
   useRealtime,
   useRpc,
@@ -14,11 +23,14 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { Switch } from "@cloudroom/shared-ui/switch";
 import {
   ACCOUNTS_CHANGED,
   LOCAL,
   MAX_ACCOUNTS,
+  USAGE_STALE_MS,
   type AccountView,
   type Provider,
   type accountsRpcContract,
@@ -30,89 +42,220 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function until(timestamp: number): string {
-  const minutes = Math.max(1, Math.round((timestamp - Date.now()) / 60_000));
+// A time span: "5m", "2h 10m", "1d 6h".
+function span(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   return hours < 24
     ? `${hours}h ${minutes % 60}m`
     : `${Math.floor(hours / 24)}d ${hours % 24}h`;
 }
+const until = (timestamp: number) => span(timestamp - Date.now());
 
 function windowLabel(label: string): string {
   return label
     .replace("Five-hour limit", "5h")
+    .replace("Five-hour · ", "5h ")
     .replace("Weekly limit", "7d")
+    .replace("Weekly · ", "7d ")
     .replace("Weekly", "7d")
     .replace("Plan usage", "Plan")
+    .replace("Plan · ", "Plan ")
     .replace("On-demand spend", "Spend");
 }
 
-const tileClass = "flex min-h-32 flex-col rounded-lg border p-3.5 text-sm";
+// One line of an account's limits. `usedPercent` is null for a limit that was not read: it is unknown, not 0%.
+type Limit = {
+  label: string;
+  usedPercent: number | null;
+  resetsAt: number | null;
+  checkedAt?: number | null;
+};
 
-/** The Mac's own login, before Cloudroom has its own sign-in for it. */
-function TerminalTile({
-  account,
-  onSignIn,
-}: {
-  account: AccountView;
-  onSignIn: () => void;
-}) {
+// The line: the limit's name, bar, percent used, and the time until it resets. Greyed when no read confirmed it lately.
+// An old bar is a floor until its reset. Past it, or at 0%, nothing is known: it shows "–", not a guessed 0%.
+function Meter({ label, usedPercent, resetsAt, checkedAt }: Limit) {
+  const used = usedPercent ?? 0;
+  const hot = used >= 90;
+  const old = checkedAt != null && Date.now() - checkedAt > USAGE_STALE_MS;
+  const unknown = usedPercent === null || (old && used === 0 && resetsAt === null);
   return (
-    <button
-      type="button"
-      onClick={onSignIn}
-      className={cn(
-        tileClass,
-        "items-center justify-center gap-2.5 border-dashed border-border text-center text-muted-foreground hover:border-foreground/50 hover:text-foreground",
-      )}
+    <div
+      className={cn("contents", old && "*:opacity-40")}
+      title={old ? (checkedAt ? `Last checked ${span(Date.now() - checkedAt)} ago` : "Last known usage") : undefined}
     >
-      <Icon name="Terminal" className="size-4" />
-      <span className="font-medium text-foreground">Add Terminal login</span>
-      <span className="max-w-full truncate text-xs">{account.email}</span>
-    </button>
+      <span>{windowLabel(label)}</span>
+      <span className="h-[3px] overflow-hidden rounded-full bg-border">
+        <span
+          className={cn("block h-full", hot ? "bg-warning-text" : "bg-muted-foreground")}
+          style={{ width: `${Math.min(100, used)}%` }}
+        />
+      </span>
+      <span
+        className={cn("text-right", hot && "text-warning-text")}
+        title={usedPercent === null ? "Not read yet" : unknown ? "Not checked lately" : undefined}
+      >
+        {unknown ? "–" : `${Math.round(used)}%`}
+      </span>
+      <span
+        className="whitespace-nowrap pl-1 text-subtle-foreground/75"
+        title={
+          resetsAt === null
+            ? undefined
+            : `Resets ${new Date(resetsAt).toLocaleString(undefined, {
+                weekday: "short",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+              })}`
+        }
+      >
+        {resetsAt === null ? null : until(resetsAt)}
+      </span>
+    </div>
   );
 }
 
-function AccountTile({
-  account,
+function fallbackName(account: AccountView, index: number): string {
+  return account.id === LOCAL
+    ? `This ${COMPUTER_TITLE}`
+    : (account.email ?? `Account ${index + 1}`);
+}
+
+function AccountRow({
+  account: loaded,
+  limits,
   index,
+  picking,
+  locked,
   onUse,
   onRename,
   onRemove,
   onSignInAgain,
+  signingIn,
 }: {
   account: AccountView;
+  // The limits every row of this agent shows, in order, each as it looks when the account doesn't report it.
+  limits: Limit[];
   index: number;
+  // This row is being switched to.
+  picking: boolean;
+  // A switch is running: no row can be picked.
+  locked: boolean;
   onUse: () => void;
   onRename: (name: string) => void;
   onRemove: () => void;
   onSignInAgain?: () => void;
+  // A sign-in is already running in this list: Sign in again waits for it.
+  signingIn: boolean;
 }) {
+  // The page can stay open past a reset, so a limit or a bar whose reset has passed clears here.
+  const now = Date.now();
+  const account = {
+    ...loaded,
+    limitedUntil:
+      loaded.limitedUntil !== null && loaded.limitedUntil > now
+        ? loaded.limitedUntil
+        : null,
+    windows: loaded.windows.map((window) =>
+      window.resetsAt !== null && window.resetsAt <= now
+        ? { ...window, usedPercent: 0, resetsAt: null }
+        : window,
+    ),
+  };
+  // Every limit gets its own line, with the time until it resets. A limit this account doesn't report shows empty,
+  // so every row has the same lines. An account with no usage read shows none.
+  // "Resets in" alone shows only for a limit that lasts longer than every full bar.
+  // A 0% Claude left out was confirmed by the row's latest read, so it greys with the rest.
+  const newest = Math.max(...account.windows.map((window) => window.checkedAt ?? -1));
+  const shown: Limit[] =
+    account.windows.length === 0
+      ? []
+      : limits.map(
+          (empty) =>
+            account.windows.find((window) => window.label === empty.label) ??
+            (empty.usedPercent === 0 && newest >= 0 ? { ...empty, checkedAt: newest } : empty),
+        );
+  // How long ago this row's bars were last read, once that's too long; 0 for bars saved before reads were timed.
+  const checkedAgo = newest >= 0 && now - newest > USAGE_STALE_MS ? (newest ? now - newest : 0) : null;
+  const full = shown.some(
+    (window) =>
+      Math.round(window.usedPercent ?? 0) >= 100 &&
+      window.resetsAt !== null &&
+      window.resetsAt >= (account.limitedUntil ?? 0) - 60_000,
+  );
   const [editing, setEditing] = useState(false);
+  const [privacy] = usePrivacyMode();
   const local = account.id === LOCAL;
-  const fallback =
-    account.email ?? (local ? `This ${COMPUTER_TITLE}` : `Account ${index + 1}`);
-  const name = account.name ?? fallback;
+  // A name belongs to a login, so "This Mac" needs one to be named.
+  const renamable = !local || account.email !== null;
+  // Privacy mode hides emails. A name the user wrote stays.
+  const real = account.name ?? fallbackName(account, index);
+  const fallback = hideEmail(fallbackName(account, index), privacy);
+  const name = hideEmail(real, privacy);
   const detail = [
-    account.inUse ? "In use" : "Not in use",
-    local && account.email ? `This ${COMPUTER_TITLE}` : null,
-    account.name ? account.email : null,
+    real === account.email ? null : hideEmail(account.email ?? "", privacy),
     account.plan,
+    local && account.name ? fallback : null,
   ]
     .filter(Boolean)
     .join(" · ");
-  const status = account.limitedUntil
-    ? `Limit hit · resets in ${until(account.limitedUntil)}`
-    : account.error;
+  const pickable = !account.inUse && !locked && !editing;
+  // During a switch the highlight is already on the picked row, so the old row drops its mark.
+  const marked = account.inUse && !locked;
+  // The whole row picks the account. The name field, links, buttons, and the ⋯ menu keep their own clicks.
+  // A click that only closes the name field must not switch accounts too.
+  const closing = useRef(false);
+  const pick = (event: MouseEvent) => {
+    const control = (event.target as Element).closest("button, input, [role=menu]");
+    const closed = closing.current;
+    closing.current = false;
+    if (
+      pickable &&
+      !closed &&
+      (control === null || control.getAttribute("role") === "radio")
+    )
+      onUse();
+  };
   return (
     <div
+      onMouseDown={() => {
+        closing.current = editing;
+      }}
+      onClick={pick}
       className={cn(
-        tileClass,
-        account.inUse ? "border-foreground/50" : "border-border",
+        "group/account flex flex-wrap items-center gap-x-3 gap-y-2 py-2.5 pl-3.5 pr-2 text-sm transition-colors",
+        pickable && "cursor-pointer hover:bg-surface-recessed",
       )}
     >
-      <div className="flex min-h-7 items-center justify-between gap-2">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={account.inUse}
+        aria-busy={picking}
+        aria-label={`Use ${name}`}
+        className={cn(
+          "-m-1.5 grid size-7 shrink-0 place-items-center rounded-full",
+          !pickable && "cursor-default",
+        )}
+      >
+        {picking ? (
+          <Icon name="Spinner" className="size-4 animate-spin text-foreground" />
+        ) : (
+          <span
+            className={cn(
+              "grid size-4 place-items-center rounded-full border-[1.5px] transition-colors",
+              marked ? "border-foreground" : "border-subtle-foreground/60",
+              pickable && "group-hover/account:border-foreground",
+            )}
+          >
+            {marked ? <span className="size-2 rounded-full bg-foreground" /> : null}
+          </span>
+        )}
+      </button>
+      <div className="min-w-0 flex-1">
         {editing ? (
           <input
             autoFocus
@@ -134,91 +277,130 @@ function AccountTile({
             }}
           />
         ) : (
-          <div className="truncate font-medium text-foreground" title={name}>
-            {name}
-          </div>
-        )}
-        {local ? null : (
-          <DropdownMenu modal={false}>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="size-7 shrink-0 text-muted-foreground"
-                aria-label="Account actions"
-              >
-                <Icon name="MoreHorizontal" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent
-              align="end"
-              // Keep focus on the rename field instead of the menu button.
-              onCloseAutoFocus={(event) => event.preventDefault()}
-            >
-              <DropdownMenuItem onSelect={() => setEditing(true)}>
-                <Icon name="Edit" /> Rename
-              </DropdownMenuItem>
-              {onSignInAgain ? (
-                <DropdownMenuItem onSelect={onSignInAgain}>
-                  <Icon name="RotateCcw" /> Sign in again
-                </DropdownMenuItem>
-              ) : null}
-              <DropdownMenuItem
-                onSelect={onRemove}
-                className="text-destructive-text focus:text-destructive-text"
-              >
-                <Icon name="Trash2" /> Remove
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        )}
-      </div>
-      <div className="truncate text-xs text-subtle-foreground" title={detail}>
-        {detail}
-      </div>
-      {status ? (
-        <div className="truncate text-xs text-warning-text" title={status}>
-          {status}
-        </div>
-      ) : null}
-      {account.limitedLogin && onSignInAgain ? (
-        <button
-          type="button"
-          onClick={onSignInAgain}
-          className="truncate text-left text-xs text-primary-text hover:underline"
-        >
-          Sign in again for claude.ai connectors
-        </button>
-      ) : null}
-      <div className="mt-auto space-y-1.5 pt-4">
-        {account.windows.slice(0, 2).map((window) => (
-          <div
-            key={window.label}
-            className="flex items-center gap-2 text-xs tabular-nums text-subtle-foreground"
-          >
-            <span className="min-w-5">{windowLabel(window.label)}</span>
-            <span className="h-[3px] flex-1 bg-border">
+          <div className="flex items-center gap-2 font-medium text-foreground">
+            <span className="truncate" title={name}>
+              {name}
+            </span>
+            {marked ? (
+              <span className="shrink-0 rounded bg-foreground/10 px-1.5 text-xs font-semibold leading-4">
+                In use
+              </span>
+            ) : null}
+            {checkedAgo !== null ? (
               <span
-                className="block h-full bg-muted-foreground"
-                style={{ width: `${Math.min(100, window.usedPercent)}%` }}
-              />
-            </span>
-            <span className="w-8 text-right">
-              {Math.round(window.usedPercent)}%
-            </span>
+                className="flex shrink-0 items-center gap-1 rounded bg-foreground/10 px-1.5 text-xs font-medium leading-4 text-subtle-foreground"
+                title={checkedAgo ? `Usage last checked ${span(checkedAgo)} ago` : "Last known usage"}
+              >
+                <Icon name="Clock" className="size-3" />
+                {checkedAgo ? `${span(checkedAgo).split(" ")[0]} ago` : "Not recent"}
+              </span>
+            ) : null}
           </div>
-        ))}
-        {account.inUse ? null : (
-          <Button
-            variant="outline"
-            size="sm"
-            className="mt-1.5"
-            onClick={onUse}
-          >
-            Use
-          </Button>
         )}
+        {detail ? (
+          <div className="truncate text-xs text-subtle-foreground" title={detail}>
+            {detail}
+          </div>
+        ) : null}
+        {/* A dead login shows even at a limit: the limit only hides usage-read errors. One click opens the sign-in page. */}
+        {account.signedOut && onSignInAgain ? (
+          // Clicks here never pick the row: a greyed-out button lets clicks through to it.
+          <div
+            className="mt-1.5 flex w-fit items-center gap-2"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <span className="text-xs text-warning-text" title={account.error ?? undefined}>
+              Signed out
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-6 gap-1 px-2 text-xs [&_[data-icon-root]]:size-3"
+              disabled={signingIn}
+              onClick={onSignInAgain}
+            >
+              <Icon name="RotateCcw" />
+              Sign in again
+            </Button>
+          </div>
+        ) : account.error && !account.limitedUntil ? (
+          <div className="truncate text-xs text-warning-text" title={account.error}>
+            {account.error}
+          </div>
+        ) : null}
+        {account.limitedLogin && onSignInAgain ? (
+          <button
+            type="button"
+            disabled={signingIn}
+            onClick={onSignInAgain}
+            className="block max-w-full truncate text-left text-xs text-primary-text hover:underline"
+          >
+            Sign in again for claude.ai connectors
+          </button>
+        ) : null}
       </div>
+      {/* On a narrow screen the usage drops to its own line, under the name. */}
+      <div className="order-last flex basis-full flex-wrap items-center gap-x-5 gap-y-1 pl-7 sm:order-none sm:basis-auto sm:justify-end sm:pl-0">
+        {account.limitedUntil && !full ? (
+          <span className="whitespace-nowrap text-xs text-subtle-foreground">
+            Resets in {until(account.limitedUntil)}
+          </span>
+        ) : null}
+        {shown.length > 0 ? (
+          <div className="grid grid-cols-[auto_6rem_2rem_3.25rem] items-center gap-x-2 text-xs leading-[18px] tabular-nums text-subtle-foreground">
+            {shown.map((window) => (
+              <Meter
+                key={window.label}
+                label={window.label}
+                usedPercent={window.usedPercent}
+                resetsAt={window.resetsAt}
+                checkedAt={window.checkedAt}
+              />
+            ))}
+          </div>
+        ) : null}
+        {account.inUse && account.needsSignIn ? (
+          <Button variant="outline" size="sm" onClick={onUse}>
+            Approve for Cloud
+          </Button>
+        ) : null}
+      </div>
+      {/* "This Mac" signed out has nothing to do: no login to name, and the computer's own login is never removed here. */}
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild disabled={!renamable}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-7 shrink-0 text-muted-foreground"
+            aria-label="Account actions"
+          >
+            <Icon name="MoreHorizontal" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          // Keep focus on the rename field instead of the menu button.
+          onCloseAutoFocus={(event) => event.preventDefault()}
+        >
+          <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <Icon name="Edit" /> Rename
+          </DropdownMenuItem>
+          {onSignInAgain ? (
+            <DropdownMenuItem disabled={signingIn} onSelect={onSignInAgain}>
+              <Icon name="RotateCcw" /> Sign in again
+            </DropdownMenuItem>
+          ) : null}
+          {/* Removing This Mac would sign the computer out. */}
+          {local ? null : (
+            <DropdownMenuItem
+              onSelect={onRemove}
+              className="text-destructive-text focus:text-destructive-text"
+            >
+              <Icon name="Trash2" /> Remove
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }
@@ -334,7 +516,9 @@ function SignInRow({
                 </span>
               </>
             ) : provider === "claude-code" ? (
-              step.second ? (
+              mac ? (
+                "Approve this Mac's account for Cloud"
+              ) : step.second ? (
                 "Approve once more, for Cloud · 2 of 2"
               ) : (
                 "Waiting for sign-in · 1 of 2"
@@ -433,27 +617,197 @@ function KeyRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
   );
 }
 
+/** Antigravity accounts sign in with Google like Cloud does: the link opens, and Google shows a code to paste back. */
+function CodeRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
+  const navigate = useBbNavigate();
+  const [session, setSession] = useState<{ id: string; url: string } | null>(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Each try is a new sign-in; leaving the row cancels the open one.
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    let started: string | null = null;
+    rpc.call("antigravity.start", null).then(
+      (next) => {
+        started = next.sessionId;
+        if (cancelled) {
+          void rpc.call("antigravity.cancel", { sessionId: next.sessionId });
+          return;
+        }
+        setSession({ id: next.sessionId, url: next.authorizeUrl });
+        navigate.openUrl(next.authorizeUrl);
+      },
+      (cause: unknown) => !cancelled && setError(errorText(cause)),
+    );
+    return () => {
+      cancelled = true;
+      if (started) void rpc.call("antigravity.cancel", { sessionId: started });
+    };
+  }, [rpc, attempt]);
+  const retry = () => {
+    setSession(null);
+    setCode("");
+    setError(null);
+    setAttempt((count) => count + 1);
+  };
+  const add = () => {
+    if (!session) return;
+    setBusy(true);
+    setError(null);
+    rpc.call("antigravity.complete", { sessionId: session.id, code }).then(close, (cause: unknown) => {
+      const message = errorText(cause);
+      // A mistyped code keeps the sign-in open; any other error ends it.
+      if (!message.startsWith("Paste the code")) setSession(null);
+      setError(message);
+      setBusy(false);
+    });
+  };
+  return (
+    <div className="space-y-2 py-2.5 text-sm">
+      <div className="flex items-center gap-2">
+        <input
+          autoFocus
+          aria-label="Google sign-in code"
+          placeholder={session ? "Paste the code Google shows" : error ? "Sign-in ended" : "Starting sign-in…"}
+          value={code}
+          disabled={busy || !session}
+          onChange={(event) => setCode(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && code.trim()) add();
+            if (event.key === "Escape" && !busy) close();
+          }}
+          className="min-w-0 flex-1 rounded border border-border bg-transparent px-2 py-1 text-sm text-foreground outline-none focus:border-foreground/50"
+        />
+        {session || busy ? (
+          <Button size="sm" disabled={busy || !code.trim()} onClick={add}>
+            {busy ? "Signing in…" : "Add"}
+          </Button>
+        ) : error ? (
+          <Button size="sm" onClick={retry}>
+            Try again
+          </Button>
+        ) : null}
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-7 text-muted-foreground"
+          aria-label="Cancel"
+          disabled={busy}
+          onClick={close}
+        >
+          <Icon name="X" />
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {error ? (
+          <span className="text-destructive-text">{error}</span>
+        ) : session ? (
+          <>
+            Sign in with the other Google account, then paste the code here.{" "}
+            <button
+              type="button"
+              onClick={() => navigate.openUrl(session.url)}
+              className="text-primary-text hover:underline"
+            >
+              Open sign-in again
+            </button>
+          </>
+        ) : (
+          "Opening Google sign-in…"
+        )}
+      </p>
+    </div>
+  );
+}
+
 function AccountsSection({
   provider,
-  title = "Accounts",
+  name,
+  hideWhenEmpty = false,
+  note,
+  onPresence,
 }: {
   provider: Provider;
-  title?: string;
+  name: string;
+  hideWhenEmpty?: boolean;
+  note?: string | undefined;
+  onPresence?: ((present: boolean) => void) | undefined;
 }) {
   const rpc = useRpc<typeof accountsRpcContract>();
+  const { providers } = useProviders();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
   const [adding, setAdding] = useState<{
     mac: boolean;
     id: string | null;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The account being switched to, and the one a finished switch names for a few seconds.
+  const [picking, setPicking] = useState<string | null>(null);
+  const [switched, setSwitched] = useState<string | null>(null);
+  const [privacy] = usePrivacyMode();
   const load = useCallback(() => {
     rpc
       .call("accounts.list", { provider })
-      .then(setAccounts, (cause: unknown) => setError(errorText(cause)));
-  }, [provider, rpc]);
+      .then(
+        (list) => {
+          setAccounts(list);
+          onPresence?.(list.length > 0);
+        },
+        (cause: unknown) => {
+          setError(errorText(cause));
+          onPresence?.(false);
+        },
+      );
+  }, [provider, rpc, onPresence]);
   useEffect(load, [load]);
   useRealtime(ACCOUNTS_CHANGED, load);
+  useEffect(() => {
+    if (switched === null) return;
+    const timer = window.setTimeout(() => setSwitched(null), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [switched]);
+
+  // The highlight moves to the picked row at once, and back if the switch fails. Rows never move.
+  const use = async (id: string, name: string) => {
+    setPicking(id);
+    setSwitched(null);
+    setError(null);
+    try {
+      await rpc.call("accounts.use", { provider, id, where: "settings" });
+      setAccounts(await rpc.call("accounts.list", { provider }));
+      setSwitched(name);
+    } catch (cause) {
+      setError(errorText(cause));
+      load();
+    }
+    setPicking(null);
+  };
+  // One highlight per list, placed over the row in use: it slides instead of jumping.
+  const rows = useRef<HTMLDivElement>(null);
+  const [highlight, setHighlight] = useState<{ top: number; height: number } | null>(null);
+  const marked = accounts?.findIndex((account) =>
+    picking === null ? account.inUse : account.id === picking,
+  );
+  useLayoutEffect(() => {
+    const list = rows.current;
+    if (!list) return;
+    const place = () => {
+      const row = list.children[marked ?? -1];
+      const next =
+        row instanceof HTMLElement
+          ? { top: row.offsetTop, height: row.offsetHeight }
+          : null;
+      setHighlight((before) =>
+        before?.top === next?.top && before?.height === next?.height ? before : next,
+      );
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [marked, accounts]);
 
   const run = async (work: () => Promise<unknown>) => {
     setError(null);
@@ -465,14 +819,67 @@ function AccountsSection({
     load();
   };
 
+  // The usage box's "+" links here with ?agent=<provider>.
+  const section = useRef<HTMLElement>(null);
+  const loaded = accounts !== null;
+  useEffect(() => {
+    if (
+      loaded &&
+      new URLSearchParams(window.location.search).get("agent") === provider
+    )
+      section.current?.scrollIntoView({ block: "nearest" });
+  }, [loaded, provider]);
+
   const count = accounts?.filter((account) => account.id !== LOCAL).length ?? 0;
+  // Optional subscriptions (Antigravity) stay hidden unless connected on this computer.
+  if (hideWhenEmpty && (accounts === null || accounts.length === 0)) return null;
+  // Every account shows the same limits, so the lines match from row to row.
+  // Claude leaves out 5h and 7d while they have no use, so those show 0%. Any other limit an account leaves out
+  // was not read (the reply check can't read a model's limit): it shows as unknown.
+  const unused = provider === "claude-code" ? ["Five-hour limit", "Weekly limit"] : [];
+  const limits: Limit[] = [
+    ...new Set([
+      ...unused,
+      ...(accounts ?? []).flatMap((account) =>
+        account.windows.map((window) => window.label),
+      ),
+    ]),
+  ].map((label) => ({
+    label,
+    usedPercent: unused.includes(label) ? 0 : null,
+    resetsAt: null,
+  }));
   return (
-    <section className="space-y-2.5">
-      <div className="flex items-center justify-between gap-4">
-        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+    <section ref={section} className="space-y-2">
+      <div className="flex items-center gap-2 pl-0.5">
+        <ProviderIcon
+          providerKind="agent"
+          provider={
+            providers.find((info) => info.id === provider) ?? { id: provider }
+          }
+          fallback="Bot"
+          className="size-4 shrink-0"
+          aria-hidden
+        />
+        <h2 className="flex-1 text-sm font-semibold text-foreground">{name}</h2>
+        <p
+          role="status"
+          className="hidden min-w-0 items-center gap-1.5 truncate text-xs text-muted-foreground sm:flex"
+        >
+          {switched ? (
+            <>
+              <Icon name="Check" className="size-3.5 shrink-0" />
+              All threads now use
+              <span className="truncate font-medium text-foreground">
+                {hideEmail(switched, privacy)}
+              </span>
+            </>
+          ) : null}
+        </p>
         <Button
           variant="ghost"
           size="sm"
+          aria-label={`Add ${name} account`}
           disabled={adding !== null || count >= MAX_ACCOUNTS}
           onClick={() => setAdding({ mac: false, id: null })}
         >
@@ -481,55 +888,77 @@ function AccountsSection({
       </div>
       {accounts === null ? (
         <p className="py-2.5 text-xs text-muted-foreground">Loading…</p>
-      ) : (
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(13rem,1fr))] gap-3">
-          {[...accounts]
-            .sort((a, b) => Number(a.needsSignIn) - Number(b.needsSignIn))
-            .map((account, index) =>
-              account.needsSignIn ? (
-                <TerminalTile
-                  key={account.id}
-                  account={account}
-                  onSignIn={() => setAdding({ mac: true, id: null })}
-                />
-              ) : (
-                <AccountTile
-                  key={account.id}
-                  account={account}
-                  index={index}
-                  onUse={() =>
-                    void run(() =>
-                      rpc.call("accounts.use", { provider, id: account.id }),
-                    )
-                  }
-                  onRename={(name) =>
-                    void run(() =>
-                      rpc.call("accounts.rename", {
-                        provider,
-                        id: account.id,
-                        name,
-                      }),
-                    )
-                  }
-                  onRemove={() =>
-                    void run(() =>
-                      rpc.call("accounts.remove", { provider, id: account.id }),
-                    )
-                  }
-                  onSignInAgain={
-                    provider === "claude-code" && adding === null
-                      ? () => setAdding({ mac: false, id: account.id })
-                      : undefined
-                  }
-                />
-              ),
-            )}
+      ) : accounts.length > 0 ? (
+        <div
+          role="radiogroup"
+          aria-label={`${name} accounts`}
+          className="relative overflow-hidden rounded-lg border border-border"
+        >
+          {highlight ? (
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-0 border-l-[3px] border-foreground bg-accent transition-[transform,height] duration-300 ease-out motion-reduce:transition-none"
+              style={{
+                transform: `translateY(${highlight.top}px)`,
+                height: highlight.height,
+              }}
+            />
+          ) : null}
+          <div ref={rows} className="relative divide-y divide-border">
+            {accounts.map((account, index) => (
+              <AccountRow
+                key={account.id}
+                account={account}
+                limits={limits}
+                index={index}
+                picking={account.id === picking}
+                locked={picking !== null}
+                onUse={() =>
+                  // The Mac's own Claude login needs one approval before Cloud can follow it.
+                  account.needsSignIn
+                    ? setAdding({ mac: true, id: null })
+                    : void use(
+                        account.id,
+                        account.name ?? fallbackName(account, index),
+                      )
+                }
+                onRename={(name) =>
+                  void run(() =>
+                    rpc.call("accounts.rename", {
+                      provider,
+                      id: account.id,
+                      name,
+                    }),
+                  )
+                }
+                onRemove={() =>
+                  void run(() =>
+                    rpc.call("accounts.remove", { provider, id: account.id }),
+                  )
+                }
+                onSignInAgain={
+                  provider === "claude-code" && account.id !== LOCAL
+                    ? () => setAdding({ mac: false, id: account.id })
+                    : undefined
+                }
+                signingIn={adding !== null}
+              />
+            ))}
+          </div>
         </div>
-      )}
+      ) : null}
       {adding ? (
         <div className="rounded-lg border border-dashed border-border px-3.5">
           {provider === "acp-cursor" ? (
             <KeyRow
+              rpc={rpc}
+              close={() => {
+                setAdding(null);
+                load();
+              }}
+            />
+          ) : provider === "acp-antigravity" ? (
+            <CodeRow
               rpc={rpc}
               close={() => {
                 setAdding(null);
@@ -550,28 +979,73 @@ function AccountsSection({
           )}
         </div>
       ) : null}
-      <p className="text-xs text-subtle-foreground">
-        All Local and Cloud threads use the account in use.
-      </p>
+      {note ? (
+        <p className="text-xs text-subtle-foreground">{note}</p>
+      ) : null}
       {error ? <p className="text-xs text-destructive-text">{error}</p> : null}
     </section>
   );
 }
 
+const AGENTS: readonly {
+  provider: Provider;
+  name: string;
+  hideWhenEmpty?: boolean;
+}[] = [
+  { provider: "claude-code", name: "Claude Code" },
+  { provider: "codex", name: "Codex" },
+  { provider: "acp-cursor", name: "Cursor" },
+  { provider: "acp-antigravity", name: "Antigravity", hideWhenEmpty: true },
+];
+
+/** Settings → Agents → Accounts: every agent's accounts on one page. All threads use the one picked. */
+function AccountsPage() {
+  // Draws the page again every minute, so the countdowns move and passed resets clear. It loads nothing.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    const timer = window.setInterval(() => tick((count) => count + 1), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const [privacy, setPrivacy] = usePrivacyMode();
+  const [hasAntigravity, setHasAntigravity] = useState(false);
+  return (
+    <div className="space-y-2">
+      {/* Hides emails here and in the usage box, for recordings. */}
+      <label className="ml-auto flex w-fit cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+        Privacy mode
+        <Switch checked={privacy} onCheckedChange={setPrivacy} />
+      </label>
+      <div className="space-y-6">
+        {AGENTS.map((agent) => (
+          <AccountsSection
+            key={agent.provider}
+            {...agent}
+            onPresence={
+              agent.provider === "acp-antigravity"
+                ? setHasAntigravity
+                : undefined
+            }
+            note={
+              agent.provider === "acp-antigravity"
+                ? "Added Antigravity accounts run Local threads; Cloud keeps its own Antigravity login. Grok signs in with your X subscription, so there's nothing to add for it."
+                : agent.provider === "acp-cursor" && !hasAntigravity
+                  ? "Grok signs in with your X subscription. One login covers it, so there's nothing to add here."
+                  : undefined
+            }
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
+  // Settings → Agents → Accounts, the one place for every agent's accounts.
   app.slots.settingsSection({
-    id: "claude-code",
-    component: () => <AccountsSection provider="claude-code" />,
-  });
-  app.slots.settingsSection({
-    id: "codex",
-    component: () => <AccountsSection provider="codex" />,
-  });
-  // Settings → Agents → ACP, which holds Cursor.
-  app.slots.settingsSection({
-    id: "acp",
-    component: () => (
-      <AccountsSection provider="acp-cursor" title="Cursor accounts" />
-    ),
+    id: "accounts",
+    // Not shown on the page (the tab names it). Settings search finds the page by these.
+    title: "Agent accounts",
+    description: "Add and switch Claude Code, Codex, Cursor, and Antigravity subscriptions.",
+    component: AccountsPage,
   });
 });

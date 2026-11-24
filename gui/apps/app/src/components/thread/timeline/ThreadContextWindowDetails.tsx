@@ -5,7 +5,7 @@ import type { ContextCategory, ContextSnapshot } from "@cloudroom/domain";
 
 type ContextWindowDetails = Pick<ContextSnapshot, "categories">;
 
-const CATEGORY_COLORS = [
+export const CATEGORY_COLORS = [
   "var(--ansi-4)",
   "var(--ansi-1)",
   "var(--ansi-3)",
@@ -14,39 +14,6 @@ const CATEGORY_COLORS = [
   "var(--ansi-2)",
   "var(--ansi-8)",
 ];
-
-export function ThreadContextWindowSegments({
-  details,
-  modelContextWindow,
-  visible,
-}: {
-  details: ContextWindowDetails;
-  modelContextWindow: number;
-  visible: boolean;
-}) {
-  return (
-    <div
-      aria-hidden="true"
-      className={cn(
-        "pointer-events-none absolute inset-0 flex transition-opacity duration-200 ease-out motion-reduce:transition-none",
-        visible ? "opacity-100" : "opacity-0",
-      )}
-    >
-      {details.categories
-        .filter((category) => category.kind === "used")
-        .map((category, index) => (
-          <div
-            key={category.id}
-            className="h-full shrink-0"
-            style={{
-              width: `${(category.tokens / modelContextWindow) * 100}%`,
-              backgroundColor: CATEGORY_COLORS[index % CATEGORY_COLORS.length],
-            }}
-          />
-        ))}
-    </div>
-  );
-}
 
 export function ContextWindowReveal({
   open,

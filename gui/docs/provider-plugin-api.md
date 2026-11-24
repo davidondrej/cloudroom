@@ -63,6 +63,7 @@ bb.providers.register({
     fork: "checkpoint",          // "none" | "tip" | "checkpoint"
     supportsNativeUserQuestion: true,
     supportsManualCompaction: true,
+    resumesInNewFolder: true,    // optional; a moved thread keeps its session (default: fresh session + chat history)
     supportsThreadArchive: true,
     supportsThreadRename: true,
     supportsServiceTier: false,
@@ -93,7 +94,10 @@ bb keeps each machine's last successful `model/list` answer per
 immediately, and refreshes it in the background once it is 10 minutes old. A
 stored answer is discarded when the bridge fingerprint changes (plugin bundle
 digest, bridge options, env passthrough). A list that depends on login state,
-CLI version, or environment values is corrected only by the next refresh.
+CLI version, or environment values is corrected only by the next refresh. When
+listing fails or times out, a new thread with no model starts on the `fallback`
+default, or, with no `fallback`, on the default from the machine's last stored
+answer, even one an app update discarded.
 
 Still experimental on the declaration (see api_to_audit.md):
 `experimental_visibility` (`"installed"` hides the row until the bridge's
@@ -135,7 +139,7 @@ Rules:
 - `completedTurnDisplay` is the provider's default for finished turns in the
   thread timeline. `"collapse"` folds a finished turn's work into one "Worked
   for" row beside the final answer; `"flat"` keeps every row visible, as while
-  the turn ran. The user overrides it per provider in Settings → Providers or
+  the turn ran. The user overrides it per provider in Settings → Agents → Harness or
   with `bb settings completed-turns`, and the server applies the result to the
   timeline, turn details, conversation outline, and `bb thread log`.
 - Third-party ACP agents (for example Amp) register the same way, with a
@@ -169,6 +173,7 @@ The runtime never scopes processes per thread and never matches error text.
   fork: "none" | "tip" | "checkpoint",
   approvalEnforcedBy: "runtime" | "provider",
   steerMode: "inject" | "queue", // declared and recorded; nothing acts on it yet
+  stopsUnopenedTurns: boolean,   // a keep-session stop also ends a turn not opened yet
   skills: { configure: boolean }, // the bridge handles skills/configure
 }
 ```

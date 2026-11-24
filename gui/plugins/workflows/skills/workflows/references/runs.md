@@ -106,3 +106,5 @@ concurrency and call count, total run timeout, retention, and UTF-8
 completion-message size are snapshotted per run. `status` is bounded
 to compact progress and call counts. Paged JSONL `history` carries ordered
 call-level execution, cache, child-thread, repair, result, and error details.
+A restarted call's earlier failed or cancelled attempts precede it as
+metadata-only records with `superseded: true`; call counts include them.

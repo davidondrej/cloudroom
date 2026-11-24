@@ -52,12 +52,12 @@ export function registerInternalThreadMemoryLimitRoutes(
           "Thread does not belong to the session host",
         );
       }
+      const memory = {
+        usedBytes: payload.usedBytes,
+        totalBytes: payload.totalBytes,
+      };
       deps.logger.warn(
-        {
-          threadId: thread.id,
-          usedBytes: payload.usedBytes,
-          totalBytes: payload.totalBytes,
-        },
+        { threadId: thread.id, ...memory },
         "Stopping a thread that used too much memory",
       );
       cancelRetriesForExplicitStop(deps, thread.id);
@@ -67,6 +67,7 @@ export function registerInternalThreadMemoryLimitRoutes(
         thread,
         environment,
         "memory-limit",
+        memory,
       );
       if (
         getThread(deps.db, thread.id)?.status !== "stopping" &&
@@ -77,6 +78,7 @@ export function registerInternalThreadMemoryLimitRoutes(
           appendThreadInterruptedEventInTransaction(tx, {
             threadId: thread.id,
             reason: "memory-limit",
+            memory,
           }),
         );
         deps.hub.notifyThread(thread.id, ["events-appended"], {

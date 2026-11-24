@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 import type {
   DirectoryEntry,
   HostDaemonOnlineRpcResult,
@@ -53,9 +54,36 @@ function assertSafeGitRef(ref: string): void {
   }
 }
 
+// Agents often write Windows paths as `/C:/...` (file-URL style). On Windows
+// that form never names a real file (`:` is invalid in names), so drop the slash.
+export function normalizeWindowsDrivePath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32" && /^\/[A-Za-z]:[\\/]/u.test(filePath)
+    ? filePath.slice(1)
+    : filePath;
+}
+
+export function isWindowsNetworkPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32" && isWindowsNetworkOrDevicePath(filePath);
+}
+
 function assertAbsoluteHostDiskPathCommand(command: HostDiskPathCommand): void {
   if (!path.isAbsolute(command.path)) {
     throw new CommandDispatchError("invalid_path", "Path must be absolute");
+  }
+  if (
+    isWindowsNetworkPath(command.path) ||
+    (command.rootPath !== undefined && isWindowsNetworkPath(command.rootPath))
+  ) {
+    throw new CommandDispatchError(
+      "invalid_path",
+      "Network paths are not supported",
+    );
   }
 
   const rootPath = command.rootPath;
@@ -248,6 +276,7 @@ export async function readHostFile(
   command: CommandOf<"host.read_file">,
   options?: Pick<CommandDispatchOptions, "runtimeManager">,
 ): Promise<HostDaemonOnlineRpcResult<"host.read_file">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
 
   if (command.ref !== undefined) {
@@ -285,6 +314,7 @@ export async function readHostFile(
 export async function readHostFileMetadata(
   command: CommandOf<"host.file_metadata">,
 ): Promise<HostDaemonOnlineRpcResult<"host.file_metadata">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
   return readFileMetadataForTransport({
     resolvedPath: command.path,
@@ -304,8 +334,9 @@ export async function readHostRelativeFile(
 }
 
 async function pathExists(path: string): Promise<boolean> {
+  if (isWindowsNetworkPath(path)) return false;
   try {
-    await fs.stat(path);
+    await fs.stat(normalizeWindowsDrivePath(path));
     return true;
   } catch (error) {
     if (

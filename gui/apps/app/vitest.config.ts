@@ -4,8 +4,8 @@ import {
   sharedWorkerProjects,
 } from "../../vitest.shared.js";
 import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
 import { sharedUiEnvSeam } from "./vite-shared-ui-seam.js";
+import { tailwindcss } from "./vite-tailwind.js";
 
 export default defineWorkspaceTestConfig({
   plugins: [sharedUiEnvSeam(), react(), tailwindcss()],

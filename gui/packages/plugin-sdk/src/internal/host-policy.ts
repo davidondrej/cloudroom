@@ -1543,6 +1543,14 @@ export function validatePluginProviderDeclaration(
     }
   }
   if (
+    capabilities.resumesInNewFolder !== undefined &&
+    typeof capabilities.resumesInNewFolder !== "boolean"
+  ) {
+    throw new Error(
+      `provider "${id}" capabilities.resumesInNewFolder must be a boolean`,
+    );
+  }
+  if (
     !(PROVIDER_FORK_VALUES as readonly string[]).includes(capabilities.fork)
   ) {
     throw new Error(
@@ -1554,6 +1562,7 @@ export function validatePluginProviderDeclaration(
     supportsNativeUserQuestion: capabilities.supportsNativeUserQuestion,
     fork: capabilities.fork,
     supportsManualCompaction: capabilities.supportsManualCompaction,
+    resumesInNewFolder: capabilities.resumesInNewFolder ?? false,
     supportsThreadArchive: capabilities.supportsThreadArchive,
     supportsThreadRename: capabilities.supportsThreadRename,
     permissionModes: validateProviderLiteralArray({

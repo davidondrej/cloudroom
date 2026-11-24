@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { resolveUserSkillsRootPath } from "@cloudroom/config/skill-storage-paths";
 import type { AgentRuntimeSkillRoot } from "@cloudroom/agent-runtime";
 import type { HostDaemonInjectedSkillSource } from "@cloudroom/host-daemon-contract";
@@ -18,6 +19,8 @@ const STORE_CONTENT_DIR = "content";
 const STORE_COMPLETE_MARKER = ".complete";
 const STORE_LAST_USED_MARKER = ".last-used";
 export const MAX_SKILL_STORE_TREES = 64;
+const PUBLISH_RENAME_ATTEMPTS = 5;
+const PUBLISH_RENAME_RETRY_DELAY_MS = 50;
 const STALE_TEMP_STAGING_DIR_AGE_MS = 60 * 60 * 1000;
 const SKILL_NAME_PATTERN = /^(?!.*--)[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
 const MAX_STAGED_SKILL_FILES = 1_000;
@@ -425,6 +428,48 @@ function createCatalogFile(args: CreateCatalogFileArgs): CatalogFile {
   };
 }
 
+// The destination is content-addressed, so a peer's complete copy is ours too.
+// Windows reports that collision, or a scanner's open handle, as EPERM/EBUSY.
+async function publishContentAddressedDir(args: {
+  completePath: string;
+  destinationPath: string;
+  tempPath: string;
+}): Promise<void> {
+  let firstError: unknown;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await fs.rename(args.tempPath, args.destinationPath);
+      return;
+    } catch (error) {
+      const collided =
+        isFsErrorWithCode(error, "EEXIST") ||
+        isFsErrorWithCode(error, "ENOTEMPTY");
+      if (
+        !collided &&
+        !isFsErrorWithCode(error, "EPERM") &&
+        !isFsErrorWithCode(error, "EBUSY")
+      ) {
+        throw error;
+      }
+      if (
+        collided ||
+        (await fs.access(args.completePath).then(
+          () => true,
+          () => false,
+        ))
+      ) {
+        await fs.rm(args.tempPath, { recursive: true, force: true });
+        return;
+      }
+      firstError ??= error;
+      if (attempt >= PUBLISH_RENAME_ATTEMPTS) {
+        throw firstError;
+      }
+      await delay(PUBLISH_RENAME_RETRY_DELAY_MS);
+    }
+  }
+}
+
 async function writeStageRoot(args: WriteStageRootArgs): Promise<string> {
   const stagingRootPath = resolveStagingRootPath(args.dataDir);
   const stageRootPath = resolveStageRootPath(args.dataDir, args.catalogHash);
@@ -464,15 +509,12 @@ async function writeStageRoot(args: WriteStageRootArgs): Promise<string> {
       )}\n`,
       "utf8",
     );
-    await fs.rename(tempRootPath, stageRootPath);
+    await publishContentAddressedDir({
+      tempPath: tempRootPath,
+      destinationPath: stageRootPath,
+      completePath: path.join(stageRootPath, "catalog.json"),
+    });
   } catch (error) {
-    if (
-      isFsErrorWithCode(error, "EEXIST") ||
-      isFsErrorWithCode(error, "ENOTEMPTY")
-    ) {
-      await fs.rm(tempRootPath, { recursive: true, force: true });
-      return stageRootPath;
-    }
     await fs.rm(tempRootPath, { recursive: true, force: true });
     throw error;
   }
@@ -704,17 +746,14 @@ async function writeFetchedTreeToStore(args: {
       path.join(tempRootPath, STORE_COMPLETE_MARKER),
       "complete\n",
     );
-    await fs.rename(tempRootPath, treeRootPath);
+    await publishContentAddressedDir({
+      tempPath: tempRootPath,
+      destinationPath: treeRootPath,
+      completePath: path.join(treeRootPath, STORE_COMPLETE_MARKER),
+    });
   } catch (error) {
-    if (
-      isFsErrorWithCode(error, "EEXIST") ||
-      isFsErrorWithCode(error, "ENOTEMPTY")
-    ) {
-      await fs.rm(tempRootPath, { recursive: true, force: true });
-    } else {
-      await fs.rm(tempRootPath, { recursive: true, force: true });
-      throw error;
-    }
+    await fs.rm(tempRootPath, { recursive: true, force: true });
+    throw error;
   }
   await touchStoredTree(treeRootPath);
   await gcSkillStore(args.dataDir);

@@ -31,7 +31,7 @@ export const reasoningLevelSchema = z.enum([
   "ultra",
 ]);
 export type ReasoningLevel = z.infer<typeof reasoningLevelSchema>;
-export const serviceTierSchema = z.enum(["default", "fast"]);
+export const serviceTierSchema = z.enum(["default", "fast", "ultrafast"]);
 export type ServiceTier = z.infer<typeof serviceTierSchema>;
 
 export const unmanagedBranchSpecSchema = z.discriminatedUnion("kind", [
@@ -147,6 +147,18 @@ export const automationTriggerSchema = z.discriminatedUnion("triggerType", [
 ]);
 export type AutomationTrigger = z.infer<typeof automationTriggerSchema>;
 
+/** One of a loop's agents that take turns: run N uses agent N of the list, round and round (docs/scopes/loops.md). */
+export const loopAgentSchema = z
+  .object({
+    providerId: z.string().min(1),
+    model: z.string().min(1),
+    reasoningLevel: reasoningLevelSchema.optional(),
+    serviceTier: serviceTierSchema.optional(),
+  })
+  .strict();
+export const MAX_LOOP_AGENTS = 8;
+export type LoopAgentInput = z.infer<typeof loopAgentSchema>;
+
 const automationAgentExecutionSchema = z
   .object({
     mode: z.literal("agent"),
@@ -158,6 +170,8 @@ const automationAgentExecutionSchema = z
     permissionMode: permissionModeSchema,
     environment: agentEnvironmentSchema,
     targetThreadId: z.string().min(1).optional(),
+    /** Two or more agents that take turns; providerId, model and reasoningLevel above are the first's. */
+    agents: z.array(loopAgentSchema).min(2).max(MAX_LOOP_AGENTS).optional(),
   })
   .strict();
 
@@ -245,10 +259,13 @@ const agentExecutionUpdateSchema = z
     serviceTier: serviceTierSchema.nullable().optional(),
     permissionMode: permissionModeSchema.optional(),
     target: agentExecutionTargetSchema.optional(),
+    /** A new list of agents that take turns; one agent ends the turns, and so does changing the agent alone. */
+    agents: z.array(loopAgentSchema).min(1).max(MAX_LOOP_AGENTS).optional(),
   })
   .strict()
   .refine(
     (value) =>
+      value.agents !== undefined ||
       value.prompt !== undefined ||
       value.providerId !== undefined ||
       value.model !== undefined ||
@@ -520,3 +537,9 @@ export const linkThreadInputSchema = z
     threadId: z.string().min(1).max(100),
   })
   .strict();
+
+/** One `workflow_scan` usage event (docs/scopes/workflow-scan.md#tracking). */
+export type TrackScan = (
+  action: "viewed" | "upgrade_clicked" | "started" | "start_failed" | "reading" | "patterns" | "loop_created",
+  properties?: Record<string, string | number | boolean | null>,
+) => void;

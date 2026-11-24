@@ -7,14 +7,15 @@ import {
   createProjectSource,
   getProjectExecutionDefaults,
   listThreadsWithPendingInteractionState,
+  replaceStoredProviderModelCatalog,
   setExperiments,
   upsertProjectExecutionDefaults,
 } from "@cloudroom/db";
 import { defaultExperiments, threadSchema } from "@cloudroom/domain";
 import { sidebarBootstrapResponseSchema } from "@cloudroom/server-contract";
-import { waitForQueuedCommand } from "../helpers/commands.js";
+import { registerTestHostRpcCapture, waitForQueuedCommand } from "../helpers/commands.js";
 import { availableModelFixture } from "../helpers/available-models.js";
-import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
+import { registerHostRpcResponder, registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { readJson } from "../helpers/json.js";
 import {
   seedEnvironment,
@@ -47,35 +48,40 @@ describe("public thread default routes", () => {
         path: "/tmp/thread-defaults-create",
       });
 
-      const response = await harness.app.request("/api/v1/threads", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          origin: "app",
-          projectId: project.id,
-          providerId: "codex",
-          model: "gpt-5-mini",
-          serviceTier: "fast",
-          reasoningLevel: "high",
-          permissionMode: "workspace-write",
-          input: [
-            { type: "text", text: "Create with explicit execution options" },
-          ],
-          environment: {
-            type: "host",
-            hostId: host.id,
-            workspace: {
-              type: "unmanaged",
-              path: null,
-            },
+      const create = (text = "Create with explicit execution options") =>
+        harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
           },
-        }),
-      });
+          body: JSON.stringify({
+            origin: "app",
+            requestId: "create-once",
+            projectId: project.id,
+            providerId: "codex",
+            model: "gpt-5-mini",
+            serviceTier: "fast",
+            reasoningLevel: "high",
+            permissionMode: "workspace-write",
+            input: [{ type: "text", text }],
+            environment: {
+              type: "host",
+              hostId: host.id,
+              workspace: {
+                type: "unmanaged",
+                path: null,
+              },
+            },
+          }),
+        });
+      const response = await create();
 
       expect(response.status).toBe(201);
       const createdThread = threadSchema.parse(await readJson(response));
+      // A retry with the same request ID gets that thread, not a duplicate (#860).
+      const retried = threadSchema.parse(await readJson(await create()));
+      expect(retried.id).toBe(createdThread.id);
+      expect((await create("Create with other options")).status).toBe(409);
       const queuedStart = await waitForQueuedCommand(
         harness,
         ({ command }) =>
@@ -268,6 +274,49 @@ describe("public thread default routes", () => {
     });
   });
 
+  // A failed listing still returns fallback entries; they must not rewrite the model. A stalled one must not delay the start.
+  it.each([
+    ["claude-opus-5.5", "claude-opus-5-5", "listed"],
+    ["claude-opus-5.5[1m]", "claude-opus-5-5[1m]", "listed"],
+    ["claude-opus-5.5[1m]", "claude-opus-5.5[1m]", "fails"],
+    ["claude-opus-5.5", "claude-opus-5.5", "stalls"],
+  ])("starts remembered %s as %s when the listing %s (#2202)", async (stored, expected, listing) => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      const ids = { hostId: host.id, sessionId: session.id };
+      const models = [availableModelFixture({ model: stored.replace(".", "-") })];
+      if (listing === "stalls") {
+        registerHostRpcResponder(harness, { ...ids, handle: () => (registerTestHostRpcCapture(harness, ids), new Promise(() => {})) });
+      } else {
+        registerProviderHostRpcResponder(harness, {
+          ...ids, restoreCommandCaptureAfterResponse: true,
+          modelsByProviderId: { "claude-code": { models, selectedOnlyModels: [] } },
+          ...(listing === "fails" ? { modelErrorsByProviderId: { "claude-code": { errorCode: "command_timeout", errorMessage: "slow" } } } : {}),
+        });
+      }
+      const startedAt = Date.now();
+      const path = "/tmp/thread-defaults-dotted-model";
+      const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path });
+      const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id, path });
+      upsertProjectExecutionDefaults(harness.db, {
+        projectId: project.id, providerId: "claude-code", model: stored,
+        serviceTier: "default", reasoningLevel: "high", permissionMode: "accept-edits",
+      });
+      const response = await harness.app.request("/api/v1/threads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          origin: "cli", projectId: project.id, input: [{ type: "text", text: "Spawn without --model" }],
+          environment: { type: "reuse", environmentId: environment.id },
+        }),
+      });
+      const { id } = threadSchema.parse(await readJson(response));
+      const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "thread.start" && command.threadId === id);
+      expect(command).toMatchObject({ options: { model: expected, reasoningLevel: "high" } });
+      expect(Date.now() - startedAt).toBeLessThan(3_500);
+    });
+  }, 10_000);
+
   it("uses the explicit provider catalog default when stored defaults belong to another provider", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
@@ -347,11 +396,11 @@ describe("public thread default routes", () => {
         sessionId: session.id,
         restoreCommandCaptureAfterResponse: true,
         modelsByProviderId: {
-          codex: {
+          "claude-code": {
             models: [
-              availableModelFixture({ model: "gpt-first" }),
+              availableModelFixture({ model: "claude-first" }),
               availableModelFixture({
-                model: "gpt-provider-default",
+                model: "claude-provider-default",
                 isDefault: true,
               }),
             ],
@@ -394,15 +443,15 @@ describe("public thread default routes", () => {
           command.threadId === createdThread.id,
       );
       expect(queuedStart.command).toMatchObject({
-        providerId: "codex",
-        options: { model: "gpt-provider-default" },
+        providerId: "claude-code",
+        options: { model: "claude-provider-default" },
       });
       expect(
         providerResponder.requests.map((request) => request.command),
       ).toMatchObject([
         {
           type: "provider.list_models",
-          providerId: "codex",
+          providerId: "claude-code",
         },
       ]);
       expect(providerResponder.requests[0].command).not.toHaveProperty("cwd");
@@ -461,6 +510,105 @@ describe("public thread default routes", () => {
           command.type === "thread.start" && command.threadId === id,
       );
       expect(command).toMatchObject({ options: { reasoningLevel: "xhigh" } });
+    });
+  });
+
+  it("starts opencode at a level it accepts when the default or saved level is none (#2239)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      const model = "opencode-go/no-think";
+      registerProviderHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        restoreCommandCaptureAfterResponse: true,
+        modelsByProviderId: {
+          "acp-opencode": {
+            models: [
+              availableModelFixture({
+                model,
+                reasoningLevels: ["none", "high", "max"],
+                defaultReasoningLevel: "none",
+              }),
+              availableModelFixture({
+                model: "opencode-go/none-only",
+                reasoningLevels: ["none"],
+              }),
+            ],
+            selectedOnlyModels: [],
+          },
+        },
+      });
+      const path = "/tmp/thread-defaults-opencode-none";
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path,
+      });
+      const start = async (
+        reasoningLevel?: string,
+        origin = "cli",
+        startModel = model,
+      ) => {
+        const response = await harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            origin,
+            projectId: project.id,
+            providerId: "acp-opencode",
+            model: startModel,
+            ...(reasoningLevel ? { reasoningLevel } : {}),
+            input: [{ type: "text", text: "Spawn" }],
+            environment:
+              origin === "cli"
+                ? { type: "reuse", environmentId: environment.id }
+                : {
+                    type: "host",
+                    hostId: host.id,
+                    workspace: { type: "unmanaged", path: null },
+                  },
+          }),
+        });
+        if (response.status !== 201) return response.status;
+        const { id } = threadSchema.parse(await readJson(response));
+        const { command } = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.start" && command.threadId === id,
+        );
+        return command.type === "thread.start"
+          ? command.options.reasoningLevel
+          : null;
+      };
+
+      expect(await start()).toBe("high");
+      // A model sharing no level with the provider fails as on main.
+      expect(await start(undefined, "cli", "opencode-go/none-only")).toBe(400);
+      // An app start is saved as the project default, so it reconciles nothing, as on main.
+      expect(await start(undefined, "app")).toBe(400);
+      expect(
+        getProjectExecutionDefaults(harness.deps.db, { projectId: project.id }),
+      ).toBeNull();
+      upsertProjectExecutionDefaults(harness.deps.db, {
+        projectId: project.id,
+        providerId: "acp-opencode",
+        model,
+        reasoningLevel: "none",
+        permissionMode: "full",
+        serviceTier: "default",
+      });
+      expect(await start()).toBe("high");
+      // A start saved as the project default keeps main's behavior, so the saved level stays.
+      expect(await start(undefined, "app")).toBe(400);
+      expect(
+        getProjectExecutionDefaults(harness.deps.db, { projectId: project.id })
+          ?.reasoningLevel,
+      ).toBe("none");
+      expect(await start("none")).toBe(400);
     });
   });
 
@@ -539,15 +687,71 @@ describe("public thread default routes", () => {
     });
   });
 
-  it("returns an actionable error when an explicitly requested provider's model catalog cannot be loaded", async () => {
+  it.each([
+    {
+      errorCode: "command_failed",
+      status: 503,
+      body: {
+        code: "model_catalog_unavailable",
+        message: expect.stringContaining("Unable to load codex models"),
+        details: { providerId: "codex", code: "failed", canRestart: true },
+        retryable: true,
+      },
+    },
+    // A broken install needs a reinstall, not a retry (#907).
+    {
+      errorCode: "missing_executable",
+      status: 409,
+      body: {
+        code: "provider_cli_missing",
+        message: expect.stringContaining("Reinstall"),
+        details: { providerId: "codex", code: "missing_executable" },
+        retryable: false,
+      },
+    },
+    // An explicit model can't start a missing CLI either (#2226).
+    {
+      errorCode: "missing_executable",
+      model: "gpt-5",
+      status: 409,
+      body: expect.objectContaining({ code: "provider_cli_missing" }),
+    },
+    // A signed-out Grok needs its login, not a wait for the host (#1160).
+    {
+      providerId: "acp-grok",
+      errorCode: "auth_required",
+      status: 409,
+      body: {
+        code: "provider_auth_required",
+        message:
+          "Grok Build is not signed in on this host. Run `grok login` on the machine to sign in. Then try again.",
+        details: { providerId: "acp-grok", code: "auth_required" },
+        retryable: false,
+      },
+    },
+    // So does every agent with a sign-in command, like Cursor and Antigravity.
+    {
+      providerId: "acp-cursor",
+      errorCode: "auth_required",
+      status: 409,
+      body: {
+        code: "provider_auth_required",
+        message:
+          "Cursor is not signed in on this host. Run `cursor-agent login` on the machine to sign in. Then try again.",
+        details: { providerId: "acp-cursor", code: "auth_required" },
+        retryable: false,
+      },
+    },
+  ])("returns an actionable catalog error ($errorCode)", async (failure) => {
+    const providerId = failure.providerId ?? "codex";
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps);
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         modelErrorsByProviderId: {
-          codex: {
-            errorCode: "command_failed",
+          [providerId]: {
+            errorCode: failure.errorCode,
             errorMessage: "Codex model discovery failed",
           },
         },
@@ -568,7 +772,8 @@ describe("public thread default routes", () => {
         body: JSON.stringify({
           origin: "cli",
           projectId: project.id,
-          providerId: "codex",
+          providerId,
+          ...(failure.model ? { model: failure.model } : {}),
           input: [{ type: "text", text: "Create without defaults" }],
           environment: {
             type: "reuse",
@@ -577,13 +782,8 @@ describe("public thread default routes", () => {
         }),
       });
 
-      expect(response.status).toBe(503);
-      await expect(readJson(response)).resolves.toEqual({
-        code: "model_catalog_unavailable",
-        message: expect.stringContaining("Unable to load codex models"),
-        details: { providerId: "codex", code: "failed", canRestart: true },
-        retryable: true,
-      });
+      expect(response.status).toBe(failure.status);
+      await expect(readJson(response)).resolves.toEqual(failure.body);
       expect(
         listThreadsWithPendingInteractionState(harness.db, {
           projectId: project.id,
@@ -591,6 +791,78 @@ describe("public thread default routes", () => {
       ).toHaveLength(0);
     });
   });
+
+  // Codex works, but the first listing after an app update failed or timed out (#1399).
+  it.each(["command_failed", "command_timeout"])(
+    "starts Codex on the default this host listed last when listing fails (%s)",
+    async (errorCode) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps);
+        replaceStoredProviderModelCatalog(harness.db, {
+          row: {
+            hostId: host.id,
+            providerId: "codex",
+            scopeKey: "",
+            fingerprint: "previous-app-version",
+            modelsJson: JSON.stringify([
+              availableModelFixture({ model: "gpt-older" }),
+              availableModelFixture({
+                model: "gpt-listed-default",
+                reasoningLevels: ["low", "high"],
+                defaultReasoningLevel: "high",
+                isDefault: true,
+              }),
+            ]),
+            selectedOnlyModelsJson: "[]",
+            fetchedAt: 1,
+          },
+          pruneWorkspaceRowsFetchedBefore: null,
+        });
+        registerProviderHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          restoreCommandCaptureAfterResponse: true,
+          modelErrorsByProviderId: {
+            codex: { errorCode, errorMessage: "Codex model discovery failed" },
+          },
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+          path: "/tmp/thread-defaults-codex-last-listed",
+        });
+
+        const response = await harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            origin: "cli",
+            projectId: project.id,
+            providerId: "codex",
+            input: [{ type: "text", text: "Spawn without a model" }],
+            environment: { type: "reuse", environmentId: environment.id },
+          }),
+        });
+
+        expect(response.status).toBe(201);
+        const createdThread = threadSchema.parse(await readJson(response));
+        const queuedStart = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.start" &&
+            command.threadId === createdThread.id,
+        );
+        expect(queuedStart.command).toMatchObject({
+          providerId: "codex",
+          options: { model: "gpt-listed-default", reasoningLevel: "high" },
+        });
+      });
+    },
+  );
 
   it.each(["failed", "empty"])(
     "falls back to another available provider when the product default's model catalog is %s",
@@ -603,14 +875,14 @@ describe("public thread default routes", () => {
           restoreCommandCaptureAfterResponse: true,
           modelsByProviderId:
             catalogState === "empty"
-              ? { codex: { models: [], selectedOnlyModels: [] } }
+              ? { "claude-code": { models: [], selectedOnlyModels: [] } }
               : {},
           modelErrorsByProviderId:
             catalogState === "failed"
               ? {
-                  codex: {
+                  "claude-code": {
                     errorCode: "command_failed",
-                    errorMessage: "Codex model discovery failed",
+                    errorMessage: "Claude Code model discovery failed",
                   },
                 }
               : {},
@@ -641,7 +913,7 @@ describe("public thread default routes", () => {
 
         expect(response.status).toBe(201);
         const createdThread = threadSchema.parse(await readJson(response));
-        expect(createdThread.providerId).toBe("claude-code");
+        expect(createdThread.providerId).toBe("codex");
         const queuedStart = await waitForQueuedCommand(
           harness,
           ({ command }) =>
@@ -649,7 +921,7 @@ describe("public thread default routes", () => {
             command.threadId === createdThread.id,
         );
         expect(queuedStart.command).toMatchObject({
-          providerId: "claude-code",
+          providerId: "codex",
           options: { model: "test-provider-default" },
         });
       });

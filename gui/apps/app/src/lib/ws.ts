@@ -1,4 +1,4 @@
-import ReconnectingWebSocket from "partysocket/ws";
+import { ReconnectingWebSocket } from "@cloudroom/domain/reconnecting-websocket";
 import {
   changedMessageLenientSchema,
   pluginSignalLenientSchema,

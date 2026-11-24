@@ -244,7 +244,7 @@ impl ClaudeLogin {
                 "--mcp-config",
                 r#"{"mcpServers":{}}"#,
             ]);
-            claude::profile_env(&mut command, config, profile);
+            claude::profile_env(&mut command, config, profile, false);
             let (process, mut events) = Process::spawn(config, command, Box::new(Protocol))?;
             tokio::spawn(async move { while events.recv().await.is_some() {} });
             let result = async {

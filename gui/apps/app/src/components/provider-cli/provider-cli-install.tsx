@@ -51,6 +51,27 @@ export function isProviderCliUpdateIssue(issue: ProviderCliIssue): boolean {
   return issue.status.installed;
 }
 
+// A toggle change can reach the UI before the next host status response.
+export function withAutoUpdateSetting(
+  status: ProviderCliStatus,
+  enabled: boolean,
+): ProviderCliStatus {
+  const autoUpdateState =
+    enabled && status.installed && status.installAction?.kind === "update"
+      ? (status.autoUpdateState ?? "queued")
+      : undefined;
+  return autoUpdateState === status.autoUpdateState
+    ? status
+    : { ...status, autoUpdateState };
+}
+
+export function autoUpdateProgress(status: ProviderCliStatus): string | null {
+  if (status.autoUpdateState === "queued") return "Queued";
+  if (status.autoUpdateState === "updating") return "Updating…";
+  if (status.autoUpdateState === "retrying") return "Retrying soon";
+  return null;
+}
+
 export function buildProviderCliIssue(
   entry: ProviderCliStatusEntry,
 ): ProviderCliIssue | null {
@@ -65,6 +86,8 @@ export function buildProviderCliIssue(
       fingerprint: `${provider}:missing:${status.latestVersion ?? "latest"}`,
     };
   }
+
+  if (autoUpdateProgress(status) !== null) return null;
 
   if (status.versionUnsupported) {
     const currentVersion = status.currentVersion ?? "Installed version unknown";
@@ -126,6 +149,14 @@ export function hasProviderCliAction(
   issue: ProviderCliIssue,
 ): issue is ProviderCliActionableIssue {
   return issue.action !== null;
+}
+
+/** Auto-update needs to know the newest version: from npm, or from the CLI's
+ *  own release check (Cursor). */
+export function canAutoUpdateProviderCli(
+  status: Pick<ProviderCliStatus, "latestVersion" | "npmPackageName">,
+): boolean {
+  return status.npmPackageName !== null || status.latestVersion !== null;
 }
 
 export function useProviderCliInstallRunner() {

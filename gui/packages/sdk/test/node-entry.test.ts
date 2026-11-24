@@ -14,7 +14,7 @@ describe("@cloudroom/sdk/node entry", () => {
       vi.stubEnv("ROOM_HOST_DAEMON_PORT", undefined);
 
       const nodeEntry = await import("../src/node.js");
-      const sdk = nodeEntry.createNodeBbSdk({ baseUrl: "http://server" });
+      const sdk = nodeEntry.createNodeRoomSdk({ baseUrl: "http://server" });
 
       expect(typeof sdk.threads.list).toBe("function");
     },

@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, relative, resolve } from "node:path";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const originalPlatform = process.platform;
@@ -8,8 +8,12 @@ Object.defineProperty(process, "platform", {
   configurable: true,
   value: "win32",
 });
-const { resolvePortableCommand, resolveWindowsShim } =
-  await import("../src/index.js");
+const {
+  findCliExecutable,
+  isClaudeNpmPlaceholder,
+  resolvePortableCommand,
+  resolveWindowsShim,
+} = await import("../src/index.js");
 
 const NPM_SHIM_HEAD =
   "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n";
@@ -44,7 +48,7 @@ afterAll(() => {
   });
 });
 
-it("runs a JS-target shim as node plus its script, preferring the node.exe beside it", () => {
+it("runs a JS-target shim as node plus its script: the node.exe beside it, else PATH's, never the cwd's", () => {
   const npm = dir({ "pi.cmd": PI_CMD });
   const script = join(
     npm,
@@ -55,16 +59,21 @@ it("runs a JS-target shim as node plus its script, preferring the node.exe besid
     "bundle",
     "cli.js",
   );
+  // Never a bare `node`, which Windows looks up in the project folder first: PATH's node.exe, else ENOENT.
+  const project = dir({ "node.exe": "" });
+  const nodejs = dir({ "node.exe": "" });
   expect(
-    resolveWindowsShim({
-      command: "pi",
-      args: ["--version"],
-      env: { PATH: npm },
-    }),
-  ).toEqual({
-    command: "node",
-    args: [script, "--version"],
+    resolveWindowsShim({ command: "pi", args: ["--version"], cwd: project, env: { PATH: `${npm};.;${nodejs}` } }),
+  ).toEqual({ command: join(nodejs, "node.exe"), args: [script, "--version"] });
+  expect(resolveWindowsShim({ command: "pi", args: [], cwd: project, env: { PATH: npm } })).toEqual({
+    command: join(npm, "node.exe"),
+    args: [script],
   });
+  // An env without PATH searches the parent's PATH, as Windows does.
+  vi.stubEnv("PATH", nodejs);
+  expect(resolveWindowsShim({ command: join(npm, "pi.cmd"), args: [], cwd: project, env: {} }).command).toBe(
+    join(nodejs, "node.exe"),
+  );
   writeFileSync(join(npm, "node.exe"), "");
   expect(
     resolveWindowsShim({ command: "pi", args: [], env: { Path: `"${npm}"` } }),
@@ -72,6 +81,17 @@ it("runs a JS-target shim as node plus its script, preferring the node.exe besid
     command: join(npm, "node.exe"),
     args: [script],
   });
+});
+
+// `\dir` and `C:dir` resolve against the working folder's drive, so they never count; a POSIX host can't express them.
+it.runIf(originalPlatform === "win32")("skips PATH folders that aren't fully qualified", () => {
+  const npm = dir({ "pi.cmd": PI_CMD });
+  const nodejs = dir({ "node.exe": "" });
+  const rooted = nodejs.slice(2);
+  const driveRelative = `${nodejs.slice(0, 2)}${relative(resolve(nodejs.slice(0, 2)), nodejs)}`;
+  expect(
+    resolveWindowsShim({ command: join(npm, "pi.cmd"), args: [], cwd: root, env: { PATH: `${rooted};${driveRelative}` } }).command,
+  ).toBe(join(npm, "node.exe"));
 });
 
 it("runs an exe-target shim's exe directly", () => {
@@ -176,4 +196,48 @@ it("finds a command in a quoted PATH entry", () => {
   expect(
     resolvePortableCommand("npm.cmd", { env: { PATH: `"${nodejs}"` } }),
   ).toBe(join(nodejs, "npm.cmd"));
+});
+
+it("skips npm's claude.cmd when it runs the unfinished Claude stub (#1148)", () => {
+  const npm = dir({});
+  const shim = join(npm, "claude.cmd");
+  const stub = join(npm, "node_modules", "@anthropic-ai", "claude-code", "bin");
+  mkdirSync(stub, { recursive: true });
+  writeFileSync(
+    join(stub, "claude.exe"),
+    'echo "Error: claude native binary not installed." >&2\nexit 1\n',
+  );
+  writeFileSync(
+    shim,
+    `${NPM_SHIM_HEAD}"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n`,
+    { mode: 0o755 },
+  );
+  const native = dir({});
+  writeFileSync(join(native, "claude.exe"), "", { mode: 0o755 });
+  expect(isClaudeNpmPlaceholder(shim)).toBe(true);
+  expect(
+    findCliExecutable("claude", {
+      PATH: [npm, native].join(delimiter),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(native, "claude.exe"));
+});
+
+it("finds Grok (#1256) and Cursor's .cmd shim (#1709) in their own folders off PATH", () => {
+  const home = dir({});
+  mkdirSync(join(home, ".grok", "bin"), { recursive: true });
+  writeFileSync(join(home, ".grok", "bin", "grok.exe"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("grok", { PATH: "", USERPROFILE: home, PATHEXT: ".exe" }),
+  ).toBe(join(home, ".grok", "bin", "grok.exe"));
+  const cursor = join(home, "Local App", "cursor-agent");
+  mkdirSync(cursor, { recursive: true });
+  writeFileSync(join(cursor, "cursor-agent.cmd"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("cursor-agent", {
+      PATH: "",
+      LOCALAPPDATA: join(home, "Local App"),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(cursor, "cursor-agent.cmd"));
 });

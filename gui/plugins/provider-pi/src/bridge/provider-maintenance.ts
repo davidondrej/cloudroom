@@ -10,6 +10,7 @@ import {
   experimental_compareVersions as compareVersions,
   experimental_execPortableFile as execPortableFile,
   experimental_formatCommand as formatCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
   experimental_npmGlobalInstallCommand as npmGlobalInstallCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
@@ -226,10 +227,7 @@ export async function getPiProviderInstallationRun(
 ): Promise<ProviderInstallationRunResult> {
   const status = await getPiProviderInstallationStatus();
   if (status.installAction?.kind !== action) {
-    return {
-      available: false,
-      message: `Pi ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Pi", action, status);
   }
   return {
     available: true,
@@ -273,6 +271,8 @@ export type PiInstallGate =
       status: "not_installed" | "unsupported_version" | "unknown";
       statusMessage: string | null;
       result: ProviderHealthResult;
+      /** Launching pi failed with ENOENT, not just its `which` lookup. */
+      launchMissing?: boolean;
     };
 
 const INSTALL_GUIDANCE = `Install ${PI_NPM_PACKAGE} ${PI_MINIMUM_SUPPORTED_VERSION} or newer: ${npmGlobalInstallCommand(PI_NPM_PACKAGE).displayCommand}`;
@@ -285,6 +285,15 @@ async function probePiInstallGate(): Promise<PiInstallGate> {
       status: "not_installed",
       statusMessage: null,
       result: piHealthResult("not_installed"),
+      // A relative command resolves from the thread's directory, not this one.
+      launchMissing:
+        (path.isAbsolute(launch.command) || !/[\\/]/u.test(launch.command)) &&
+        (await execPortableFile(launch.command, [...launch.args, "--version"], {
+          timeoutMs: VERSION_PROBE_TIMEOUT_MS,
+        }).then(
+          () => false,
+          (error: { code?: unknown } | null) => error?.code === "ENOENT",
+        )),
     };
   }
   const probe = await probePiVersion();

@@ -483,6 +483,38 @@ describe("buildProjectThreadGroups", () => {
       "manager-old",
     ]);
   });
+
+  it("reuses unchanged nodes on rebuild so only the changed path redraws", () => {
+    const parent = createThread({ id: "parent", createdAt: 3 });
+    const child = createThread({ id: "child", parentThreadId: "parent" });
+    const other = createThread({ id: "other", createdAt: 2 });
+    const [parentItem, otherItem] = buildProjectThreadGroups([
+      parent,
+      child,
+      other,
+    ]);
+
+    expect(buildProjectThreadGroups([parent, child, other])[0]).toBe(
+      parentItem,
+    );
+
+    const updatedChild = { ...child, status: "active" as const };
+    const [nextParentItem, nextOtherItem] = buildProjectThreadGroups([
+      parent,
+      updatedChild,
+      other,
+    ]);
+
+    expect(nextOtherItem).toBe(otherItem);
+    expect(nextParentItem).not.toBe(parentItem);
+    const childItem =
+      nextParentItem?.kind === "thread"
+        ? nextParentItem.node.children[0]
+        : undefined;
+    expect(childItem?.kind === "thread" && childItem.node.thread).toBe(
+      updatedChild,
+    );
+  });
 });
 
 describe("section bucketing", () => {

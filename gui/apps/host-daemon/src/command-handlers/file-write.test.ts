@@ -8,8 +8,7 @@ import {
   type CommandOf,
   isExpectedCommandDispatchError,
 } from "../command-dispatch-support.js";
-import { writeHostFile } from "./file-write.js";
-import { readHostFile } from "./host-files.js";
+import { readHostFile, writeHostFile } from "./files.js";
 
 const tempDirs: string[] = [];
 
@@ -234,6 +233,26 @@ describe("writeHostFile", () => {
     await expect(
       fs.readFile(path.join(outsideDir, "escape.md"), "utf8"),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects writes through a dangling symlink under the declared root", async () => {
+    const rootDir = await makeTempDir("bb-file-write-root-");
+    const outsideDir = await makeTempDir("bb-file-write-outside-");
+    for (const [link, target, write] of [
+      ["file-link", "new.md", "file-link"],
+      ["dir-link", "new-dir", "dir-link/new.md"],
+    ] as const) {
+      await fs.symlink(path.join(outsideDir, target), path.join(rootDir, link));
+      const error = await captureWriteError(
+        writeCommand({
+          path: path.join(rootDir, write),
+          rootPath: rootDir,
+          createParents: true,
+        }),
+      );
+      expect((error as CommandDispatchError).code).toBe("invalid_path");
+    }
+    await expect(fs.readdir(outsideDir)).resolves.toEqual([]);
   });
 
   it("rejects lexical escapes from the declared root", async () => {
