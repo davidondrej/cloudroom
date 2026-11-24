@@ -60,6 +60,7 @@ async function startTestServer(args: StartTestServerArgs): Promise<TestServer> {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   while (testServers.length > 0) {
     const testServer = testServers.pop();
     if (testServer !== undefined) {
@@ -257,5 +258,85 @@ describe("waitForCompatibleServer", () => {
       serverUrl: "http://127.0.0.1:65535",
     });
     expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("waits for a slow system config response longer than 1s", async () => {
+    vi.useFakeTimers();
+
+    const fetchImpl: ServerProbeFetch = (input, init) => {
+      if (input.endsWith("/health")) {
+        return Promise.resolve(Response.json({ ok: true }));
+      }
+      return new Promise<Response>((resolveResponse, rejectResponse) => {
+        const signal = init?.signal;
+        const onAbort = () => {
+          clearTimeout(timer);
+          rejectResponse(
+            new DOMException("This operation was aborted", "AbortError"),
+          );
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolveResponse(
+            Response.json({
+              hostDaemonPort: 4_242,
+              voiceTranscriptionEnabled: false,
+            }),
+          );
+        }, 1_500);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    };
+
+    const waitPromise = waitForCompatibleServer({
+      fetchImpl,
+      intervalMs: 250,
+      serverUrl: "http://127.0.0.1:65535",
+      timeoutMs: 4_000,
+    });
+    await vi.runAllTimersAsync();
+
+    await expect(waitPromise).resolves.toEqual({
+      dataDir: null,
+      kind: "compatible",
+      serverUrl: "http://127.0.0.1:65535",
+    });
+  });
+
+  it("still times out when the server hangs", async () => {
+    vi.useFakeTimers();
+
+    const fetchImpl: ServerProbeFetch = (_input, init) =>
+      new Promise<Response>((_resolveResponse, rejectResponse) => {
+        const signal = init?.signal;
+        const onAbort = () => {
+          rejectResponse(
+            new DOMException("This operation was aborted", "AbortError"),
+          );
+        };
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+
+    const waitPromise = waitForCompatibleServer({
+      fetchImpl,
+      intervalMs: 250,
+      serverUrl: "http://127.0.0.1:65535",
+      timeoutMs: 3_000,
+    });
+    await vi.runAllTimersAsync();
+
+    const result = await waitPromise;
+    expect(result.kind).toBe("unavailable");
+    if (result.kind === "unavailable") {
+      expect(result.reason).toContain("Timed out after 3000ms");
+    }
   });
 });

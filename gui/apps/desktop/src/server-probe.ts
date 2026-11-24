@@ -225,6 +225,9 @@ export async function probeRoomServer(
 // Mac slept mid-startup, so that gap does not count toward the startup timeout.
 const MAX_AWAKE_POLL_GAP_MS = 10_000;
 
+// Allow each probe enough time for the server's same-user caller check on busy machines.
+const PROBE_REQUEST_TIMEOUT_MS = 5_000;
+
 function createAwakeTimeout(timeoutMs: number): () => boolean {
   let awakeMs = 0;
   let last = performance.now();
@@ -251,7 +254,7 @@ export async function waitForCompatibleServer(
     lastResult = await probeRoomServer({
       ...(args.fetchImpl === undefined ? {} : { fetchImpl: args.fetchImpl }),
       serverUrl: args.serverUrl,
-      timeoutMs: Math.min(args.intervalMs, 1_000),
+      timeoutMs: Math.min(args.timeoutMs, PROBE_REQUEST_TIMEOUT_MS),
     });
 
     if (lastResult.kind === "compatible") {
