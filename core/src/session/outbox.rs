@@ -88,12 +88,13 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
 
 impl Journal {
     pub fn open(directory: &Path) -> io::Result<Self> {
-        Self::open_from(directory, 0)
+        Self::open_from(directory, || 0)
     }
 
     /// `known` is the last record a replay snapshot covers. Listing every record of a large journal is slow,
     /// so a present `known` record skips the listing and only the records after it are counted.
-    pub fn open_from(directory: &Path, known: u64) -> io::Result<Self> {
+    /// `known` runs only once the lock is held: a waiting Core reads no snapshot, and never one older than its lock (#1968).
+    pub fn open_from(directory: &Path, known: impl FnOnce() -> u64) -> io::Result<Self> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -105,8 +106,14 @@ impl Journal {
             .truncate(false)
             .mode(0o600)
             .open(directory.join("lock"))?;
-        lock.try_lock()
-            .map_err(|_| io::Error::other("state directory already in use"))?;
+        // Its own kind: a restart's new Core waits while the old one still exits (#1968).
+        lock.try_lock().map_err(|error| match error {
+            fs::TryLockError::WouldBlock => {
+                io::Error::new(io::ErrorKind::WouldBlock, "state directory already in use")
+            }
+            fs::TryLockError::Error(error) => error,
+        })?;
+        let known = known();
         // A record file at or before the segments' end is one an interrupted `compact` left behind.
         let compacted = Self::compacted(directory);
         let last = if known > compacted && directory.join(record_name(known)).is_file() {

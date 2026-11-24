@@ -12,6 +12,7 @@ import {
   type ClaudeUsage,
   localClaudeAccount,
   profileAccount,
+  profilePlan,
   profileUsage,
   signOut,
   tokenOrganization,
@@ -241,6 +242,8 @@ export default async function plugin(room: BbPluginApi) {
   // `inCloud` is the account Cloud last confirmed. `cloudStale`: it has a newer token to upload.
   let cloudStale = z.boolean().catch(false).parse(await kv.get("cloud-stale:v1"));
   let cloudPending: string | null = null;
+  // Counts stale marks, so an upload that started before a mark doesn't clear it.
+  let staleMarks = 0;
   let cloudQueue: Promise<unknown> = Promise.resolve();
   // Before Cursor accounts, Cloud used a copy of the Mac's own Cursor login.
   let cursorInCloud = z.string().catch(LOCAL).parse(await kv.get("cursor-cloud:v1"));
@@ -502,6 +505,7 @@ export default async function plugin(room: BbPluginApi) {
     return run;
   };
   const followOnce = async (connect: boolean): Promise<string | null> => {
+    const marks = staleMarks;
     const id = current("claude-code");
     const account = accounts.find((entry) => entry.id === id);
     if (id === inCloud && !cloudStale) return null;
@@ -523,9 +527,10 @@ export default async function plugin(room: BbPluginApi) {
       if (status.state !== "connected")
         return "Claude isn't connected in Cloud.";
       inCloud = id;
-      cloudStale = false;
+      // A mark made during the upload (say a new plan) still needs its own upload.
+      if (staleMarks === marks) cloudStale = false;
       await kv.set("cloud:v1", id);
-      await kv.set("cloud-stale:v1", false);
+      await kv.set("cloud-stale:v1", cloudStale);
       return null;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -536,6 +541,7 @@ export default async function plugin(room: BbPluginApi) {
     }
   };
   const markStale = async () => {
+    staleMarks++;
     cloudStale = true;
     await kv.set("cloud-stale:v1", true);
   };
@@ -758,7 +764,10 @@ export default async function plugin(room: BbPluginApi) {
   const timer = setInterval(() => {
     background(refreshAll());
     background(telemetry.daily(snapshot));
-    if (++ticks % IDLE_USAGE_TICKS === 0) background(refreshIdle());
+    if (++ticks % IDLE_USAGE_TICKS === 0) {
+      background(refreshIdle());
+      background(refreshPlans());
+    }
     if (cloudStale) void followInCloud(false);
   }, USAGE_EVERY_MS);
   if (cloudStale) void followInCloud(false);
@@ -767,17 +776,59 @@ export default async function plugin(room: BbPluginApi) {
   background(refreshAll());
   background(refreshIdle(true));
   if (current("acp-antigravity") !== LOCAL) background(placeAgy());
-  // Accounts saved before plan tiers were read learn theirs once, so Ultra shows as Ultra.
-  void Promise.all(
-    accounts
-      .filter((entry) => entry.provider === "claude-code" && entry.profile && entry.tier === undefined)
-      .map(async (entry) => {
-        const found = await profileAccount(profilePath(entry.profile!)).catch(() => null);
-        if (!found) return false;
-        entry.tier = found.tier;
-        return true;
-      }),
-  ).then((read) => (read.includes(true) ? changed() : undefined));
+  // Plans change on Claude's side, and `claude auth status` keeps the one a login signed in with (#2534). So each full
+  // login's plan is read live at start and hourly, with no reply. Accounts saved before plan tiers were read fall back
+  // to `claude auth status` once, so Ultra shows as Ultra. A changed plan Cloud runs on is sent to Cloud again.
+  const refreshPlans = async () => {
+    let moved = false;
+    for (const entry of accounts) {
+      if (disposed) return;
+      if (entry.provider !== "claude-code" || !entry.profile) continue;
+      const dir = profilePath(entry.profile);
+      const found =
+        (await profilePlan(dir).catch(() => null)) ??
+        (entry.tier === undefined
+          ? await profileAccount(dir).catch(() => null)
+          : null);
+      const plan = found?.plan ?? entry.plan;
+      if (
+        !found ||
+        !accounts.includes(entry) ||
+        (entry.org && "org" in found && found.org && found.org !== entry.org) ||
+        (plan === entry.plan && found.tier === entry.tier)
+      )
+        continue;
+      const planMoved = plan !== entry.plan;
+      entry.plan = plan;
+      entry.tier = found.tier;
+      moved = true;
+      if (planMoved && (entry.id === inCloud || entry.id === cloudPending)) await markStale();
+    }
+    // The Mac's own login approved for Cloud, while Cloud runs on it and its usage is read anyway.
+    await refreshMac();
+    const approved = macCloud;
+    const onMac = () => inCloud === LOCAL || cloudPending === LOCAL;
+    if (approved && onMac() && macCloudReady() && readMacUsage()) {
+      const found = await profilePlan().catch(() => null);
+      // The terminal login may have changed during the read: only the approved login's plan counts.
+      if (
+        found &&
+        found.plan !== approved.plan &&
+        (!approved.org || found.org === approved.org) &&
+        macCloud === approved &&
+        macCloudReady() &&
+        onMac() &&
+        !disposed
+      ) {
+        macCloud = { ...approved, plan: found.plan };
+        await kv.set("mac-cloud:v1", macCloud);
+        await markStale();
+        moved = true;
+      }
+    }
+    if (moved) await changed();
+  };
+  background(refreshPlans());
 
   // Adding never switches accounts: the one in use stays in use.
   const add = async (

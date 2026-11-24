@@ -19,6 +19,8 @@ import { SignOutDialog } from "./CloudroomAccountSettings";
 import { getSettingsSectionRoutePath } from "./settings-sections";
 
 const BILLING_URL = "https://www.cloudroom.dev/billing";
+// The one booking page for paying customers, like Settings → Account. The website picks the calendar.
+const CALL_URL = "https://www.cloudroom.dev/call?from=app";
 const ROW_CLASS =
   "flex w-full items-center gap-2.5 rounded-md px-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-accent";
 
@@ -245,6 +247,21 @@ export function SettingsAccountMenu() {
             }
             onSelect={() => openUrlInExternalBrowser(BILLING_URL)}
           />
+          {/* Paid plans include a 1:1 call (docs/scopes/calls.md#one-booking-page). */}
+          {status?.plan && status.plan !== "free" && (
+            <MenuItem
+              icon="Calendar"
+              label="Book a 1:1 call"
+              detail={
+                <Icon
+                  name="ExternalLink"
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+              }
+              onSelect={() => openUrlInExternalBrowser(CALL_URL)}
+            />
+          )}
           <DropdownMenuSeparator />
           <MenuItem
             icon="LogOut"

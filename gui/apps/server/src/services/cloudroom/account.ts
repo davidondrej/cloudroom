@@ -8,7 +8,7 @@ import { ApiError } from "../../errors.js";
 import { cloudroom, configuredWebsite, trustedWebsite } from "./commands.js";
 import { cancelClaudeToken } from "./claude-token.js";
 import { cancelGithubLogin } from "./github-login.js";
-import { macAccess, macAccessSupported, supportedMacAccessLevels } from "./previews.js";
+import { macAccess, supportedMacAccessLevels } from "./previews.js";
 import { hasMacCodexLogin } from "./sandboxes.js";
 import { copyLogins } from "./sync.js";
 import { linkInstall, reportSignInFailed } from "./setup-telemetry.js";
@@ -53,6 +53,9 @@ export function cloudroomAccount(deps: Deps) {
   return service;
 }
 
+/** The system of the computer this server runs on, whose access the app saves, not the one viewing it (#958). */
+const computerOs = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
+
 export class CloudroomAccountService {
   private pending: Pending | null = null;
   private error: string | null = null;
@@ -62,7 +65,7 @@ export class CloudroomAccountService {
   async status() {
     const status = await cloudroom(this.deps).status();
     const macAccessLevel = await macAccess(this.deps);
-    return { ...status, macAccess: macAccessLevel === null ? null : macAccessLevel !== "off", macAccessLevel, macAccessSupported, macAccessLevels: supportedMacAccessLevels, copyLogins: await copyLogins(this.deps), localLogins: { codex: await hasMacCodexLogin() }, signingIn: this.pending !== null, signInError: this.error };
+    return { ...status, macAccess: macAccessLevel === null ? null : macAccessLevel !== "off", macAccessLevel, macAccessLevels: supportedMacAccessLevels, computerOs, copyLogins: await copyLogins(this.deps), localLogins: { codex: await hasMacCodexLogin() }, signingIn: this.pending !== null, signInError: this.error };
   }
 
 

@@ -342,7 +342,7 @@ export function AppSidebar({
           />
           <SidebarUpdatesBadge onNavigate={closeOnMobile} />
           <CloudQueueChip />
-          <MacAccessChip />
+          <MacAccessChip hidden={isHiddenHostedBody} />
         </SidebarMenu>
       </SidebarFooter>
       <SidebarResizeHandle

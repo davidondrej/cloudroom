@@ -1,7 +1,7 @@
 /// <reference path="./cross-spawn.d.ts" />
 import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, extname, join, posix, resolve, win32 } from "node:path";
+import { delimiter, dirname, extname, isAbsolute, join, posix, resolve, sep, win32 } from "node:path";
 import parseCrossSpawnCommand from "cross-spawn/lib/parse.js";
 
 // Windows process helpers, hand-ported from get-bb/bb#4610, #5429 and #5997
@@ -151,11 +151,28 @@ export function resolveWindowsShim(request: {
   if (source !== `${NPM_SHIM_HEAD}${NPM_NODE_SHIM_PROG}"%dp0%\\${target}" %*\r\n`) {
     return unchanged;
   }
+  // Never a bare `node`: Windows looks in the working folder (often a project) before PATH. With no node.exe
+  // beside the shim or on PATH, the missing sibling path fails with ENOENT, as a bare `node` would.
   const localNode = join(dirname(shim), "node.exe");
   return {
-    command: existsSync(localNode) ? localNode : "node",
+    command: existsSync(localNode) ? localNode : (nodeOnPath(request.env ?? process.env) ?? localNode),
     args: [file, ...request.args],
   };
+}
+
+/**
+ * `node.exe` from PATH's fully qualified folders only (`C:\…` or `\\server\share`), never the working folder,
+ * a drive-relative `C:dir` or a rooted `\dir` (both resolve against the working folder's drive). An env without
+ * PATH uses the parent's, as Windows does.
+ */
+function nodeOnPath(env: NodeJS.ProcessEnv): string | undefined {
+  return (normalizeWindowsEnv(env).PATH ?? process.env.PATH ?? "")
+    .split(";")
+    .map((directory) => directory.replace(/^"(.*)"$/u, "$1"))
+    // A POSIX host only fakes win32 in tests; there an absolute path is fully qualified.
+    .filter((directory) => (sep === "/" ? isAbsolute(directory) : /^([A-Za-z]:[\\/]|[\\/]{2}[^\\/])/u.test(directory)))
+    .map((directory) => join(directory, "node.exe"))
+    .find(isRunnableFile);
 }
 
 /**

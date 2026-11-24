@@ -83,7 +83,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     unarchive: (thread) => { const restored = unarchiveThreadKeepingOpenParent(deps, thread.id, true); if (restored) emitPluginThreadUnarchived(restored); },
     remove: (thread) => deleteThreadOnMac(deps, thread),
   };
-  cloudroom(deps).childTurnEnded = (child, turnStatus) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus });
+  cloudroom(deps).childTurnEnded = (child, turnStatus, failureReason) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus, failureReason });
   startClaudeVersionSync(deps, () => cloudroom(deps).teleportClient());
   startAutoDeleteSync(deps);
   const localOnly: MiddlewareHandler = async (context, next) => {

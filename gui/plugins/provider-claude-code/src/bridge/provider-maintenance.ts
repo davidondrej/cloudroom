@@ -1,4 +1,8 @@
-import { execFile } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +29,7 @@ import {
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
   experimental_readCliVersion as readCliVersion,
   experimental_resolveExecutablePath as resolveExecutablePath,
+  experimental_spawnPortableProcess as spawnPortableProcess,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -84,6 +89,22 @@ export function claudeExecutable(): string {
     findCliExecutable("claude") ||
     "claude"
   );
+}
+
+/** Starts the Claude CLI. On Windows an npm install puts `claude.cmd` on PATH, which plain `spawn` can't start (EINVAL). */
+export function spawnClaude(
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+): ChildProcessWithoutNullStreams {
+  return process.platform === "win32"
+    ? (spawnPortableProcess({
+        command: claudeExecutable(),
+        args,
+        ...options,
+        stdio: "pipe",
+        windowsHide: true,
+      }) as ChildProcessWithoutNullStreams)
+    : spawn(claudeExecutable(), args, { ...options, stdio: "pipe" });
 }
 
 // npm's unfinished stub isn't Claude Code: report it missing, so the

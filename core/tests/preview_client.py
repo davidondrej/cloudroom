@@ -279,6 +279,60 @@ class UpstreamTimeoutTests(unittest.TestCase):
                     relay.terminate()
 
 
+class WindowsPathTests(unittest.TestCase):
+    """#958: Windows jobs run in Git Bash, so paths cross between its /c/... form and Python's C:/... form."""
+    def test_paths_convert_both_ways_only_on_windows(self):
+        with mock.patch.object(preview, 'WINDOWS', True):
+            self.assertEqual(preview.native('/c/Users/Me Q/x'), 'C:/Users/Me Q/x')  # pathlib would read C:\c\Users.
+            self.assertEqual(preview.native('/d'), 'D:/')
+            self.assertEqual(preview.native(r'C:\Users\me\x'), 'C:/Users/me/x')
+            for kept in ('~/Desktop', 'Desktop/x', '/tmp/x', '/é/x', 'C:/Users/me', '~'):
+                self.assertEqual(preview.native(kept), kept)
+            # Git Bash's tar reads a C: in an archive's path as a remote host, so shell commands get /c/...
+            self.assertEqual(preview.posix(r'C:\Users\Me Q\x'), '/c/Users/Me Q/x')
+            self.assertEqual(preview.posix(Path('D:/x')), '/d/x')
+            self.assertEqual(preview.posix('/c/x'), '/c/x')
+            self.assertEqual(preview.posix('C:rel'), 'C:rel')
+            self.assertEqual(preview.posix(preview.native('/c/a b/c')), '/c/a b/c')
+        with mock.patch.object(preview, 'WINDOWS', False):
+            for path in ('/c/x', r'a\b', 'C:/x'):
+                self.assertEqual((preview.native(path), preview.posix(path)), (path, path))
+
+    def test_push_refuses_names_windows_cannot_store(self):
+        for bad in ('', 'a:b', r'a\b', 'x?', 'a*b', '"q"', 'NUL', 'con.txt', 'CONIN$', 'CONOUT$.txt', 'COM1', 'COM¹', 'lpt9.log', 'LPT³', 'name.', 'name ', 'tab\there'):
+            self.assertFalse(preview.windows_name(bad), bad)
+        for good in ('notes.txt', 'ü q.txt', 'CONSOLE', 'nul2', '.env', 'COM10'):
+            self.assertTrue(preview.windows_name(good), good)
+        with mock.patch.object(preview, 'WINDOWS', True):
+            for bad_to in ('C:', 'C:rel'):
+                with self.assertRaises(ValueError):
+                    preview.copy_command({'name': 'a.txt', 'to': bad_to})
+
+    def test_windows_job_env_strips_server_vars(self):
+        env = preview.windows_job_env('echo hi', {
+            'PATH': r'C:\Windows\System32',
+            'USERPROFILE': r'C:\Users\me',
+            'NODE_ENV': 'production',
+            'ELECTRON_RUN_AS_NODE': '1',
+            'ROOM_CLI': r'C:\app\room-cli',
+            'ROOM_DATA_DIR': r'C:\data',
+            'BB_SERVER_PORT': '4000',
+            'BB_SERVER_HEADERS': '{"authorization":"secret"}',
+            'CLOUDROOM_SERVER_URL': 'http://127.0.0.1:4000',
+            'CLOUDROOM_ROOM_CLI': r'C:\app',
+            'CLOUDROOM_PREVIEW_START': 'abc',
+        })
+        self.assertEqual(env['PATH'], r'C:\Windows\System32')
+        self.assertEqual(env['USERPROFILE'], r'C:\Users\me')
+        self.assertEqual(env['MSYSTEM'], 'MINGW64')
+        self.assertEqual(env['CHERE_INVOKING'], '1')
+        self.assertEqual(env['CLOUDROOM_COMMAND'], 'echo hi')
+        for stripped in ('NODE_ENV', 'ELECTRON_RUN_AS_NODE', 'ROOM_CLI', 'ROOM_DATA_DIR',
+                         'BB_SERVER_PORT', 'BB_SERVER_HEADERS', 'CLOUDROOM_SERVER_URL',
+                         'CLOUDROOM_ROOM_CLI', 'CLOUDROOM_PREVIEW_START'):
+            self.assertNotIn(stripped, env)
+
+
 @unittest.skipUnless(sys.platform == 'win32', 'Windows helper lifecycle')
 class WindowsLifecycleTests(unittest.TestCase):
     def test_start_confirms_and_stop_asks_the_helper_to_exit(self):

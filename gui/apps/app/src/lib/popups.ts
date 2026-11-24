@@ -15,7 +15,7 @@ const DAY = 86_400_000;
 const UNSAVED_KEY = "cloudroom.popups.unsaved";
 const LEGACY_KEYS: Partial<Record<Popup, string>> = { credits: "cloudroom.creditsExplainerSeen", install: "cloudroom.installApp.dismissed" };
 const statusAtom = atom<Partial<Record<Popup, boolean | null>>>({});
-const openAtom = atom<Popup | "claiming" | "plan" | null>(null);
+const openAtom = atom<Popup | "claiming" | "plan" | "computer-access" | null>(null);
 
 const send = async (body: { popup: Popup | "star_card" | "cloud_card"; event: "shown" | "closed"; detail?: Detail }) => {
   const response = await fetchWithAppSurface(PATH, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -144,7 +144,7 @@ export function usePopup(id: Popup, eligible: boolean | null) {
 
 /** A pop-up with its own rules (the one after buying a plan) takes the one pop-up slot while it wants to show, so
  *  no other pop-up opens over it. False while another one is open: it waits its turn. */
-export function usePopupSlot(id: "plan", wants: boolean): boolean {
+export function usePopupSlot(id: "plan" | "computer-access", wants: boolean): boolean {
   const [open, setOpen] = useAtom(openAtom);
   useEffect(() => {
     if (wants && open === null) setOpen(id);

@@ -55,7 +55,8 @@ export interface HostHooks {
   teleportRecovery?: () => void;
   /** Main's archive of a thread and its idle children; `websiteHasIt`: the website already has this thread archived. */
   archiveRequest?: (threadId: string, liveThreadIds?: string[], websiteHasIt?: boolean) => void;
-  childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus) => void;
+  /** `failureReason`: Core's error on a failed turn's receipt (#2513). */
+  childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus, failureReason?: string) => void;
   moveRequest?: (threadId: string, project: string) => void;
 }
 

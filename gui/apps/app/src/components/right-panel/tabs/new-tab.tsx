@@ -10,10 +10,7 @@ import {
 } from "react";
 import { useAtom } from "jotai";
 import { DndContext, type DragEndEvent } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { directoryFromPath } from "@cloudroom/thread-view";
 import {
   COARSE_POINTER_COMPACT_ICON_SIZE_CLASS,

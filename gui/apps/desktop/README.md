@@ -302,7 +302,8 @@ and that run never restarts by itself when idle; a click here, in a browser, or 
 
 When this Mac user can't write the app, **Restart to update** first asks for the Mac password. An unanswered
 prompt closes after 2 minutes and the button works again. An app opened from the disk image or translocated
-from Downloads is read-only, so Squirrel.Mac can never replace it: it skips the in-app update. A pop-up over
+from Downloads is read-only, so Squirrel.Mac can never replace it: it skips the in-app update. So does an app on
+another disk than Applications: Squirrel.Mac's swap across disks can fail halfway and delete it (#2511). A pop-up over
 the app (and over setup) offers **Move to Applications** (`app.moveToApplicationsFolder()`), which stops Local
 agents, copies the app, and reopens it from Applications; the agents resume. **Not now** hides it until the
 next launch, and the update banner still asks to move it.

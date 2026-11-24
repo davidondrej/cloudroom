@@ -105,16 +105,15 @@ describe("@cloudroom/templates", () => {
     expect(local).not.toContain("/var/tmp");
   });
 
-  it("offers Mac access and Local computer use only off Windows", () => {
+  it("offers Mac access everywhere and Local computer use only off Windows", () => {
     expect(systemPrompt("cloud")).toContain("room-cli mac pull");
     expect(systemPrompt("local")).toContain("read the `computer-use` skill");
     expect(systemPrompt("local") + systemPrompt("cloud")).not.toMatch(/\bMac\b(?! access)|laptop/u);
-    expect(systemPrompt("local", true) + systemPrompt("cloud", true)).not.toMatch(/room-cli mac (pull|push)|run it on the user's computer/u);
+    // #958: Windows Cloud threads reach the user's computer through Git Bash, like a Mac.
+    expect(systemPrompt("cloud", true)).toContain("room-cli mac pull");
+    expect(systemPrompt("local", true) + systemPrompt("cloud", true)).not.toContain("run it on the user's computer");
     expect(systemPrompt("local", true)).not.toContain("read the `computer-use` skill");
-    expect(systemPrompt("cloud", true)).toContain("Save lasting skills in the repo.");
-    // #1334: Windows Cloud threads ask the user instead of trying `mac run`.
-    expect(systemPrompt("cloud", true)).toContain("Cloud threads can't reach the user's Windows computer.");
-    expect(systemPrompt("local", true) + systemPrompt("cloud")).not.toContain("Windows computer");
+    expect(systemPrompt("local", true) + systemPrompt("cloud", true)).not.toContain("Windows computer");
   });
 
   it("renders child thread needs-attention messages with blocker summaries", () => {

@@ -122,12 +122,51 @@ pub async fn serve(mut config: config::Config) -> Result<(), Box<dyn std::error:
         profile.home = profile.home.canonicalize()?;
         profile.binary = launch_path(*kind, &profile.binary)?;
     }
-    // A bind failure must not mutate saved sessions or claim their recovery.
-    let listener = tokio::net::TcpListener::bind(config.listen).await?;
     // A stop during recovery must be delivered to graceful shutdown, even before the server is polled.
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
-    let manager = session::Manager::open(config.clone())?;
+    // A bind failure must not mutate saved sessions or claim their recovery. A restart's new Core can start while the
+    // old one, on a stalled disk, still exits: it frees the port, then the state directory once its HTTP clients
+    // drain. The new Core waits for both, or its exit 1 is blamed on the cut-off turns (#1968).
+    let give_up = std::time::Instant::now() + config.previous_exit_wait;
+    let (mut listener, mut waiting) = (None, false);
+    let manager = loop {
+        let attempt = match listener {
+            Some(_) => session::Manager::open(config.clone()),
+            None => match tokio::net::TcpListener::bind(config.listen).await {
+                Ok(bound) => {
+                    listener = Some(bound);
+                    session::Manager::open(config.clone())
+                }
+                Err(error) => Err(error),
+            },
+        };
+        let error = match attempt {
+            Ok(manager) => break manager,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::AddrInUse | std::io::ErrorKind::WouldBlock
+                ) && std::time::Instant::now() < give_up =>
+            {
+                error
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !std::mem::replace(&mut waiting, true) {
+            eprintln!(
+                "Waiting up to {} s for the previous Core to exit: {error}",
+                config.previous_exit_wait.as_secs()
+            );
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+            // Nothing was loaded or saved yet.
+            _ = terminate.recv() => return Ok(()),
+            _ = interrupt.recv() => return Ok(()),
+        }
+    };
+    let listener = listener.expect("bound before the state directory opened");
     manager.check_storage().await;
     runtime::warm_codex(&config).await;
     // Reconcile previous workloads before the API or storage guard can start work.

@@ -1201,11 +1201,12 @@ impl Adapter for Protocol {
             && value["parent_tool_use_id"].is_null()
             && value["isReplay"] != true
             && value["api_error"] == "usage_limit_reached"
-            && let Some(limit) = limit_window(&value["api_error_params"]["rate_limit_info"])
         {
-            self.limit = Some(limit);
-            self.overage = None;
-            self.plan_ok_sent = false;
+            self.limit = merge_limit(self.limit, &value["api_error_params"]["rate_limit_info"]);
+            if self.limit.is_some() {
+                self.overage = None;
+                self.plan_ok_sent = false;
+            }
         }
         if kind == "assistant"
             && let Some(tokens) = prompt_tokens(&value["message"]["usage"])
@@ -1425,11 +1426,9 @@ impl Adapter for Protocol {
                         result_error(value)
                     }
                 });
-                if pending_limit.is_none()
-                    && error.is_some()
-                    && value["api_error"] == "usage_limit_reached"
-                {
-                    pending_limit = limit_window(&value["api_error_params"]["rate_limit_info"]);
+                if error.is_some() && value["api_error"] == "usage_limit_reached" {
+                    pending_limit =
+                        merge_limit(pending_limit, &value["api_error_params"]["rate_limit_info"]);
                 }
                 if let (Some((resets, account_wide)), Some(text)) = (pending_limit, &mut error) {
                     let mut limited = super::plan_limited("claude-code", resets);
@@ -1536,6 +1535,22 @@ fn limit_window(info: &Value) -> Option<(Option<u64>, bool)> {
         .as_str()
         .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
     Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide))
+}
+
+/// Add one limit frame to what this turn already knows. A frame that names no window keeps the known scope, and one
+/// without a reset keeps the known reset, so a sparse repeat never widens a model's limit to the whole account.
+fn merge_limit(known: Option<(Option<u64>, bool)>, info: &Value) -> Option<(Option<u64>, bool)> {
+    let Some((resets, account_wide)) = limit_window(info) else {
+        return known;
+    };
+    let Some((known_resets, known_wide)) = known else {
+        return Some((resets, account_wide));
+    };
+    let named = info["rateLimitType"].is_string();
+    Some((
+        resets.or(known_resets),
+        if named { account_wide } else { known_wide },
+    ))
 }
 
 /// Claude's own words for a failed turn, so receipts show the real cause (ADR 0123).
@@ -1711,6 +1726,7 @@ mod tests {
             storage: None,
             rpc_timeout: std::time::Duration::from_secs(1),
             diagnostic_upload: std::time::Duration::from_secs(1),
+            previous_exit_wait: std::time::Duration::ZERO,
         };
         let args = |probe| {
             let (command, _) =
@@ -1802,19 +1818,15 @@ mod tests {
             provider: None,
         };
         let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
-        // One failed turn: an optional assistant error frame, then its result. Returns (usage_limited, error).
-        fn turn(
-            claude: &mut Protocol,
-            assistant: Option<Value>,
-            result: Value,
-        ) -> (Option<Value>, String) {
+        // One failed turn's frames, ending with its result. Returns (usage_limited, error).
+        fn turn(claude: &mut Protocol, frames: Vec<Value>) -> (Option<Value>, String) {
             claude.active = Some(("u".into(), "r".into()));
             let mut state = Progress {
                 request: Some("r".into()),
                 ..Default::default()
             };
             let mut events = Vec::new();
-            for frame in assistant.into_iter().chain([result]) {
+            for frame in frames {
                 events.extend(
                     claude
                         .receive(&frame, frame.to_string(), &mut state)
@@ -1850,12 +1862,14 @@ mod tests {
         for params in [info(json!({"status":"rejected"})), info(json!({}))] {
             let (limited, error) = turn(
                 &mut claude,
-                Some(assistant(
-                    json!("usage_limit_reached"),
-                    params,
-                    "You've hit your Fable limit",
-                )),
-                failed("You've hit your Fable limit"),
+                vec![
+                    assistant(
+                        json!("usage_limit_reached"),
+                        params,
+                        "You've hit your Fable limit",
+                    ),
+                    failed("You've hit your Fable limit"),
+                ],
             );
             let limited = limited.expect("a repeat limit is a plan limit");
             assert_eq!(limited["model_only"], json!(true));
@@ -1869,8 +1883,7 @@ mod tests {
         ] {
             let (limited, error) = turn(
                 &mut claude,
-                Some(assistant(Value::Null, Value::Null, text)),
-                failed(text),
+                vec![assistant(Value::Null, Value::Null, text), failed(text)],
             );
             assert!(limited.is_none(), "{text}");
             assert!(!error.contains(super::super::PLAN_LIMIT), "{error}");
@@ -1881,8 +1894,30 @@ mod tests {
         claude
             .receive(&other, other.to_string(), &mut Progress::default())
             .unwrap();
-        let (limited, _) = turn(&mut claude, None, failed("boom"));
+        let (limited, _) = turn(&mut claude, vec![failed("boom")]);
         assert!(limited.is_none());
+        // A sparse frame never widens a known Fable limit or drops its reset, whichever comes first.
+        let limit = json!("usage_limit_reached");
+        let fable = info(json!({"status":"rejected"}));
+        let mut detailed_result = failed("You've hit your Fable limit");
+        detailed_result["api_error"] = limit.clone();
+        detailed_result["api_error_params"] = fable.clone();
+        for frames in [
+            vec![
+                json!({"type":"rate_limit_event","rate_limit_info":fable["rate_limit_info"]}),
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                failed("You've hit your Fable limit"),
+            ],
+            vec![
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                detailed_result,
+            ],
+        ] {
+            let (limited, _) = turn(&mut claude, frames);
+            let limited = limited.expect("still a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
+        }
     }
 
     #[test]

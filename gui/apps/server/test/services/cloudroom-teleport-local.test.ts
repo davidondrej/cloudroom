@@ -4,13 +4,19 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlink
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
-import { dirname, join } from "node:path";
-import { expect, it } from "vitest";
-import { tarCommand } from "@cloudroom/process-utils";
+import { dirname, join, sep } from "node:path";
+import { expect, it, vi } from "vitest";
+import { chatFileCopyPath } from "@cloudroom/config/chat-file-copies";
+import { openSession } from "@cloudroom/db";
+import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
+import { CHAT_FILE_COPIES_DIR_NAME, ensureDataPrivateDir, tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
+import { cloudroom } from "../../src/services/cloudroom/commands.js";
+import { seedHost, seedPrimaryHost } from "../helpers/seed.js";
+import { withTestHarness } from "../helpers/test-app.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
 import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
-import { allowance, applyChanges, cloudChanges, codexLineage, conversationParser, download, moveAntigravityConversation, moveAntigravityWorkspace, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
+import { allowance, applyChanges, cloudChanges, cloudFile, codexLineage, conversationParser, download, moveAntigravityConversation, moveAntigravityWorkspace, packChangesCommand, saveCloudImages } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
   const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-local-"));
@@ -372,4 +378,52 @@ it("Antigravity's saved workspace moves to the Local folder, so its commands run
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+it("Cloud chat file copies go only where no sandbox can write, never through a link planted where they used to go", async () => {
+  await withTestHarness(async (harness) => {
+    const temp = mkdtempSync(join(tmpdir(), "cloudroom-chat-copies-"));
+    try {
+      const dataDir = join(temp, "data");
+      const host = seedHost(harness.deps);
+      openSession(harness.deps.db, { hostId: host.id, instanceId: "instance-1", hostName: "Test Host", dataDir, protocolVersion: HOST_DAEMON_PROTOCOL_VERSION, heartbeatIntervalMs: 5_000, leaseTimeoutMs: 30_000 });
+      seedPrimaryHost(harness.deps, host.id);
+      // The host daemon makes it at startup.
+      ensureDataPrivateDir(dataDir, CHAT_FILE_COPIES_DIR_NAME);
+      const threadId = "thr_cloudcopies";
+      // The sandbox (a local folder here) shows an image.
+      const image = join(temp, "sandbox", "shot.png");
+      mkdirSync(dirname(image), { recursive: true });
+      writeFileSync(image, "image");
+      const sandbox = {
+        runOnVm: async (input: { command: string }) => {
+          const result = spawnSync("bash", ["-c", input.command]);
+          return { code: result.status ?? 1, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false };
+        },
+      } as unknown as CloudroomClient;
+      const threadClient = vi.spyOn(cloudroom(harness.deps), "threadClient").mockResolvedValue(sandbox);
+      // A sandboxed Local agent can write thread storage: it links a folder on the way to where this copy used to go.
+      const outside = join(temp, "outside");
+      mkdirSync(outside);
+      const old = join(dataDir, "thread-storage", threadId, "Cloud files");
+      mkdirSync(old, { recursive: true });
+      symlinkSync(outside, join(old, image.split(sep)[1]!));
+
+      await saveCloudImages(harness.deps, threadId, `![Shot](${image})`);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(readFileSync(chatFileCopyPath(dataDir, threadId, image)!, "utf8")).toBe("image");
+      // A copy that can be shown spares the sandbox a wake.
+      await expect(cloudFile(harness.deps, threadId, image)).resolves.toEqual(Buffer.from("image"));
+      expect(threadClient).toHaveBeenLastCalledWith(threadId, false);
+
+      // A copy that can't be read or saved: the sandbox wakes, and the downloaded file still shows.
+      rmSync(join(dataDir, CHAT_FILE_COPIES_DIR_NAME), { recursive: true });
+      writeFileSync(join(dataDir, CHAT_FILE_COPIES_DIR_NAME), "not a folder");
+      await expect(cloudFile(harness.deps, threadId, image)).resolves.toEqual(Buffer.from("image"));
+      expect(threadClient).toHaveBeenLastCalledWith(threadId, true);
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
 });

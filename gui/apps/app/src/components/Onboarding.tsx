@@ -120,9 +120,12 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
   const [imported, setImported] = useState(false);
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
+  const os = account.data?.computerOs;
   const leave = () => {
     const saves = Boolean(account.data?.account) || progress.ownCore;
-    if (saves && account.data?.macAccessSupported !== false && account.data?.macAccess == null) saveMacAccess.mutate(choices.macAccess);
+    // Windows (#958): skipping never turns access on, nor when the computer's system is unknown. It stays unset (Off),
+    // and on Windows the chip asks once (MacAccessChip). The server's system counts, not the viewer's.
+    if (saves && os !== undefined && os !== "windows" && account.data?.macAccessSupported !== false && account.data?.macAccess == null) saveMacAccess.mutate(choices.macAccess);
     if (saves && account.data?.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
     close();
   };
@@ -514,7 +517,11 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   const client = useQueryClient();
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
-  const [ask] = useState(() => ({ mac: account.data?.macAccessSupported !== false && account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
+  const [askedAccess] = useState(() => ({ mac: account.data?.macAccessSupported !== false && account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
+  // Windows (#958): setup never asks or saves computer access, so Connect can't save the ticked default. The sidebar
+  // chip asks once instead (MacAccessChip). Until the server says its system, nothing is saved either.
+  const os = account.data?.computerOs;
+  const ask = { ...askedAccess, mac: askedAccess.mac && os !== undefined && os !== "windows" };
   const { macAccess, copyLogins } = choices;
   // Save whenever a box differs from the saved choice, so re-checking it after a Connect works.
   const saveChoices = () =>

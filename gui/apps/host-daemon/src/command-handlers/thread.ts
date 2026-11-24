@@ -6,6 +6,7 @@ import {
   AgentRuntimeTurnBusyError,
   type AgentRuntimeBridgeLaunch,
 } from "@cloudroom/agent-runtime";
+import { deleteChatFileCopies } from "@cloudroom/config/chat-file-copies";
 import {
   flattenPromptInputGroups,
   isStandaloneBuiltinCompactCommand,
@@ -77,6 +78,7 @@ export async function deleteThreadStorage(
     "Thread storage path escapes the storage root",
   );
   await fs.rm(storagePath, { recursive: true, force: true });
+  await deleteChatFileCopies(options.dataDir, command.threadId);
 }
 
 type ThreadStartRuntimeCommand =

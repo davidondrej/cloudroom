@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 165
+
+Cloud agents reach Windows PCs (2026-11-24)
+
+### Changes
+
+- Cloud agents can now run commands and move files on your paired Windows computer.
+- Windows updates now stage in the background for quick restarts, and npm-installed Claude Code signs in cleanly.
+- Back-to-back Claude plan limits in Cloud threads each get a plan-limit card, and restarted Cloud threads no longer report a fake exit status 1.
+- Background command markers are now minimal hairline dividers, Claude plan changes sync to Cloud, and Workflow and Cyber scans keep going past unreadable files.
+- Security fixes.
+
 ## 164
 
 Share only the repos you pick (2026-11-23)

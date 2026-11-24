@@ -24,7 +24,7 @@ import {
   type Sensor,
   type TouchSensorOptions,
 } from "@dnd-kit/core";
-import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { sortableKeyboardCoordinates } from "@/lib/sortable";
 import {
   useDragClickSuppression,
   type ConsumeDragClickSuppression,

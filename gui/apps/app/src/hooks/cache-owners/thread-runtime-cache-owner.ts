@@ -217,7 +217,6 @@ interface BuildAcceptedPromptHistoryEntryArgs {
 }
 
 interface BuildOptimisticUserMessageRowParams {
-  cloudMessageId?: string;
   createdAt: number;
   input: SendThreadMessageMutationRequest["input"];
   mode: SendThreadMessageMutationRequest["mode"];
@@ -578,7 +577,6 @@ function requestWillOptimisticallyQueue(
 }
 
 export function buildOptimisticUserMessageRow({
-  cloudMessageId,
   createdAt,
   input,
   mode,
@@ -623,7 +621,6 @@ export function buildOptimisticUserMessageRow({
     systemMessageKind: "unlabeled",
     systemMessageSubject: null,
     turnRequest: {
-      ...(cloudMessageId ? { cloudMessageId } : {}),
       isGrouped: false,
       kind: optimisticTurnRequestKind({ mode, threadStatus }),
       status: "pending",
@@ -891,7 +888,6 @@ export async function beginSendThreadMessageTransaction({
   });
 
   const optimisticRow = buildOptimisticUserMessageRow({
-    cloudMessageId: request.recoverCloudDelivery ? request.requestId : undefined,
     createdAt: optimisticCreatedAt,
     input: request.input,
     mode: request.mode,
@@ -1011,7 +1007,6 @@ export function applySendThreadMessageSuccess({
         queryClient,
         request.id,
         buildOptimisticUserMessageRow({
-          cloudMessageId: request.recoverCloudDelivery ? request.requestId : undefined,
           createdAt: optimisticCreatedAt,
           input: request.input,
           mode: request.mode,

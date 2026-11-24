@@ -12,10 +12,10 @@ import {
 import {
   SortableContext,
   sortableKeyboardCoordinates,
+  sortableTranslate,
   useSortable,
   verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { sortableTranslate } from "@/lib/sortable-translate";
+} from "@/lib/sortable";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";

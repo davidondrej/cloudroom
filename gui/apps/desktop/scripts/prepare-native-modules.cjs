@@ -424,6 +424,16 @@ async function pruneNativeBuildFiles(appOutDir, target) {
   }
 }
 
+// Windows staged updates (#2525): the installer checks a background unpack has at least this many files before it
+// may replace the app (build/installer.nsh). Signing later changes sizes, never the count. Counts itself, and
+// resources/elevate.exe, which electron-builder's NSIS target copies in after afterPack.
+async function writeWindowsFileCount(appOutDir) {
+  const entries = await readdir(appOutDir, { recursive: true, withFileTypes: true });
+  const elevate = existsSync(path.join(appOutDir, "resources", "elevate.exe")) ? 0 : 1;
+  const files = entries.filter((entry) => entry.isFile() && entry.name !== "cloudroom-files.txt").length + 1 + elevate;
+  await writeFile(path.join(appOutDir, "resources", "cloudroom-files.txt"), String(files));
+}
+
 async function afterPack(context) {
   const arch = resolveArchName(context);
   const platform = context.electronPlatformName ?? process.platform;
@@ -455,6 +465,7 @@ async function afterPack(context) {
         ? path.join(context.appOutDir, `${productName}.exe`)
         : path.join(context.appOutDir, context.packager.executableName);
   await smokePackagedNpm(appBinary);
+  if (platform === "win32") await writeWindowsFileCount(context.appOutDir);
   if (platform === "linux") {
     await installLinuxLauncher(context.appOutDir, context.packager.executableName);
   }

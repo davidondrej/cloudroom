@@ -249,6 +249,17 @@ new='                    "browser-harness did not retry or create another connec
 if grep -qs "$old" "$admin"; then
   sed "s|$old|$new|" "$admin" > "$admin.$$" 2>/dev/null && mv -f "$admin.$$" "$admin" 2>/dev/null || rm -f "$admin.$$"
 fi
+# 0.1.13 waits with no time limit while Chrome's Allow popup is open, so an unattended run hung until something killed it
+# (#2521). Give up after 90 s, under agents' usual 2-minute command limit: upstream's permission-blocked error then fires
+# and the pending daemon keeps the popup up, so a later click still connects. Swapped in by rename like run.py; skips
+# itself once a release changes the line.
+old='^    approval_wait = None if local and not explicit_wait else startup_wait$'
+new='    approval_wait = 90.0 if local and not explicit_wait else startup_wait'
+old_msg='^                "Approve that exact popup; browser-harness did not retry or create another connection[.]"$'
+new_msg='                "Approve that exact popup; browser-harness did not retry or create another connection. In an unattended run, stop and tell the user to click Allow in Chrome."'
+if grep -qs "$old" "$admin"; then
+  sed -e "s|$old|$new|" -e "s|$old_msg|$new_msg|" "$admin" > "$admin.$$" 2>/dev/null && mv -f "$admin.$$" "$admin" 2>/dev/null || rm -f "$admin.$$"
+fi
 
 # 0.1.13 reads BU_CDP_URL as an HTTP address and polls its /json/version, so a WebSocket address there, such as a
 # built-in browser lease's endpoint, failed after 30 s (#1335). Pass a ws:// or wss:// one on as BU_CDP_WS.

@@ -5,7 +5,7 @@ import {
 } from "@/components/ClaudeConnection";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router";
-import { arrayMove } from "@dnd-kit/sortable";
+import { arrayMove } from "@/lib/sortable";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { invalidateHostProviderCliStatus } from "@/hooks/cache-owners/provider-cli-status-cache-owner";
 import { COMPUTER, COMPUTER_TITLE, type AppSettings, type CompletedTurnDisplay, type ProviderInfo } from "@cloudroom/domain";

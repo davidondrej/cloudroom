@@ -9,7 +9,7 @@ import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { appRequestId, installTag, readInstallTag } from "../../src/services/cloudroom/cloud-threads.js";
-import { command, coreStates, saveBinding, saveCommandState, saveStatus, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { binding, command, coreStates, saveBinding, saveCommandState, saveStatus, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
 import { projectRecords } from "../../src/services/cloudroom/events.js";
 import type { SessionRecord } from "../../src/services/cloudroom/client.js";
 import { getLastThreadOutput } from "../../src/services/threads/thread-data.js";
@@ -21,7 +21,7 @@ import { availableModelFixture } from "../helpers/available-models.js";
 import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
 import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
 import { turnScope } from "@cloudroom/domain";
-import { archiveThread, unarchiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { archiveThread, unarchiveThread, createThread, listQueuedThreadMessages, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
 
 /** The app tags each prompt, steer, edit and rewind with its install (#237): `tagged` names one, `untagged` reads one. */
 const untagged = (id: string | undefined) => id?.replace(/^app_[a-f0-9]{12}_/, "");
@@ -828,7 +828,7 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
     const reports = vi.fn();
     service.childTurnEnded = reports;
     service.children.tellLocalParent(own.id, "completed", "turn-1");
-    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed");
+    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed", undefined);
     expect((await patch(own.id, cloudParent.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(cloudParent.id);
 
@@ -1323,6 +1323,17 @@ it("credits Claude usage that arrives after a follow-up was sent to the turn tha
     await expect.poll(() => harness.db.select().from(cloudroomThreads).get()!.cursor >= records.findIndex((value) => (value as { kind: string }).kind === "usage") + 1).toBe(true);
     expect(harness.db.select().from(events).all().filter((event) => event.type === "thread/tokenUsage/updated").map((event) => event.turnId)).toEqual(["one"]);
     expect(service.threadStatus(thread.id)?.error ?? null).toBeNull();
+    // The same plan limit on two turns in a row gets a card each; one turn reporting it twice gets one (#949).
+    const limit = "Claude's plan limit (not Cloudroom's). Switch accounts to keep working. Claude said: You've hit your Fable limit";
+    for (const turn of ["three", "four"]) {
+      expect(await send(thread.id, turn)).toMatchObject({ delivery: "sent" });
+      record("state", { state: "starting_turn", request_id: turn });
+      record("receipt", { request_id: turn, command: "prompt", state: "failed", error: limit });
+    }
+    record("receipt", { request_id: "four", command: "prompt", state: "failed", error: limit });
+    const repeated = records.length;
+    await expect.poll(() => harness.db.select().from(cloudroomThreads).get()!.cursor >= repeated).toBe(true);
+    expect(harness.db.select().from(events).all().filter((event) => event.type === "system/error").map((event) => JSON.parse(event.data).message)).toEqual([limit, limit]);
   } finally {
     service.stop();
     core.closeAllConnections();
@@ -1963,6 +1974,33 @@ it("maps exactly the Core session states core/docs/api.md lists", async () => {
   const documented = [...(doc.match(/Session `state` values: (.*)/)?.[1] ?? "").matchAll(/`(\w+)`/g)].map((match) => match[1]);
   expect(documented.length).toBeGreaterThan(10);
   expect([...documented].sort()).toEqual([...coreStates].sort());
+});
+
+// #2513: a Local parent hears why its Cloud child's turn failed, in Core's words on the failed receipt.
+it("tells a Local parent why its Cloud child's turn failed", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id });
+    const parent = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, providerThreadId: "provider-parent", threadId: parent.id });
+    const child = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status: "active" });
+    harness.db.insert(cloudroomThreads).values({ threadId: child.id, coreUrl: `sandbox:${child.id}`, sessionId: "cr_child", startRequestId: "start", nativeId: "native", model: "m", reasoning: "medium" }).run();
+    const service = cloudroom(harness.deps) as unknown as { rt: { me(): Promise<string>; state(id: string): { actFrom: number | null } }; stream: { handleStreamRecord(...args: unknown[]): Promise<unknown> }; messaging: { failStart(id: string, message: string): void } };
+    const state = Object.assign(service.rt.state(child.id), { actFrom: 0 });
+    const error = "Codex's plan limit (not Cloudroom's). Switch accounts to keep working. Codex said: usage limit reached";
+    const record = { sequence: 1, timestamp_ms: 1, session_id: "cr_child", kind: "receipt", data: { request_id: appRequestId(await service.rt.me(), "turn"), command: "prompt", state: "failed", error } };
+    await service.stream.handleStreamRecord(binding(harness.db, child.id), null, record, new AbortController().signal, false, false, null, 0, 0, () => state, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    const notice = harness.db.select().from(events).where(eq(events.threadId, parent.id)).all().find((row) => row.type === "client/turn/requested" && row.data.includes('"initiator":"system"'));
+    expect(notice?.data).toContain(`failed.\\n\\nError: ${error}`);
+    // A start Core refuses for good, say at a Codex usage limit, too; it waits behind the first notice.
+    const refused = "Your Codex usage limit is reached. Sign in with another ChatGPT account to keep working, or wait for it to reset.";
+    service.messaging.failStart(child.id, refused);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(listQueuedThreadMessages(harness.db, parent.id)[0]?.content).toContain(`failed.\\n\\nError: ${refused}`);
+  } finally { await harness.cleanup(); }
 });
 
 it("tells a Cloud parent once when Core keeps refusing its child's start for now, and keeps it trying (#865)", async () => {

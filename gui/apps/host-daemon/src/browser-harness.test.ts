@@ -321,7 +321,8 @@ it.skipIf(!supported)(
 
 // 0.1.13 messages that sent agents the wrong way: mac-approve sees only English Google Chrome sheets on the
 // current Space, yet said to run it again (#1295); Chrome rejects at once while it has no window, yet the
-// message named no fix, so every retry failed the same way (#1702). Each source is 0.1.13's, verbatim.
+// message named no fix, so every retry failed the same way (#1702); the Allow popup wait had no limit (#2521).
+// Each source is 0.1.13's, verbatim.
 it.skipIf(!supported).each([
   [
     "mac-approve not-found asks the user to click Allow instead of retrying (#1295)",
@@ -342,6 +343,17 @@ it.skipIf(!supported).each([
       '                    "browser-harness did not retry or create another connection."\n' +
       "                ,)\n",
     "permission-blocked: the pending Chrome connection ended before approval; browser-harness did not retry or create another connection. Chrome rejects the connection at once, with no popup, when it has no open browser window. Ask the user to open a Chrome window and confirm, then retry once; they click Allow on the popup that appears. Do not retry before they confirm.",
+  ],
+  [
+    "a local Allow popup wait ends after 90 s and says what to do unattended (#2521)",
+    "admin.py",
+    "def f(local=True, explicit_wait=False, startup_wait=60.0):\n" +
+      "    approval_wait = None if local and not explicit_wait else startup_wait\n" +
+      "    return (\n" +
+      '                "permission-blocked: Chrome\'s Allow popup is still open and the pending daemon was left running. "\n' +
+      '                "Approve that exact popup; browser-harness did not retry or create another connection."\n' +
+      "    , approval_wait)\n",
+    "permission-blocked: Chrome's Allow popup is still open and the pending daemon was left running. Approve that exact popup; browser-harness did not retry or create another connection. In an unattended run, stop and tell the user to click Allow in Chrome.|90.0",
   ],
 ])("%s", async (_name, file, source, expected) => {
   const root = mkdtempSync(join(tmpdir(), "browser-harness-"));

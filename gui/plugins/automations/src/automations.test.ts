@@ -1792,6 +1792,22 @@ it("a Cloud loop update refuses --target-thread instead of claiming it moved (#2
   expect(automations).not.toHaveBeenCalled();
 });
 
+it("room-cli wake says it made a loop, shows it in loop list, and how to cancel it (#2485)", async () => {
+  const room = createAutomationServiceRoom();
+  const threads = { ...room.sdk.threads, get: async () => ({ projectId: "proj_test", providerId: "codex" }), defaultExecutionOptions: async () => ({ model: "gpt-5", permissionMode: "full" }) };
+  const sdk = { ...room.sdk, threads, cloudroom: { automations: () => Promise.reject(new Error("Sign in")) } } as never;
+  let cli: PluginCliRegistration | undefined;
+  const service = createAutomationService({ bb: { ...room, sdk }, db: createTestDb(), pluginDataDir: "/tmp", serverUrl: "" });
+  registerAutomationCli({ bb: { sdk, cli: { register: (r) => void (cli = r) } }, service });
+  const list = async () => (await cli!.run(["list", "--project", "proj_test"], {})).stdout;
+  const woke = (await cli!.run(["wake", "5m", "check\nthe deploy"], { threadId: "thr_me" })).stdout ?? "";
+  const id = /^Loop created: (auto_\S+)\n/.exec(woke)?.[1];
+  expect(await list()).toContain(`${id}  Wake: check the deploy `);
+  const cancel = /\nCancel it: room-cli loop (delete .+)\n$/.exec(woke)?.[1] ?? "";
+  expect(await cli!.run(cancel.split(" "), {})).toMatchObject({ exitCode: 0 });
+  expect(await list()).toBe("No Local loops found\n");
+});
+
 describe("automation CLI --script-file", () => {
   type FileReadCall = { hostId: string | undefined; path: string; rootPath?: string };
 

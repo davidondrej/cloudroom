@@ -25,6 +25,7 @@ For flags, Cloud loops, and scripts:
   Cloud loops use them by default.
 - **Where:** a Local loop in the project's main checkout (first line of `git worktree list`). No new worktrees. Use a Cloud loop when it must run with the user's computer off, and always from a Cloud thread.
 - **One thread per run:** every run is its own top-level thread. Never point a loop at one manager thread that re-prompts and spawns sub-agents: the runs pile up nested under it. Local loops and Cloud `--cron` loops already start a fresh thread per run, so don't add `--same-thread`. A script that starts threads itself spawns them top-level: no `--parent-self` locally, `--top-level` in a Cloud thread, never `--shared-sandbox`.
+- **Webhooks:** a Cloud `--webhook` loop's run reads only up to the first 16 KB of a request, less with a long prompt. Have bigger senders POST a link or split the report.
 - **Access:** read only. No edits, commits, or pushes until the user approves a fix.
 - **Secrets:** a Cloud loop gets only the API keys its job needs: `--secrets KEY,.env` or `--secrets none`. Any picked list, even `.env` or `none`, blocks `room-cli mac` in its runs, so a job that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop.
 - **Safety:** include the safety sentence below verbatim in every Local or Cloud loop prompt, including prompts embedded in scripts.

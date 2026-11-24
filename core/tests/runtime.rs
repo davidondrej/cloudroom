@@ -46,6 +46,7 @@ fn fixture() -> (Directory, Config) {
         storage: None,
         rpc_timeout: Duration::from_secs(30),
         diagnostic_upload: Duration::from_secs(1),
+        previous_exit_wait: Duration::ZERO,
     };
     (dir, config)
 }

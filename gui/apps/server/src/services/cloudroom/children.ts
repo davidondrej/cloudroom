@@ -330,15 +330,15 @@ export class CloudChildren {
   }
 
   /** Reports a finished child turn to a Local parent (after the record is shown, as before). */
-  tellLocalParent(threadId: string, status: ThreadEventTurnStatus, turn: string): void {
+  tellLocalParent(threadId: string, status: ThreadEventTurnStatus, turn: string, error?: string): void {
     const thread = this.rt.host.getThread(threadId);
     const parent = this.reportedParent(thread);
     if (!thread?.parentThreadId || !parent || isCloudThread(parent)) return;
     if (teleportBlocked(this.rt.host.db, parent.id)) {
-      void this.holdChildReport(threadId, status, turn).then(() => this.deliverChildReports(), (error: unknown) => this.rt.host.warn("A child report could not be saved", error, { threadId }));
+      void this.holdChildReport(threadId, status, turn, error).then(() => this.deliverChildReports(), (error: unknown) => this.rt.host.warn("A child report could not be saved", error, { threadId }));
       return;
     }
-    this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status);
+    this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, error);
   }
 
   /** A parent moving either way holds its children's reports until it lands. Teleport to Local closes the Cloud session
@@ -352,8 +352,8 @@ export class CloudChildren {
     return teleportBlocked(this.rt.host.db, threadId) || localTeleports.has(threadId);
   }
 
-  holdChildReport(child: string, status: ThreadEventTurnStatus, turn: string): Promise<void> {
-    return this.rt.updateRecords(CHILD_REPORTS, childReportSchema, (reports) => ({ ...reports, [`${child}:${turn}`]: { child, status, turn } }));
+  holdChildReport(child: string, status: ThreadEventTurnStatus, turn: string, error?: string): Promise<void> {
+    return this.rt.updateRecords(CHILD_REPORTS, childReportSchema, (reports) => ({ ...reports, [`${child}:${turn}`]: { child, status, turn, ...(error ? { error } : {}) } }));
   }
 
   deliverChildReports(): Promise<void> {
@@ -372,7 +372,7 @@ export class CloudChildren {
               const sent = await this.noticeCloudParent(report.child, status, report.turn).then(() => true, (error: unknown) => { this.rt.host.warn("A child report could not be sent", error, { threadId: report.child }); return false; });
               if (!sent) { failed = true; continue; }
             } else if (parent && thread?.parentThreadId) {
-              this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status);
+              this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, report.error);
             }
             await this.rt.updateRecords(CHILD_REPORTS, childReportSchema, ({ [key]: _done, ...rest }) => rest);
           }

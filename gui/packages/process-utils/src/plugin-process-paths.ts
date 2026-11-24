@@ -74,14 +74,14 @@ async function othersCanChange(path: string): Promise<boolean> {
 }
 
 // `name` (`.cloudroom-tmp`, `environment-hooks`) in a data folder, given at its
-// real path. Synchronous, so ensureDataTempDir's callers can make their folder
-// and start in one step.
-function ownPrivateDir(realDataDir: string, name: string): string {
+// real path, made unless `create` is false. Synchronous, so ensureDataTempDir's
+// callers can make their folder and start in one step.
+function ownPrivateDir(realDataDir: string, name: string, create = true): string {
   const base = join(realDataDir, name);
   if (process.platform === "win32") {
     // Windows has no owner or mode bits to check. The data folder is in the
     // user's profile, which only this account and administrators can write.
-    mkdirSync(base, { recursive: true });
+    if (create) mkdirSync(base, { recursive: true });
     if (!lstatSync(base).isDirectory()) {
       throw new Error(`${base} must be a folder`);
     }
@@ -89,7 +89,7 @@ function ownPrivateDir(realDataDir: string, name: string): string {
   }
   // It must be a real, owner-only folder this account owns.
   try {
-    mkdirSync(base, { mode: 0o700 });
+    if (create) mkdirSync(base, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -161,11 +161,28 @@ export function ensureDataPrivateDir(dataDir: string, name: string): string {
   return ownPrivateDir(realpathSync.native(dataDir), name);
 }
 
+/**
+ * `<dataDir>/<name>` as ensureDataPrivateDir made it before, with the same
+ * checks, but never made here. For a folder no sandbox may read: on Linux,
+ * Claude's sandbox hides only paths that exist when it starts, so the folder
+ * must not appear while one runs.
+ */
+export function existingDataPrivateDir(dataDir: string, name: string): string {
+  return ownPrivateDir(realpathSync.native(dataDir), name, false);
+}
+
+/**
+ * `<dataDir>/chat-file-copies`: Cloudroom's copies of the images chats showed,
+ * one folder per thread. Owner-only, and on the list below, because a copy is
+ * written outside every sandbox and may hold any file an agent named.
+ */
+export const CHAT_FILE_COPIES_DIR_NAME = "chat-file-copies";
+
 // Files in the data folder that hold credentials or every thread's data: the
 // host key, the cloud account token, the auth secret, the browser broker token,
-// Codex account tokens, share tokens, plugin state backups, and the app
-// database. Not the whole folder: managed worktrees, attachments, and thread
-// storage live there too, and agents need them.
+// Codex account tokens, share tokens, plugin state backups, the app database,
+// and chat image copies. Not the whole folder: managed worktrees, attachments,
+// and thread storage live there too, and agents need them.
 const PRIVATE_DATA_FILES = [
   "auth.json",
   "auth-secret",
@@ -180,6 +197,7 @@ const PRIVATE_DATA_FILES = [
   "bb.db-journal",
   join("plugins", "accounts", "secrets"),
   join("plugins", "snapshots"),
+  CHAT_FILE_COPIES_DIR_NAME,
 ];
 
 // Real paths, not wildcards: Claude's sandbox matches wildcards differently on

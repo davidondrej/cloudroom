@@ -142,6 +142,11 @@
       "source": "./src/human-click.ts",
       "types": "./src/human-click.ts",
       "default": "./src/human-click.ts"
+    },
+    "./chat-file-copies": {
+      "source": "./src/chat-file-copies.ts",
+      "types": "./src/chat-file-copies.ts",
+      "default": "./src/chat-file-copies.ts"
     }
   },
   "scripts": {

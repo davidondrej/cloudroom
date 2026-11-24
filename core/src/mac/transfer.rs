@@ -109,7 +109,7 @@ async fn copy_in(
     // so only a regular file is measured; anything else passes, since a login profile may set errexit.
     let size = "$([ ! -f \"$n\" ] || [ -L \"$n\" ] || wc -c < \"$n\")";
     let pack = format!(
-        "p={}; {RESOLVE} t={dir}; mkdir -m 700 \"$t\" || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
+        "p={}; {RESOLVE} t={dir}; (umask 077 && mkdir \"$t\") || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
          b={size} || {{ rm -rf \"$t\"; exit 1; }}; \
          {{ COPYFILE_DISABLE=1 tar --no-xattrs -czf - -- \"$n\" || touch \"$t/failed\"; }} \
          | head -c {} > \"$t/a.tgz\"; s=$(wc -c < \"$t/a.tgz\" | tr -d ' '); \

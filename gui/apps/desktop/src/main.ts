@@ -31,6 +31,7 @@ import {
   type WebContents,
 } from "electron";
 import { autoUpdater } from "electron-updater";
+import { promises as originalFs } from "original-fs";
 import {
   APP_SURFACE_DESKTOP,
   APP_SURFACE_ENV_NAME,
@@ -195,7 +196,9 @@ import {
   takeFailedWindowsUpdate,
 } from "./desktop-update-resume.js";
 import {
+  appOnOtherVolume,
   appOnReadOnlyVolume,
+  createWindowsUpdateStager,
   installNeedsPassword,
   macAppLocation,
   reopenAfterExit,
@@ -455,12 +458,13 @@ let stoppingForQuit = false;
 let quitting = false;
 // Set once an update install starts, until it fails without exiting.
 let updateInstallStarted = false;
-// Opened from the disk image or translocated from Downloads: Restart to update can never
-// work there, so the app doesn't update itself and the banner asks to move it to Applications.
+let windowsUpdateStager: ReturnType<typeof createWindowsUpdateStager> | null = null;
+// Opened from the disk image, translocated from Downloads, or on an external disk: Restart to update can't work
+// there, or can delete the app, so the app doesn't update itself and the banner asks to move it to Applications.
 const updateNeedsMove =
   process.platform === "darwin" &&
   app.isPackaged &&
-  appOnReadOnlyVolume(process.execPath);
+  (appOnReadOnlyVolume(process.execPath) || appOnOtherVolume(process.execPath));
 let serverTargetStore: ServerTargetStore | null = null;
 let computersSync: ComputersSync | null = null;
 let relaySessionKeeper: RelaySessionKeeper | null = null;
@@ -2125,6 +2129,11 @@ async function installDownloadedUpdate(): Promise<void> {
   if (!desktopAutoUpdateService.beginInstall()) {
     return;
   }
+  // Windows: the installer runs one copy at a time, so a stage still unpacking must end first (#2525).
+  if (windowsUpdateStager !== null && !(await windowsUpdateStager.stop())) {
+    desktopAutoUpdateService.endInstall();
+    throw new Error("The update is still being prepared. Try Restart to update again in a minute.");
+  }
   updateInstallStarted = true;
   const reopens =
     process.platform === "darwin" &&
@@ -2216,10 +2225,12 @@ async function installDownloadedUpdate(): Promise<void> {
   if (process.platform === "win32" && handedOff) await new Promise<never>(() => {});
 }
 
-// Opened from the disk image or Downloads: copy Cloudroom into Applications and reopen it from there.
+// Opened from the disk image, Downloads or another disk: copy Cloudroom into Applications and reopen it from there.
 // Local agents stop first and resume after the relaunch, like Restart to update.
 async function moveToApplications(): Promise<boolean> {
   if (!updateNeedsMove || quitting || stoppingForQuit) return false;
+  // Electron skips the move, and never reopens, for an app in any "Applications" folder, e.g. on an external disk.
+  if (app.isInApplicationsFolder()) return false;
   const runtime = currentRuntime?.ownership === "spawned" ? currentRuntime : null;
   const resumeArgs = runtime && {
     logger: desktopLogger,
@@ -3129,7 +3140,7 @@ async function runDesktopApp(): Promise<void> {
   const updateNeedsPassword = appUpdateNeedsPassword();
   if (updateNeedsMove) {
     desktopLogger.warn(
-      "Cloudroom runs from a read-only place (the disk image or Downloads), so it can't update itself until it's moved to Applications.",
+      "Cloudroom runs from the disk image, Downloads or another disk, so it can't update itself until it's moved to Applications.",
     );
   } else if (updateNeedsPassword) {
     desktopLogger.warn(
@@ -3155,6 +3166,21 @@ async function runDesktopApp(): Promise<void> {
   desktopUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
   });
+  if (process.platform === "win32" && app.isPackaged) {
+    const stager = createWindowsUpdateStager(desktopLogger, originalFs);
+    windowsUpdateStager = stager;
+    // Only installers that know --cloudroom-stage may run now: an older one (a rollback) would ignore the flag and
+    // install silently over the running app. The release marks them in latest.yml (release-gui.yml).
+    autoUpdater.on("update-downloaded", (event) => {
+      if ((event as { cloudroomStage?: unknown }).cloudroomStage === true) stager.stage(event.downloadedFile, event.version);
+    });
+    // Quit: electron-updater installs from its own quit handler, which can't wait for a stage still holding the
+    // installer's lock. Skip that install this once; the downloaded update installs on the next restart or quit.
+    // handleBeforeQuit runs first: a quit canceled at its "agents are running" prompt leaves `quitting` false.
+    app.on("before-quit", () => {
+      if (quitting && stager.close()) autoUpdater.autoInstallOnAppQuit = false;
+    });
+  }
   if (restartFailed) {
     desktopLogger.error(
       `Restart to update didn't install ${updateAttempt.to}; offering it again.`,

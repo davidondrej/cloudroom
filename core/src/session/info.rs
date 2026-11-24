@@ -164,7 +164,7 @@ pub const LOCAL_ONLY: [&str; 17] = [
 /// Where a command the Cloud CLI lacks does run.
 pub fn on_computer(command: &str) -> String {
     format!(
-        "Cloud threads have no `room-cli {command}`. It runs in the Cloudroom app on the user's computer: room-cli mac run '~/.local/bin/room-cli {command} ...' (see the cloud-mac skill)."
+        "Cloud threads have no `room-cli {command}`. It runs in the Cloudroom app on the user's computer: room-cli mac run '~/.local/bin/room-cli {command} ...' (or plain `room-cli` on Windows; see the room-cli and cloud-mac skills)."
     )
 }
 

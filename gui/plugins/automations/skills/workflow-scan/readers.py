@@ -5,16 +5,16 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
 
   readers.py spawn DIR PROVIDER MODEL  -> starts a reader per DIR/slices/slice-NN.txt, saving DIR/readers.json after each;
                                           run it again after a failure to start only the missing readers
-  readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed
-                                          or archived reader once; prints "done" (and writes DIR/lines.txt, without chat IDs
-                                          that are not in a reader's slice) or "running N/M"; a failed room-cli read is
-                                          retried until --max, then it exits with the error
+  readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed,
+                                          archived or never-started (pending 5 minutes) reader once; prints "done" (and
+                                          writes DIR/lines.txt, without chat IDs that are not in a reader's slice) or
+                                          "running N/M"; a failed room-cli read is retried until --max, then it exits with the error
   readers.py archive DIR               -> archives every reader thread
 
 Other scans reuse it (the Cyber scan): SCAN_READER_PROMPT, SCAN_TITLE and SCAN_READER_REASONING, set on spawn, replace
 this folder's reader.md, "Workflow scan" and "low". They are saved in readers.json, so wait restarts readers the same way.
 """
-import glob, hashlib, json, os, re, shutil, subprocess, sys, time
+import collections, glob, hashlib, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = os.environ.get("ROOM_PROJECT_ID") or "proj_personal"
@@ -22,6 +22,7 @@ WIN = sys.platform == "win32"
 CLI = (shutil.which("room-cli") if WIN else None) or "room-cli"
 ID = re.compile(r"(?<![A-Za-z0-9-])([a-z]-[0-9a-f]{8})(?![A-Za-z0-9])(?:, *| +)?")  # a chat ID as extract.py writes it, plus the separator after it
 LEAD = re.compile(r"[\s#|*_`>\[(\d.)+-]*")  # markup before a chat line's own ID: headings, tables, lists, bold, code
+PENDING = 300  # seconds a reader may wait to start; past it, it is restarted once, then failed (#2515)
 
 
 def cli(*args, check=False, timeout=None):
@@ -63,7 +64,7 @@ def report(d, state, stage):
         progress = json.load(open(os.path.join(d, "slices", "progress.json")))
     except (OSError, ValueError):
         return
-    finished = [n for n, r in state["readers"].items() if "output" in r]
+    finished = [n for n, r in state["readers"].items() if r.get("output")]  # a failed reader read nothing (#2515)
     read = [0] * len(progress["days"])
     for n in finished:
         for day, count in progress["slices"].get(n, {}).items():
@@ -85,7 +86,7 @@ def start(d, state, n):
     request = f"scan-{hashlib.sha1(os.path.abspath(d).encode()).hexdigest()[:12]}-{n}-{tries}"
     thread = room("thread", "spawn", *parent, "--request-id", request, "--visibility", "hidden", "--project", PROJECT, "--machine", "cloud", "--provider", state["provider"],
                   "--model", state["model"], "--reasoning-level", state.get("reasoning") or "low", "--title", f"{state.get('title') or 'Workflow scan'} · reader {n}", *prompt_args)
-    state["readers"][n] = {"id": thread["id"], "tries": tries}
+    state["readers"][n] = {"id": thread["id"], "tries": tries, "at": time.time()}
     state["all"].append(thread["id"])
 
 
@@ -159,28 +160,43 @@ def wait(d, limit=540):
             if errors or time.time() > end:  # a stalled app makes every read wait out its 45 s timeout: end the pass
                 break
             now = status.get(r["id"], "error")
-            if "output" in r or now not in ("idle", "error"):
+            stuck = now == "pending" and time.time() - r.setdefault("at", time.time()) > PENDING  # never started
+            if "output" in r or now not in ("idle", "error") and not stuck:
                 continue
             got = read(errors, "thread", "output", r["id"]) if now == "idle" else {}
             if got is None:
                 continue
             output = (got.get("output") or "").strip()
-            if " | " in output or r["tries"] >= 2:
+            if " | " in output:
                 r["output"], r["invented"] = drop_invented(output, slice_ids(d, n))
-            else:
+                continue
+            if r["tries"] < 2:
                 cli("thread", "archive", r["id"])
-                start(d, state, n)
+                try:
+                    start(d, state, n)
+                    continue
+                except (subprocess.CalledProcessError, ValueError):  # Cloud unreachable; never print e: it holds the prompt (#2376)
+                    stuck = True
+            # the last try: an answer with no line (a usage limit message) is a failed reader (#2515)
+            r["output"], r["stuck"], r["last"] = "", stuck, output.splitlines()[-1] if output else ""
         save(d, state)
         done = sum("output" in r for r in state["readers"].values())
         if not errors:  # its own retries would add ~50 s to a stalled pass
             report(d, state, "patterns" if done == len(state["readers"]) else "reading")
         if done == len(state["readers"]):
-            with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:
-                f.write("\n\n".join(heading(d, state, n) + r["output"] for n, r in state["readers"].items() if r["output"]))
+            with open(os.path.join(d, "lines.txt"), "w", encoding="utf-8") as f:  # other scans list a failed reader's repo, never as clean
+                f.write("\n\n".join(heading(d, state, n) + (r["output"] or "not checked: " + (r.get("last") or ("never started" if r.get("stuck") else "no output")))
+                                    for n, r in state["readers"].items() if r["output"] or state.get("title")))
             failed = [n for n, r in state["readers"].items() if not r["output"]]
+            stuck = [n for n, r in state["readers"].items() if r.get("stuck")]
             invented = [f"{n} ({r['invented']})" for n, r in state["readers"].items() if r.get("invented")]
-            return print("done" + (f", no output from readers {', '.join(failed)}" if failed else "")
-                         + (f", dropped invented chat IDs from readers {', '.join(invented)}" if invented else ""))
+            print("done" + (f", no output from readers {', '.join(failed)}" if failed else "")
+                  + (f", never started: {', '.join(stuck)}" if stuck else "")
+                  + (f", dropped invented chat IDs from readers {', '.join(invented)}" if invented else ""))
+            last = collections.Counter(r["last"] for r in state["readers"].values() if r.get("last")).most_common(1)
+            if last and last[0][1] * 2 > len(state["readers"]):  # most readers failed the same way, such as a usage limit
+                print(f"{last[0][1]} of {len(state['readers'])} readers answered only: {last[0][0]}")
+            return
         if time.time() + 20 > end:  # the next pass would start past --max
             running = f"running {done}/{len(state['readers'])}"
             if errors:

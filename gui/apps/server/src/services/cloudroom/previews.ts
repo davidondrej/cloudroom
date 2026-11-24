@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
@@ -62,9 +62,7 @@ export async function previewStatus(deps: Deps, freshMs = 45_000) {
   } catch { return { state: "offline", count: 0, message: null, detail: null }; }
 }
 
-/** How much cloud agents may do on this computer (ADR 0113, levels in ADR 0186), or null until first-run setup asks. The preview helper runs Mac access. */
-/** The preview helper that runs Mac access is macOS and Linux only for now. */
-export const macAccessSupported = process.platform !== "win32";
+/** How much cloud agents may do on this computer (ADR 0113, levels in ADR 0186), or null until first-run setup asks. The preview helper runs Mac access, in Git Bash on Windows (#958). */
 const macAccessFile = (deps: Deps) => join(deps.config.dataDir, "cloudroom-mac-access.json");
 export async function macAccess(deps: Deps): Promise<MacAccessLevel | null> {
   const text = await readFile(macAccessFile(deps), "utf8").catch(() => null);
@@ -76,7 +74,6 @@ export async function macAccess(deps: Deps): Promise<MacAccessLevel | null> {
   } catch { return "off"; }
 }
 export async function setMacAccess(deps: Deps, level: MacAccessLevel): Promise<void> {
-  if (!macAccessSupported) throw new ApiError(409, "mac_access_unsupported", "Cloud agents can't use a Windows computer yet.");
   if (!supportedMacAccessLevels.includes(level)) throw new ApiError(400, "mac_access_unsupported", "Read and Ask need macOS. Pick Off or Full.");
   // Written whole, so the helper, which rereads it before each Mac job, never sees half a file.
   const file = macAccessFile(deps), temp = `${file}.${randomUUID()}.tmp`;
@@ -89,13 +86,24 @@ export const previewsSetUp = (deps: Deps) => readFile(join(folder(deps), "config
 // The helper outlives the app, so restart it once per launch: macOS only applies a newly granted Full Disk Access to new processes.
 let restartedThisLaunch = false;
 
+// Windows puts the app's room-cli on no PATH, so Mac jobs, which run in Git Bash, get its folder (#958).
+const roomCliFolder = () => (process.platform === "win32" && process.env.ROOM_CLI ? { CLOUDROOM_ROOM_CLI: dirname(process.env.ROOM_CLI) } : {});
+
+// The server's own credentials never reach the preview helper (which stays resident on Windows).
+function helperEnv(deps: Deps): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, CLOUDROOM_SERVER_URL: `http://127.0.0.1:${deps.config.serverPort}`, ...roomCliFolder() };
+  delete env.BB_SERVER_HEADERS;
+  delete env.BB_CONNECT_MACHINE_CREDENTIAL;
+  return env;
+}
+
 // Mac jobs point a nested room-cli at this server, the one that owns the helper, not whichever the CLI finds (#1243, #1290).
 // An environment variable, as for CLOUDROOM_SHELL_PATH, so an older helper ignores it instead of failing on a new flag.
 export async function setupPreviews(deps: Deps): Promise<void> {
   const launcher = process.platform === "darwin" && process.versions.electron ? ["--launcher", process.execPath] : [];
   const restart = restartedThisLaunch ? [] : ["--restart"];
   try {
-    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true, env: { ...process.env, CLOUDROOM_SERVER_URL: `http://127.0.0.1:${deps.config.serverPort}` } });
+    await promisify(execFile)(...helper(deps, ["configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), "--mac-access", await macAccess(deps) ?? "off", ...launcher, ...restart, ...(devBuild(deps) ? ["--own-threads"] : [])]), { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true, env: helperEnv(deps) });
     restartedThisLaunch = true;
   } catch (error) {
     // The helper's own reason, such as launchctl's, so Settings and the API say why (#109).

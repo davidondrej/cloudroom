@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { commandGuardBlockReason } from "@get-bb/plugin-sdk/internal/command-guard";
 import { cloudroomCommands, cloudroomThreads, deleteThreadEventSuffixInTransaction, events, listOpenBackgroundTaskItemRowsForThread, threads, threadConversationOutlines, threadSearchSegments, getThread, type DbConnection, type DbQueryConnection, type DbTransaction, type AppendStoredThreadEventArgs } from "@cloudroom/db";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gt } from "drizzle-orm";
 import { appendThreadEventsInTransaction, appendThreadProvisioningEventInTransaction } from "../threads/thread-events.js";
 import { markCustomInstructionsLost } from "../threads/custom-instructions.js";
 import { CORE_PLAN_LIMIT, LIMIT_RESUME } from "../system/plan-limit-telemetry.js";
@@ -110,7 +110,7 @@ function promptRequestedEvent(db: DbQueryConnection, saved: Binding, request: Co
     direction: "outbound", requestId: roomRequestId(request.id), source: initial ? "spawn" : "tell", ...(sender ? { initiator: "agent" } : childNotice(db, saved, request, stored.text)), senderThreadId: sender,
     input: hidden ? input.map((block: Record<string, unknown>) => ({ ...block, visibility: "agent-only" })) : input,
     target: steeredTurnId ? { kind: "steer", expectedTurnId: steeredTurnId } : { kind: initial ? "thread-start" : "new-turn" },
-    request: { method: initial ? "thread/start" : "turn/start", params: initial ? {} : { cloudMessageId: request.id } },
+    request: { method: initial ? "thread/start" : "turn/start", params: {} },
     execution: { source: "client/turn/requested", model: saved.model, reasoningLevel: messageReasoning(JSON.stringify(stored), saved.reasoning), permissionMode: "full", serviceTier: serviceTierSchema.catch("default").parse(stored.service_tier) },
   });
 }
@@ -334,7 +334,11 @@ export function projectRecords(
       if ((harness === "pi" || isAcpProvider(harness) || harness === "claude-code") && (receipt.command === "auto" || (previous && receipt.command === "prompt")) && FINISHED.includes(receipt.state) && saved.nativeId && turnStarted(tx, threadId, receipt.request_id)) {
         emit({ threadId, providerThreadId: saved.nativeId, scope: turnScope(receipt.request_id), type: "turn/completed", status: turnStatus(receipt.state) });
       }
-      const lastError = () => tx.select({ data: events.data }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "system/error"))).orderBy(desc(events.sequence)).limit(1).get();
+      // Only this turn's error counts: the same plan limit on the next turn is a new card, not a repeat.
+      const lastError = () => {
+        const turn = tx.select({ sequence: events.sequence }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "turn/started"))).orderBy(desc(events.sequence)).limit(1).get()?.sequence ?? -1;
+        return tx.select({ data: events.data }).from(events).where(and(eq(events.threadId, threadId), eq(events.type, "system/error"), gt(events.sequence, turn))).orderBy(desc(events.sequence)).limit(1).get();
+      };
       const error = receipt.error ? codexErrorFields(receipt.error, codexOutage) : null;
       if (["failed", "unknown", "unknown_after_restart"].includes(receipt.state) && error && !projected.some((event) => event.type === "system/error" && event.message === error.message) && !sameError(JSON.parse(lastError()?.data ?? "{}"), error.message)) {
         emit({ type: "system/error", scope: threadScope(), threadId, ...error });

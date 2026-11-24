@@ -18,9 +18,9 @@ function finishedMs(row: TimelineWorkflowWorkRow): number {
   return row.completedAt === null ? 0 : row.completedAt - row.startedAt;
 }
 
-/** A centered pill on a hairline divider for a background command: dashed while the agent waits on it, solid where it
- *  ended. Claude starts a turn by itself when one ends, so this separates the reply and says why without looking like
- *  a user message. */
+/** Quiet centered hairline divider for a background command: dashed while the agent waits on it, edge-fading solid
+ *  where it ended. Claude starts a turn by itself when one ends, so this separates the reply and says why without
+ *  looking like a user message. */
 export function BackgroundCommandBubble({
   row,
 }: {
@@ -32,54 +32,61 @@ export function BackgroundCommandBubble({
   const rawName = row.description.trim() || "Background command";
   const name = rawName.replace(/\s+/g, " ");
   const statusLabel = STATUS_LABEL[row.status];
-  const ruleClassName = cn(
-    "min-w-4 flex-1",
+  const leftRuleClassName = cn(
+    "min-w-6 flex-1",
     waiting
-      ? "h-0 border-t border-dashed border-border/80"
-      : "h-px bg-border/80",
+      ? "h-0 border-t border-dashed border-border/50"
+      : "h-px bg-gradient-to-r from-transparent to-border/45",
+  );
+  const rightRuleClassName = cn(
+    "min-w-6 flex-1",
+    waiting
+      ? "h-0 border-t border-dashed border-border/50"
+      : "h-px bg-gradient-to-l from-transparent to-border/45",
   );
 
   return (
     <div
       role="separator"
       aria-label={`${name} ${statusLabel}`}
-      className="my-2.5 flex w-full items-center px-2"
+      className="my-1.5 flex w-full items-center gap-2.5 px-2"
       data-message-column=""
     >
-      <span className={ruleClassName} aria-hidden="true" />
+      <span className={leftRuleClassName} aria-hidden="true" />
       <div
         title={rawName}
-        className={cn(
-          "inline-flex min-w-0 max-w-[min(85%,30rem)] items-center gap-1.5 rounded-full border bg-background px-3 py-1 text-xs text-muted-foreground",
-          waiting
-            ? "border-dashed border-foreground/25"
-            : failed
-              ? "border-destructive/40"
-              : "border-border",
-        )}
+        className="inline-flex min-w-0 max-w-[min(80%,28rem)] items-center gap-1.5 text-[11px] text-muted-foreground/65"
       >
         <Icon
           name="Terminal"
-          className={cn("size-3.5 shrink-0", failed && "text-destructive")}
+          className={cn(
+            "size-3 shrink-0 opacity-60",
+            failed && "text-destructive opacity-100",
+          )}
           aria-hidden="true"
         />
-        <span className="min-w-0 truncate font-medium text-foreground/85">
+        <span className="min-w-0 truncate text-muted-foreground/90">
           {name}
         </span>
-        <span className={cn("shrink-0", failed && "text-destructive")}>
+        <span
+          className={cn(
+            "shrink-0 text-muted-foreground/55",
+            failed && "text-destructive",
+          )}
+        >
           {statusLabel}
         </span>
         {waiting ? (
-          <span className="shrink-0 tabular-nums text-muted-foreground/65 empty:hidden before:mr-1 before:content-['·']">
+          <span className="shrink-0 tabular-nums text-muted-foreground/45 empty:hidden before:mr-1 before:content-['·']">
             <LiveDurationText startedAt={row.startedAt} />
           </span>
         ) : ms > 0 ? (
-          <span className="shrink-0 tabular-nums text-muted-foreground/65">
+          <span className="shrink-0 tabular-nums text-muted-foreground/45">
             · {durationToCompactString(ms)}
           </span>
         ) : null}
       </div>
-      <span className={ruleClassName} aria-hidden="true" />
+      <span className={rightRuleClassName} aria-hidden="true" />
     </div>
   );
 }

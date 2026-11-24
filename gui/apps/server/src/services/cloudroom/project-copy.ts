@@ -17,7 +17,6 @@ import type { ProjectCopyProgress } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { resolvePrimaryHostId } from "../hosts/primary-host.js";
 import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
-import { macAccessSupported } from "./previews.js";
 import { sandboxThread } from "./sandboxes.js";
 import { redactSecrets } from "./shares.js";
 import { binding, command, saveProjectCopyProgress } from "./store.js";
@@ -120,20 +119,16 @@ export async function localProjectNote(deps: Deps, projectId: string): Promise<s
   if (!project || !path) return undefined;
   const remote = await projectRemote(deps, project, path);
   if (cloudRepository(remote) || (await smallProject(path))) return undefined;
-  // Teleport uploads the project when its remote is on another host.
-  const rest = macAccessSupported
-    ? `The rest is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
-    : remote
-      ? "Cloud agents can't reach the user's Windows computer, so ask the user to start the thread Local and Teleport it to Cloud, which uploads the project."
-      : "Cloud agents can't reach the user's Windows computer, so ask the user to push the project to GitHub or GitLab.com, then start a new thread.";
+  const rest = `The rest is on the user's ${COMPUTER} at \`${bashPath(path)}\`. Pull only what the task needs with \`room-cli mac pull\`.`;
   return `This project has no supported Git remote and is too large to copy, so only its \`.env\` files are here. ${rest}`;
 }
 
-/** What the agent does when a failed copy left the project on the user's computer. Cloud agents can't reach Windows (ADR 0294). */
+/** What the agent does when a failed copy left the project on the user's computer. */
 export const localFilesNote = (path: string) =>
-  macAccessSupported
-    ? `The full project is on the user's ${COMPUTER} at \`${path}\`. Pull only what the task needs with \`room-cli mac pull\`.`
-    : "Cloud agents can't reach the user's Windows computer. Tell the user what failed: pass on any fix the message names, otherwise ask them to start a new thread.";
+  `The full project is on the user's ${COMPUTER} at \`${bashPath(path)}\`. Pull only what the task needs with \`room-cli mac pull\`.`;
+
+/** Windows runs Mac access in Git Bash (#958), which reads C:/Users/me but not C:\Users\me. */
+const bashPath = (path: string) => (process.platform === "win32" ? path.replaceAll("\\", "/") : path);
 
 /** A project copy's target: one folder per thread sandbox, or one shared folder on a VM. */
 export const copyKey = (sandbox: string | null, workspace: string) => sandbox ? `${sandbox}:${workspace}` : workspace;

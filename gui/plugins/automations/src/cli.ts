@@ -1232,6 +1232,7 @@ no output skips the run (exit 0 or 1; other exit codes fail it, 3 in a row pause
 A --webhook loop, Local or Cloud, runs when its secret URL gets a POST: create prints the URL once, and each run gets
 the requests that arrived as data. Cloud runs start within seconds; this Mac checks for Local ones about once a minute,
 and they wait while it is off. A Local webhook loop made here starts paused: a person turns it on in Loops.
+A URL takes up to 64 KB a request, but a Cloud run reads only up to its first 16 KB, less with a long prompt: send bigger reports as a link or in parts.
 room-cli loop create --cloud --project <id> --name <name> --prompt <text> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--new-thread | --same-thread] [--script <inline> | --script-file <path>] [--provider <id>] [--model <model>] [--reasoning <level>] [--agent <provider,model[,level]>...] [--priority 1-4] [--secrets <KEY,.env|none|all>]
 room-cli loop create --cloud --project <id> --name <name> --cron <expr> --timezone <tz> --script-file <path> --jev <questions.json> (--act-file <path> | --act <inline>) [--secrets ...]
 A Jev loop runs no agent (paid plans; a few Cloud Credits per thousand items). Its script prints items, one per line,
@@ -1547,7 +1548,7 @@ async function runReportCommand(
 }
 
 const WAKE_USAGE =
-  'room-cli wake <when> "<prompt>"   Wake this thread once with a prompt: a timer or a reminder.\n  <when> is a delay like 5m, 2h, 1d, or a time like 2026-12-01T09:00. It fires within about a minute of then.\n';
+  'room-cli wake <when> "<prompt>"   Wake this thread once with a prompt: a timer or a reminder.\n  <when> is a delay like 5m, 2h, 1d, or a time like 2026-12-01T09:00. It fires within about a minute of then.\n  A wake is a one-time loop: see it with room-cli loop list --project <id>, cancel it with room-cli loop delete <loopId> --project <id> --yes.\n';
 
 /** `wake 2m "text"` as the `create` it stands for: a one-time re-prompt of the calling thread, on its own agent.
  *  The words after the time are the prompt as typed, so a prompt may hold `--flags`. */
@@ -1559,6 +1560,8 @@ async function wakeAsCreate(
   const [when, ...words] = argv.filter((word) => word !== "--json");
   const prompt = words.join(" ").trim();
   if (!when || when.startsWith("-") || !prompt) throw new Error(`Usage: ${WAKE_USAGE}`);
+  // One line, so a multiline prompt keeps one row in `loop list`.
+  const name = prompt.replace(/\s+/g, " ");
   if (!ctx.threadId) {
     throw new Error("room-cli wake wakes the thread it runs in. Outside a thread, use room-cli loop create.");
   }
@@ -1571,7 +1574,7 @@ async function wakeAsCreate(
   return [
     "create",
     `--project=${thread.projectId}`,
-    `--name=Wake: ${prompt.length > 50 ? `${prompt.slice(0, 49)}…` : prompt}`,
+    `--name=Wake: ${name.length > 50 ? `${name.slice(0, 49)}…` : name}`,
     `--${DURATION_PATTERN.test(when) ? "in" : "at"}=${when}`,
     `--prompt=${prompt}`,
     `--provider=${thread.providerId}`,
@@ -1749,7 +1752,7 @@ export function registerAutomationCli(args: {
               : `Cloud loops\n${cloud.automations.map(printCloudAutomation).join("")}`);
           return {
             exitCode: 0,
-            stdout: json ?? (text || (cloud.error ? "" : "No loops found\n")),
+            stdout: json ?? (text || (cloud.error ? "No Local loops found\n" : "No loops found\n")),
             ...(cloud.error ? { stderr: cloud.error } : {}),
           };
         }
@@ -1801,7 +1804,7 @@ export function registerAutomationCli(args: {
             exitCode: 0,
             stdout:
               json ??
-              `Loop created: ${created.id}\n${printAutomation(created)}${created.webhookUrl ? webhookNote(created.webhookUrl) : ""}${paused}${printScriptFileSnapshotNote(created, scriptSource)}`,
+              `Loop created: ${created.id}\n${printAutomation(created)}${created.webhookUrl ? webhookNote(created.webhookUrl) : ""}${paused}${printScriptFileSnapshotNote(created, scriptSource)}${wake ? `Cancel it: room-cli loop delete ${created.id} --project ${projectId} --yes\n` : ""}`,
           };
         }
         if (command === "show") {

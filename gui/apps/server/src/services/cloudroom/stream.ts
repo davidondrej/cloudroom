@@ -358,9 +358,11 @@ export class CloudStream {
     const turn = ended ? z.object({ request_id: z.string() }).catch({ request_id: String(record.sequence) }).parse(record.data).request_id : "";
     // The computer that owns a turn reports it to a Cloud parent; one that only shows it doesn't.
     const owned = ended && acts(record) && this.rt.ownsTurn(saved.threadId, turn) ? ended : null;
+    // Core's words for why the turn failed, as its own child notices say (#2513).
+    const cause = owned === "failed" ? z.object({ error: z.string() }).safeParse(record.data).data?.error : undefined;
     if (owned) await this.children.noticeCloudParent(saved.threadId, owned, turn);
     const held = owned && this.children.teleportingParent(saved.threadId) ? owned : null;
-    if (held) await this.children.holdChildReport(saved.threadId, held, turn);
+    if (held) await this.children.holdChildReport(saved.threadId, held, turn, cause);
     const receipt = fresh && record.kind === "receipt" ? record.data as { command?: string; state?: string; input?: { keep_paused?: boolean } } : null;
     if (receipt?.state === "accepted" && receipt.command === "stop") this.rt.state(saved.threadId).stopReceipt = { session: record.session_id, at: Date.now() };
     if (receipt?.state === "accepted" && receipt.command === "resume" && !receipt.input?.keep_paused) this.rt.state(saved.threadId).stopReceipt = undefined;
@@ -389,7 +391,7 @@ export class CloudStream {
     // streamed pieces go. Cloud never did this, and its threads kept every piece.
     if (ended) try { this.rt.host.pruneEvents("idle", saved.threadId); } catch (error) { this.rt.host.warn("A finished Cloud turn's streamed pieces could not be cleared", error, { threadId: saved.threadId }); }
     if (held) void this.children.deliverChildReports();
-    else if (owned) this.children.tellLocalParent(saved.threadId, owned, turn);
+    else if (owned) this.children.tellLocalParent(saved.threadId, owned, turn, cause);
     const reply = ended ? this.rt.host.getLastOutput(saved.threadId) : null;
     if (reply) void saveCloudImages(this.rt.host.deps, saved.threadId, reply).catch((error: unknown) => this.rt.host.warn("Chat images could not be saved", error, { threadId: saved.threadId }));
     if (mirroredArchive) this.rt.sync.local?.archive(mirroredArchive);

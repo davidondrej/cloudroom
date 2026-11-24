@@ -432,8 +432,8 @@ export function registerShowCommand(
           return;
         }
 
-        // An errored thread prints its own error below.
-        const cloudNote = cloudIssueText(cloud && thread.status === "error" ? { ...cloud, error: null } : cloud);
+        // An errored thread prints its own error below; without one, the Cloud error is the only reason (#2513).
+        const cloudNote = cloudIssueText(cloud && thread.status === "error" && lastError ? { ...cloud, error: null } : cloud);
         printThreadStatus(statusPayload, execution, environmentInfo, fetchedPullRequest, cloudNote);
         if (credits?.status === "unavailable")
           console.log(`  Cloud Credits: unavailable (${credits.message})`);

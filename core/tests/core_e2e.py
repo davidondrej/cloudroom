@@ -298,7 +298,7 @@ def main():
                 result = service.request("GET", "/v1/health", expected=expected, token=token)
                 if expected == 200:
                     assert result["status"] == "ready"
-            collision = subprocess.run([str(BINARY)], env=env, capture_output=True, timeout=5)
+            collision = subprocess.run([str(BINARY)], env=env, capture_output=True, timeout=8)
             assert collision.returncode != 0
             passed("HTTP auth, client reconnection, and exclusive state ownership")
             if args.fixture:

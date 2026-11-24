@@ -2407,6 +2407,17 @@ describe("buildThreadTimelineFromEvents", () => {
       );
       expect(row).toMatchObject({ planLimit: true });
     }
+    const [overload] = collectSystemRows(
+      buildTimelineRows([
+        turnStartedEvent({ seq: 1 }),
+        providerErrorEvent({
+          detail: "You've hit your requests per minute limit",
+          errorInfo: { category: "overloaded", providerCode: null, httpStatusCode: 529 },
+          seq: 2,
+        }),
+      ]),
+    );
+    expect(overload).not.toHaveProperty("planLimit", true);
   });
 
   it("keeps error rows in the regular timeline", () => {

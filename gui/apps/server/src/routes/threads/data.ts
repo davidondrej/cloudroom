@@ -21,7 +21,7 @@ import {
 } from "@cloudroom/db";
 import type { Hono } from "hono";
 import {
-  CHAT_FILE_COPIES_FOLDER,
+  LEGACY_CHAT_FILE_COPIES_FOLDER,
   DEFAULT_COMPLETED_TURN_DISPLAY,
   PROMPT_HISTORY_ENTRY_LIMIT,
   threadEventTypeSchema,
@@ -761,7 +761,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           respectGitIgnore: false,
           excludeNames: [
             ...DEFAULT_PATH_LIST_EXCLUDE_NAMES,
-            CHAT_FILE_COPIES_FOLDER,
+            LEGACY_CHAT_FILE_COPIES_FOLDER,
           ],
         },
       });
@@ -830,7 +830,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           respectGitIgnore: false,
           excludeNames: [
             ...DEFAULT_PATH_LIST_EXCLUDE_NAMES,
-            CHAT_FILE_COPIES_FOLDER,
+            LEGACY_CHAT_FILE_COPIES_FOLDER,
           ],
         },
       });

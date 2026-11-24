@@ -7,6 +7,189 @@
   ; For install-timing.json: how long setup waited for Cloudroom.exe to unlock, and how often it asked the user.
   Var cloudroomLockWaitMs
   Var cloudroomPrompts
+  !include FileFunc.nsh
+!macroend
+
+; .next and .old are ours only with this file in them, so a user's own "Cloudroom.next" or "Cloudroom.old" is never
+; deleted, filled, or moved (#2535 review).
+!macro cloudroomRemoveOwned DIR
+  ${If} ${FileExists} "${DIR}\.cloudroom-owned"
+    RMDir /r "${DIR}"
+    ; RMDir deletes the marker first, so a locked file left behind must not turn the rest into a user's folder.
+    ${If} ${FileExists} "${DIR}"
+      FileOpen $R2 "${DIR}\.cloudroom-owned" w
+      FileClose $R2
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; Staged updates (#2525), like Squirrel.Mac: while Cloudroom runs, the app starts the downloaded installer with
+; --cloudroom-stage, which only unpacks the new version to "<install dir>.next" and exits. Restart to update runs the
+; installer as before; with a matching stage it swaps the two folders instead of uninstalling and unpacking again.
+!macro cloudroomStageIfAsked
+  !ifndef BUILD_UNINSTALLER
+    ${GetParameters} $R0
+    ClearErrors
+    ${GetOptions} $R0 "--cloudroom-stage" $R1
+    ${IfNot} ${Errors}
+      SetSilent silent
+      InitPluginsDir
+      !insertmacro cloudroomRemoveOwned "$INSTDIR.next"
+      ; A folder or file we don't own: never fill it.
+      ${If} ${FileExists} "$INSTDIR.next"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      ClearErrors
+      CreateDirectory "$INSTDIR.next"
+      FileOpen $R2 "$INSTDIR.next\.cloudroom-owned" w
+      FileClose $R2
+      ${If} ${Errors}
+        RMDir "$INSTDIR.next"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      ; Same data as the install section's copy, so makensis stores the package once.
+      !ifdef COMPRESS
+        SetCompress off
+      !endif
+      File /oname=$PLUGINSDIR\app-64.7z "${APP_64}"
+      !ifdef COMPRESS
+        SetCompress "${COMPRESS}"
+      !endif
+      SetOutPath "$INSTDIR.next"
+      Nsis7z::Extract "$PLUGINSDIR\app-64.7z"
+      SetOutPath $TEMP
+      ; Nsis7z reports no errors, so check the result: every file the build packed (resources\cloudroom-files.txt,
+      ; written by afterPack) and at least 99% of the unpacked size electron-builder measured. The marker keeps the
+      ; file count and size; the swap re-checks them, so a file lost since (antivirus) is caught.
+      ${GetSize} "$INSTDIR.next" "/S=0K" $R3 $R4 $R5
+      IntOp $R5 ${APP_64_UNPACKED_SIZE} * 99
+      IntOp $R5 $R5 / 100
+      StrCpy $R6 ""
+      ClearErrors
+      FileOpen $R2 "$INSTDIR.next\resources\cloudroom-files.txt" r
+      FileRead $R2 $R6
+      FileClose $R2
+      ${If} $R6 == ""
+        StrCpy $R6 999999
+      ${EndIf}
+      ; .cloudroom-owned isn't in the build's count.
+      IntOp $R6 $R6 + 1
+      ; Also give up if Cloudroom was uninstalled meanwhile (its uninstaller deletes .next, maybe mid-unpack).
+      ${If} $R3 < $R5
+      ${OrIf} $R4 < $R6
+      ${OrIfNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+        !insertmacro cloudroomRemoveOwned "$INSTDIR.next"
+        SetErrorLevel 2
+        Quit
+      ${EndIf}
+      ; Written last: without it, Restart to update does the full install.
+      ClearErrors
+      FileOpen $R2 "$INSTDIR.next\.cloudroom-staged" w
+      FileWrite $R2 "${VERSION} $R4 $R3"
+      FileClose $R2
+      ${If} ${Errors}
+        !insertmacro cloudroomRemoveOwned "$INSTDIR.next"
+        SetErrorLevel 2
+      ${Else}
+        SetErrorLevel 0
+      ${EndIf}
+      Quit
+    ${EndIf}
+  !endif
+!macroend
+
+; Runs once our app check stopped Cloudroom. Any failure leaves the old folder in place for the full install.
+!macro cloudroomSwapStaged
+  !ifndef BUILD_UNINSTALLER
+  ${If} ${isUpdated}
+  ${AndIf} ${FileExists} "$INSTDIR.next\.cloudroom-staged"
+  ${AndIf} ${FileExists} "$INSTDIR.next\.cloudroom-owned"
+    ClearErrors
+    FileOpen $R2 "$INSTDIR.next\.cloudroom-staged" r
+    FileRead $R2 $R3
+    FileClose $R2
+    ; The marker is "<version> <files> <KB>"; the folder must still match it (the marker itself is one more file).
+    Delete "$INSTDIR.next\.cloudroom-staged"
+    ${GetSize} "$INSTDIR.next" "/S=0K" $R5 $R6 $R7
+    ${If} $R3 == "${VERSION} $R6 $R5"
+      System::Call 'kernel32::GetTickCount()i .s'
+      Pop $R4
+      ; The uninstaller comes from this installer, so the stage never needs it.
+      ClearErrors
+      File "/oname=$INSTDIR.next\${UNINSTALL_FILENAME}" "${UNINSTALLER_OUT_FILE}"
+      ; Windows can't rename a folder that is a process's working folder, ours included.
+      SetOutPath $TEMP
+      ${IfNot} ${Errors}
+        !insertmacro cloudroomRemoveOwned "$INSTDIR.old"
+        ClearErrors
+        ${If} ${FileExists} "$INSTDIR.old\*.*"
+          SetErrors
+        ${Else}
+          FileOpen $R2 "$INSTDIR\.cloudroom-owned" w
+          FileClose $R2
+          ; Without the marker, a cut-off swap could never be restored.
+          ${IfNot} ${Errors}
+            Rename "$INSTDIR" "$INSTDIR.old"
+          ${EndIf}
+        ${EndIf}
+      ${EndIf}
+      ${IfNot} ${Errors}
+        Rename "$INSTDIR.next" "$INSTDIR"
+        ${If} ${Errors}
+          ; Put the old version back. If even that fails, the full install below fills the folder, and the next
+          ; installer run finds .old (cloudroomRecoverSwap).
+          ClearErrors
+          Rename "$INSTDIR.old" "$INSTDIR"
+        ${ElseIfNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+          Rename "$INSTDIR" "$INSTDIR.next"
+          Rename "$INSTDIR.old" "$INSTDIR"
+        ${Else}
+          !insertmacro registryAddInstallInfo
+          !insertmacro copyFile "$EXEPATH" "$LOCALAPPDATA\${APP_INSTALLER_STORE_FILE}"
+          System::Call 'kernel32::GetTickCount()i .s'
+          Pop $R0
+          IntOp $R4 $R0 - $R4
+          IntOp $R0 $R0 - $cloudroomInstallStart
+          IntOp $cloudroomLockWaitMs $cloudroomLockWaitMs + 0
+          IntOp $cloudroomPrompts $cloudroomPrompts + 0
+          FileOpen $R2 "$INSTDIR\install-timing.json" w
+          FileWrite $R2 '{"ms":$R0,"update":true,"staged":true,"swap_ms":$R4,"lock_wait_ms":$cloudroomLockWaitMs,"prompts":$cloudroomPrompts}'
+          FileClose $R2
+          ${If} ${isForceRun}
+            HideWindow
+            ; Like the full install's StartApp: through the Start Menu shortcut, which carries the app's taskbar ID.
+            StrCpy $R1 "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+            ${If} ${FileExists} "$newStartMenuLink"
+              StrCpy $R1 "$newStartMenuLink"
+            ${EndIf}
+            ${StdUtils.ExecShellAsUser} $0 "$R1" "open" "--updated"
+          ${EndIf}
+          !insertmacro cloudroomRemoveOwned "$INSTDIR.old"
+          SetErrorLevel 0
+          Quit
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
+  ; A stage that can't be used is stale.
+  !insertmacro cloudroomRemoveOwned "$INSTDIR.next"
+  !endif
+!macroend
+
+; A swap cut off between its two renames leaves no app in the install folder but a whole one in .old: put it back.
+; Runs first in every installer start, staging included.
+!macro cloudroomRecoverSwap
+  !ifndef BUILD_UNINSTALLER
+  ${IfNot} ${FileExists} "$INSTDIR\${APP_EXECUTABLE_FILENAME}"
+  ${AndIf} ${FileExists} "$INSTDIR.old\${APP_EXECUTABLE_FILENAME}"
+  ${AndIf} ${FileExists} "$INSTDIR.old\.cloudroom-owned"
+    SetOutPath $TEMP
+    RMDir /r "$INSTDIR"
+    Rename "$INSTDIR.old" "$INSTDIR"
+  ${EndIf}
+  !endif
 !macroend
 
 ; The detached cloud preview helper runs the bundled python.exe from the install folder and keeps it locked,
@@ -120,9 +303,13 @@
     Sleep 1000
   ${EndIf}
   cloudroomAppChecked:
+  !insertmacro cloudroomSwapStaged
 !macroend
 
 !macro customInit
+  !insertmacro cloudroomRecoverSwap
+  ; Staging runs while Cloudroom is open, so it must not stop the preview helper below.
+  !insertmacro cloudroomStageIfAsked
   ; Start the install timer first (see customInstall). GetTickCount wraps every 49 days; the difference still comes out right.
   Var /GLOBAL cloudroomInstallStart
   System::Call 'kernel32::GetTickCount()i .s'
@@ -150,4 +337,11 @@
 
 !macro customUnInit
   !insertmacro stopPreviewHelper
+!macroend
+
+!macro customUnInstall
+  ${ifNot} ${isUpdated}
+    !insertmacro cloudroomRemoveOwned "$INSTDIR.next"
+    !insertmacro cloudroomRemoveOwned "$INSTDIR.old"
+  ${endIf}
 !macroend

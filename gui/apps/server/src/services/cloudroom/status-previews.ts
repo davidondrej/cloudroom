@@ -4,7 +4,7 @@ import { cloudroomCommands, cloudroomThreads } from "@cloudroom/db";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomError } from "./client.js";
-import { checkPreviewsNow, helperRunning, macAccess, macAccessSupported, previewStatus, previewsSetUp, setupPreviews } from "./previews.js";
+import { checkPreviewsNow, helperRunning, macAccess, previewStatus, previewsSetUp, setupPreviews } from "./previews.js";
 import { refreshProjectRemote } from "./project-copy.js";
 import { HOSTED_WEBSITE, publicError, type Capabilities, type CloudroomAccount, type Storage } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
@@ -171,8 +171,7 @@ export class CloudStatusPreviews {
     if (!sandboxes.length) return this.macReports.clear();
     const status = await previewStatus(this.rt.host.deps, 60_000);
     const problem = status.state === "offline" && status.detail ? status.message : null;
-    // Windows hides Mac access: "off" keeps older Cores' answer, `unsupported` tells newer ones there is no setting (#871).
-    const report = macAccessSupported ? { access: await macAccess(this.rt.host.deps) ?? "off", problem } : { access: "off", problem, unsupported: true };
+    const report = { access: await macAccess(this.rt.host.deps) ?? "off", problem };
     const key = JSON.stringify(report), sent = this.macReports;
     this.macReports = new Map();
     for (const { url, token } of sandboxes) {
@@ -216,7 +215,7 @@ export class CloudStatusPreviews {
       this.previewRetryAt = Date.now() + Math.min(30_000 * 2 ** ++this.previewFailures, 300_000);
       this.previewIssue = publicError(error);
       // Twice in a row, so a slow start at login never counts.
-      const level = macAccessSupported ? await macAccess(this.rt.host.deps).catch(() => null) : null;
+      const level = await macAccess(this.rt.host.deps).catch(() => null);
       if (this.previewFailures >= 2 && level && level !== "off" && !await helperRunning(this.rt.host.deps)) reportMacHelperDown(this.previewIssue);
     }).finally(() => { if (this.previewSetupEpoch === epoch) this.previewSetupEpoch = -1; });
   }

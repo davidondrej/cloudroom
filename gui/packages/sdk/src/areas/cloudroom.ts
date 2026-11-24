@@ -38,10 +38,12 @@ export interface CloudroomStatus {
   macAccess?: boolean | null;
   /** How much cloud agents may do on this computer (ADR 0186); null until first-run setup asks. */
   macAccessLevel?: MacAccessLevel | null;
-  /** False where cloud agents can't use this computer yet (Windows); hide Mac access there. */
+  /** Only older Windows servers send it, as false: hide Mac access for them. Newer servers support every system (#958). */
   macAccessSupported?: boolean;
-  /** The levels this computer supports: macOS has all four, Linux only Off and Full. Missing from older servers. */
+  /** The levels this computer supports: macOS has all four, Linux and Windows only Off and Full. Missing from older servers. */
   macAccessLevels?: readonly MacAccessLevel[];
+  /** The system of the computer whose access this is: the server's, not the viewer's. Missing from older servers. */
+  computerOs?: "macos" | "linux" | "windows";
   /** Copy this computer's logins, API keys, and model providers to the VM (ADR 0130); null until first-run setup asks. */
   copyLogins?: boolean | null;
   /** Agent logins found on this computer. Claude's is checked through its provider plugin. */

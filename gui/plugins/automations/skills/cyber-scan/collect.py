@@ -11,7 +11,7 @@ Reads metadata only: never prints or saves a secret value. Only advisory lookups
 and versions go to OSV (api.osv.dev), and the threat lists come from CISA's list on GitHub and GitHub's advisories.
 """
 import base64, calendar, concurrent.futures, glob, json, math, os, platform, plistlib, re, shutil, subprocess, sys, time
-import urllib.request
+import urllib.request, xml.parsers.expat
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "workflow-scan"))
 from readers import cli  # room-cli that also starts on Windows (room-cli.cmd, arguments in ROOM_CLI_ARGV)
 
@@ -20,6 +20,7 @@ UA = {"User-Agent": "cloudroom-cyber-scan"}
 ROOTS = ["code", "Code", "Developer", "Documents/code", "Documents/GitHub", "GitHub", "projects", "Projects", "src", "dev",
          "work", "repos", "source/repos"]
 SKIP_DIRS = {"node_modules", "Library", ".cache", "vendor", "target", "dist", "build", ".venv", "venv", ".Trash"}
+PLIST_ERRORS = (OSError, plistlib.InvalidFileException, ValueError, xml.parsers.expat.ExpatError)  # bad XML: ExpatError (#2477)
 
 
 def run(args, timeout=30, env=None):
@@ -62,7 +63,7 @@ def mac():
         su = plistlib.load(open("/Library/Preferences/com.apple.SoftwareUpdate.plist", "rb"))
         f["auto_updates"] = {k: su.get(k) for k in ("AutomaticCheckEnabled", "AutomaticDownload", "AutomaticallyInstallMacOSUpdates",
                                                     "CriticalUpdateInstall", "ConfigDataInstall")}
-    except (OSError, plistlib.InvalidFileException, ValueError):
+    except PLIST_ERRORS:
         f["auto_updates"] = None
     f["pending_updates"] = [l.strip("* ").strip() for l in run(["softwareupdate", "--list"], timeout=150).splitlines()
                             if "Label:" in l or "Title:" in l][:12]
@@ -79,7 +80,7 @@ def apps():
     for path in sorted(glob.glob("/Applications/*.app") + glob.glob(os.path.join(HOME, "Applications/*.app"))):
         try:
             info = plistlib.load(open(os.path.join(path, "Contents/Info.plist"), "rb"))
-        except (OSError, plistlib.InvalidFileException, ValueError):
+        except PLIST_ERRORS:
             continue
         found.append(f"{os.path.basename(path)[:-4]} {info.get('CFBundleShortVersionString') or info.get('CFBundleVersion') or '?'}")
     return found
@@ -111,7 +112,7 @@ def startup_items():
             try:
                 p = plistlib.load(open(path, "rb"))
                 program = p.get("Program") or (p.get("ProgramArguments") or ["?"])[0]
-            except (OSError, plistlib.InvalidFileException, ValueError):
+            except PLIST_ERRORS:
                 program = "unreadable"
             items.append(f"{path.replace(HOME, '~')} -> {program}")
     return items[:60]
@@ -187,7 +188,7 @@ def git(repo, *args, timeout=30):
 
 
 def github_name(url):
-    m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url or "")
+    m = re.search(r"github\.com(?::\d+)?[:/]([^/\s]+/[^/\s]+?)(?:\.git)?/?$", url or "")  # also ssh.github.com:443
     return m.group(1) if m else None
 
 

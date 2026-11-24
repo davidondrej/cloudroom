@@ -212,10 +212,13 @@ impl Local {
     /// Opens the journal and rebuilds the sessions: from a usable snapshot, then the records after it.
     /// A missing, unreadable, older or too-new snapshot means a full replay.
     pub(super) fn open(directory: &std::path::Path) -> io::Result<Self> {
-        let snapshot = Journal::read_snapshot(directory)
-            .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
-            .filter(|s| s.version == SNAPSHOT_VERSION);
-        let journal = Journal::open_from(directory, snapshot.as_ref().map_or(0, |s| s.sequence))?;
+        let mut snapshot = None;
+        let journal = Journal::open_from(directory, || {
+            snapshot = Journal::read_snapshot(directory)
+                .and_then(|bytes| serde_json::from_slice::<Snapshot>(&bytes).ok())
+                .filter(|s| s.version == SNAPSHOT_VERSION);
+            snapshot.as_ref().map_or(0, |s| s.sequence)
+        })?;
         let (changed, _) = watch::channel(journal.last());
         let mut local = Local {
             loud: journal.last(),

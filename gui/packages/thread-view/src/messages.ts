@@ -213,9 +213,6 @@ function buildClientUserRow(
     systemMessageKind: event.systemMessageKind ?? "unlabeled",
     systemMessageSubject: event.systemMessageSubject ?? null,
     turnRequest: {
-      ...(typeof event.request.params.cloudMessageId === "string"
-        ? { cloudMessageId: event.request.params.cloudMessageId }
-        : {}),
       isGrouped: event.inputGroups !== undefined,
       kind,
       status: requestStatus,
@@ -384,7 +381,9 @@ export function buildErrorRow(
     !isReconnect &&
     (providerErrorInfo?.category === "rate-limit" ||
       combinedText.includes(CORE_PLAN_LIMIT) ||
-      PROVIDER_PLAN_LIMIT_RE.test(combinedText));
+      // The wording fallback is only for unclassified errors: an overload saying "requests per minute limit" is no plan limit.
+      ((!providerErrorInfo || providerErrorInfo.category === "unknown") &&
+        PROVIDER_PLAN_LIMIT_RE.test(combinedText)));
   const refusal = !isReconnect && providerErrorInfo?.category === "policy";
 
   return {

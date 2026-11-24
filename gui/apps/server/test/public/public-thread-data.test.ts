@@ -1,3 +1,4 @@
+import { chatFileCopyName } from "@cloudroom/config/chat-file-copies";
 import { and, eq } from "drizzle-orm";
 import {
   claimQueuedThreadMessage,
@@ -4417,17 +4418,19 @@ describe("public thread data routes", () => {
         );
         expect(fileErrorResponse.status).toBe(200);
         if (errorCode === "ENOENT") {
-          // A missing file is looked up in the thread's saved chat file copies, which have none here.
-          const copyCommand = await waitForQueuedCommand(
-            harness,
-            ({ command }) =>
-              command.type === "host.read_file" &&
-              command.path !== hostFilePath,
-          );
-          await reportQueuedCommandError(harness, copyCommand, {
-            errorCode,
-            errorMessage: "No copy",
-          });
+          // A missing file is looked up in the thread's saved chat file copies (new, then old), which have none here.
+          for (const folder of ["chat-file-copies", "thread-storage"]) {
+            const copyCommand = await waitForQueuedCommand(
+              harness,
+              ({ command }) =>
+                command.type === "host.read_file" &&
+                command.path.includes(`/${folder}/`),
+            );
+            await reportQueuedCommandError(harness, copyCommand, {
+              errorCode,
+              errorMessage: "No copy",
+            });
+          }
         }
 
         const fileResponse = await filePromise;
@@ -4450,9 +4453,15 @@ describe("public thread data routes", () => {
         sourceThreadId: thread.id,
       });
       const imagePath = "/tmp/ui-preview/option-a.png";
-      const storageOf = (threadId: string) =>
-        `/tmp/bb-host-data/${host.id}/thread-storage/${threadId}`;
+      const dataDir = `/tmp/bb-host-data/${host.id}`;
+      const copiesOf = (threadId: string) =>
+        `${dataDir}/chat-file-copies/${threadId}`;
       const copyOf = (threadId: string) =>
+        `${copiesOf(threadId)}/${chatFileCopyName(imagePath)}`;
+      // Where copies were saved before 2026-11-23, still read.
+      const storageOf = (threadId: string) =>
+        `${dataDir}/thread-storage/${threadId}`;
+      const oldCopyOf = (threadId: string) =>
         `${storageOf(threadId)}/Cloud files/tmp/ui-preview/option-a.png`;
       const readOf = (path: string) =>
         waitForQueuedCommand(
@@ -4466,14 +4475,17 @@ describe("public thread data routes", () => {
         `/api/v1/threads/${fork.id}/host-files/content?path=${encodeURIComponent(imagePath)}`,
       );
       await reportQueuedCommandError(harness, await readOf(imagePath), gone);
-      await reportQueuedCommandError(
-        harness,
-        await readOf(copyOf(fork.id)),
-        gone,
-      );
+      const forkCopy = await readOf(copyOf(fork.id));
+      expect(forkCopy.command).toMatchObject({ rootPath: copiesOf(fork.id) });
+      await reportQueuedCommandError(harness, forkCopy, gone);
+      const forkOldCopy = await readOf(oldCopyOf(fork.id));
+      expect(forkOldCopy.command).toMatchObject({
+        rootPath: storageOf(fork.id),
+      });
+      await reportQueuedCommandError(harness, forkOldCopy, gone);
       const copyCommand = await readOf(copyOf(thread.id));
       expect(copyCommand.command).toMatchObject({
-        rootPath: storageOf(thread.id),
+        rootPath: copiesOf(thread.id),
       });
       await reportQueuedCommandSuccess(
         harness,

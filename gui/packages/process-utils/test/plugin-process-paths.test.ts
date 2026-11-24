@@ -165,6 +165,7 @@ it("lists the data folder's secret files, including ones found by scanning", asy
         join("plugins", "github", "secrets"),
         join("plugins", "accounts", "profiles", "p1", ".credentials.json"),
         join("cloudroom-preview-old", "id_ed25519"),
+        "chat-file-copies",
       ].map((name) => join(dataDir, name)),
     ),
   );

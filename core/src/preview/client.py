@@ -39,6 +39,153 @@ else:
     import pwd
 # Windows files have no owner IDs or mode bits; the user's profile folder ACL keeps this folder private there.
 NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+# The system Mac jobs run on, for agents' `room-cli mac status` (#958).
+MAC_OS = 'windows' if WINDOWS else 'macos' if sys.platform == 'darwin' else 'linux'
+# Windows jobs and their tools never open a console window: the helper runs detached.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
+
+
+def native(path):
+    r"""Windows (#958): a job's path as Python reads it, with / for \. Git Bash's /c/x becomes C:/x, which pathlib
+    would read as C:\c\x. Other systems keep the path."""
+    if not WINDOWS:
+        return path
+    path = path.replace('\\', '/')
+    return path[1].upper() + ':/' + path[3:] if path[:1] == '/' and path[1:2].isascii() and path[1:2].isalpha() and path[2:3] in ('', '/') else path
+
+
+def posix(path):
+    r"""Windows (#958): a path as Git Bash names it, C:\Users\me as /c/Users/me. Its tar reads a C: in an archive's path
+    as a remote host. Other systems keep the path."""
+    path = str(path)
+    if not WINDOWS:
+        return path
+    path = path.replace('\\', '/')
+    if len(path) >= 2 and path[0].isascii() and path[0].isalpha() and path[1] == ':' and (len(path) == 2 or path[2] == '/'):
+        return '/' + path[0].lower() + path[2:]
+    return path
+
+
+WINDOWS_DEVICES = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
+                   *(f'{kind}{n}' for kind in ('COM', 'LPT') for n in (*range(1, 10), '¹', '²', '³'))}
+
+
+def windows_name(name):
+    r"""Whether Windows can store a pushed item under this name: no \ : * ? " < > | or control characters (a : would
+    write a hidden data stream), no device name such as NUL or CON.txt, and no trailing dot or space."""
+    return bool(name) and not (set(name) & set('\\:*?"<>|') or any(ord(c) < 32 for c in name) or name[-1] in '. '
+                               or name.split('.')[0].rstrip(' ').upper() in WINDOWS_DEVICES)
+
+
+@functools.cache  # Once per helper; each app launch restarts it.
+def git_bash():
+    """Windows runs Mac jobs in Git for Windows' bash, which Cloudroom requires there, so agents' sh and Core's copy
+    scripts (tar, mktemp, sha256sum) work unchanged. Found as the host daemon finds it; None without Git."""
+    found = []
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        shell = subprocess.run(['git', 'var', 'GIT_SHELL_PATH'], capture_output=True, text=True, timeout=10,
+                               creationflags=NO_WINDOW).stdout.strip()
+        if shell:
+            found.append(Path(shell).parent / 'bash.exe')
+        # Older Git reports no shell, or a POSIX one; <Git>\mingw64\libexec\git-core is three folders below <Git>.
+        libexec = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, timeout=10,
+                                 creationflags=NO_WINDOW).stdout.strip()
+        if libexec:
+            parents = Path(libexec).parents
+            if len(parents) >= 3:
+                found.append(parents[2] / 'usr' / 'bin' / 'bash.exe')
+    found.append(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Git' / 'usr' / 'bin' / 'bash.exe')
+    if local := os.environ.get('LOCALAPPDATA'):
+        found.append(Path(local) / 'Programs' / 'Git' / 'usr' / 'bin' / 'bash.exe')
+    return next((str(path) for path in found if path.is_file()), None)
+
+
+WINDOWS_STRIP_ENV = {'ELECTRON_RUN_AS_NODE', 'NODE_ENV', 'CLOUDROOM_PREVIEW_START', 'CLOUDROOM_SERVER_URL', 'CLOUDROOM_ROOM_CLI'}
+WINDOWS_STRIP_PREFIXES = ('BB_', 'ROOM_')
+
+
+def windows_job_env(command, base=None):
+    """Environment for a Windows Mac job (#958). Drops the Electron server's own variables (the helper inherits them on
+    Windows because there is no launchd/systemd), including NODE_ENV=production, BB_*, and ROOM_*."""
+    source = os.environ if base is None else base
+    env = {key: value for key, value in source.items()
+           if key.upper() not in WINDOWS_STRIP_ENV and not key.upper().startswith(WINDOWS_STRIP_PREFIXES)}
+    env.update(MSYSTEM='MINGW64', CHERE_INVOKING='1', CLOUDROOM_COMMAND=command)
+    return env
+
+
+def windows_start(command, **options):
+    """Windows (#958): starts a Mac job in its own job object, which holds every process it starts. taskkill /T misses
+    Git Bash's children, which leave the Windows parent tree. It starts suspended and runs only once assigned, so nothing
+    escapes. No kill-on-close: as on a Mac, what a finished command leaves running keeps running. Returns the process and
+    the job's handle for windows_stop. Without a job, a stop couldn't end what the command starts, so it never runs."""
+    import ctypes
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateJobObjectW.restype = k.CreateToolhelp32Snapshot.restype = k.OpenThread.restype = w.HANDLE
+    k.CreateJobObjectW.argtypes, k.AssignProcessToJobObject.argtypes = (w.LPVOID, w.LPCWSTR), (w.HANDLE, w.HANDLE)
+    k.CloseHandle.argtypes = k.ResumeThread.argtypes = (w.HANDLE,)
+    k.ResumeThread.restype = w.DWORD
+    k.OpenThread.argtypes, k.CreateToolhelp32Snapshot.argtypes = (w.DWORD, w.BOOL, w.DWORD), (w.DWORD, w.DWORD)
+
+    class Entry(ctypes.Structure):  # THREADENTRY32
+        _fields_ = [('size', w.DWORD), ('usage', w.DWORD), ('thread', w.DWORD), ('owner', w.DWORD), ('base', w.LONG),
+                    ('delta', w.LONG), ('flags', w.DWORD)]
+    k.Thread32First.argtypes = k.Thread32Next.argtypes = (w.HANDLE, ctypes.POINTER(Entry))
+    invalid = ctypes.c_void_p(-1).value
+    process = subprocess.Popen(command, creationflags=0x4 | subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW, **options)  # CREATE_SUSPENDED
+    job = None
+    try:
+        job = k.CreateJobObjectW(None, None)
+        if not job or not k.AssignProcessToJobObject(job, int(process._handle)):
+            raise OSError("Windows couldn't set up a way to stop this command, so it did not run. Try again.")
+        # Popen keeps no thread handle, so resume the new process's only thread through a snapshot.
+        snapshot, entry, resumed = k.CreateToolhelp32Snapshot(4, 0), Entry(), 0  # TH32CS_SNAPTHREAD
+        if snapshot not in (None, 0, invalid):
+            try:
+                entry.size = ctypes.sizeof(entry)
+                more = k.Thread32First(snapshot, ctypes.byref(entry))
+                while more:
+                    if entry.owner == process.pid:
+                        thread = k.OpenThread(2, False, entry.thread)  # THREAD_SUSPEND_RESUME
+                        if thread:
+                            resumed += k.ResumeThread(thread) != 0xFFFFFFFF
+                            k.CloseHandle(thread)
+                    more = k.Thread32Next(snapshot, ctypes.byref(entry))
+            finally:
+                k.CloseHandle(snapshot)
+        if not resumed:
+            raise OSError("Windows didn't start the command")
+    except BaseException:
+        if job:
+            k.CloseHandle(job)
+        process.kill()  # Never left suspended.
+        process.wait()
+        raise
+    return process, job
+
+
+def sweep_windows_copies():
+    """Removes Core's copy staging (/tmp/cloudroom.*, /tmp/cloudroom-copy-*) over a day old: a `room-cli mac` copy whose
+    CLI was stopped never asks for its cleanup, and Git Bash's /tmp is the user's temp folder, which Windows keeps (#958)."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError, TypeError):
+        bash = git_bash()
+        if not bash:
+            return
+        # Explicit /usr/bin paths: non-login bash.exe doesn't add /usr/bin to PATH, so bare `find` hits System32\find.exe.
+        subprocess.run([bash, '-c', "/usr/bin/find /tmp -maxdepth 1 -type d \\( -name 'cloudroom.*' -o -name 'cloudroom-copy-*' \\) -mmin +1440 "
+                        "-exec /usr/bin/rm -rf {} +"], stdin=subprocess.DEVNULL, capture_output=True, timeout=300, creationflags=NO_WINDOW)
+
+
+def windows_stop(job, terminate):
+    """Ends every process in a Mac job's job object (terminate), and frees its handle."""
+    import ctypes
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.TerminateJobObject.argtypes, k.CloseHandle.argtypes = (w.HANDLE, w.UINT), (w.HANDLE,)
+    if terminate:
+        k.TerminateJobObject(job, 1)
+    k.CloseHandle(job)
 
 
 def private_json(path):
@@ -1041,7 +1188,8 @@ def deliver(post, result):
 
 
 # A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when the user's PATH puts GNU tar first.
-COPY_TAR = '/usr/bin/tar' if sys.platform == 'darwin' else 'tar'
+# Windows Git Bash also pins /usr/bin/tar so a user profile can't shadow it with Windows' System32\tar.exe (#958).
+COPY_TAR = '/usr/bin/tar' if sys.platform in ('darwin', 'win32') else 'tar'
 # Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
 COPY_MODE = '/usr/bin/stat -Lf %OLp' if sys.platform == 'darwin' else 'stat -Lc %a'
 # Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
@@ -1096,7 +1244,29 @@ def in_temp(folder):
     return False
 
 
-def copy_command(copy):
+# Windows (#958): checks a push's archive listing before anything is unpacked. GNU tar lists a control character in a
+# name as an escape (\t, \n), and a \ as \\, so both show as a backslash. Refuses names Windows can't store (\ : * ? " < >
+# |, a trailing dot or space, device names such as NUL, CON.txt, or COM¹, a ..) and two spellings of one path, after
+# dropping . and empty parts, that differ only in case, which a Windows folder would merge into one. Exits 1 to refuse.
+WINDOWS_ARCHIVE_NAMES = r"""
+{ if ($0 ~ /[\\:*?"<>|]/) bad = 1
+  n = split($0, part, "/"); path = ""
+  for (i = 1; i <= n; i++) {
+    if (part[i] == "" || part[i] == ".") continue
+    if (part[i] == "..") { bad = 1; continue }
+    if (part[i] ~ /[. ]$/) bad = 1
+    base = tolower(part[i]); sub(/\..*$/, "", base); sub(/ +$/, "", base)
+    if (base ~ /^(con|prn|aux|nul|conin\$|conout\$)$/ || base ~ /^(com|lpt)([1-9]|¹|²|³)$/) bad = 1
+    # Each folder and the entry itself, as Windows would match them: two spellings of one path differ only in case.
+    path = path "/" part[i]; key = tolower(path)
+    if ((key in seen) && seen[key] != path) bad = 1
+    seen[key] = path
+  } }
+END { exit bad }
+"""
+
+
+def copy_command(copy, token=None):
     """The command for a `room-cli mac push` (#222), built here from the job's names, never from the sandbox's command.
     Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
 
@@ -1105,10 +1275,16 @@ def copy_command(copy):
     temp folder they can, so there the command runs read-only (as_copy). It unpacks in a new, empty folder at the place
     and keeps only the named item, so an archive can't add other files or reach existing ones through a hard link. Like
     cp, the item gets a new name, which must not exist yet, or goes into a folder: it moves in if new, else is re-packed
-    there so that folders merge and files replace as before. Raises ValueError for a name or place it can't use."""
+    there so that folders merge and files replace as before. Raises ValueError for a name or place it can't use.
+
+    Windows (#958): a stop ends the job without running its traps, so the unpack folder is named after `token` and the
+    helper removes it itself (as_copy, execute). Names Windows can't store are refused, in the place and in the archive."""
     name, to, staged = copy['name'], copy['to'], copy.get('staged')
+    to = native(to) if isinstance(to, str) else to  # Windows: C:\x and /c/x as C:/x (#958).
     if not (isinstance(name, str) and isinstance(to, str) and 0 < len(to) <= 4096 and name not in ('', '.', '..')
-            and '/' not in name and '\0' not in name + to and len(name.encode()) <= 255):
+            and '/' not in name and '\0' not in name + to and len(name.encode()) <= 255 and (not WINDOWS or windows_name(name))):
+        raise ValueError('Invalid copy')
+    if WINDOWS and len(to) >= 2 and to[1] == ':' and (len(to) == 2 or to[2] != '/'):
         raise ValueError('Invalid copy')
     if staged is not None and not (isinstance(staged, str) and staged.startswith('/tmp/cloudroom.') and staged[15:].isascii() and staged[15:].isalnum()):
         raise ValueError('Invalid copy')
@@ -1119,15 +1295,23 @@ def copy_command(copy):
     folder = os.path.realpath(folder)
     if final in ('', '.', '..'):
         raise ValueError('Invalid copy')
+    if WINDOWS and not all(windows_name(part) for part in [*to.split('/'), final] if part not in ('', '~', '.', '..')
+                           and not (len(part) == 2 and part[1] == ':')):
+        raise ValueError('Invalid copy')
     place, temp = os.path.join(folder, final), any(folder == root or folder.startswith(root + '/') for root in TEMP_FOLDERS)
     taken = '{ [ ! -e "$to" ] && [ ! -L "$to" ] || taken; }'
-    return (f"b={shlex.quote(folder)}; n={shlex.quote(name)}; to={shlex.quote(place)}; s={staged or ''}; "
+    return (f"b={shlex.quote(posix(folder))}; n={shlex.quote(name)}; to={shlex.quote(posix(place))}; s={staged or ''}; "
             "taken() { printf '%s already exists; nothing was copied\\n' \"$to\" >&2; return 1; }; "
             + ('' if inside else f'{taken} || exit 1; ') +
-            'mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; '
+            (f'mkdir -p -- "$b" && x="$b/.cloudroom.{token}" && mkdir -- "$x" && mkdir -- "$x/i" || exit 1; ' if token else
+               'mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; ') +
             'clean() { find "$x" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$x" $s; }; '
             "trap 'clean; exit 1' HUP INT TERM; "
-            + (f'cat {staged}/* | ' if staged else '') + f'{COPY_TAR} -xzf - -C "$x/i"; c=$?; '
+            + ((f'cat {staged}/* > "$x/a.tgz"' if staged else 'cat > "$x/a.tgz"') + '; c=$?; '
+               f'if [ $c = 0 ] && ! {COPY_TAR} -tzf "$x/a.tgz" | awk {shlex.quote(WINDOWS_ARCHIVE_NAMES)}; then '
+               'echo "The copy holds names Windows cannot store, or names that differ only in case, so nothing was copied" >&2; c=1; fi; '
+               f'[ $c != 0 ] || {{ {COPY_TAR} -xzf "$x/a.tgz" -C "$x/i"; c=$?; }}; ' if WINDOWS else
+               (f'cat {staged}/* | ' if staged else '') + f'{COPY_TAR} -xzf - -C "$x/i"; c=$?; ') +
             # Exactly one item, named $n. Entries are counted by NUL, since a name may hold a line break.
             'if [ $c = 0 ] && ! { { [ -e "$x/i/$n" ] || [ -L "$x/i/$n" ]; } && '
             '[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc \'\\000\' | wc -c) )) = 1 ]; }; '
@@ -1168,11 +1352,14 @@ def as_copy(job):
     into a temp folder also runs read-only. Why it can't run, or None."""
     if job.get('copy') is None:
         return None
+    token = uuid.uuid4().hex[:16] if WINDOWS else None
     try:
-        command, place, inside, temp = copy_command(job['copy'])
+        command, place, inside, temp = copy_command(job['copy'], token)
     except (KeyError, TypeError, ValueError, AttributeError):
-        return 'This copy has a name or place the Mac cannot use, so nothing was copied.'
+        return f"This copy has a name or place {'this computer' if WINDOWS else 'the Mac'} cannot use, so nothing was copied."
     job.update(command=command, cwd=None, write=True, sandbox=temp, place=(place, inside))
+    if token:  # What a stopped push leaves, for execute to remove: its unpack folder and staged pieces.
+        job['leftovers'] = [posix(os.path.dirname(place)) + '/.cloudroom.' + token, *([job['copy']['staged']] if job['copy'].get('staged') else [])]
     return None
 
 
@@ -1336,11 +1523,15 @@ class MacJobs:
 
     def serve(self):
         """One job stream per reachable core: the VM's, and each awake sandbox's while it stays awake."""
-        streams = {}
+        streams, swept = {}, None
         while True:
             with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
                 config = self.enabled()
                 self.track(mac_level(config or {}))
+                # Windows never empties its temp folder, so copies a dropped `room-cli` left there go after a day, checked hourly.
+                if WINDOWS and config and (swept is None or time.monotonic() - swept > 3600):
+                    swept = time.monotonic()
+                    threading.Thread(target=sweep_windows_copies, daemon=True).start()
                 listed = {core.key: core for core in cores(config)} if config else {}
                 self.wanted = set(listed)
                 for key, core in listed.items():
@@ -1400,7 +1591,7 @@ class MacJobs:
         while core.key in self.wanted:
             try:
                 request = urllib.request.Request(core.url + '/v1/mac/jobs?device=' + device + '&boot=' + MAC_BOOT + '&fetch=true&name='
-                                                 + urllib.parse.quote(computer_name(), safe=''),
+                                                 + urllib.parse.quote(computer_name(), safe='') + '&os=' + MAC_OS,
                                                  headers={**core.headers, 'Accept': 'text/event-stream'})
                 with NET['opener'].open(request, timeout=60) as stream:
                     delay, event = 2, None
@@ -1459,10 +1650,16 @@ class MacJobs:
             except (OSError, ValueError):
                 time.sleep(1)
         result = {'state': 'done', 'code': 127, 'stdout': '', 'stderr': '', 'truncated': False}
+        job.pop('leftovers', None)  # Only as_copy sets it, from the helper's own names: never trust the stream's.
         # Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
         # Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
         refused = ('The Mac could not confirm this command with the cloud, so it did not run. Try again.' if not confirmed else
                    self.closed(core)[1])
+        authorized = not refused
+        # Windows: a push's staged pieces, tracked only once authorized (confirmed, access on, no key list), so a refused
+        # or stopped authorized push cleans them while an unauthorized sandbox never touches disk.
+        staged = (job.get('copy') or {}).get('staged') if authorized and isinstance(job.get('copy'), dict) else None
+        staging = [staged] if WINDOWS and isinstance(staged, str) and staged.startswith('/tmp/cloudroom.') and staged[15:].isascii() and staged[15:].isalnum() else []
         if not refused:
             job['stdin'] = mac_stdin(core, device, job)
             refused = ("The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
@@ -1475,13 +1672,18 @@ class MacJobs:
         if sandboxed and not self.containable():
             refused, sandboxed = "This Mac can't make sure a read-only command leaves nothing running, so it did not run.", False
         mark = f'{self.boot}.{uuid.uuid4().hex[:16]}' if sandboxed else None  # Never the job's ID, which a sandbox can pick.
-        login = pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
+        login = (git_bash() or '') if WINDOWS else pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
+        if WINDOWS and not login and not refused:
+            refused = ("This Windows computer has no Git for Windows, which runs cloud agents' commands there, so the command "
+                       'did not run. Ask the user to install it from https://git-scm.com/download/win, then restart Cloudroom.')
         # As in Local threads, Cloudroom's own tools (browser-harness) come first, then the PATH the app read from an
         # interactive login shell, so tools set up in ~/.zshrc are found, all after the user's profile sets PATH. On macOS
         # that lookup always uses /bin/zsh, so other shells keep their own PATH. The shell stays non-interactive: rc files
         # could print into a `mac pull` archive or wait on a prompt (#338).
         data = Path(core.config['connectionFile']).parent
-        tools, saved = shlex.quote(str(data / 'bin')), core.config.get('shellPath')
+        tools, saved = shlex.quote(posix(data / 'bin')), core.config.get('shellPath')
+        if core.config.get('roomCli'):  # Windows: the app's own room-cli, which no Git Bash PATH has (#958).
+            tools += ':' + shlex.quote(posix(core.config['roomCli']))
         if saved and (sys.platform != 'darwin' or login.endswith('/zsh')):
             tools += (' ' if login.endswith('/fish') else ':') + shlex.quote(saved)
         path = f'set -gx PATH {tools} $PATH; ' if login.endswith('/fish') else f'PATH={tools}:"$PATH"; '
@@ -1508,13 +1710,27 @@ class MacJobs:
             command = (f'{b} cd -- {shlex.quote(approved)} && {b} test "$({b} pwd -P)" = {shlex.quote(approved)} '
                        f'|| {{ {b} echo {shlex.quote(changed)} >&2; {b} exit 126; }}; {command}')
         shell = [login, '-lc', path + command]
+        command_file = None
         try:
             if refused:
                 raise PermissionError(refused)
-            folder = Path.home() / os.path.expanduser(job.get('cwd') or '~')
+            folder = Path.home() / os.path.expanduser(native(job.get('cwd') or '~'))
             # The folder the user approved must still be the same folder, at the same real path.
             if approved and real_folder(str(folder)) != (approved, job['approved_folder']):
                 raise PermissionError(changed)
+            env = None
+            if WINDOWS:
+                # The command travels in the environment, so Windows' command line rules and MSYS globbing never touch it.
+                # A login shell stays in the job's folder (CHERE_INVOKING) and finds Git's tools (MSYSTEM). Commands too long
+                # for one variable (32,767 characters) go through a file in the helper's private folder, created only after
+                # refusal checks pass. Unset CLOUDROOM_COMMAND before eval so child processes never inherit it.
+                full = path + command
+                if len(full) > 30_000:
+                    command_file = self.folder / f'command-{uuid.uuid4().hex}'
+                    command_file.write_text(full, encoding='utf-8', newline='\n')
+                    full = f'. {shlex.quote(posix(command_file))}'
+                env = windows_job_env(full)
+                shell = [login, '-lc', '__cloudroom_cmd=$CLOUDROOM_COMMAND; unset CLOUDROOM_COMMAND; eval "unset __cloudroom_cmd\n$__cloudroom_cmd"']
             with self.lock:  # A stop that arrives while the command starts either skips or kills it.
                 if job['id'] in self.cancelled:
                     self.cancelled.discard(job['id'])
@@ -1524,13 +1740,20 @@ class MacJobs:
                 # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
                 if sandboxed and core.key not in self.wanted:
                     raise PermissionError('The Mac stopped taking commands from this sandbox, so this command did not run.')
-                process = subprocess.Popen([*read_only(data, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
-                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                if WINDOWS:
+                    process, process.job = windows_start(shell, cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                         stderr=subprocess.PIPE)
+                else:
+                    process = subprocess.Popen([*read_only(data, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
+                                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self.running[job['id']] = process
                 if sandboxed:
                     self.sandboxes[mark] = (core.key, None, process)
         except OSError as error:
             result['code'] = 126 if isinstance(error, PermissionError) else 127
+            if getattr(error, 'winerror', None) == 225:  # ERROR_VIRUS_INFECTED: Defender or other antivirus blocked it.
+                error = PermissionError("Windows security software blocked this command, so it did not run. Don't retry it; "
+                                        'tell the user, who can check Windows Security → Protection history.')
             result['stderr'] = str(error).encode().hex()
         else:
             output = {'stdout': bytearray(), 'stderr': bytearray()}
@@ -1551,6 +1774,9 @@ class MacJobs:
                 thread.join(2)  # A background process may keep the pipe open.
             with self.lock:
                 self.running.pop(job['id'], None)
+                if getattr(process, 'job', None):  # What it left running keeps running, as on a Mac.
+                    windows_stop(process.job, False)
+                    process.job = None
                 if ended:
                     self.sandboxes.pop(mark, None)
                 elif sandboxed:
@@ -1570,6 +1796,18 @@ class MacJobs:
                     b"Or download it first with `room-cli mac run --write 'brctl download PATH'`. The user approves either.\n")
             result['truncated'] = any(len(value) > MAC_LIMIT for value in output.values())
             result.update({name: bytes(value[:MAC_LIMIT]).hex() for name, value in output.items()})
+        if command_file:
+            with contextlib.suppress(OSError):
+                command_file.unlink()
+        # Windows: a push that was stopped ran no trap, and an authorized push stopped or refused before it started never
+        # cleaned its staged pieces, so remove what it left with Git's own rm. A push that ran to its end cleaned up itself.
+        if WINDOWS and authorized and result['code'] and login and (job.get('leftovers') or staging):
+            for _ in range(3):
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    if not subprocess.run([str(Path(login).parent / 'rm.exe'), '-rf', '--', *(job.get('leftovers') or staging)], stdin=subprocess.DEVNULL,
+                                          capture_output=True, timeout=120, creationflags=NO_WINDOW).returncode:
+                        break
+                time.sleep(2)
         # The result survives disconnects: retry until the VM accepts it, forgets the job, or an hour passes.
         deadline = time.monotonic() + 3600
         while time.monotonic() < deadline:
@@ -1584,11 +1822,20 @@ class MacJobs:
             time.sleep(5)
 
     def cancel(self, job):
+        handle = None
         with self.lock:
             process = self.running.get(job)
             if not process and job in self.taken:
                 self.cancelled.add(job)
-        if process:
+            elif process and WINDOWS:
+                handle, process.job = getattr(process, 'job', None), None
+        if process and WINDOWS:  # Its job object holds everything it started; without one, only the shell itself.
+            with contextlib.suppress(OSError):
+                if handle:
+                    windows_stop(handle, True)
+                else:
+                    process.kill()
+        elif process:
             def kill(signal_number):
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(process.pid, signal_number)
@@ -1639,9 +1886,8 @@ def run(folder):
     signal.signal(signal.SIGTERM, stop)
     with (folder / 'lock').open('a') as lock:
         claim(folder, lock)  # Before Mac jobs, so a second helper never takes any.
-        jobs = None if WINDOWS else MacJobs(folder)  # Mac access is macOS and Linux only (macAccessSupported).
-        if jobs:
-            threading.Thread(target=jobs.serve, daemon=True).start()
+        jobs = MacJobs(folder)
+        threading.Thread(target=jobs.serve, daemon=True).start()
         try:
             while True:
                 try:
@@ -1878,7 +2124,8 @@ def windows(folder, stop):
         (folder / 'stop').unlink(missing_ok=True)
         if (folder / 'ports.json').exists():
             (folder / 'ports.json').open('rb').close()
-        command = [sys.executable, '-B', '-E', '-s', str(folder / 'client.py'), 'run', str(folder)]
+        # UTF-8 mode (-X utf8): -E ignores PYTHONUTF8, and Windows' code page can't encode every character (#958).
+        command = [sys.executable, '-B', '-E', '-s', '-X', 'utf8', str(folder / 'client.py'), 'run', str(folder)]
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         for extra in (subprocess.CREATE_BREAKAWAY_FROM_JOB, 0):  # Outlive the app's job object when it allows that.
             try:
@@ -2004,10 +2251,12 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     shell_path = os.environ.get('CLOUDROOM_SHELL_PATH') or (old or {}).get('shellPath')
     # The app's own loopback server, so a nested room-cli in a Mac job reaches this app (#1243, #1290).
     server_url = os.environ.get('CLOUDROOM_SERVER_URL') or None
+    # Windows: the folder of the app's bundled room-cli, for Mac jobs' PATH (#958). Each launch reconfigures, so updates follow.
+    room_cli = os.environ.get('CLOUDROOM_ROOM_CLI') or None
     if (activate and not restart and old and old['binding'] == binding and old.get('connectionFile') == str(connection_file)
             and old.get('allowPrivateSsh', False) == allow_private and old.get('macAccess') == mac_access
             and old.get('launcher') == launcher and old.get('binary') == binary and old.get('ownThreads', False) == own
-            and old.get('website') == trusted and old.get('shellPath') == shell_path and old.get('serverUrl') == server_url and target.is_file() and target.read_bytes() == source.read_bytes()):
+            and old.get('website') == trusted and old.get('shellPath') == shell_path and old.get('serverUrl') == server_url and old.get('roomCli') == room_cli and target.is_file() and target.read_bytes() == source.read_bytes()):
         if WINDOWS:
             if running(folder):
                 return {'enabled': True}
@@ -2023,7 +2272,7 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     config = {'device': old['device'] if old else uuid.uuid4().hex, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
               **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {}),
-              **({'serverUrl': server_url} if server_url else {})}
+              **({'serverUrl': server_url} if server_url else {}), **({'roomCli': room_cli} if room_cli else {})}
     save(folder / 'config.json', config)
     identity(folder)
     if activate:

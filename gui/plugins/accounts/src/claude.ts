@@ -423,6 +423,49 @@ export async function profileUsage(profile?: string): Promise<ClaudeUsage | null
   };
 }
 
+const livePlanSchema = z.object({
+  organization: z.object({
+    uuid: z.string().nullish(),
+    organization_type: z.string().nullish(),
+    rate_limit_tier: z.string().nullish(),
+  }),
+});
+
+// A full login's live plan, read as Claude Code reads it, without a reply. `claude auth status` keeps the plan the
+// login signed in with, even after a plan change (#2534). Null when the login can't be read, Claude refuses the read,
+// or it names a plan Claude Code doesn't know. A network error throws.
+export async function profilePlan(
+  profile?: string,
+): Promise<{ plan: string; tier: string; org: string | null } | null> {
+  const token = await profileToken(profile);
+  if (!token) return null;
+  const response = await fetch("https://api.anthropic.com/api/oauth/profile", {
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      "anthropic-beta": "oauth-2025-04-20",
+      "user-agent": "claude-code/2.1.0",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    return null;
+  }
+  const { organization } = livePlanSchema.parse(await response.json());
+  const plan = organization.organization_type?.match(
+    /^claude_(max|pro|team|enterprise)$/,
+  )?.[1];
+  if (!plan) return null;
+  // Claude Code's `planTier`: `max_5x` or `max_20x` names Max and Ultra apart.
+  const max = organization.rate_limit_tier?.match(
+    /^default_claude_(max_(?:5|20)x)$/,
+  )?.[1];
+  const tier =
+    plan === "max" ? (max ?? "max_other") : plan === "pro" ? "pro" : "other";
+  return { plan, tier, org: organization.uuid ?? null };
+}
+
 // One-year setup tokens can't read /api/oauth/usage (it needs user:profile),
 // but every Claude reply carries the account's limits in its headers, even a 429.
 // OAuth replies need the Claude Code system prompt, or Anthropic answers 429.

@@ -205,7 +205,7 @@ export const storageSchema = z.object({
 });
 export type Storage = z.infer<typeof storageSchema>;
 
-export const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string() });
+export const childReportSchema = z.object({ child: z.string(), status: z.string(), turn: z.string(), error: z.string().optional() });
 
 export type ConnectionPhase = "delivery" | "stream" | "replay";
 export type ConnectionIssue = { message: string; reconnecting: boolean };

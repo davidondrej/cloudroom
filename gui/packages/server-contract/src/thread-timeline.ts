@@ -98,7 +98,6 @@ export const timelineConversationTurnRequestStatusValues = [
   "rejected",
 ] as const;
 export const timelineConversationTurnRequestSchema = z.object({
-  cloudMessageId: z.string().optional(),
   isGrouped: z.boolean(),
   kind: z.enum(timelineConversationTurnRequestKindValues),
   status: z.enum(timelineConversationTurnRequestStatusValues),

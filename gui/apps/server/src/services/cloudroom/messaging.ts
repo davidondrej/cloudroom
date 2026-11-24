@@ -628,6 +628,8 @@ export class CloudMessaging {
     });
     this.rt.notify(threadId, ["system/thread-provisioning"]);
     void this.children.noticeCloudParent(threadId, "not_started", "start", message).catch((error: unknown) => this.rt.host.warn("A child report could not be sent", error, { threadId }));
+    // A Local parent hears it too, say a Codex usage limit (#2513).
+    this.children.tellLocalParent(threadId, "failed", "start", message);
   }
 
   progress(threadId: string, steps: StartStep[], block?: "completed" | "failed"): void {

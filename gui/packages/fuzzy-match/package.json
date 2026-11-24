@@ -16,9 +16,6 @@
     "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
-  "dependencies": {
-    "fzf": "^0.5.2"
-  },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "typescript": "npm:@typescript/typescript6@^6.0.2",

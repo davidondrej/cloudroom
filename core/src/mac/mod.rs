@@ -126,6 +126,8 @@ pub struct Device {
     fetch: bool,
     /// The Mac's computer name, so `mac run` and `mac status` say which Mac runs commands (#608). Older helpers send none.
     name: Option<String>,
+    /// The computer's system, `macos`, `linux`, or `windows`, for `mac status` (#958). Older helpers send none.
+    os: Option<String>,
 }
 /// What the user's Mac app sees of Mac access (#109). The app reaches this sandbox even when the Mac's helper can't,
 /// so agents learn why the Mac is unavailable. `problem` is the short reason Settings shows, never technical detail.
@@ -133,7 +135,7 @@ pub struct Device {
 pub struct AppReport {
     access: String,
     problem: Option<String>,
-    /// The app runs where Mac access is hidden (Windows, #871); older apps send none.
+    /// An older Windows app, which hid Mac access (#871); newer ones send none.
     #[serde(default)]
     unsupported: bool,
 }
@@ -183,6 +185,8 @@ pub struct Mac {
     using: Mutex<Option<String>>,
     /// The last helper that connected, and its computer name if it sent one.
     named: Mutex<Option<(String, Option<String>)>>,
+    /// The device whose helper last streamed, and the system it said it runs (#958).
+    os: Mutex<Option<(String, String)>>,
     /// When a Mac with access on last asked for jobs but the pairing stayed with an away Mac, because that Mac's app
     /// isn't the one using this sandbox (no prompt from it: loops, phones, website wakes). Cleared on attach.
     kept_out: Mutex<Option<Instant>>,
@@ -206,6 +210,7 @@ impl Default for Mac {
             check: AtomicBool::default(),
             using: Mutex::default(),
             named: Mutex::default(),
+            os: Mutex::default(),
             kept_out: Mutex::default(),
             last_ran: Mutex::default(),
         }
@@ -367,7 +372,7 @@ impl Mac {
         let after = |at: &Instant| left.is_none_or(|left| *at > left);
         let reported = self.report.lock().unwrap();
         match reported.as_ref().filter(|(_, at)| at.elapsed() < REPORTED) {
-            Some((AppReport { unsupported: true, .. }, _)) => ("unsupported", "Mac unavailable: the user's Cloudroom app runs on Windows, where cloud agents can't use their computer yet. There is no setting to turn on, so don't ask them to; continue cloud work.".into()),
+            Some((AppReport { unsupported: true, .. }, _)) => ("unsupported", "Mac unavailable: the user's Cloudroom app on Windows is too old to let cloud agents use their computer. If you need it, ask them to update Cloudroom, then pick Computer access in its sidebar; otherwise continue cloud work.".into()),
             Some((report, _)) if report.access == "off" => ("access_off", "Mac unavailable: the user turned Mac access off. If you need their Mac, ask them to turn it on in Cloudroom; otherwise continue cloud work.".into()),
             Some((AppReport { problem: Some(problem), .. }, at)) if after(at) => ("mac_problem", format!("Mac unavailable: the user's Mac is online, but Mac access can't connect to Cloudroom{since}. Cloudroom shows them why in Settings → Machines, with a Check now link: {problem} Continue cloud work; mention it only if you need their Mac.")),
             Some((_, at)) if after(at) && kept_out => ("paired_away", format!("Mac unavailable: this sandbox is paired with another of the user's Macs, which is away (asleep or offline){since}. It moves to the Mac the user is on once they send this thread a message from Cloudroom there. Continue cloud work meanwhile.")),
@@ -503,6 +508,11 @@ async fn stream(
     let attached = m.previews.while_paired(&device, || {
         *m.mac.kept_out.lock().unwrap() = None;
         *m.mac.named.lock().unwrap() = Some((device.clone(), name.map(str::to_owned)));
+        *m.mac.os.lock().unwrap() = input
+            .os
+            .as_deref()
+            .filter(|os| matches!(*os, "macos" | "linux" | "windows"))
+            .map(|os| (device.clone(), os.to_owned()));
         *m.mac.helper.lock().unwrap() = Some(Helper {
             generation,
             device: device.clone(),
@@ -900,11 +910,18 @@ async fn local_status(
         None => false,
     };
     let name = paired_name(&m);
-    Ok(Json(if connected {
+    let mut status = if connected {
         json!({"connected":true,"mac":name})
     } else {
         json!({"connected":false,"reason":naming(&m, mac.unavailable()),"mac":name})
-    }))
+    };
+    // Which system the paired computer's helper said it runs: Windows runs commands in Git Bash, with only Off and
+    // Full access (#958). Omitted while unknown, or for a computer that is no longer paired.
+    let os = mac.os.lock().unwrap().clone();
+    if let Some((_, os)) = os.filter(|(device, _)| m.previews.paired(device)) {
+        status["os"] = json!(os);
+    }
+    Ok(Json(status))
 }
 
 /// Every route on the agent socket. Two modules using the same method and path panic here, which a test catches.
@@ -1295,7 +1312,7 @@ mod tests {
 
     #[test]
     fn mac_status_says_why_from_the_app_report() {
-        // #871: Windows apps send "off" with `unsupported`, so agents must not ask the user to turn on a hidden setting.
+        // #871: older Windows apps send "off" with `unsupported`, so agents ask for an update, not a hidden setting.
         for (extra, reason) in [
             ("", "access_off"),
             (r#","unsupported":true"#, "unsupported"),

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Deterministic Rust HTTP/Codex-protocol checks; no inference or database required."""
+import fcntl
 import json
 import os
 import re
@@ -905,14 +906,21 @@ class RecoveryTests(unittest.TestCase):
 
     def test_occupied_port_does_not_change_saved_recovery_state(self):
         self.seed([('receipt',{'request_id':'queued','command':'prompt','input':{'text':'hello'},'state':'accepted'})])
-        before = {p.name:p.read_bytes() for p in self.state.glob('*.record')}
-        with socket.socket() as occupied:
-            occupied.bind(('127.0.0.1',0)); occupied.listen()
-            env = {**self.env,'CLOUDROOM_LISTEN':'127.0.0.1:'+str(occupied.getsockname()[1])}
-            failed = subprocess.run([str(BINARY)],env=env,capture_output=True,timeout=8)
-            self.assertNotEqual(failed.returncode,0)
-            self.assertEqual(before,{p.name:p.read_bytes() for p in self.state.glob('*.record')})
+        records = lambda: {p.name:p.read_bytes() for p in self.state.glob('*.record')}
+        before = records()
+        occupied = socket.socket(); occupied.bind(('127.0.0.1',0)); occupied.listen()
+        self.env['CLOUDROOM_LISTEN'] = '127.0.0.1:'+str(occupied.getsockname()[1])
+        # A port still taken after the wait (3 s in tests) fails the start.
+        failed = subprocess.run([str(BINARY)],env=self.env,capture_output=True,timeout=8)
+        self.assertNotEqual(failed.returncode,0)
+        self.assertEqual(before,records())
+        # #1968: a restart's new Core waits while the old one still holds the port, then its state lock, rather than exit 1.
+        lock = open(self.state/'lock','a'); fcntl.flock(lock,fcntl.LOCK_EX)
+        def release():
+            time.sleep(.5); occupied.close(); time.sleep(.5); unchanged.append(before == records()); lock.close()
+        unchanged = []; threading.Thread(target=release).start()
         self.start()
+        self.assertEqual(unchanged,[True])
         self.wait(lambda:self.status()['receipts']['queued']['state']=='completed','queued work preserved')
         self.assertEqual(self.status()['native_id'],self.native)
 

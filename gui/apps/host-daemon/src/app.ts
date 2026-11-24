@@ -46,6 +46,10 @@ import {
 import { runtimeErrorLogFields, summarizeError } from "./error-utils.js";
 import { saveChatImages } from "./chat-images.js";
 import { ensureThreadStorageRoot } from "./thread-storage-root.js";
+import {
+  CHAT_FILE_COPIES_DIR_NAME,
+  ensureDataPrivateDir,
+} from "@cloudroom/process-utils";
 import type { AgentRuntime, AgentRuntimeOptions } from "@cloudroom/agent-runtime";
 import { createProtocolSelfUpdater } from "./protocol-self-update.js";
 import {
@@ -218,6 +222,16 @@ export async function createHostDaemonApp(
     options.runtimeShellEnv ?? {},
   );
   const threadStorageRootPath = await ensureThreadStorageRoot(options.dataDir);
+  // Before any sandbox starts: on Linux, Claude's sandbox hides only the private paths that exist when it starts.
+  // Copies go only in a folder made here, so without it none are kept until the daemon restarts.
+  try {
+    ensureDataPrivateDir(options.dataDir, CHAT_FILE_COPIES_DIR_NAME);
+  } catch (error) {
+    options.logger.warn(
+      runtimeErrorLogFields(error),
+      "Chat file copies folder could not be made, so chat images get no copies",
+    );
+  }
   const dataDirSkillsRootPath = await ensureUserSkillsRootPath(homedir());
   await cleanupInjectedSkillStagingDirs({
     dataDir: options.dataDir,
@@ -517,6 +531,7 @@ export async function createHostDaemonApp(
         event.item.type === "agentMessage"
       ) {
         void saveChatImages({
+          dataDir: options.dataDir,
           text: event.item.text,
           threadId: event.threadId,
           threadStorageRootPath,

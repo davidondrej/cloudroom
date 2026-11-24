@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router";
-import { arrayMove } from "@dnd-kit/sortable";
+import { arrayMove } from "@/lib/sortable";
 import type { Host } from "@cloudroom/domain";
 import type { ProjectWithThreadsResponse } from "@cloudroom/server-contract";
 import { Button } from "@cloudroom/shared-ui/button";

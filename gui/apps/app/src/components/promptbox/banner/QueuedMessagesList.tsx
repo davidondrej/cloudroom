@@ -1,4 +1,3 @@
-import { RemoteSendReceipt } from "@/components/thread/RemoteSendReceipt";
 import {
   Fragment,
   memo,
@@ -44,10 +43,10 @@ import {
   SortableContext,
   arrayMove,
   sortableKeyboardCoordinates,
+  sortableTranslate,
   useSortable,
   verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { sortableTranslate } from "@/lib/sortable-translate";
+} from "@/lib/sortable";
 import type {
   PromptInput,
   PromptTextMention,
@@ -1103,7 +1102,6 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
               </span>
             ) : null}
           </div>
-          {!queuedMessage.failureReason && <RemoteSendReceipt threadId={queuedMessage.threadId} messageId={queuedMessage.id} />}
           {senderLabel !== null || isProcessing || hasWaitLine ? (
             <div
               data-queued-message-metadata=""

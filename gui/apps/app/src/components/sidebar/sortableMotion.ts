@@ -3,8 +3,7 @@ import type {
   DraggableAttributes,
   DraggableSyntheticListeners,
 } from "@dnd-kit/core";
-import { useSortable } from "@dnd-kit/sortable";
-import { sortableTranslate } from "@/lib/sortable-translate";
+import { sortableTranslate, useSortable } from "@/lib/sortable";
 
 const SIDEBAR_SORTABLE_TRANSITION = {
   duration: 160,

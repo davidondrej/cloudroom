@@ -22,7 +22,8 @@ import {
   threadPluginMetadata,
   threads,
 } from "@cloudroom/db";
-import { chatFileCopySegments, chatImagePaths, getHostPathComparisonKey, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { chatImagePaths, getHostPathComparisonKey, legacyChatFileCopySegments, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
+import { chatFileCopyPath, readRegularFile, saveChatFileCopy } from "@cloudroom/config/chat-file-copies";
 import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
@@ -41,7 +42,7 @@ import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-pro
 import { requestQueuedMessageDispatch } from "../threads/queued-message-dispatch.js";
 import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "../threads/background-task-reconciliation.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
-import { requireThreadStoragePath } from "../threads/thread-storage.js";
+import { requireHostDataDir } from "../threads/thread-storage.js";
 import { cloudroom } from "./commands.js";
 import { RECORD_VALUES, values, type CloudroomClient } from "./client.js";
 import { SKIPPED } from "./project-copy.js";
@@ -416,13 +417,20 @@ export async function openOnMac(deps: AppDeps, threadId: string, path: string): 
 }
 
 type ImageDeps = Pick<AppDeps, "db" | "hub" | "config" | "providerRegistry">;
-/** This Mac's copy of a cloud file the chat showed, so it still shows once the sandbox no longer has it. */
-async function savedCloudFile(deps: ImageDeps, threadId: string, path: string): Promise<string> {
+/** This Mac's data folder, which keeps a Cloud thread's copies of the files its chat showed. */
+function imageDataDir(deps: ImageDeps): string {
   const hostId = resolvePrimaryHostId(deps);
   if (!hostId) throw new ApiError(409, "host_unavailable", "This computer's local host is not ready.");
-  const copy = chatFileCopySegments(path);
-  if (!copy) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
-  return join(await requireThreadStoragePath(deps, { hostId, threadId }), ...copy);
+  return requireHostDataDir(deps, hostId);
+}
+
+/** This Mac's copies of a cloud file the chat showed, so it still shows once the sandbox no longer has it: the current
+ *  one, then where copies were saved before 2026-11-23 (read only, since agents can write thread storage). */
+function savedCloudFiles(dataDir: string, threadId: string, path: string): string[] {
+  const copy = chatFileCopyPath(dataDir, threadId, path);
+  const legacy = legacyChatFileCopySegments(path);
+  if (!copy || !legacy) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
+  return [copy, join(dataDir, "thread-storage", threadId, ...legacy)];
 }
 
 /** When a turn ends, its sandbox is still awake: saves the images its last message shows, so they still show after the
@@ -432,25 +440,32 @@ export async function saveCloudImages(deps: ImageDeps, threadId: string, text: s
   if (!paths.length) return;
   const client = await cloudroom(deps).threadClient(threadId, false).catch(() => null);
   if (!client) return;
+  const dataDir = imageDataDir(deps);
+  let failure: unknown;
   for (const path of paths) {
     const data = await download(client, path, PREVIEW_MB).catch(() => null);
-    if (!data) continue;
-    const saved = await savedCloudFile(deps, threadId, path);
-    await mkdir(dirname(saved), { recursive: true });
-    await writeFile(saved, data);
+    // Keep going: the other images can still be saved. The first error is still reported.
+    if (data) await saveChatFileCopy({ data, dataDir, filePath: path, threadId }).catch((error: unknown) => { failure ??= error; });
   }
+  if (failure !== undefined) throw failure;
 }
 
 export async function cloudFile(deps: AppDeps, threadId: string, path: string): Promise<Buffer> {
   if (!isAbsolute(path)) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
-  const saved = await savedCloudFile(deps, threadId, path);
+  const dataDir = imageDataDir(deps);
+  let saved: Buffer | null = null;
+  for (const file of savedCloudFiles(dataDir, threadId, path)) {
+    saved = await readRegularFile(file, PREVIEW_MB * 1024 * 1024);
+    if (saved) break;
+  }
   try {
-    const data = await download(await cloudroom(deps).threadClient(threadId, !existsSync(saved)), path, PREVIEW_MB);
-    await mkdir(dirname(saved), { recursive: true });
-    await writeFile(saved, data);
+    // Only a copy that can be shown spares a sleeping sandbox the wake.
+    const data = await download(await cloudroom(deps).threadClient(threadId, saved === null), path, PREVIEW_MB);
+    // A copy that can't be saved still leaves the file to show.
+    await saveChatFileCopy({ data, dataDir, filePath: path, threadId }).catch(() => {});
     return data;
   } catch (error) {
-    if (existsSync(saved)) return readFile(saved);
+    if (saved) return saved;
     throw error instanceof ApiError ? error : new ApiError(502, "cloud_file_unavailable", `Could not read ${path} from the cloud. ${error instanceof Error ? error.message : ""}`.trim());
   }
 }

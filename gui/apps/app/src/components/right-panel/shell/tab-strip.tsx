@@ -25,8 +25,9 @@ import {
 import {
   horizontalListSortingStrategy,
   SortableContext,
+  sortableTranslate,
   useSortable,
-} from "@dnd-kit/sortable";
+} from "@/lib/sortable";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -44,7 +45,6 @@ import {
   MACOS_APP_REGION_NO_DRAG_CLASS,
   MACOS_WINDOW_NO_DRAG_CLASS,
 } from "@/lib/room-desktop";
-import { sortableTranslate } from "@/lib/sortable-translate";
 
 export const SECONDARY_PANEL_TAB_STRIP_FADE_TONE: OverflowFadeTone = "sidebar";
 

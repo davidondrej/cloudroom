@@ -4,8 +4,6 @@ import { sendMessageResponseSchema, type SendMessageResponse } from "@cloudroom/
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { OtherMacUnavailableError, onMacConnectionChange, otherMacLostAt, relayConnectionError } from "./mac-connection";
 
-export const REMOTE_SEND_MUTATION_KEY = ["send-thread-message"] as const;
-
 // The server executes a bare /compact or its command chip separately from the message ledger.
 export function canRecoverCloudSend(input: readonly PromptInput[]): boolean {
   const only = input.length === 1 ? input[0] : undefined;

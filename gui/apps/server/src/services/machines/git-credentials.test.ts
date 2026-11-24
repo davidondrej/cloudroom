@@ -152,6 +152,11 @@ describe("machine Git environment", () => {
     },
   );
 
+  it("keeps JS replacement patterns out of env values (Astro < 7.4.6, #2529)", async () => {
+    const entries = withAiCoAuthorStripping(await resolveGitCredentials(gh()));
+    expect(JSON.stringify(entries)).not.toMatch(/\$['&`]/u);
+  });
+
   it("lets agent-provider contributions override host credentials", async () => {
     const host = await resolveGitCredentials(gh());
     const provider = [

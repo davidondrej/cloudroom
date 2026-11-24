@@ -396,12 +396,26 @@ export function createRpcHandlers(
       const kind = input?.kind ?? "workflow";
       const cyber = kind === "cyber";
       const source: { source?: string } = input?.source ? { source: input.source } : {};
-      const plan = (await sdk.cloudroom.status().catch(() => null))?.plan;
+      const status = await sdk.cloudroom.status().catch(() => null);
+      const plan = status?.plan;
       const freeScan = plan === "free" && scans !== undefined && (await scans.kv.get(scanThreadKey(kind)).catch(() => "unknown")) == null;
       if (!plan || (plan === "free" && !freeScan)) {
         trackScan("start_failed", { reason: plan ? "free" : "no_plan", kind, ...source });
         throw new Error(
           "Scans need a paid plan. Upgrade at https://www.cloudroom.dev/billing",
+        );
+      }
+      // Workflow scan readers are Cloud threads: in a blocked region they never start, so don't use up the free scan
+      // (#2515). Not when they land on the user's own VPS (ADR 0319). A Cyber scan without GitHub repos has no readers.
+      const vps = () =>
+        sdk.cloudroom.vps().then(
+          (v) => v.connected && v.useForCloud,
+          () => false,
+        );
+      if (!cyber && status?.cloudQueue?.regionBlocked && !(await vps())) {
+        trackScan("start_failed", { reason: "region", kind, ...source });
+        throw new Error(
+          "Scans need Cloud threads, which aren't available in your region yet. Nothing was used up, so try again once Cloud reaches your region.",
         );
       }
       const [claude, codex] = await Promise.all([

@@ -40,17 +40,37 @@ def cut(text, n):
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
+UNREADABLE = []  # chat files we could not read: skipped and counted, never the end of an agent's chats (#2512)
+
+
+def recent(paths, cutoff):
+    """(path, mtime) of the chat files changed since cutoff."""
+    for path in paths:
+        if os.name == "nt" and not path.startswith("\\\\"):  # Windows can't read a path over 260 characters (MAX_PATH) without this prefix
+            path = "\\\\?\\" + os.path.abspath(path)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            UNREADABLE.append(path)
+            continue
+        if mtime >= cutoff:
+            yield path, mtime
+
+
 def lines(path, keep=None, skip=None):
-    with open(path, "rb") as f:
-        for raw in f:
-            if keep and not any(k in raw for k in keep):
-                continue
-            if skip and any(k in raw for k in skip):
-                continue
-            try:
-                yield json.loads(raw)
-            except Exception:
-                pass
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if keep and not any(k in raw for k in keep):
+                    continue
+                if skip and any(k in raw for k in skip):
+                    continue
+                try:
+                    yield json.loads(raw)
+                except Exception:
+                    pass
+    except OSError:
+        UNREADABLE.append(path)
 
 
 def iso(ts):
@@ -87,9 +107,8 @@ def record(agent, sid, path, start, cwd, title, users, reply):
 
 
 def claude(cutoff):
-    for path in glob.glob(f"{H}/.claude/projects/*/*.jsonl"):
-        if os.path.basename(path).startswith("agent-") or os.path.getmtime(path) < cutoff:
-            continue
+    paths = [p for p in glob.glob(f"{H}/.claude/projects/*/*.jsonl") if not os.path.basename(p).startswith("agent-")]
+    for path, _ in recent(paths, cutoff):
         users, reply, cwd, start, title = [], None, None, None, None
         for l in lines(path, keep=[b'"user"', b'"assistant"', b'"summary"'], skip=[b'"tool_result"', b'"tool_use"']):
             start = start or parse_ts(l.get("timestamp"))
@@ -122,9 +141,7 @@ def claude(cutoff):
 
 def codex(cutoff):
     files = glob.glob(f"{H}/.codex/sessions/**/rollout-*.jsonl", recursive=True) + glob.glob(f"{H}/.codex/archived_sessions/**/rollout-*.jsonl", recursive=True)
-    for path in files:
-        if os.path.getmtime(path) < cutoff:
-            continue
+    for path, _ in recent(files, cutoff):
         users, reply, cwd, start, sid, origin = [], None, None, None, None, None
         for l in lines(path, keep=[b"session_meta", b"user_message", b"agent_message", b"UserMessage", b"AgentMessage"]):
             p = l.get("payload") or {}
@@ -162,9 +179,7 @@ def text_of(content):
 
 
 def pi(cutoff):
-    for path in glob.glob(f"{H}/.pi/agent/sessions/**/*.jsonl", recursive=True):
-        if os.path.getmtime(path) < cutoff:
-            continue
+    for path, mtime in recent(glob.glob(f"{H}/.pi/agent/sessions/**/*.jsonl", recursive=True), cutoff):
         users, reply, cwd, start, sid, title = [], None, None, None, None, None
         for l in lines(path):
             if l.get("type") == "session":
@@ -177,7 +192,7 @@ def pi(cutoff):
                     users.append(text_of(m.get("content")))
                 elif m.get("role") == "assistant":
                     reply = text_of(m.get("content")) or reply
-        r = record("pi", sid or path, path, start or os.path.getmtime(path), cwd, title, users, reply)
+        r = record("pi", sid or path, path, start or mtime, cwd, title, users, reply)
         if r and r["ts"] >= cutoff:
             yield r
 
@@ -264,6 +279,7 @@ def cmd_index(out, days=90):
     keep = kept(chats)
     repeated = Counter(cut(c["first"], 100) for c in chats if c["auto"] and c["why"] == "repeated template prompt")
     stats = {"days": days, "seconds": round(time.time() - t0, 1), "chats": len(chats), "kept": len(keep), "by_agent": dict(counts),
+             "skipped_files": len(UNREADABLE),
              "auto": Counter(c["why"] for c in chats if c["auto"]), "kept_chars": sum(len(" ".join(c["user"])) for c in keep),
              "first": min((c["start"] for c in chats), default=None), "last": max((c["start"] for c in chats), default=None),
              "already_automated": repeated.most_common(15)}

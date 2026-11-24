@@ -87,7 +87,6 @@ import {
   SelectableMessageProse,
   type MessageProseSelection,
 } from "./SelectableMessageProse.js";
-import { RemoteSendReceipt } from "../RemoteSendReceipt";
 import { MessageContextGroup } from "./MessageContextChip.js";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
 import type { PromptDraftAttachment } from "@cloudroom/client-core";
@@ -655,9 +654,6 @@ function UserConversationMessage({
               projectId={projectId}
             />
           </div>
-          {threadId && turnRequest.cloudMessageId && turnRequest.status !== "rejected" && (
-            <RemoteSendReceipt threadId={threadId} messageId={turnRequest.cloudMessageId} />
-          )}
           <MessageActionBar
             messageText={messageText}
             alignment="end"

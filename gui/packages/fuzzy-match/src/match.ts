@@ -1,4 +1,4 @@
-import { Fzf, type FzfResultItem } from "fzf";
+import { createFzf, type Casing } from "./fzf.js";
 
 export interface Hit<T> {
   item: T;
@@ -13,39 +13,21 @@ export interface Searchable {
 
 const byNumber = (left: number, right: number) => left - right;
 
-function byStart(
-  left: FzfResultItem<Searchable>,
-  right: FzfResultItem<Searchable>,
-) {
-  return left.start - right.start;
-}
-
-function byLength(
-  left: FzfResultItem<Searchable>,
-  right: FzfResultItem<Searchable>,
-) {
-  return left.item.text.length - right.item.text.length;
-}
-
 export function createFinder<T extends Searchable>(
   items: readonly T[],
-  casing: "smart-case" | "case-insensitive",
+  casing: Casing,
 ): (query: string) => Hit<T>[] {
-  const fzf = new Fzf<readonly Searchable[]>(items, {
-    selector: (item: Searchable) => item.text,
+  const find = createFzf(
+    items.map((item) => item.text),
     casing,
-    forward: true,
-    tiebreakers: [byStart, byLength],
-  });
-  return (query) => {
-    const results: FzfResultItem<Searchable>[] = fzf.find(query);
-    return results.map(({ item, score, start, positions }) => ({
-      item: item as T,
+  );
+  return (query) =>
+    find(query).map(({ index, score, start, positions }) => ({
+      item: items[index]!,
       score,
       start,
       positions,
     }));
-  };
 }
 
 export function sorted(values: Iterable<number>, offset = 0): number[] {
