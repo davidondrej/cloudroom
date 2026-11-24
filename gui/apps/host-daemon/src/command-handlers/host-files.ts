@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 import type {
   DirectoryEntry,
   HostDaemonOnlineRpcResult,
@@ -64,9 +65,25 @@ export function normalizeWindowsDrivePath(
     : filePath;
 }
 
+export function isWindowsNetworkPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32" && isWindowsNetworkOrDevicePath(filePath);
+}
+
 function assertAbsoluteHostDiskPathCommand(command: HostDiskPathCommand): void {
   if (!path.isAbsolute(command.path)) {
     throw new CommandDispatchError("invalid_path", "Path must be absolute");
+  }
+  if (
+    isWindowsNetworkPath(command.path) ||
+    (command.rootPath !== undefined && isWindowsNetworkPath(command.rootPath))
+  ) {
+    throw new CommandDispatchError(
+      "invalid_path",
+      "Network paths are not supported",
+    );
   }
 
   const rootPath = command.rootPath;
@@ -317,6 +334,7 @@ export async function readHostRelativeFile(
 }
 
 async function pathExists(path: string): Promise<boolean> {
+  if (isWindowsNetworkPath(path)) return false;
   try {
     await fs.stat(normalizeWindowsDrivePath(path));
     return true;

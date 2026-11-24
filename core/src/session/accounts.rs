@@ -352,6 +352,9 @@ impl Manager {
         }
         let mut continued = Vec::new();
         for id in ids {
+            if !local.sessions[&id].can_resume() {
+                continue;
+            }
             // The continuation of a `plan_only` loop run stays `plan_only` (ADR 0292).
             let mut input = json!({"text":"keep working"});
             if local.sessions[&id].resume_plan_only {
@@ -373,8 +376,9 @@ impl Manager {
             if local.append(&id, "receipt", data, None).is_err() {
                 continue;
             }
-            if let Some(handle) = &local.sessions[&id].handle {
-                handle.request_shutdown();
+            // A sleep, not a crash: it settles the switch's own pending sleep and keeps the turn's one recovery.
+            if local.sessions[&id].handle.is_some() {
+                self.release(local, &id);
             } else if self.wake(local, &id).is_err() {
                 continue;
             }

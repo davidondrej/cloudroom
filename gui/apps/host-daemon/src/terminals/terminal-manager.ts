@@ -23,6 +23,7 @@ import { runtimeErrorLogFields } from "../error-utils.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 import { ExpectedCommandDispatchError } from "../command-dispatch-support.js";
 import { openCloudPty } from "./cloud-pty.js";
+import { corePtyAdapter } from "./core-pty.js";
 import {
   resolveWindowsTerminalShell,
   terminalShellArgs,
@@ -37,6 +38,9 @@ const EXITED_TERMINAL_OUTPUT_TTL_MS = 15 * 60 * 1000;
 const MAX_OUTPUT_CHUNK_BYTES = 64 * 1024;
 const DEFAULT_OUTPUT_BATCH_DELAY_MS = 4;
 const DEFAULT_TERMINAL_CLOSE_GRACE_PERIOD_MS = 2_000;
+// Under the server's 10 s open limit, so a slow step is named (#1277).
+const TERMINAL_OPEN_STEPS_TIMEOUT_MS = 8_000;
+const TERMINAL_PATH_REFRESH_TIMEOUT_MS = 3_000;
 const PRIMARY_DEVICE_ATTRIBUTES_QUERY_PATTERN = /\u001b\[(?:0)?c/g;
 const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE = "\u001b[?1;2c";
 const MAX_PRIMARY_DEVICE_ATTRIBUTES_REPLIES_PER_CHUNK = 8;
@@ -96,6 +100,8 @@ export interface TerminalManagerOptions {
   closeGracePeriodMs?: number;
   logger: HostDaemonLogger;
   ptyAdapter?: TerminalPtyAdapter;
+  /** Re-reads the user's PATH into the runtime manager's shell env. */
+  refreshShellEnv?: () => Promise<unknown>;
   resolveShell?: ResolveTerminalShell;
   runtimeManager: RuntimeManager;
   sendMessage: (message: HostDaemonDaemonWsMessage) => boolean;
@@ -463,6 +469,31 @@ async function requireTerminalCwd(cwd: string | null): Promise<string> {
   return resolvedCwd;
 }
 
+async function withinTerminalOpenDeadline<T>(args: {
+  deadline: number;
+  step: string;
+  work: Promise<T>;
+}): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new ExpectedCommandDispatchError(
+            "terminal_open_step_timeout",
+            `${args.step} took too long on this machine. Try again in a moment.`,
+          ),
+        ),
+      Math.max(0, args.deadline - Date.now()),
+    );
+  });
+  try {
+    return await Promise.race([args.work, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createTerminalOperationCompletion(): TerminalOperationCompletion {
   let resolveCompletion: () => void = () => {
     throw new Error("Terminal operation completion resolver was not set");
@@ -518,7 +549,7 @@ export class TerminalManager {
   constructor(private readonly options: TerminalManagerOptions) {
     this.closeGracePeriodMs =
       options.closeGracePeriodMs ?? DEFAULT_TERMINAL_CLOSE_GRACE_PERIOD_MS;
-    this.ptyAdapter = options.ptyAdapter ?? nodePtyAdapter;
+    this.ptyAdapter = options.ptyAdapter ?? corePtyAdapter() ?? nodePtyAdapter;
     this.resolveShell = options.resolveShell ?? resolveDefaultTerminalShell;
   }
 
@@ -648,9 +679,19 @@ export class TerminalManager {
     } catch (error) {
       const code =
         error instanceof ExpectedCommandDispatchError &&
-        error.code === "workspace_type_mismatch"
+        (error.code === "workspace_type_mismatch" ||
+          error.code === "terminal_open_step_timeout")
           ? error.code
           : "terminal_open_failed";
+      this.options.logger.warn(
+        {
+          code,
+          requestId: message.requestId,
+          terminalId: message.terminalId,
+          ...runtimeErrorLogFields(error),
+        },
+        "Terminal open failed",
+      );
       this.sendTerminalError({
         code,
         message: error instanceof Error ? error.message : String(error),
@@ -684,7 +725,13 @@ export class TerminalManager {
         target: { cwd: cloud.cwd, environmentId: null },
       };
     }
-    const target = await this.resolveTerminalOpenTarget(message);
+    const deadline = Date.now() + TERMINAL_OPEN_STEPS_TIMEOUT_MS;
+    await this.refreshWindowsPath(message.terminalId);
+    const target = await withinTerminalOpenDeadline({
+      deadline,
+      step: "Preparing the terminal folder",
+      work: this.resolveTerminalOpenTarget(message),
+    });
     const env = normalizeWindowsEnv(
       buildTerminalEnv({
         shellEnv: operationEnvironment(
@@ -698,7 +745,11 @@ export class TerminalManager {
         threadStoragePath: message.threadStoragePath,
       }),
     );
-    const shell = await this.resolveShell();
+    const shell = await withinTerminalOpenDeadline({
+      deadline,
+      step: "Finding the shell",
+      work: this.resolveShell(),
+    });
     const launch =
       process.platform !== "win32"
         ? { file: shell, args: posixShellArgs(message.start) }
@@ -722,6 +773,27 @@ export class TerminalManager {
       rows: message.rows,
     });
     return { pty, shell, target };
+  }
+
+  /**
+   * Windows shells keep the PATH they inherit, so tools installed since
+   * Cloudroom started stay missing. Re-read it from the registry; if that is
+   * slow or fails, open with the last known PATH (#1881).
+   */
+  private async refreshWindowsPath(terminalId: string): Promise<void> {
+    if (process.platform !== "win32" || !this.options.refreshShellEnv) return;
+    try {
+      await withinTerminalOpenDeadline({
+        deadline: Date.now() + TERMINAL_PATH_REFRESH_TIMEOUT_MS,
+        step: "Refreshing PATH",
+        work: this.options.refreshShellEnv(),
+      });
+    } catch (error) {
+      this.options.logger.warn(
+        { terminalId, ...runtimeErrorLogFields(error) },
+        "Terminal PATH refresh failed or timed out",
+      );
+    }
   }
 
   private async resolveTerminalOpenTarget(

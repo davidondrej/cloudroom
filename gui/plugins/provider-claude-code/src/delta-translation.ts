@@ -390,6 +390,8 @@ interface ClaudeThreadDialectState {
   assistantError: ClaudeAssistantMessageError | undefined;
   selectedModelContextWindow: number | null;
   suppressUnacceptedTurnStart: boolean;
+  /** This turn showed reply text, so a hook stop after it is not a silent turn (#1036). */
+  turnReplied: boolean;
   openCompaction: { segment: number } | undefined;
   startedTools: Map<string, ClaudeClassifiedTool>;
   tasksById: ClaudeTaskMap;
@@ -407,6 +409,7 @@ function createThreadState(): ClaudeThreadDialectState {
     assistantError: undefined,
     selectedModelContextWindow: null,
     suppressUnacceptedTurnStart: false,
+    turnReplied: false,
     openCompaction: undefined,
     startedTools: new Map(),
     tasksById: new Map(),
@@ -450,6 +453,7 @@ export function createClaudeDeltaTranslator(
     state.mirror.turnOpen = true;
     state.mirror.segment += 1;
     state.mirror.pendingInputs = 0;
+    state.turnReplied = false;
     state.latestRequestContextTokens = undefined;
     state.latestProviderCheckpointId = undefined;
     state.armedHardRateLimitRejection = undefined;
@@ -862,17 +866,24 @@ export function createClaudeDeltaTranslator(
       });
     }
 
+    const tools = extractToolUses(message);
     const text = extractAssistantText(message);
     if (text) {
+      if (parentToolCallId === undefined && text.trim() !== "") {
+        state.turnReplied = true;
+      }
       deltas.push({
         kind: "item.textClose",
         key: { channel: ASSISTANT_STREAM_KEY, ...parentRefField },
         channel: "agentMessage",
         text,
+        ...(providerCheckpointId && tools.length === 0 && !message.error && message.isReplay !== true
+          ? { providerCheckpointId }
+          : {}),
       });
     }
 
-    for (const toolUse of extractToolUses(message)) {
+    for (const toolUse of tools) {
       const classified = classifyClaudeToolUse({
         toolName: toolUse.name,
         toolUseId: toolUse.id,
@@ -1070,9 +1081,27 @@ export function createClaudeDeltaTranslator(
         ? state.armedHardRateLimitRejection
         : undefined;
     const resultFailed = isClaudeResultFailure(message);
-    const failed = resultFailed || pendingHardRateLimitRejection !== undefined;
+    // A hook that stops Claude (`continue: false`) ends the turn as a "success"
+    // with an empty result. With no reply shown, fail it with a reason (#1036).
+    const hookStopped =
+      !resultFailed && message.terminal_reason === "hook_stopped";
+    const silentHookStop = hookStopped && !state.turnReplied;
+    const failed =
+      resultFailed ||
+      silentHookStop ||
+      pendingHardRateLimitRejection !== undefined;
+    if (hookStopped && !failed) {
+      deltas.push({
+        kind: "provider.warning",
+        summary: "A Claude Code hook stopped this turn",
+        details: "Claude may not have finished. Check your Claude Code hooks.",
+        vouchedTurn: true,
+      });
+    }
     if (failed) {
-      const resultDetail = getClaudeResultErrorDetail(message);
+      const resultDetail = silentHookStop
+        ? "A Claude Code hook stopped Claude before it replied. Check your Claude Code hooks."
+        : getClaudeResultErrorDetail(message);
       const resultErrorInfo = buildClaudeProviderErrorInfo({
         ...(state.assistantError === undefined
           ? {}
@@ -1103,7 +1132,8 @@ export function createClaudeDeltaTranslator(
     if (!failed && hasCompletionBlockingClaudeTasks(state.tasksById)) {
       return deltas;
     }
-    state.suppressUnacceptedTurnStart = failed;
+    state.suppressUnacceptedTurnStart =
+      resultFailed || pendingHardRateLimitRejection !== undefined;
     deltas.push(
       ...withMirror(state, [
         {
@@ -1284,16 +1314,48 @@ export function createClaudeDeltaTranslator(
     return withMirror(state, [{ kind: "input.accepted", clientRequestId }]);
   }
 
-  function buildSessionSettlementDeltas(threadId: string): ThreadDelta[] {
+  /** An input the user stopped before Claude took it: one turn, ended as interrupted. */
+  function cancelInput(
+    threadId: string,
+    clientRequestId: ClientTurnRequestId,
+  ): ThreadDelta[] {
+    return withMirror(stateFor({ threadId }), [
+      { kind: "input.accepted", clientRequestId },
+      { kind: "session.ended" },
+    ]);
+  }
+
+  /** Claude's IDs for the commands, agents, and workflows it still runs for this thread. */
+  function runningTaskIds(threadId: string): string[] {
+    return [...stateFor({ threadId }).tasksById]
+      .filter(([, task]) => !task.terminal)
+      .map(([taskId]) => taskId);
+  }
+
+  function buildSessionSettlementDeltas(
+    threadId: string,
+    includeUnopenedTurn = false,
+  ): ThreadDelta[] {
     const state = stateFor({ threadId });
     const deltas: ThreadDelta[] = [];
-    if (state.mirror.turnOpen) {
+    if (
+      state.mirror.turnOpen ||
+      (includeUnopenedTurn && state.mirror.pendingInputs > 0)
+    ) {
       deltas.push(...withMirror(state, [{ kind: "session.ended" }]));
     }
-    deltas.push(
-      ...buildInterruptedClaudeTaskDeltas({ tasks: state.tasksById }),
-    );
+    // A Stop: what a sub-agent still streams must not open a turn of its own.
+    // The next input lifts this.
+    if (includeUnopenedTurn) state.suppressUnacceptedTurnStart = true;
+    deltas.push(...buildEndedTaskDeltas(threadId));
     return deltas;
+  }
+
+  /** Claude ended: its commands, agents, and workflows ended with it (#2228). */
+  function buildEndedTaskDeltas(threadId: string): ThreadDelta[] {
+    return buildInterruptedClaudeTaskDeltas({
+      tasks: stateFor({ threadId }).tasksById,
+    });
   }
 
   function hasOpenTurn(threadId: string): boolean {
@@ -1310,9 +1372,12 @@ export function createClaudeDeltaTranslator(
 
   return {
     acceptInput,
+    buildEndedTaskDeltas,
     buildSessionSettlementDeltas,
+    cancelInput,
     configureInjectedTools,
     hasOpenTurn,
+    runningTaskIds,
     setClaudeModelContextWindowHint,
     translate,
   };

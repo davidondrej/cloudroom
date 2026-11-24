@@ -77,7 +77,7 @@ describe("ModelUnavailable", () => {
     renderMissingCodex();
 
     expect(await screen.findByText("Codex install is broken")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Reinstall Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reinstall" }));
 
     expect(sdk.hosts.installProviderCli).toHaveBeenCalledWith({
       hostId: "host_mac",
@@ -95,9 +95,11 @@ describe("ModelUnavailable", () => {
     });
     renderMissingCodex();
 
+    expect(await screen.findByRole("button", { name: "Install" })).toBeTruthy();
+    expect(screen.getByText("Get Codex")).toBeTruthy();
+    // Models reload by themselves after an install, so there is no Reload.
     expect(
-      await screen.findByRole("button", { name: "Install Codex" }),
-    ).toBeTruthy();
-    expect(screen.getByText("Not installed")).toBeTruthy();
+      screen.queryByRole("button", { name: "Retry loading Codex models" }),
+    ).toBeNull();
   });
 });

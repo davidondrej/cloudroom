@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { personalProjectAllowsEnvironment } from "@cloudroom/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
@@ -10,12 +11,15 @@ import {
   getAutomationForProject,
   getAutomationRun,
   listWebhookAttempts,
+  countWaitingWakes,
   isAutomationSpawnedThread,
   listAllAutomations,
   listAutomationRuns,
   listAutomationsForProject,
+  getSentRun,
   getThreadReportRun,
   linkRunThread,
+  recoverFailedRun,
   setAutomationEnabled,
   THREAD_ARCHIVED_ERROR,
   setReviewed,
@@ -69,7 +73,7 @@ import {
   scriptAgents,
   writeInlineAutomationScript,
 } from "./script-files.js";
-import { errorMessage, executeAgentRun, executeScriptRun, signedOut } from "./run.js";
+import { currentTurnSentIds, errorMessage, executeAgentRun, executeScriptRun, signedOut } from "./run.js";
 import { listLiveProjects } from "./sweep.js";
 
 type ServiceApi = Pick<BbPluginApi, "realtime" | "log"> & {
@@ -170,13 +174,28 @@ function computeNextRunAt(
   });
 }
 
+const MAX_WAITING_WAKES = 5;
+
+/** A thread a loop started can't make loops, or its runs could start threads without end. A wake is the exception:
+ *  a one-time re-prompt of that same thread starts no thread. A few at a time, so a run can't flood itself. */
 function assertNotRecursiveCreation(
   db: Db,
-  createdByThreadId: string | undefined,
+  payload: Pick<
+    ResolvedCreateAutomationInput,
+    "createdByThreadId" | "trigger" | "execution"
+  >,
 ): void {
-  if (createdByThreadId === undefined) return;
-  if (isAutomationSpawnedThread(db, createdByThreadId)) {
-    throw new Error("Loop-spawned threads cannot create loops");
+  const threadId = payload.createdByThreadId;
+  if (threadId === undefined || !isAutomationSpawnedThread(db, threadId)) return;
+  const wake =
+    payload.trigger.triggerType === "once" &&
+    payload.execution.mode === "agent" &&
+    payload.execution.targetThreadId === threadId;
+  if (!wake) throw new Error("Loop-spawned threads cannot create loops");
+  if (countWaitingWakes(db, threadId) >= MAX_WAITING_WAKES) {
+    throw new Error(
+      `This thread already has ${MAX_WAITING_WAKES} wakes waiting. Wait for one to fire, or delete one with room-cli loop delete.`,
+    );
   }
 }
 
@@ -340,7 +359,7 @@ function requireCanonicalAutomationForWrite(
 }
 
 function toStoredAutomationReadResult(
-  bb: Pick<ServiceApi, "log">,
+  room: Pick<ServiceApi, "log">,
   pluginDataDir: string,
   row: AutomationRow,
 ): AutomationReadResult {
@@ -349,7 +368,7 @@ function toStoredAutomationReadResult(
     return withStoredScriptPath(pluginDataDir, decoded.automation);
   }
   if (decoded.automation.problem === "invalid-stored-data") {
-    bb.log.warn(
+    room.log.warn(
       `Malformed stored automation ${row.id}: ${decoded.error.message}`,
     );
   }
@@ -436,6 +455,21 @@ function encodeRunCursor(startedAt: number, id: string): string {
   return Buffer.from(`${startedAt}:${id}`, "utf8").toString("base64url");
 }
 
+/** Each agent of a loop that takes turns must be available where the loop runs, with the loop's permission mode and
+ *  its own reasoning level. */
+async function checkLoopAgents(
+  bb: Parameters<typeof resolvePermissionMode>[0],
+  execution: AutomationExecution,
+): Promise<void> {
+  if (execution.mode !== "agent") return;
+  const routing = providerRoutingForEnvironment(execution.environment);
+  for (const agent of execution.agents ?? []) {
+    await resolvePermissionMode(bb, agent.providerId, execution.permissionMode, routing);
+    if (agent.reasoningLevel !== undefined)
+      await requireReasoningLevel(bb, agent.providerId, agent.reasoningLevel, routing);
+  }
+}
+
 function applyAgentExecutionUpdate(
   execution: AutomationExecution,
   update: AgentExecutionUpdate,
@@ -465,6 +499,22 @@ function applyAgentExecutionUpdate(
   } else if (update.serviceTier !== undefined) {
     next.serviceTier = update.serviceTier;
   }
+  // A new list starts with its first agent; one agent, or a change to the agent alone, ends the turns.
+  const [first, ...rest] = update.agents ?? [];
+  if (first !== undefined) {
+    Object.assign(next, { providerId: first.providerId, model: first.model, reasoningLevel: first.reasoningLevel ?? "medium" });
+    if (first.serviceTier === undefined) delete next.serviceTier;
+    else next.serviceTier = first.serviceTier;
+  }
+  if (rest.length > 0) next.agents = update.agents;
+  else if (
+    first !== undefined ||
+    update.providerId !== undefined ||
+    update.model !== undefined ||
+    update.reasoningLevel !== undefined ||
+    update.serviceTier !== undefined
+  )
+    delete next.agents;
   if (update.target === undefined) return next;
   if (update.target.type === "target-thread") {
     return { ...next, targetThreadId: update.target.threadId };
@@ -492,34 +542,55 @@ function parseRunCursor(
 }
 
 async function projectNameById(
-  bb: Pick<ServiceApi, "sdk" | "log">,
+  room: Pick<ServiceApi, "sdk" | "log">,
 ): Promise<Map<string, string>> {
   try {
     return new Map(
-      (await listLiveProjects(bb)).map((project) => [
+      (await listLiveProjects(room)).map((project) => [
         project.id,
         project.name ?? project.id,
       ]),
     );
   } catch (error) {
-    bb.log.warn(
+    room.log.warn(
       `Failed to list projects for automations overview: ${errorMessage(error)}`,
     );
     return new Map();
   }
 }
 
-const projectAvailableSchema = z.object({ id: z.string() }).passthrough();
+const projectAvailableSchema = z
+  .object({ id: z.string(), kind: z.string().optional() })
+  .passthrough();
 
 async function requireProjectAvailable(
-  bb: Pick<ServiceApi, "sdk">,
+  room: Pick<ServiceApi, "sdk">,
   projectId: string,
-): Promise<void> {
+): Promise<{ kind?: string }> {
   try {
-    projectAvailableSchema.parse(await bb.sdk.projects.get({ projectId }));
+    return projectAvailableSchema.parse(
+      await room.sdk.projects.get({ projectId }),
+    );
   } catch (error) {
     throw new Error(
       `Project ${projectId} is not available: ${errorMessage(error)}`,
+    );
+  }
+}
+
+/** A fresh-thread loop in the Personal project must pass thread creation's workspace rule, or every run fails. */
+function assertLoopWorkspace(
+  project: { kind?: string },
+  execution: AutomationExecution,
+): void {
+  if (
+    project.kind === "personal" &&
+    execution.mode === "agent" &&
+    execution.targetThreadId === undefined &&
+    !personalProjectAllowsEnvironment(execution.environment)
+  ) {
+    throw new Error(
+      "Personal project loops must use the personal workspace. Leave out --environment and --new-environment, or create the loop in the project that owns this folder.",
     );
   }
 }
@@ -536,12 +607,12 @@ function tookEvents(run: AutomationRunRow): boolean {
 
 /** A Local webhook loop's URL from the website, which keeps the events while this Mac is off (ADR 0262). */
 async function webhookUrl(
-  bb: ServiceApi,
+  room: ServiceApi,
   automationId: string,
 ): Promise<string> {
-  if (!bb.sdk.cloudroom)
+  if (!room.sdk.cloudroom)
     throw new Error("Webhook loops need a Cloudroom account.");
-  const { url } = await bb.sdk.cloudroom.automations({
+  const { url } = await room.sdk.cloudroom.automations({
     action: "hook",
     local: automationId,
   });
@@ -666,10 +737,12 @@ export function createAutomationService(args: {
     },
 
     async create(payload) {
-      await requireProjectAvailable(bb, payload.projectId);
+      const project = await requireProjectAvailable(bb, payload.projectId);
+      assertLoopWorkspace(project, payload.execution);
       const now = Date.now();
       validateTrigger(payload.trigger, now);
-      assertNotRecursiveCreation(db, payload.createdByThreadId);
+      assertNotRecursiveCreation(db, payload);
+      await checkLoopAgents(bb, payload.execution);
       if (payload.execution.mode === "agent") {
         await resolvePermissionMode(
           bb,
@@ -744,7 +817,7 @@ export function createAutomationService(args: {
     },
 
     async update(input) {
-      await requireProjectAvailable(bb, input.projectId);
+      const project = await requireProjectAvailable(bb, input.projectId);
       const current = requireProjectAutomation(db, input);
       const currentAutomation = decodeAutomationRow(current).automation;
       if (
@@ -782,6 +855,7 @@ export function createAutomationService(args: {
           : null;
       }
       if (input.execution !== undefined) {
+        await checkLoopAgents(bb, input.execution);
         if (input.execution.mode === "agent") {
           await resolvePermissionMode(
             bb,
@@ -837,8 +911,12 @@ export function createAutomationService(args: {
             providerRoutingForEnvironment(updatedExecution.environment),
           );
         }
+        if (input.agent.agents !== undefined)
+          await checkLoopAgents(bb, { ...updatedExecution, agents: input.agent.agents });
         patch.execution = updatedExecution;
       }
+      if (patch.execution !== undefined)
+        assertLoopWorkspace(project, patch.execution);
       if (
         "problem" in currentAutomation &&
         currentAutomation.problem === "missing-agent-prompt" &&
@@ -1061,7 +1139,10 @@ export function createAutomationService(args: {
     },
 
     async report(input) {
-      const run = getThreadReportRun(db, input.threadId);
+      // Else the run whose message Core put in this turn, though the turn before it closed the run (#1100).
+      const run =
+        getThreadReportRun(db, input.threadId) ??
+        getSentRun(db, input.threadId, await currentTurnSentIds(bb, input.threadId));
       const automation = run ? getAutomation(db, run.automationId) : null;
       if (!run || !automation)
         throw new Error(
@@ -1099,6 +1180,17 @@ export function createAutomationService(args: {
         reason: input.reason,
         actions: input.actions,
       });
+      // A failed run's thread that came back to report did the run's work, so the run gets no retry, unless it
+      // reports that it failed (#1443).
+      if (
+        run.status === "failed" &&
+        input.outcome !== "failed" &&
+        recoverFailedRun(db, run.id, Date.now())
+      )
+        publishAutomationChange(bb, automation.projectId, [
+          "automations-changed",
+          "automation-runs-changed",
+        ]);
       // A running run's idle event reloads Review; one that already settled needs this signal to show the report.
       if (run.status !== "running")
         publishAutomationChange(

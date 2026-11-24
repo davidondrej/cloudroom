@@ -1,388 +1,240 @@
-import { turnScope } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
-import { groupCompletedTurnMessages } from "../src/completed-turn-grouping.js";
-import type { CompletedTurnMessageGroups } from "../src/completed-turn-grouping.js";
-import type {
-  EventProjectionAssistantTextMessage,
-  EventProjectionCommandMessage,
-  EventProjectionMessage,
-  EventProjectionOperationMessage,
-  EventProjectionTurnRequest,
-  EventProjectionTurn,
-  EventProjectionUserMessage,
-} from "../src/event-projection-types.js";
+import type { ThreadEventRow } from "@cloudroom/domain";
+import type { TimelineRow } from "@cloudroom/server-contract";
+import {
+  createTimelineEventFactory,
+  renderTimelineFixture,
+} from "./timeline-test-harness.js";
 
-interface MessageBaseArgs {
-  id: string;
-  seq: number;
+function renderCollapsed(events: ThreadEventRow[]): TimelineRow[] {
+  return renderTimelineFixture({
+    completedTurnDisplay: "collapse",
+    events,
+    includeNestedRows: true,
+    projectionOptions: { threadStatus: "idle", turnMessageDetail: "full" },
+  }).rows;
 }
 
-function messageBase({ id, seq }: MessageBaseArgs) {
-  return {
-    id,
-    threadId: "thread-1",
-    sourceSeqStart: seq,
-    sourceSeqEnd: seq,
-    createdAt: seq,
-    startedAt: seq,
-    scope: turnScope("turn-1"),
-  };
-}
-
-function assistantMessage(
-  args: MessageBaseArgs,
-): EventProjectionAssistantTextMessage {
-  return {
-    ...messageBase(args),
-    kind: "assistant-text",
-    text: args.id,
-    status: "completed",
-  };
-}
-
-function commandMessage(args: MessageBaseArgs): EventProjectionCommandMessage {
-  return {
-    ...messageBase(args),
-    kind: "command",
-    callId: args.id,
-    command: "pnpm test",
-    cwd: "/repo",
-    parsedIntents: [],
-    source: null,
-    output: "",
-    exitCode: 0,
-    completedAt: args.seq,
-    approvalStatus: null,
-    status: "completed",
-  };
-}
-
-interface UserMessageArgs extends MessageBaseArgs {
-  initiator?: EventProjectionUserMessage["initiator"];
-  turnRequest?: EventProjectionTurnRequest;
-}
-
-function userMessage(args: UserMessageArgs): EventProjectionUserMessage {
-  return {
-    ...messageBase(args),
-    kind: "user",
-    initiator: args.initiator ?? "user",
-    senderThreadId: null,
-    systemMessageKind: "unlabeled",
-    systemMessageSubject: null,
-    turnRequest: args.turnRequest ?? {
-      isGrouped: false,
-      kind: "message",
-      status: "accepted",
-    },
-    text: args.id,
-    mentions: [],
-  };
-}
-
-function legacyUserMessage(
-  args: MessageBaseArgs,
-): EventProjectionAssistantTextMessage {
-  return {
-    ...assistantMessage(args),
-    isLegacyUserMessage: true,
-  };
-}
-
-function compactionMessage(
-  args: MessageBaseArgs,
-): EventProjectionOperationMessage {
-  return {
-    ...messageBase(args),
-    kind: "operation",
-    opType: "compaction",
-    title: "Context compacted",
-    status: "completed",
-    completedAt: args.seq,
-  };
-}
-
-function contextClearMessage(
-  args: MessageBaseArgs,
-): EventProjectionOperationMessage {
-  return {
-    ...messageBase(args),
-    kind: "operation",
-    opType: "context-clear",
-    title: "Context cleared",
-    status: "completed",
-    completedAt: args.seq,
-  };
-}
-
-function completedTurn(
-  messages: EventProjectionMessage[],
-  terminalMessage: EventProjectionMessage | undefined,
-  summaryCount = messages.length,
-): EventProjectionTurn {
-  return {
-    turnId: "turn-1",
-    threadId: "thread-1",
-    sourceSeqStart: 1,
-    sourceSeqEnd: messages.length,
-    startedAt: 1,
-    createdAt: messages.length,
-    completedAt: messages.length,
-    status: "completed",
-    summaryCount,
-    messages,
-    ...(terminalMessage ? { terminalMessage } : {}),
-  };
-}
-
-function summarySourceMessageIds(
-  groups: CompletedTurnMessageGroups,
-): string[][] {
-  return groups.summaryItems.flatMap((item) =>
-    item.kind === "summary"
-      ? [item.sourceMessages.map((message) => message.id)]
-      : [],
-  );
-}
-
-describe("groupCompletedTurnMessages", () => {
+describe("completed turn grouping", () => {
   it("unwraps a singleton compaction group after a user message", () => {
-    const user = userMessage({ id: "compact-request", seq: 1 });
-    const compaction = compactionMessage({ id: "compaction", seq: 2 });
-    const turn = completedTurn([user, compaction], undefined);
-    turn.externalUserBoundarySeqs = [0];
-    const groups = groupCompletedTurnMessages(turn);
-
-    expect(groups.summaryItems).toEqual([
-      { kind: "ungrouped-message", message: user },
-      { kind: "ungrouped-message", message: compaction },
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const req = f.clientTurnRequested({ text: "compact", seq: 1 });
+    const rows = renderCollapsed([
+      req,
+      f.turnStarted({ seq: 2 }),
+      f.inputAccepted({ clientRequestId: req.data.requestId, seq: 3 }),
+      f.contextCompactionCompleted({ seq: 4 }),
+      f.turnCompleted({ seq: 5 }),
     ]);
-    expect(groups.terminalMessages).toEqual([]);
-    expect(groups.trailingMessages).toEqual([]);
+
+    expect(rows.map((r) => r.kind)).toEqual(["conversation", "system"]);
+    expect(rows[1]).toMatchObject({
+      kind: "system",
+      systemKind: "operation",
+      operationKind: "compaction",
+    });
   });
 
   it("unwraps a singleton context-clear group", () => {
-    const contextClear = contextClearMessage({
-      id: "context-clear",
-      seq: 1,
-    });
-    const groups = groupCompletedTurnMessages(
-      completedTurn([contextClear], undefined),
-    );
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1 }),
+      f.threadContextCleared({ seq: 2 }),
+      f.turnCompleted({ seq: 3 }),
+    ]);
 
-    expect(groups.summaryItems).toEqual([
-      { kind: "ungrouped-message", message: contextClear },
+    expect(rows).toEqual([
+      expect.objectContaining({
+        kind: "system",
+        systemKind: "operation",
+        operationKind: "context-clear",
+      }),
     ]);
   });
 
   it("uses one summary group when no messages are ungroupable", () => {
-    const messages = [
-      assistantMessage({ id: "assistant-1", seq: 1 }),
-      commandMessage({ id: "command-1", seq: 2 }),
-    ];
-    const groups = groupCompletedTurnMessages(
-      completedTurn(messages, undefined),
-    );
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1, createdAt: 1 }),
+      f.commandCompleted({ itemId: "cmd-1", command: "pnpm test", seq: 2, createdAt: 2 }),
+      f.commandCompleted({ itemId: "cmd-2", command: "pnpm lint", seq: 3, createdAt: 3 }),
+      f.turnCompleted({ seq: 4, createdAt: 4 }),
+    ]);
 
-    expect(groups.summaryItems).toMatchObject([
+    expect(rows).toMatchObject([
       {
-        kind: "summary",
+        kind: "turn",
+        id: "thread-1:turn-1:turn",
         startedAt: 1,
-        completedAt: 2,
-        segmentIndex: null,
+        completedAt: 4,
         summaryCount: 2,
       },
-    ]);
-    expect(summarySourceMessageIds(groups)).toEqual([
-      ["assistant-1", "command-1"],
     ]);
   });
 
   it("keeps an assistant response visible when more assistant text follows it directly", () => {
-    const answer = assistantMessage({ id: "answer", seq: 1 });
-    const hookReply = assistantMessage({ id: "hook-reply", seq: 2 });
-    const groups = groupCompletedTurnMessages(
-      completedTurn([answer, hookReply], hookReply),
-    );
-
-    expect(groups.summaryItems).toEqual([
-      { kind: "ungrouped-message", message: answer },
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1 }),
+      f.assistantCompleted({ itemId: "a1", text: "answer", seq: 2 }),
+      f.assistantCompleted({ itemId: "a2", text: "hook-reply", seq: 3 }),
+      f.turnCompleted({ seq: 4 }),
     ]);
-    expect(groups.terminalMessages).toEqual([hookReply]);
+
+    expect(rows).toMatchObject([
+      { kind: "conversation", role: "assistant", text: "answer" },
+      { kind: "conversation", role: "assistant", text: "hook-reply" },
+    ]);
   });
 
   it("folds narration that precedes work and keeps the response that precedes the terminal text", () => {
-    const narration = assistantMessage({ id: "narration", seq: 1 });
-    const command = commandMessage({ id: "command", seq: 2 });
-    const answer = assistantMessage({ id: "answer", seq: 3 });
-    const hookReply = assistantMessage({ id: "hook-reply", seq: 4 });
-    const groups = groupCompletedTurnMessages(
-      completedTurn([narration, command, answer, hookReply], hookReply),
-    );
-
-    expect(groups.summaryItems).toMatchObject([
-      {
-        kind: "summary",
-        startedAt: 1,
-        completedAt: 4,
-        segmentIndex: 0,
-        sourceMessages: [{ id: "narration" }, { id: "command" }],
-        summaryCount: 2,
-      },
-      { kind: "ungrouped-message", message: { id: "answer" } },
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1, createdAt: 1 }),
+      f.assistantCompleted({ itemId: "n", text: "narration", seq: 2, createdAt: 2 }),
+      f.commandCompleted({ itemId: "c", command: "pnpm test", seq: 3, createdAt: 3 }),
+      f.assistantCompleted({ itemId: "a", text: "answer", seq: 4, createdAt: 4 }),
+      f.assistantCompleted({ itemId: "h", text: "hook-reply", seq: 5, createdAt: 5 }),
+      f.turnCompleted({ seq: 6, createdAt: 6 }),
     ]);
-    expect(groups.terminalMessages).toEqual([hookReply]);
+
+    expect(rows).toMatchObject([
+      {
+        kind: "turn",
+        id: "thread-1:turn-1:turn:0",
+        startedAt: 1,
+        completedAt: 6,
+        summaryCount: 2,
+        children: [
+          { kind: "conversation", role: "assistant", text: "narration" },
+          { kind: "work", workKind: "command", callId: "c" },
+        ],
+      },
+      { kind: "conversation", role: "assistant", text: "answer" },
+      { kind: "conversation", role: "assistant", text: "hook-reply" },
+    ]);
   });
 
   it("keeps every response in a run of adjacent assistant texts", () => {
-    const first = assistantMessage({ id: "first", seq: 1 });
-    const second = assistantMessage({ id: "second", seq: 2 });
-    const command = commandMessage({ id: "command", seq: 3 });
-    const terminal = assistantMessage({ id: "terminal", seq: 4 });
-    const groups = groupCompletedTurnMessages(
-      completedTurn([first, second, command, terminal], terminal),
-    );
-
-    expect(groups.summaryItems).toMatchObject([
-      { kind: "ungrouped-message", message: { id: "first" } },
-      {
-        kind: "summary",
-        sourceMessages: [{ id: "second" }, { id: "command" }],
-      },
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1 }),
+      f.assistantCompleted({ itemId: "a1", text: "first", seq: 2 }),
+      f.assistantCompleted({ itemId: "a2", text: "second", seq: 3 }),
+      f.commandCompleted({ itemId: "c", command: "pnpm test", seq: 4 }),
+      f.assistantCompleted({ itemId: "a3", text: "terminal", seq: 5 }),
+      f.turnCompleted({ seq: 6 }),
     ]);
-    expect(groups.terminalMessages).toEqual([terminal]);
+
+    expect(rows).toMatchObject([
+      { kind: "conversation", role: "assistant", text: "first" },
+      {
+        kind: "turn",
+        children: [
+          { kind: "conversation", role: "assistant", text: "second" },
+          { kind: "work", workKind: "command", callId: "c" },
+        ],
+      },
+      { kind: "conversation", role: "assistant", text: "terminal" },
+    ]);
   });
 
   it("preserves the last assistant message before an ungroupable user message", () => {
-    const assistantBefore = assistantMessage({
-      id: "assistant-before",
-      seq: 1,
-    });
-    const assistantAfter = assistantMessage({
-      id: "assistant-after",
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const steer = f.clientTurnRequested({
+      initiator: "user",
+      target: { kind: "auto", expectedTurnId: "turn-1" },
+      text: "user-steer",
       seq: 3,
     });
-    const turn = completedTurn(
-      [assistantBefore, userMessage({ id: "user", seq: 2 }), assistantAfter],
-      assistantAfter,
-    );
-    const groups = groupCompletedTurnMessages(turn);
-
-    expect(groups.summaryItems).toMatchObject([
-      {
-        kind: "ungrouped-message",
-        message: {
-          id: "assistant-before",
-        },
-      },
-      {
-        kind: "ungrouped-message",
-        message: {
-          id: "user",
-        },
-      },
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1 }),
+      f.assistantCompleted({ itemId: "a1", text: "assistant-before", seq: 2 }),
+      steer,
+      f.inputAccepted({ clientRequestId: steer.data.requestId, seq: 4 }),
+      f.assistantCompleted({ itemId: "a2", text: "assistant-after", seq: 5 }),
+      f.turnCompleted({ seq: 6 }),
     ]);
-    expect(summarySourceMessageIds(groups)).toEqual([]);
-    expect(groups.terminalMessages.map((message) => message.id)).toEqual([
-      "assistant-after",
+
+    expect(rows).toMatchObject([
+      { kind: "conversation", role: "assistant", text: "assistant-before" },
+      { kind: "conversation", role: "user", text: "user-steer" },
+      { kind: "conversation", role: "assistant", text: "assistant-after" },
     ]);
   });
 
   it("does not segment summary groups around agent and system steers", () => {
-    const turn = completedTurn(
-      [
-        assistantMessage({ id: "assistant-before", seq: 1 }),
-        userMessage({
-          id: "agent-steer",
-          initiator: "agent",
-          seq: 2,
-          turnRequest: { isGrouped: false, kind: "steer", status: "accepted" },
-        }),
-        userMessage({
-          id: "system-steer",
-          initiator: "system",
-          seq: 3,
-          turnRequest: { isGrouped: false, kind: "steer", status: "accepted" },
-        }),
-        assistantMessage({ id: "assistant-after", seq: 4 }),
-      ],
-      undefined,
-    );
-    const groups = groupCompletedTurnMessages(turn);
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const agentSteer = f.clientTurnRequested({
+      initiator: "agent",
+      target: { kind: "auto", expectedTurnId: "turn-1" },
+      text: "agent-steer",
+      seq: 3,
+    });
+    const systemSteer = f.clientTurnRequested({
+      initiator: "system",
+      target: { kind: "auto", expectedTurnId: "turn-1" },
+      text: "system-steer",
+      seq: 5,
+    });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1, createdAt: 1 }),
+      f.commandCompleted({ itemId: "c1", command: "pnpm test", seq: 2, createdAt: 2 }),
+      agentSteer,
+      f.inputAccepted({ clientRequestId: agentSteer.data.requestId, seq: 4, createdAt: 4 }),
+      systemSteer,
+      f.inputAccepted({ clientRequestId: systemSteer.data.requestId, seq: 6, createdAt: 6 }),
+      f.commandCompleted({ itemId: "c2", command: "pnpm lint", seq: 7, createdAt: 7 }),
+      f.turnCompleted({ seq: 8, createdAt: 8 }),
+    ]);
 
-    expect(groups.summaryItems).toMatchObject([
+    expect(rows).toMatchObject([
       {
-        kind: "summary",
+        kind: "turn",
+        id: "thread-1:turn-1:turn",
         startedAt: 1,
-        completedAt: 4,
-        segmentIndex: null,
+        completedAt: 8,
         summaryCount: 4,
       },
-    ]);
-    expect(summarySourceMessageIds(groups)).toEqual([
-      ["assistant-before", "agent-steer", "system-steer", "assistant-after"],
     ]);
   });
 
   it("segments summary groups around converted legacy user messages", () => {
-    const turn = completedTurn(
-      [
-        assistantMessage({ id: "assistant-before", seq: 1 }),
-        legacyUserMessage({ id: "legacy-user-message", seq: 2 }),
-        assistantMessage({ id: "assistant-after", seq: 3 }),
-      ],
-      undefined,
-    );
-    const groups = groupCompletedTurnMessages(turn);
-
-    expect(groups.summaryItems).toMatchObject([
-      {
-        kind: "summary",
-        startedAt: 1,
-        completedAt: null,
-        segmentIndex: 0,
-        summaryCount: 1,
-      },
-      {
-        kind: "ungrouped-message",
-        message: {
-          id: "legacy-user-message",
-        },
-      },
-      {
-        kind: "summary",
-        startedAt: 3,
-        completedAt: null,
-        segmentIndex: 1,
-        summaryCount: 1,
-      },
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1, createdAt: 1 }),
+      f.commandCompleted({ itemId: "c1", command: "pnpm test", seq: 2, createdAt: 2 }),
+      f.legacyUserMessage({ text: "legacy-user-message", turnId: "turn-1", seq: 3, createdAt: 3 }),
+      f.commandCompleted({ itemId: "c2", command: "pnpm lint", seq: 4, createdAt: 4 }),
+      f.assistantCompleted({ itemId: "final", text: "done", seq: 5, createdAt: 5 }),
+      f.turnCompleted({ seq: 6, createdAt: 6 }),
     ]);
-    expect(summarySourceMessageIds(groups)).toEqual([
-      ["assistant-before"],
-      ["assistant-after"],
+
+    expect(rows).toMatchObject([
+      { kind: "turn", id: "thread-1:turn-1:turn:0", summaryCount: 1 },
+      { kind: "conversation", role: "assistant", text: "legacy-user-message" },
+      { kind: "turn", id: "thread-1:turn-1:turn:1", summaryCount: 1 },
+      { kind: "conversation", role: "assistant", text: "done" },
     ]);
   });
 
   it("slices terminal and trailing messages out of the summary groups", () => {
-    const before = commandMessage({ id: "before", seq: 1 });
-    const terminal = assistantMessage({ id: "terminal", seq: 2 });
-    const trailing = assistantMessage({ id: "trailing", seq: 3 });
-    const groups = groupCompletedTurnMessages(
-      completedTurn([before, terminal, trailing], terminal),
-    );
+    const f = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = renderCollapsed([
+      f.turnStarted({ seq: 1 }),
+      f.commandCompleted({ itemId: "before", command: "pnpm test", seq: 2 }),
+      f.assistantCompleted({ itemId: "terminal", text: "terminal", seq: 3 }),
+      f.commandCompleted({ itemId: "trailing", command: "pnpm cleanup", seq: 4 }),
+      f.turnCompleted({ seq: 5 }),
+    ]);
 
-    expect(summarySourceMessageIds(groups)).toEqual([["before"]]);
-    expect(groups.summaryItems).toMatchObject([
+    expect(rows).toMatchObject([
       {
-        kind: "summary",
-        sourceMessages: [{ id: "before" }],
+        kind: "turn",
+        children: [{ kind: "work", workKind: "command", callId: "before" }],
       },
-    ]);
-    expect(groups.terminalMessages.map((message) => message.id)).toEqual([
-      "terminal",
-    ]);
-    expect(groups.trailingMessages.map((message) => message.id)).toEqual([
-      "trailing",
+      { kind: "conversation", role: "assistant", text: "terminal" },
+      { kind: "work", workKind: "command", callId: "trailing" },
     ]);
   });
 });

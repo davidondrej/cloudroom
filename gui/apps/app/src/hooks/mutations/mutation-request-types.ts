@@ -9,6 +9,7 @@ export type RequestEnvironmentActionMutationRequest = {
 } & EnvironmentActionRequest;
 
 export interface SendThreadMessageMutationRequest extends SendMessageRequest {
+  recoverCloudDelivery?: boolean;
   id: string;
 }
 

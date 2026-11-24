@@ -641,6 +641,11 @@
     .ProseMirror
     p.is-editor-empty:first-child::before {
     content: var(--promptbox-container-compact-placeholder);
+    height: auto;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
@@ -864,6 +869,31 @@
 
 /* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
+/* A ```draft field: a blinking caret after the last letter says "you can type here". The real caret takes over on focus. */
+.draft-caret:not(:focus)::after {
+  content: "";
+  display: inline-block;
+  width: 1.5px;
+  height: 1.2em;
+  margin-left: 1px;
+  vertical-align: -0.22em;
+  background: var(--foreground);
+  pointer-events: none;
+  animation: draft-caret-blink 1.06s step-end infinite;
+}
+
+@keyframes draft-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-caret:not(:focus)::after {
+    animation: none;
+  }
+}
+
 @keyframes bb-search-flash {
   from {
     background-color: color-mix(in oklch, var(--ring) 22%, transparent);
@@ -875,9 +905,6 @@
 
 [data-window-blurred]
   :is(
-    .animate-shine,
-    .animate-shine-icon,
-    .animate-spin,
     .animate-pulse,
     .motion-safe\:animate-pulse,
     .animate-indeterminate-progress,
@@ -891,6 +918,23 @@
 [data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::after {
   animation-play-state: paused !important;
   will-change: auto;
+}
+
+/* A frozen spinner or shimmer looks like a hung agent, and an unfocused window is often
+   still in plain view on a second monitor (#832). Keep them moving at about 4 frames a
+   second: same cycle, fewer steps, so they don't jump when focus changes. */
+[data-window-blurred] .animate-spin {
+  animation-timing-function: steps(6) !important;
+}
+[data-window-blurred] .animate-shine {
+  animation-timing-function: steps(8) !important;
+}
+[data-window-blurred] .animate-shine-icon {
+  animation-timing-function: steps(10) !important;
+}
+[data-window-blurred] .working-grid i::after,
+[data-window-blurred] .subagent-grid i::after {
+  animation-timing-function: steps(2) !important;
 }
 
 .bb-search-flash {
@@ -1144,4 +1188,35 @@
 :root[data-corners="sharp"] *::before,
 :root[data-corners="sharp"] *::after {
   border-radius: 0 !important;
+}
+
+/* Cloud icon color (Settings > Appearance > Cloud icon): Electric lime by
+ * default, or Crisp white (crisp dark ink in light mode). */
+:root[data-cloud-icon="crisp-white"] {
+  --cloud-icon: #111111;
+  --cloud-icon-sidebar: rgb(17 17 17 / 0.88);
+  --cloud-icon-stroke: 2;
+  --cloud-icon-sidebar-stroke: 1.9;
+}
+
+:root.dark[data-cloud-icon="crisp-white"] {
+  --cloud-icon: #ffffff;
+  --cloud-icon-sidebar: rgb(255 255 255 / 0.9);
+  --cloud-icon-stroke: 2;
+  --cloud-icon-sidebar-stroke: 1.9;
+}
+
+@layer utilities {
+  .cloud-icon {
+    color: var(--cloud-icon, var(--primary));
+  }
+  .cloud-icon path {
+    stroke-width: var(--cloud-icon-stroke, 1.9);
+  }
+  .cloud-icon-sidebar {
+    color: var(--cloud-icon-sidebar, var(--primary));
+  }
+  .cloud-icon-sidebar path {
+    stroke-width: var(--cloud-icon-sidebar-stroke, 1.9);
+  }
 }

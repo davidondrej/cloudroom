@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { resolveContextThreadId, resolveExplicitIdFlag } from "../../context-env.js";
 import { resolveLocalHostId } from "../../daemon.js";
 import { outputJson } from "../helpers.js";
@@ -43,10 +43,12 @@ export function registerWorktreeCommand(parent: Command, getUrl: () => string): 
           threadIdValue: string | undefined,
           opts: { carry?: string[]; allowDirty?: boolean; json?: boolean },
         ) => {
+          const contextThreadId = resolveContextThreadId();
           const threadId =
-            resolveExplicitIdFlag({ flagName: "thread ID", value: threadIdValue }) ?? resolveContextThreadId();
+            resolveExplicitIdFlag({ flagName: "thread ID", value: threadIdValue }) ?? contextThreadId;
           if (!threadId) throw new Error("Pass a thread ID, or run this inside a Cloudroom thread.");
-          const sdk = createCliBbSdk(getUrl());
+          const self = !threadIdValue || threadId === contextThreadId;
+          const sdk = createCliRoomSdk(getUrl());
           const source = await sdk.threads.get({ threadId });
           if (source.executionTarget === "cloud")
             throw new Error("Cloud threads already run in their own sandbox.");
@@ -71,13 +73,24 @@ export function registerWorktreeCommand(parent: Command, getUrl: () => string): 
                 "Other agents may share this checkout. Pass --carry with only the files this thread changed, and --allow-dirty to leave the rest.",
               ].join("\n"),
             );
-          const result = await sdk.threads.worktree({ threadId, carry });
+          const result = await sdk.threads.worktree({ threadId, carry, self });
           if (outputJson(opts, result)) return;
+          const carried = carry.length > 0 ? `, with ${carry.length} carried path(s)` : "";
+          if (!result.deferred) {
+            console.log(`Moving ${threadId} to a new worktree${carried}.`);
+            return;
+          }
+          if (!self) {
+            console.log(
+              `${threadId} moves to a new worktree when its current turn ends${carried}.`,
+            );
+            return;
+          }
           console.log(
-            `This thread moves to a new worktree when its current turn ends${carry.length > 0 ? `, with ${carry.length} carried path(s)` : ""}.`,
+            `This thread moves to a new worktree when its current turn ends${carried}.`,
           );
           console.log(
-            `End your turn now. From the next turn on, work only in the new worktree; never edit ${result.previousPath}.`,
+            `End your turn now without asking the user to continue: Cloudroom will resume you in the new worktree automatically. Never edit ${result.previousPath}.`,
           );
         },
       ),

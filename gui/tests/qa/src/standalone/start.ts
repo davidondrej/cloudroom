@@ -59,7 +59,7 @@ async function main() {
 
   const tmpRoot = await fs.mkdtemp(path.join(tmpdir(), "bb-standalone-"));
   const logsDir = path.join(tmpRoot, "logs");
-  const bbRoot = path.join(tmpRoot, "bb-root");
+  const roomRoot = path.join(tmpRoot, "bb-root");
   const serverDataDir = path.join(tmpRoot, "server-data");
   const projectRoot = path.join(tmpRoot, "repos", "test-project");
   const statePath = path.join(tmpRoot, "standalone-state.json");
@@ -102,7 +102,7 @@ async function main() {
       env: buildStandaloneRuntimeEnv({
         baseEnv: standaloneBaseEnv,
         overrides: {
-          BB_DATA_DIR: bbRoot,
+          BB_DATA_DIR: roomRoot,
           BB_HOST_DAEMON_PORT: String(daemonPort),
           BB_HOST_ENROLL_KEY: enrollKey.enrollKey,
           BB_HOST_ID: enrollKey.hostId,
@@ -128,7 +128,7 @@ async function main() {
       cwd: repoRoot,
       daemonPid: daemonProcess.pid,
       daemonPort,
-      dataDir: bbRoot,
+      dataDir: roomRoot,
       entrypoint: path.join(repoRoot, "apps/host-daemon/dist/index.js"),
       envFilePath: envFile.path,
       hostId: host.id,
@@ -164,7 +164,7 @@ async function main() {
         restartDaemon: restartDaemonCommand,
       },
       daemon: {
-        dataDir: bbRoot,
+        dataDir: roomRoot,
         logPath: daemonLogPath,
         pid: daemonProcess.pid,
         port: daemonPort,
@@ -173,7 +173,7 @@ async function main() {
       instanceId,
       parentPid,
       paths: {
-        bbRoot,
+        bbRoot: roomRoot,
         daemonRestartPidPath,
         envFilePath: envFile.path,
         logsDir,

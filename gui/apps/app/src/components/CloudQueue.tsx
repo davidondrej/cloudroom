@@ -77,23 +77,26 @@ export function CreditsBar({ plan, limit, extra, extraTotal, className, planClas
   );
 }
 
-/** Free accounts always see their Cloud Credits left (ADR 0307). The chevron shrinks the card to the one-line meter for
- *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used): a shrink from before then
- *  doesn't count, but one made while low survives a refill. Paid plans see the meter once 75% are used, and while on pack credits. */
+/** Free accounts see their Cloud Credits left once plan + extra credits left drop under 20% of the plan (ADR
+ *  20261118-090000): a new user isn't greeted by a meter. Then the chevron shrinks the card to the one-line meter for
+ *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used, no extra credits): a shrink
+ *  from before then doesn't count, but one made while low survives a refill. Extra credits (ADR 0328) count like
+ *  Settings. Paid plans see the meter once plan + extra credits left drop under 25% of the plan, so a big pack hides it. */
 const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom.planCard.shrunkLowUntil";
 const SHRINK_MS = 72 * 3_600_000;
 
 export function PlanCard() {
-  const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const account = useCloudroomAccount().data, usage = account?.planUsage ?? null;
   const calmShrink = useHiddenUntil(SHRUNK_KEY), lowShrink = useHiddenUntil(SHRUNK_LOW_KEY);
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";
-  const hidden = !usage || used === null || (!free && share(used, limit) < 0.75);
+  const hidden = !usage || used === null || Math.max(0, limit - used) + Math.max(0, usage.extraCredits ?? 0) > (free ? 0.2 : 0.25) * limit;
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
   if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;
-  const low = share(used, limit) >= 0.8, shrunk = low ? lowShrink : calmShrink;
-  if (shrunk.hidden) return <PlanMeter plan="free" used={used} limit={limit} extra={0} extraTotal={0} onExpand={shrunk.show} />;
+  const extra = Math.max(0, usage.extraCredits ?? 0), extraTotal = usage.extraCreditsTotal ?? 0, planLeft = Math.max(0, limit - used);
+  const low = extra === 0 && share(used, limit) >= 0.8, shrunk = low ? lowShrink : calmShrink;
+  if (shrunk.hidden) return <PlanMeter plan="free" used={used} limit={limit} extra={extra} extraTotal={extraTotal} onExpand={shrunk.show} />;
   return (
     <section aria-label="Free plan" className="rounded-lg border border-border bg-surface-raised-solid p-3">
       <p className="flex items-center justify-between text-xs text-muted-foreground">
@@ -108,11 +111,13 @@ export function PlanCard() {
         </Tooltip>
       </p>
       <div className="mt-2">
-        <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.max(0, Math.floor(limit - used)).toLocaleString("en-US")}</span> Cloud Credits left</p>
-        <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>
+        <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.floor(planLeft + extra).toLocaleString("en-US")}</span> Cloud Credits left</p>
+        {extra > 0
+          ? <CreditsBar className="h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-primary" edgeClassName="border-surface-raised-solid" />
+          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(planLeft, limit) * 100}%` }} /></div>}
       </div>
       <div className="mt-3 flex justify-end">
-        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Upgrade to Pro<Icon name="ArrowRight" aria-hidden /></Button>
+        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Get more credits<Icon name="ArrowRight" aria-hidden /></Button>
       </div>
     </section>
   );
@@ -120,11 +125,12 @@ export function PlanCard() {
 
 /** "Pro · 9,000 credits left" over a thin bar: amber from 75%, red at 0. With extra credits (ADR 0317) the number is
  *  plan + extra and the bar is CreditsBar. The white "+ buy more" chip opens /billing: a pack or the next plan.
- *  Free's shrunk card: lime until 80% used, an "Upgrade" chip, and clicking the line opens the card again. */
+ *  Free's shrunk card: lime until 80% used or while it has extra credits, an "Upgrade" chip, and clicking the line
+ *  opens the card again. */
 function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: string; used: number; limit: number; extra: number; extraTotal: number; onExpand?: () => void }) {
   const name = plan.charAt(0).toUpperCase() + plan.slice(1);
   const planLeft = Math.max(0, limit - used), onExtra = planLeft === 0 && extra > 0, out = used >= limit && extra <= 0;
-  const left = planLeft + Math.max(0, extra), calm = plan === "free" && share(used, limit) < 0.8;
+  const left = planLeft + Math.max(0, extra), calm = plan === "free" && (extra > 0 || share(used, limit) < 0.8);
   const label = <>{name} · <span className={cn("font-semibold tabular-nums", extra > 0 || calm ? "text-foreground" : out ? "text-destructive" : "text-warning-text")}>{Math.floor(left).toLocaleString("en-US")}</span> {onExtra ? "extra credits left" : "credits left"}</>;
   return (
     <div className="w-full px-2 pb-1">
@@ -135,9 +141,9 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
         <button type="button" className="shrink-0 border border-foreground/30 px-1.5 leading-5 text-foreground hover:bg-foreground/5" onClick={() => openUpgrade("plan_card")}>{plan === "free" ? "Upgrade" : "+ buy more"}</button>
       </p>
       {extra > 0
-        ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-warning" edgeClassName="border-sidebar" />
+        ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName={calm ? "bg-primary" : "bg-warning"} edgeClassName="border-sidebar" />
         : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
+          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(planLeft, limit) * 100}%` }} />
         </div>}
     </div>
   );
@@ -146,11 +152,11 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
 const FREE_WITHOUT_CREDITS = ["starting new cloud threads", "idle cloud threads", "sleeping sandboxes", "waiting for your reply", "your ai tokens", "local threads", "chat history and files"];
 
 /** Once per account, ever (ADR 0307, 0321): what changed, the one thing that uses credits, and the one-time reset
- *  (ADR 0308). Only accounts that paid before Cloud Credits see it; new users, new payers, and OGs on the free Pro never do. */
+ *  (ADR 0308). Only accounts that paid before Cloud Credits see it; new users and new payers never do. */
 export function CreditsExplainer() {
   const usage = useCloudroomAccount().data?.planUsage ?? null;
   const cohort = useCreditsCohort();
-  const popup = usePopup("credits", cohort === false ? false : cohort && usage ? usage.plan !== "free" && !usage.og : null);
+  const popup = usePopup("credits", cohort === false ? false : cohort && usage ? usage.plan !== "free" : null);
   if (!usage || !popup.open) return null;
   const close = () => popup.close();
   const used = usage.credits ?? 0, mono = "font-mono text-[11px] leading-[1.9]";
@@ -207,42 +213,6 @@ export function FreePlanTip() {
   const [reason] = useState(nextReason);
   if (usage?.plan !== "free") return null;
   return <UpgradeTip where="free_tip" className="mt-3 px-3.5">{reason}</UpgradeTip>;
-}
-
-const OG_HIDDEN_KEY = "cloudroom.ogLetterHiddenUntil";
-const HAND = { fontFamily: '"Bradley Hand", "Noteworthy", "Segoe Print", cursive' };
-
-/** David's letter to OG beta testers under the new-thread composer (ADR 0218). The website sends `og` only to OGs still
- *  on the free Pro it gave them, never to Free, paying, or team accounts. "Not now" hides it for 3 days. */
-export function OgLetter() {
-  const og = useCloudroomAccount().data?.planUsage?.og ?? null;
-  const [hidden, setHidden] = useState(() => Number(localStorage.getItem(OG_HIDDEN_KEY)) > Date.now());
-  const show = Boolean(og) && !hidden;
-  useUpgradePromptViewed(show ? "og_letter" : null);
-  if (!og || !show) return null;
-  const ends = new Date(og.endsAt).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-  const notNow = () => {
-    localStorage.setItem(OG_HIDDEN_KEY, String(Date.now() + 3 * 86_400_000));
-    setHidden(true);
-  };
-  return (
-    <section aria-label="A note from David" className="mt-3 rounded-sm bg-[#f3eee2] px-6 pb-3.5 pt-3 text-[#2a2a28] shadow-lg [background-image:repeating-linear-gradient(180deg,transparent_0_29px,rgba(70,110,160,0.16)_29px_30px)] [background-position:0_13px]">
-      <p className="text-lg leading-[30px]" style={HAND}>
-        {og.name ? `Hey ${og.name},` : "Hey,"}<br />
-        thanks for testing Cloudroom so early.<br />
-        Free Pro ends {ends}, but you keep 50% off forever.
-      </p>
-      <p className="mb-2.5 text-2xl" style={{ fontFamily: '"Snell Roundhand", "Bradley Hand", cursive' }}>David</p>
-      <div className="flex flex-wrap items-center gap-3 border-t border-black/10 pt-3">
-        <span className="border-[1.5px] border-dashed border-[#2a2a28] px-2 py-0.5 font-mono text-xs font-bold tracking-widest">OG50</span>
-        <span className="text-xs text-[#6b665b]">Only 39 people have this code</span>
-        <button type="button" className="ml-auto text-xs text-[#6b665b] hover:text-[#2a2a28]" onClick={notNow}>Not now</button>
-        <Button type="button" size="sm" className="border-[#1a1a1a] bg-[#1a1a1a] text-[#f3eee2] hover:bg-black" onClick={() => openUpgrade("og_letter", "https://www.cloudroom.dev/billing?keep=pro")}>
-          Keep Pro for $25/mo
-        </Button>
-      </div>
-    </section>
-  );
 }
 
 /** Sidebar footer badge while the account waits. Says so once when the account gets in. */

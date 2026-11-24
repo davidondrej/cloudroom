@@ -19,7 +19,7 @@ import {
   useActiveFixedRightTerminalId,
   useRemoveFixedRightTerminalTab,
   useSetFixedRightTerminalActiveTerminal,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   applyTerminalSessionClose,
   applyTerminalSessionUpsert,

@@ -176,9 +176,10 @@ export function useQueuedMessageActions({
     updateQueuedMessage,
   ]);
 
+  // A delete removes its row at once and locks nothing, so several can be deleted in a row
+  // while a slow Cloud sandbox still answers the first.
   const handleDeleteQueuedMessage = useCallback(
     (queuedMessageId: string) => {
-      setProcessingQueuedMessage({ id: queuedMessageId, action: "delete" });
       void deleteQueuedMessage
         .mutateAsync({
           id: threadId,
@@ -190,11 +191,6 @@ export function useQueuedMessageActions({
             fallbackMessage: "Failed to delete queued message",
             lifecycleOperation: "queue_message",
           });
-        })
-        .finally(() => {
-          setProcessingQueuedMessage((current) =>
-            current?.id === queuedMessageId ? null : current,
-          );
         });
     },
     [deleteQueuedMessage, threadId],
@@ -219,7 +215,6 @@ export function useQueuedMessageActions({
   );
 
   const queuedMessageActionPending =
-    deleteQueuedMessage.isPending ||
     reorderQueuedMessage.isPending ||
     sendQueuedMessage.isPending ||
     updateQueuedMessage.isPending;

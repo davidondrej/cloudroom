@@ -1,8 +1,10 @@
+import { setTimeout as sleep } from "node:timers/promises";
 import { refreshProviderRetirement, restoreParkedWorktree } from "../../services/environments/environment-engine.js";
 import {
   deleteQueuedThreadMessage,
   getEnvironment,
   getQueuedThreadMessage,
+  getThread,
   listActiveVisiblePinnedThreadRootsWithPendingInteractionState,
   pinThread,
   reorderPinnedThread,
@@ -67,17 +69,27 @@ import {
   dispatchThreadUnarchiveCommand,
   prepareTurnSubmitCommandPayload,
 } from "../../services/threads/thread-commands.js";
-import { getLastProviderThreadId } from "../../services/threads/thread-events.js";
+import {
+  appendThreadInterruptedEventInTransaction,
+  getLastProviderThreadId,
+  isManualCompactionActive,
+} from "../../services/threads/thread-events.js";
+import {
+  hasQueuedCompaction,
+  holdCompactFollowUp,
+  queueFirst,
+} from "../../services/threads/compact-follow-up.js";
 import { stopThreadForCurrentState } from "../../services/threads/thread-lifecycle.js";
 import {
   getThreadPromptBannerActivity,
   toThreadListEntryResponses,
   toThreadResponseFromThread,
 } from "../../services/threads/thread-runtime-display.js";
-import { archiveThreadAndChildren } from "../../services/threads/thread-archive.js";
+import { archiveThreadAndChildren, listThreadsArchivedWith, listThreadWithDescendants } from "../../services/threads/thread-archive.js";
 import { unarchiveThreadKeepingOpenParent } from "../../services/threads/thread-ownership.js";
 import { cloudroom, isCloudThread } from "../../services/cloudroom/commands.js";
 import { teleports } from "../../services/cloudroom/teleport.js";
+import { binding } from "../../services/cloudroom/store.js";
 import { teleportToLocal } from "../../services/cloudroom/teleport-local.js";
 import {
   requireThreadCommandEnvironment,
@@ -119,15 +131,35 @@ function toQueuedMessageOrderResponse(
   }
 }
 
-async function compactThreadContext(
+// Goals run only on providers that offer /goal, today Codex (#855).
+// Waits out startup registration; an unknown provider ends at settle.
+async function requireGoalSupport(
   deps: AppDeps,
   thread: Thread,
 ): Promise<void> {
-  if (isCloudThread(thread)) {
-    await cloudroom(deps).compact(thread);
-    return;
+  await deps.providerRegistry.whenProviderRegistered(thread.providerId);
+  const actions = deps.providerRegistry.get(thread.providerId)?.info
+    .composerActions;
+  if (!actions?.some((action) => action.kind === "goal")) {
+    throw new ApiError(
+      409,
+      "invalid_request",
+      `Provider "${thread.providerId}" does not support Goals. Goals work on Codex threads.`,
+    );
   }
+}
+
+/**
+ * `room-cli thread compact`: an idle thread compacts now, a busy one first thing after its turn, so an agent can
+ * compact itself. `then` runs right after it, saying how it went (compact-follow-up.ts; Core does this for Cloud).
+ */
+async function compactThreadContext(
+  deps: AppDeps,
+  thread: Thread,
+  then?: string,
+): Promise<void> {
   ensureThreadIsWritable(thread);
+  if (isCloudThread(thread)) return cloudroom(deps).compact(thread, then);
   if (!deps.providerRegistry.supportsManualCompaction(thread.providerId)) {
     throw new ApiError(
       409,
@@ -135,24 +167,30 @@ async function compactThreadContext(
       `Provider "${thread.providerId}" does not support manual context compaction`,
     );
   }
-  if (thread.status !== "idle" && thread.status !== "error") {
-    throw new ApiError(
-      409,
-      "invalid_request",
-      "Context can only be compacted while the thread is idle or errored",
-    );
+  if (!["idle", "error", "active"].includes(thread.status)) {
+    throw new ApiError(409, "invalid_request", `Context can't be compacted while the thread is ${thread.status}`);
   }
-
-  const environment = await requireThreadCommandEnvironment(deps, { thread });
-  await sendThreadMessage(deps, {
-    environment,
-    payload: {
-      input: createStandaloneBuiltinCompactCommandInput(),
-      mode: "start",
-    },
-    thread,
-    trigger: "user",
-  });
+  if (isManualCompactionActive(deps, thread) || hasQueuedCompaction(deps, thread.id)) {
+    throw new ApiError(409, "invalid_request", "This thread is already compacting or has a compaction queued");
+  }
+  const input = createStandaloneBuiltinCompactCommandInput();
+  const first: string[] = [];
+  if (thread.status === "active") {
+    const sent = await acceptThreadSendRequest(deps, { thread, payload: { input, mode: "queue-if-active" } });
+    if (sent.delivery === "queued") first.push(sent.queuedMessage.id);
+  } else {
+    const environment = await requireThreadCommandEnvironment(deps, { thread });
+    await sendThreadMessage(deps, { environment, payload: { input, mode: "start" }, thread, trigger: "user" });
+  }
+  if (then !== undefined) {
+    const followUp = await createQueuedMessageForThread(deps, {
+      thread: getThread(deps.db, thread.id) ?? thread,
+      payload: { input: [{ type: "text", text: then, mentions: [] }] },
+    });
+    holdCompactFollowUp(thread.id, followUp.id);
+    first.push(followUp.id);
+  }
+  queueFirst(deps, thread.id, first);
 }
 
 function buildActivePinnedThreadRootListResponse(
@@ -341,18 +379,31 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     teleports(deps).abandon(thread.id);
     const cancelledRetries = cancelRetriesForExplicitStop(deps, thread.id);
     cancelInterruptedThreadStartInput(deps.db, thread.id);
+    if (thread.status === "error" && !isCloudThread(thread)) {
+      deps.db.transaction((tx) =>
+        appendThreadInterruptedEventInTransaction(tx, {
+          threadId: thread.id,
+          reason: "manual-stop",
+        }),
+      );
+      deps.hub.notifyThread(thread.id, ["events-appended"], {
+        eventTypes: ["system/thread/interrupted"],
+      });
+    }
     await stopThreadForCurrentState(
       deps,
       thread,
       environment,
-      query.endProcesses === "true" ? { endProcesses: true } : undefined,
+      query.endProcesses === "true"
+        ? { endProcesses: true }
+        : { keepSession: true },
     );
     return context.json({ ok: true, cancelledRetries });
   });
 
-  post(routes.compact, async (context) => {
+  post(routes.compact, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    await compactThreadContext(deps, thread);
+    await compactThreadContext(deps, thread, payload.then);
     return context.json({ ok: true });
   });
 
@@ -405,6 +456,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
 
   post(routes.clearGoal, async (context) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    await requireGoalSupport(deps, thread);
     if (!getThreadPromptBannerActivity(deps, thread).hasGoal) {
       throw new ApiError(409, "invalid_request", "No Goal to clear");
     }
@@ -458,6 +510,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
 
   post(routes.setGoal, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    await requireGoalSupport(deps, thread);
     const environment = await requireThreadCommandEnvironment(deps, {
       thread,
     });
@@ -529,7 +582,9 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.worktree, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
-      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? []),
+      requestThreadWorktreeMove(deps, thread.id, payload.carry ?? [], {
+        self: payload.self ?? true,
+      }),
     );
   });
 
@@ -569,34 +624,59 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     return context.json(buildActivePinnedThreadRootListResponse(deps));
   });
 
-  post(routes.archiveAll, (context, query) => {
+  post(routes.archiveAll, async (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
-    const result = archiveThreadAndChildren(deps, {
-      parentThread: thread,
-      includeLive: query.includeLive === "true",
-    });
+    const family = listThreadWithDescendants(deps, thread);
+    const includeLive = query.includeLive === "true";
+    if (!family.some(item => isCloudThread(item) && item.archivedAt === null)) {
+      return context.json({ ok: true, ...archiveThreadAndChildren(deps, { parentThread: thread, includeLive }, family) });
+    }
+    const checkOwner = await cloudroom(deps).threadOwnerCheck();
+    // A child may have joined or been archived during the account read.
+    const result = archiveThreadAndChildren(deps, { parentThread: requirePublicThread(deps.db, thread.id), includeLive, checkOwner });
     return context.json({ ok: true, ...result });
   });
 
-  post(routes.unarchive, (context, query) => {
-    const thread = requirePublicThread(deps.db, context.req.param("id"));
-    // A worktree mid-removal would be deleted under the restored thread.
-    if (
-      !isCloudThread(thread) &&
-      thread.environmentId !== null &&
-      getEnvironment(deps.db, thread.environmentId)?.teardownStatus ===
-        "running"
-    )
-      throw new ApiError(
-        409,
-        "environment_removing",
-        "This thread's worktree is being removed. Try again in a few seconds.",
-      );
+  /** Waits, only reading, while a Local worktree is being removed. Returns why the thread can't come back yet, or null. */
+  async function worktreeRemovalBlock(
+    thread: ReturnType<typeof requirePublicThread>,
+    deadline: number,
+  ): Promise<string | null> {
+    const environmentId = thread.environmentId;
+    if (isCloudThread(thread) || environmentId === null) return null;
+    const status = () => getEnvironment(deps.db, environmentId)?.teardownStatus;
+    while (status() === "running" && Date.now() < deadline) await sleep(250);
+    const final = status();
+    if (final === "running")
+      return "This thread's worktree is still being removed. Try again in a moment.";
+    // A failed removal may have deleted the folder already; its retry parks it.
+    if (final === "failed")
+      return "This thread's worktree couldn't be removed. Cloudroom retries every minute, so try again after that.";
+    return null;
+  }
+
+  /** One thread's restore, with everything that follows it. */
+  async function unarchiveWithEffects(
+    archived: ReturnType<typeof requirePublicThread>,
+    keepParent: boolean,
+    deadline: number,
+  ): Promise<void> {
+    // A worktree mid-removal would be deleted under the restored thread, so
+    // wait for it to park; the restore below rebuilds it.
+    const blocked = await worktreeRemovalBlock(archived, deadline);
+    if (blocked !== null)
+      throw new ApiError(409, "environment_removing", blocked);
+    // Read again: it may have been deleted during the wait.
+    const thread = requirePublicThread(deps.db, archived.id);
     const providerThreadId = getLastProviderThreadId(deps, thread.id);
+    if (isCloudThread(thread)) {
+      const saved = binding(deps.db, thread.id);
+      if (saved) await cloudroom(deps).requireOwnThread(saved);
+    }
     const unarchivedThread = unarchiveThreadKeepingOpenParent(
       deps,
       thread.id,
-      query.keepParent === "true",
+      keepParent,
     );
     if (unarchivedThread !== null) {
       if (isCloudThread(unarchivedThread)) void cloudroom(deps).restore(unarchivedThread.id).catch((error: unknown) => deps.logger.warn({ threadId: unarchivedThread.id, error: error instanceof Error ? error.message : String(error) }, "The thread's sandbox could not be restored"));
@@ -616,7 +696,26 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
         thread,
       });
     }
-    return context.json({ ok: true });
+  }
+
+  post(routes.unarchive, async (context, query) => {
+    const thread = requirePublicThread(deps.db, context.req.param("id"));
+    const archivedWith =
+      query.withChildren === "true" ? listThreadsArchivedWith(deps, thread) : [];
+    // One deadline for the whole request, under the remote relay's 30 s.
+    const deadline = Date.now() + 20_000;
+    await unarchiveWithEffects(thread, query.keepParent === "true", deadline);
+    const unarchivedThreadIds = [thread.id];
+    for (const child of archivedWith) {
+      // Its parent is open again, so it stays under it. One that can't come back never fails the others.
+      try {
+        await unarchiveWithEffects(child, true, deadline);
+        unarchivedThreadIds.push(child.id);
+      } catch (error) {
+        deps.logger.warn({ threadId: child.id, error: error instanceof Error ? error.message : String(error) }, "A thread archived with its parent could not be restored");
+      }
+    }
+    return context.json({ ok: true, unarchivedThreadIds });
   });
 
   post(routes.read, (context) => {

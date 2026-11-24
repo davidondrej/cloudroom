@@ -4,7 +4,7 @@ const API = "cloudroom-api";
 const PLUGINS = "cloudroom-plugins";
 const PLUGIN_ASSET = /^\/api\/v1\/plugins\/[^/]+\/assets\//;
 const LIVE_API =
-  /^\/api\/v1\/(?:search|threads\/[^/]+\/(?:timeline|host-files|events|search))/;
+  /^\/api\/v1\/(?:search|system\/voice-transcription\/jobs|threads\/[^/]+\/(?:timeline|host-files|events|search))/;
 const OFFLINE_HEADERS = ["x-cloudroom-offline", "x-bb-tunnel-offline"];
 const MAC_HEADER = "x-cloudroom-mac";
 const MAC_KEY = "/__cloudroom-mac";

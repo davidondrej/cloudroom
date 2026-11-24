@@ -191,6 +191,8 @@ export type ProviderCliInstallAction = z.infer<
 >;
 
 const providerCliStatusSchema = z.object({
+  // Added by the server for an opted-in update on a persistent host.
+  autoUpdateState: z.enum(["queued", "updating", "retrying", "failed"]).optional(),
   displayName: z.string().min(1),
   executableName: z.string().min(1),
   executablePath: z.string().min(1).nullable(),

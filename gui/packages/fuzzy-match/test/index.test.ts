@@ -6,6 +6,18 @@ import {
 } from "../src/index.js";
 
 describe("fuzzyMatchPaths", () => {
+  it("keeps positions stable across identical searches", () => {
+    const args = {
+      items: ["\n\naa>", "\ud800aaaaaaaa/aa"],
+      query: "\n>",
+      getPath: (path: string) => path,
+      limit: 1,
+    };
+
+    const first = fuzzyMatchPaths(args);
+    expect(fuzzyMatchPaths(args)).toEqual(first);
+  });
+
   it("returns the first limited paths for an empty query", () => {
     const paths = ["src/a.ts", "src/b.ts", "src/c.ts"];
 
@@ -94,6 +106,17 @@ describe("fuzzyMatchPaths", () => {
     expect(matches.map((match) => match.item)).toEqual([
       "apps\\app\\src\\components\\promptbox\\PromptBox.tsx",
     ]);
+  });
+
+  it("keeps an earlier directory match when the best filename match would skip the next segment", () => {
+    const matches = fuzzyMatchPaths({
+      items: ["application/spec/app.ts", "app/spec.ts"],
+      query: "app/spec",
+      getPath: (path) => path,
+      limit: 2,
+    });
+
+    expect(matches.map((match) => match.item)).toEqual(["app/spec.ts", "application/spec/app.ts"]);
   });
 
   it("treats exact directory prefixes as scoped path searches", () => {

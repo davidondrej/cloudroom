@@ -1,8 +1,8 @@
 import {
-  bbAppRuntimeVerifyTokens,
-  clearOwnBbAppRuntimeFile,
-  readBbAppRuntimeFile,
-  type BbAppRuntimeFile,
+  roomAppRuntimeVerifyTokens,
+  clearOwnRoomAppRuntimeFile,
+  readRoomAppRuntimeFile,
+  type RoomAppRuntimeFile,
 } from "@cloudroom/config/app-runtime-file";
 import { stopVerifiedProcess } from "@cloudroom/config/verified-process-stop";
 import type { VerifiedProcessOps } from "@cloudroom/config/verified-process-stop";
@@ -36,7 +36,7 @@ type StopForeignRuntimeResult =
   | { kind: "unverified"; pid: number };
 
 function matchesProbedServer(
-  runtimeFile: BbAppRuntimeFile,
+  runtimeFile: RoomAppRuntimeFile,
   serverUrl: string,
 ): boolean {
   try {
@@ -53,7 +53,7 @@ export async function readForeignRuntimeDetails(
     return null;
   }
 
-  const runtimeFile = await readBbAppRuntimeFile(args.dataDir);
+  const runtimeFile = await readRoomAppRuntimeFile(args.dataDir);
   if (runtimeFile === null) {
     return null;
   }
@@ -74,7 +74,7 @@ export async function readForeignRuntimeDetails(
 export async function stopForeignRuntime(
   args: StopForeignRuntimeArgs,
 ): Promise<StopForeignRuntimeResult> {
-  const current = await readBbAppRuntimeFile(args.details.dataDir);
+  const current = await readRoomAppRuntimeFile(args.details.dataDir);
   if (
     current !== null &&
     (current.pid !== args.details.pid ||
@@ -90,7 +90,7 @@ export async function stopForeignRuntime(
     signal: "SIGTERM",
     startedAt: args.details.startedAt,
     timeoutMs: args.timeoutMs,
-    verifyTokens: bbAppRuntimeVerifyTokens(args.details.entryPath),
+    verifyTokens: roomAppRuntimeVerifyTokens(args.details.entryPath),
   });
 
   if (stopResult.kind === "unverified") {
@@ -102,7 +102,7 @@ export async function stopForeignRuntime(
   if (stopResult.kind === "not-running") {
     return { kind: "not-running" };
   }
-  await clearOwnBbAppRuntimeFile({
+  await clearOwnRoomAppRuntimeFile({
     dataDir: args.details.dataDir,
     pid: args.details.pid,
   });

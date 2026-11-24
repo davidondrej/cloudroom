@@ -427,6 +427,14 @@ export function registerFileRoutes(app: Hono, deps: AppDeps): void {
           ifNoneMatch: isHtml ? undefined : context.req.header("if-none-match"),
         });
       },
+      isHtmlPath
+        ? undefined
+        : {
+            directLocal: {
+              ifRange: context.req.header("if-range"),
+              range: context.req.header("range"),
+            },
+          },
     );
   });
 }

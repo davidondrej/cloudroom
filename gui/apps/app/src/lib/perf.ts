@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { fetchWithAppSurface } from "./app-surface";
-import { getBbDesktopInfo } from "./bb-desktop";
+import { getRoomDesktopInfo } from "./room-desktop";
 
 type PerfMetric =
   | "app_ready"
@@ -146,7 +146,7 @@ export function installPerfMonitor(): void {
     passive: true,
   });
   watchFreezes();
-  getBbDesktopInfo()?.onTopRightWindowDrag?.((position) => {
+  getRoomDesktopInfo()?.onTopRightWindowDrag?.((position) => {
     recordPerf({ metric: "top_right_window_drag", ms: 0, detail: position });
   });
   window.setInterval(flushPerf, FLUSH_INTERVAL_MS);

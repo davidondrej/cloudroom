@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   createHash,
   createHmac,
@@ -225,22 +226,159 @@ function nextTcpTables(): Promise<TcpTables> {
   });
 }
 
+const LSOF = "/usr/sbin/lsof";
+const LSOF_TIMEOUT_MS = 5_000;
+const LSOF_KILL_GRACE_MS = 1_000;
+const LSOF_ABANDON_MS = 30_000;
+let warnedAbandonedLsof = false;
+const LSOF_MAX_BYTES = 8 * 1024 * 1024;
+
+// One form for an address however it is written: `[::1]`, `::ffff:127.0.0.1`.
+function comparableAddress(text: string): string | null {
+  const bytes = addressBytes(text.replace(/^\[|\]$/gu, ""));
+  if (bytes === null) return null;
+  const mapped =
+    bytes.length === 16 &&
+    IPV4_MAPPED_PREFIX.every((byte, at) => bytes[at] === byte);
+  return (mapped ? bytes.slice(12) : bytes).join(".");
+}
+
+// macOS has no table of socket owners. `lsof -u <uid> -Fn` lists that user's
+// sockets, one `n<from>:<port>-><to>:<port>` line each. The caller runs as
+// that user only when its end of this connection is listed: from the caller,
+// to us. Anything else, an empty listing included, is no.
+export function lsofListsCaller(peer: CallerPeer, listing: string): boolean {
+  const { localAddress, localPort, remoteAddress, remotePort } = peer;
+  if (
+    localAddress === undefined ||
+    localPort === undefined ||
+    remoteAddress === undefined ||
+    remotePort === undefined
+  ) {
+    return false;
+  }
+  const caller = comparableAddress(remoteAddress);
+  const ours = comparableAddress(localAddress);
+  if (caller === null || ours === null) return false;
+  return listing.split("\n").some((line) => {
+    const socket = /^n(.+):(\d+)->(.+):(\d+)$/u.exec(line);
+    return (
+      socket !== null &&
+      Number(socket[2]) === remotePort &&
+      Number(socket[4]) === localPort &&
+      comparableAddress(socket[1] ?? "") === caller &&
+      comparableAddress(socket[3] ?? "") === ours
+    );
+  });
+}
+
+interface LsofQueue {
+  running: boolean;
+  stuck: boolean;
+  waiting: Array<(listing: string | null) => void>;
+}
+
+const lsofQueues = new Map<number, LsofQueue>();
+
+// A listing, or null when lsof didn't run to its own exit (killed at the
+// timeout, stuck, failed to start): no answer for this connection, so the
+// read is refused and the next one on it checks again (#2203).
+function runLsof(port: number, uid: number, queue: LsofQueue): void {
+  let waiters = queue.waiting;
+  queue.waiting = [];
+  const answer = (listing: string | null) => {
+    for (const waiter of waiters) waiter(listing);
+    waiters = [];
+  };
+  // execFile only calls back once lsof exits, and one stuck in the kernel
+  // outlives its kill. Until it exits, reads are refused instead of waiting.
+  const overdue = setTimeout(() => {
+    queue.stuck = true;
+    answer(null);
+    for (const waiter of queue.waiting.splice(0)) waiter(null);
+  }, LSOF_TIMEOUT_MS + LSOF_KILL_GRACE_MS);
+  const child = execFile(
+    LSOF,
+    ["-nP", "-a", "-u", String(uid), `-iTCP:${port}`, "-Fn"],
+    {
+      killSignal: "SIGKILL",
+      maxBuffer: LSOF_MAX_BYTES,
+      timeout: LSOF_TIMEOUT_MS,
+    },
+    // lsof exits 1 when it lists nothing; any exit code is its answer.
+    (error, stdout) =>
+      answer(error === null || typeof error.code === "number" ? stdout : null),
+  );
+  // The slot stays taken until lsof is really gone, so a failed kill can't
+  // start a second one on this port. One still alive 30 s after its kill
+  // gives the slot up anyway, so a fresh lookup can try again.
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    clearTimeout(overdue);
+    clearTimeout(abandon);
+    queue.stuck = false;
+    answer(null);
+    if (queue.waiting.length > 0) runLsof(port, uid, queue);
+    else queue.running = false;
+  };
+  const abandon = setTimeout(() => {
+    if (!warnedAbandonedLsof) {
+      warnedAbandonedLsof = true;
+      console.warn("Cloudroom caller check: lsof did not exit after its kill");
+    }
+    release();
+  }, LSOF_TIMEOUT_MS + LSOF_ABANDON_MS);
+  child.once("close", release);
+}
+
+// One lsof at a time per port (about 70 ms on a busy Mac), shared by every
+// lookup that was waiting when it started. A run that started before a
+// connection opened can't vouch for it, so later lookups wait for the next.
+function nextLsofListing(port: number, uid: number): Promise<string | null> {
+  const queue = lsofQueues.get(port) ?? {
+    running: false,
+    stuck: false,
+    waiting: [],
+  };
+  lsofQueues.set(port, queue);
+  if (queue.stuck) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    queue.waiting.push(resolve);
+    if (queue.running) return;
+    queue.running = true;
+    setImmediate(() => runLsof(port, uid, queue));
+  });
+}
+
 const peerUserChecks = new WeakMap<CallerPeer, Promise<boolean>>();
 
 // Every OS account on a computer can reach its loopback, so the open reads
-// need a caller that runs as this OS user. Linux names each socket's owner.
-// macOS and Windows can't tell cheaply, so there every local caller still
-// gets them (docs/scopes/security.md). One lookup per connection.
+// need a caller that runs as this OS user. Linux names each socket's owner,
+// and on macOS lsof lists this user's sockets. Windows can't tell cheaply,
+// so there every local caller still gets them (docs/scopes/security.md).
+// One lookup per connection.
 function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
   const uid = process.getuid?.();
-  if (process.platform !== "linux" || uid === undefined) {
+  const { platform } = process;
+  if ((platform !== "linux" && platform !== "darwin") || uid === undefined) {
     return Promise.resolve(true);
   }
   let check = peerUserChecks.get(peer);
   if (check === undefined) {
-    check = nextTcpTables().then(
-      (tables) => tcpConnectionOwner(peer, tables) === uid,
-    );
+    check =
+      platform === "linux"
+        ? nextTcpTables().then(
+            (tables) => tcpConnectionOwner(peer, tables) === uid,
+          )
+        : peer.localPort === undefined
+          ? Promise.resolve(false)
+          : nextLsofListing(peer.localPort, uid).then((listing) => {
+              if (listing !== null) return lsofListsCaller(peer, listing);
+              peerUserChecks.delete(peer);
+              return false;
+            });
     peerUserChecks.set(peer, check);
   }
   return check;
@@ -277,6 +415,8 @@ export interface CallerProofIssuer {
   start(): StartedCallerProof;
   finish(id: string, claim: string): Promise<string | null>;
   verify(token: string | undefined): boolean;
+  /** True for a token this process issued to its own code, like the phone relay. */
+  isInternal(token: string | undefined): boolean;
   issueInternal(): string;
 }
 
@@ -424,6 +564,13 @@ export async function createCallerProofIssuer(
       tokens.set(key, now());
       return true;
     },
+    isInternal(token) {
+      return (
+        token !== undefined &&
+        token.length <= MAX_TOKEN_LENGTH &&
+        internalTokens.has(sha256(token))
+      );
+    },
     issueInternal() {
       const token = randomBytes(32).toString("base64url");
       internalTokens.add(sha256(token));
@@ -460,6 +607,18 @@ export interface ProveLocalCallerArgs {
   fetch?: typeof fetch;
   proofPath: string;
   signal?: AbortSignal;
+}
+
+// A machine daemon's agent proxy listens on a new port each start. It writes
+// that URL here so room-cli in a plain shell, cron or launchd job finds it
+// without thread env (#1564).
+export const MACHINE_PROXY_URL_FILE_NAME = "machine-proxy-url";
+
+export function readMachineProxyUrl(dataDir: string): string | null {
+  const raw = readProofFile(join(dataDir, MACHINE_PROXY_URL_FILE_NAME))?.trim();
+  return raw !== undefined && isLocalCallerProofTarget(raw)
+    ? new URL(raw).origin
+    : null;
 }
 
 export function isLocalCallerProofTarget(baseUrl: string): boolean {

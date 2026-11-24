@@ -1,3 +1,4 @@
+import type { AvailableModel } from "./provider-types.js";
 import type { ReasoningLevel } from "./shared-types.js";
 
 /** Claude and Codex models of about the same level, newest per level (docs/scopes/loop-fallback.md). */
@@ -38,11 +39,12 @@ export const MODEL_LEVELS: readonly {
   },
 ];
 
-/** The other provider's model at the same level, for Claude Code ↔ Codex only. An unknown model counts as Opus ↔ Sol. */
+/** An unknown model counts as Opus ↔ Sol. With a Codex catalog, a missing family leaves the choice to the CLI default. */
 export function sameLevelModel(
   model: string,
   fromProviderId: string,
   toProviderId: string,
+  availableModels?: readonly AvailableModel[],
 ): string | null {
   const toCodex = fromProviderId === "claude-code" && toProviderId === "codex";
   if (
@@ -56,5 +58,21 @@ export function sameLevelModel(
     MODEL_LEVELS.find((entry) =>
       name.includes(toCodex ? entry.claude : entry.codex),
     ) ?? MODEL_LEVELS[1]!;
-  return toCodex ? level.codexModel : level.claudeModel;
+  if (!toCodex) return level.claudeModel;
+  if (!availableModels) return level.codexModel;
+  return newestModel(availableModels.map(({ model }) => model), level.codex);
+}
+
+/** The newest model of a family ("astra", "opus", "neon") in a harness's own list: gpt-6.2-astra beats gpt-6-astra, and a 1M twin wins a tie. */
+export function newestModel(models: readonly string[], family: string): string | null {
+  const pattern = new RegExp(`^(?:(?:gpt|gemini)-(\\d+(?:\\.\\d+)*)-${family}|claude-${family}-(\\d+(?:-\\d{1,2})?)(?:-\\d{8})?)(\\[1m\\])?$`);
+  let best: { id: string; score: number } | null = null;
+  for (const id of models) {
+    const match = pattern.exec(id);
+    if (!match) continue;
+    const [major = 0, minor = 0, patch = 0] = (match[1] ?? match[2]!).split(/[.-]/).map(Number);
+    const score = ((major * 1000 + minor) * 1000 + patch) * 2 + (match[3] ? 1 : 0);
+    if (!best || score > best.score) best = { id, score };
+  }
+  return best?.id ?? null;
 }

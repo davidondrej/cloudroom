@@ -3,7 +3,7 @@ import type {
   CreateExecutionInputSources,
   ExecutionInputFieldSource,
   ExistingThreadExecutionInputSources,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import type {
   StoredPermissionMode,
@@ -29,6 +29,7 @@ export type ScopedExecutionInputSources =
   | ExistingThreadExecutionInputSources;
 
 export interface UsePromptModelReasoningOptions {
+  cloud?: boolean;
   enabled?: boolean;
   environmentId?: string;
   environmentHostId?: string;
@@ -44,7 +45,8 @@ export interface UsePromptModelReasoningOptions {
   preferenceProjectId?: string | null;
   resolveProviderRouting?: (
     environmentSelectionValue: string,
-  ) => SystemProvidersQuery;
+    providerId: string,
+  ) => SystemExecutionOptionsQuery;
 }
 
 export interface UseNewThreadCreationOptions extends UsePromptModelReasoningOptions {

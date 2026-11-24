@@ -14,11 +14,8 @@ import {
 } from "@/hooks/queries/query-keys";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
-import {
-  GitDiffTabContent,
-  HostScopedFilePreviewTabContent,
-  WorkspaceFilePreviewTabContent,
-} from "./ThreadSecondaryPanelTabContent";
+import { GitDiffTabContent } from "@/components/right-panel/shell/diff-tab-host";
+import { HostScopedFilePreviewTabContent, WorkspaceFilePreviewTabContent } from "@/components/right-panel/shell/file-preview-tabs";
 
 vi.mock("@/lib/sdk", () => ({
   sdk: {

@@ -110,7 +110,7 @@ export function MoveToApplicationsPrompt() {
         <DiskImageWindow />
         <h2 className="mt-6 text-xl font-semibold text-foreground">Move Cloudroom to Applications</h2>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
-          It's running from the disk image, so it can't update itself. One click moves it and reopens it.
+          It's running from the disk image or another disk, so it can't update itself. One click moves it and reopens it.
         </p>
         {failed ? (
           <p role="alert" className="mt-3 text-sm leading-relaxed text-destructive-text">

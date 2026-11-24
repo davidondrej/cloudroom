@@ -1,5 +1,5 @@
 import type { ComponentProps } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import {
   type BuiltInSidebarNavEntry,
   ResourceNavSidebarItem,

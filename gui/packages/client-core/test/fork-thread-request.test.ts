@@ -35,7 +35,6 @@ describe("buildForkThreadRequest", () => {
       },
       projectId: "proj_test",
       providerId: "codex",
-      providerSupportsFork: true,
       reasoningLevel: "high",
       serviceTier: "fast",
       sourceSeqEnd: 42,
@@ -75,7 +74,6 @@ describe("buildForkThreadRequest", () => {
       pluginSubmission: undefined,
       projectId: "proj_test",
       providerId: "codex",
-      providerSupportsFork: true,
       reasoningLevel: "medium",
       serviceTier: undefined,
       sourceSeqEnd: undefined,
@@ -99,7 +97,6 @@ describe("buildForkThreadRequest", () => {
         pluginSubmission: undefined,
         projectId: "proj_test",
         providerId: "acp-amp",
-        providerSupportsFork: true,
         reasoningLevel: "medium",
         serviceTier: undefined,
         sourceSeqEnd: undefined,
@@ -112,48 +109,21 @@ describe("buildForkThreadRequest", () => {
       sourceThreadId: "thr_source",
     });
   });
-
-  it("returns null when the provider cannot fork sessions", () => {
-    expect(
-      buildForkThreadRequest({
-        environment: { type: "reuse", environmentId: "env_source" },
-        environmentId: "env_source",
-        executionTarget: undefined,
-        input: [{ type: "text", text: "Continue from here", mentions: [] }],
-        model: "unknown-model",
-        permissionMode: "auto",
-        pluginSubmission: undefined,
-        projectId: "proj_test",
-        providerId: "not-a-provider",
-        providerSupportsFork: false,
-        reasoningLevel: "medium",
-        serviceTier: undefined,
-        sourceSeqEnd: undefined,
-        sourceThreadId: "thr_source",
-        sourceThreadTitle: "Investigate flaky test",
-      }),
-    ).toBeNull();
-  });
 });
 
 describe("isThreadForkable", () => {
   it("rejects an archived source and permits it after unarchiving", () => {
     const source = makeThread({ archivedAt: 123 });
 
-    expect(isThreadForkable(source, true)).toBe(false);
-    expect(isThreadForkable({ ...source, archivedAt: null }, true)).toBe(true);
+    expect(isThreadForkable(source)).toBe(false);
+    expect(isThreadForkable({ ...source, archivedAt: null })).toBe(true);
   });
 
-  it("is true only with an environment id and a fork-capable provider", () => {
-    expect(
-      isThreadForkable(makeThread({ environmentId: "env_source" }), true),
-    ).toBe(true);
-    expect(isThreadForkable(makeThread({ environmentId: null }), true)).toBe(
-      false,
-    );
-    expect(
-      isThreadForkable(makeThread({ providerId: "not-a-provider" }), false),
-    ).toBe(false);
-    expect(isThreadForkable(null, true)).toBe(false);
+  it("is true for any harness with an environment, or any Cloud thread", () => {
+    expect(isThreadForkable(makeThread({ environmentId: "env_source" }))).toBe(true);
+    expect(isThreadForkable(makeThread({ providerId: "acp-antigravity" }))).toBe(true);
+    expect(isThreadForkable(makeThread({ environmentId: null }))).toBe(false);
+    expect(isThreadForkable(makeThread({ environmentId: null, executionTarget: "cloud" }))).toBe(true);
+    expect(isThreadForkable(null)).toBe(false);
   });
 });

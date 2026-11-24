@@ -1,5 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import {
+  ensureDataTempDir,
+  gitShell,
   normalizeWindowsEnv,
   preparePortablePtyCommand,
   resolvePortableCommand,
@@ -11,6 +15,7 @@ import {
 } from "@cloudroom/host-daemon-contract";
 import { spawn as spawnPty } from "node-pty";
 import type { HostDaemonLogger } from "./logger.js";
+import { corePtyAdapter } from "./terminals/core-pty.js";
 import { ensureNodePtySpawnHelperExecutable } from "./terminals/terminal-manager.js";
 
 const nodePtyLogger: HostDaemonLogger = {
@@ -59,9 +64,60 @@ function windowsPtyLaunch(
   const env = normalizeWindowsEnv(inheritedEnv);
   const resolved = resolvePortableCommand(command, { cwd, env });
   if (resolved === undefined) {
-    throw new Error(`Command not found: ${command}`);
+    throw new Error(
+      command === "sh"
+        ? "This installer needs Git for Windows (Git Bash). Install it from https://git-scm.com/download/win, then try again."
+        : `Command not found: ${command}`,
+    );
   }
   return { ...preparePortablePtyCommand({ command: resolved, args, cwd, env }), env };
+}
+
+/**
+ * Script installers run `sh -c`, but a default Git for Windows install puts
+ * only `git\cmd` on PATH. Run them with Git's own shell instead (#1251).
+ */
+export async function withWindowsGitShell(args: {
+  plan: ProviderInstallationCommand;
+  env: NodeJS.ProcessEnv;
+}): Promise<{ plan: ProviderInstallationCommand; env: NodeJS.ProcessEnv }> {
+  if (
+    process.platform !== "win32" ||
+    args.plan.command !== "sh" ||
+    resolvePortableCommand("sh", { env: args.env }) !== undefined
+  ) {
+    return args;
+  }
+  const shell = await gitShell(args.env).catch(() => null);
+  return shell === null
+    ? args
+    : { plan: { ...args.plan, command: shell.command }, env: shell.env };
+}
+
+/**
+ * Installers run outside any sandbox. On macOS and Linux each run gets a fresh TMPDIR in the data folder, so the
+ * downloaded script (`${TMPDIR:-/tmp}/provider-installation.XXXXXX`) and whatever else the installer stages there stay
+ * out of the OS temp folder, which Read-only Mac commands and sandboxed agents can change. Windows keeps its TEMP.
+ */
+export async function withPrivateInstallTemp<T>(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  run: (env: NodeJS.ProcessEnv) => Promise<T>,
+): Promise<T> {
+  if (process.platform === "win32") return run(env);
+  const folder = await mkdtemp(
+    join(ensureDataTempDir(dataDir), "provider-installation-"),
+  );
+  try {
+    return await run({ ...env, TMPDIR: folder });
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+function spawnNodePty(command: string, args: string[] | string, cwd: string, env: NodeJS.ProcessEnv) {
+  ensureNodePtySpawnHelperExecutable(nodePtyLogger);
+  return spawnPty(command, args, { cols: 120, cwd, env, name: "xterm-256color", rows: 30 });
 }
 
 function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProcessSpawner {
@@ -75,14 +131,8 @@ function createPtyProviderInstallationProcessSpawner(): ProviderInstallationProc
         process.platform === "win32"
           ? windowsPtyLaunch(args.command, args.args, cwd, env)
           : { command: args.command, args: args.args, env };
-      ensureNodePtySpawnHelperExecutable(nodePtyLogger);
-      const pty = spawnPty(launch.command, launch.args, {
-        cols: 120,
-        cwd,
-        env: launch.env,
-        name: "xterm-256color",
-        rows: 30,
-      });
+      const pty = corePtyAdapter()?.spawn({ file: launch.command, args: launch.args, cols: 120, rows: 30, cwd, env: launch.env, logger: nodePtyLogger })
+        ?? spawnNodePty(launch.command, launch.args, cwd, launch.env);
       pty.onData((data) => stdout.write(data));
       pty.onExit(() => {
         stdout.end();

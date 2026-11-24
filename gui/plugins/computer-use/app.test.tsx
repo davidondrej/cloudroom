@@ -9,7 +9,7 @@ afterEach(cleanup);
 
 const permissions = { accessibility: false, screenRecording: false };
 
-function render() {
+function render(extra: Record<string, unknown> = {}) {
   const submit = vi.fn(async () => undefined);
   const slot = renderSlot(
     app.pendingInteractions[0]!,
@@ -24,6 +24,7 @@ function render() {
           purpose: null,
           platform: "darwin",
           permissions,
+          ...extra,
         },
         createdAt: 0,
         expiresAt: null,
@@ -89,4 +90,12 @@ it("denies on Escape", () => {
     key: "Escape",
   });
   expect(submit).toHaveBeenCalledExactlyOnceWith({ decision: "deny" });
+});
+
+it("foreground card shows Allow once and Deny with no Always allow", () => {
+  const { slot, submit } = render({ foreground: true });
+  expect(slot.queryByRole("button", { name: "Always allow" })).toBeNull();
+  expect(slot.queryByRole("button", { name: "Only this thread" })).toBeNull();
+  fireEvent.click(slot.getByRole("button", { name: "Allow once" }));
+  expect(submit).toHaveBeenCalledExactlyOnceWith({ decision: "thread" });
 });

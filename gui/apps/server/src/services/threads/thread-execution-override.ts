@@ -1,4 +1,5 @@
 import {
+  createEventId,
   getProjectExecutionDefaults,
   getThreadExecutionOverride,
   setThreadExecutionOverride,
@@ -6,6 +7,8 @@ import {
 } from "@cloudroom/db";
 import {
   reconcileReasoningLevel,
+  threadScope,
+  THREAD_MODEL_SELECTION_OPERATION,
   type AvailableModel,
   type CallerExecutionInputSource,
   type ReasoningLevel,
@@ -20,7 +23,7 @@ import {
   providerSetupError,
   resolveSystemExecutionOptionsForValidation,
 } from "../system/execution-options.js";
-import { getLastExecutionOptions } from "./thread-events.js";
+import { appendThreadEventInTransaction, getLastExecutionOptions } from "./thread-events.js";
 import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
 
 interface ThreadExecutionOverridePatch {
@@ -37,6 +40,8 @@ interface ResolveThreadExecutionOverrideUpdateArgs {
 }
 
 interface ApplyThreadExecutionOverrideArgs {
+  recordModelSelection?: boolean;
+  beforeSave?: (() => void) | undefined;
   thread: Thread;
   patch: ThreadExecutionOverridePatch;
 }
@@ -128,6 +133,7 @@ export async function applyThreadExecutionOverride(
     thread,
     typeof patch.model === "string" ? patch.model : null,
   );
+  args.beforeSave?.();
   const existing = getThreadExecutionOverride(deps.db, thread.id) ?? {
     modelOverride: null,
     reasoningLevelOverride: null,
@@ -141,11 +147,24 @@ export async function applyThreadExecutionOverride(
     fallbackModel: resolveFallbackModel(deps, thread),
   });
 
-  setThreadExecutionOverride(deps.db, {
-    threadId: thread.id,
-    modelOverride: next.modelOverride,
-    reasoningLevelOverride: next.reasoningLevelOverride,
+  deps.db.transaction((tx) => {
+    setThreadExecutionOverride(tx, { threadId: thread.id, ...next });
+    if (args.recordModelSelection && patch.model) {
+      appendThreadEventInTransaction(tx, {
+        threadId: thread.id,
+        environmentId: thread.environmentId,
+        type: "system/operation",
+        scope: threadScope(),
+        data: {
+          operation: THREAD_MODEL_SELECTION_OPERATION,
+          operationId: createEventId(),
+          status: "completed",
+          message: `Selected ${patch.model} for the next turn.`,
+        },
+      });
+    }
   });
+  if (args.recordModelSelection) deps.hub.notifyThread(thread.id, ["events-appended"], { projectId: thread.projectId });
 }
 
 /** A harness switch (ADR 0211) checks the model against the new harness's catalog and starts its overrides fresh. */

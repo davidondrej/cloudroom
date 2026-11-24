@@ -310,6 +310,7 @@ describe("process utils", () => {
       ROOM_SERVER_URL: "http://127.0.0.1:39886",
       ROOM_THREAD_ID: "parent_thread",
       ROOM_CLI_REEXEC: "1",
+      ARGV0: "/home/u/Applications/Cloudroom.AppImage",
       NODE_ENV: "development",
       NODE_OPTIONS: "--enable-source-maps",
       OPENAI_API_KEY: "external-secret",
@@ -377,6 +378,31 @@ describe("process utils", () => {
     expect(findCliExecutable("codex", env)).toBe(official);
   });
 
+  it("on Windows, finds install.ps1's current\\bin Codex ahead of the older layout and PATH", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const home = mkdtempSync(join(tmpdir(), "codex-win-"));
+      const codexAt = (...parts: string[]) => {
+        const file = join(home, ...parts);
+        mkdirSync(join(file, ".."), { recursive: true });
+        writeFileSync(file, "", { mode: 0o755 });
+        return file;
+      };
+      // No LOCALAPPDATA: its junction to current\bin can't help here.
+      const env = { HOME: home, PATH: join(home, "bin"), PATHEXT: ".EXE" };
+      const current = [".codex", "packages", "standalone", "current"];
+      const onPath = codexAt("bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(onPath);
+      const legacy = codexAt(...current, "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(legacy);
+      const bin = codexAt(...current, "bin", "codex.exe");
+      expect(findCliExecutable("codex", env)).toBe(bin);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("skips npm's unfinished Claude placeholder for the next claude (#1148)", () => {
     const home = mkdtempSync(join(tmpdir(), "claude-pick-"));
     const extension = process.platform === "win32" ? ".exe" : "";
@@ -396,6 +422,97 @@ describe("process utils", () => {
     };
     expect(findCliExecutable("claude", env)).toBe(real);
   });
+
+  // An old native claude ahead of a current Homebrew one broke every Local thread.
+  it.skipIf(process.platform === "win32")(
+    "uses the newest Claude Code on the machine, but keeps an unknown wrapper first",
+    () => {
+      const home = mkdtempSync(join(tmpdir(), "claude-newest-"));
+      const install = (link: string, real: string, contents = "") => {
+        mkdirSync(join(home, link, ".."), { recursive: true });
+        mkdirSync(join(home, real, ".."), { recursive: true });
+        writeFileSync(join(home, real), contents, { mode: 0o755 });
+        symlinkSync(join(home, real), join(home, link));
+        return join(home, link);
+      };
+      const native = install(
+        ".local/bin/claude",
+        ".local/share/claude/versions/2.0.31",
+      );
+      // 99.x so a real claude elsewhere on this machine can't win.
+      const brew = install(
+        "brew/bin/claude",
+        "brew/Caskroom/claude-code/99.0.0/claude",
+      );
+      const npm = install(
+        "npm/bin/claude",
+        "npm/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+      );
+      writeFileSync(
+        join(
+          home,
+          "npm/lib/node_modules/@anthropic-ai/claude-code/package.json",
+        ),
+        JSON.stringify({ version: "99.1.0" }),
+      );
+      // An old npm copy under nodenv: its Node folder (199.x, above any real
+      // claude here) isn't Claude Code's version.
+      const nodenvPackage =
+        "nodenv/versions/199.0.0/lib/node_modules/@anthropic-ai/claude-code";
+      const nodenv = install(
+        "nodenv/bin/claude",
+        `${nodenvPackage}/bin/claude.exe`,
+      );
+      writeFileSync(
+        join(home, nodenvPackage, "package.json"),
+        JSON.stringify({ version: "1.0.0" }),
+      );
+      const dirs = (...files: string[]) =>
+        files.map((file) => join(file, "..")).join(delimiter);
+      expect(
+        findCliExecutable("claude", { HOME: home, PATH: dirs(native, brew) }),
+      ).toBe(brew);
+      expect(
+        findCliExecutable("claude", {
+          HOME: home,
+          PATH: dirs(native, brew, npm),
+        }),
+      ).toBe(npm);
+      expect(
+        findCliExecutable("claude", { HOME: home, PATH: dirs(brew, nodenv) }),
+      ).toBe(brew);
+      const wrapper = join(home, "wrapper", "claude");
+      mkdirSync(join(wrapper, ".."));
+      writeFileSync(wrapper, "#!/bin/sh\n", { mode: 0o755 });
+      expect(
+        findCliExecutable("claude", {
+          HOME: home,
+          PATH: dirs(wrapper, native, brew),
+        }),
+      ).toBe(wrapper);
+    },
+  );
+
+  // #1823: cmux's grok wrapper fails when the real Grok CLI is missing.
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "prefers ~/.grok/bin's grok over cmux.app's wrapper on PATH",
+    () => {
+      const home = mkdtempSync(join(tmpdir(), "grok-cmux-"));
+      const bin = join(home, "cmux.app", "Contents", "Resources", "bin");
+      const real = join(home, ".grok", "bin", "grok");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "grok"), "", { mode: 0o755 });
+      const env = { HOME: home, PATH: bin };
+      // A grok this machine keeps in /usr/local/bin or Homebrew also wins.
+      const elsewhere = findCliExecutable("grok", { HOME: home, PATH: "" });
+      expect(findCliExecutable("grok", env)).toBe(
+        elsewhere ?? join(bin, "grok"),
+      );
+      mkdirSync(join(real, ".."), { recursive: true });
+      writeFileSync(real, "", { mode: 0o755 });
+      expect(findCliExecutable("grok", env)).toBe(elsewhere ?? real);
+    },
+  );
 
   // #96: running a binary inside a flagged Codex.app gets the whole app moved to the Bin.
   it.skipIf(process.platform === "win32")(

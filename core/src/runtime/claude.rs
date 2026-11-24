@@ -12,7 +12,13 @@ use tokio::process::Command;
 
 /// How long a selected skill waits for a new thread's project copy before the agent is told to look for it.
 const SKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+/// The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+/// 20261117-113618). Never on commits. Local uses the same line: `PR_FOOTER` in the Claude Code plugin's bridge.
+const PR_FOOTER: &str = "Built with [Cloudroom](https://cloudroom.dev)";
 const INSTRUCTIONS: &str = "Cloudroom owns this cloud session. Ask clarifying questions in ordinary chat, not interactive tools. Start child threads with `room-cli thread spawn` (any harness and model; see `room-cli thread --help`); each gets its own sandbox with a copy of your code (add `--shared-sandbox` to run it in yours), shows under this thread, and Cloudroom messages you when it finishes. Do not use native subagents, workflows, or agent teams. Fast mode is unavailable. Rewinding changes conversation history only, never files.";
+
+/// User settings only and no MCP servers but Cloudroom's, as in `claude_login`.
+const PROBE_SOURCES: [&str; 3] = ["--setting-sources", "user", "--strict-mcp-config"];
 
 pub(super) fn uuid() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -35,28 +41,37 @@ pub(super) fn command(
     profile: &HarnessConfig,
     saved: Option<&Resume>,
     fork: Option<&str>,
-    guarded: bool,
-    strip_ai_co_authors: bool,
+    (guarded, strip_ai_co_authors): (bool, bool),
     system_prompt: Option<&str>,
+    probe: bool,
 ) -> io::Result<(Command, String)> {
     let id = match saved.filter(|_| fork.is_none()) {
         Some(saved) => saved.id.clone(),
         None => uuid()?,
     };
     // Claude keeps only the last `--settings`, so every setting goes in one, the Command Guard's hooks included.
-    let mut settings = json!({"fastMode": false, "enableWorkflows": false});
+    // `/loop` and `/schedule` run on Claude's own timers, which are blocked below.
+    let mut settings = json!({"fastMode": false, "enableWorkflows": false, "skillOverrides": {"loop": "off", "schedule": "off"}});
     if strip_ai_co_authors {
-        settings["attribution"] = json!({"commit": "", "pr": ""});
+        settings["attribution"] = json!({"commit": "", "pr": PR_FOOTER});
+    }
+    // A model-list probe runs no turn, so the user's SessionStart/SessionEnd hooks must not see it (#1014).
+    if probe {
+        settings["disableAllHooks"] = json!(true);
     }
     let settings = settings.to_string();
-    let mut command = if guarded {
+    let mut command = if guarded && !probe {
         super::command_guard::claude_command(config, profile, &settings)
     } else {
         let mut command = super::command(&profile.binary, config);
         command.args(["--settings", &settings]);
         command
     };
-    profile_env(&mut command, config, profile);
+    profile_env(&mut command, config, profile, false);
+    // A probe ignores the folder's own Claude settings and MCP servers: its env, helpers and hooks (#1958).
+    if probe {
+        command.args(PROBE_SOURCES);
+    }
     command
         .args([
             "-p",
@@ -68,8 +83,8 @@ pub(super) fn command(
             "--include-partial-messages",
             "--replay-user-messages",
             "--dangerously-skip-permissions",
-            "--permission-prompts",
-            "none",
+            "--permission-prompt-tool",
+            "stdio",
             "--no-chrome",
         ])
         .args([
@@ -82,7 +97,8 @@ pub(super) fn command(
         ])
         .args([
             "--disallowedTools",
-            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage",
+            // The last five are Claude's own timers: `room-cli wake` and loops replace them.
+            "AskUserQuestion,EnterPlanMode,ExitPlanMode,Agent,Task,Workflow,SendMessage,ScheduleWakeup,CronCreate,CronDelete,CronList,RemoteTrigger",
         ])
         .args([
             "--mcp-config",
@@ -114,29 +130,61 @@ pub(super) fn key_path(config: &Config) -> PathBuf {
     config.state_dir.join("claude-api-key")
 }
 
-/// Fingerprint of the login files `profile_env` reads, so a running agent can tell its login changed.
+/// Fingerprint of the login files `profile_env` reads, so a running agent can tell its login changed. The
+/// ANTHROPIC_ lines of the Cloud environment count too: an idle agent then restarts without a removed key (#1340).
 pub(super) fn login(config: &Config) -> u64 {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     fs::read(key_path(config)).ok().hash(&mut hasher);
     fs::read(token_path(config)).ok().hash(&mut hasher);
+    let environment = fs::read_to_string(config.state_dir.join("environment")).unwrap_or_default();
+    for line in environment
+        .lines()
+        .filter(|line| line.starts_with("ANTHROPIC_"))
+    {
+        line.hash(&mut hasher);
+    }
     hasher.finish()
 }
 
-pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &HarnessConfig) {
+/// Fingerprint of the cloud MCP sign-ins the website wrote. Claude connects MCP servers only at start, so a new
+/// sign-in restarts an idle agent before its next prompt (#1175). Token refreshes never change it.
+pub(super) fn mcp_login(config: &Config) -> u64 {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    fs::read(config.state_dir.join("claude-mcp-signins"))
+        .ok()
+        .hash(&mut hasher);
+    hasher.finish()
+}
+
+/// `shell` is a terminal: the user's own ANTHROPIC_ variables stay there for their apps.
+pub(super) fn profile_env(
+    command: &mut Command,
+    config: &Config,
+    profile: &HarnessConfig,
+    shell: bool,
+) {
     // Setting this even to ~/.claude relocates ~/.claude.json and hides native user settings.
     if profile.home != config.account_home.join(".claude") {
         command.env("CLAUDE_CONFIG_DIR", &profile.home);
     }
     // Cloudroom matches the Mac's Claude version (ADR 0133); Claude's own updater must not move it.
     command.env("DISABLE_AUTOUPDATER", "1");
-    // Claude prefers an API key over a subscription token, so pass only one.
+    // Claude prefers an API key over a subscription token, so pass only one. A key the user saved in Cloud
+    // environment settings for their app must not replace the login saved here either (#1340).
     let key = fs::read_to_string(key_path(config)).unwrap_or_default();
     if !key.trim().is_empty() {
+        if !shell {
+            hide_app_keys(command);
+        }
         command.env("ANTHROPIC_API_KEY", key.trim());
     } else if let Ok(saved) = fs::read_to_string(token_path(config)) {
         let mut lines = saved.lines().map(str::trim);
         if let Some(token) = lines.next().filter(|s| !s.is_empty()) {
+            if !shell {
+                hide_app_keys(command);
+            }
             command.env("CLAUDE_CODE_OAUTH_TOKEN", token);
         }
         // Without the plan, Claude hides plan-only models such as Opus 1M.
@@ -146,12 +194,53 @@ pub(super) fn profile_env(command: &mut Command, config: &Config, profile: &Harn
     }
 }
 
-pub(super) async fn auth_ready(config: &Config) -> io::Result<bool> {
-    let (code, value) = run_json(config, &["auth", "status", "--json"], 10).await?;
-    match (code, value["loggedIn"].as_bool()) {
+/// Claude bills an Anthropic key from its environment before the login saved here, so the user's own keys from
+/// Cloud environment settings move to CLOUDROOM_APP_ names Claude doesn't read. Core's agent-shell hook and its Node
+/// and Python preloads move them back in the commands and MCP servers Claude runs, so the user's app keeps its key
+/// (#1340). Without them (no helpers, or the user's own CLAUDE_ENV_FILE), nothing moves. CLAUDECODE marks Claude's
+/// children, so a CLAUDECODE from Cloud environment settings never reaches Claude itself.
+fn hide_app_keys(command: &mut Command) {
+    let get = |command: &Command, name: &str| {
+        let mut envs = command.as_std().get_envs();
+        envs.find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(ToOwned::to_owned))
+    };
+    // The helpers bring CLAUDE_ENV_FILE, NODE_OPTIONS and PYTHONPATH together. The user's own NODE_OPTIONS and
+    // PYTHONPATH keep Core's ahead (`super::command`); their own CLAUDE_ENV_FILE replaces Core's.
+    let hook = super::linux::agent_env()
+        .iter()
+        .find(|(name, _)| *name == "CLAUDE_ENV_FILE");
+    if hook.is_none_or(|(_, hook)| {
+        get(command, "CLAUDE_ENV_FILE").is_none_or(|own| own != hook.as_str())
+    }) {
+        return;
+    }
+    command.env_remove("CLAUDECODE");
+    for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"] {
+        if let Some(value) = get(command, name) {
+            command
+                .env(format!("CLOUDROOM_APP_{name}"), value)
+                .env_remove(name);
+        }
+    }
+}
+
+/// Logged in or out, or why `auth status` gave no answer: a reason word, never Claude's own output (#1222).
+pub(super) async fn auth_ready(config: &Config) -> Result<bool, &'static str> {
+    let (code, bytes) = run_output(config, &["auth", "status", "--json"], 10)
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => "check_timeout",
+            _ => "check_failed",
+        })?;
+    let logged_in = serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|value| value["loggedIn"].as_bool());
+    match (code, logged_in) {
         (Some(0), Some(true)) => Ok(true),
         (Some(1), Some(false)) => Ok(false),
-        _ => Err(io::Error::other("invalid Claude account response")),
+        (Some(0 | 1), _) => Err("check_bad_response"),
+        _ => Err("check_bad_exit"),
     }
 }
 
@@ -169,7 +258,10 @@ pub(super) async fn probe(config: &Config, model: &str, reasoning: Option<&str>)
         "--no-session-persistence",
         "--tools",
         "",
+        "--settings",
+        r#"{"disableAllHooks":true}"#,
     ];
+    args.extend(PROBE_SOURCES);
     if let Some(effort) = reasoning.filter(|effort| *effort != "none") {
         args.extend(["--effort", effort]);
     }
@@ -207,7 +299,7 @@ pub(super) async fn run_output(
         .get(&super::Kind::Claude)
         .ok_or_else(|| io::Error::other("Claude is not configured"))?;
     let mut command = super::command(&profile.binary, config);
-    profile_env(&mut command, config, profile);
+    profile_env(&mut command, config, profile, false);
     command.args(args).stderr(std::process::Stdio::null());
     let group = config
         .storage
@@ -273,6 +365,7 @@ pub(super) fn model_catalog(value: &Value) -> io::Result<Vec<super::Model>> {
                 models.push(super::Model {
                     model: name.into(),
                     reasoning_levels: levels.clone(),
+                    service_tiers: Vec::new(),
                 });
             }
         }
@@ -285,19 +378,23 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     // `none` runs any model without an effort override; a start picks it for a model without effort (#1059).
     if let Some(reasoning) = handle.reasoning.as_deref().filter(|r| *r != "none") {
         let models = model_catalog(&info)?;
-        super::supports(
-            super::Kind::Claude,
-            &models,
-            &handle.profile.model,
-            reasoning,
-        )
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        handle
-            .call(
-                "apply_flag_settings",
-                json!({"settings":{"effortLevel":reasoning,"fastMode":false}}),
-            )
-            .await?;
+        let model = &handle.profile.model;
+        let level = match super::supports(super::Kind::Claude, &models, model, reasoning) {
+            Ok(()) => Some(reasoning.to_owned()),
+            Err(error) if handle.resume.is_none() => {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
+            }
+            // A resume never fails on an effort its model doesn't take: it runs the nearest one.
+            Err(_) => super::fit_reasoning(super::Kind::Claude, &models, model, reasoning),
+        };
+        if let Some(level) = level.filter(|level| level != "none") {
+            handle
+                .call(
+                    "apply_flag_settings",
+                    json!({"settings":{"effortLevel":level,"fastMode":false}}),
+                )
+                .await?;
+        }
     }
     handle
         .call(
@@ -337,6 +434,21 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
     if !warnings.is_empty() {
         crate::workspace::files::settle(&handle.repository, SKILL_WAIT).await;
         (text, warnings) = expand().await.map_err(io::Error::other)??;
+    }
+    // A model picked since the last prompt runs from this one on, in the same session, as Local's Claude does.
+    if let Some(model) = input["model"].as_str()
+        && model != handle.live_model()
+    {
+        handle
+            .call("set_model", json!({"model":model}))
+            .await
+            .map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Claude could not switch to {model}: {error}"),
+                )
+            })?;
+        handle.set_live_model(model);
     }
     let mut settings = json!({"fastMode":false,"effortLevel":null});
     if let Some(reasoning) = input["reasoning"].as_str().or(handle.reasoning.as_deref()) {
@@ -518,23 +630,30 @@ pub(super) fn fork_source(handle: &Handle, before: &str) -> io::Result<(Resume, 
     let id = handle.native()?;
     let path = transcript(&handle.profile, &id)?;
     let saved = resume(handle, id, path);
-    let parent = checkpoint_parent(&handle.profile, &saved, before, handle.file_identity)?;
+    let parent = fork_checkpoint(&handle.profile, &saved, before, handle.file_identity, false)?;
     Ok((saved, parent))
 }
 
-/// The message a fork of `saved` resumes at: the saved parent of user message `before`.
-pub(super) fn checkpoint_parent(
+/// Resolve an inclusive assistant message or the parent of a user rewind point.
+pub(super) fn fork_checkpoint(
     profile: &HarnessConfig,
     saved: &Resume,
-    before: &str,
+    checkpoint: &str,
     identity: files::Identity,
+    inclusive: bool,
 ) -> io::Result<String> {
     let file = validate(profile, &saved.path, &saved.id, identity)?;
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(0))?;
     while let Some(raw) = next_line(&mut reader)? {
         let value: Value = serde_json::from_str(&raw)?;
-        if value["uuid"] == before && value["type"] == "user" && value["isMeta"] != true {
+        if value["uuid"] != checkpoint {
+            continue;
+        }
+        if inclusive && value["type"] == "assistant" && value["isSidechain"] != true {
+            return Ok(checkpoint.to_owned());
+        }
+        if !inclusive && value["type"] == "user" && value["isMeta"] != true {
             let parent = value["parentUuid"].as_str().ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
@@ -574,6 +693,8 @@ pub(super) struct Protocol {
     compacted: bool,
     bootstrapped: bool,
     close_confirmed: bool,
+    // Core asked Claude to stop (`close`): a turn this cuts ends with Claude's opaque `[ede_diagnostic]` (#1967).
+    closing: bool,
     last_result_failed: bool,
     // Claude's plan limit rejected this turn: when it resets, if Claude said (ms), and whether it is the account's
     // (not one model's own window).
@@ -617,6 +738,7 @@ impl Protocol {
             compacted: false,
             bootstrapped: false,
             close_confirmed: false,
+            closing: false,
             last_result_failed: false,
             limit: None,
             credits: None,
@@ -806,6 +928,12 @@ impl Adapter for Protocol {
                     .push(Self::reply_control(id, json!({"continue":true})));
                 return Ok(events);
             }
+            // Full access, like a Local thread: allow what a Claude ask rule would prompt for. The Command Guard's hook denies first.
+            if value["request"]["subtype"] == "can_use_tool" {
+                let allow = json!({"behavior":"allow","updatedInput":value["request"]["input"]});
+                self.pending_frames.push(Self::reply_control(id, allow));
+                return Ok(events);
+            }
             let response = if value["request"]["subtype"] == "hook_callback" {
                 json!({"continue":false,"stopReason":"Native Claude subagents are disabled. Start a managed child thread with `room-cli thread spawn`."})
             } else {
@@ -901,6 +1029,12 @@ impl Adapter for Protocol {
                 });
             }
         }
+        // Claude's whole list of background tasks, sent on each change. A count of processes can miss them (#1216).
+        if kind == "system" && value["subtype"] == "background_tasks_changed" {
+            let mut tasks = value["tasks"].as_array().into_iter().flatten();
+            let running = tasks.any(|task| task["task_type"] == "local_bash");
+            events.push(Event::Background { running });
+        }
         if kind == "system" && value["subtype"] == "compact_boundary" {
             self.compacted = true;
             self.context = value["compact_metadata"]["post_tokens"].as_u64();
@@ -926,6 +1060,48 @@ impl Adapter for Protocol {
             events.extend(state.started());
         }
         let request = self.active.as_ref().map(|(_, id)| id.clone());
+        // Claude's safeguards flagged a message and Claude retried on another model, kept for the rest of this run
+        // (`local`: this reply only). The thread's chosen model stays for its next run; this says which model answered.
+        if kind == "system"
+            && value["subtype"] == "model_refusal_fallback"
+            && let Some(model) = value["fallback_model"].as_str()
+        {
+            let span = if value["scope"] == "local" {
+                "this reply"
+            } else {
+                "the rest of this run"
+            };
+            events.push(Event::Record {
+                kind: "model_fallback",
+                data: json!({"harness":"claude-code","request_id":request,"original_model":value["original_model"],
+                    "fallback_model":model,"message":format!("Claude switched to {model} for {span}.")}),
+                native: None,
+            });
+        }
+        // Claude sends the transcript UUID on the assistant frame, adjacent to the streamed
+        // block's stop. Only a whole, root text message is an independent fork point.
+        let checkpoint = (kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["error"].is_null()
+            && value["isReplay"] != true)
+            .then(|| value["uuid"].as_str())
+            .flatten()
+            .filter(|id| !id.is_empty());
+        if let Some(uuid) = checkpoint
+            && value["message"]["id"] == self.message_id
+            && let Some([block]) = value["message"]["content"].as_array().map(Vec::as_slice)
+            && block["type"] == "text"
+        {
+            let mut candidates = self
+                .blocks
+                .values_mut()
+                .filter(|item| item["item_type"] == "text" && item["text"] == block["text"]);
+            if let Some(item) = candidates.next()
+                && candidates.next().is_none()
+            {
+                item["provider_checkpoint_id"] = json!(uuid);
+            }
+        }
         let mut data = json!({"harness":"claude-code","type":kind,"request_id":request});
         let mut keep = true;
         let event_kind = if kind == "stream_event" {
@@ -1019,6 +1195,19 @@ impl Adapter for Protocol {
         {
             events.push(Event::Authentication { accepted: false });
         }
+        // Claude Code only emits `rate_limit_event` when rate-limit state changes and throttles repeat rejections
+        // for 30s, so a back-to-back limited turn reports the limit only on its assistant/result error frames.
+        if kind == "assistant"
+            && value["parent_tool_use_id"].is_null()
+            && value["isReplay"] != true
+            && value["api_error"] == "usage_limit_reached"
+        {
+            self.limit = merge_limit(self.limit, &value["api_error_params"]["rate_limit_info"]);
+            if self.limit.is_some() {
+                self.overage = None;
+                self.plan_ok_sent = false;
+            }
+        }
         if kind == "assistant"
             && let Some(tokens) = prompt_tokens(&value["message"]["usage"])
             && tokens > 0
@@ -1050,13 +1239,19 @@ impl Adapter for Protocol {
                     if let Some(name) = block["name"].as_str() {
                         self.track(&id, name);
                     }
-                    let part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
+                    let mut part = json!({"harness":"claude-code","request_id":request,"item_id":id,"item_type":block["type"],"text":block.get("text").or_else(||block.get("thinking")),"tool_name":block["name"],"input":block["input"]});
                     events.push(Event::Record {
                         kind: "item_started",
                         data: part.clone(),
                         native: None,
                     });
                     if block["type"] != "tool_use" {
+                        if block["type"] == "text"
+                            && content.len() == 1
+                            && let Some(uuid) = checkpoint
+                        {
+                            part["provider_checkpoint_id"] = json!(uuid);
+                        }
                         events.push(Event::Record {
                             kind: "item_completed",
                             data: part,
@@ -1100,8 +1295,11 @@ impl Adapter for Protocol {
         let account_wide = info["rateLimitType"]
             .as_str()
             .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
-        if kind == "rate_limit_event" && info["status"] == "rejected" && !overage {
-            self.limit = Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide));
+        if kind == "rate_limit_event"
+            && info["status"] == "rejected"
+            && let Some(limit) = limit_window(info)
+        {
+            self.limit = Some(limit);
             // The plan coming back after this limit is news again.
             self.overage = None;
             self.plan_ok_sent = false;
@@ -1155,6 +1353,8 @@ impl Adapter for Protocol {
             }
         }
         if kind == "result" {
+            // Clear any armed limit on every result so interrupted or unmatched turns never leak into the next turn.
+            let mut pending_limit = self.limit.take();
             // The next turn, prompted or Claude's own, hears about credits again.
             self.recheck = true;
             self.last_result_failed = value["is_error"] == true;
@@ -1216,9 +1416,21 @@ impl Adapter for Protocol {
                 {
                     events.push(Event::Authentication { accepted: true });
                 }
-                let mut error = (status == "failed").then(|| result_error(value));
-                if let (Some((resets, account_wide)), Some(text)) = (self.limit.take(), &mut error)
-                {
+                // Claude's other errors stay its own; its raw result stays in history either way.
+                let cut = self.closing && value["subtype"] == "error_during_execution";
+                let mut error = (status == "failed").then(|| {
+                    if cut {
+                        "Cloudroom stopped Claude mid-turn, for example to restart its sandbox"
+                            .into()
+                    } else {
+                        result_error(value)
+                    }
+                });
+                if error.is_some() && value["api_error"] == "usage_limit_reached" {
+                    pending_limit =
+                        merge_limit(pending_limit, &value["api_error_params"]["rate_limit_info"]);
+                }
+                if let (Some((resets, account_wide)), Some(text)) = (pending_limit, &mut error) {
                     let mut limited = super::plan_limited("claude-code", resets);
                     if let Event::Record { data, .. } = &mut limited
                         && !account_wide
@@ -1291,6 +1503,7 @@ impl Adapter for Protocol {
         self.capture.more
     }
     fn close(&mut self) -> Vec<Value> {
+        self.closing = true;
         vec![
             json!({"type":"control_request","request_id":"close","request":{"subtype":"interrupt","cancel_queued":true}}),
         ]
@@ -1305,6 +1518,39 @@ impl Adapter for Protocol {
         // Claude preserves the last failed turn's exit code after an acknowledged shutdown.
         code == Some(0) || (self.close_confirmed && self.last_result_failed && code == Some(1))
     }
+}
+
+/// Read `resetsAt` and account-wide scope from a `rate_limit_info` payload, returning `None` when overage covers it.
+/// Only an account-wide window (`five_hour`, `seven_day`, `overage`, or none named) is the account's plan;
+/// a model's own window (such as `seven_day_fable` or `seven_day_opus`) is not.
+fn limit_window(info: &Value) -> Option<(Option<u64>, bool)> {
+    let overage = matches!(
+        info["overageStatus"].as_str(),
+        Some("allowed" | "allowed_warning")
+    );
+    if overage {
+        return None;
+    }
+    let account_wide = info["rateLimitType"]
+        .as_str()
+        .is_none_or(|kind| matches!(kind, "five_hour" | "seven_day" | "overage"));
+    Some((info["resetsAt"].as_u64().map(|s| s * 1000), account_wide))
+}
+
+/// Add one limit frame to what this turn already knows. A frame that names no window keeps the known scope, and one
+/// without a reset keeps the known reset, so a sparse repeat never widens a model's limit to the whole account.
+fn merge_limit(known: Option<(Option<u64>, bool)>, info: &Value) -> Option<(Option<u64>, bool)> {
+    let Some((resets, account_wide)) = limit_window(info) else {
+        return known;
+    };
+    let Some((known_resets, known_wide)) = known else {
+        return Some((resets, account_wide));
+    };
+    let named = info["rateLimitType"].is_string();
+    Some((
+        resets.or(known_resets),
+        if named { account_wide } else { known_wide },
+    ))
 }
 
 /// Claude's own words for a failed turn, so receipts show the real cause (ADR 0123).
@@ -1458,6 +1704,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn only_a_probe_skips_the_folders_own_claude_settings() {
+        let home = std::env::temp_dir().join("cloudroom-test-1958");
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: home.clone(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let config = Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: "t".repeat(32),
+            state_dir: home.clone(),
+            repository: home.clone(),
+            api_url: None,
+            store: "test".into(),
+            instance: None,
+            account_home: home,
+            default_harness: super::super::Kind::Claude,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: std::time::Duration::from_secs(1),
+            diagnostic_upload: std::time::Duration::from_secs(1),
+            previous_exit_wait: std::time::Duration::ZERO,
+        };
+        let args = |probe| {
+            let (command, _) =
+                command(&config, &profile, None, None, (false, false), None, probe).unwrap();
+            let args: Vec<_> = command.as_std().get_args().map(|a| a.to_owned()).collect();
+            args.windows(3).any(|w| w == PROBE_SOURCES)
+        };
+        assert!(args(true));
+        assert!(!args(false));
+    }
+
+    #[test]
     fn a_forked_skill_subagent_runs_but_other_subagents_still_fail() {
         let profile = HarnessConfig {
             binary: "claude".into(),
@@ -1480,5 +1761,186 @@ mod tests {
         assert!(feed(child("other")).is_err());
         feed(json!({"type":"user","session_id":"s","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"skill","content":"done"}]}})).unwrap();
         assert!(feed(child("skill")).is_err());
+        // A project ask rule must not stall a Cloud thread: nobody can answer the prompt (#1077).
+        let ask =
+            json!({"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"git push"}});
+        feed(json!({"type":"control_request","request_id":"ask","request":ask})).unwrap();
+        assert_eq!(
+            claude.pending_frames[0]["response"]["response"],
+            json!({"behavior":"allow","updatedInput":{"command":"git push"}})
+        );
+    }
+
+    #[test]
+    fn a_refusal_fallback_records_the_model_that_answered() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "claude-opus-5-5".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        let mut state = Progress::default();
+        let fallback = |scope| json!({"type":"system","subtype":"model_refusal_fallback","scope":scope,"original_model":"claude-opus-5-5","fallback_model":"claude-opus-4-8"});
+        for (frame, expected) in [
+            (fallback("session"), Some("for the rest of this run.")),
+            (fallback("local"), Some("for this reply.")),
+            (json!({"type":"system","subtype":"status"}), None),
+        ] {
+            let events = claude.receive(&frame, frame.to_string(), &mut state);
+            let notice = events.unwrap().into_iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "model_fallback",
+                    data,
+                    ..
+                } => Some(data),
+                _ => None,
+            });
+            let expected = expected.map(|span| {
+                json!([
+                    "claude-opus-4-8",
+                    format!("Claude switched to claude-opus-4-8 {span}")
+                ])
+            });
+            assert_eq!(
+                notice.map(|d| json!([d["fallback_model"], d["message"]])),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_real_usage_limit_marks_the_turn_plan_limited() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        // One failed turn's frames, ending with its result. Returns (usage_limited, error).
+        fn turn(claude: &mut Protocol, frames: Vec<Value>) -> (Option<Value>, String) {
+            claude.active = Some(("u".into(), "r".into()));
+            let mut state = Progress {
+                request: Some("r".into()),
+                ..Default::default()
+            };
+            let mut events = Vec::new();
+            for frame in frames {
+                events.extend(
+                    claude
+                        .receive(&frame, frame.to_string(), &mut state)
+                        .unwrap(),
+                );
+            }
+            let limited = events.iter().find_map(|event| match event {
+                Event::Record {
+                    kind: "usage_limited",
+                    data,
+                    ..
+                } => Some(data.clone()),
+                _ => None,
+            });
+            let error = events.iter().find_map(|event| match event {
+                Event::Finished { error, .. } => error.clone(),
+                _ => None,
+            });
+            (limited, error.unwrap_or_default())
+        }
+        let info = |extra: Value| {
+            let mut info = json!({"rateLimitType":"seven_day_fable","resetsAt":2_000_000_000u64});
+            info.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            json!({"rate_limit_info":info})
+        };
+        let assistant = |error: Value, params: Value, text: &str| json!({"type":"assistant","session_id":"s","parent_tool_use_id":null,"error":"rate_limit","api_error":error,"api_error_params":params,"message":{"content":[{"type":"text","text":text}]}});
+        let failed = |text: &str| json!({"type":"result","session_id":"s","subtype":"success","is_error":true,"result":text,"user_message_uuid":"u"});
+
+        // A repeat limit sends no rate_limit_event, only `api_error` on its frames; a model window stays model-only,
+        // even when `status` is missing.
+        for params in [info(json!({"status":"rejected"})), info(json!({}))] {
+            let (limited, error) = turn(
+                &mut claude,
+                vec![
+                    assistant(
+                        json!("usage_limit_reached"),
+                        params,
+                        "You've hit your Fable limit",
+                    ),
+                    failed("You've hit your Fable limit"),
+                ],
+            );
+            let limited = limited.expect("a repeat limit is a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
+            assert!(error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // Temporary throttles share `error: "rate_limit"` but never send `api_error`: not a plan limit.
+        for text in [
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            "Opus is experiencing high load, please use /model to switch to Sonnet",
+        ] {
+            let (limited, error) = turn(
+                &mut claude,
+                vec![assistant(Value::Null, Value::Null, text), failed(text)],
+            );
+            assert!(limited.is_none(), "{text}");
+            assert!(!error.contains(super::super::PLAN_LIMIT), "{error}");
+        }
+        // A limit armed before an unmatched (interrupted) result never labels the next unrelated failure.
+        claude.limit = Some((None, true));
+        let other = json!({"type":"result","session_id":"s","subtype":"error_during_execution","is_error":true,"user_message_uuid":"other"});
+        claude
+            .receive(&other, other.to_string(), &mut Progress::default())
+            .unwrap();
+        let (limited, _) = turn(&mut claude, vec![failed("boom")]);
+        assert!(limited.is_none());
+        // A sparse frame never widens a known Fable limit or drops its reset, whichever comes first.
+        let limit = json!("usage_limit_reached");
+        let fable = info(json!({"status":"rejected"}));
+        let mut detailed_result = failed("You've hit your Fable limit");
+        detailed_result["api_error"] = limit.clone();
+        detailed_result["api_error_params"] = fable.clone();
+        for frames in [
+            vec![
+                json!({"type":"rate_limit_event","rate_limit_info":fable["rate_limit_info"]}),
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                failed("You've hit your Fable limit"),
+            ],
+            vec![
+                assistant(limit.clone(), json!({}), "You've hit your Fable limit"),
+                detailed_result,
+            ],
+        ] {
+            let (limited, _) = turn(&mut claude, frames);
+            let limited = limited.expect("still a plan limit");
+            assert_eq!(limited["model_only"], json!(true));
+            assert_eq!(limited["resets_at_ms"], json!(2_000_000_000_000u64));
+        }
+    }
+
+    #[test]
+    fn only_listed_background_bash_keeps_the_agent_awake() {
+        let profile = HarnessConfig {
+            binary: "claude".into(),
+            home: "/nonexistent".into(),
+            model: "haiku".into(),
+            provider: None,
+        };
+        let mut claude = Protocol::new(&profile, "s".into(), None, None).unwrap();
+        for (tasks, running) in [
+            (json!([{"task_id":"b1","task_type":"local_bash"}]), true),
+            (json!([]), false),
+            (json!([{"task_id":"m1","task_type":"monitor"}]), false),
+        ] {
+            let frame = json!({"type":"system","subtype":"background_tasks_changed","tasks":tasks});
+            let events = claude.receive(&frame, frame.to_string(), &mut Progress::default());
+            let found = events.unwrap().into_iter().find_map(|event| match event {
+                Event::Background { running } => Some(running),
+                _ => None,
+            });
+            assert_eq!(found, Some(running), "{tasks}");
+        }
     }
 }

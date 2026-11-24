@@ -66,6 +66,9 @@ function runGitIgnoredMatchingStatus(
     execFile(
       "git",
       [
+        // A checkout's `core.fsmonitor` would run its program on every automatic status (#2189).
+        "-c",
+        "core.fsmonitor=false",
         "--no-optional-locks",
         "status",
         "--porcelain=v1",
@@ -78,6 +81,7 @@ function runGitIgnoredMatchingStatus(
         encoding: "utf8",
         maxBuffer: WORKSPACE_ROOT_IGNORE_STATUS_MAX_BUFFER_BYTES,
         timeout: WORKSPACE_ROOT_IGNORE_STATUS_TIMEOUT_MS,
+        windowsHide: true,
       },
       (error, stdout) => {
         if (error) {

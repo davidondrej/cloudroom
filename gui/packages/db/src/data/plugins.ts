@@ -1,6 +1,10 @@
 import { and, eq, isNull } from "drizzle-orm";
+import {
+  stripGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "@cloudroom/domain";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
-import { installedPlugins, pluginArtifacts } from "../schema.js";
+import { installedPlugins, pluginArtifacts, pluginSettings } from "../schema.js";
 
 export type PluginProvenance =
   | { kind: "builtin" }
@@ -188,6 +192,29 @@ function normalizedColumns(
   } as const;
 }
 
+// Rows saved before #1935 can hold Git URLs with a username or token. Strip
+// them on read so they never reach git argv, update details, or the API.
+// A plugin source can also be `git:user:TOKEN@host/repo@ref`.
+export function stripPluginGitUrlCredentials(value: string): string {
+  return stripGitUrlCredentials(value).replace(/^git:[^/?#\\]*@/iu, "git:");
+}
+export { stripTextGitUrlCredentials };
+
+function withoutGitUrlCredentials(row: InstalledPluginRow): InstalledPluginRow {
+  return {
+    ...row,
+    source: stripPluginGitUrlCredentials(row.source),
+    sourceGitUrl:
+      row.sourceGitUrl && stripPluginGitUrlCredentials(row.sourceGitUrl),
+    updateStatusDetail:
+      row.updateStatusDetail &&
+      stripTextGitUrlCredentials(row.updateStatusDetail),
+    lastFailureDetail:
+      row.lastFailureDetail &&
+      stripTextGitUrlCredentials(row.lastFailureDetail),
+  };
+}
+
 export function listInstalledPlugins(db: DbConnection): InstalledPluginRow[] {
   return db
     .select({ plugin: installedPlugins, artifactPath: pluginArtifacts.path })
@@ -198,13 +225,15 @@ export function listInstalledPlugins(db: DbConnection): InstalledPluginRow[] {
     )
     .where(isNull(installedPlugins.removedAt))
     .all()
-    .map(({ plugin, artifactPath }) => ({
-      ...plugin,
-      rootDir:
-        plugin.activeArtifactId !== null && artifactPath !== null
-          ? artifactPath
-          : plugin.rootDir,
-    }));
+    .map(({ plugin, artifactPath }) =>
+      withoutGitUrlCredentials({
+        ...plugin,
+        rootDir:
+          plugin.activeArtifactId !== null && artifactPath !== null
+            ? artifactPath
+            : plugin.rootDir,
+      }),
+    );
 }
 
 export function getInstalledPlugin(
@@ -221,20 +250,25 @@ export function getInstalledPlugin(
     .where(and(eq(installedPlugins.id, id), isNull(installedPlugins.removedAt)))
     .get();
   if (result === undefined) return undefined;
-  return {
+  return withoutGitUrlCredentials({
     ...result.plugin,
     rootDir:
       result.plugin.activeArtifactId !== null && result.artifactPath !== null
         ? result.artifactPath
         : result.plugin.rootDir,
-  };
+  });
 }
 
 export function getInstalledPluginRegistration(
   db: DbConnection,
   id: string,
 ): InstalledPluginRow | undefined {
-  return db.select().from(installedPlugins).where(eq(installedPlugins.id, id)).get();
+  const row = db
+    .select()
+    .from(installedPlugins)
+    .where(eq(installedPlugins.id, id))
+    .get();
+  return row && withoutGitUrlCredentials(row);
 }
 
 export function listUnnormalizedPluginRegistrations(
@@ -250,7 +284,8 @@ export function listUnnormalizedPluginRegistrations(
     })
     .from(installedPlugins)
     .where(eq(installedPlugins.normalizationVersion, 0))
-    .all();
+    .all()
+    .map((row) => ({ ...row, source: stripPluginGitUrlCredentials(row.source) }));
 }
 
 export function normalizeInstalledPluginRegistration(
@@ -417,6 +452,47 @@ export function setInstalledPluginSourceClassification(
     )
     .run();
   return result.changes > 0;
+}
+
+/**
+ * Move a built-in plugin to a new id, keeping whether it is on, whether it was
+ * removed, and its settings. Does nothing when there is no old row or the new
+ * id is already installed, so it is safe to run on every start.
+ */
+export function renameBuiltinPlugin(
+  db: DbConnection,
+  args: { from: string; to: string; settingKeys?: Record<string, string> },
+): boolean {
+  const { from, to } = args;
+  return db.transaction((tx) => {
+    const rowWithId = (id: string) =>
+      tx
+        .select({ source: installedPlugins.source })
+        .from(installedPlugins)
+        .where(eq(installedPlugins.id, id))
+        .get();
+    if (rowWithId(from)?.source !== `builtin:${from}` || rowWithId(to)) {
+      return false;
+    }
+    tx.update(installedPlugins)
+      .set({ id: to, source: `builtin:${to}`, sourceBuiltinName: to })
+      .where(eq(installedPlugins.id, from))
+      .run();
+    tx.delete(pluginSettings).where(eq(pluginSettings.pluginId, to)).run();
+    tx.update(pluginSettings)
+      .set({ pluginId: to })
+      .where(eq(pluginSettings.pluginId, from))
+      .run();
+    for (const [oldKey, newKey] of Object.entries(args.settingKeys ?? {})) {
+      tx.update(pluginSettings)
+        .set({ key: newKey })
+        .where(
+          and(eq(pluginSettings.pluginId, to), eq(pluginSettings.key, oldKey)),
+        )
+        .run();
+    }
+    return true;
+  });
 }
 
 export function deleteInstalledPlugin(db: DbConnection, id: string): boolean {

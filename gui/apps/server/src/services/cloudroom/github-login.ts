@@ -11,17 +11,26 @@ import { copyMacGithub, setCopyMacGithub } from "./sync.js";
 const GITHUB_OAUTH_CLIENT_ID = "Ov23li9OTKaEYO6RAHos";
 // Sandboxes run `gh auth login --with-token`, which rejects tokens without read:org.
 const SCOPE = "repo read:org workflow";
+// Cloudroom's GitHub App "Cloudroom Agents" (docs/external/github.md), for people who give Cloud only the repos they
+// pick (#2084). Its login is the same device flow with this Client ID and no scope: the token reaches a repo only once
+// the app is installed on it, which the person does on `install`. An OAuth App's `repo` scope always means every repo.
+const GITHUB_APP = { clientId: "Iv23lilRDA0DFyES7mNr", install: "https://github.com/apps/cloudroom-agents/installations/new" };
+const PICK_REPOS_MS = 15 * 60_000;
 const idle: CodexAuthStatus = { state: "missing", email: null, plan: null, message: null, login_id: null, verification_url: null, user_code: null };
 const codeSchema = z.object({ device_code: z.string().min(1).max(256), user_code: z.string().regex(/^[A-Z0-9-]{1,32}$/), verification_uri: z.string().startsWith("https://github.com/"), expires_in: z.number().positive(), interval: z.number().positive() });
 
 type Login = { id: string; abort: AbortController; status: CodexAuthStatus | null };
 let login: Login | null = null;
 let failure: CodexAuthStatus | null = null;
+// A failed switch (to picked repos, or another account) leaves the older login working. The card still says what
+// failed, for this long.
+let failedAt = 0;
+const FAILURE_SHOWN_MS = 10 * 60_000;
 
 async function github(path: string, form: Record<string, string>, signal: AbortSignal): Promise<Record<string, unknown>> {
   const response = await fetch(`https://github.com/${path}`, {
     method: "POST", redirect: "error", headers: { Accept: "application/json" },
-    body: new URLSearchParams({ client_id: GITHUB_OAUTH_CLIENT_ID, ...form }), signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+    body: new URLSearchParams(form), signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
   });
   return z.record(z.string(), z.unknown()).parse(await response.json());
 }
@@ -34,16 +43,18 @@ export function cancelGithubLogin(): void {
   failure = null;
 }
 
-/** GitHub's device flow for cloud sandboxes, for Macs without `gh`. The token goes to the website only, like a copied `gh` login. */
-export async function githubAuth(deps: AppDeps, action?: "login" | "cancel", requestId = ""): Promise<CodexAuthStatus> {
-  if (action === "login") return start(deps, requestId);
+/** GitHub's device flow for cloud sandboxes, for Macs without `gh`. The token goes to the website only, like a copied `gh` login.
+ *  With `repos`, the login is the GitHub App's, and it waits for the person to pick repos on GitHub. */
+export async function githubAuth(deps: AppDeps, action?: "login" | "cancel", requestId = "", repos = false): Promise<CodexAuthStatus> {
+  if (action === "login") return start(deps, requestId, repos);
   if (action === "cancel" && login?.id === requestId) cancelGithubLogin();
   if (login?.status) return login.status;
-  if (await macGithub(deps)) return { ...idle, state: "connected" };
+  const connected: CodexAuthStatus = { ...idle, state: "connected", message: failure && Date.now() - failedAt < FAILURE_SHOWN_MS ? failure.message : null };
+  if (await macGithub(deps)) return connected;
   const logins = await cloudroom(deps).sandboxes.logins().catch((error: unknown) => {
     throw new ApiError(503, "github_auth_unavailable", error instanceof Error ? error.message : String(error));
   });
-  return logins.github ? { ...idle, state: "connected" } : failure ?? idle;
+  return logins.github ? connected : failure ?? idle;
 }
 
 /** This Mac's `gh` token while it is the one copied to cloud sandboxes, else "". */
@@ -52,10 +63,13 @@ const macGithub = async (deps: AppDeps) => await copyMacGithub(deps) ? macGithub
 /** The GitHub account cloud sandboxes use, or null when it can't be told. */
 export async function githubAccount(deps: AppDeps): Promise<GithubAccount | null> {
   const token = await macGithub(deps);
-  if (!token) return cloudroom(deps).sandboxes.githubAccount().catch(() => null);
-  const response = await fetch("https://api.github.com/user", {
+  const saved = () => cloudroom(deps).sandboxes.githubAccount().catch(() => null);
+  if (!token) return saved();
+  // The website keeps a picked-repos login over a copied `gh` login, so that one is what Cloud uses.
+  const [picked, response] = await Promise.all([saved(), fetch("https://api.github.com/user", {
     headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000),
-  }).catch(() => null);
+  }).catch(() => null)]);
+  if (picked?.reposUrl) return picked;
   const user = response?.ok ? z.object({ login: z.string(), name: z.string().nullable(), avatar_url: z.string().nullable() }).safeParse(await response.json()) : null;
   return user?.success ? githubAccountSchema.parse({ login: user.data.login, name: user.data.name, avatarUrl: user.data.avatar_url }) : null;
 }
@@ -72,7 +86,7 @@ export async function disconnectGithub(deps: AppDeps): Promise<void> {
   });
 }
 
-async function start(deps: AppDeps, requestId: string): Promise<CodexAuthStatus> {
+async function start(deps: AppDeps, requestId: string, repos: boolean): Promise<CodexAuthStatus> {
   if (GITHUB_OAUTH_CLIENT_ID.startsWith("REPLACE_WITH")) throw new ApiError(409, "github_auth_unsupported", "Connecting GitHub is not set up in this version of Cloudroom yet.");
   const account = await cloudroom(deps).sandboxes.account();
   if (!account) throw new ApiError(409, "github_auth_unavailable", "Sign in to Cloudroom first.");
@@ -80,12 +94,13 @@ async function start(deps: AppDeps, requestId: string): Promise<CodexAuthStatus>
   cancelGithubLogin();
   const current: Login = { id: requestId, abort: new AbortController(), status: null };
   login = current;
+  const clientId = repos ? GITHUB_APP.clientId : GITHUB_OAUTH_CLIENT_ID;
   let value: Record<string, unknown> | null = null;
   try {
-    value = await github("login/device/code", { scope: SCOPE }, current.abort.signal);
+    value = await github("login/device/code", repos ? { client_id: clientId } : { client_id: clientId, scope: SCOPE }, current.abort.signal);
     const code = codeSchema.parse(value);
     current.status = { ...idle, state: "waiting", login_id: requestId, verification_url: code.verification_uri, user_code: code.user_code };
-    void poll(deps, current, account, code.device_code, code.interval, Date.now() + code.expires_in * 1000);
+    void poll(deps, current, account, { clientId, repos, deviceCode: code.device_code, interval: code.interval, deadline: Date.now() + code.expires_in * 1000 });
     return current.status;
   } catch {
     if (login === current) login = null;
@@ -94,25 +109,51 @@ async function start(deps: AppDeps, requestId: string): Promise<CodexAuthStatus>
   }
 }
 
-async function poll(deps: AppDeps, current: Login, account: SandboxAccount, deviceCode: string, interval: number, deadline: number): Promise<void> {
+/** Waits until the GitHub App is installed, and not suspended, on at least one account the token's owner can reach:
+ *  until then the token reads no private repo. The status sends the person to GitHub's page for it, with no code to
+ *  type. False when time runs out. Someone whose account or organization already has the app skips the wait. */
+async function reposPicked(current: Login, token: string): Promise<boolean> {
+  const signal = current.abort.signal, deadline = Date.now() + PICK_REPOS_MS;
+  for (let first = true; Date.now() < deadline; first = false) {
+    const response = await fetch("https://api.github.com/user/installations?per_page=100", {
+      headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${token}` }, redirect: "error", signal: AbortSignal.any([signal, AbortSignal.timeout(15_000)]),
+    }).catch(() => null);
+    signal.throwIfAborted();
+    if (response?.status === 401) throw new Error("GitHub rejected the new login.");
+    const found = response?.ok ? z.object({ installations: z.array(z.object({ suspended_at: z.string().nullish() })) }).safeParse(await response.json().catch(() => null)) : null;
+    if (found?.success && found.data.installations.some((install) => !install.suspended_at)) return true;
+    if (first) current.status = { ...idle, state: "waiting", login_id: current.id, verification_url: GITHUB_APP.install };
+    await sleep(3000, undefined, { signal, ref: false });
+  }
+  return false;
+}
+
+type Flow = { clientId: string; repos: boolean; deviceCode: string; interval: number; deadline: number };
+async function poll(deps: AppDeps, current: Login, account: SandboxAccount, { clientId, repos, deviceCode, interval, deadline }: Flow): Promise<void> {
   const signal = current.abort.signal;
-  const end = (status: CodexAuthStatus | null) => { if (login === current) { login = null; failure = status; } };
+  const end = (status: CodexAuthStatus | null) => { if (login === current) { login = null; failure = status; failedAt = Date.now(); } };
   try {
     while (Date.now() < deadline) {
       await sleep(interval * 1000, undefined, { signal, ref: false });
       // A network blip only skips one check; the code stays valid until its deadline.
-      const value = await github("login/oauth/access_token", { device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }, signal).catch(() => null);
+      const value = await github("login/oauth/access_token", { client_id: clientId, device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }, signal).catch(() => null);
       if (signal.aborted) return;
       if (!value || value.error === "authorization_pending") continue;
       if (value.error === "slow_down") { interval = Math.max(interval + 5, Number(value.interval) || 0); continue; }
       if (value.error === "expired_token") break;
       const token = typeof value.access_token === "string" && /^[\x21-\x7e]{1,4096}$/.test(value.access_token) ? value.access_token : null;
       if (!token) return end({ ...idle, state: "error", message: value.error === "access_denied" ? "GitHub sign-in was declined." : `GitHub sign-in failed${reason(value)}. Try again.` });
+      if (repos && !await reposPicked(current, token)) return end({ ...idle, state: "expired", message: "No repos were picked on GitHub. Try again. If your organization has to approve Cloudroom Agents, ask an owner first." });
       const entry = await sandboxGithubLogin(token);
       signal.throwIfAborted();
-      // The account the user just picked wins over this Mac's `gh` login from now on.
+      // The account the user just picked wins over this Mac's `gh` login from now on. The copy stops first, so it
+      // can't put the old login back, and comes back if the save fails.
+      const mac = await copyMacGithub(deps);
       await setCopyMacGithub(deps, false);
-      await cloudroom(deps).sandboxes.saveLogin("github", entry, { account, signal });
+      await cloudroom(deps).sandboxes.saveLogin("github", entry, { account, signal }, false, true).catch(async (error: unknown) => {
+        await setCopyMacGithub(deps, mac);
+        throw error;
+      });
       return end(null);
     }
     end({ ...idle, state: "expired", message: "The GitHub code expired. Try again." });

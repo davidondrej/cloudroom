@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -10,8 +10,9 @@ import { binding, command, saveStatus } from "../../src/services/cloudroom/store
 import { setCopyLogins, setCopyMacGithub } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
-import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
-import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing } from "@cloudroom/db";
+import { seedEnvironment, seedHostSession, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
+import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing, threads } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 
 // The Cursor key check runs this computer's Cursor CLI, which rejects the tests' fake keys.
 vi.mock("../../src/services/cloudroom/sandboxes.js", async (original) => ({ ...await original<object>(), cursorKeyRejected: async () => false }));
@@ -38,11 +39,14 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
   const prompts: string[] = [];
   let state: "new" | "awake" | "asleep" | "archived" = "new";
   let refusal: string | null = null;
+  let coreDown: "502" | "storage" | null = null;
   let sandboxThread = "";
   let coreUrl = "";
   const coreServer = createServer(async (req, res) => {
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     core.push({ path: req.url!, auth: req.headers.authorization });
+    if (coreDown === "502") return json({ error: "upstream unreachable" }, 502);
+    if (coreDown === "storage") return json({ error: "storage unsafe; new execution is blocked", code: "storage_blocked" }, 409);
     if (req.url === "/v1/health") return json({});
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
@@ -60,7 +64,10 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     const input = await body(req);
     website.push({ action: input.action ?? input.name, thread: input.thread, project: input.project, auth: req.headers.authorization, title: input.title, project_name: input.project_name, session: input.session, harness: input.harness, model: input.model, parent: input.parent });
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
     if (input.action === "awake") return json({ sandboxes: state === "awake" ? [{ thread: sandboxThread, origin: coreUrl, token: "t".repeat(64) }] : [] });
+    if (input.action === "wake" && refusal === "drop") return req.socket.destroy();
+    if (input.action === "wake" && refusal === "502") return json({ error: "Upstream unreachable." }, 502);
     if (input.action === "wake" && refusal) return json({ error: "Refused.", code: refusal }, 429);
     if (input.action === "wake") { state = "awake"; sandboxThread = input.thread; }
     if (input.action === "archive") state = "archived";
@@ -124,23 +131,53 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     refusal = "sandbox_repairing";
     service.sandboxes.forget(thread.id);
     await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "idle", "asleep");
-    const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id === id)?.state;
+    // The app tags each prompt with its install (#237); these name them by the rest.
+    const commandState = (id: string) => harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.replace(/^app_[a-f0-9]{12}_/, "") === id)?.state;
     const skipBackoff = () => (service.sandboxes as unknown as { backoff: Map<string, unknown> }).backoff.clear();
-    let refusedAt = wakes();
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
-    await waitFor(() => wakes() > refusedAt, "refused wake");
-    // A 429 that isn't a plan limit, like a repair, may come after the sandbox started: Stop still fails, cancelling nothing.
-    expect((await request(`/threads/${thread.id}/stop`, {})).status).toBe(503);
-    expect(commandState("over-limit")).toBe("sending");
+    // Behind a website 502, out of reach, or awake with its Core not answering (#1699): Stop is saved and says so (its
+    // agent may run), and the message never goes out. A refusal is an answer: a repair may come after the sandbox
+    // started, and a Core blocking new work keeps it, so Stop fails as before, cancelling nothing. A restore is held.
+    const asleep = (wake: string | null) => () => { refusal = wake; coreDown = null; state = "asleep"; service.sandboxes.forget(thread.id); };
+    const unreachable: [string, () => void, string, string, boolean, number][] = [
+      ["sandbox_repairing", asleep("sandbox_repairing"), "sandbox_repairing", "sending", false, 0],
+      ["storage_blocked", () => { refusal = null; coreDown = "storage"; }, "storage_blocked", "sending", false, 1],
+      ["502", asleep("502"), "cloudroom_stop_pending", "cancelled", true, 1],
+      ["drop", asleep("drop"), "cloudroom_stop_pending", "cancelled", true, 1],
+      ["core-down", () => { refusal = null; coreDown = "502"; }, "cloudroom_stop_pending", "cancelled", true, 1],
+      ["sandbox_restoring", asleep("sandbox_restoring"), "cloudroom_stop_pending", "cancelled", true, 1],
+    ];
+    const held = () => harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && item.state === "sending").length;
+    for (const [failure, fail, code, message, paused, holds] of unreachable) {
+      fail();
+      skipBackoff();
+      const before = core.length, attempts = wakes();
+      const sent = await request(`/threads/${thread.id}/send`, { requestId: `unreachable-${failure}`, mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] });
+      expect(sent.status, `${failure}: ${await sent.clone().text()}`).toBe(200);
+      await waitFor(() => coreDown ? core.length > before : wakes() > attempts, `${failure}: failed delivery`);
+      skipBackoff();
+      const holding = held();
+      const stopped = await request(`/threads/${thread.id}/stop`, {});
+      expect([stopped.status, (await stopped.json()).code, commandState(`unreachable-${failure}`), Boolean(binding(harness.deps.db, thread.id)?.queuePaused), held()], failure)
+        .toEqual([503, code, message, paused, holding + holds]);
+    }
+    // The repair's message was the current turn, which Core may already have had: it was kept, and goes out as before.
+    refusal = null;
+    coreDown = null;
+    skipBackoff();
+    await waitFor(() => commandState("unreachable-sandbox_repairing") === "accepted", "kept turn delivered");
+    state = "asleep";
+    service.sandboxes.forget(thread.id);
+    await waitFor(() => getThread(harness.deps.db, thread.id)?.status === "idle", "asleep again");
     // Free's spent daily budget: Stop works without a wake, and the message never goes out.
     refusal = "cloud_budget_limit";
-    refusedAt = wakes();
+    let refusedAt = wakes();
     skipBackoff();
+    expect((await request(`/threads/${thread.id}/send`, { requestId: "over-limit", mode: "auto", input: [{ type: "text", text: "Not now", mentions: [] }] })).status).toBe(200);
     await waitFor(() => wakes() > refusedAt, "refused for the budget");
-    harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: "over-limit", expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
+    harness.deps.db.insert(cloudroomCommands).values({ id: "edit-queued", threadId: thread.id, command: "edit", input: JSON.stringify({ target_request_id: harness.deps.db.select().from(cloudroomCommands).all().find(item => item.id.endsWith("_over-limit"))!.id, expected_revision: 1, text: "Not now, edited" }), createdAt: Date.now() + 1 }).run();
     // A delivery is preparing to wake the sandbox for the message, copying logins first, when Stop lands. Every login is
     // skipped, so no real one is read.
-    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "cursor", "github"]);
+    const allLogins = new Set(["codex", "pi", "opencode", "hermes", "devin", "kimi", "openclaw", "agent-zero", "cursor", "github"]);
     let releaseLogins: (() => void) | null = null;
     service.sandboxes.skipLogins = () => releaseLogins ? Promise.resolve(allLogins) : new Promise(resolve => { releaseLogins = () => resolve(allLogins); });
     await setCopyLogins(harness.deps, true);
@@ -174,11 +211,13 @@ it("gives each cloud thread its own sandbox, wakes it only for work, and archive
     skipBackoff();
     const resumed = await request(`/threads/${thread.id}/send`, { requestId: "after-limit", mode: "auto", input: [{ type: "text", text: "Go on", mentions: [] }] });
     expect(resumed.status, await resumed.clone().text()).toBeLessThan(300);
-    await waitFor(() => prompts.includes("after-limit"), "prompt after the limit");
+    await waitFor(() => prompts.some(id => id.endsWith("_after-limit")), "prompt after the limit");
     const paths = core.map(call => call.path);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeGreaterThan(-1);
     expect(paths.indexOf("/v1/sessions/cr_one/stop")).toBeLessThan(paths.lastIndexOf("/v1/sessions/cr_one/prompts"));
-    expect(prompts).not.toContain("over-limit");
+    expect(prompts.some(id => /_(over-limit|unreachable-(storage_blocked|502|drop|core-down|sandbox_restoring))$/.test(id))).toBe(false);
+    // This Core can't scope a stop to its turn, so the ones held while unreachable never go out.
+    expect(harness.deps.db.select().from(cloudroomCommands).all().filter(item => item.command === "stop" && JSON.parse(item.input).guarded).map(item => item.state)).toEqual(["cancelled", "cancelled", "cancelled"]);
     expect(paths.filter(path => /\/(rewind|goal)$/.test(path))).toEqual([]);
 
     // Archive goes to the website, which stops the sandbox even mid-task, so the thread stops showing as running.
@@ -264,13 +303,24 @@ it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and
     expect(calls("restore")).toEqual([parent.id]);
 
     // That restore failed, so the wake finds the sandbox archived, restores it, and delivers. Core first detaches the
-    // thread, so the archived parent hears nothing of its new work.
-    const sent = await post(`/threads/${child.id}/send`, { requestId: "follow-up", mode: "auto", input: [{ type: "text", text: "Continue", mentions: [] }] });
+    // thread, so the archived parent hears nothing of its new work. A view's wake at the same time sends no second one.
+    const [sent] = await Promise.all([
+      post(`/threads/${child.id}/send`, { requestId: "follow-up", mode: "auto", input: [{ type: "text", text: "Continue", mentions: [] }] }),
+      post(`/cloudroom/threads/${child.id}/wake`, { reason: "view" }),
+    ]);
     expect(sent.status, await sent.clone().text()).toBeLessThan(300);
     await waitFor(() => core.includes("/v1/sessions/cr_child/prompts"), "prompt delivery");
     expect(calls("restore")).toEqual([parent.id, parent.id]);
     expect(core.indexOf("/v1/sessions/cr_child/detach")).toBeGreaterThan(-1);
     expect(core.indexOf("/v1/sessions/cr_child/detach")).toBeLessThan(core.indexOf("/v1/sessions/cr_child/prompts"));
+
+    // Another computer archives it again. The Undo here is done, so a view leaves that archive alone (#2246).
+    state = "archived";
+    service.sandboxes.forget(parent.id);
+    const viewed = calls("wake").length;
+    await post(`/cloudroom/threads/${child.id}/wake`, { reason: "view" });
+    await waitFor(() => calls("wake").length > viewed, "the view's wake");
+    expect(calls("restore")).toEqual([parent.id, parent.id]);
 
     // Archiving its last active thread archives the sandbox again.
     expect((await post(`/threads/${child.id}/archive-all`)).status).toBe(200);
@@ -282,7 +332,52 @@ it("an unarchived Cloud child becomes top-level, keeps its parent's sandbox, and
   }
 });
 
-it("archiving a working child whose parent keeps the sandbox open stops the child's agent, and only it", async () => {
+it("viewing a thread open here never restores an archive without an Undo here, and the list then archives it here (#2246)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const website: { action: string; thread?: string }[] = [];
+  const [done, parent, child] = [null, null, "parent"].map(() => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }));
+  harness.deps.db.update(threads).set({ parentThreadId: parent!.id }).where(eq(threads.id, child!.id)).run();
+  harness.deps.db.insert(cloudroomThreads).values([[done!, done!, "cr_done"], [parent!, parent!, "cr_parent"], [child!, parent!, "cr_child"]].map(([thread, sandbox, session]) =>
+    ({ threadId: (thread as typeof done)!.id, coreUrl: `sandbox:${(sandbox as typeof done)!.id}`, sessionId: session as string, startRequestId: session as string, model: "test-model", reasoning: "medium" }))).run();
+  // The list already took the parent's archive and is still applying it, so the parent and its shared child are open here.
+  const account = "11111111-1111-4111-8111-111111111111";
+  await writeFile(join(harness.deps.config.dataDir, "cloudroom-thread-sync.json"), JSON.stringify({ account, archived: [parent!.id] }));
+  const at = new Date().toISOString();
+  // `done`'s agent archived it when its turn ended; the list shows that only after the view.
+  const archivedRow = { thread: done!.id, session: "cr_done", project: project.id, project_name: project.name, repository: null, title: null, state: "archived", sandbox: null, harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: at, woke_at: null, updated_at: at };
+  const websiteServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const input = await body(req);
+    website.push({ action: input.action, thread: input.thread });
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ threads: website.some(call => call.action === "wake" && call.thread === done!.id) ? [archivedRow] : [], next: `${new Date().toISOString()}~`, more: false });
+    if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
+    if (input.action === "wake") return json({ error: "This thread is archived. Restore it to continue.", code: "sandbox_archived" }, 409);
+    return json({ thread: input.thread, state: "archived", generation: 1, issue: null });
+  });
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: account, email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    // Each view's wake finds its sandbox archived (the parent's second from the website's refusal, kept a while) and
+    // keeps the archive: it asks for the list instead of restoring.
+    const kept = vi.spyOn(service.sync, "changed");
+    for (const viewed of [done!, parent!, child!]) {
+      const before = kept.mock.calls.length;
+      await harness.app.request(`/api/v1/cloudroom/threads/${viewed.id}/wake`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "view" }) });
+      await waitFor(() => kept.mock.calls.length > before || website.some(call => call.action === "restore"), "the view's wake");
+    }
+    await waitFor(() => getThread(harness.deps.db, done!.id)?.archivedAt != null, "the list to archive the thread here", 10_000);
+    expect(website.map(call => call.action)).not.toContain("restore");
+  } finally {
+    service.stop();
+    websiteServer.close();
+  }
+}, 20_000);
+
+it("archiving a working child whose parent, even a hidden fork, keeps the sandbox open stops the child's agent, and only it", async () => {
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
@@ -310,7 +405,9 @@ it("archiving a working child whose parent keeps the sandbox open stops the chil
   const websiteUrl = await listen(websiteServer);
   try {
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
-    const parent = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "active" });
+    // A hidden fork still keeps its own sandbox; only side chats sharing their source's sandbox don't (#2210).
+    const source = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+    const parent = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "active", visibility: "hidden", originKind: "fork", sourceThreadId: source.id });
     const child = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", parentThreadId: parent.id, status: "active" });
     sandbox = parent.id;
     harness.deps.db.insert(cloudroomThreads).values([
@@ -390,6 +487,122 @@ it("moving back to the VM: new threads start on the VM while sandbox threads sta
   }
 });
 
+it("Connect Claude writes its token only to the Cloudroom sign-in it started under (#1924)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const a = { id: "11111111-1111-4111-8111-111111111111", email: "a@example.com" }, b = { id: "22222222-2222-4222-8222-222222222222", email: "b@example.com" };
+  const vmWrites: string[] = [];
+  let switchBack = false, uploads = 0;
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    // ...then back to A while B's VM answers.
+    if (req.url === "/v1/capabilities" && switchBack && req.headers.authorization === `Bearer ${"b".repeat(64)}`) await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, claude_auth: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url === "/v1/accounts/claude/token") { vmWrites.push(String(req.headers.authorization)); return json({ state: "connected", email: null, plan: null, message: null, login_id: null, verification_url: null, user_code: null }, 202); }
+    json({});
+  });
+  const coreUrl = await listen(coreServer);
+  let switchOnUpload = false;
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    if (input.name === "claude") uploads += 1;
+    // The user switches to B while A's upload is in flight...
+    if (input.name === "claude" && switchOnUpload) await service.configure({ url: coreUrl, token: "b".repeat(64) }, b, undefined, websiteUrl, "b".repeat(64));
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "mode" ? { sandboxes: true } : { saved: true, claude: false, codex: false, pi: false, github: false }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  const token = "sk-ant-oat01-fake-token";
+  try {
+    // Older VM accounts have no sandbox sign-in: A's token never reaches B's VM.
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a);
+    const ownerA = await service.loginOwner();
+    await service.configure({ url: coreUrl, token: "b".repeat(64) }, b);
+    await expect(service.claudeAuth("token", "req-1", token, undefined, false, ownerA)).rejects.toThrow("The Cloudroom account changed");
+    expect(vmWrites).toEqual([]);
+    await service.claudeAuth("token", "req-2", token, undefined, false, await service.loginOwner());
+    expect(vmWrites).toEqual([`Bearer ${"b".repeat(64)}`]);
+    // Started signed out: nothing is written anywhere.
+    await expect(service.claudeAuth("token", "req-3", token, undefined, false, null)).rejects.toThrow("Sign in");
+    // Signing in again to the same account rotates its tokens; the pending sign-in still saves to it.
+    vmWrites.length = 0;
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    const ownerA2 = await service.loginOwner();
+    await service.configure({ url: coreUrl, token: "c".repeat(64) }, a, undefined, websiteUrl, "c".repeat(64));
+    await service.claudeAuth("token", "req-4", token, undefined, false, ownerA2);
+    expect(uploads).toBe(1);
+    expect(vmWrites).toEqual([`Bearer ${"c".repeat(64)}`]);
+    // A to B during A's website upload, back to A while B's VM answers: B's VM never gets A's token.
+    vmWrites.length = 0;
+    await service.configure({ url: coreUrl, token: "a".repeat(64) }, a, undefined, websiteUrl, "a".repeat(64));
+    switchOnUpload = switchBack = true;
+    await service.claudeAuth("token", "req-5", `${token}-2`, undefined, false, await service.loginOwner());
+    expect(uploads).toBe(2);
+    expect(vmWrites).toEqual([]);
+  } finally {
+    service.stop();
+    coreServer.close(); websiteServer.close();
+  }
+});
+
+it("a login copy started under one Cloudroom account never finishes under the next (#1940)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "login-switch-"));
+  const { SandboxDirectory, cloudClaudeEnvironment } = await import("../../src/services/cloudroom/sandboxes.js");
+  // This Mac: Claude signed out, and Codex and Pi signed in (one fake file for both). HOME is empty.
+  await writeFile(join(dir, "claude"), "#!/bin/sh\necho '{\"loggedIn\":false}'\n", { mode: 0o755 });
+  await writeFile(join(dir, "auth.json"), "{}");
+  for (const [name, value] of [["PATH", `${dir}:${process.env.PATH}`], ["HOME", dir], ["CODEX_HOME", dir], ["PI_CODING_AGENT_DIR", dir]]) vi.stubEnv(name, value);
+  const a = { userId: "a", token: "a".repeat(64) }, b = { userId: "b", token: "b".repeat(64) };
+  let signedIn = a, switchOn = "", resetOn = "", resetOnRead = false;
+  const toB: string[] = [], reads: typeof a[] = [];
+  const website = createServer(async (req, res) => {
+    const input = await body(req);
+    if (req.headers.authorization?.includes(Buffer.from(`b:${b.token}`).toString("base64"))) toB.push(`${input.action ?? "save"} ${input.name ?? ""}`);
+    // The user switches to B while A's request is in flight.
+    if (switchOn && `${input.action ?? "save"} ${input.name}` === switchOn) { switchOn = ""; signedIn = b; directory.reset(); }
+    // A to B and back to A, both resets landing on the next account read.
+    if (resetOn && `${input.action ?? "save"} ${input.name}` === resetOn) { resetOn = ""; resetOnRead = true; }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "status" ? { claude: true, codex: true, pi: false, github: false } : { value: JSON.stringify({ token: "sk-ant-oat01-fake-a" }), saved: true }));
+  });
+  const url = await listen(website);
+  const directory = new SandboxDirectory(async () => {
+    if (resetOnRead) { resetOnRead = false; directory.reset(); }
+    return { website: url, ...(reads.shift() ?? signedIn) };
+  });
+  const asA = () => ({ account: { website: url, ...a }, signal: AbortSignal.timeout(5_000) });
+  try {
+    // Cloud → Mac: A's Claude login never becomes this Mac's while B is signed in.
+    switchOn = "get claude";
+    await expect(directory.copyCloudLogins(true)).rejects.toThrow("account changed");
+    expect(cloudClaudeEnvironment()).toEqual([]);
+    // Mac → cloud: a copy A started stops at the switch, so B gets nothing from it.
+    signedIn = a; switchOn = "save codex";
+    directory.skipLogins = async () => new Set(["claude", "opencode", "hermes", "devin", "kimi", "openclaw", "agent-zero", "cursor", "github"]);
+    await expect(directory.copyMacLogins(true)).rejects.toThrow("account changed");
+    expect(toB).toEqual([]);
+    // A → B → A between two account reads: A's login is never sent as B.
+    signedIn = a; reads.push(b, a);
+    await expect(directory.saveLogin("cursor", "{}", asA())).rejects.toThrow("account changed");
+    expect(toB).toEqual([]);
+    // Switched to B during A's own save: B's save of the same value still uploads.
+    reads.length = 0; switchOn = "save cursor";
+    await directory.saveLogin("cursor", "{}", asA());
+    await directory.saveLogin("cursor", "{}");
+    expect(toB).toEqual(["save cursor"]);
+    // A → B → A just before the Codex write: the copy stops and this Mac gets no Codex login.
+    signedIn = a; resetOn = "get codex";
+    vi.stubEnv("CODEX_HOME", join(dir, "codex"));
+    directory.skipLogins = async () => new Set(["claude"]);
+    await expect(directory.copyCloudLogins(true)).rejects.toThrow("account changed");
+    await expect(readFile(join(dir, "codex", "auth.json"))).rejects.toThrow("ENOENT");
+  } finally {
+    vi.unstubAllEnvs();
+    website.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 it.each([
   { mode: { sandboxes: true, plan: "free" }, plan: "free", usage: true, queue: null },
   { mode: { sandboxes: true, plan: "free", queue: { position: 3, total: 9 } }, plan: "free", usage: false, queue: { position: 3, total: 9, regionBlocked: false } },
@@ -421,8 +634,9 @@ it("sends a new thread's first message before its project copy starts, so a slow
   const core: string[] = [];
   let firstPrompt: { text: string; copyStarted: boolean } | null = null;
   let coreUrl = "";
-  // Workspace lookups: the copy plan, then the `room-cli files wait` status, then the copy itself starting.
-  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/")).length >= 3;
+  // Workspace lookups: the copy plan, then the `room-cli files wait` status, then the copy itself starting. The copy's
+  // heartbeat (#2168) starts at once and moves no files.
+  const copyStarted = () => core.filter(path => path.startsWith("/v1/workspaces/") && !path.endsWith("/alive")).length >= 3;
   const coreServer = createServer(async (req, res) => {
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     core.push(req.url!);
@@ -468,6 +682,7 @@ it("sends a new thread's first message before its project copy starts, so a slow
 it.each([
   ["existing checkout", null], ["fresh clone", null], ["existing checkout", "index.lock"], ["existing checkout", "terminated"],
   ["existing checkout", "checkout probe"], ["personal child", "checkout probe"], ["existing checkout", "status write"], ["existing checkout", "status write x3"],
+  ["existing checkout", "agent branch"], ["child", null], ["child", "agent branch"], ["fresh clone", "clone 504"], ["existing checkout", "branch dropped"], ["existing checkout", "workspace slow"], ["child", "workspace late"],
 ] as const)("`room-cli files wait` reads a new thread's %s as copying until its branch and files are ready (#816, fault: %s)", async (kind, fault) => {
   const root = await mkdtemp(join(tmpdir(), "cloudroom-files-ready-"));
   const folder = join(root, "project"), origin = join(root, "origin.git"), mac = join(root, "mac");
@@ -478,14 +693,17 @@ it.each([
   git(join(root, "seed"), "add", "-A"); git(join(root, "seed"), "commit", "-q", "-m", "Base");
   git(root, "clone", "-q", "--bare", "seed", origin);
   if (kind !== "fresh clone") git(root, "clone", "-q", origin, folder);
+  // A Cloud child in a sandbox of its own gets its parent's code, committed here, once its copy lands.
+  const source = join(root, "parent");
+  if (kind === "child") { git(root, "clone", "-q", origin, source); await writeFile(join(source, "file0.txt"), "parent\n"); git(source, "commit", "-qam", "Parent work"); }
   if (fault === "index.lock") await writeFile(join(folder, ".git", "index.lock"), "");
-  let faults = fault === "status write x3" ? 99 : fault === "checkout probe" || fault === "status write" ? 1 : 0;
+  let faults = fault === "status write x3" || fault === "clone 504" ? 99 : 1;
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);
   const { project: own } = seedProjectWithSource(harness.deps, { hostId: host.id, path: mac });
   const project = kind === "personal child" ? { id: PERSONAL_PROJECT_ID } : own;
-  const parent = kind === "personal child" ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: PERSONAL_PROJECT_ID, providerId: "codex", status: "idle" }) : null;
-  if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
+  const parent = kind.endsWith("child") ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }) : null;
+  if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, sessionId: kind === "child" ? "cr_parent" : null, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
   setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
   await setCopyMacGithub(harness.deps, false);
   const service = cloudroom(harness.deps);
@@ -497,16 +715,36 @@ it.each([
     if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, root_workspace: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
     if (req.url?.startsWith("/v1/workspaces/")) return json({ id: decodeURIComponent(req.url.split("/")[3]!), path: folder });
+    if (req.url === "/v1/sessions/cr_parent/workspace") return json({ path: source, branch: "main", head: "head" });
+    // A child's code is uploaded raw, in pieces.
+    if (req.url?.startsWith("/v1/vm/run/raw?")) {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
+      const result = spawnSync("/bin/bash", ["-c", new URL(req.url, "http://core").searchParams.get("command")!], { input: Buffer.concat(chunks) });
+      return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
+    }
+    // Branch setup's workspace read outlasts the client's own deadline once, shortened below (#2023).
+    if (req.url === "/v1/sessions/cr_one/workspace" && fault?.startsWith("workspace") && await marker() === "copying" && faults-- > 0) await new Promise(resolve => setTimeout(resolve, 3_000));
     if (req.url === "/v1/sessions/cr_one/workspace") return fault === "checkout probe" && faults-- > 0 ? json({ error: "busy" }, 500) : json({ path: folder, branch: null, head: checkout().branch ? "head" : null });
     const input = await body(req);
-    if (req.url === "/v1/vm/run") {
+    if (req.url?.split("?")[0] === "/v1/vm/run") {
       // Core runs it in bash; the "GitHub" clone comes from a local repository. The thread's branch setup is slow.
       const command = String(input.command).replaceAll("https://github.com/example/project", origin);
       if (fault?.startsWith("status write") && command.includes(".cloudroom-files") && faults-- > 0) return json({ code: 1, stdout: "", stderr: Buffer.from("disk full").toString("hex"), truncated: false });
+      // The agent made its own branch before the thread's branch setup ran: it must stay there (#1377).
+      if (fault === "agent branch" && command.includes("git checkout -q -b")) { git(folder, "checkout", "-q", "-b", "feature"); await writeFile(join(folder, "agent.txt"), "agent\n"); git(folder, "add", "-A"); git(folder, "commit", "-qm", "Agent work"); }
       if (command.includes("git checkout -q -b")) await new Promise(resolve => setTimeout(resolve, 800));
+      // A proxy's 504 cuts off every clone's answer. Core keeps only a clone it was asked to keep (#1970), which lands a
+      // moment later (#1524); any other dies with its request.
+      if (fault === "clone 504" && command.includes("git clone") && faults-- > 0) {
+        if (req.url.endsWith("?keep=true")) spawn("/bin/bash", ["-c", command.replace("git clone", "sleep 2 && git clone")], { cwd: root, stdio: "ignore" });
+        await new Promise(resolve => setTimeout(resolve, 300));
+        return void res.writeHead(504).end("Gateway Timeout");
+      }
       // Killed mid-setup (say, SIGTERM): no exit code, no output.
       if (fault === "terminated" && command.includes("git checkout -q -b")) return json({ code: null, stdout: "", stderr: "", truncated: false });
       const result = spawnSync("/bin/bash", ["-c", command], { cwd: input.cwd ?? root, input: Buffer.from(input.stdin ?? "", "hex") });
+      // The branch switch ran, but its answer is lost with the connection (#1524).
+      if (fault === "branch dropped" && command.includes("git checkout -q -b") && faults-- > 0) return void req.socket.destroy();
       const state = await marker();
       if (state && state !== "copying") atDone ??= { marker: state, ...checkout() };
       return json({ code: result.status, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false });
@@ -528,6 +766,12 @@ it.each([
   });
   coreUrl = await listen(coreServer);
   const websiteUrl = await listen(websiteServer);
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  // `workspace late`: the retry window (3.5 of the copy's 9 minutes) closes before the read times out, so a retry that
+  // would answer just before the deadline, and then switch the branch after it, never starts.
+  const later = setTimeout, short: Record<number, number> = fault === "workspace late" ? { 30_000: 2_000, 210_000: 1_000 } : { 30_000: 2_000 };
+  if (fault?.startsWith("workspace")) vi.spyOn(AbortSignal, "timeout").mockImplementation((ms) => timeout(short[ms] ?? ms));
+  if (fault === "workspace late") vi.spyOn(globalThis, "setTimeout").mockImplementation(((run: () => void, ms?: number, ...args: unknown[]) => later(run, ms === 9 * 60_000 ? 8_000 : ms, ...args)) as typeof setTimeout);
   try {
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
     const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId: "files-ready", title: "Files ready", projectId: project.id, parentThreadId: parent?.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "medium", environment: { type: "project-default" }, input: [{ type: "text", text: "test", mentions: [] }] }) });
@@ -541,12 +785,23 @@ it.each([
     await waitFor(() => atFirstPrompt !== undefined, "first message");
     // The agent's first `room-cli files wait` must wait: with no status, a folder with files reads as nothing running.
     expect(atFirstPrompt).toBe("copying");
+    if (fault === "workspace late") {
+      for (let i = 0; i < 400 && !(await marker())?.startsWith("failed"); i++) await new Promise(resolve => later(resolve, 25));
+      // It fails at once, as main does, and nothing changes the branch or the marker after the deadline.
+      await new Promise(resolve => later(resolve, 8_000));
+      expect({ marker: await marker(), branch: checkout().branch }).toEqual({ marker: expect.stringMatching(/^failed: Cloudroom could not set up the thread's branch .*: Cloudroom request cancelled or timed out$/), branch: "main" });
+      return;
+    }
     await waitFor(() => atDone !== undefined, "ready or failed", 15_000);
     if (fault === "index.lock" || fault === "terminated") expect(atDone).toMatchObject({ marker: expect.stringMatching(fault === "index.lock" ? /^failed: Cloudroom could not switch the folder to the thread's branch room\/.*, so it is still on main\. Git said: .*index\.lock/s : /^failed: .*Git said: exit code null$/), branch: "main" });
     // The child's parent has no folder, so its code (none) ends as failed, after the branch.
+    // The agent's own branch keeps its commit; a child's code lands only on the thread's branch (#1377).
+    else if (fault === "agent branch") expect({ ...atDone, log: git(folder, "log", "--format=%s", "feature") }).toEqual({ marker: kind === "child" ? expect.stringMatching(/^failed: The folder was already on the agent's own branch feature/) : "ready", branch: "feature", status: "", log: "Agent work\nBase" });
     else expect(atDone).toEqual({ marker: kind === "personal child" ? expect.stringMatching(/^failed: The source thread's code was not copied/) : "ready", branch: expect.stringMatching(/^room\//), status: "" });
+    if (kind === "child" && !fault) expect(git(folder, "log", "-1", "--format=%s")).toBe("Parent work");
     expect(await readdir(folder)).toContain("file19.txt");
   } finally {
+    vi.restoreAllMocks();
     service.stop();
     coreServer.close(); websiteServer.close();
     await harness.cleanup();
@@ -563,7 +818,8 @@ it("tells the user to remove forced API login when Codex refuses ChatGPT sign-in
     process.env.PATH = `${dir}:${path}`;
     process.env.CODEX_HOME = dir;
     const { macCodexLogin, startMacCodexLogin } = await import("../../src/services/cloudroom/sandboxes.js");
-    const run = startMacCodexLogin();
+    // Codex is found, so the install deps go unused.
+    const run = startMacCodexLogin({} as never);
     await waitFor(() => run.done, "codex login exit");
     expect(run.error).toContain('Remove `forced_login_method = "api"`');
     expect(run.error).toContain(join(dir, "config.toml"));
@@ -629,7 +885,7 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
     expect(count("awake") - failedFrom).toBeLessThanOrEqual(3);
     expect(count("register")).toBe(0);
 
-    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+    const deliveries = vi.spyOn((service as unknown as { delivery: { deliverPending: (id: string) => Promise<void> } }).delivery, "deliverPending");
     const failing = count("awake");
     await waitFor(() => count("awake") > failing, "another failed awake check");
     await new Promise(resolve => setTimeout(resolve, 1_600));
@@ -682,7 +938,7 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
     const threads = Array.from({ length: 3 }, () => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }));
     harness.deps.db.insert(cloudroomThreads).values(threads.map((thread, i) => ({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: `cr_${i}`, startRequestId: `start_${i}`, model: "test-model", reasoning: "medium" }))).run();
-    const deliveries = vi.spyOn(service as unknown as { deliverPending: (id: string) => Promise<void> }, "deliverPending");
+    const deliveries = vi.spyOn((service as unknown as { delivery: { deliverPending: (id: string) => Promise<void> } }).delivery, "deliverPending");
 
     await new Promise(resolve => setTimeout(resolve, 4_000));
     expect(deliveries.mock.calls.map(([id]) => id).sort()).toEqual(threads.map(thread => thread.id).sort());
@@ -715,6 +971,45 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     coreServer.closeAllConnections(); coreServer.close(); websiteServer.close();
   }
 }, 25_000);
+
+it("a thread cut off mid-turn is archived when the website archived its sandbox, as after its agent archived it while this computer slept", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const lookups: string[] = [];
+  let archived = "";
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
+    if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "lookup") lookups.push(input.thread);
+    res.end(JSON.stringify({ thread: input.thread, state: input.thread === archived ? "archived" : "asleep", generation: 1, issue: null }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  try {
+    // Three turns were running when this computer went to sleep. All three sandboxes are gone when it wakes.
+    const [done, slept, old, idle] = ["active", "active", "active", "idle"].map(status => createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: status as "active" | "idle" }));
+    archived = done!.id;
+    harness.deps.db.insert(cloudroomThreads).values([done!, slept!, old!, idle!].map((thread, i) => ({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: `cr_${i}`, startRequestId: `start_${i}`, model: "test-model", reasoning: "medium" }))).run();
+    harness.deps.db.update(threads).set({ updatedAt: Date.now() - 7 * 86_400_000 }).where(eq(threads.id, old!.id)).run();
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+
+    // The one whose sandbox the website archived is archived here too. The one that only sleeps stays, idle.
+    await waitFor(() => Boolean(getThread(harness.deps.db, done!.id)?.archivedAt), "the finished thread to be archived");
+    await waitFor(() => getThread(harness.deps.db, slept!.id)?.status === "idle" && getThread(harness.deps.db, old!.id)?.status === "idle", "the others to go idle");
+    expect(getThread(harness.deps.db, slept!.id)?.archivedAt).toBeNull();
+    // Last heard from a week ago, its sandbox may be archived as an old run: it stays, and nothing is asked.
+    // A thread that was idle already costs no lookup either.
+    await new Promise(resolve => setTimeout(resolve, 3_200));
+    expect(lookups.sort()).toEqual([done!.id, slept!.id].sort());
+    expect([old!, idle!].map(thread => getThread(harness.deps.db, thread.id)?.archivedAt)).toEqual([null, null]);
+  } finally {
+    service.stop();
+    websiteServer.close();
+  }
+}, 20_000);
 
 it("a message to a stopped thread is saved first, then resumes it once its restoring sandbox wakes (#534)", async () => {
   const harness = await createTestAppHarness();
@@ -760,7 +1055,7 @@ it("a message to a stopped thread is saved first, then resumes it once its resto
 
     // Without saved capabilities the app must ask the sandbox first. Two attempts wait on its slow wake: a first try and a
     // new message.
-    const asked = vi.spyOn(service as unknown as { liveCapabilities: () => Promise<unknown> }, "liveCapabilities");
+    const asked = vi.spyOn((service as unknown as { rt: { liveCapabilities: () => Promise<unknown> } }).rt, "liveCapabilities");
     const slow = send("after-stop"), other = send("no-capabilities");
     await waitFor(() => asked.mock.calls.length === 2 && wakes === 1, "both attempts asking the sandbox");
     // Meanwhile a retry of the first, with saved capabilities, saves the message at once.
@@ -807,7 +1102,7 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.end(); return; }
     const input = await body(req);
-    // An unarchive right after an archive: the first wake gets the old box's address, which is gone by the time the prompt lands.
+    // An unarchive right after an archive: the first wakes get the old box's address, which is gone by the time the prompt lands (twice: #1076).
     if (gone) return json({ error: "preview not found" }, 404);
     core.push(req.url!);
     const command = req.url?.match(/^\/v1\/sessions\/cr_0\/(prompts|resume)/)?.[1];
@@ -820,7 +1115,7 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
     if (input.action === "awake") return json({ sandboxes: [], recheck_ms: 60_000 });
     if (input.action === "wake") {
-      if (++wakes > 1) gone = false;
+      if (++wakes > 2) gone = false;
       return json({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: coreUrl, token: "t".repeat(64) });
     }
     json({ thread: input.thread, state: "asleep", generation: 1, issue: null });
@@ -836,10 +1131,57 @@ it("a saved message that meets a sandbox already gone (404) wakes it again inste
     expect(sent.status, await sent.clone().text()).toBeLessThan(300);
     await waitFor(() => core.some(path => path.startsWith("/v1/sessions/cr_0/resume")), "prompt and resume on the woken sandbox");
     expect(core.map(path => path.split("/").at(-1)!.split("?")[0])).toEqual(["prompts", "resume"]);
-    expect(harness.deps.db.select().from(cloudroomCommands).all().find(row => row.id === "after-unarchive")?.state).toBe("accepted");
+    expect(harness.deps.db.select().from(cloudroomCommands).all().find(row => row.id.endsWith("_after-unarchive"))?.state).toBe("accepted");
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();
+  }
+}, 20_000);
+
+it("a Teleport check whose cached sandbox address stopped answering wakes it again and checks once more (#1840)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id });
+  const thread = seedThread(harness.deps, { projectId: project.id, environmentId: environment.id });
+  seedThreadRuntimeState(harness.deps, { threadId: thread.id, environmentId: environment.id, providerThreadId: "native-1", model: "test-model" });
+  const service = cloudroom(harness.deps);
+  // The relay in front of a VPS sandbox, then a hosted one: what the old address answers once the sandbox slept or its Core stopped.
+  const answers: [number, string][] = [[502, "cloudroom: tunnel client aborted: Error: connect ECONNREFUSED 127.0.0.1:20042"], [404, "{}"]];
+  let [status, text] = answers[0]!, asleep = false, wakeHelps = true, wakes = 0, checks = 0;
+  const relay = createServer((req, res) => {
+    if (asleep) { res.writeHead(status, { "Content-Type": "text/plain" }); return void res.end(text); }
+    if (req.url === "/v1/teleports/check") checks++;
+    res.writeHead(202, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true }));
+  });
+  const relayUrl = await listen(relay);
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/desktop/logins") return res.end(JSON.stringify({ claude: false, codex: false, pi: false, github: false }));
+    if (input.action === "awake") return res.end(JSON.stringify({ sandboxes: [], recheck_ms: 60_000 }));
+    if (input.action === "wake") { wakes++; asleep &&= !wakeHelps; }
+    res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: relayUrl, token: "t".repeat(64) }));
+  });
+  const websiteUrl = await listen(websiteServer);
+  const check = () => harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check" }) });
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    expect((await check()).status).toBe(200);
+    expect({ wakes, checks }).toEqual({ wakes: 1, checks: 1 });
+    for (const [i, answer] of answers.entries()) {
+      [status, text] = answer; asleep = true;
+      const response = await check();
+      expect({ status: response.status, wakes, checks }, await response.text()).toEqual({ status: 200, wakes: i + 2, checks: i + 2 });
+    }
+    // A sandbox that stays unreachable is woken once, not again and again: the check fails as before.
+    asleep = true; wakeHelps = false;
+    const failed = await check();
+    expect({ status: failed.status, wakes }).toEqual({ status: 409, wakes: 4 });
+    expect(await failed.text()).toContain("Teleport would not start.");
+  } finally {
+    service.stop();
+    relay.close(); websiteServer.close();
   }
 }, 20_000);
 

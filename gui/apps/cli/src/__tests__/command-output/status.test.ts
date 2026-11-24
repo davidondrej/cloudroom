@@ -9,6 +9,7 @@ import {
 import type { CommandRegistrar } from "../helpers/command-output-harness.js";
 import * as fixtures from "../helpers/command-output-fixtures.js";
 import { registerStatusCommand } from "../../commands/status.js";
+import { BbRequestTimeoutError } from "@cloudroom/sdk";
 
 describe("room-cli status command output", () => {
   setupCommandOutputTestEnvironment();
@@ -133,6 +134,34 @@ describe("room-cli status command output", () => {
         '  gone-1  idle (archived)  "gone-1"',
       ]),
     );
+  });
+
+  it("room-cli status says why Cloud children are pending, best effort (#1273)", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "parent-1");
+    const child = (id: string, executionTarget: "cloud" | "local") =>
+      fixtures.makeThread({ id, projectId: "proj-1", providerId: "codex", status: "pending", title: id, executionTarget });
+    stubServerApi({
+      "v1.threads.:id.$get": async () => fixtures.makeThread({ id: "parent-1", projectId: "proj-1", providerId: "codex", status: "idle" }),
+      "v1.threads.$get": async () => [child("stuck", "cloud"), child("healthy", "cloud"), child("slow", "cloud"), child("local", "local")],
+    });
+    const asked: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const id = String(input).split("/").pop()!;
+      asked.push(id);
+      if (id === "slow") throw new BbRequestTimeoutError(5_000);
+      const answer = id === "stuck" ? { model: "m", reasoning: "low", error: null, reconnecting: true } : { model: "m", reasoning: "low", error: null, reconnecting: false };
+      return new Response(JSON.stringify(answer), { headers: { "Content-Type": "application/json" } });
+    });
+
+    await runCommand(["status", "--json"], register);
+    await runCommand(["status"], register);
+
+    const [json, ...text] = collectLogPayloads(vi.mocked(console.log));
+    expect(JSON.parse(json).childThreads.map((row: { id: string; cloud?: unknown }) => [row.id, row.cloud ?? null])).toEqual([
+      ["stuck", { error: null, reconnecting: true }], ["healthy", null], ["slow", null], ["local", null],
+    ]);
+    expect(text).toContain("    Cloud: Cloudroom can't reach this thread's cloud right now and retries by itself");
+    expect(asked).not.toContain("local");
   });
 
   it("room-cli status prints pinned state for pinned thread context", async () => {

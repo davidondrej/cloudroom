@@ -1457,6 +1457,7 @@ export function useSectionThreadDnd({
           }
           break;
         case "move-project":
+          // A Cloud move waits for the sandbox, so don't hold the ghost (#1252).
           moveThreadToProject(decision.activeId, {
             id: decision.projectId,
             name: decision.projectName,
@@ -1466,9 +1467,9 @@ export function useSectionThreadDnd({
                 ? unpinThread.mutateAsync({ id: decision.activeId })
                 : undefined,
             )
-            .catch(() => undefined)
-            .finally(clearProjectedDrag);
-          break;
+            .catch(() => undefined);
+          clearProjectedDrag();
+          return;
         case "reorder-pinned":
           handlePinnedDragEnd(event);
           clearProjectedDrag();

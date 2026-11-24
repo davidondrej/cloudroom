@@ -18,7 +18,13 @@ export function normalizeUsageMeasurement(
     edu: "Education",
   };
   const plan = usage.plan;
-  const planName = plan ? labels[plan.id] : undefined;
+  // Anthropic renamed Max 20x to Ultra and Max 5x to plain Max on 2026-10-30.
+  const planName =
+    plan?.id === "max" && plan.multiplier === 20
+      ? "Ultra"
+      : plan
+        ? labels[plan.id]
+        : undefined;
   const windowLabels = {
     "five-hour": "Five-hour limit",
     daily: "Daily limit",
@@ -29,9 +35,7 @@ export function normalizeUsageMeasurement(
     ...measurement,
     usage: {
       ...usage,
-      planLabel: planName
-        ? `${planName}${plan?.multiplier == null ? "" : ` (${plan.multiplier}x)`}`
-        : usage.planLabel,
+      planLabel: planName ?? usage.planLabel,
       windows: usage.windows.map((window) => ({
         ...window,
         label:

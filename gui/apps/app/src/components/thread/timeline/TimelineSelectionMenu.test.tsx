@@ -8,6 +8,11 @@ import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coa
 import { TimelineSelectionMenu } from "./TimelineSelectionMenu";
 import type { MessageProseSelection } from "./SelectableMessageProse";
 
+const { copyToClipboardWithToast } = vi.hoisted(() => ({
+  copyToClipboardWithToast: vi.fn(),
+}));
+vi.mock("@/lib/clipboard", () => ({ copyToClipboardWithToast }));
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -66,6 +71,29 @@ describe("TimelineSelectionMenu", () => {
         .getByRole("button", { name: "Reply" })
         .closest("[data-bb-portaled-overlay]"),
     ).not.toBeNull();
+  });
+
+  it("copies exactly the selected text, whitespace included, and closes", () => {
+    copyToClipboardWithToast.mockClear();
+    const onDismiss = vi.fn();
+    render(
+      <TimelineSelectionMenu
+        selection={makeSelection({
+          text: "first()\n    second()",
+          copyText: "    first()\n    second()\n",
+        })}
+        onAddToChat={vi.fn()}
+        onDismiss={onDismiss}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
+
+    expect(copyToClipboardWithToast).toHaveBeenCalledExactlyOnceWith(
+      "    first()\n    second()\n",
+      { chatMessage: true },
+    );
+    expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
   it("does not mount when no action handlers are supplied", () => {

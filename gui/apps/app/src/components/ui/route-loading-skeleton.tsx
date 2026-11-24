@@ -1,5 +1,5 @@
 import { HEADER_SEAM_CLASS } from "@/components/layout/AppPageHeader";
-import { CHROME_ROW_CLASS } from "@/lib/bb-desktop";
+import { CHROME_ROW_CLASS } from "@/lib/room-desktop";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 

@@ -1,35 +1,35 @@
 import type {
-  BbDesktopInfo,
-  BbDesktopInfoChangeHandler,
-  BbDesktopInfoUnsubscribe,
+  RoomDesktopInfo,
+  RoomDesktopInfoChangeHandler,
+  RoomDesktopInfoUnsubscribe,
 } from "@cloudroom/desktop-contract";
 
 const DESKTOP_UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export const DESKTOP_UPDATE_ACTIVE_MIN_INTERVAL_MS = 60 * 1000;
 
 export interface DesktopUpdateService {
-  checkAfterActive(): Promise<BbDesktopInfo | null>;
-  checkForUpdates(): Promise<BbDesktopInfo>;
-  getInfo(): BbDesktopInfo;
+  checkAfterActive(): Promise<RoomDesktopInfo | null>;
+  checkForUpdates(): Promise<RoomDesktopInfo>;
+  getInfo(): RoomDesktopInfo;
   start(): void;
   stop(): void;
-  subscribe(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe;
+  subscribe(listener: RoomDesktopInfoChangeHandler): RoomDesktopInfoUnsubscribe;
 }
 
 interface DesktopUpdateScheduler extends DesktopUpdateService {
-  updateInfo(nextInfo: BbDesktopInfo): void;
+  updateInfo(nextInfo: RoomDesktopInfo): void;
 }
 
 interface CreateDesktopUpdateSchedulerArgs {
   enabled: boolean;
-  initialInfo: BbDesktopInfo;
+  initialInfo: RoomDesktopInfo;
   now: () => number;
   runCheck(checkedAt: string): Promise<void>;
 }
 
 function areDesktopInfoValuesEqual(
-  left: BbDesktopInfo,
-  right: BbDesktopInfo,
+  left: RoomDesktopInfo,
+  right: RoomDesktopInfo,
 ): boolean {
   return (
     left.lastCheckedAt === right.lastCheckedAt &&
@@ -48,12 +48,12 @@ export function createDesktopUpdateScheduler(
   args: CreateDesktopUpdateSchedulerArgs,
 ): DesktopUpdateScheduler {
   let currentInfo = args.initialInfo;
-  let inflight: Promise<BbDesktopInfo> | null = null;
+  let inflight: Promise<RoomDesktopInfo> | null = null;
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let lastAttemptedAt: number | null = null;
-  const listeners = new Set<BbDesktopInfoChangeHandler>();
+  const listeners = new Set<RoomDesktopInfoChangeHandler>();
 
-  function updateInfo(nextInfo: BbDesktopInfo): void {
+  function updateInfo(nextInfo: RoomDesktopInfo): void {
     if (areDesktopInfoValuesEqual(currentInfo, nextInfo)) {
       return;
     }
@@ -63,7 +63,7 @@ export function createDesktopUpdateScheduler(
     }
   }
 
-  async function checkForUpdates(): Promise<BbDesktopInfo> {
+  async function checkForUpdates(): Promise<RoomDesktopInfo> {
     if (!args.enabled) {
       return currentInfo;
     }
@@ -88,7 +88,7 @@ export function createDesktopUpdateScheduler(
   }
 
   return {
-    async checkAfterActive(): Promise<BbDesktopInfo | null> {
+    async checkAfterActive(): Promise<RoomDesktopInfo | null> {
       if (!args.enabled) {
         return null;
       }
@@ -102,7 +102,7 @@ export function createDesktopUpdateScheduler(
       return checkForUpdates();
     },
     checkForUpdates,
-    getInfo(): BbDesktopInfo {
+    getInfo(): RoomDesktopInfo {
       return currentInfo;
     },
     start(): void {
@@ -121,7 +121,7 @@ export function createDesktopUpdateScheduler(
       clearInterval(intervalHandle);
       intervalHandle = null;
     },
-    subscribe(listener: BbDesktopInfoChangeHandler): BbDesktopInfoUnsubscribe {
+    subscribe(listener: RoomDesktopInfoChangeHandler): RoomDesktopInfoUnsubscribe {
       listeners.add(listener);
       return () => {
         listeners.delete(listener);

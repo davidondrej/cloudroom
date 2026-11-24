@@ -58,6 +58,18 @@ export function useCloudLoginFixed(then: () => void): void {
   }, []);
 }
 
+/** Runs `then` when the app's pop-up after buying a plan saw the new plan or turned Cloud loops on
+ *  (gui/apps/app/src/components/PlanLoops.tsx): an open Loops page then shows them without a reload. */
+export function usePlanLoopsChanged(then: () => void): void {
+  const latest = useRef(then);
+  latest.current = then;
+  useEffect(() => {
+    const changed = () => latest.current();
+    window.addEventListener("cloudroom:plan-loops-changed", changed);
+    return () => window.removeEventListener("cloudroom:plan-loops-changed", changed);
+  }, []);
+}
+
 async function rpc(method: string, input: unknown = null): Promise<unknown> {
   const response = await fetch(`/api/v1/plugins/automations/rpc/${method}`, {
     method: "POST",

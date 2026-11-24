@@ -7,7 +7,7 @@
   <a href="core/docs/harnesses.md">Harness adapters</a> ·
   <a href="core/docs/setup.md">Self-host</a> ·
   <a href="core/docs/api.md">HTTP API</a> ·
-  <a href="https://www.cloudroom.dev/download">Download</a>
+  <a href="https://github.com/davidondrej/cloudroom/releases/latest">Download</a>
 </p>
 
 <p align="center">
@@ -41,7 +41,7 @@ For Apple Silicon Macs (macOS 13+), Linux x64, and Windows 11.
 
 ## Get started
 
-**Use the app.** [Download it](https://www.cloudroom.dev/download). It updates itself.
+**Use the app.** [Download it](https://github.com/davidondrej/cloudroom/releases/latest) for macOS, Windows, or Linux. It updates itself.
 
 **Host the core yourself.** On Ubuntu 24.04:
 

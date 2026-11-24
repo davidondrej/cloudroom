@@ -301,8 +301,8 @@ describe("electron-builder signing config", () => {
     );
     const config = electronBuilderConfigSchema.parse(JSON.parse(configText));
 
-    expect(config.asarUnpack).toContain("dist/bb-app-bridge.mjs");
-    expect(config.asarUnpack).not.toContain("dist/bb-app-bridge.js");
+    expect(config.asarUnpack).toContain("dist/launcher-bridge.mjs");
+    expect(config.asarUnpack).not.toContain("dist/launcher-bridge.js");
   });
 
   it("runs a native module preparation hook after packaging", async () => {

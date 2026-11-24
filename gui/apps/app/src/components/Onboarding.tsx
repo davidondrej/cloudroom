@@ -2,19 +2,21 @@ import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
+import { useNavigate } from "react-router";
 import { deriveProjectNameFromPath } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { ClaudeConnectionButton, useClaudeConnection } from "@/components/ClaudeConnection";
+import { ClaudeConnectionButton, useClaudeConnection, useInstallPercent } from "@/components/ClaudeConnection";
 import { openCodexConnection } from "@/components/CodexConnectionPanel";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 import { ImportChats } from "@/components/settings/ImportChats";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { useOwnCoreConnection } from "@/components/settings/SelfHostedCoreForm";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { appToast } from "@/components/ui/app-toast";
 import { useCreateProject } from "@/hooks/mutations/project-mutations";
 import { useUpdateGeneralSettings } from "@/hooks/mutations/settings-mutations";
-import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportBb, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
+import { cloudCanRunHarness, useCloudroomAccount, useCloudroomSignIn, useImportRoom, useMacAgents, useNativeSessions, useProjectSuggestions, useSetCopyLogins, useSetMacAccess } from "@/hooks/queries/cloudroom-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useHostDaemon, useThisComputer } from "@/hooks/useHostDaemon";
 import { GitForWindowsBanner } from "@/components/layout/DesktopUpdateBanner";
@@ -22,7 +24,7 @@ import { usePathPickerHost } from "@/hooks/useLocalPathPicker";
 import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { usePromptBoxProviderPreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { booleanLocalStorage } from "@/lib/browser-storage";
-import { getBbDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo, MACOS_APP_REGION_NO_DRAG_CLASS, MACOS_WINDOW_DRAG_CLASS } from "@/lib/room-desktop";
 import { copyTextToClipboard, copyToClipboardWithToast, useClipboardCopy } from "@/lib/clipboard";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useSystemConfig, useSystemProviders } from "@/hooks/queries/system-queries";
@@ -36,12 +38,11 @@ const dismissedAtom = atomWithStorage("cloudroom.setup.dismissed", false, boolea
 const openAtom = atom(false);
 // A new install's sign-in page opens by itself (David, 2026-11-03, docs/scopes/onboarding.md). 20% keep the button, to measure it.
 const signInGroupAtom = atomWithStorage<"auto" | "manual" | "auto_done" | null>("cloudroom.setup.signInGroup", null, undefined, { getOnInit: true });
-export const useOpenSetup = () => useSetAtom(openAtom);
 
 const STEPS = ["Sign in", "Connect an agent", "Connect GitHub", "Import your work"];
 const STEP_IDS = ["account", "agent", "github", "project"] as const;
 type SetupStepId = (typeof STEP_IDS)[number];
-type SetupDetail = "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "fx" | "openclaw" | "auto" | "manual";
+type SetupDetail = "gitlab" | "claude" | "codex" | "both" | "none" | "existing" | "found" | "folder" | "recent_folder" | "bb_import" | "chat_import" | "pi" | "opencode" | "cursor" | "hermes" | "grok" | "devin" | "droid" | "kimi" | "antigravity" | "fx" | "openclaw" | "agent-zero" | "auto" | "manual" | "repos";
 const agentDetail = (id: string) => id.replace(/^acp-/, "").replace(/-agent$/, "") as SetupDetail;
 function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipped" | "closed" | "detected", detail: SetupDetail | null = null, agents?: SetupDetail[]) {
   void fetchWithAppSurface("/api/v1/cloudroom/setup-step", {
@@ -51,18 +52,21 @@ function track(step: SetupStepId, action: "viewed" | "started" | "done" | "skipp
 const LATER = ["Your Cloudroom account", "Claude Code or Codex", "For private repos", "Last step"];
 const PALETTE = {
   "--ob-bg": "#faf7ef", "--ob-rail": "#f2ecde", "--ob-card": "#fffdf7", "--ob-line": "#e2dac6", "--ob-dash": "#c9bfa6",
-  "--ob-ink": "#29251e", "--ob-muted": "#7a7263", "--ob-lime": "#bfff00", "--ob-ok": "#4d6b00", "--ob-green": "#17803f",
+  "--ob-ink": "#29251e", "--ob-muted": "#7a7263", "--ob-lime": "#bfff00", "--ob-ok": "#4d6b00", "--ob-green": "#17803f", "--ob-error": "#b42318",
 } as CSSProperties;
 
 export function useSetupProgress() {
   const account = useCloudroomAccount();
   const accountId = account.data?.account?.id;
+  // A Core the user hosts, with no Cloudroom account: connecting it was step 1, and its server keeps its own GitHub login.
+  // Never true for account users, so their setup is unchanged.
+  const ownCore = account.data?.selfHosted === true && !account.data.account;
   const ready = account.data?.ready === true;
   const offline = Boolean(account.data?.account && !ready && account.data?.error);
-  const claude = useClaudeConnection({ target: "cloud" }, Boolean(accountId));
+  const claude = useClaudeConnection({ target: "cloud" }, Boolean(accountId) || ownCore);
   const codex = useQuery({
     queryKey: ["cloudroom-codex-auth", accountId],
-    enabled: Boolean(accountId) && ready,
+    enabled: (Boolean(accountId) || ownCore) && ready,
     queryFn: ({ signal }) => sdk.cloudroom.codexAuth(signal),
     retry: false,
     refetchInterval: (query) => (query.state.data?.state === "waiting" ? 1500 : false),
@@ -80,43 +84,56 @@ export function useSetupProgress() {
   const signedIn = useMacAgents(extra !== null).data?.includes(extra ?? "") === true;
   const other = provider && signedIn ? provider.id : null;
   const agents = { claude: claude.data?.state === "connected", codex: codex.data?.state === "connected", other, otherName: other && provider?.displayName };
-  const done = [Boolean(accountId), agents.claude || agents.codex || other !== null, github.data?.state === "connected"];
-  return { account, ready, offline, agents, codex, github, done, complete: done.every(Boolean), checking: account.isPending };
+  const gitlab = useGitlabConnection(Boolean(accountId) && ready);
+  const done = [Boolean(accountId) || ownCore, agents.claude || agents.codex || other !== null, github.data?.state === "connected" || Boolean(gitlab.state?.login && !gitlab.state.expired) || ownCore];
+  return { account, ownCore, ready, offline, agents, codex, github, gitlab, done, complete: done.every(Boolean), checking: account.isPending };
 }
+
+/** True while setup is open, so a pop-up waits for it to close. */
+export const useOnboardingOpen = () => useAtomValue(openAtom);
 
 export function Onboarding() {
   const [dismissed, setDismissed] = useAtom(dismissedAtom);
   const [open, setOpen] = useAtom(openAtom);
   const projects = useSidebarNavigation().data?.projects;
   const account = useCloudroomAccount();
-  const locked = account.isSuccess && !account.data.account && !account.data.selfHosted;
+  // No account and no Core of their own. Setup never locks: the app works without sign-in (ADR 20261116-210853).
+  const signedOut = account.isSuccess && !account.data.account && !account.data.selfHosted;
   // Only the desktop app opens setup by itself: "skipped" is saved per browser, so phones and other browsers would see it again.
-  const firstRun = !dismissed && getBbDesktopInfo() !== null && projects !== undefined && projects.length === 0;
+  const firstRun = !dismissed && getRoomDesktopInfo() !== null && projects !== undefined && projects.length === 0;
   // Stay open once shown: adding a folder or importing chats creates projects, which would otherwise end the first run mid-step.
   useEffect(() => { if (firstRun) setOpen(true); }, [firstRun, setOpen]);
-  const visible = locked || open || firstRun;
+  const visible = open || firstRun;
   if (!visible) return null;
-  return <Setup locked={locked} fresh={projects?.length === 0} close={() => { setDismissed(true); setOpen(false); }} />;
+  return <Setup signedOut={signedOut} fresh={projects?.length === 0} close={() => { setDismissed(true); setOpen(false); }} />;
 }
 
-function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; close: () => void }) {
+function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean; close: () => void }) {
   const progress = useSetupProgress();
   const { done, account } = progress;
+  const lab = progress.gitlab.state;
+  const gitlabChosen = lab?.waiting || (lab?.login && !lab.expired && progress.github.data?.state !== "connected");
+  const [ownCoreForm, setOwnCoreForm] = useState(false);
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
   // Step 4's progress lives here, so going back a step keeps the Added ticks and Continue.
   const [added, setAdded] = useState<AddedFolder[]>([]);
   const [imported, setImported] = useState(false);
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
+  const os = account.data?.computerOs;
   const leave = () => {
-    if (account.data?.account && account.data.macAccessSupported !== false && account.data.macAccess == null) saveMacAccess.mutate(choices.macAccess);
-    if (account.data?.account && account.data.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
+    const saves = Boolean(account.data?.account) || progress.ownCore;
+    // Windows (#958): skipping never turns access on, nor when the computer's system is unknown. It stays unset (Off),
+    // and on Windows the chip asks once (MacAccessChip). The server's system counts, not the viewer's.
+    if (saves && os !== undefined && os !== "windows" && account.data?.macAccessSupported !== false && account.data?.macAccess == null) saveMacAccess.mutate(choices.macAccess);
+    if (saves && account.data?.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
     close();
   };
   useFirstAgentDefault(progress.agents);
   const first = done.findIndex((isDone) => !isDone);
   const [picked, setPicked] = useState<number | null>(null);
   const step = picked ?? (first === -1 ? 3 : first);
+  const skip = () => { track(STEP_IDS[step] ?? "project", "closed"); leave(); };
   const next = () => setPicked(nextStep(done, step));
   const signedIn = done[0];
   const wasSignedIn = useRef(signedIn);
@@ -172,7 +189,7 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
       <div className="flex min-h-0 flex-1">
         <aside className="hidden w-[300px] shrink-0 flex-col border-r border-(--ob-line) bg-(--ob-rail) px-[22px] pt-7 pb-6 md:flex">
           <div className="flex items-center gap-2.5 text-base font-semibold tracking-tight">
-            <BbLogo className="size-7" />
+            <RoomLogo className="size-7" />
             cloudroom
           </div>
           <p className="mt-10 mb-3 ml-3 text-[11px] tracking-[0.14em] text-(--ob-muted) uppercase">Setup</p>
@@ -206,7 +223,7 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
                       {state === "done" ? <Icon name="Check" className="size-3.5" aria-label="Done" /> : `0${index + 1}`}
                     </span>
                     <span className="min-w-0">
-                      <strong className="block text-sm leading-tight font-semibold">{title}</strong>
+                      <strong className="block text-sm leading-tight font-semibold">{index === 0 && (progress.ownCore || (signedOut && ownCoreForm)) ? "Your own Core" : index === 2 && gitlabChosen ? "Connect GitLab" : title}</strong>
                       <small className="mt-0.5 block truncate text-[12.5px] text-(--ob-muted)">{meta}</small>
                     </span>
                   </button>
@@ -214,21 +231,26 @@ function Setup({ locked, fresh, close }: { locked: boolean; fresh: boolean; clos
               );
             })}
           </ol>
-          <p className="mt-auto px-3 text-[12.5px] text-(--ob-muted)">Reopen setup anytime from the account button in the sidebar.</p>
         </aside>
         <main className="relative flex min-w-0 flex-1 overflow-y-auto px-6 pt-16 pb-8 md:px-[110px] md:py-10">
-          {!locked && (
-            <button type="button" onClick={() => { track(STEP_IDS[step] ?? "project", "closed"); leave(); }} className={cn("absolute top-5 right-6 flex items-center gap-1.5 text-[13px] text-(--ob-muted) hover:text-(--ob-ink)", MACOS_APP_REGION_NO_DRAG_CLASS)}>
+          {signedOut && step === 0 ? (
+            // Self-hosters need no account (docs/scopes/self-hosting.md). The step itself offers "Use without an account".
+            <button type="button" onClick={() => setOwnCoreForm(!ownCoreForm)} className={CORNER}>
+              <Icon name={ownCoreForm ? "ArrowLeft" : "Server"} className="size-3.5" aria-hidden />
+              {ownCoreForm ? "Sign in instead" : "Use my own Core"}
+            </button>
+          ) : (
+            <button type="button" onClick={skip} className={CORNER}>
               Skip setup
               <Icon name="X" className="size-3" aria-hidden />
             </button>
           )}
           <div key={step} className={cn("my-auto w-full duration-300 animate-in fade-in-0 slide-in-from-bottom-1", step === 3 ? "max-w-[860px]" : "max-w-[600px]")}>
-            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <BbLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
+            {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
-            {step === 0 && <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} next={next} fresh={fresh} />}
+            {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : signedOut && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} skip={signedOut ? skip : null} />)}
             {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
-            {step === 2 && <GithubStep progress={progress} next={next} />}
+            {step === 2 && <GithubStep progress={progress} next={next} stay={()=>setPicked(2)} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
           </div>
         </main>
@@ -266,9 +288,10 @@ function nextStep(done: boolean[], from: number) {
 }
 
 function doneMeta(index: number, progress: ReturnType<typeof useSetupProgress>) {
-  if (index === 0) return progress.account.data?.account?.email ?? "Signed in";
+  if (index === 0) return progress.account.data?.account?.email ?? (progress.ownCore ? "Connected" : "Signed in");
   if (index === 1) return [progress.agents.claude && "Claude Code", progress.agents.codex && "Codex", progress.agents.otherName].filter(Boolean).join(" + ");
-  return progress.github.data?.email ?? "Connected";
+  if (progress.gitlab.state?.login && progress.github.data?.state !== "connected") return "@"+progress.gitlab.state.login;
+  return progress.github.data?.email ?? (progress.ownCore ? "On your server" : "Connected");
 }
 
 function Heading({ lead, mark }: { lead: string; mark: string }) {
@@ -280,6 +303,7 @@ function Heading({ lead, mark }: { lead: string; mark: string }) {
   );
 }
 
+const CORNER = cn("absolute top-5 right-6 flex items-center gap-1.5 text-[13px] text-(--ob-muted) hover:text-(--ob-ink)", MACOS_APP_REGION_NO_DRAG_CLASS);
 const Note = ({ children }: { children: ReactNode }) => <p className="text-[13px] text-(--ob-muted)">{children}</p>;
 const LINK = "text-(--ob-ink) underline underline-offset-[3px] disabled:opacity-50";
 const QUIET_LINK = "underline decoration-(--ob-dash) underline-offset-[3px] hover:text-(--ob-ink) disabled:opacity-50";
@@ -363,7 +387,8 @@ function CopyLink({ url }: { url: string }) {
 }
 
 const SIGN_IN_COUNTDOWN = 3;
-function AccountStep({ email, signingIn, next, fresh }: { email: string | null; signingIn: boolean; next: () => void; fresh: boolean }) {
+/** `skip` closes setup with no account: the app works without sign-in (ADR 20261116-210853). */
+function AccountStep({ email, signingIn, error, next, fresh, skip }: { email: string | null; signingIn: boolean; error: string | null; next: () => void; fresh: boolean; skip: (() => void) | null }) {
   const signIn = useCloudroomSignIn();
   const busy = signingIn || signIn.isPending;
   const [group, setGroup] = useAtom(signInGroupAtom);
@@ -373,7 +398,7 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
   const openNow = () => { setLeft(null); begin(); };
   const cancel = () => { setLeft(null); setGroup("auto_done"); };
   // Only the desktop app on a new install, and only once: Cancel or a finished countdown never auto-opens again.
-  const offered = fresh && !email && getBbDesktopInfo() !== null;
+  const offered = fresh && !email && getRoomDesktopInfo() !== null;
   useEffect(() => {
     if (!offered || busy) return;
     if (group === null) setGroup(Math.random() < 0.2 ? "manual" : "auto");
@@ -403,6 +428,7 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
             <Cta onClick={openNow}>Opening your browser in {left}…</Cta>
             <Note>
               <button type="button" className={LINK} onClick={openNow}>Open now</button> · <button type="button" className={LINK} onClick={cancel}>Cancel</button>
+              {skip && <> · <button type="button" className={LINK} onClick={skip}>Use without an account</button></>}
             </Note>
           </div>
           <CountdownBar seconds={SIGN_IN_COUNTDOWN} />
@@ -412,11 +438,51 @@ function AccountStep({ email, signingIn, next, fresh }: { email: string | null; 
         <>
           <p className="mt-3 text-base text-(--ob-muted)">Use the account you made on cloudroom.dev.</p>
           <div className="mt-8 flex flex-col items-start gap-4">
-            <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
-            <Note>Already signed in there? You come right back.</Note>
+            <div className="flex flex-wrap items-center gap-3">
+              <Cta onClick={() => start()}>Sign in with browser <Icon name="ArrowRight" aria-hidden /></Cta>
+              {skip && <button type="button" onClick={skip} className="inline-flex h-12 items-center justify-center border border-(--ob-ink) px-7 text-[15.5px] font-semibold text-(--ob-ink) transition-colors hover:bg-(--ob-card)">Use without an account</button>}
+            </div>
+            {error ? <p role="alert" className="text-[13px] text-(--ob-error)">{error}</p> : <Note>Already signed in there? You come right back.</Note>}
           </div>
         </>
       )}
+    </>
+  );
+}
+
+const FIELD = "h-11 w-full border border-(--ob-line) bg-(--ob-card) px-3.5 text-[14px] text-(--ob-ink) outline-none placeholder:text-(--ob-muted) focus:border-(--ob-ink)";
+
+/** Step 1 for self-hosters: connect the Core by URL and token. Setup stays open and moves on to the agents. */
+function OwnCoreStep() {
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const keepOpen = useSetAtom(openAtom);
+  const connect = useOwnCoreConnection(() => keepOpen(true));
+  const failure = connect.failure;
+  return (
+    <>
+      <Heading lead="Connect your own" mark="Core" />
+      <p className="mt-3 text-base text-(--ob-muted)">Use its address and the API token from /etc/cloudroom/core.env.</p>
+      <form className="mt-8 flex max-w-[460px] flex-col gap-3" onSubmit={(event) => { event.preventDefault(); connect.mutate({ url, token }); }}>
+        <input aria-label="Core URL" className={FIELD} placeholder="https://my-core.example.ts.net" value={url} onChange={(event) => setUrl(event.target.value)} autoComplete="off" spellCheck={false} />
+        <input aria-label="Core API token" type="password" className={FIELD} placeholder="API token" value={token} onChange={(event) => setToken(event.target.value)} autoComplete="off" />
+        <div className="mt-3 flex items-center gap-5">
+          <Cta type="submit" disabled={connect.isPending || !url.trim() || !token.trim()}>{connect.isPending ? "Connecting…" : <>Connect <Icon name="ArrowRight" aria-hidden /></>}</Cta>
+          {failure ? <p role="alert" className="text-[13px] text-(--ob-error)">{failure}</p> : <Note>No Cloudroom account needed.</Note>}
+        </div>
+      </form>
+    </>
+  );
+}
+
+function OwnCoreDone({ next }: { next: () => void }) {
+  return (
+    <>
+      <Heading lead="Connected to your" mark="Core" />
+      <div className="mt-8 flex items-center gap-5">
+        <Cta onClick={next}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
+        <Note>No Cloudroom account needed.</Note>
+      </div>
     </>
   );
 }
@@ -451,7 +517,11 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   const client = useQueryClient();
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
-  const [ask] = useState(() => ({ mac: account.data?.macAccessSupported !== false && account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
+  const [askedAccess] = useState(() => ({ mac: account.data?.macAccessSupported !== false && account.data?.macAccess == null, logins: account.data?.copyLogins == null }));
+  // Windows (#958): setup never asks or saves computer access, so Connect can't save the ticked default. The sidebar
+  // chip asks once instead (MacAccessChip). Until the server says its system, nothing is saved either.
+  const os = account.data?.computerOs;
+  const ask = { ...askedAccess, mac: askedAccess.mac && os !== undefined && os !== "windows" };
   const { macAccess, copyLogins } = choices;
   // Save whenever a box differs from the saved choice, so re-checking it after a Connect works.
   const saveChoices = () =>
@@ -474,7 +544,17 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   });
   const finish = useMutation({ mutationFn: saveChoices, onSuccess: () => { track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : "codex"); next(); }, meta: { showErrorToast: false }, onError: (error) => appToast.error(error.message) });
   const codexBrowser = codex.data?.state === "waiting" && !codex.data.user_code ? codex.data : null;
-  const waiting = !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
+  // Connect installs a missing Codex first; the button shows it (ADR 20261111-123959).
+  const codexInstalling = useInstallPercent(codexBrowser?.installing_since);
+  // An install or sign-in that fails after Connect arrives through the status poll, not the mutation: show it once.
+  const codexState = codex.data?.state;
+  const codexMessage = codex.data?.message;
+  const codexWasWaiting = useRef(false);
+  useEffect(() => {
+    if (codexState === "error" && codexWasWaiting.current && codexMessage) appToast.error(codexMessage);
+    codexWasWaiting.current = codexState === "waiting";
+  }, [codexState, codexMessage]);
+  const waiting = progress.ownCore ? (ready ? null : "Your Core isn't reachable") : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : null;
   const connectedLead = agents.claude && agents.codex ? "Agents" : agents.claude ? "Claude Code" : "Codex";
   const action = (connected: boolean, button: ReactNode) => (connected ? <Connected /> : waiting ? <Note>{waiting}</Note> : button);
   return (
@@ -489,13 +569,13 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
           {action(agents.claude, <span onClickCapture={() => started("claude")}><ClaudeConnectionButton target="cloud" className={CONNECT} /></span>)}
         </Card>
         <Card on={agents.codex} isDefault={agents.codex && defaultAgent === "codex"} logo={<AgentLogo id="codex" className="bg-black text-white" />} name="Codex" detail={account.data?.localLogins?.codex ? `Found on ${here}` : "Uses your ChatGPT plan"}>
-          {action(agents.codex, codexBrowser ? (
+          {action(agents.codex, codexBrowser && codexInstalling === null ? (
             <Note>
               Finish in your browser.{" "}
               {codexBrowser.verification_url && <button type="button" className={LINK} onClick={() => openUrlInExternalBrowser(codexBrowser.verification_url!)}>Reopen</button>}
             </Note>
           ) : (
-            <Outline className={CONNECT} disabled={connectCodex.isPending} onClick={() => { started("codex"); connectCodex.mutate(); }}>{connectCodex.isPending ? "Connecting…" : "Connect"}</Outline>
+            <Outline className={cn(CONNECT, "tabular-nums")} disabled={connectCodex.isPending || codexInstalling !== null} onClick={() => { started("codex"); connectCodex.mutate(); }}>{codexInstalling !== null ? `Installing ${codexInstalling}%` : connectCodex.isPending ? "Connecting…" : "Connect"}</Outline>
           ))}
         </Card>
       </div>
@@ -614,18 +694,21 @@ const CountdownBar = ({ seconds }: { seconds: number }) => (
 const GITHUB_COUNTDOWN = 4;
 const openGithub = (url: string) => { if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); };
 
-function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupProgress>; next: () => void }) {
-  const { github, account, ready, offline } = progress;
+function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useSetupProgress>; next: () => void; stay:()=>void }) {
+  const { github, gitlab, account, ready, offline } = progress;
   const here = useThisComputer();
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // "Only share specific repos": the GitHub App's login, then the user picks repos on GitHub (#2084).
+  const [picking, setPicking] = useState(false);
   const refresh = () => client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
   const connect = useMutation({
-    mutationFn: async () => {
-      track("github", "started");
+    mutationFn: async (repos: boolean) => {
+      setPicking(repos);
+      track("github", "started", repos ? "repos" : null);
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current);
+      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
       if (result.state === "waiting" && result.verification_url && result.user_code) {
         if (new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
         setCopied(await copyTextToClipboard(result.user_code));
@@ -644,19 +727,45 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
   });
   const state = github.data?.state;
   const connected = state === "connected";
+  const onServer = progress.ownCore; // Never queries GitHub: its server has its own login.
   const code = state === "waiting" ? github.data?.user_code : null;
   const url = state === "waiting" ? github.data?.verification_url : null;
   const [left, setLeft] = useCountdown(Boolean(url), () => { if (url) openGithub(url); });
+  // After the code is approved, the same login waits with GitHub's page for picking repos and no code. It opens by
+  // itself once, right after the code screen, like the code's page did.
+  const pick = Boolean(url) && !code;
+  const hadCode = useRef(false);
+  useEffect(() => {
+    if (code) hadCode.current = true;
+    else if (pick && hadCode.current) { hadCode.current = false; setLeft(GITHUB_COUNTDOWN); }
+  }, [code, pick, setLeft]);
   const open = () => {
     setLeft(null);
     if (url) openGithub(url);
   };
+  // Someone whose account or organization already has the app skips the picking screen, so the repos may not be the
+  // ones they had in mind: the link opens GitHub's page for changing them.
+  const repos = useQuery({ queryKey: ["cloudroom-github-account"], enabled: connected && picking, retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal) }).data?.reposUrl;
   const copyAgain = async () => {
     if (code && await copyToClipboardWithToast(code, { successMessage: "Code copied." })) setCopied(true);
   };
   const detail = connected
-    ? "Cloud agents can use your repos."
+    ? picking ? "Cloud agents can use the repos Cloudroom has on GitHub." : "Cloud agents can use your repos."
+    : onServer ? "Your Core uses the GitHub login set up on its server."
     : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…" : `Not found on ${here}. You'll copy a code, then paste it on github.com.`;
+  if (gitlab.state?.waiting || (!connected && gitlab.state?.login && !gitlab.state.expired)) {
+    const waiting = gitlab.state.waiting;
+    return <>
+      <Heading lead={waiting ? "Connect" : "Connected to"} mark="GitLab"/>
+      <div className="mt-8"><Card on={!waiting} logo={<img className="size-8" src="/gitlab.svg" alt=""/>} name={waiting ? "GitLab.com" : "@"+gitlab.state.login}
+        detail={waiting ? "Finish authorizing Cloudroom in your browser." : "Cloud agents can use your GitLab projects."}>{!waiting && <Connected/>}</Card></div>
+      <div className="mt-8 flex items-center gap-5">
+        {waiting ? <><Cta onClick={gitlab.open}>Open GitLab <Icon name="ExternalLink"/></Cta><Note><button className={LINK} disabled={gitlab.busy} onClick={()=>gitlab.change("cancel")}>Back to GitHub</button></Note></> :
+          <Cta onClick={()=>{track("github","done","gitlab");next();}}>Continue <Icon name="ArrowRight"/></Cta>}
+      </div>
+      {gitlab.error && <p role="alert">{gitlab.error}</p>}
+    </>;
+  }
   if (code) {
     return (
       <>
@@ -684,6 +793,25 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
       </>
     );
   }
+  if (pick) {
+    return (
+      <>
+        <Heading lead="Pick your" mark="repos" />
+        <p className="mt-4 text-[15px] text-(--ob-muted)">GitHub is connected. Now choose which repos cloud agents may use.</p>
+        <div className="mt-8 flex items-center gap-5">
+          <Cta onClick={open}><Icon name="Github" aria-hidden />{left === null ? "Pick repos on GitHub" : `Opening GitHub in ${left}…`}</Cta>
+          <Note>
+            {left !== null && <><button type="button" className={LINK} onClick={open}>Open now</button> · </>}
+            <button type="button" className={LINK} onClick={() => cancel.mutate()}>Cancel</button>
+          </Note>
+        </div>
+        {left !== null && <CountdownBar seconds={GITHUB_COUNTDOWN} />}
+        <p className="mt-6 text-sm text-(--ob-muted)">
+          On GitHub: choose your account, pick <b className="text-(--ob-ink)">Only select repositories</b>, then click <b className="text-(--ob-ink)">Install</b>. This screen moves on by itself.
+        </p>
+      </>
+    );
+  }
   return (
     <>
       <Heading lead="Connect" mark="GitHub" />
@@ -692,20 +820,27 @@ function GithubStep({ progress, next }: { progress: ReturnType<typeof useSetupPr
           {connected && <Connected />}
         </Card>
       </div>
+      {!connected && (state === "error" || state === "expired") && github.data?.message && <p role="alert" className="mt-3 text-sm text-(--ob-error)">{github.data.message}</p>}
       {offline && <CloudOffline />}
       <div className="mt-8 flex items-center gap-5">
-        {connected ? (
-          <Cta onClick={() => { track("github", "done"); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
+        {connected || onServer ? (
+          <Cta onClick={() => { track("github", "done", picking ? "repos" : null); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
         ) : (
-          <Cta disabled={!ready || connect.isPending} onClick={() => connect.mutate()}>
+          <Cta disabled={!ready || connect.isPending} onClick={() => connect.mutate(false)}>
             <Icon name={connect.isPending ? "Loading" : "Github"} className={cn(connect.isPending && "animate-spin")} aria-hidden />
             {connect.isPending ? "Getting your code…" : "Connect GitHub"}
           </Cta>
         )}
-        {!connected && (
+        {!connected && !onServer && (
           <Note><button type="button" className={LINK} onClick={() => { track("github", "skipped"); next(); }}>Skip this step</button> if you only use public repos.</Note>
         )}
+        {connected && repos && <Note><button type="button" className={LINK} onClick={() => openGithub(repos)}>Change repos</button> on GitHub.</Note>}
       </div>
+      {!connected && !onServer && <div className="mt-3.5 text-[12.5px] text-(--ob-muted)">
+        <button type="button" className={QUIET_LINK} disabled={!ready || connect.isPending} onClick={() => connect.mutate(true)}>Only share specific repos</button>
+        {gitlab.state?.available && <> · <button type="button" className={QUIET_LINK} disabled={gitlab.busy || !ready} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button></>}
+        {gitlab.error && <p role="alert" className="text-xs text-(--ob-error)">{gitlab.error}</p>}
+      </div>}
     </>
   );
 }
@@ -726,9 +861,10 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const { canUseNativeFolderPicker, clientHostId, hostId } = usePathPickerHost();
   const here = useThisComputer();
   const { localHostId } = useHostDaemon();
-  const importBb = useImportBb();
+  const importRoom = useImportRoom();
   const sessions = useNativeSessions().data?.sessions;
-  const empty = sessions?.length === 0;
+  // An import empties the scan; keep "Import your work" with Continue instead of flipping to "No agent chats to import".
+  const empty = sessions?.length === 0 && !imported;
   // Unless the scan found no chats, added folders stay on this step with a tick, and the lime Continue button leaves it.
   const addedPaths = new Set(added.map((folder) => folder.path));
   const suggested = useProjectSuggestions()?.repos.filter((repo) => repo.source === "mac").filter((repo) => !addedPaths.has(repo.path)) ?? [];
@@ -760,7 +896,7 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
   const bringWorkOver = () => {
     if (!localHostId) return appToast.error(`${here[0]!.toUpperCase()}${here.slice(1)} is not connected yet. Try again in a moment.`);
     track("project", "started", "bb_import");
-    importBb.mutate(localHostId, {
+    importRoom.mutate(localHostId, {
       onSuccess: ({ imported }) => {
         appToast.success(`Imported ${imported.length} BB thread${imported.length === 1 ? "" : "s"}`);
         if (imported.length) setImported(true);
@@ -830,8 +966,8 @@ function ProjectStep({ close, added, setAdded, imported, setImported }: {
             <span aria-hidden className="mx-2 text-(--ob-dash)">·</span>
           </>
         )}
-        <button type="button" className={QUIET_LINK} disabled={importBb.isPending} onClick={bringWorkOver}>
-          {importBb.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
+        <button type="button" className={QUIET_LINK} disabled={importRoom.isPending} onClick={bringWorkOver}>
+          {importRoom.isPending ? "Bringing your BB threads over…" : "Coming from BB?"}
         </button>
       </p>
       {done && (

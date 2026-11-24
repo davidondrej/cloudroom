@@ -5,7 +5,7 @@ export type Json =
   | string
   | Json[]
   | { [key: string]: Json };
-export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "openclaw";
+export type Harness = "codex" | "pi" | "cursor" | "claude-code" | "fx" | "opencode" | "hermes" | "devin" | "droid" | "kimi" | "antigravity" | "openclaw" | "agent-zero";
 export type CodexAuthStatus = {
   state: "missing" | "waiting" | "connected" | "limited" | "unavailable" | "error" | "expired";
   email: string | null; plan: string | null; message: string | null;
@@ -16,6 +16,7 @@ export type TeleportManifest = {
   request_id: string; harness: Harness; native_id: string; model: string; provider: string | null; reasoning: string | null;
   workspace: string; workspace_name: string; files: TeleportFile[]; handoff: string;
   service_tier?: string | null; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string;
+  thread_id?: string; project_id?: string;
   queued: (string | { text: string; reasoning?: string; service_tier?: string })[];
   /** A fork starts idle with no handoff; its first message is a `rewind` with `fork`. */
   fork?: boolean;
@@ -32,8 +33,9 @@ export type TeleportCheckResult = { ok: true } | {
 };
 export type Workspace = { id: string; path: string; parent?: string };
 type Upload = { body: ReadableStream<Uint8Array>; length: number; contentType?: string };
-/** Hex-encoded bytes keep binary input and output intact. */
-export type VmRun = { command: string; stdin?: string; cwd?: string };
+/** Hex-encoded bytes keep binary input and output intact. `keep`: the command outlives a request a proxy drops (#1970);
+ *  it goes in the query, which older cores ignore. */
+export type VmRun = { command: string; stdin?: string; cwd?: string; keep?: boolean };
 export type VmRunResult = { code: number | null; stdout: string; stderr: string; truncated: boolean };
 export type Receipt = {
   request_id: string;
@@ -63,6 +65,11 @@ export type Session = {
   last_sequence: number;
   queue: string[];
   receipts: { [id: string]: Receipt };
+  /** Cores with `cloud_threads` (#237): the newest app prompt, and the session this one continues. */
+  last_app_prompt?: { request_id: string; sequence: number } | null;
+  continued?: { from?: string; history?: string | null } | null;
+  title?: string | null;
+  pinned?: boolean;
 };
 export type SessionSummary = {
   session_id: string;
@@ -76,9 +83,16 @@ export type SessionSummary = {
   queued: number;
   last_sequence: number;
   last_activity_ms: number | null;
+  /** Cores with `cloud_threads` (#237). */
+  title?: string | null;
+  archived?: boolean;
+  parent_thread?: string | null;
+  last_app_prompt?: { request_id: string; sequence: number } | null;
 };
 
+export const antigravitySignInRequired = "Sign in with Google or enter a Gemini API key to use Antigravity in Cloud. Your prompt is saved.";
 const rejectionMessages: Record<string, string> = {
+  antigravity_auth_required: antigravitySignInRequired,
   cursor_auth_required: "Connect your Cursor account to use Cursor in Cloud. Your prompt is saved.",
   cursor_auth_unavailable: "Cursor in Cloud didn't answer the login check. Cloudroom tries again by itself.",
   cursor_auth_busy: "Close Cursor sessions before changing the cloud login. Existing threads were not changed.",
@@ -106,9 +120,14 @@ const rejectionMessages: Record<string, string> = {
   invalid_attachment: "The attachment could not be stored on Cloud.",
   attachment_permission_denied: "Cloud folder permission denied",
   attachment_too_large: "The attachment exceeds the Cloud size limit (10 MiB per image, 100 MiB per file).",
+  // Another computer holds the thread (#237): the send fails, so it isn't sent later into a session that's gone.
+  moving: "This thread is moving to a computer. Send it again when that's done.",
+  switching: "This thread is switching agents. Send it again in a moment.",
 };
 // Thread errors with these messages ask the user to connect an account, not retry blindly.
-export const authRequiredMessages = new Set([rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
+export const authRequiredMessages = new Set([rejectionMessages.antigravity_auth_required, rejectionMessages.codex_auth_required, rejectionMessages.cursor_auth_required, rejectionMessages.claude_auth_required]);
+// Why Core could not check the Claude login (core/src/session/mod.rs, #1222). Only these exact causes are shown.
+const claudeCheckCauses = ["the login check timed out", "the Claude CLI could not run", "the Claude CLI exited with an error", "the Claude CLI gave an unreadable answer"];
 const transientRejections = new Set(["storage_blocked", "service_stopping", "service_draining", "session_waking", "model_catalog_unavailable", "codex_auth_unavailable", "claude_auth_unavailable", "cursor_auth_unavailable"]);
 
 export class CloudroomError extends Error {
@@ -139,6 +158,30 @@ export class CloudroomConnectionError extends CloudroomError {
       "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
       "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT",
     ].includes(code) ? code : null;
+  }
+}
+
+/** Cores before `room_ids` refuse a thread or project ID as an unknown field, before doing anything, so the request
+ *  goes again once without them (#199). */
+async function withoutIds<
+  B extends { thread_id?: string; project_id?: string },
+  T,
+>(body: B, send: (body: B) => Promise<T>): Promise<T> {
+  try {
+    return await send(body);
+  } catch (error) {
+    if (
+      !(
+        error instanceof CloudroomError &&
+        error.status === 422 &&
+        /unknown field `(thread_id|project_id)`/.test(error.message)
+      )
+    )
+      throw error;
+    const rest = { ...body };
+    delete rest.thread_id;
+    delete rest.project_id;
+    return await send(rest);
   }
 }
 
@@ -191,7 +234,7 @@ async function uncompressed(response: Response): Promise<void> {
 
 /** JSON values in `text`, counted without parsing it as in web/lib/history.ts, and only until the count passes `limit`.
  *  Parsing tiny values (`[{},{},...]`) takes about 30 times their bytes in memory, so a byte limit alone doesn't bound it. */
-function values(text: string, limit: number): number {
+export function values(text: string, limit: number): number {
   let count = 1;
   for (let i = 0; i < text.length && count <= limit; i++) {
     const char = text.charCodeAt(i);
@@ -309,13 +352,16 @@ const REPLAY_VALUES = 1024 * 1024;
 /** JSON values per answer. At 16 bytes a value, the byte limits bind first for any real answer. */
 const ANSWER_VALUES = 1024 * 1024;
 /** JSON values per record, as in saved history and the phone's stream (web/lib/history.ts). */
-const RECORD_VALUES = 256 * 1024;
+export const RECORD_VALUES = 256 * 1024;
 const STREAM_SILENCE_MS = 45_000;
 /** The most one upload request may carry: some sandbox proxies drop requests over about 8 MB. */
 export const UPLOAD_PART = 4 * 1024 * 1024;
 const VM_RUN_TIMEOUT = 5 * 60_000;
 
 export class CloudroomClient {
+  /** This Mac's helper device, sent with commands to Cores with `mac_device`: a sleeping Mac's pairing moves only to
+   *  the Mac using the thread (#608). */
+  macDevice?: string;
   #base: string;
   #token: string;
   #gateToken?: string;
@@ -356,7 +402,7 @@ export class CloudroomClient {
   }
 
   async prepareTeleport(manifest: TeleportManifest): Promise<TeleportStatus> {
-    return await this.#json("/v1/teleports", manifest) as unknown as TeleportStatus;
+    return await withoutIds(manifest, body => this.#json("/v1/teleports", body)) as unknown as TeleportStatus;
   }
   /** Ask the VM to run the same Claude Code version as this Mac (ADR 0133). It switches only while no Claude session runs. */
   async matchClaudeVersion(version: string): Promise<{ state: "current" | "updating" | "waiting" | "failed"; installed?: string; target: string; error?: string | null }> {
@@ -384,8 +430,8 @@ export class CloudroomClient {
 
   /** Runs a shell command on the VM as its agent account (ADR 0113). Without a `signal`, it gives up after
    *  `VM_RUN_TIMEOUT`. Raw `bytes` replace hex stdin, halving the upload; older cores answer 404. */
-  async runOnVm(input: VmRun, signal: AbortSignal = AbortSignal.timeout(VM_RUN_TIMEOUT), bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
-    const raw = bytes ? `/raw?${new URLSearchParams({ command: input.command, ...(input.cwd ? { cwd: input.cwd } : {}) })}` : "";
+  async runOnVm({ keep, ...input }: VmRun, signal: AbortSignal = AbortSignal.timeout(VM_RUN_TIMEOUT), bytes?: Uint8Array<ArrayBuffer>): Promise<VmRunResult> {
+    const raw = bytes ? `/raw?${new URLSearchParams({ command: input.command, ...(input.cwd ? { cwd: input.cwd } : {}) })}` : keep ? "?keep=true" : "";
     let response: Response;
     try {
       response = await fetch(`${this.#base}/v1/vm/run${raw}`, {
@@ -419,8 +465,9 @@ export class CloudroomClient {
     return { code, stdout, stderr, truncated: truncated === true } as VmRunResult;
   }
 
-  async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<void> {
-    await this.#json("/v1/mac/helper", report);
+  /** True when an agent there couldn't reach this Mac, so the app should check its connection now (#608). */
+  async reportMac(report: { access: string; problem: string | null; unsupported?: boolean }): Promise<boolean> {
+    return (await this.#json("/v1/mac/helper", report)).check === true;
   }
 
   /** Every request's headers. Core never compresses, so they ask for no encoding (see `uncompressed`). */
@@ -439,6 +486,7 @@ export class CloudroomClient {
     body?: Json,
     signal?: AbortSignal,
     upload?: Upload,
+    headers: Record<string, string> = {},
   ): Promise<Response> {
     let response: Response;
     try {
@@ -451,6 +499,7 @@ export class CloudroomClient {
             : "application/json",
           ...(body === undefined ? {} : { "Content-Type": "application/json" }),
           ...(upload ? { "Content-Type": upload.contentType ?? "application/gzip", "Content-Length": String(upload.length) } : {}),
+          ...headers,
         },
         ...(upload ? { body: upload.body, duplex: "half" } : body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
@@ -478,7 +527,8 @@ export class CloudroomClient {
       await response.body?.cancel().catch(() => {});
       // Only 400/409 codes steer retry decisions; other statuses keep status-based rules.
       const code = response.status === 400 || response.status === 409 ? known : null;
-      const message = code ? rejectionMessages[code] : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
+      const cause = code === "claude_auth_unavailable" ? claudeCheckCauses.find((c) => error === `Claude account could not be verified: ${c}`) : undefined;
+      const message = code ? `${rejectionMessages[code]}${cause ? ` Cause: ${cause}.` : ""}` : `Cloudroom rejected the request (HTTP ${response.status})${error ? `: ${error}` : ""}`;
       throw new CloudroomError(message, response.status, code);
     }
     return response;
@@ -490,6 +540,7 @@ export class CloudroomClient {
     signal?: AbortSignal,
     upload?: Upload,
     timeoutMs = this.#timeoutMs,
+    headers: Record<string, string> = {},
   ): Promise<Record<string, unknown>> {
     const timeout = AbortSignal.timeout(timeoutMs);
     const response = await this.#request(
@@ -497,6 +548,7 @@ export class CloudroomClient {
       body,
       signal ? AbortSignal.any([signal, timeout]) : timeout,
       upload,
+      headers,
     );
     if ((body !== undefined || upload) && response.status !== 202) {
       await response.body?.cancel();
@@ -531,7 +583,7 @@ export class CloudroomClient {
     sessionId?: string,
   ): Promise<Acceptance> {
     requestId(body.request_id);
-    const value = await this.#json(path, body);
+    const value = await this.#json(path, body, undefined, undefined, undefined, this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {});
     const accepted = {
       session_id: text(value.session_id),
       receipt: receipt(value.receipt),
@@ -625,10 +677,27 @@ export class CloudroomClient {
     }
   }
 
-  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; last_turn_id?: string } } = {}) {
-    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "openclaw")
+  /** A project copy's heartbeat for `room-cli files wait` (#2168). Older cores answer 404. */
+  async alive(id: string, signal?: AbortSignal): Promise<void> {
+    requestId(id);
+    await this.#json(`/v1/workspaces/${id}/alive`, {}, signal);
+  }
+
+  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; through?: string; last_turn_id?: string }; continue_from?: string } = {}) {
+    if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "antigravity" && harness !== "openclaw" && harness !== "agent-zero")
       throw new CloudroomError("Unsupported Cloudroom harness");
-    return this.#command("/v1/sessions", "start", { request_id: id, harness, ...options });
+    return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body));
+  }
+
+  /** An agent switch or project move through Core (`cloud_threads`, #237): a new session that continues `from` with Core's
+   *  own history. `pending`: the website hasn't confirmed it yet; Core keeps trying. */
+  async continueSession(id: string, harness: Harness, from: string, options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; thread_id?: string; project_id?: string } = {}): Promise<Acceptance & { pending: boolean }> {
+    requestId(id);
+    // Core answers within about 2 minutes: up to 60 s for the new agent to start, then 60 s for the website.
+    const value = await withoutIds({ request_id: id, harness, continue_from: from, ...options }, body => this.#json("/v1/sessions", body, undefined, undefined, 150_000));
+    const accepted = { session_id: text(value.session_id), receipt: receipt(value.receipt), saving: json(value.saving), pending: value.pending === true };
+    if (accepted.receipt.request_id !== id || accepted.receipt.command !== "start") throw new CloudroomError("Cloudroom acceptance does not match the command");
+    return accepted;
   }
 
   prompt(
@@ -696,6 +765,16 @@ export class CloudroomClient {
     );
   }
 
+  /** The user's model pick (`set_model`): the session runs it, with this effort, from its next turn. */
+  setModel(sessionId: string, id: string, model: string, reasoning?: string, idleOnly = false) {
+    return this.#command(
+      `${sessionPath(sessionId)}/model`,
+      "model",
+      { request_id: id, model, ...(reasoning ? { reasoning } : {}), ...(idleOnly ? { idle_only: true } : {}) },
+      sessionId,
+    );
+  }
+
   steer(sessionId: string, id: string, targetRequestId: string, text: string) {
     if (!text.trim() || new TextEncoder().encode(text).length > 256 * 1024) {
       throw new CloudroomError("Prompt must contain 1–262144 bytes of text", 400);
@@ -708,8 +787,9 @@ export class CloudroomClient {
     );
   }
 
-  compact(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/compact`, "compact", { request_id: id }, sessionId);
+  /** `then` (Cores with `compact_after_turn`) is sent once compaction ends, saying how it went. */
+  compact(sessionId: string, id: string, then?: string) {
+    return this.#command(`${sessionPath(sessionId)}/compact`, "compact", { request_id: id, ...(then ? { then } : {}) }, sessionId);
   }
 
   /** The user's goal control: pause or resume (`status`), replace the `objective`, or `clear`. */
@@ -789,8 +869,46 @@ export class CloudroomClient {
     );
   }
 
-  stop(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id }, sessionId);
+  /** `after`: a Stop held while the sandbox slept stops only that turn (Cores with `cloud_threads`, #237). Its receipt
+   *  says `ignored` when another turn runs. */
+  stop(sessionId: string, id: string, after?: string) {
+    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id, ...(after ? { after } : {}) }, sessionId);
+  }
+
+  /** Holds the session for Teleport to Local (#237): until `release`, a close, or 5 minutes without renewal, Core refuses
+   *  every other client's change with code `moving`. */
+  async freeze(sessionId: string, id: string, release = false): Promise<void> {
+    requestId(id);
+    // Core answers 200, not a command's 202, so any success counts (#1554).
+    const response = await this.#request(
+      `${sessionPath(sessionId)}/freeze`,
+      { request_id: id, ...(release ? { release: true } : {}) },
+      AbortSignal.timeout(this.#timeoutMs),
+    );
+    await response.body?.cancel();
+  }
+
+  /** The user's rename and archive or restore of a session Core keeps them for: one sharing another thread's sandbox (#237). */
+  async renameSession(sessionId: string, id: string, title: string): Promise<void> {
+    requestId(id);
+    await this.#json(`${sessionPath(sessionId)}/title`, { request_id: id, title });
+  }
+  async archiveSession(sessionId: string, id: string, archived: boolean): Promise<void> {
+    requestId(id);
+    const response = await this.#request(
+      `${sessionPath(sessionId)}/archive`,
+      { request_id: id, archived },
+      AbortSignal.timeout(this.#timeoutMs),
+    );
+    await response.body?.cancel();
+  }
+
+  /** The request-status endpoint includes the session's current archive flag without loading its history.
+   *  Core returns the flag even when there is no receipt with this name. */
+  async isSessionArchived(sessionId: string, signal?: AbortSignal): Promise<boolean> {
+    const { archived } = await this.#json(`${sessionPath(sessionId)}/requests/archive`, undefined, signal);
+    if (typeof archived !== "boolean") throw new CloudroomError("Invalid Cloudroom archive status");
+    return archived;
   }
 
   resume(sessionId: string, id: string, keepPaused = false) {
@@ -825,11 +943,12 @@ export class CloudroomClient {
     await this.#json(`${sessionPath(sessionId)}/children/${encodeURIComponent(id)}`, answer);
   }
 
-  close(sessionId: string, id: string) {
+  /** `freeze`: Teleport to Local's, so the close happens only while it still holds (#237). */
+  close(sessionId: string, id: string, freeze?: string) {
     return this.#command(
       `${sessionPath(sessionId)}/close`,
       "close",
-      { request_id: id },
+      { request_id: id, ...(freeze ? { freeze } : {}) },
       sessionId,
     );
   }
@@ -849,7 +968,7 @@ export class CloudroomClient {
     );
     if (
       value.session_id !== sessionId ||
-      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "openclaw")
+      (value.harness !== "codex" && value.harness !== "pi" && value.harness !== "cursor" && value.harness !== "claude-code" && value.harness !== "fx" && value.harness !== "opencode" && value.harness !== "hermes" && value.harness !== "devin" && value.harness !== "droid" && value.harness !== "kimi" && value.harness !== "antigravity" && value.harness !== "openclaw" && value.harness !== "agent-zero")
     ) {
       throw new CloudroomError(
         "Cloudroom session mismatch or unsupported harness",
@@ -872,6 +991,9 @@ export class CloudroomClient {
           receipt(item),
         ]),
       ),
+      ...(value.last_app_prompt && typeof value.last_app_prompt === "object" ? { last_app_prompt: value.last_app_prompt as Session["last_app_prompt"] } : {}),
+      ...(value.continued && typeof value.continued === "object" ? { continued: value.continued as Session["continued"] } : {}),
+      ...(typeof value.title === "string" ? { title: value.title } : {}),
     };
   }
 

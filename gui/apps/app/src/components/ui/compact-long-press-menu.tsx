@@ -8,7 +8,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
-import { Slot } from "@radix-ui/react-slot";
+import { Slot } from "@cloudroom/shared-ui/slot";
 import { DropdownMenu, DropdownMenuContent } from "@cloudroom/shared-ui/dropdown-menu";
 
 const LONG_PRESS_MS = 700;

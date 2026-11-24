@@ -88,12 +88,13 @@ fn sync_directory(directory: &Path) -> io::Result<()> {
 
 impl Journal {
     pub fn open(directory: &Path) -> io::Result<Self> {
-        Self::open_from(directory, 0)
+        Self::open_from(directory, || 0)
     }
 
     /// `known` is the last record a replay snapshot covers. Listing every record of a large journal is slow,
     /// so a present `known` record skips the listing and only the records after it are counted.
-    pub fn open_from(directory: &Path, known: u64) -> io::Result<Self> {
+    /// `known` runs only once the lock is held: a waiting Core reads no snapshot, and never one older than its lock (#1968).
+    pub fn open_from(directory: &Path, known: impl FnOnce() -> u64) -> io::Result<Self> {
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -105,8 +106,14 @@ impl Journal {
             .truncate(false)
             .mode(0o600)
             .open(directory.join("lock"))?;
-        lock.try_lock()
-            .map_err(|_| io::Error::other("state directory already in use"))?;
+        // Its own kind: a restart's new Core waits while the old one still exits (#1968).
+        lock.try_lock().map_err(|error| match error {
+            fs::TryLockError::WouldBlock => {
+                io::Error::new(io::ErrorKind::WouldBlock, "state directory already in use")
+            }
+            fs::TryLockError::Error(error) => error,
+        })?;
+        let known = known();
         // A record file at or before the segments' end is one an interrupted `compact` left behind.
         let compacted = Self::compacted(directory);
         let last = if known > compacted && directory.join(record_name(known)).is_file() {
@@ -267,7 +274,17 @@ impl Journal {
 
     pub fn append(&mut self, record: &[u8]) -> io::Result<u64> {
         let id = self.next;
-        self.write_atomic(&record_name(id), record)?;
+        // A write refused for space deletes the reserve kept for history (`Guard::reserve`) and tries again (#606).
+        match self.write_atomic(&record_name(id), record) {
+            Err(error)
+                if no_space(&error)
+                    && fs::remove_file(self.directory.join(crate::workspace::storage::RESERVE))
+                        .is_ok() =>
+            {
+                self.write_atomic(&record_name(id), record)?
+            }
+            written => written?,
+        }
         self.next += 1;
         Ok(id)
     }
@@ -287,9 +304,12 @@ impl Journal {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(temporary, self.directory.join(SNAPSHOT))
+        let written = (file.write_all(bytes).and_then(|()| file.sync_all()))
+            .and_then(|()| fs::rename(&temporary, self.directory.join(SNAPSHOT)));
+        if written.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        written
     }
 
     pub fn read(&mut self, id: u64) -> io::Result<Vec<u8>> {
@@ -370,13 +390,19 @@ impl Journal {
             .truncate(true)
             .mode(0o600)
             .open(&temporary)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
+        // A partial write gives its space back at once, so a full disk isn't left at zero.
+        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
         // A rename refused for space changed nothing (a full disk can refuse a new directory block), so only that
         // write fails (#211). Any other failed rename, or a failed directory fsync after one, has an uncertain outcome:
         // refuse further writes until reopening, rather than overwrite that record.
-        let renamed = fs::rename(temporary, self.directory.join(name));
+        let renamed = fs::rename(&temporary, self.directory.join(name));
         self.writable = renamed.as_ref().is_err_and(no_space);
+        if self.writable {
+            let _ = fs::remove_file(&temporary);
+        }
         renamed?;
         File::open(&self.directory)?.sync_all()?;
         self.writable = true;

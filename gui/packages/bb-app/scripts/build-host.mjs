@@ -24,8 +24,6 @@ const dependencyNames = [
   "@parcel/watcher",
   "fs-native-extensions",
   "node-pty",
-  "pino",
-  "pino-pretty",
   "pino-roll",
 ];
 const hostDaemonFiles = [
@@ -62,14 +60,6 @@ await buildNodeEsmEntry({
   entryPoint: resolve(packageRoot, "src", "bin", "room-cli.ts"),
   executable: true,
   outfile: resolve(hostPackageRoot, "dist", "room-cli.js"),
-  packageRoot: hostPackageRoot,
-  sourcemap: false,
-});
-await buildNodeEsmEntry({
-  cleanDist: false,
-  entryPoint: resolve(packageRoot, "src", "bin", "bb-host-daemon.ts"),
-  executable: true,
-  outfile: resolve(hostPackageRoot, "dist", "bb-host-daemon.js"),
   packageRoot: hostPackageRoot,
   sourcemap: false,
 });
@@ -117,7 +107,6 @@ await writeFile(
       bin: {
         "room-cli": "dist/room-cli.js",
         "bb-app": "dist/bb-app.js",
-        "bb-host-daemon": "dist/bb-host-daemon.js",
       },
       files: ["dist", "host-daemon", "README.md"],
       engines: sourcePackageJson.engines,

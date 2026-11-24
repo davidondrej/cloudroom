@@ -90,6 +90,11 @@ export class CommandRouter {
   private readonly threadUnarchiveBarriers = new Map<string, Promise<void>>();
   private readonly threadLaneTails = new Map<string, Promise<void>>();
   private readonly threadTurnLaneTails = new Map<string, Promise<void>>();
+  /** Interrupting stops received and not finished yet, per thread. */
+  private readonly pendingThreadStops = new Map<string, number>();
+  /** Attaches received and not finished, per environment. A cancel skips the
+   *  lane an attach may still wait in, so it aborts them on arrival (#2171). */
+  private readonly receivedAttaches = new Map<string, Set<AbortController>>();
 
   constructor(private readonly options: CommandRouterOptions) {
     this.logger = options.logger;
@@ -190,19 +195,31 @@ export class CommandRouter {
   private executeLiveDaemonCommand(
     command: HostDaemonCommand,
   ): Promise<HostDaemonCommandResultForCommand> {
-    if (
-      command.type === "thread.archive" ||
-      (command.type === "thread.stop" &&
-        (command.intent === "interrupt" || command.immediate === true))
-    ) {
+    const interruptingStop =
+      command.type === "thread.stop" &&
+      (command.intent === "interrupt" || command.immediate === true);
+    if (command.type === "thread.archive" || interruptingStop) {
       // Stop and Archive queue behind the thread's running command. Tell its
       // bridge now, so a resume still retrying gives up instead (#104).
       for (const entry of this.options.runtimeManager.listThreadOwnerEntries(
         command.threadId,
       )) {
-        entry.runtime.notifyThreadStopRequested?.(command.threadId);
+        entry.runtime.notifyThreadStopRequested?.(
+          command.threadId,
+          interruptingStop,
+        );
       }
     }
+    if (command.type === "environment.attach.cancel") {
+      for (const attach of this.receivedAttaches.get(command.environmentId) ??
+        []) {
+        attach.abort();
+      }
+    }
+    const attach =
+      command.type === "environment.attach"
+        ? this.receiveAttach(command.environmentId)
+        : null;
     const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
     const threadLaneKey = this.resolveThreadLaneKey(command);
     const task = this.runAfterThreadUnarchiveBarrier(command, () =>
@@ -211,18 +228,51 @@ export class CommandRouter {
           command,
           environmentLaneMode,
           threadLaneKey,
-          () => this.executeLiveDaemonCommandBody(command),
+          () => this.executeLiveDaemonCommandBody(command, attach?.signal),
         ),
       ),
     );
+    if (attach !== null) void task.then(attach.release, attach.release);
     this.registerThreadUnarchiveBarrier(command, task);
+    if (interruptingStop) {
+      const { threadId } = command;
+      const pending = this.pendingThreadStops;
+      pending.set(threadId, (pending.get(threadId) ?? 0) + 1);
+      const settle = (): void => {
+        const left = (pending.get(threadId) ?? 1) - 1;
+        if (left > 0) pending.set(threadId, left);
+        else pending.delete(threadId);
+      };
+      void task.then(settle, settle);
+    }
     return task;
+  }
+
+  private receiveAttach(environmentId: string) {
+    const attaches = this.receivedAttaches.get(environmentId) ?? new Set();
+    this.receivedAttaches.set(environmentId, attaches);
+    const controller = new AbortController();
+    attaches.add(controller);
+    const release = (): void => {
+      attaches.delete(controller);
+      if (
+        attaches.size === 0 &&
+        this.receivedAttaches.get(environmentId) === attaches
+      ) {
+        this.receivedAttaches.delete(environmentId);
+      }
+    };
+    return { signal: controller.signal, release };
   }
 
   private async executeLiveDaemonCommandBody(
     command: HostDaemonCommand,
+    attachCancelSignal?: AbortSignal,
   ): Promise<HostDaemonCommandResultForCommand> {
-    const result = await dispatchCommand(command, this.createDispatchOptions());
+    const result = await dispatchCommand(command, {
+      ...this.createDispatchOptions(),
+      ...(attachCancelSignal ? { attachCancelSignal } : {}),
+    });
     if (shouldFlushEventsBeforeReportingCommandResult(command)) {
       await this.options.eventSink.flush();
     }
@@ -294,6 +344,7 @@ export class CommandRouter {
       fetchSkillTree: this.options.fetchSkillTree,
       fetchPluginHostArtifact: this.options.fetchPluginHostArtifact,
       runtimeManager: this.options.runtimeManager,
+      isThreadStopPending: (threadId) => this.pendingThreadStops.has(threadId),
       desktopBrowserBroker: this.options.desktopBrowserBroker,
       dataDir: this.options.dataDir,
       eventSink: this.options.eventSink,

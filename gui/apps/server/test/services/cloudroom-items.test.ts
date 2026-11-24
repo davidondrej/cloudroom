@@ -50,6 +50,8 @@ it.each([
     records: (send: Send) => {
       const frame = (method: string, params: object) => send("native_event", { harness: "codex" }, { method, params: { threadId: "native", ...params } });
       frame("turn/started", { turn: { id: "turn" } });
+      // A follow-up that becomes the newest request before its turn starts leaves this turn's output here (#2022).
+      send("state", { state: "starting_turn", request_id: "t2" });
       frame("item/started", { item: { type: "userMessage", id: "user", content: [] } });
       frame("item/started", { item: { type: "commandExecution", id: "cmd", command: "pwd", cwd: "/code", status: "inProgress", exitCode: null, durationMs: null, aggregatedOutput: null, commandActions: [] } });
       frame("item/commandExecution/outputDelta", { itemId: "cmd", delta: "/code" });

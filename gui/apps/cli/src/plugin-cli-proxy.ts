@@ -1,10 +1,16 @@
+import { createReadStream } from "node:fs";
 import type { Writable } from "node:stream";
 import {
   resolveContextProjectId,
   resolveContextThreadId,
 } from "./context-env.js";
-import { Agent, setGlobalDispatcher, type Dispatcher } from "undici";
-import { cliFetch } from "./client.js";
+import {
+  Agent,
+  getGlobalDispatcher,
+  setGlobalDispatcher,
+  type Dispatcher,
+} from "undici";
+import { CLI_READ_TIMEOUT_MS, cliFetch } from "./client.js";
 
 export interface PluginCliContributionEntry {
   pluginId: string;
@@ -16,7 +22,6 @@ export interface PluginCliContributionEntry {
 
 const CONTRIBUTIONS_TIMEOUT_MS = 2000;
 
-const CONTRIBUTIONS_TIMEOUT_MULTIPLIERS = [1, 2, 2] as const;
 const CONTRIBUTIONS_RETRY_DELAYS_MS = [150, 500] as const;
 
 const RETRYABLE_CODES = new Set([
@@ -37,7 +42,9 @@ type PluginCliContributionsResult =
       attempts: number;
       lastTimeoutMs: number;
     }
-  | { outcome: "invalid" };
+  | { outcome: "invalid"; detail: string };
+
+const MALFORMED_CONTRIBUTIONS = "sent a malformed plugin command list";
 
 interface UnreachableDiagnosis {
   blockedCode: "EPERM" | "EACCES" | undefined;
@@ -157,6 +164,12 @@ export function describeUnreachableServer(
 
 interface FetchPluginCliContributionsOptions {
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * The last try's window. By default as long as a core read: the command can't
+   * run without this list, and a server too busy to answer in 4 s still answered
+   * `room-cli status` while every `room-cli tasks` failed here (#1533).
+   */
+  lastWindowMs?: number;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -168,12 +181,13 @@ export async function fetchPluginCliContributions(
   options: FetchPluginCliContributionsOptions = {},
 ): Promise<PluginCliContributionsResult> {
   const sleep = options.sleep ?? defaultSleep;
-  for (
-    let attempt = 0;
-    attempt < CONTRIBUTIONS_TIMEOUT_MULTIPLIERS.length;
-    attempt += 1
-  ) {
-    const window = timeoutMs * CONTRIBUTIONS_TIMEOUT_MULTIPLIERS[attempt]!;
+  const windows = [
+    timeoutMs,
+    timeoutMs * 2,
+    options.lastWindowMs ?? CLI_READ_TIMEOUT_MS,
+  ];
+  for (let attempt = 0; attempt < windows.length; attempt += 1) {
+    const window = windows[attempt]!;
     try {
       const response = await cliFetch(
         `${baseUrl}/api/v1/plugins/contributions`,
@@ -181,7 +195,23 @@ export async function fetchPluginCliContributions(
           signal: AbortSignal.timeout(window),
         },
       );
-      if (!response.ok) return { outcome: "invalid" };
+      if (!response.ok) {
+        // Same `{ error }` / `{ code, message }` shapes runPluginCliCommand reports (e.g. caller proof).
+        const body = (await response.json().catch(() => null)) as {
+          error?: unknown;
+          code?: unknown;
+          message?: unknown;
+        } | null;
+        const code = typeof body?.code === "string" ? ` ${body.code}` : "";
+        const message =
+          typeof body?.message === "string" ? body.message : body?.error;
+        return {
+          outcome: "invalid",
+          detail: `did not return the plugin command list (HTTP ${response.status}${code})${
+            typeof message === "string" ? `: ${message.slice(0, 300)}` : ""
+          }`,
+        };
+      }
       let parsed: { cliCommands?: unknown } | null;
       try {
         parsed = (await response.json()) as {
@@ -189,12 +219,14 @@ export async function fetchPluginCliContributions(
         } | null;
       } catch (error) {
         if (!diagnoseUnreachableServer(error).retryable) {
-          return { outcome: "invalid" };
+          return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
         }
         throw error;
       }
       const cliCommands = parsed?.cliCommands;
-      if (!Array.isArray(cliCommands)) return { outcome: "invalid" };
+      if (!Array.isArray(cliCommands)) {
+        return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
+      }
       return {
         outcome: "ok",
         contributions: cliCommands.filter(
@@ -206,8 +238,7 @@ export async function fetchPluginCliContributions(
         ),
       };
     } catch (error) {
-      const isLastAttempt =
-        attempt === CONTRIBUTIONS_TIMEOUT_MULTIPLIERS.length - 1;
+      const isLastAttempt = attempt === windows.length - 1;
       if (isLastAttempt || !diagnoseUnreachableServer(error).retryable) {
         return {
           outcome: "unreachable",
@@ -219,7 +250,7 @@ export async function fetchPluginCliContributions(
       await sleep(CONTRIBUTIONS_RETRY_DELAYS_MS[attempt]!);
     }
   }
-  return { outcome: "invalid" };
+  return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
 }
 
 export async function findDisabledPluginForCommand(
@@ -281,6 +312,51 @@ interface PluginCliInputStream extends AsyncIterable<Buffer | string> {
 
 const PLUGIN_CLI_STDIN_MAX_BYTES = 16 * 1024;
 const PLUGIN_CLI_STDIN_FLAG = /^--([a-z0-9](?:[a-z0-9-]*[a-z0-9])?)-stdin$/u;
+
+export function snippetArguments(argv: string[]) {
+  let command: string | undefined;
+  let help = false;
+  let source: { flag: string; index: number } | undefined;
+  let duplicate = false;
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i]!;
+    if (flag === "--help" || flag === "-h") help = true;
+    else if (["--file", "--data-stdin", "--text-stdin"].includes(flag)) {
+      if (source) duplicate = true;
+      source = { flag, index: i };
+      if (flag === "--file") i++;
+    } else if (flag.startsWith("--")) {
+      if (flag !== "--json") i++;
+    } else command ??= flag;
+  }
+  return { command, help, source, duplicate };
+}
+
+/** Snippet imports and multi-line prompt text are read on the caller's machine. */
+async function snippetInput(argv: string[], stdin: PluginCliInputStream) {
+  const { command, source, duplicate } = snippetArguments(argv);
+  if (duplicate) throw new Error("Choose one snippet input source.");
+  if (!source) return argv;
+  const { flag, index } = source;
+  const path = argv[index + 1];
+  if (flag === "--file" && (!path || command !== "import")) throw new Error("Use import --file PATH.");
+  if (flag !== "--file" && stdin.isTTY) throw new Error("Pipe input into " + flag + ".");
+  const stream = flag === "--file" ? createReadStream(path!) : stdin;
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of stream) {
+    const buffer = Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes > 3 * 1024 * 1024) throw new Error("Snippet input exceeds 3 MiB.");
+    chunks.push(buffer);
+  }
+  return [
+    ...argv.slice(0, index),
+    flag === "--text-stdin" ? "--text" : "--data",
+    Buffer.concat(chunks).toString("utf8"),
+    ...argv.slice(index + (flag === "--file" ? 2 : 1)),
+  ];
+}
 
 async function materializeStdinFlag(
   argv: readonly string[],
@@ -379,6 +455,27 @@ function getPluginCliDispatcher(): Dispatcher {
   return pluginCliDispatcher;
 }
 
+// process.exit() with fetch sockets still open can abort Node on Windows (libuv
+// UV_HANDLE_CLOSING, #828): close them and let Node exit; the timer only guards a hang.
+// `abortRequests`: a failed command drops its other requests, as process.exit() did (#1815).
+export async function exitWhenIdle(
+  code: number,
+  abortRequests = false,
+): Promise<void> {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 5000).unref();
+  const dispatchers = [pluginCliDispatcher, getGlobalDispatcher()];
+  pluginCliDispatcher = undefined;
+  if (abortRequests) process.on("unhandledRejection", () => {});
+  await Promise.all(
+    dispatchers.map((dispatcher) =>
+      (abortRequests ? dispatcher?.destroy() : dispatcher?.close())?.catch(
+        () => {},
+      ),
+    ),
+  );
+}
+
 export async function runPluginCliCommand(
   baseUrl: string,
   pluginId: string,
@@ -391,7 +488,7 @@ export async function runPluginCliCommand(
 ): Promise<number> {
   let resolvedArgv: string[];
   try {
-    resolvedArgv = await materializeStdinFlag(argv, input);
+    resolvedArgv = pluginId === "snippets" ? await snippetInput(argv, input) : await materializeStdinFlag(argv, input);
   } catch (error) {
     await writePluginCliOutput(
       streams.stderr,

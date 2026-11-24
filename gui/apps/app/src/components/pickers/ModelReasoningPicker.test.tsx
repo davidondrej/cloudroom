@@ -30,7 +30,6 @@ import {
 import type { PickerOption } from "./OptionPicker";
 import type { ProviderPickerOption } from "./model-brand-prefix";
 import type { ModelPickerOption } from "./model-picker-option";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 
 type CapturedCommandHandler = (invocation: {
   target: EventTarget | null;
@@ -44,6 +43,19 @@ vi.mock("@/lib/sdk", () => ({
   sdk: {
     system: { executionOptions: vi.fn() },
     providers: { restartModelDiscovery: vi.fn() },
+  },
+}));
+
+const providerLogin = vi.hoisted(() => ({
+  hostId: null as string | null,
+  onDone: () => {},
+  start: vi.fn(),
+}));
+vi.mock("@/components/settings/ProviderLoginButton", () => ({
+  useProviderLogin: (hostId: string | null, onDone: () => void) => {
+    providerLogin.hostId = hostId;
+    providerLogin.onDone = onDone;
+    return { start: providerLogin.start, starting: false, drawer: null };
   },
 }));
 
@@ -229,9 +241,9 @@ function renderPicker({
         reasoningValue={reasoningValue}
         reasoningOptions={pickerReasoningOptions}
         onReasoningChange={onReasoningChange}
-        fastModeEnabled={false}
-        onFastModeChange={vi.fn()}
-        showFastModeToggle={false}
+        serviceTier="default"
+        onServiceTierChange={vi.fn()}
+        showServiceTiers={false}
         muted={muted}
         modal={false}
         onSelectModel={onSelectModel}
@@ -331,8 +343,8 @@ describe("ModelReasoningPicker", () => {
     expect(document.activeElement).toBe(model);
   });
 
-  it("does not change reasoning when the submenu handles an arrow", () => {
-    const { onReasoningChange } = renderPicker({
+  it("expands extra models in place", () => {
+    renderPicker({
       moreModelOptions: [{ value: "legacy", label: "Legacy" }],
     });
     fireEvent.click(
@@ -340,12 +352,10 @@ describe("ModelReasoningPicker", () => {
         name: "Provider and model",
       }),
     );
-    const moreModels = screen.getByRole("button", { name: "More models" });
-    act(() => moreModels.focus());
-    fireEvent.keyDown(moreModels, {
-      key: "ArrowRight",
-    });
-    expect(onReasoningChange).not.toHaveBeenCalled();
+    expect(screen.queryByText("Legacy")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More models" }));
+    expect(screen.getByText("Legacy")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Fewer models" })).not.toBeNull();
   });
 
   it("leaves modified arrows and models without reasoning alone", () => {
@@ -425,7 +435,7 @@ describe("ModelReasoningPicker", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
 
-    expect(screen.getByTitle("Codex")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Codex" })).not.toBeNull();
     expect(
       screen.getByText(
         "Codex is unavailable because its provider plugin failed to load.",
@@ -449,40 +459,39 @@ describe("ModelReasoningPicker", () => {
         modelOptions: [],
         modelValue: "",
         pickerReasoningOptions: [],
+        providerRouting: { hostId: "host_pi" },
       });
       fireEvent.click(
         screen.getByRole("button", { name: "Provider and model" }),
       );
     };
 
-    it("runs the provider's sign-in command in a new terminal", () => {
-      const started: unknown[] = [];
+    it("runs the provider's login on the machine that checks its models", () => {
       openEmptyPiPicker();
-      commandHandlers.set("terminal.open", () => {
-        started.push(takeTerminalStartRequest());
-        return true;
-      });
 
-      expect(screen.getByText("Sign in to a provider for Pi.")).not.toBeNull();
+      expect(screen.getByText("Connect Pi in 2 steps")).not.toBeNull();
       expect(
         screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
       ).toBe("Run pi, type /login, and pick a provider.");
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
 
-      expect(started).toEqual([
-        { start: { mode: "command", command: "pi" }, title: "Sign in to Pi" },
-      ]);
-      expect(takeTerminalStartRequest()).toEqual({});
+      expect(providerLogin.hostId).toBe("host_pi");
+      expect(providerLogin.start).toHaveBeenCalledWith("pi", "Pi");
     });
 
-    it("tells the user to run the command when no terminal can open", () => {
+    it("reloads models on that machine when the login ends", async () => {
+      vi.mocked(sdk.providers.restartModelDiscovery).mockResolvedValue(
+        executionOptions({ models: [] }),
+      );
       openEmptyPiPicker();
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
 
-      expect(
-        screen.getByText("pi", { selector: "code" }).parentElement?.textContent,
-      ).toBe("Could not open a terminal here. Run pi in your own terminal.");
-      expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
+      await act(async () => providerLogin.onDone());
+
+      expect(sdk.providers.restartModelDiscovery).toHaveBeenCalledWith({
+        providerId: "pi",
+        hostId: "host_pi",
+      });
     });
 
     it("reloads models when the picker reopens after sign-in", async () => {
@@ -494,22 +503,22 @@ describe("ModelReasoningPicker", () => {
         }),
       );
       openEmptyPiPicker();
-      commandHandlers.set("terminal.open", () => true);
       fireEvent.click(screen.getByRole("button", { name: "Sign in to Pi" }));
       expect(sdk.providers.restartModelDiscovery).not.toHaveBeenCalled();
-      const trigger = screen.getByRole("button", {
-        name: "Provider and model",
-        hidden: true,
-      });
-      fireEvent.click(trigger);
+      // Sign in closes the picker so the login drawer is in front.
       expect(
         screen.queryByRole("button", { name: "Sign in to Pi" }),
       ).toBeNull();
 
-      await act(async () => fireEvent.click(trigger));
+      await act(async () =>
+        fireEvent.click(
+          screen.getByRole("button", { name: "Provider and model", hidden: true }),
+        ),
+      );
 
       expect(sdk.providers.restartModelDiscovery).toHaveBeenCalledWith({
         providerId: "pi",
+        hostId: "host_pi",
       });
     });
   });
@@ -652,7 +661,7 @@ describe("ModelReasoningPicker", () => {
     fireEvent.change(search, { target: { value: "o4" } });
     fireEvent.keyDown(search, { key: "ArrowDown" });
 
-    const claudeTab = screen.getByTitle("Claude Code");
+    const claudeTab = screen.getByRole("button", { name: "Claude Code" });
     if (fireEvent.mouseDown(claudeTab)) claudeTab.focus();
     fireEvent.click(claudeTab);
 
@@ -747,7 +756,9 @@ describe("ModelReasoningPicker", () => {
     const models = screen.getByRole("listbox", { name: "Models" });
     expect(scrollers[0]).toBe(models);
     expect(models.className).toContain("overscroll-contain");
-    expect(models.className).toContain("max-h-64");
+    expect(models.className).toContain(
+      "max-h-[calc(5*var(--model-row-height)+0.5rem)]",
+    );
     expect(menu.textContent).not.toContain("Medium");
   });
 
@@ -759,7 +770,7 @@ describe("ModelReasoningPicker", () => {
     expect(screen.getByRole("dialog").className).not.toContain("100dvh");
     expect(screen.getByRole("dialog").className).toContain("inset-x-2");
     const models = await screen.findByRole("listbox", { name: "Models" });
-    expect(models.className).toContain("max-h-[15.25rem]");
+    expect(models.className).toContain("max-h-[calc(5*var(--model-row-height))]");
     expect(models.className).toContain("overflow-y-auto");
   });
 
@@ -773,7 +784,7 @@ describe("ModelReasoningPicker", () => {
     );
     expect(screen.getAllByText("5.5")).toHaveLength(2);
 
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
 
     expect(onSelectedProviderChange).toHaveBeenCalledWith("claude-code");
     expect(await screen.findByText("Opus 4.7")).not.toBeNull();
@@ -805,7 +816,7 @@ describe("ModelReasoningPicker", () => {
       ],
     });
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
     fireEvent.click(await screen.findByText("Haiku"));
     expect(onSelectModel).toHaveBeenCalledExactlyOnceWith({
       providerId: "claude-code",
@@ -865,7 +876,7 @@ describe("ModelReasoningPicker", () => {
         name: "Provider and model",
       }),
     );
-    fireEvent.click(screen.getByTitle("Claude Code"));
+    fireEvent.click(screen.getByRole("button", { name: "Claude Code" }));
 
     expect(await screen.findByText("Opus 4.7")).not.toBeNull();
   });
@@ -1072,44 +1083,25 @@ describe("buildModelNavRows", () => {
   ];
   const more: readonly PickerOption<string>[] = [{ value: "c", label: "C" }];
 
-  it("keeps desktop extra models out of keyboard nav (submenu-driven)", () => {
+  it("flattens extra models inline while searching", () => {
     const rows = buildModelNavRows({
       modelOptions: primary,
       moreModelOptions: more,
-      isCompactViewport: false,
-      isSearching: false,
+      isSearching: true,
       showMoreModels: false,
     });
 
     expect(rows).toEqual([
       { kind: "model", option: primary[0] },
       { kind: "model", option: primary[1] },
+      { kind: "model", option: more[0] },
     ]);
   });
 
-  it("flattens extra models inline while searching, on any viewport", () => {
-    for (const isCompactViewport of [false, true]) {
-      const rows = buildModelNavRows({
-        modelOptions: primary,
-        moreModelOptions: more,
-        isCompactViewport,
-        isSearching: true,
-        showMoreModels: false,
-      });
-
-      expect(rows).toEqual([
-        { kind: "model", option: primary[0] },
-        { kind: "model", option: primary[1] },
-        { kind: "model", option: more[0] },
-      ]);
-    }
-  });
-
-  it("compact: a toggle precedes the extra models and only lists them when expanded", () => {
+  it("puts a toggle before the extra models and lists them only when expanded", () => {
     const collapsed = buildModelNavRows({
       modelOptions: primary,
       moreModelOptions: more,
-      isCompactViewport: true,
       isSearching: false,
       showMoreModels: false,
     });
@@ -1122,7 +1114,6 @@ describe("buildModelNavRows", () => {
     const expanded = buildModelNavRows({
       modelOptions: primary,
       moreModelOptions: more,
-      isCompactViewport: true,
       isSearching: false,
       showMoreModels: true,
     });
@@ -1138,7 +1129,6 @@ describe("buildModelNavRows", () => {
     const rows = buildModelNavRows({
       modelOptions: primary,
       moreModelOptions: [],
-      isCompactViewport: true,
       isSearching: false,
       showMoreModels: true,
     });

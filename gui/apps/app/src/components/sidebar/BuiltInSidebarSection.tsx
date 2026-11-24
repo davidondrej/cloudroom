@@ -22,6 +22,7 @@ export interface BuiltInSidebarSectionOptions {
   actions?: ReactNode;
   actionsOpen?: boolean;
   collapsedThreads?: readonly ThreadSplitIndicatorTarget[];
+  collapsedNavigation?: TopLevelSidebarSectionProps["collapsedNavigation"];
   content: ReactNode;
   isDropTargetActive?: boolean;
   label: string;
@@ -75,6 +76,7 @@ function BuiltInSidebarSection({
   actionsOpen,
   activity,
   collapsedThreads,
+  collapsedNavigation,
   consumeClickSuppression,
   content,
   disabled,
@@ -94,6 +96,7 @@ function BuiltInSidebarSection({
       actionsOpen={actionsOpen}
       collapsedActivity={activity}
       collapsedThreads={collapsedThreads}
+      collapsedNavigation={collapsedNavigation}
       actionsMobileAlways
       collapseControl={{
         isCollapsed,

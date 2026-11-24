@@ -26,8 +26,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
-  const host = bb.hosts.experimental_client({
+export default async function worktreePlugin(room: BbPluginApi): Promise<void> {
+  const host = room.hosts.experimental_client({
     contract: worktreeHostContract,
     experimental_signals: worktreeHostSignals,
   });
@@ -38,7 +38,7 @@ export default async function worktreePlugin(bb: BbPluginApi): Promise<void> {
     if (report !== undefined) reportHostProgress(report, event.payload);
   });
 
-  bb.experimental_environments.register({
+  room.experimental_environments.register({
     id: GIT_WORKTREE_ENVIRONMENT_PROVIDER_ID,
     displayName: "Worktree",
     description: "Create an isolated Git worktree for your changes.",

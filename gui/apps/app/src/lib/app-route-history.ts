@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
-import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
-import type { Location } from "react-router-dom";
+import { useLocation, useNavigate, useNavigationType } from "react-router";
+import type { Location } from "react-router";
 
 interface AppRouteHistoryEntry {
   key: string;

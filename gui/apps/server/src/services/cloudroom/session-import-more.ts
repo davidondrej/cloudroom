@@ -14,6 +14,7 @@ import { getProviderInstallations } from "../system/provider-installations.js";
 import { createThreadFromRequest } from "../threads/thread-create.js";
 import { messagesSeed } from "../threads/thread-harness-switch.js";
 import { localRepos } from "./local-repos.js";
+import { remoteKey } from "./project-copy.js";
 import { claudeHome, compact, headLines, historyRows, mapLimit, parseLine, readLines, shorten, tailLines, type Found, type Line, type Turn } from "./session-import.js";
 
 export type MoreHarness = "pi" | "acp-hermes-agent" | "t3code" | "conductor";
@@ -401,7 +402,7 @@ export async function conductorExport(deps: AppDeps, input: string): Promise<{ s
       for (const file of await readdir(dir, { withFileTypes: true })) {
         const id = file.isFile() ? EXPORT_CHAT.exec(file.name)?.[1] : undefined;
         const chat = id ? await readExportJson(join(dir, file.name)) : null;
-        const messages: Line[] = Array.isArray(chat?.messages) ? chat.messages : [];
+        const messages = exportMessages(chat);
         const first = messages.map((message) => (message.role === "user" ? exportUserText(message, null) : null)).find(Boolean);
         const updatedAt = conductorTime(messages.at(-1)?.created_at) ?? conductorTime(chat?.created_at);
         if (!id || !first || updatedAt === null) continue;
@@ -424,10 +425,15 @@ export async function conductorExport(deps: AppDeps, input: string): Promise<{ s
 async function conductorExportEvents(file: string): Promise<ConductorEvent[]> {
   const chat = await readExportJson(file);
   const owner = (await readExportJson(join(dirname(dirname(file)), "user.json")))?.name;
-  const messages: Line[] = Array.isArray(chat?.messages) ? chat.messages : [];
+  const messages = exportMessages(chat);
   return messages.map((message) => message.role === "user"
     ? { at: conductorTime(message.created_at), user: exportUserText(message, owner), agent: null }
     : { at: conductorTime(message.created_at), user: null, agent: message.content && typeof message.content === "object" ? message.content : null });
+}
+
+function exportMessages(chat: Line | null): Line[] {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : [];
+  return messages.filter((message: unknown): message is Line => message !== null && typeof message === "object" && !Array.isArray(message));
 }
 
 function conductorTurns(rows: ConductorEvent[]): Turn[] {
@@ -465,7 +471,7 @@ function conductorUserText(content: unknown): string | null {
   return text && conductorMentions(text);
 }
 
-const conductorMentions = (text: string) => text.replace(/@⟦([^⟧]*)⟧\((?:[^()]|\([^()]*\))*\)/g, "@$1");
+const conductorMentions = (text: string) => text.replace(/@⟦((?:(?!@⟦)[^⟧])*)⟧\((?:[^()]|\([^()]*\))*\)/g, "@$1");
 
 function conductorTime(value: unknown): number | null {
   if (typeof value !== "string") return null;
@@ -504,7 +510,7 @@ async function unzipExport(file: string): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "conductor-export-"));
   const [command, args] = process.platform === "linux" ? ["unzip", ["-q", file, "-d", dir]] : [tarCommand(), ["-xf", file, "-C", dir]];
   try {
-    await execFileAsync(command, args, { timeout: 120_000 });
+    await execFileAsync(command, args, { timeout: 120_000, windowsHide: true });
     return dir;
   } catch (error) {
     await rm(dir, { recursive: true, force: true });
@@ -540,11 +546,6 @@ async function repoFolders(deps: AppDeps): Promise<Map<string, string>> {
     deps.logger.warn({ error }, "Conductor repo scan failed");
   }
   return folders;
-}
-
-function remoteKey(remote: unknown): string | null {
-  if (typeof remote !== "string") return null;
-  return remote.trim().toLowerCase().replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):/, "$1/").replace(/\/+$/, "").replace(/\.git$/, "") || null;
 }
 
 function withDb<T>(path: string, read: (db: Database.Database) => T): T {

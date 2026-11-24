@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { applyWebsiteRelease } from "./useDesktopUpdateInfo";
 
-const info = (platform: BbDesktopInfo["platform"]): BbDesktopInfo => ({
+const info = (platform: RoomDesktopInfo["platform"]): RoomDesktopInfo => ({
   lastCheckedAt: null,
   latestVersion: null,
   pendingVersion: null,

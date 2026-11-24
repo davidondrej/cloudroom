@@ -1,3 +1,4 @@
+import { MessageEditBlockedContext } from "./MessageActionBar.js";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import type {
   ActiveThinking,
@@ -49,8 +50,11 @@ export interface ThreadTimelineSurfaceProps {
   timelineError: boolean;
   loadingContent?: ReactNode;
   leadingContent?: ReactNode;
+  /** Shown right after the last message, like a card the agent posted. */
+  trailingContent?: ReactNode;
   onForkMessage?: ThreadTimelineForkMessageHandler;
   onEditMessage?: ThreadTimelineEditMessageHandler;
+  editMessageBlockedReason?: string;
   inlineMessageEditor?: ThreadTimelineInlineMessageEditor;
   onMessageAddToChat?: ThreadTimelineAddToChatHandler;
   onSendToMainMessage?: ThreadTimelineSendToMainMessageHandler;
@@ -152,8 +156,10 @@ export function ThreadTimelineSurface({
   timelineError,
   loadingContent,
   leadingContent,
+  trailingContent,
   onForkMessage,
   onEditMessage,
+  editMessageBlockedReason,
   inlineMessageEditor,
   onMessageAddToChat,
   onSendToMainMessage,
@@ -227,37 +233,42 @@ export function ThreadTimelineSurface({
             className={timelineErrorClassName}
           />
         ) : timelineRowsWithPendingStop.length > 0 ? (
-          <ThreadTimelineRows
-            canSpawnChild={canSpawnChild}
-            threadOriginKind={threadOriginKind}
-            onForkMessage={onForkMessage}
-            onEditMessage={onEditMessage}
-            inlineMessageEditor={inlineMessageEditor}
-            onMessageAddToChat={onMessageAddToChat}
-            onSendToMainMessage={onSendToMainMessage}
-            onSelectionAddToChat={onSelectionAddToChat}
-            consumerMessageActions={consumerMessageActions}
-            includePluginMessageActions={includePluginMessageActions}
-            onOpenLink={onOpenLink}
-            onOpenLocalFileLink={onOpenLocalFileLink}
-            onOpenPluginPanel={onOpenPluginPanel}
-            onTitleAction={onTitleAction}
-            projectId={projectId}
-            resolveMentionLink={resolveMentionLink}
-            resolveUserAttachmentImageSrc={toUserAttachmentImageSrc}
-            hasOlderTimelineRows={hasOlderTimelineRows}
-            isLoadingOlderTimelineRows={isLoadingOlderTimelineRows}
-            onLoadOlderRows={onLoadOlderRows}
-            timelineRows={timelineRowsWithPendingStop}
-            timelineNavigationTargetRowId={timelineNavigationTargetRowId}
-            timelineWindowingEnabled={timelineWindowingEnabled}
-            threadId={threadId}
-            threadRuntimeDisplayStatus={threadRuntimeDisplayStatus}
-            unreadDividerAutoScroll={unreadDividerAutoScroll}
-            unreadDividerPlacement={unreadDividerPlacement}
-            workspaceRootPath={workspaceRootPath}
-          />
+          <MessageEditBlockedContext.Provider
+            value={editMessageBlockedReason ?? null}
+          >
+            <ThreadTimelineRows
+              canSpawnChild={canSpawnChild}
+              threadOriginKind={threadOriginKind}
+              onForkMessage={onForkMessage}
+              onEditMessage={onEditMessage}
+              inlineMessageEditor={inlineMessageEditor}
+              onMessageAddToChat={onMessageAddToChat}
+              onSendToMainMessage={onSendToMainMessage}
+              onSelectionAddToChat={onSelectionAddToChat}
+              consumerMessageActions={consumerMessageActions}
+              includePluginMessageActions={includePluginMessageActions}
+              onOpenLink={onOpenLink}
+              onOpenLocalFileLink={onOpenLocalFileLink}
+              onOpenPluginPanel={onOpenPluginPanel}
+              onTitleAction={onTitleAction}
+              projectId={projectId}
+              resolveMentionLink={resolveMentionLink}
+              resolveUserAttachmentImageSrc={toUserAttachmentImageSrc}
+              hasOlderTimelineRows={hasOlderTimelineRows}
+              isLoadingOlderTimelineRows={isLoadingOlderTimelineRows}
+              onLoadOlderRows={onLoadOlderRows}
+              timelineRows={timelineRowsWithPendingStop}
+              timelineNavigationTargetRowId={timelineNavigationTargetRowId}
+              timelineWindowingEnabled={timelineWindowingEnabled}
+              threadId={threadId}
+              threadRuntimeDisplayStatus={threadRuntimeDisplayStatus}
+              unreadDividerAutoScroll={unreadDividerAutoScroll}
+              unreadDividerPlacement={unreadDividerPlacement}
+              workspaceRootPath={workspaceRootPath}
+            />
+          </MessageEditBlockedContext.Provider>
         ) : null}
+        {isThreadTimelinePending || timelineError ? null : trailingContent}
         {hostConnectionNotice ? (
           <TimelineStatusIndicator
             label={hostConnectionNotice.label}

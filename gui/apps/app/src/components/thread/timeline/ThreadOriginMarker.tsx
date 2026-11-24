@@ -1,4 +1,4 @@
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 
 export type ThreadOriginRelationship = "parent" | "fork" | "side-chat";

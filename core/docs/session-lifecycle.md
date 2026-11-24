@@ -23,7 +23,7 @@ Service shutdown signals all harnesses before waiting. Session recording and bes
 ## Sleep idle sessions
 
 - After 30 minutes without activity, Core stops the session's harness process and marks it `sleeping`. History stays on disk. A running turn, queued work, busy child sessions, pending interrupts, or new background processes in its workload keep it awake. Unprotected local runs cannot see background processes.
-- `POST /v1/sessions/{id}/sleep` (same body as close) asks for sleep now. It applies once a running turn or interrupt settles. The GUI sends Stop, then Sleep, on Archive.
+- `POST /v1/sessions/{id}/sleep` (same body as close) asks for sleep now. It applies once a running turn or interrupt settles. The GUI sends Stop, then Sleep, on Archive. A sleep still pending at a restart completes: the restart stopped the agent.
 - The next prompt, Teleport update, or `resume` of a paused queue resumes the same native conversation, then delivers the work. Compact or rewind on a sleeping session wakes it and returns 409; retry once it is idle.
 - Restart relaunches only sessions with queued work or activity in the last 30 minutes. Other resumable sessions stay or become `sleeping`, so a reboot does not refill memory.
 
@@ -47,7 +47,7 @@ Authenticated `GET /v1/sessions/{id}/recovery` is read-only. It returns `status`
 
 Check this before deployment for every session expected to resume. Do not silently replace or discard `empty`/`missing` sessions to pass verification.
 
-A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `missing_history`, or `resume_failed`). After correcting the cause, `POST /v1/sessions/{id}/resume` with a new `request_id` explicitly restarts a `process_lost` session (a failed startup, or a crash after its one automatic recovery) only after old-process cleanup and a successful history preflight. Its receipt completes after the native handshake. It unpauses the queue unless sent with `keep_paused: true` (capability `resume_keep_paused`), which keeps a Stop's pause so a client can queue and reorder before a plain `resume` releases it; older journal receipts have no flag and still unpause on replay. It never replays completed, failed, or uncertain prompts. Retrying the same request ID does not launch another process. Closed sessions stay closed.
+A failed resume exposes `startup_error` (`startup_timeout`, `empty_session`, `missing_history`, or `resume_failed`). After correcting the cause, `POST /v1/sessions/{id}/resume` with a new `request_id` explicitly restarts a `process_lost` session (a failed startup, or a crash after its one automatic recovery) only after old-process cleanup and a successful history preflight. Its receipt completes after the native handshake. It unpauses the queue unless sent with `keep_paused: true` (capability `resume_keep_paused`), which keeps a Stop's pause so a client can queue and reorder before a plain `resume` releases it; older journal receipts have no flag and still unpause on replay. It never replays completed, failed, or uncertain prompts. Retrying the same request ID does not launch another process. A tell from a thread above it (`thread tell`, or its relay from another sandbox) sends this resume first, once per message and never to a stopped or archived session (#1629). Closed sessions stay closed.
 
 ## Storage and replay
 

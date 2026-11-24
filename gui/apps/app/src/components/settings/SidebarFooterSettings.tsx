@@ -1,8 +1,5 @@
 import { DndContext } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Switch } from "@cloudroom/shared-ui/switch";

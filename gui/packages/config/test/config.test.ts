@@ -860,6 +860,15 @@ describe("consumer-specific config", () => {
 
     expect(hostDaemonEntrypointConfig).toEqual({});
   });
+
+  it("honors CLOUDROOM_TELEMETRY and DO_NOT_TRACK alongside BB_TELEMETRY", () => {
+    expect(loadServerConfig({ env: createServerRuntimeEnv() }).BB_TELEMETRY).toBe(true);
+    expect(loadServerConfig({ env: createServerRuntimeEnv({ CLOUDROOM_TELEMETRY: "false" }) }).BB_TELEMETRY).toBe(false);
+    expect(loadServerConfig({ env: createServerRuntimeEnv({ DO_NOT_TRACK: "1" }) }).BB_TELEMETRY).toBe(false);
+    expect(loadServerConfig({ env: createServerRuntimeEnv({ DO_NOT_TRACK: "true" }) }).BB_TELEMETRY).toBe(false);
+    expect(loadServerConfig({ env: createServerRuntimeEnv({ DO_NOT_TRACK: "0" }) }).BB_TELEMETRY).toBe(true);
+    expect(loadServerConfig({ env: createServerRuntimeEnv({ DO_NOT_TRACK: "" }) }).BB_TELEMETRY).toBe(true);
+  });
 });
 
 describe("provider model config", () => {

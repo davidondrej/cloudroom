@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { threadScope, type ContextSnapshot } from "@cloudroom/domain";
-import type { ThreadEventWithMeta } from "../src/build-event-projection.js";
-import { extractThreadContextWindowUsage } from "../src/thread-context-window-usage.js";
+import {
+  extractThreadContextWindowUsage,
+  type ThreadEventWithMeta,
+} from "../src/index.js";
 
 const snapshot: ContextSnapshot = {
   capturedAt: "2026-09-11T12:00:00.000Z",

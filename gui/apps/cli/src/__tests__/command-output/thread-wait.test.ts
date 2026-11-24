@@ -88,6 +88,43 @@ describe("room-cli thread wait command output", () => {
     expect(get).toHaveBeenCalledTimes(row.reads.length);
   });
 
+  it("room-cli thread wait --children prints each settled child, and exits 2 while one still works", async () => {
+    const child = (id: string, status: "idle" | "error" | "active") =>
+      fixtures.makeThread({
+        id,
+        projectId: "proj-1",
+        providerId: "codex",
+        status,
+        title: id,
+        createdAt: 1,
+        updatedAt: 2,
+      });
+    const list = vi.fn(async () => [
+      child("child-done", "idle"),
+      child("child-failed", "error"),
+    ]);
+    stubServerApi({ "v1.threads.$get": list });
+    // A brief connection reset is retried instead of ending the wait (#2283).
+    list.mockRejectedValueOnce(
+      new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
+    );
+
+    await runCommand(["thread", "wait", "parent", "--children"], register);
+
+    expect(collectLogLines(vi.mocked(console.log))).toEqual([
+      `${"done".padEnd(11)}  @thread:child-done  child-done`,
+      `${"failed".padEnd(11)}  @thread:child-failed  child-failed`,
+    ]);
+
+    list.mockResolvedValue([child("child-busy", "active")]);
+    await expect(
+      runCommand(
+        ["thread", "wait", "parent", "--children", "--timeout", "0"],
+        register,
+      ),
+    ).rejects.toThrow("process.exit:2");
+  });
+
   it("room-cli thread wait --status exits with timeout code when the status is not reached", async () => {
     const get = vi.fn(async () =>
       fixtures.makeThread({
@@ -222,6 +259,40 @@ describe("room-cli thread wait command output", () => {
 
     expect(collectLogLines(vi.mocked(console.log))).toContain(
       "Thread thread-t0 observed event turn/completed at seq 3.",
+    );
+  });
+
+  it("room-cli thread wait --event asks for less than Connect's 30 s and retries its 504 (#2446)", async () => {
+    const row = {
+      id: "e",
+      scope: { kind: "turn", turnId: "u" },
+      threadId: "t",
+      seq: 4,
+      createdAt: 1,
+      type: "turn/completed",
+      data: { providerThreadId: "p", turnId: "u", status: "completed" },
+    };
+    const waitGet = vi.fn(async (_args: { query: { waitMs: string } }) =>
+      Response.json(row),
+    );
+    waitGet.mockResolvedValueOnce(
+      new Response("cloudroom: timed out waiting for the tunnel client\n", {
+        status: 504,
+      }),
+    );
+    stubServerApi({ "v1.threads.:id.events.wait.$get": waitGet });
+
+    await runCommand(
+      ["thread", "wait", "t", "--event", "turn/completed", "--timeout", "55"],
+      register,
+    );
+
+    expect(waitGet.mock.calls.map(([args]) => args.query.waitMs)).toEqual([
+      "20000",
+      "20000",
+    ]);
+    expect(collectLogLines(vi.mocked(console.log))).toContain(
+      "Thread t observed event turn/completed at seq 4.",
     );
   });
 });

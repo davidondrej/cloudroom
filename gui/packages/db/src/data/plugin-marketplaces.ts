@@ -1,6 +1,10 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { pluginMarketplaceIcons, pluginMarketplaces } from "../schema.js";
+import {
+  stripPluginGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "./plugins.js";
 
 export type PluginMarketplaceSourceKind = "https" | "git" | "path";
 
@@ -18,15 +22,28 @@ export type UpsertPluginMarketplaceIconInput = Omit<
   "updatedAt"
 >;
 
+// Git marketplaces saved before #1935 can hold a token in their URL. Strip it
+// on read so it never reaches git argv or the API (same as installed plugins).
+function withoutUrlCredentials(
+  row: PluginMarketplaceRow,
+): PluginMarketplaceRow {
+  return {
+    ...row,
+    manifestUrl: stripPluginGitUrlCredentials(row.manifestUrl),
+    lastError: row.lastError && stripTextGitUrlCredentials(row.lastError),
+  };
+}
+
 export function getPluginMarketplace(
   db: DbQueryConnection,
   name: string,
 ): PluginMarketplaceRow | undefined {
-  return db
+  const row = db
     .select()
     .from(pluginMarketplaces)
     .where(eq(pluginMarketplaces.name, name))
     .get();
+  return row && withoutUrlCredentials(row);
 }
 
 export function listPluginMarketplaces(
@@ -36,7 +53,8 @@ export function listPluginMarketplaces(
     .select()
     .from(pluginMarketplaces)
     .orderBy(asc(pluginMarketplaces.name))
-    .all();
+    .all()
+    .map(withoutUrlCredentials);
 }
 
 export function deletePluginMarketplace(

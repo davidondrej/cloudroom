@@ -157,8 +157,16 @@ Editing a sent message:
 
 Listing:
 
-  room-cli thread list                           List open (unarchived) threads
+  room-cli thread list                           List open (unarchived) threads, most recently updated first
     --project <id>                         Filter by project
+    --status <status>                      Filter by status: pending, idle, starting, active, stopping, error
+    --provider <id>                        Filter by provider, such as claude-code
+    --machine <local|cloud>                Filter by where threads run
+    --pinned                               Show only pinned threads
+    --sort <updated|created>               Newest first by last update (default) or creation
+    --limit <count>                        Maximum threads to print
+    --all                                  Print every thread in the table, not just 50
+    --fields <keys>                        Print only these comma-separated JSON keys, one thread per line
     --environment <id>                     Filter by environment
     --parent-thread <id>                   Filter by parent thread
     --archived                             Show only archived threads
@@ -167,11 +175,16 @@ Listing:
     --unsectioned                          Show only threads outside sections
     --include-hidden                       Include hidden threads
 
-  The table prints ID, Title, Project, and Status. Title uses the thread
-  title, then the fallback title from the first prompt, then "-". Long
-  titles are cut at 60 characters. Project shows the project name; the
-  personal project shows "-". Use --json for the full thread records.
+  The table prints ID, Title, Project, Status, and Updated (time since the
+  last change). Title uses the thread title, then the fallback title from
+  the first prompt, then "-". Long titles are cut at 60 characters. Project
+  shows the project name; the personal project shows "-".
   An archived thread is never open, whatever its status says.
+
+  The table shows the first 50 threads and says when more exist. Filter
+  first, then read the table. --json prints every match as full records,
+  about 1.5 KB per thread: pipe it to a script, don't read it. To read JSON,
+  pick keys: `room-cli thread list --status active --fields id,title,status`.
 
   room-cli thread search <query> [--limit <1-50>]
                                              Search threads and messages
@@ -182,14 +195,16 @@ Listing:
     --host <id>                            Count threads whose environment is on this machine
     --provider <id>                        Count threads running on this provider
     --project <id>                         Count threads in this project
-    --parent <id|none>                     Count one thread's children, or 'none' for threads with no parent
+    --parent <id|none|any>                 Count one thread's children, 'none' for threads with no parent, or 'any' for every child thread
+    --archived                             Count archived threads only
     --by <dimension>                       Group the count by host, provider, or project
 
   Counting happens in the database, so use it instead of listing threads and
   counting rows: `room-cli thread list` pages a bounded window and would miscount.
-  Archived, deleted, and hidden threads are excluded. Without --by the command
-  prints one number; with --by it prints a count per group (threads with no
-  host/provider/project group under "-") followed by the total.
+  Deleted and hidden threads are excluded, and archived ones too unless
+  --archived. Without --by the command prints one number; with --by it prints
+  a count per group (threads with no host/provider/project group under "-")
+  followed by the total.
 
 Sections:
 
@@ -205,6 +220,8 @@ Inspecting:
     --self                                 Target current thread
     --work-status                          Include git working-tree status
     --git-diff                             Include git diff
+    --no-pr                                Skip the GitHub pull request lookup
+    --credits                              Include Cloud Credits, last 7 days (one website read)
     --diff-target <type>                   Diff scope: uncommitted, branch_committed, all, commit
     --diff-sha <sha>                       Commit SHA (for --diff-target commit)
     --diff-merge-base <branch>             Override merge-base branch for diff
@@ -232,6 +249,9 @@ Inspecting:
     --event <type>                         Wait for this event type
     --timeout <seconds>                    Timeout in seconds (default: 1200 / 20 min)
     --poll-interval <ms>                   Polling interval in milliseconds
+  room-cli thread wait [id] --children           Wait until every open child of the thread (default: this one)
+                                         is done, failed, or needs input; prints one line per child.
+                                         Times out after 9 minutes (exit 2): run it again to keep waiting
 
 Opening threads and files in the app:
 
@@ -293,8 +313,9 @@ Messaging:
   A follow-up carries a thread's first prompt only if setup failed before the
   workspace was ready and the thread wasn't stopped. `room-cli thread retry`
   re-sends the most recent failed message (the original only if it never
-  reached the agent). After Stop, or when unsure, re-send the task yourself; a
-  carried first prompt is labeled for the agent, so a duplicate is harmless.
+  reached the agent); it is for Local threads only. After Stop, or when
+  unsure, re-send the task yourself; a carried first prompt is labeled for the
+  agent, so a duplicate is harmless.
 
   --plan sends the same structured /plan command the composer's plan action
   sends, so the agent proposes a plan for approval before executing (Claude
@@ -306,17 +327,22 @@ Messaging:
   `input` to `threads.spawn` or `threads.send`.
 
   room-cli thread stop [id]                      Stop work and release the agent runtime
-  room-cli thread compact [id]                   Request compaction of an idle or errored thread's context
+  room-cli thread compact [id]                   Compact context now, or once the running turn ends
+    --then <text>                                Follow-up message after compaction (default: keep going)
+    --no-then                                    Send no follow-up
   room-cli thread clear [id]                     Clear model context for an idle or failed thread
   room-cli thread cancel-plan [id]               Exit the provider's active Plan mode
   room-cli thread clear-goal [id]                Clear the provider's Goal
   room-cli thread pause-goal [id]                Pause the active Goal
   room-cli thread resume-goal [id]               Resume a paused or blocked Goal
   room-cli thread set-goal <objective> [id]      Start a Goal or replace its objective
+                                                 (Goal commands: Codex threads only)
     --self                                 Target current thread
 
-  `thread compact` enqueues the same structured /compact turn used by the
-  composer. Follow the thread timeline for the eventual compaction result.
+  `thread compact` sends the same structured /compact turn as the composer. On a
+  busy thread it waits for the turn to end, so an agent can compact itself with
+  `--self` and then end its turn. The follow-up runs next, starting with whether
+  compaction worked; a stop drops it.
   `thread clear` keeps the Cloudroom thread, workspace, durable event history, and
   sticky execution settings. Its active timeline starts at one visible
   `Context cleared` boundary, and its next prompt starts a fresh provider
@@ -422,7 +448,7 @@ Persisted panel tabs:
 
 Lifecycle:
 
-  room-cli thread retry [id]                     Retry the thread's failed turn
+  room-cli thread retry [id]                     Retry a Local thread's failed turn
     --self                                 Target current thread
     --turn <requestId>                     Retry this turn request id specifically; fails when it is not the thread's failed turn
     --send-at <when>                       Dispatch at an ISO 8601 timestamp or a duration from now (30s, 10m, 2h, 7d)
@@ -439,8 +465,11 @@ Lifecycle:
   (until the server restarts), as does retrying a thread that has not
   failed or a turn that already has a retry queued. Without --send-at the retry
   is attempted now, and may still queue behind a busy thread or a plugin.
+  Local threads only. On a Cloud thread, retry a rejected start with
+  `room-cli cloud retry-start <id>`; otherwise check `thread show` and
+  `thread output` first, and send a follow-up only if work is really unfinished.
 
-  room-cli thread archive [id]                   Archive a thread (and children/hidden forks)
+  room-cli thread archive [ids...]               Archive a thread (and children/hidden forks), or several at once
     --self                                 Archive current thread
 
   `thread stop` preserves the thread history, metadata, environment, and future
@@ -454,6 +483,7 @@ Lifecycle:
   room-cli thread unarchive [id]                 Unarchive a thread
     --self                                 Unarchive current thread
     --keep-parent                          Stay under the parent, even an archived one
+    --with-children                        Also unarchive the threads archived with it
 
   room-cli thread delete <id>                    Delete permanently
     --yes                                  Skip confirmation

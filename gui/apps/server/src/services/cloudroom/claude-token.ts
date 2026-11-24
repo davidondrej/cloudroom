@@ -1,11 +1,11 @@
 import { COMPUTER } from "@cloudroom/domain";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
-import { claudeInstallerCommand, NO_TERMINAL, readClaudeToken, screenText, spawnInTerminal } from "@cloudroom/process-utils/claude-token";
+import { claudeInstallerCommand, createBrowserOpener, NO_TERMINAL, readClaudeToken, screenText, spawnInTerminal } from "@cloudroom/process-utils/claude-token";
 import type { HostDaemonOnlineRpcResult } from "@cloudroom/host-daemon-contract";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -26,7 +26,7 @@ let installing: Promise<string> | null = null;
 function installClaude(): Promise<string> {
   const started = Date.now();
   installing ??= new Promise<string>((resolve, reject) => {
-    execFile(INSTALL.command, INSTALL.args, { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024 }, (error, _stdout, stderr) => {
+    execFile(INSTALL.command, INSTALL.args, { timeout: 10 * 60_000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (error, _stdout, stderr) => {
       const binary = claudeBinary();
       const reason = stderr.trim().split("\n").at(-1) || (error?.killed ? "the download took longer than 10 minutes" : error?.message);
       reportCliInstall("claude", "claude_connect", binary ? "ok" : "failed", Date.now() - started, binary ? null : reason);
@@ -85,20 +85,29 @@ const isSignInUrl = (value: string) => {
 };
 
 
-interface TokenRun { id: string; url: string | null; error: string | null; done: boolean; stop: () => void }
+/** For telemetry: `linkMs` is when Claude printed its sign-in link (null: it never did), `seenAt` the last time a screen
+ *  read this sign-in's status, so a timeout tells "the user left" from "the user watched it hang". */
+interface TokenRun { id: string; url: string | null; error: string | null; done: boolean; stop: () => void; started: number; linkMs: number | null; seenAt: number | null }
 let tokenRun: TokenRun | null = null;
+const newRun = (id: string, stop: () => void): TokenRun => ({ id, url: null, error: null, done: false, stop, started: Date.now(), linkMs: null, seenAt: null });
+
+/** Keeps Claude's sign-in link once it is a real one, and when it first appeared. */
+function sawLink(run: TokenRun, url: string | null | undefined): boolean {
+  if (!url || !isSignInUrl(url)) return false;
+  run.url = url;
+  run.linkMs ??= Date.now() - run.started;
+  return true;
+}
 
 /**
  * Runs `claude setup-token` on this Mac for a one-year token (ADR 0121), using the Claude desktop app's copy when no CLI is installed.
  * `BROWSER` hands us Claude's sign-in link, so the app opens it itself. The token goes straight to `save`; it never reaches the UI.
  */
-function runSetupToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): TokenRun {
+function runSetupToken(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): TokenRun {
   const binary = claudeBinary() ?? desktopClaude();
   if (!binary) throw new ApiError(409, "claude_missing", `Claude Code isn't installed on ${here}.`);
-  if (windows && deps) return runWindowsSetupToken(deps, id, binary, save);
-  const dir = mkdtempSync(join(tmpdir(), "cloudroom-claude-"));
-  const browser = join(dir, "open");
-  writeFileSync(browser, `#!/bin/sh\nprintf '%s' "$1" > "$0.url"\n`, { mode: 0o700 });
+  if (windows) return runWindowsSetupToken(deps, id, binary, save);
+  const { dir, browser } = browserOpener(deps);
   // A wide terminal keeps the token on one line.
   const child = spawnInTerminal(`stty cols 1000; exec "$CLAUDE_BIN" setup-token`, { ...process.env, CLAUDE_BIN: binary, BROWSER: browser });
   if (!child) {
@@ -107,14 +116,13 @@ function runSetupToken(id: string, save: (token: string) => Promise<unknown>, de
     throw failed(NO_TERMINAL);
   }
   const stopChild = () => { try { process.kill(-child.pid!); } catch { /* already gone */ } };
-  const run: TokenRun = { id, url: null, error: null, done: false, stop: () => finish("Claude sign-in was cancelled.") };
+  const run = newRun(id, () => finish("Claude sign-in was cancelled."));
   let output = "";
   let saving = false;
-  const started = Date.now();
   const finish = (error: string | null) => {
     if (run.done) return;
     Object.assign(run, { done: true, error });
-    try { reportSetupToken(error, output, binary, Date.now() - started); } catch { /* telemetry never blocks sign-in */ }
+    try { reportSetupToken(error, output, binary, run); } catch { /* telemetry never blocks sign-in */ }
     clearTimeout(timer);
     clearInterval(poll);
     stopChild();
@@ -123,7 +131,7 @@ function runSetupToken(id: string, save: (token: string) => Promise<unknown>, de
   const timer = setTimeout(() => finish("Claude sign-in timed out. Try again."), 5 * 60_000);
   const poll = setInterval(() => {
     const url = (() => { try { return readFileSync(`${browser}.url`, "utf8").trim(); } catch { return ""; } })();
-    if (isSignInUrl(url)) { run.url = url; clearInterval(poll); }
+    if (sawLink(run, url)) clearInterval(poll);
   }, 250);
   child.stdout.on("data", (chunk: Buffer) => {
     output = (output + chunk.toString()).slice(-65536);
@@ -154,14 +162,13 @@ function runWindowsSetupToken(deps: AppDeps, id: string, binary: string, save: (
 
 /** Polls the daemon's setup-token run. A failed call (the daemon disconnected) ends the sign-in at once. */
 export function runDaemonSetupToken(id: string, binary: string, save: (token: string) => Promise<unknown>, step: SetupTokenStep, report = true): TokenRun {
-  const run: TokenRun = { id, url: null, error: null, done: false, stop: () => finish("Claude sign-in was cancelled.") };
+  const run = newRun(id, () => finish("Claude sign-in was cancelled."));
   let screen: string[] = [];
   let next: NodeJS.Timeout | undefined;
-  const started = Date.now();
   const finish = (error: string | null) => {
     if (run.done) return;
     Object.assign(run, { done: true, error });
-    if (report) try { reportSetupToken(error, screen.join("\n"), binary, Date.now() - started); } catch { /* telemetry never blocks sign-in */ }
+    if (report) try { reportSetupToken(error, screen.join("\n"), binary, run); } catch { /* telemetry never blocks sign-in */ }
     clearTimeout(timer);
     clearTimeout(next);
     void step("cancel").catch(() => {});
@@ -170,7 +177,7 @@ export function runDaemonSetupToken(id: string, binary: string, save: (token: st
   const check = (action: "start" | "read") => void step(action).then((result) => {
     if (run.done) return;
     screen = result.screen;
-    if (result.url && isSignInUrl(result.url)) run.url = result.url;
+    sawLink(run, result.url);
     if (result.token) {
       clearTimeout(timer);
       void step("cancel").catch(() => {});
@@ -205,31 +212,44 @@ const SETUP_TOKEN_CODES: Record<string, string> = {
   "Cloudroom lost this PC's host during Claude sign-in. Try again.": "host_lost",
 };
 /** Telemetry for one sign-in, with Claude Code's last lines on screen: the only clue to why it quit early. */
-function reportSetupToken(error: string | null, output: string, binary: string, ms: number) {
+function reportSetupToken(error: string | null, output: string, binary: string, run: TokenRun) {
   const code = error === null ? null : SETUP_TOKEN_CODES[error] ?? "save_failed";
   const lines = screenText(output).split("\n").map(line => line.replace(/[✢✳✶✻✽·]/g, "").trim()).filter(Boolean);
   reportAgentConnect("claude", code === "cancelled" ? "cancelled" : error === null ? "ok" : "failed", {
     code,
     message: error === null ? null : code === "save_failed" ? error : scrub(lines.slice(-3).join(" | ")),
-    ms,
+    ms: Date.now() - run.started,
+    linkMs: run.linkMs,
+    uiSeenAgoS: run.seenAt === null ? null : Math.round((Date.now() - run.seenAt) / 1000),
     cliVersion: lines.join(" ").match(/Code ?v(\d+\.\d+\.\d+)/)?.[1] ?? null,
     cliPlace: cliPlace(binary),
   });
 }
 
+/** Claude runs the sign-in opener outside any sandbox, so it goes in the data folder, never the OS temp folder. */
+function browserOpener(deps: AppDeps) {
+  try {
+    return createBrowserOpener(deps.config.dataDir);
+  } catch (error) {
+    throw failed(`Claude sign-in could not start: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** Starts Claude sign-in (or joins the running one) and waits briefly for its sign-in link. */
-async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps?: AppDeps): Promise<void> {
+async function startClaudeToken(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): Promise<void> {
   if (!tokenRun || tokenRun.done) tokenRun = runSetupToken(id, save, deps);
   const run = tokenRun;
   for (let waited = 0; !run.url && !run.done && waited < 15_000; waited += 250) await new Promise(resolve => setTimeout(resolve, 250));
 }
+
+export const ACCOUNT_CHANGED = "The Cloudroom account changed during Claude sign-in. Sign in again.";
 
 interface InstallWait { id: string; since: number; error: string | null }
 let installWait: InstallWait | null = null;
 
 /**
  * Starts Claude sign-in. Connecting Claude means the user wants Claude Code in Cloudroom, so a missing CLI is installed
- * silently (ADR 0193). With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
+ * first, and the status shows it (ADR 20261111-123959). With the Claude desktop app's copy, sign-in goes ahead and the install runs in the background.
  * With no Claude Code at all, this returns at once: the status shows the install, and sign-in starts once it's done.
  */
 export async function connectClaude(id: string, save: (token: string) => Promise<unknown>, deps: AppDeps): Promise<void> {
@@ -272,7 +292,10 @@ export function withClaudeTokenRun<T extends { state: string; message: string | 
   }
   const run = tokenRun;
   if (!run) return status;
-  if (!run.done) return { ...status, state: "waiting", message: null, login_id: run.id, verification_url: run.url };
+  if (!run.done) {
+    run.seenAt = Date.now();
+    return { ...status, state: "waiting", message: null, login_id: run.id, verification_url: run.url };
+  }
   tokenRun = null;
   return run.error ? { ...status, state: "error", message: run.error } : status;
 }

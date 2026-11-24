@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   macRows,
   pickThreadProcesses,
+  stopStaleThreadAgents,
   stopThreadProcesses,
   type ProcessRow,
 } from "./thread-processes.js";
@@ -125,6 +126,25 @@ describe("stopThreadProcesses", () => {
     };
     expect(await stopThreadProcesses("thr_abc", URL, table)).toBe(0);
     expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("ends a stale writer: only the thread's agent under a bridge (#1717)", async () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const rows = [
+      row(30, process.pid, []), // A provider bridge.
+      row(40, 30, tags("thr_abc")), // The thread's Codex.
+      row(41, 40, tags("thr_abc")), // What it runs.
+      row(42, 30, tags("thr_other")),
+      row(60, process.pid, tags("thr_abc")), // The thread's terminal.
+    ];
+    let checks = 0;
+    const table = {
+      list: async () => rows,
+      started: async (pids: readonly number[]) =>
+        new Map(checks++ === 0 ? pids.map((pid) => [pid, "1"]) : []),
+    };
+    expect(await stopStaleThreadAgents("thr_abc", URL, table)).toBe(1);
+    expect(kill.mock.calls).toEqual([[40, "SIGTERM"]]);
   });
 
   it.runIf(process.platform === "linux")(

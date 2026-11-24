@@ -43,6 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import {
+  formatModelName,
   formatAutomationTrigger,
   isCloudWebhook,
   formatOverviewScheduleMetadata,
@@ -78,6 +79,7 @@ import {
   type LoopDialogContext,
   type RunTick,
 } from "./loop-dialog.js";
+import { JEV_PROVIDER_ID, JevLabel } from "./jev-loop.js";
 import {
   LoopReviewView,
   OFFSCREEN_ROW_CLASSES,
@@ -228,26 +230,18 @@ function LoopPriorityMenu({
   );
 }
 
-function formatModelName(model: string): string {
-  const [, base = model, context] = /^(.+?)(?:\[(\w+)\])?$/u.exec(model) ?? [];
-  const name = (base.split("/").at(-1) ?? base)
-    .replace(/^claude-/u, "")
-    .split("-")
-    .map((part) =>
-      part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1),
-    )
-    .join(" ")
-    .replace(/(\d) (?=\d)/gu, "$1.")
-    .replace(/^GPT /u, "GPT-");
-  return context === undefined ? name : `${name} (${context.toUpperCase()})`;
-}
-
 function automationAgents(
   automation: AutomationResponse,
   scriptAgents: readonly AutomationAgentSummary[] | undefined,
 ): readonly AutomationAgentSummary[] {
   const { execution } = automation;
   if (execution.mode === "script") return scriptAgents ?? [];
+  if (execution.agents)
+    return execution.agents.map((agent) => ({
+      providerId: agent.providerId,
+      model: agent.model,
+      reasoningLevel: agent.reasoningLevel ?? null,
+    }));
   return [
     {
       providerId: execution.providerId,
@@ -269,6 +263,7 @@ function AutomationAgentLine({
   compact?: boolean;
   quiet?: boolean;
 }) {
+  if (agents[0]?.providerId === JEV_PROVIDER_ID) return <JevLabel />;
   if (agents.length === 0) {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
@@ -1132,13 +1127,15 @@ export function CloudAutomationRow({
       }
       agent={
         <AutomationAgentLine
-          agents={[
-            automation.agent ?? {
-              providerId: null,
-              model: null,
-              reasoningLevel: null,
-            },
-          ]}
+          agents={
+            automation.agents ?? [
+              automation.agent ?? {
+                providerId: null,
+                model: null,
+                reasoningLevel: null,
+              },
+            ]
+          }
           providers={providers}
           compact
           quiet
@@ -2191,6 +2188,7 @@ export function AutomationOverviewView({
       )}
       {openCloud && cloud ? (
         <CloudLoopDialog
+          key={openCloud.id}
           automation={openCloud}
           context={dialogContext(cloudKey(openCloud), openCloud.project_id, () =>
             setOpenCloudId(null),

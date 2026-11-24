@@ -51,6 +51,7 @@ type ExecutionOptionsRequest = ExistingThreadExecutionInputRequest;
 
 export interface ThreadStopCommandArgs {
   immediate?: boolean;
+  keepSession?: boolean;
   environmentId: string;
   hostId: string;
   intent: ThreadStopIntent;
@@ -271,7 +272,11 @@ export async function buildThreadStartCommand(
     environment: args.environment,
     model: args.execution.model,
   });
-  const bridgeLaunch = requireBridgeLaunchForProviderId(deps, args.providerId);
+  const bridgeLaunch = requireBridgeLaunchForProviderId(
+    deps,
+    args.providerId,
+    args.environment.hostId,
+  );
   return {
     type: "thread.start",
     environmentId: args.environment.id,
@@ -285,7 +290,7 @@ export async function buildThreadStartCommand(
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
       deps.db,
-      { threadId: args.thread.id, projectId: args.projectId, hostId: args.environment.hostId },
+      { threadId: args.thread.id, projectId: args.projectId, hostId: args.environment.hostId, experimental_execution: { providerId: args.providerId, model: args.execution.model } },
       args,
       true,
     ),
@@ -313,6 +318,7 @@ function buildPreparedTurnSubmitCommandPayload(
   const bridgeLaunch = requireBridgeLaunchForProviderId(
     args.deps,
     args.runtimeContext.providerId,
+    args.hostId,
   );
   return {
     type: "turn.submit",
@@ -321,7 +327,7 @@ function buildPreparedTurnSubmitCommandPayload(
     bridgeLaunch,
     ...prepareCustomInstructionInput(
       args.deps.db,
-      { threadId: args.threadId, projectId: args.runtimeContext.projectId, hostId: args.hostId },
+      { threadId: args.threadId, projectId: args.runtimeContext.projectId, hostId: args.hostId, experimental_execution: { providerId: args.runtimeContext.providerId, model: args.execution.model } },
       args,
     ),
     options: toRuntimeExecutionOptions({
@@ -693,6 +699,7 @@ export function buildThreadStopCommand(
     intent: args.intent,
     threadId: args.threadId,
     ...(args.immediate ? { immediate: true } : {}),
+    ...(args.keepSession && !args.immediate ? { keepSession: true } : {}),
   };
 }
 

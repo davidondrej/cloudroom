@@ -355,11 +355,11 @@ async function replayCanonical(workspaceDir: string): Promise<ReplayResult> {
     });
     await settle(2);
 
-    const bbTurnId = firstTurnId(events);
+    const roomTurnId = firstTurnId(events);
     const expectedTurnId =
-      bbTurnId === undefined
+      roomTurnId === undefined
         ? undefined
-        : collector.assembler.getProviderTurnId(THREAD_ID, bbTurnId);
+        : collector.assembler.getProviderTurnId(THREAD_ID, roomTurnId);
     if (expectedTurnId === undefined) {
       throw new Error("Expected a codex-native turn id to steer against");
     }

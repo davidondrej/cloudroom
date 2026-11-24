@@ -1,10 +1,12 @@
 import { eq } from "drizzle-orm";
+import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
 import {
   createEventId,
   environmentHasLiveThreads,
   environments,
   findProjectEnvironmentByHostPath,
   getEnvironment,
+  getPersonalProject,
   getProject,
   getProjectSourceByHost,
   getThread,
@@ -15,6 +17,7 @@ import {
   type ProjectRow,
 } from "@cloudroom/db";
 import {
+  PERSONAL_PROJECT_ID,
   THREAD_HARNESS_SWITCH_OPERATION,
   threadScope,
   type Thread,
@@ -24,10 +27,12 @@ import type { AppDeps } from "../../types.js";
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { macAccess } from "../cloudroom/previews.js";
 import { teleportBlocked } from "../cloudroom/store.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
+  detachEnvironmentWithoutOpenThreads,
   provisionUnmanagedEnvironmentForPath,
   reuseEnvironmentForPath,
 } from "./thread-environment-directory.js";
@@ -52,7 +57,7 @@ export interface ThreadMoveResult {
 export type MoveRequester = "local" | "cloud-agent";
 
 const AGENT_MOVE_REFUSED =
-  "The agent asked to move this thread to another project. Cloudroom didn't move it because Mac access isn't Full. Move it from the thread menu.";
+  `The agent asked to move this thread to another project. Cloudroom didn't move it because ${COMPUTER_TITLE} access isn't Full. Move it from the thread menu.`;
 const AGENT_MOVE_LIMITED =
   "The agent asked to move this thread to another project. Cloudroom didn't move it because this sandbox has only the API keys picked for its Cloud loop. Move it from the thread menu.";
 const AGENT_MOVE_UNCHECKED =
@@ -82,12 +87,18 @@ export async function moveThreadToProject(
       "Unarchive the thread, then move it.",
     );
   }
-  if (refusal) refuseAgentMove(deps, thread, refusal);
+  if (refusal) {
+    appendMoveFailure(deps, thread, refusal);
+    throw new ApiError(403, "mac_access", refusal);
+  }
   const project = resolveProject(deps, projectRef);
   if (project.id === thread.projectId) {
     pendingMoves.delete(thread.id);
     return { thread, moved: true, previousPath: null };
   }
+  const local = isCloudThread(thread)
+    ? null
+    : localDestination(deps, thread, project);
   const children = listUnarchivedAssignedChildThreads(deps.db, {
     parentThreadId: thread.id,
   });
@@ -108,11 +119,11 @@ export async function moveThreadToProject(
   }
   pendingMoves.delete(thread.id);
   const previousPath = await withThreadContextClearGuard(thread.id, () =>
-    isCloudThread(thread)
-      ? cloudroom(deps).moveProject(thread, project.id, () =>
-          moveRecord(deps, thread, project, null, thread.environmentId),
-        )
-      : moveLocalThread(deps, thread, project),
+    local
+      ? moveLocalThread(deps, thread, project, local)
+      : cloudroom(deps).moveProject(thread, project.id, (seeded) =>
+          moveRecord(deps, thread, project, null, thread.environmentId, seeded),
+        ),
   );
   return {
     thread: getThread(deps.db, thread.id) ?? thread,
@@ -153,11 +164,11 @@ async function agentMoveRefusal(
   return keys ? AGENT_MOVE_LIMITED : null;
 }
 
-function refuseAgentMove(
+function appendMoveFailure(
   deps: AppDeps,
   thread: Thread,
   message: string,
-): never {
+): void {
   appendThreadEvent(deps, {
     threadId: thread.id,
     environmentId: thread.environmentId,
@@ -170,7 +181,6 @@ function refuseAgentMove(
       message,
     },
   });
-  throw new ApiError(403, "mac_access", message);
 }
 
 async function applyPendingThreadMove(
@@ -193,6 +203,16 @@ async function applyPendingThreadMove(
       return;
     }
     deps.logger.warn({ error, threadId }, "Thread move failed");
+    const thread = getThread(deps.db, threadId);
+    if (
+      thread &&
+      !(error instanceof ApiError && error.body.code === "mac_access")
+    )
+      appendMoveFailure(
+        deps,
+        thread,
+        `Cloudroom couldn't move this thread. ${error instanceof Error ? error.message : String(error)}`,
+      );
   }
 }
 
@@ -208,6 +228,9 @@ function resolveProject(deps: AppDeps, ref: string): ProjectRow {
     (project) => project.name.toLowerCase() === name,
   );
   if (named.length === 1) return named[0]!;
+  const personal = getPersonalProject(deps.db);
+  if (named.length === 0 && personal?.name.toLowerCase() === name)
+    return personal;
   throw new ApiError(
     404,
     "project_not_found",
@@ -217,11 +240,15 @@ function resolveProject(deps: AppDeps, ref: string): ProjectRow {
   );
 }
 
-async function moveLocalThread(
-  deps: AppDeps,
-  thread: Thread,
-  project: ProjectRow,
-): Promise<string | null> {
+// Checks that need no idle thread, so an impossible move is refused at once instead of queued.
+function localDestination(deps: AppDeps, thread: Thread, project: ProjectRow) {
+  if (project.id === PERSONAL_PROJECT_ID) {
+    throw new ApiError(
+      409,
+      "project_not_on_machine",
+      "Local threads can't be moved to Personal yet. Start a new thread there.",
+    );
+  }
   const current = thread.environmentId
     ? getEnvironment(deps.db, thread.environmentId)
     : null;
@@ -234,6 +261,15 @@ async function moveLocalThread(
       `${project.name} has no folder on this machine. Add one in its project settings, then move the thread.`,
     );
   }
+  return { current, hostId, source };
+}
+
+async function moveLocalThread(
+  deps: AppDeps,
+  thread: Thread,
+  project: ProjectRow,
+  { current, hostId, source }: ReturnType<typeof localDestination>,
+): Promise<string | null> {
   assertEnvironmentPathAvailable(deps, {
     hostId,
     path: source.path,
@@ -269,6 +305,11 @@ async function moveLocalThread(
       environmentId: target.id,
     });
     record(tx);
+    if (
+      current?.environmentProviderId ===
+      DEFAULT_ENVIRONMENT_PROVIDER_ID.personalWorkspace
+    )
+      detachEnvironmentWithoutOpenThreads(tx, current.id);
   });
   if (
     current?.environmentProviderId &&
@@ -289,12 +330,13 @@ async function moveRecord(
   project: ProjectRow,
   path: string | null,
   environmentId: string | null,
+  seeded = true,
 ): Promise<(tx: DbTransaction) => void> {
   const from = getProject(deps.db, thread.projectId)?.name ?? "previous";
   const folder = path
     ? `Your working folder is now ${path}.`
     : "Your working folder is now this project's folder. Run `room-cli files wait` before you rely on its files.";
-  const seed = await historySeed(
+  const seed = !seeded ? [] : await historySeed(
     deps,
     thread,
     `[Cloudroom] This thread moved from the ${from} project to the ${project.name} project. ${folder} The old project's folder is unchanged.`,

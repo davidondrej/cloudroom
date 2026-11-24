@@ -167,7 +167,7 @@ describe("provider registry ordering", () => {
       bundledIndex: 1,
       installedAt: 0,
     });
-    registerProvider(registry, "acp-cursor", "provider-acp", {
+    registerProvider(registry, "acp-opencode", "provider-acp", {
       bundledIndex: 2,
       installedAt: 0,
     });
@@ -175,7 +175,7 @@ describe("provider registry ordering", () => {
     pi.dispose();
     expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
       "codex",
-      "acp-cursor",
+      "acp-opencode",
     ]);
 
     registerProvider(registry, "pi", "provider-pi", {
@@ -185,13 +185,17 @@ describe("provider registry ordering", () => {
     expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
       "codex",
       "pi",
-      "acp-cursor",
+      "acp-opencode",
     ]);
   });
 
-  it("lets the user's providerOrder lead and reads a default only when registered", () => {
+  it("lists the default first, then the most used, and reads a default only when registered", () => {
     const preferences = {
-      providerOrder: ["acp-cursor", "ghost", "pi"],
+      usage: new Map([
+        ["acp-opencode", 9],
+        ["ghost", 5],
+        ["pi", 2],
+      ]) as ReadonlyMap<string, number>,
       defaultProviderId: "ghost" as string | null,
     };
     const registry = createProviderRegistryService({
@@ -205,24 +209,42 @@ describe("provider registry ordering", () => {
       bundledIndex: 1,
       installedAt: 0,
     });
-    registerProvider(registry, "acp-cursor", "provider-acp", {
+    registerProvider(registry, "acp-opencode", "provider-acp", {
       bundledIndex: 2,
       installedAt: 0,
     });
 
     expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
-      "acp-cursor",
+      "acp-opencode",
       "pi",
       "codex",
     ]);
     expect(registry.getUserDefaultProviderId()).toBeNull();
     preferences.defaultProviderId = "codex";
     expect(registry.getUserDefaultProviderId()).toBe("codex");
-    preferences.providerOrder = [];
+    expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
+      "codex",
+      "acp-opencode",
+      "pi",
+    ]);
+    const hidden = createProviderRegistryService({
+      readUserProviderPreferences: () => ({
+        ...preferences,
+        hiddenProviderIds: ["acp-opencode"],
+      }),
+    });
+    for (const entry of registry.list()) hidden.register(entry);
+    expect(hidden.list().map((entry) => entry.info.id)).toStrictEqual([
+      "codex",
+      "pi",
+      "acp-opencode",
+    ]);
+    preferences.defaultProviderId = null;
+    preferences.usage = new Map();
     expect(registry.list().map((entry) => entry.info.id)).toStrictEqual([
       "codex",
       "pi",
-      "acp-cursor",
+      "acp-opencode",
     ]);
   });
 });

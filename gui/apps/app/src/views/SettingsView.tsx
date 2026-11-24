@@ -9,7 +9,7 @@ import {
   useNavigate,
   useLocation,
   matchPath,
-} from "react-router-dom";
+} from "react-router";
 import "@cloudroom/shared-ui/icon-extended";
 import {
   builtInThemes,
@@ -56,6 +56,10 @@ import {
 import { useHostDaemon, useLocalHostDaemonAccess } from "@/hooks/useHostDaemon";
 import { useAppThemePreview } from "@/hooks/useAppThemePreview";
 import { useBrandMark } from "@/hooks/useBrandMark";
+import {
+  useCloudIconStyle,
+  type CloudIconStyle,
+} from "@/hooks/useCloudIconStyle";
 import { useCorners, type Corners } from "@/hooks/useCorners";
 import {
   ProviderTurnDisplaySection,
@@ -67,7 +71,7 @@ import { SidebarThreadListSetting } from "@/components/settings/SidebarThreadLis
 import { SidebarFooterSettings } from "@/components/settings/SidebarFooterSettings";
 import { SidebarNavigationSetting } from "@/components/settings/SidebarNavigationSetting";
 import { SplitDimmingSetting } from "@/components/settings/SplitDimmingSetting";
-import { StarterPromptsSetting } from "@/components/ActivationChecklist";
+import { OneClickScansSetting } from "@/components/ActivationChecklist";
 import { HarnessIconsSetting } from "@/components/settings/HarnessIconsSetting";
 import { useSettingsNavState } from "@/components/settings/settings-nav";
 import { useRevealSettingsTarget } from "@/components/settings/settings-search";
@@ -84,9 +88,12 @@ import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSectio
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
 import {
+  FeaturePromptsSettingsSection,
   ProjectNudgeSettingsSection,
+  DeepapiSettingsSection,
   SmartSearchSettingsSection,
   PromptSuggestionsSetting,
+  SkillSuggestionsSetting,
   ThreadNamingSettingsSection,
   ThreadPurposeSettingsSection,
 } from "@/components/settings/ThreadNamingSettingsSection";
@@ -102,8 +109,7 @@ import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedTh
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
 import { ExportChatsSettingsSection } from "@/components/settings/ExportChats";
 import { CliSkillsSettingsSection } from "@/components/settings/CliSkillsSettingsSection";
-import { CreditsUsageSection } from "@/components/settings/CreditsUsageSection";
-import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
+import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
 import { MarketplacesSettingsSection } from "@/components/settings/MarketplacesSettingsSection";
 import {
   useUpdateGeneralSettings,
@@ -113,7 +119,7 @@ import {
 import { useSystemConfig } from "@/hooks/queries/system-queries";
 import { WorktreeDiskUse } from "@/components/layout/LowDiskBanner";
 import { useWorkspaceOpenTargets } from "@/hooks/useWorkspaceOpenTargets";
-import { isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import {
   FAVICON_COLOR_VALUES,
   getFaviconGlyphHref,
@@ -437,6 +443,86 @@ function CornersSetting() {
                 className={cn(
                   "ml-auto",
                   corners !== option.value && "opacity-0",
+                  COARSE_POINTER_ICON_SIZE_CLASS,
+                )}
+              />
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </SettingsWithControl>
+  );
+}
+
+const CLOUD_ICON_OPTIONS: ReadonlyArray<{
+  iconClassName: string;
+  label: string;
+  value: CloudIconStyle;
+}> = [
+  {
+    iconClassName: "text-primary [&_path]:stroke-[1.9]",
+    label: "Electric lime",
+    value: "electric-lime",
+  },
+  {
+    iconClassName: "text-neutral-950 dark:text-white [&_path]:stroke-[2]",
+    label: "Crisp white",
+    value: "crisp-white",
+  },
+];
+
+function CloudIconSetting() {
+  const [cloudIcon, setCloudIcon] = useCloudIconStyle();
+  const active =
+    CLOUD_ICON_OPTIONS.find((option) => option.value === cloudIcon) ??
+    CLOUD_ICON_OPTIONS[0]!;
+  return (
+    <SettingsWithControl
+      label="Cloud icon"
+      description="Color of the Cloud icon in the composer and sidebar."
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="outline"
+            size="sm"
+            className={SETTINGS_DROPDOWN_TRIGGER_CLASS}
+            aria-label="Cloud icon"
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", active.iconClassName)}
+                aria-hidden
+              />
+              <span className="min-w-0 truncate">{active.label}</span>
+            </span>
+            <Icon
+              name="ChevronDown"
+              className="size-3.5 text-muted-foreground"
+            />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="end"
+          className={SETTINGS_DROPDOWN_CONTENT_CLASS}
+        >
+          {CLOUD_ICON_OPTIONS.map((option) => (
+            <DropdownMenuItem
+              key={option.value}
+              onSelect={() => setCloudIcon(option.value)}
+            >
+              <Icon
+                name="Cloud"
+                className={cn("size-3.5 shrink-0", option.iconClassName)}
+                aria-hidden
+              />
+              {option.label}
+              <Icon
+                name="Check"
+                className={cn(
+                  "ml-auto",
+                  cloudIcon !== option.value && "opacity-0",
                   COARSE_POINTER_ICON_SIZE_CLASS,
                 )}
               />
@@ -916,6 +1002,7 @@ export function AppearanceSettingsSection({
           faviconColor={faviconColor}
           onFaviconColorChange={onFaviconColorChange}
         />
+        <CloudIconSetting />
         <SplitDimmingSetting />
         <SidebarFooterSettings />
         <SettingsWithControl
@@ -929,7 +1016,8 @@ export function AppearanceSettingsSection({
             aria-label="Question cards"
           />
         </SettingsWithControl>
-        <StarterPromptsSetting />
+        <OneClickScansSetting />
+        <PluginSettingsSections pluginId="wallpaper" />
       </div>
     </SettingsSection>
   );
@@ -976,6 +1064,7 @@ export function GeneralSettingsSection({
           </SettingsWithControl>
 
           <PromptSuggestionsSetting />
+          <SkillSuggestionsSetting />
 
           <SettingsWithControl
             label={FOLLOW_UP_BEHAVIOR_SETTING_LABEL}
@@ -1104,7 +1193,7 @@ export function PrivacySettingsSection({
 
         <SettingsWithControl
           label="Share usage data and setup errors"
-          description="Send app starts, thread and message counts, plugin installs, and short letters-only settings searches that find nothing to help improve Cloudroom. Failed agent connects and installs are saved with your account so we can fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
+          description="Send app starts, thread and message counts, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account so we can help fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
         >
           <Switch
             checked={telemetryEnabled}
@@ -1273,6 +1362,8 @@ export function SettingsView() {
   }
   const groupTabs = (
     <SettingsGroupTabs
+      // Analytics draws its own row of pages right under these, and that row carries the line.
+      nested={activeSection === "analytics"}
       links={getSettingsGroupLinks(
         findSettingsNavGroup(activeSection, activePluginId),
         navigation,
@@ -1406,12 +1497,7 @@ export function SettingsView() {
   } else if (activeSection === "account") {
     content = <CloudroomAccountSettings />;
   } else if (activeSection === "analytics") {
-    content = (
-      <>
-        <CreditsUsageSection />
-        <SkillUsageSection />
-      </>
-    );
+    content = <AnalyticsTabs />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1461,6 +1547,8 @@ export function SettingsView() {
         {updateGeneralSettingsMutation.error && <p role="alert">{updateGeneralSettingsMutation.error.message}</p>}
       </SettingsSection>
     );
+  } else if (activeSection === "feature-prompts") {
+    content = <FeaturePromptsSettingsSection />;
   } else if (activeSection === "marketplaces") {
     content = <MarketplacesSettingsSection />;
   } else if (activeSection === "community") {
@@ -1510,6 +1598,7 @@ export function SettingsView() {
         <ThreadPurposeSettingsSection />
         <ProjectNudgeSettingsSection />
         <SmartSearchSettingsSection />
+        <DeepapiSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
           telemetryEnabled={generalSettings.telemetryEnabled}
@@ -1599,12 +1688,12 @@ export function MachinesSettingsPage() {
   );
 }
 
-function SettingsGroupTabs({ links }: { links: readonly SettingsNavLink[] }) {
+function SettingsGroupTabs({ links, nested = false }: { links: readonly SettingsNavLink[]; nested?: boolean }) {
   if (links.length < 2) return null;
   return (
     <nav
       aria-label="Settings pages"
-      className="mb-6 flex flex-wrap gap-1 border-b border-border pb-2"
+      className={cn("flex flex-wrap gap-1", nested ? "mb-4" : "mb-6 border-b border-border pb-2")}
     >
       {links.map((link) => (
         <Link

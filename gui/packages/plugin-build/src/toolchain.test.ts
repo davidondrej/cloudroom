@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
@@ -21,12 +22,49 @@ describe("plugin build toolchain", () => {
     await rm(baseDir, { recursive: true, force: true });
   });
 
-  it("keys the cache directory on the pinned versions", () => {
+  it("keys the cache directory on the pinned versions and the lock", async () => {
     const dir = toolchainCacheDir("/data");
     for (const version of Object.values(PLUGIN_TOOLCHAIN_PINS)) {
       expect(basename(dir)).toContain(version);
     }
+    const lock: unknown = JSON.parse(
+      await readFile(
+        new URL("../toolchain/package-lock.json", import.meta.url),
+        "utf8",
+      ),
+    );
+    const lockHash = createHash("sha256")
+      .update(JSON.stringify(lock))
+      .digest("hex")
+      .slice(0, 12);
+    expect(basename(dir).endsWith(`-${lockHash}`)).toBe(true);
     expect(dir.startsWith("/data/")).toBe(true);
+  });
+
+  it("locks every fetched package to the pins with an integrity hash and no registry URL", async () => {
+    const lock = JSON.parse(
+      await readFile(
+        new URL("../toolchain/package-lock.json", import.meta.url),
+        "utf8",
+      ),
+    ) as {
+      packages: Record<
+        string,
+        {
+          dependencies?: object;
+          integrity?: string;
+          inBundle?: boolean;
+          resolved?: string;
+        }
+      >;
+    };
+    const { "": root, ...packages } = lock.packages;
+    expect(root?.dependencies).toEqual(PLUGIN_TOOLCHAIN_PINS);
+    for (const [path, entry] of Object.entries(packages)) {
+      if (entry.inBundle !== true) expect(entry.integrity, path).toBeTruthy();
+      // No `resolved` URL, so npm fetches from the user's (scoped) registries.
+      expect(entry.resolved, path).toBeUndefined();
+    }
   });
 
   it("prefers a locally resolvable toolchain over fetching", async () => {
@@ -112,15 +150,17 @@ describe("plugin build toolchain", () => {
     );
 
     it.skipIf(process.platform === "win32")(
-      "fetches with the shipped npm and excludes script-policy config without PATH executables",
+      "fetches with the shipped npm, installs from the lock, and excludes script-policy config without PATH executables",
       async () => {
         const envDump = join(baseDir, "npm-env.txt");
+        const argvDump = join(baseDir, "npm-argv.json");
         const preload = join(baseDir, "capture-npm-env.mjs");
         await writeFile(
           preload,
           [
             'import { writeFileSync } from "node:fs";',
             `writeFileSync(${JSON.stringify(envDump)}, Object.entries(process.env).map(([key, value]) => key + "=" + value).join("\\n"));`,
+            `writeFileSync(${JSON.stringify(argvDump)}, JSON.stringify(process.argv));`,
             "process.exit(0);",
           ].join("\n"),
         );
@@ -157,6 +197,9 @@ describe("plugin build toolchain", () => {
               return [line.slice(0, at), line.slice(at + 1)] as const;
             }),
         );
+        const argv = JSON.parse(await readFile(argvDump, "utf8")) as string[];
+        expect(argv).toContain("ci");
+        expect(argv).not.toContain("install");
         expect(seen.has("npm_config_allow_scripts")).toBe(false);
         expect(seen.has("NPM_CONFIG_IGNORE_SCRIPTS")).toBe(false);
         expect(seen.get("npm_config_registry")).toBe(

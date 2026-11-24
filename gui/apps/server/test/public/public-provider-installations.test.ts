@@ -167,16 +167,18 @@ describe("public provider installation routes", () => {
       expect(response.status).toBe(200);
       const body = (await readJson(response)) as ProviderCliStatusResponse;
       expect(Object.keys(body)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
       ]);
       expect(Object.values(body).map((status) => status.displayName)).toEqual([
-        "Codex",
         "Claude Code",
-        "Pi",
+        "Codex",
+        "Antigravity",
         "Cursor",
+        "Pi",
       ]);
       expect(
         responder.requests
@@ -192,6 +194,12 @@ describe("public provider installation routes", () => {
         "acp-grok",
         "acp-fx",
         "acp-hermes-agent",
+        "acp-openclaw",
+        "acp-droid",
+        "acp-kilo",
+        "acp-cline",
+        "acp-kimi",
+        "acp-agent-zero",
       ]);
       expect(
         responder.requests
@@ -204,7 +212,13 @@ describe("public provider installation routes", () => {
               ? request.command.providerId
               : null,
           ),
-      ).toEqual(["codex", "claude-code", "pi", "acp-cursor"]);
+      ).toEqual([
+        "claude-code",
+        "codex",
+        "acp-antigravity",
+        "acp-cursor",
+        "pi",
+      ]);
     });
   });
 
@@ -239,11 +253,17 @@ describe("public provider installation routes", () => {
 
       expect(response.status).toBe(200);
       const body = (await readJson(response)) as ProviderCliStatusResponse;
-      expect(Object.keys(body)).toEqual(["codex", "pi", "acp-cursor"]);
+      expect(Object.keys(body)).toEqual([
+        "codex",
+        "acp-antigravity",
+        "acp-cursor",
+        "pi",
+      ]);
       expect(Object.values(body).map((status) => status.displayName)).toEqual([
         "Codex",
-        "Pi",
+        "Antigravity",
         "Cursor",
+        "Pi",
       ]);
       expect(warn).toHaveBeenCalledWith(
         {

@@ -140,7 +140,13 @@ async fn browser_path_streaming_upload_readiness_and_privacy() {
         assert_eq!(request(port, get("/", extra), b"").await.0, 403);
     }
     let attacker = "GET / HTTP/1.1\r\nHost: attacker.example\r\n\r\n".to_owned();
-    assert_eq!(request(port, attacker, b"").await.0, 403);
+    let (status, _, body) = request(port, attacker, b"").await;
+    assert!(status == 403 && !String::from_utf8_lossy(&body).contains(&host));
+    // Only a plain loopback visit learns the preview's address (#1879).
+    let loopback = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
+    let (status, head, body) = request(port, loopback, b"").await;
+    assert!(status == 403 && head.starts_with("HTTP/1.1 403 Preview origin is not allowed\r\n"));
+    assert!(String::from_utf8_lossy(&body).contains(&format!("http://{host}/")));
     assert_eq!(request(port, get("/", "Sec-Fetch-Site: cross-site\r\nSec-Fetch-Mode: navigate\r\nSec-Fetch-Dest: document\r\n"), b"").await.0, 200);
     let chunked = format!("POST / HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\r\n");
     assert_eq!(request(port, chunked, b"").await.0, 411);
@@ -151,10 +157,17 @@ async fn browser_path_streaming_upload_readiness_and_privacy() {
 fn ask_first_popup_shows_agent_text_as_text() {
     // Security sweep: line breaks in a folder name could push the command out of view in the Ask first popup.
     let stdin: String = (0..25).map(|n| format!("echo {n}\r\n")).collect();
-    let job = json!({"id": "job", "command": "bash -s\necho two\u{202e}", "cwd": format!("/tmp/a\nb{}", "c".repeat(300)), "write": true, "stdin": super::hex(stdin.as_bytes())});
+    let job = json!({"id": "job", "command": "bash -s\necho two\u{202e}", "cwd": format!("/opt/a\nb{}", "c".repeat(300)), "write": true, "stdin": super::hex(stdin.as_bytes())});
     let text = jobs::popup_text(&job, Path::new("/unused"));
-    let lines: Vec<&str> = text.split('\n').collect();
-    let folder = format!("Folder: /tmp/a\\nb{}…", "c".repeat(191));
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    assert_eq!(
+        lines.drain(2..4).collect::<Vec<_>>(),
+        [
+            "Warning: 109 more characters of the folder are not shown.",
+            ""
+        ]
+    );
+    let folder = format!("Folder: /opt/a\\nb{}…", "c".repeat(191));
     let expected = [
         "Warning: 44 more characters of its input are not shown, and will also run.",
         "",
@@ -180,6 +193,61 @@ fn ask_first_popup_shows_agent_text_as_text() {
         jobs::visible(&"\0".repeat(300), 600, 10),
         ("\\x00".repeat(150), 150)
     );
+}
+
+#[tokio::test]
+async fn ask_first_popup_shows_the_folder_the_command_runs_in() {
+    // #2470: `.` and `..` in the agent's folder text could show a project folder while the command ran in a temp folder.
+    let raw = format!(
+        "/Users/me/code/{}{}private/tmp/b",
+        "./".repeat(100),
+        "../".repeat(30)
+    );
+    let cwd = jobs::realpath(Path::new(&raw));
+    assert_eq!(cwd, Path::new("/private/tmp/b"));
+    let job = json!({"id": "job", "command": "make", "cwd": cwd, "write": true});
+    let text = jobs::popup_text(&job, Path::new("/Users/me"));
+    assert!(text.contains("Warning: the command uses files in a temp folder."));
+    assert!(text.ends_with("Folder: /private/tmp/b"));
+    let home = json!({"id": "job", "command": "make", "cwd": "/Users/me/code", "write": true});
+    assert!(jobs::popup_text(&home, Path::new("/Users/me")).ends_with("\n\nFolder: ~/code"));
+    // `..` never skips a missing part or a file, which the OS would refuse to start in.
+    let base = folder("real-folder");
+    std::fs::create_dir(base.join("code")).unwrap();
+    std::fs::write(base.join("file"), "").unwrap();
+    std::os::unix::fs::symlink(base.join("code"), base.join("link")).unwrap();
+    let (real, id) = jobs::real_folder(&base.join("link/.")).unwrap();
+    assert_eq!(real, base.join("code").to_string_lossy());
+    assert!(jobs::real_folder(&base.join("missing/../code")).is_err());
+    assert!(jobs::real_folder(&base.join("file/../code")).is_err());
+    // The approved command runs in that folder. Swapped after Allow, it no longer matches, so it does not start.
+    let _alone = FORKS.lock().await;
+    let jobs = jobs::Jobs::new(std::sync::Arc::new(super::net::Shared::new(base.clone())));
+    let job =
+        json!({"id": "run", "command": "pwd", "cwd": real, "approvedFolder": id, "write": true});
+    let ran = jobs.run(&job, None, &base, None, None).await;
+    let stdout = super::unhex(ran["stdout"].as_str().unwrap()).unwrap();
+    assert_eq!(String::from_utf8(stdout).unwrap().trim(), real);
+    std::fs::rename(base.join("code"), base.join("old")).unwrap();
+    std::fs::create_dir(base.join("code")).unwrap();
+    assert_eq!(jobs.run(&job, None, &base, None, None).await["code"], 126);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn real_folder_uses_the_letter_case_on_disk() {
+    // #2470: realpath keeps a typed ~/CODE, while the shell's `pwd -P` shows ~/code, so the approved folder never matched.
+    let base = folder("disk-case");
+    std::fs::create_dir(base.join("code")).unwrap();
+    if base.join("CODE").exists() {
+        let real = base.join("code").to_string_lossy().into_owned();
+        assert_eq!(
+            jobs::real_folder(&base.join("CODE")).map(|found| found.0),
+            Ok(real)
+        );
+    }
+    std::fs::remove_dir_all(base).unwrap();
 }
 
 #[test]
@@ -266,7 +334,7 @@ async fn push_places_only_its_named_item() {
         if let Some(refused) = super::jobs::as_copy(&mut job, &home, &[]) {
             return (126, String::new(), refused);
         }
-        let result = jobs.run(&job, None, &root, None).await;
+        let result = jobs.run(&job, None, &root, None, None).await;
         let text = |key: &str| {
             String::from_utf8(super::unhex(result[key].as_str().unwrap()).unwrap()).unwrap()
         };
@@ -543,6 +611,7 @@ async fn read_only_command_leaves_nothing_running() {
             sandbox,
             &root,
             None,
+            None,
         )
         .await["code"]
             .clone()
@@ -557,6 +626,7 @@ async fn read_only_command_leaves_nothing_running() {
                 &json!({"id": id, "command": command}),
                 Some(&core),
                 &root,
+                None,
                 None,
             )
             .await["code"]
@@ -667,7 +737,13 @@ async fn background_process_outlives_its_result() {
         marker.display()
     );
     let result = jobs
-        .run(&json!({"id": "bg", "command": command}), None, &root, None)
+        .run(
+            &json!({"id": "bg", "command": command}),
+            None,
+            &root,
+            None,
+            None,
+        )
         .await;
     assert_eq!(
         (&result["code"], &result["stdout"]),
@@ -682,6 +758,24 @@ async fn background_process_outlives_its_result() {
     assert!(
         marker.exists(),
         "the background process died writing its output"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn nested_room_cli_reaches_the_app_that_owns_the_helper() {
+    let _alone = FORKS.lock().await;
+    // #1243, #1290: a stale ROOM_SERVER_URL from the helper's or the login shell's environment, or none, sent the
+    // Mac's room-cli to a dead port or another app. The app's own server comes last, after the login setup.
+    let root = folder("server");
+    let jobs = jobs::Jobs::new(std::sync::Arc::new(super::net::Shared::new(root.clone())));
+    let job = json!({"id": "url", "command": "printf %s \"$ROOM_SERVER_URL\""});
+    let result = jobs
+        .run(&job, None, &root, None, Some("http://127.0.0.1:41000"))
+        .await;
+    assert_eq!(
+        result["stdout"],
+        json!(super::hex(b"http://127.0.0.1:41000"))
     );
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -159,15 +159,14 @@ function folderPrefixMatches<T>(
 function bestSegment(
   segments: readonly Segment[],
   from: number,
-  skipFileName: boolean,
+  through: number,
   hits: ReadonlyMap<string, Hit<Searchable>>,
 ) {
   let best: { index: number; segment: Segment; hit: Hit<Searchable> } | null =
     null;
-  for (let index = from; index < segments.length; index += 1) {
+  for (let index = from; index <= through; index += 1) {
     const segment = segments[index]!;
-    const hit =
-      skipFileName && segment.isFileName ? undefined : hits.get(segment.text);
+    const hit = hits.get(segment.text);
     if (hit === undefined) continue;
     if (
       best === null ||
@@ -211,16 +210,25 @@ function slashPathMatches<T>(
   const matches: PathMatch<T>[] = [];
   entries.forEach((entry, entryIndex) => {
     const segments = segmentsByEntry[entryIndex]!;
+    // Leave a match for every later part before choosing the strongest earlier one.
+    const latest: number[] = [];
+    let end = segments.length - (trailingSlash ? 2 : 1);
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const hits = hitsByPart.get(parts[i]!)!;
+      while (end >= 0 && !hits.has(segments[end]!.text)) end--;
+      if (end < 0) return;
+      latest[i] = end;
+      end--;
+    }
     const positions: number[] = [];
     let score = 0;
     let start: number | null = null;
     let next = 0;
     for (const [partIndex, part] of parts.entries()) {
-      const skipFileName = trailingSlash && partIndex === parts.length - 1;
       const best = bestSegment(
         segments,
         next,
-        skipFileName,
+        latest[partIndex]!,
         hitsByPart.get(part)!,
       );
       if (best === null) return;

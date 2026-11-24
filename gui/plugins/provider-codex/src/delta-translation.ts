@@ -80,17 +80,22 @@ interface CodexShownTerminalError {
 
 interface CodexEventTranslationState {
   rateLimitsByLimitId: Map<string, CodexRateLimitSnapshot>;
+  /** Codex sent account/rateLimits/updated; a later startup read is stale. */
+  codexSentRateLimits: boolean;
   injectedToolsByName: Map<string, CodexInjectedTool>;
   retryErrorsByTurnKey: Map<string, CodexRetryErrorContext>;
   lastTerminalErrorByThreadId: Map<string, CodexShownTerminalError>;
+  windowsSandboxWarned: boolean;
 }
 
 export function createCodexEventTranslationState(): CodexEventTranslationState {
   return {
     rateLimitsByLimitId: new Map(),
+    codexSentRateLimits: false,
     injectedToolsByName: new Map(),
     retryErrorsByTurnKey: new Map(),
     lastTerminalErrorByThreadId: new Map(),
+    windowsSandboxWarned: false,
   };
 }
 
@@ -284,6 +289,25 @@ type CodexRateLimitCandidate = {
   nonResettableBlock: boolean;
   rateLimits: ProviderRateLimitState;
 };
+
+/** The usual rate-limit event for the current state, worst bucket first. */
+export function codexRateLimitsDelta(
+  state: CodexEventTranslationState,
+): ThreadDelta[] {
+  let worst: ProviderRateLimitState | undefined;
+  for (const limitId of state.rateLimitsByLimitId.keys()) {
+    const rateLimits = normalizeCodexRateLimits(state, limitId);
+    if (
+      worst === undefined ||
+      rateLimitStatusRank(rateLimits.status) > rateLimitStatusRank(worst.status)
+    ) {
+      worst = rateLimits;
+    }
+  }
+  return worst === undefined
+    ? []
+    : [{ kind: "provider.rateLimits", rateLimits: worst }];
+}
 
 function normalizeCodexRateLimits(
   state: CodexEventTranslationState,
@@ -575,6 +599,25 @@ const BARE_BAD_REQUEST_PATTERN =
 const BAD_REQUEST_RECOVERY =
   "Send a message to try again. If it keeps failing, start a new thread.";
 const BARE_BAD_REQUEST_NOTE = `The model API returned only a generic Bad Request, and Codex passed it on with no reason or request ID. ${BAD_REQUEST_RECOVERY}`;
+/**
+ * The account can't use the thread's model (anymore), as when a ChatGPT plan
+ * drops one. Codex tags it `other`, `badRequest`, or nothing, so one code lets
+ * the server reload the agent's models (#2009).
+ */
+const UNSUPPORTED_MODEL_PATTERN =
+  /model is not supported when using Codex with a ChatGPT account/iu;
+const UNSUPPORTED_MODEL_NOTE =
+  "This account can't use this model now. Pick another one in the model picker (or `room-cli thread update <thread> --model <model>`), then send again. A loop that starts new threads keeps its own model: change it in the loop's Agent setting (or `room-cli loop update <loop> --project <project> --model <model>`).";
+/**
+ * Before each model request, Codex asks chatgpt.com which workspace backend to
+ * use. Each thread's Codex keeps the answer in memory, so one thread can work
+ * while a restarted one can't get an answer (#2426). The 401 variant is handled
+ * separately (#2206).
+ */
+const ROUTING_DISCOVERY_PATTERN =
+  /\bworkspace routing discovery (?:timed out|failed)\b/iu;
+const ROUTING_DISCOVERY_NOTE =
+  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree. The chat is kept: send again to retry. If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
 
 function codexProviderErrorDelta(
   state: CodexEventTranslationState,
@@ -593,6 +636,17 @@ function codexProviderErrorDelta(
       httpStatusCode: null,
     };
   }
+  const unsupportedModel =
+    willRetry !== true &&
+    (errorInfo?.providerCode === "modelNotFound" ||
+      UNSUPPORTED_MODEL_PATTERN.test(error.message));
+  if (unsupportedModel) {
+    errorInfo = {
+      category: "bad-request",
+      providerCode: "modelNotFound",
+      httpStatusCode: errorInfo?.httpStatusCode ?? null,
+    };
+  }
   return {
     kind: "provider.error",
     message: "Provider error",
@@ -603,6 +657,13 @@ function codexProviderErrorDelta(
         ? error.additionalDetails
           ? BAD_REQUEST_RECOVERY
           : BARE_BAD_REQUEST_NOTE
+        : null,
+      unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
+      willRetry !== true &&
+      ROUTING_DISCOVERY_PATTERN.test(
+        `${error.message}\n${error.additionalDetails ?? ""}`,
+      )
+        ? ROUTING_DISCOVERY_NOTE
         : null,
     ]
       .filter(Boolean)
@@ -884,7 +945,7 @@ function toolStatusFields(status: CodexItemStatus): {
 
 const PLAN_STEPS_CHANNEL = "planSteps";
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 function isTerminalCodexItemStatus(status: CodexItemStatus): boolean {
   return status !== "inProgress";
@@ -914,7 +975,13 @@ function summarizeCollabAgentsStates(
   agentsStates: Record<string, unknown>,
 ): string | undefined {
   const lines = Object.entries(agentsStates).map(([agentThreadId, state]) => {
-    const rendered = typeof state === "string" ? state : JSON.stringify(state);
+    let rendered: string | undefined;
+    try {
+      rendered = typeof state === "string" ? state : JSON.stringify(state);
+    } catch {
+      // Provider JSON can nest beyond JSON.stringify's stack limit.
+      rendered = "[state too deeply nested]";
+    }
     return `${agentThreadId}: ${rendered}`;
   });
   return lines.length > 0 ? lines.join("\n") : undefined;
@@ -1013,7 +1080,7 @@ function translateCodexItemShape(
         kind: "translated",
         shape: {
           type: "tool",
-          ...(injected === undefined ? {} : { server: BB_TOOL_SERVER }),
+          ...(injected === undefined ? {} : { server: ROOM_TOOL_SERVER }),
           tool: parsedItem.tool,
           ...(parsedItem.arguments === undefined
             ? {}
@@ -1203,6 +1270,77 @@ function hookProblemWarning(
   };
 }
 
+// Codex's Windows sandbox can fail its setup before a command starts, so every
+// command fails with "setup refresh had errors" (#1231). Warn once per thread
+// with the repair; the failed command shows as before.
+function windowsSandboxSetupWarning(
+  state: CodexEventTranslationState,
+  translation: Extract<CodexItemTranslationResult, { kind: "translated" }>,
+): ThreadDelta[] {
+  if (
+    process.platform !== "win32" ||
+    state.windowsSandboxWarned ||
+    translation.shape.type !== "command" ||
+    translation.status === "completed"
+  ) {
+    return [];
+  }
+  const line = translation.shape.aggregatedOutput
+    ?.split("\n")
+    .find((text) => text.includes("setup refresh had errors"));
+  if (line === undefined) return [];
+  state.windowsSandboxWarned = true;
+  return [
+    {
+      kind: "provider.warning",
+      category: "general",
+      summary: `Codex can't set up its command sandbox on this Windows computer (${line.trim()}). Update Codex, or switch this thread to Full Access.`,
+    },
+  ];
+}
+
+// Codex MCP errors can quote URLs, headers and rejected credentials, so a
+// warning shows only a fixed reason picked from the error, never its text.
+const MCP_STARTUP_REASONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/not logged in|reauthenticat/i, "It needs a sign-in."],
+  [
+    /\b40[13]\b|unauthori[sz]ed|forbidden|auth required|invalid (credential|api.?key|token)/i,
+    "It rejected the sign-in or key.",
+  ],
+  [/timed out|timeout/i, "It took too long to start."],
+  [
+    /os error 2\b|no such file|cannot find the file|program not found|not recognized as/i,
+    "Its command was not found.",
+  ],
+  [
+    /error sending request|connection refused|could not connect|dns error|failed to lookup/i,
+    "Codex could not reach it.",
+  ],
+  [
+    /connection closed|initialize response|handshak|exit/i,
+    "It stopped while starting.",
+  ],
+];
+
+// A server name can be a URL with a credential, so only plain names are shown.
+const SAFE_MCP_SERVER_NAME = /^[A-Za-z0-9_.-]{1,64}$/;
+
+export function codexMcpStartupReason(params: {
+  name?: unknown;
+  error?: unknown;
+  failureReason?: unknown;
+}): string {
+  const { name, error, failureReason } = params;
+  if (failureReason === "reauthenticationRequired")
+    return "It needs a sign-in.";
+  if (typeof error !== "string") return "Codex did not say why.";
+  // Codex quotes the name in its error, so `timeout-tools` is not a timeout.
+  const text =
+    typeof name === "string" && name ? error.replaceAll(name, "") : error;
+  const match = MCP_STARTUP_REASONS.find(([pattern]) => pattern.test(text));
+  return match?.[1] ?? "Codex did not say why.";
+}
+
 export function translateCodexEventToDeltas(
   event: ProviderRuntimeEvent,
   state: CodexEventTranslationState,
@@ -1238,6 +1376,7 @@ export function translateCodexEventToDeltas(
   const handledEvent: CodexHandledEvent = parsed.data;
   switch (handledEvent.method) {
     case "account/rateLimits/updated": {
+      state.codexSentRateLimits = true;
       const rateLimits = applyCodexRateLimitUpdate(
         state,
         handledEvent.params.rateLimits,
@@ -1381,6 +1520,7 @@ export function translateCodexEventToDeltas(
           presentation: translation.presentation,
           providerTurnId: handledEvent.params.turnId,
         },
+        ...windowsSandboxSetupWarning(state, translation),
       ];
     }
     case "item/agentMessage/delta":
@@ -1555,6 +1695,30 @@ export function translateCodexEventToDeltas(
           summary: handledEvent.params.message,
         },
       ];
+    case "mcpServer/startupStatus/updated": {
+      const { name, status } = handledEvent.params;
+      if (status !== "failed") return [];
+      const reason = codexMcpStartupReason(handledEvent.params);
+      const safe = typeof name === "string" && SAFE_MCP_SERVER_NAME.test(name);
+      const server = safe ? `MCP server ${name}` : "An MCP server";
+      const check = safe
+        ? `Check its setup with \`codex mcp get ${name}\` or sign in again with \`codex mcp login ${name}\``
+        : "See your servers with `codex mcp list`";
+      const fix =
+        name === "codex_apps"
+          ? ""
+          : ` ${check}. A new thread picks up the fix. With Codex 0.147 or newer, this thread retries it too, at most once a minute.`;
+      return [
+        {
+          kind: "provider.warning",
+          category: "general",
+          summary:
+            presentationTitle(`${server} did not start. ${reason}`) ??
+            `${server} did not start`,
+          details: `${reason} Run \`codex\` in a terminal to see the full error.${fix}`,
+        },
+      ];
+    }
     case "configWarning":
       return [
         {

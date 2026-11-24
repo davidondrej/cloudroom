@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import "tw-animate-css";
+@import "./tw-animate.css";
 @source "..";
 /* The UI kit's component source lives in @cloudroom/shared-ui (a workspace package
    resolved via a node_modules symlink, which Tailwind v4 does not auto-scan).
@@ -260,6 +260,79 @@
     );
   }
 
+  /* Ambient sky-blue glow for a thread actively using computer use (David, 2026-11-19, design 1C). */
+  .bb-sidebar-computer-use-row {
+    --bb-computer-use-accent: #0284c7;
+    --bb-computer-use-stop-1: 15%;
+    --bb-computer-use-stop-2: 6%;
+    background-image: linear-gradient(
+      90deg,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--sidebar)
+        )
+        0%,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--sidebar)
+        )
+        52%,
+      var(--sidebar) 100%
+    );
+  }
+
+  .dark .bb-sidebar-computer-use-row {
+    --bb-computer-use-accent: #38bdf8;
+    --bb-computer-use-stop-1: 18%;
+    --bb-computer-use-stop-2: 7%;
+  }
+
+  .bb-sidebar-computer-use-row:is(:hover, :has([data-state="open"])) {
+    background-image: linear-gradient(
+      90deg,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--sidebar-accent)
+        )
+        0%,
+      color-mix(
+          in oklab,
+          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--sidebar-accent)
+        )
+        52%,
+      var(--sidebar-accent) 100%
+    );
+  }
+
+  .bb-sidebar-computer-use-laptop {
+    color: #0284c7;
+    opacity: 1;
+    filter: drop-shadow(0 0 4px color-mix(in oklab, #0284c7 45%, transparent));
+  }
+
+  .dark .bb-sidebar-computer-use-laptop {
+    color: #38bdf8;
+    filter: drop-shadow(0 0 5px color-mix(in oklab, #38bdf8 55%, transparent));
+  }
+
+  .bb-sidebar-computer-use-laptop path:first-child {
+    fill: color-mix(in oklab, currentColor 28%, transparent);
+  }
+
+  .bb-sidebar-computer-use-spinner {
+    color: color-mix(in oklab, #0284c7 55%, var(--muted-foreground));
+    opacity: 0.75;
+  }
+
+  .dark .bb-sidebar-computer-use-spinner {
+    color: color-mix(in oklab, #38bdf8 55%, var(--muted-foreground));
+    opacity: 0.7;
+  }
+
   .bb-sidebar-hover-actions {
     pointer-events: none;
     opacity: 0;
@@ -335,8 +408,8 @@
     --bb-sidebar-sticky-tier-top: var(--bb-sidebar-sticky-label-top);
     --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-label-height);
     --bb-sidebar-sticky-tier-z-index: 60;
-    --bb-sidebar-sticky-tier-shield-top-height: var(
-      --bb-sidebar-sticky-stack-padding
+    --bb-sidebar-sticky-tier-shield-top-height: calc(
+      var(--bb-sidebar-sticky-stack-padding) + 2px
     );
     --bb-sidebar-sticky-tier-shield-bottom-height: var(
       --bb-sidebar-sticky-label-gap
@@ -979,6 +1052,104 @@
   }
 
   /*
+   * Working indicator: a 3x3 pixel grid beside "Working..." and "Thinking…". A
+   * wave crosses it from a new direction each pass (diagonal, sideways, up,
+   * down), then ripples out of the center and back in. Every pass is the same
+   * pulse keyframe: a cell runs it six times, each with its own delay, and
+   * `animation-composition: add` sums them onto the resting pixel. Additive
+   * animations run on the main thread, so the grid gets its own layer for the
+   * same reason `.animate-shine` does.
+   */
+  .working-grid {
+    display: inline-grid;
+    flex: none;
+    grid-template-columns: repeat(3, 3px);
+    gap: 2px;
+    place-content: center;
+    width: 14px;
+    height: 14px;
+    will-change: transform;
+  }
+
+  .working-grid i {
+    position: relative;
+    width: 3px;
+    height: 3px;
+  }
+
+  .working-grid i::before,
+  .working-grid i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    transform: scale(0.8);
+  }
+
+  .working-grid i::before {
+    background: var(--muted-foreground);
+    opacity: 0.32;
+  }
+
+  /* --r and --c are the cell's row and column; --k is its ring (0 center, 1 edge, 1.7 corner). */
+  .working-grid i::after {
+    background: var(--primary);
+    opacity: 0;
+    animation: working-grid-pulse 8s ease-in-out infinite;
+    animation-name:
+      working-grid-pulse, working-grid-pulse, working-grid-pulse,
+      working-grid-pulse, working-grid-pulse, working-grid-pulse;
+    animation-composition: add;
+    animation-delay:
+      calc((var(--r) + var(--c)) * 150ms), calc(1350ms + var(--c) * 230ms),
+      calc(2650ms + (2 - var(--r) + var(--c)) * 150ms),
+      calc(4000ms + var(--r) * 230ms), calc(5300ms + var(--k) * 230ms),
+      calc(6500ms + (1.7 - var(--k)) * 230ms);
+  }
+
+  /*
+   * A subagent's smaller cousin of the grid above: 2x2 pixels, lit one after
+   * another clockwise. `--n` is a cell's place in the orbit; `--o` shifts the
+   * whole cube so pills side by side don't blink in step.
+   */
+  .subagent-grid {
+    display: inline-grid;
+    flex: none;
+    grid-template-columns: repeat(2, 4px);
+    gap: 2px;
+    place-content: center;
+    width: 13px;
+    height: 13px;
+  }
+
+  .subagent-grid i {
+    position: relative;
+    width: 4px;
+    height: 4px;
+  }
+
+  .subagent-grid i::before,
+  .subagent-grid i::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 0.5px;
+    transform: scale(0.82);
+  }
+
+  .subagent-grid i::before {
+    background: var(--muted-foreground);
+    opacity: 0.34;
+  }
+
+  .subagent-grid i::after {
+    background: var(--primary);
+    opacity: 0;
+    animation: subagent-grid-orbit 1.6s linear infinite;
+    /* Negative, so a cube mounts mid-orbit instead of dark. */
+    animation-delay: calc(var(--n) * 400ms - 1600ms - var(--o, 0ms));
+  }
+
+  /*
    * Hidden hosts keep shimmering rows mounted: the closed sidebar drawer's
    * inert panel, a collapsed `aria-hidden` banner body, a retained overlay.
    * Pause the sweep and release the layer there so nothing off-screen repaints
@@ -987,8 +1158,12 @@
    */
   [inert] .animate-shine,
   [inert] .animate-shine-icon,
+  [inert] .working-grid i::after,
+  [inert] .subagent-grid i::after,
   [aria-hidden="true"] .animate-shine,
-  [aria-hidden="true"] .animate-shine-icon {
+  [aria-hidden="true"] .animate-shine-icon,
+  [aria-hidden="true"] .working-grid i::after,
+  [aria-hidden="true"] .subagent-grid i::after {
     animation-play-state: paused;
     will-change: auto;
   }
@@ -1001,6 +1176,48 @@
    */
   .animate-indeterminate-progress {
     animation: indeterminate-progress 1.5s ease-in-out infinite;
+  }
+
+  /*
+   * Touch press feedback. The browser applies `:active` at touch-down, before
+   * any click handler runs, so a slow handler can never delay it. Both classes
+   * replace the system's grey tap flash, and neither changes layout.
+   * `.press-feedback` (buttons) shrinks, then springs back with a slight
+   * overshoot; `--press-scale` sets the depth. `.press-highlight` (rows) tints
+   * instead, after a short delay so a scroll doesn't flash each row it touches.
+   */
+  @media (pointer: coarse) {
+    .press-feedback,
+    .press-highlight {
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    .press-feedback {
+      transition:
+        scale 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+        color 150ms,
+        background-color 150ms,
+        border-color 150ms,
+        opacity 150ms;
+    }
+
+    .press-feedback:active {
+      scale: var(--press-scale, 0.96);
+      transition-duration: 70ms, 150ms, 150ms, 150ms, 150ms;
+      transition-timing-function: ease-out;
+    }
+
+    .press-highlight:active {
+      background-color: var(--state-active);
+      transition: background-color 0s 60ms;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .press-feedback:active {
+        scale: none;
+        opacity: 0.7;
+      }
+    }
   }
 
   /* Reduced motion: drop the shimmer sweep and render the active cue as plain
@@ -1025,6 +1242,41 @@
       mask-image: none;
       will-change: auto;
     }
+
+    /* The still gray grid plus the label still reads as "busy". */
+    .working-grid i::after,
+    .subagent-grid i::after {
+      animation: none;
+    }
+  }
+}
+
+/* One orbit: a cell lights for a quarter, then fades over the next. */
+@keyframes subagent-grid-orbit {
+  0%,
+  22% {
+    opacity: 1;
+    transform: scale(1.12);
+  }
+  50%,
+  100% {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+}
+
+/* Added on top of the resting scale(0.8): 180ms in, 40ms hold, 560ms out, then idle. */
+@keyframes working-grid-pulse {
+  0%,
+  9.75%,
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+  2.25%,
+  2.75% {
+    opacity: 1;
+    transform: scale(1.475);
   }
 }
 
@@ -1043,6 +1295,16 @@
   }
   100% {
     margin-inline-start: 100%;
+  }
+}
+
+@keyframes scroll-bottom-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1.5px);
   }
 }
 

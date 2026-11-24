@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import type { BbDesktopBrowserApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
 import {
   DESKTOP_BROWSER_IMPORT_FAILURE_COPY,
   type DesktopBrowserImportOutcome,
@@ -14,7 +14,7 @@ import {
   SettingsRowList,
   SettingsSection,
 } from "@/components/ui/settings-section";
-import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { BrowserImportDialog } from "./BrowserImportDialog";
 import { BrowserSourceIcon } from "./BrowserSourceIcon";
@@ -123,7 +123,7 @@ function BrowserRow({
 }
 
 export interface BrowserSettingsSectionContentProps {
-  desktopBrowser: BbDesktopBrowserApi | null;
+  desktopBrowser: RoomDesktopBrowserApi | null;
 }
 
 export function BrowserSettingsSectionContent({

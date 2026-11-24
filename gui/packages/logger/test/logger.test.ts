@@ -34,13 +34,14 @@ async function runLoggerInSubprocess(args: {
 }): Promise<SubprocessLoggerResult> {
   const script = `
     (async () => {
+      const realNow = Date.now;
       Date.now = () => ${JSON.stringify(args.timestampMs)};
       const { createLogger } = await import(${JSON.stringify(LOGGER_IMPORT_SPECIFIER)});
       const logger = createLogger({ component: ${JSON.stringify(args.component)} });
       logger.info({ marker: ${JSON.stringify(args.message)} }, ${JSON.stringify(args.message)});
-      // Worker transport is async. Pino's flush callback only waits for the
-      // main-thread buffer, not the worker thread; a short settle window lets
-      // the worker drain to stdout/file before we exit.
+      // pino-roll runs in this process and times its daily roll with
+      // Date.now, so only the line above sees the fake clock.
+      Date.now = realNow;
       setTimeout(() => process.exit(0), 250);
     })().catch((error) => {
       console.error(error);
@@ -213,7 +214,7 @@ describe("createLogger", () => {
     expect(getComponentLogFiles(logDir, "server").length).toBeGreaterThan(1);
   });
 
-  it("delivers log lines to both the file and the process stdout in worker mode", async () => {
+  it("delivers log lines to both the file and the process stdout outside Vitest", async () => {
     const dataDir = createTempDir();
     const logDir = path.join(dataDir, "logs");
     const message = `stdout-behavior-${Date.now()}`;

@@ -6,6 +6,7 @@ import {
   type RuntimePermissionPolicy,
   type ServiceTier,
   buildShellEnvOverrides,
+  experimental_privateDataPaths as privateDataPaths,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import fs from "node:fs";
 import path from "node:path";
@@ -18,7 +19,7 @@ import type { ThreadStartParams } from "./generated/codex-app-server/schema/v2/T
 import type { UserInput as CodexUserInput } from "./generated/codex-app-server/schema/v2/UserInput.js";
 import type { AskForApproval } from "./generated/codex-app-server/schema/v2/AskForApproval.js";
 import type { ApprovalsReviewer } from "./generated/codex-app-server/schema/v2/ApprovalsReviewer.js";
-import { mapBbReasoningLevelToCodex } from "./models.js";
+import { mapRoomReasoningLevelToCodex } from "./models.js";
 
 export type CodexSessionOptions = {
   model?: string;
@@ -43,12 +44,12 @@ export interface CodexThreadPermissionSettings {
   sandbox: CodexSandboxMode;
 }
 
-export type BbThreadStartParams = ThreadStartParams & {
+export type RoomThreadStartParams = ThreadStartParams & {
   experimentalRawEvents?: boolean;
   dynamicTools?: DynamicToolSpec[];
 };
 
-export type BbThreadForkParams = {
+export type RoomThreadForkParams = {
   threadId: string;
   lastTurnId?: string | null;
   excludeTurns?: boolean;
@@ -132,8 +133,13 @@ type GitHeadState =
   | { type: "unsafe" };
 
 interface CodexInstructionSource {
+  approvalPolicy?: AskForApproval;
   instructionMode: "append" | "replace";
-  options: { instructions?: string };
+  platform?: NodeJS.Platform;
+  options: {
+    instructions?: string;
+    permissionScope?: CodexSessionOptions["permissionScope"];
+  };
 }
 
 interface CodexInstructionOverrides {
@@ -146,20 +152,41 @@ interface CodexInstructionOverrides {
 const CODEX_PLAIN_CHAT =
   "request_user_input and request_user_input_async don't reach the user; ask in plain chat instead.";
 
+// #1294. The workspace sandbox keeps .agents and .codex read-only, so in a linked
+// worktree git can half finish a branch change and still exit 0.
+const CODEX_READ_ONLY_GIT =
+  "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
+
+// #1805. Codex's Windows sandbox grants itself read access to the user profile
+// in the background, minutes after the first command, so room-cli can't be found yet.
+const CODEX_WINDOWS_ROOM_CLI =
+  "On Windows, Codex's sandbox can take minutes to get read access to Cloudroom's install folder. If room-cli or room-cli.cmd is \"not recognized\" inside the sandbox, rerun the same command with escalation instead of retrying or giving up.";
+
+// #1456. With approval "never" (Full Access), Codex rejects any command that a
+// prompt rule matches (user, project or managed .rules), and the model can't ask.
+const CODEX_NEVER_ASKS =
+  "This permission mode can't ask the user for approval. If a command fails with \"approval required by policy, but AskForApproval is set to Never\", a Codex rule requires approval for that command. Do not retry or work around it. Tell the user that a Codex rule needs approval: they can switch this thread to Manual and send again to approve it themselves, use Auto to let Codex's automatic review decide, or change that rule.";
+
 export function resolveCodexInstructionOverrides(
   command: CodexInstructionSource,
 ): CodexInstructionOverrides {
+  const notes = [
+    CODEX_PLAIN_CHAT,
+    ...(command.options.permissionScope === "workspace"
+      ? [CODEX_READ_ONLY_GIT]
+      : []),
+    ...(command.options.permissionScope === "workspace" &&
+    (command.platform ?? process.platform) === "win32"
+      ? [CODEX_WINDOWS_ROOM_CLI]
+      : []),
+    ...(command.approvalPolicy === "never" ? [CODEX_NEVER_ASKS] : []),
+  ].join("\n\n");
   const instructions = command.options.instructions?.trim();
   if (instructions && command.instructionMode === "replace") {
-    return {
-      baseInstructions: instructions,
-      developerInstructions: CODEX_PLAIN_CHAT,
-    };
+    return { baseInstructions: instructions, developerInstructions: notes };
   }
   return {
-    developerInstructions: instructions
-      ? `${CODEX_PLAIN_CHAT}\n\n${instructions}`
-      : CODEX_PLAIN_CHAT,
+    developerInstructions: instructions ? `${notes}\n\n${instructions}` : notes,
   };
 }
 
@@ -652,14 +679,14 @@ export function toCodexPermissionSettings(
 
 export function toCodexServiceTier(
   tier: ServiceTier | undefined,
-): "fast" | null | undefined {
+): "fast" | "ultrafast" | null | undefined {
   return tier === "default" ? null : tier;
 }
 
 export function toCodexReasoningEffort(
   reasoningLevel: ReasoningLevel,
 ): CodexReasoningEffort {
-  const codexEffort = mapBbReasoningLevelToCodex(reasoningLevel);
+  const codexEffort = mapRoomReasoningLevelToCodex(reasoningLevel);
   if (codexEffort == null) {
     throw new Error(
       `Codex does not support the ${reasoningLevel} reasoning level.`,
@@ -739,6 +766,44 @@ export function keepShellEnvironmentSetKeys(
     : {};
 }
 
+const THREAD_IDENTITY_ENV_KEYS = [
+  "ROOM_THREAD_ID",
+  "ROOM_THREAD_STORAGE",
+  "ROOM_PROJECT_ID",
+  "ROOM_ENVIRONMENT_ID",
+] as const;
+
+/**
+ * Codex starts stdio MCP servers with only a few of its own variables, so tool
+ * hosts with a shell tool (such as ctx_shell) never saw the thread identity
+ * (#1532). Gives each configured stdio server the identity keys this config
+ * sets for shells. A key the server's own `env` already sets is left alone.
+ */
+export function shareThreadIdentityWithMcpServers(
+  config: { [key in string]?: JsonValue },
+  servers:
+    | Record<
+        string,
+        { command?: string | null; env?: Record<string, string> | null }
+      >
+    | null
+    | undefined,
+): Record<string, string> {
+  const env = THREAD_IDENTITY_ENV_KEYS.flatMap((key) => {
+    const value = config[`shell_environment_policy.set.${key}`];
+    return typeof value === "string" ? [[key, value] as const] : [];
+  });
+  const result: Record<string, string> = {};
+  for (const [name, server] of Object.entries(servers ?? {})) {
+    if (!/^[\w-]+$/u.test(name) || typeof server.command !== "string") continue;
+    for (const [key, value] of env) {
+      if (server.env?.[key] !== undefined) continue;
+      result[`mcp_servers.${name}.env.${key}`] = value;
+    }
+  }
+  return result;
+}
+
 export function buildCodexConfig(
   args: BuildCodexConfigArgs,
 ): { [key in string]?: JsonValue } | undefined {
@@ -765,6 +830,7 @@ export function buildCodexConfig(
     config["features.multi_agent"] = false;
     config["features.multi_agent_v2.max_concurrent_threads_per_session"] = 1;
   }
+  Object.assign(config, buildPrivateDataDenyConfig(args.options?.envVars));
   config["memories.use_memories"] = args.options?.memoryEnabled ?? true;
   config["memories.generate_memories"] = args.options?.memoryEnabled ?? true;
   if (args.options?.permissionScope === "workspace") {
@@ -777,6 +843,38 @@ export function buildCodexConfig(
     }
   }
   return Object.keys(config).length > 0 ? config : undefined;
+}
+
+const CLOUDROOM_PERMISSION_PROFILE = "cloudroom";
+
+/**
+ * A Codex permission profile that denies sandboxed commands Cloudroom's
+ * credential files (#2191). Each turn's `sandboxPolicy` still sets writes and
+ * network, and Codex keeps this profile's deny entries on top. A thread-level
+ * `sandbox` mode would replace the profile, so the bridge leaves it out while
+ * this profile is set. Not on Windows, whose sandbox was not tested.
+ */
+export function buildPrivateDataDenyConfig(
+  envVars: Record<string, string> | undefined,
+  platform: NodeJS.Platform = process.platform,
+): { [key in string]?: JsonValue } {
+  const paths = platform === "win32" ? [] : privateDataPaths(envVars?.ROOM_DATA_DIR);
+  if (paths.length === 0) return {};
+  return {
+    default_permissions: CLOUDROOM_PERMISSION_PROFILE,
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.filesystem`]: {
+      ":root": "read",
+      ":workspace_roots": { ".": "write" },
+      ...Object.fromEntries(paths.map((entry) => [entry, "deny"])),
+    },
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.network.enabled`]: true,
+  };
+}
+
+export function usesPrivateDataDenyProfile(
+  config: { [key in string]?: JsonValue } | undefined,
+): boolean {
+  return config?.default_permissions === CLOUDROOM_PERMISSION_PROFILE;
 }
 
 interface CodexDynamicToolInput {

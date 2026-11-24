@@ -213,11 +213,11 @@ function readTailwindContentPatterns(
   pkg: Record<string, unknown>,
   packageJsonPath: string,
 ): string[] {
-  const bb = pkg.bb;
-  if (!isRecord(bb) || bb.pluginTailwindContent === undefined) {
+  const room = pkg.bb;
+  if (!isRecord(room) || room.pluginTailwindContent === undefined) {
     return [];
   }
-  const patterns = bb.pluginTailwindContent;
+  const patterns = room.pluginTailwindContent;
   if (
     !Array.isArray(patterns) ||
     !patterns.every((pattern) => typeof pattern === "string")
@@ -399,7 +399,7 @@ interface PluginAppBuildOptions {
 
 export async function buildPluginApp(
   rootDir: string,
-  bbVersion: string,
+  roomVersion: string,
   toolchain: PluginBuildToolchain,
   options: PluginAppBuildOptions = { minify: true },
 ): Promise<PluginAppBuildResult> {
@@ -477,7 +477,7 @@ export async function buildPluginApp(
     await writeFile(
       stagedMetaPath,
       JSON.stringify(
-        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion }),
+        createPluginArtifactMeta({ packageName, pluginVersion, bbVersion: roomVersion }),
         null,
         2,
       ) + "\n",

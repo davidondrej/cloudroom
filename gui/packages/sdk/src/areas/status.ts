@@ -6,7 +6,7 @@ import type {
   ThreadTimelineResponse,
   ThreadWithIncludesResponse,
 } from "@cloudroom/server-contract";
-import { BbRequestTimeoutError } from "../response.js";
+import { RoomRequestTimeoutError } from "../response.js";
 import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export interface StatusGetArgs {
@@ -48,7 +48,7 @@ async function fetchSilent<TValue>(
   try {
     return await fn();
   } catch (error) {
-    if (error instanceof BbRequestTimeoutError) throw error;
+    if (error instanceof RoomRequestTimeoutError) throw error;
     return null;
   }
 }

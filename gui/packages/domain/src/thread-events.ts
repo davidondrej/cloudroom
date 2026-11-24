@@ -86,9 +86,14 @@ export const turnRequestEventDataSchema = z.object({
   retryOfRequestId: clientTurnRequestIdSchema.optional(),
   /** Which attempt this is: 2 is the first retry of the original request. */
   retryAttempt: z.number().int().min(2).optional(),
+  queueDelivered: z.literal(true).optional(),
+  /** The queued row this request delivered; older events lack it. */
+  queuedMessageId: z.string().optional(),
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
   senderThreadId: z.string().nullable(),
+  /** Where the request came from (`desktop`, `web`, `mobile`, `api`), so telemetry can tell a person from a script. */
+  appSurface: z.string().optional(),
   systemMessageKind: systemMessageKindSchema.optional(),
   systemMessageSubject: systemMessageSubjectSchema.nullable().optional(),
   input: z.array(promptInputSchema),
@@ -134,6 +139,8 @@ export const turnRequestRejectedEventDataSchema = z.object({
 export const systemErrorEventDataSchema = z
   .object({
     code: z.string().optional(),
+    /** The host's own code under a generic `code` (`path_not_found` under `thread_command_failed`), for telemetry. */
+    cause: z.string().optional(),
     message: z.string(),
     detail: z.string().optional(),
     reconnectAttempt: z.number().int().positive().optional(),
@@ -231,11 +238,15 @@ export type OwnershipChangeOperationMetadata = z.infer<
 >;
 
 export const THREAD_CONTEXT_CLEAR_OPERATION = "context_clear";
+/** A saved Local model pick supersedes the last provider fallback. */
+export const THREAD_MODEL_SELECTION_OPERATION = "model_selection";
 /** The thread moved to another harness or model (ADR 0211): the next turn starts a fresh native session. Hidden in the timeline. */
 export const THREAD_HARNESS_SWITCH_OPERATION = "harness_switch";
 /** Another account of the same agent continued a turn its plan limit stopped (ADR 20261107-082836). Hidden; the limit row shows it. */
 export const THREAD_ACCOUNT_SWITCH_OPERATION = "account_switch";
 export const THREAD_IMPORT_OPERATION = "import";
+/** Teleport moved the thread from Cloud to this computer. Hidden; its seed tells the next turn what moved (#1818). */
+export const THREAD_TELEPORT_LOCAL_OPERATION = "teleport_local";
 
 export const systemOperationEventDataSchema = z.object({
   operation: z.string(),
@@ -289,7 +300,31 @@ export type SystemThreadInterruptedReason = z.infer<
 export const systemThreadInterruptedEventDataSchema = z.object({
   reason: systemThreadInterruptedReasonSchema,
   cause: z.literal("host-connection-lost").optional(),
+  /** Memory guard stops: what it measured, so the banner can say it (#1965). */
+  memory: z
+    .object({ usedBytes: z.number(), totalBytes: z.number() })
+    .optional(),
 });
+export type SystemThreadInterruptedEventData = z.infer<
+  typeof systemThreadInterruptedEventDataSchema
+>;
+
+/** The warning for a message a Stop may have ended the agent before it read (#2137). */
+export const UNDELIVERED_MESSAGE_WARNING =
+  "May not have been delivered: the agent stopped before reading it";
+
+/** Plain words for a recorded stop, for parent notices and `thread show` (#1159). */
+export function describeThreadInterruption(
+  stop: SystemThreadInterruptedEventData,
+): string {
+  if (stop.cause === "host-connection-lost") return "host connection lost";
+  return {
+    "manual-stop": "stopped by the user or an agent",
+    "host-daemon-restarted": "host restarted",
+    "provider-turn-idle": "provider went silent",
+    "memory-limit": "memory protection",
+  }[stop.reason];
+}
 
 export const WORKSPACE_PROVISIONING_STEP_KEYS = {
   workspacePath: "workspace-path",

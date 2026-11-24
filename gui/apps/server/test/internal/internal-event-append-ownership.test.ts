@@ -1,11 +1,18 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
+  createQueuedThreadMessage,
   events,
+  getLatestThreadSequence,
   getThread,
   listEvents,
   listQueuedThreadMessages,
 } from "@cloudroom/db";
-import { threadScope, turnScope } from "@cloudroom/domain";
+import {
+  threadScope,
+  turnScope,
+  UNDELIVERED_MESSAGE_WARNING,
+} from "@cloudroom/domain";
+import { cancelRetriesForExplicitStop } from "../../src/services/threads/turn-retry.js";
 import {
   groupHostDaemonEvents,
   hostDaemonEventBatchResponseSchema,
@@ -13,8 +20,11 @@ import {
 } from "@cloudroom/host-daemon-contract";
 import { describe, expect, it } from "vitest";
 import { buildThreadTimelineWithProfile } from "../../src/services/threads/timeline.js";
+import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import {
   internalAuthHeaders,
+  listQueuedThreadCommands,
+  reportQueuedCommandSuccess,
   waitForQueuedCommand,
 } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
@@ -51,6 +61,18 @@ async function postEventBatch(args: PostEventBatchArgs): Promise<Response> {
       sessionId: args.sessionId,
       eventGroups: groupHostDaemonEvents(args.events),
     }),
+  });
+}
+
+async function sweepAfterGrace(harness: TestAppHarness, threadId: string) {
+  harness.db
+    .update(events)
+    .set({ createdAt: sql`${events.createdAt} - 31000` })
+    .where(eq(events.threadId, threadId))
+    .run();
+  await runQueuedMessageDispatch(harness.deps, {
+    kind: "idle-recovery",
+    now: Date.now(),
   });
 }
 
@@ -534,6 +556,425 @@ describe("internal event append ownership", () => {
     }
   });
 
+  it.each([
+    { status: "failed" as const, error: { message: "Provider error" } },
+    { status: "interrupted" as const },
+  ])(
+    "auto-sends a message queued behind a turn that ends $status on its own",
+    async (completion) => {
+      const { environment, harness, session, thread } = await setupEventRoute();
+      try {
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          providerThreadId: "provider-ends-alone",
+          threadId: thread.id,
+        });
+        seedQueuedMessage(harness.deps, {
+          content: [{ type: "text", text: "queued fix", mentions: [] }],
+          threadId: thread.id,
+          waitingOn: { kind: "thread-busy" },
+        });
+        seedQueuedMessage(harness.deps, {
+          content: [{ type: "text", text: "queued later", mentions: [] }],
+          threadId: thread.id,
+          waitingOn: null,
+        });
+        const completed: HostDaemonEventEnvelope = {
+          threadId: thread.id,
+          event: {
+            type: "turn/completed",
+            threadId: thread.id,
+            providerThreadId: "provider-ends-alone",
+            scope: turnScope("turn-ends-alone"),
+            ...completion,
+          },
+        };
+
+        const response = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/started",
+                threadId: thread.id,
+                providerThreadId: "provider-ends-alone",
+                scope: turnScope("turn-ends-alone"),
+              },
+            },
+            completed,
+          ],
+        });
+
+        expect(response.status).toBe(200);
+        if (completion.status === "failed") {
+          await sweepAfterGrace(harness, thread.id);
+        }
+        const queuedTurn = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "turn.submit" && command.threadId === thread.id,
+        );
+        expect(queuedTurn.command).toMatchObject({
+          input: [{ type: "text", text: "queued fix", mentions: [] }],
+        });
+
+        const replay = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [completed],
+        });
+        expect(replay.status).toBe(200);
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "idle-recovery",
+          now: Date.now(),
+        });
+        expect(
+          listQueuedThreadCommands(harness, "turn.submit", thread.id),
+        ).toHaveLength(1);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(1);
+
+        const nextFailed = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/started",
+                threadId: thread.id,
+                providerThreadId: "provider-ends-alone",
+                scope: turnScope("turn-queued-fix"),
+              },
+            },
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/completed",
+                threadId: thread.id,
+                providerThreadId: "provider-ends-alone",
+                scope: turnScope("turn-queued-fix"),
+                status: "failed",
+                error: { message: "Again" },
+              },
+            },
+          ],
+        });
+        expect(nextFailed.status).toBe(200);
+        await sweepAfterGrace(harness, thread.id);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(
+          completion.status === "failed" ? 1 : 0,
+        );
+      } finally {
+        await harness.cleanup();
+      }
+    },
+  );
+
+  it.each([
+    { status: "failed" as const, error: { message: "Provider error" } },
+    { status: "interrupted" as const },
+  ])(
+    "holds a message queued during Stop until the stop lands ($status)",
+    async (completion) => {
+      const { environment, harness, session, thread } = await setupEventRoute();
+      try {
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          providerThreadId: "provider-stop-fail",
+          threadId: thread.id,
+        });
+        const started = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/started",
+                threadId: thread.id,
+                providerThreadId: "provider-stop-fail",
+                scope: turnScope("turn-stop-fail"),
+              },
+            },
+          ],
+        });
+        expect(started.status).toBe(200);
+        const stopResponse = harness.app.request(
+          `/api/v1/threads/${thread.id}/stop`,
+          { method: "POST" },
+        );
+        const stop = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.stop" && command.threadId === thread.id,
+        );
+        const queued = await harness.app.request(
+          `/api/v1/threads/${thread.id}/queued-messages`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              input: [{ type: "text", text: "after stop" }],
+              model: "gpt-5",
+              permissionMode: "full",
+              reasoningLevel: "medium",
+              serviceTier: "default",
+            }),
+          },
+        );
+        expect(queued.status).toBe(201);
+        const failed = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: [
+            {
+              threadId: thread.id,
+              event: {
+                type: "turn/completed",
+                threadId: thread.id,
+                providerThreadId: "provider-stop-fail",
+                scope: turnScope("turn-stop-fail"),
+                ...completion,
+              },
+            },
+          ],
+        });
+        expect(failed.status).toBe(200);
+        await runQueuedMessageDispatch(harness.deps, {
+          kind: "idle-recovery",
+          now: Date.now(),
+        });
+        expect(
+          listQueuedThreadCommands(harness, "turn.submit", thread.id),
+        ).toEqual([]);
+
+        await reportQueuedCommandSuccess(harness, stop, {
+          providerCheckpointId: null,
+        });
+        expect((await stopResponse).status).toBe(200);
+        await sweepAfterGrace(harness, thread.id);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toEqual([]);
+      } finally {
+        await harness.cleanup();
+      }
+    },
+  );
+
+  it.each([
+    { mark: "$.queueDelivered", value: "true" },
+    { mark: "$.initiator", value: '"system"' },
+  ])("holds the queue after an automatic run ($mark) fails too, until the user sends again", async (automatic) => {
+    const { environment, harness, session, thread } = await setupEventRoute();
+    try {
+      const failRun = async (
+        sequenceStart: number,
+        turnId: string,
+        isAutomatic: boolean,
+      ) => {
+        seedThreadRuntimeState(harness.deps, {
+          environmentId: environment.id,
+          providerThreadId: "provider-failed-twice",
+          sequenceStart,
+          threadId: thread.id,
+        });
+        if (isAutomatic) {
+          harness.db
+            .update(events)
+            .set({
+              data: sql`json_set(${events.data}, ${automatic.mark}, json(${automatic.value}))`,
+            })
+            .where(eq(events.sequence, sequenceStart + 1))
+            .run();
+        }
+        const failed = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          events: ["turn/started", "turn/completed"].map((type) => ({
+            threadId: thread.id,
+            event:
+              type === "turn/started"
+                ? {
+                    type: "turn/started" as const,
+                    threadId: thread.id,
+                    providerThreadId: "provider-failed-twice",
+                    scope: turnScope(turnId),
+                  }
+                : {
+                    type: "turn/completed" as const,
+                    threadId: thread.id,
+                    providerThreadId: "provider-failed-twice",
+                    scope: turnScope(turnId),
+                    status: "failed" as const,
+                    error: { message: "Provider still broken" },
+                  },
+          })),
+        });
+        expect(failed.status).toBe(200);
+      };
+      await failRun(1, "turn-user-fails", false);
+      await failRun(5, "turn-queued-fails", true);
+      for (const text of ["queued C", "queued E"]) {
+        seedQueuedMessage(harness.deps, {
+          content: [{ type: "text", text, mentions: [] }],
+          threadId: thread.id,
+          waitingOn: { kind: "thread-busy" },
+        });
+      }
+      await sweepAfterGrace(harness, thread.id);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([]);
+
+      await failRun(9, "turn-user-sends-again", false);
+      await sweepAfterGrace(harness, thread.id);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toHaveLength(1);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(1);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("keeps queued messages behind a scheduled retry of the failed turn", async () => {
+    const { environment, harness, session, thread } = await setupEventRoute();
+    try {
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-retry-first",
+        threadId: thread.id,
+      });
+      seedQueuedMessage(harness.deps, {
+        content: [{ type: "text", text: "queued B", mentions: [] }],
+        threadId: thread.id,
+        waitingOn: { kind: "thread-busy" },
+      });
+      const failed = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [
+          {
+            threadId: thread.id,
+            event: {
+              type: "turn/started",
+              threadId: thread.id,
+              providerThreadId: "provider-retry-first",
+              scope: turnScope("turn-retry-first"),
+            },
+          },
+          {
+            threadId: thread.id,
+            event: {
+              type: "turn/completed",
+              threadId: thread.id,
+              providerThreadId: "provider-retry-first",
+              scope: turnScope("turn-retry-first"),
+              status: "failed",
+              error: { message: "Overloaded" },
+            },
+          },
+        ],
+      });
+      expect(failed.status).toBe(200);
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "idle-recovery",
+        now: Date.now(),
+      });
+      createQueuedThreadMessage(harness.db, harness.deps.hub, {
+        threadId: thread.id,
+        content: [{ type: "text", text: "retry A", mentions: [] }],
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "default",
+        senderThreadId: null,
+        waitingOn: { kind: "time" },
+        sendAt: Date.now() + 60 * 60_000,
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: "creq_retryfirst",
+          attempt: 2,
+          reason: "Rate limited",
+        },
+        systemNotice: null,
+      });
+      await sweepAfterGrace(harness, thread.id);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([]);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(2);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("pauses the queue of a thread in error when the user stops it", async () => {
+    const { environment, harness, session, thread } = await setupEventRoute();
+    try {
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-error-stop",
+        threadId: thread.id,
+      });
+      const failed = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [
+          {
+            threadId: thread.id,
+            event: {
+              type: "turn/started",
+              threadId: thread.id,
+              providerThreadId: "provider-error-stop",
+              scope: turnScope("turn-error-stop"),
+            },
+          },
+          {
+            threadId: thread.id,
+            event: {
+              type: "turn/completed",
+              threadId: thread.id,
+              providerThreadId: "provider-error-stop",
+              scope: turnScope("turn-error-stop"),
+              status: "failed",
+              error: { message: "Provider error" },
+            },
+          },
+        ],
+      });
+      expect(failed.status).toBe(200);
+      expect(getThread(harness.db, thread.id)?.status).toBe("error");
+      seedQueuedMessage(harness.deps, {
+        content: [{ type: "text", text: "held by stop", mentions: [] }],
+        threadId: thread.id,
+        waitingOn: { kind: "thread-busy" },
+      });
+
+      const stopResponse = harness.app.request(
+        `/api/v1/threads/${thread.id}/stop`,
+        { method: "POST" },
+      );
+      const stop = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.stop" && command.threadId === thread.id,
+      );
+      await reportQueuedCommandSuccess(harness, stop, {
+        providerCheckpointId: null,
+      });
+      expect((await stopResponse).status).toBe(200);
+      await sweepAfterGrace(harness, thread.id);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([]);
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(1);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
   it("rejects unowned thread events without blocking owned events in the same batch", async () => {
     const { harness, session, thread } = await setupEventRoute();
     try {
@@ -769,6 +1210,129 @@ describe("internal event append ownership", () => {
           },
         },
       ]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  // #1159: the parent hears why a child's turn was interrupted, only from a stop that is surely that turn's.
+  it.each([
+    ["memory-limit", "during", "was interrupted (memory protection)."],
+    ["host-daemon-restarted", "after", "was interrupted (host restarted)."],
+    ["manual-stop", "before", "was interrupted."],
+    ["memory-limit", "overlap", "was interrupted."],
+    ["memory-limit", "open-earlier", "was interrupted."],
+    [null, null, "was interrupted."],
+  ] as const)("reports a child's %s stop recorded %s its turn", async (reason, when, expected) => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const parentThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "idle" });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, inputText: "Coordinate", providerThreadId: "provider-parent-stop", threadId: parentThread.id });
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, parentThreadId: parentThread.id, projectId: project.id, status: "active" });
+    const seedStop = () =>
+      reason !== null &&
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "system/thread/interrupted", scope: threadScope(), data: { reason } });
+    try {
+      if (when === "before") seedStop();
+      // An earlier turn still open: the stop could be either turn's.
+      if (when === "overlap" || when === "open-earlier") seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-open" });
+      // A finished turn in between must not hide the open one.
+      if (when === "open-earlier") {
+        seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-done" });
+        seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "turn/completed", scope: turnScope("turn-done"), data: { providerThreadId: null, status: "completed" } });
+      }
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-stopped" });
+      if (when === "during" || when === "overlap" || when === "open-earlier") seedStop();
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "turn/completed", threadId: childThread.id, providerThreadId: "provider-turn-stopped", scope: turnScope("turn-stopped"), status: "interrupted" } }],
+      });
+      expect(response.status).toBe(200);
+      // Recorded after the notice was queued, before its 2 s flush.
+      if (when === "after") {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        seedStop();
+      }
+      const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "turn.submit" && command.threadId === parentThread.id, 5_000);
+      const input = command.type === "turn.submit" ? command.input[0] : undefined;
+      expect(input?.type === "text" ? input.text : "").toContain(`@thread:${childThread.id} ${expected}\n`);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("tells the parent a Stop may have ended the child before it read messages, once per message of that turn (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const parentThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "idle" });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, inputText: "Coordinate", providerThreadId: "provider-parent-unread", threadId: parentThread.id });
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, parentThreadId: parentThread.id, projectId: project.id, status: "active" });
+    const next = () => getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1;
+    const warning = (turnId: string, details: string) => ({
+      threadId: childThread.id,
+      event: { type: "provider/warning" as const, threadId: childThread.id, providerThreadId: "provider-unread", scope: turnScope(turnId), category: "general" as const, summary: UNDELIVERED_MESSAGE_WARNING, details },
+    });
+    try {
+      // An earlier turn's mark is not this turn's.
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-earlier" });
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "provider/warning", scope: turnScope("turn-earlier"), providerThreadId: "provider-unread", data: { providerThreadId: "provider-unread", category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "old" } });
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "turn/completed", scope: turnScope("turn-earlier"), data: { providerThreadId: null, status: "interrupted" } });
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-unread" });
+      cancelRetriesForExplicitStop(harness.deps, childThread.id);
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "system/thread/interrupted", scope: threadScope(), data: { reason: "manual-stop" } });
+      // The daemon replays the batch after losing the reply.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          // Two tells with the same text are two messages.
+          events: [warning("turn-unread", "Also run the tests."), warning("turn-unread", "Also run the tests."), { threadId: childThread.id, event: { type: "turn/completed", threadId: childThread.id, providerThreadId: "provider-turn-unread", scope: turnScope("turn-unread"), status: "interrupted" } }],
+        });
+        expect(response.status).toBe(200);
+      }
+      const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "turn.submit" && command.threadId === parentThread.id, 5_000);
+      const input = command.type === "turn.submit" ? command.input[0] : undefined;
+      expect(
+        listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning" && event.turnId === "turn-unread"),
+      ).toHaveLength(2);
+      expect(input?.type === "text" ? input.text : "").toContain(
+        `@thread:${childThread.id} was interrupted (stopped by the user or an agent; it may not have read 2 messages sent to it, so send again if still needed).\n`,
+      );
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("drops the may-not-have-read mark after a harness switch, even from a retried POST (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "active" });
+    try {
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-switched" });
+      // As thread-harness-switch.ts records its stop once the switch is done.
+      cancelRetriesForExplicitStop(harness.deps, childThread.id, { chosen: false });
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "provider/warning", threadId: childThread.id, providerThreadId: "provider-switched", scope: turnScope("turn-switched"), category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "seeded into the new harness" } }],
+      });
+      expect(response.status).toBe(200);
+      expect(listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning")).toEqual([]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("drops the may-not-have-read mark when nobody chose the Stop (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "active" });
+    try {
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-edited" });
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "provider/warning", threadId: childThread.id, providerThreadId: "provider-edited", scope: turnScope("turn-edited"), category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "edited away" } }],
+      });
+      expect(response.status).toBe(200);
+      expect(listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning")).toEqual([]);
     } finally {
       await harness.cleanup();
     }

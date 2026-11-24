@@ -4,8 +4,8 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getActiveSecondaryPanelTab } from "@cloudroom/client-core";
-import { useFixedPanelTabsState } from "@/lib/fixed-panel-tabs";
+import { getActiveSecondaryPanelTab } from "@/components/right-panel/store/tab-ops";
+import { useFixedPanelTabsState } from "@/components/right-panel/store/panel-atoms";
 import {
   createBrowserFixedPanelTab,
   createEmptyFixedPanelTabsState,
@@ -17,12 +17,12 @@ import {
   FIXED_PANEL_TABS_STATE_STORAGE_VERSION,
   type PluginPanelFixedPanelTab,
   type SecondaryFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import { buildFileOpenerPanelTab } from "@/components/plugin/file-opener-tabs";
 import {
   resetRecentlyClosedPanelTabsForTest,
   useThreadFileTabs,
-} from "./useThreadFileTabs";
+} from "@/components/right-panel/store/use-panel-tabs";
 import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,

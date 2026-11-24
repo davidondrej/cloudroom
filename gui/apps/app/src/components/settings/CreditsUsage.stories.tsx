@@ -1,13 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { CreditsUsageSection, creditsWaveKey, type CreditsWave } from "@/components/settings/CreditsUsageSection";
-import { SkillUsageSection } from "@/components/settings/SkillUsageSection";
-import { projectSkillsQueryKey, systemSkillUsageQueryKey } from "@/hooks/queries/query-keys";
+import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
+import { creditsWaveKey, type CreditsWave } from "@/components/settings/CreditsUsageSection";
+import { projectSkillsQueryKey, systemSkillUsageQueryKey, systemUsageAnalyticsQueryKey } from "@/hooks/queries/query-keys";
 import { SettingsStoryChrome } from "../../../.ladle/story-settings-chrome";
 
-// Settings → Analytics with sample data: Cloud Credits above Skills (design A, David 2026-11-08).
+// Settings → Analytics with sample data, one sub tab per stat. Add `&tab=models` to the story URL to open a tab.
 export default { title: "settings/Credits usage" };
 
 const rand = (i: number) => 0.8 + 0.4 * (((Math.sin(i * 12.9898) * 43758.5453) % 1 + 1) % 1);
@@ -25,11 +26,23 @@ function sampleWave(): CreditsWave {
   const hours = Array.from({ length: 168 }, (_, i) => {
     const top = THREADS.map(([name, at], k) => ({ name, credits: Math.round(at(Math.floor(i / 24), i % 24) * rand(i + k * 300)) }))
       .filter((thread) => thread.credits > 0).sort((a, b) => b.credits - a.credits);
-    return { credits: top.reduce((sum, thread) => sum + thread.credits, 0), top: top.slice(0, 3) };
+    return { credits: top.reduce((sum, thread) => sum + thread.credits, 0), top: top.slice(0, 3), threads: top };
   });
-  const days = Array.from({ length: 30 }, (_, i) => Math.round(1100 * (0.4 + rand(i * 7)) * ([0, 6].includes(new Date(Date.now() - (29 - i) * 86_400_000).getUTCDay()) ? 0.3 : 1)));
-  return { start: new Date(start).toISOString(), hours, days, daysStart: new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10),
-    standouts: [{ at: 24 + 15, name: "Fine-tune the ranker", credits: 2700 }, { at: 3 * 24 + 21, name: "Speed up cold starts", credits: 1560 }], standouts24h: [] };
+  // Threads per day exist for the last 7 days only, as on a new account.
+  const day = (i: number) => 29 - Math.floor((167 - i) / 24);
+  const days = Array.from({ length: 30 }, (_, i) => i >= 23 ? 0 : Math.round(1100 * (0.4 + rand(i * 7)) * ([0, 6].includes(new Date(Date.now() - (29 - i) * 86_400_000).getUTCDay()) ? 0.3 : 1)));
+  hours.forEach((hour, i) => { days[day(i)]! += hour.credits; });
+  /** The website's split: threads ranked by credits, the top 4 with a series, plus 9 small threads not shown. */
+  const splitOf = (series: { name: string; points: number[] }[], since: string) => {
+    const ranked = series.map((thread) => ({ id: `thr_${thread.name.length}demo`, name: thread.name, credits: thread.points.reduce((a, b) => a + b, 0), points: thread.points }))
+      .filter((thread) => thread.credits > 0).sort((a, b) => b.credits - a.credits);
+    return { since, threads: ranked.length + 9, credits: ranked.reduce((total, thread) => total + thread.credits, 0) + 380, top: ranked.slice(0, 8).map((thread, k) => (k < 4 ? thread : { ...thread, points: undefined })) };
+  };
+  const perHour = (from: number) => THREADS.map(([name]) => ({ name, points: hours.slice(from).map((hour) => hour.threads.find((thread) => thread.name === name)?.credits ?? 0) }));
+  const perDay = THREADS.map(([name]) => ({ name, points: Array.from({ length: 30 }, (_, d) => hours.reduce((total, hour, i) => total + (day(i) === d ? hour.threads.find((thread) => thread.name === name)?.credits ?? 0 : 0), 0)) }));
+  return { start: new Date(start).toISOString(), hours: hours.map(({ credits, top }) => ({ credits, top })), days, daysStart: new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10),
+    standouts: [{ at: 24 + 15, name: "Fine-tune the ranker", credits: 2700 }, { at: 3 * 24 + 21, name: "Speed up cold starts", credits: 1560 }], standouts24h: [],
+    split: { "24h": splitOf(perHour(144), new Date(start + 144 * 3_600_000).toISOString()), "7d": splitOf(perHour(0), new Date(start).toISOString()), "30d": splitOf(perDay, new Date(start).toISOString()) } };
 }
 
 const SKILLS: [string, number][] = [["self-archive", 1907], ["room-cli", 1503], ["read-prod-database", 1290], ["deepapi", 942], ["rename", 913], ["triage-bug-reports", 681], ["gpt-review", 490], ["state", 389]];
@@ -45,13 +58,45 @@ function skillUsage() {
   };
 }
 
+const DAYS = 30, START = new Date(Date.now() - (DAYS - 1) * 86_400_000).toISOString().slice(0, 10);
+const days = (at: (day: number) => number) => Array.from({ length: DAYS }, (_, day) => at(day));
+const MODELS: [string, number][] = [["Opus 5.5", 1840], ["GPT-6.1 Sol", 420], ["Sonnet 5.5", 180], ["Kimi K3.1 Pro", 64]];
+const sum = (values: number[]) => values.reduce((a, b) => a + b, 0);
+/** One model's tokens on one day, in proportion to how much it is used. */
+function tokenDay(model: number, day: number) {
+  const written = Math.round((MODELS[model]![1] / 1840) * 2_400_000 * rand(day + model * 40) * (day === 12 ? 2.2 : 1) * (model === 3 && day < 20 ? 0 : 1));
+  return { written, read: written * 9, cached: written * 260 };
+}
+/** The four stats worked out from thread history, as the server sends them. */
+function usageAnalytics() {
+  const base = { startDate: START, days: DAYS };
+  return {
+    agentHours: { ...base, agentHours: { local: days((d) => 9 * rand(d)), cloud: days((d) => (d === 22 ? 26 : 7 * rand(d + 50))), you: days((d) => (d === 22 ? 1.2 : 5 * rand(d + 90))) } },
+    models: { ...base, models: { local: 1502, cloud: 1002, list: MODELS.map(([name, total], m) => ({ name, total, daily: days((d) => Math.round((total / DAYS) * rand(d + m * 40) * (m === 3 && d < 20 ? 0 : 1))) })) } },
+    tokens: { ...base, tokens: {
+      // Two ranges of days: the one before, then this one.
+      written: [...days((d) => Math.round(1_600_000 * rand(d + 30))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).written)))],
+      read: [...days((d) => Math.round(9_000_000 * rand(d + 60))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).read)))],
+      cached: [...days((d) => Math.round(260_000_000 * rand(d + 90))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).cached)))],
+      models: MODELS.map(([name], m) => ({ name, written: days((d) => tokenDay(m, d).written), read: days((d) => tokenDay(m, d).read), cached: days((d) => tokenDay(m, d).cached) })),
+      top: Array.from({ length: DAYS }, (_, d) => THREADS.slice(0, 3).map(([name], k) => { const written = Math.round((d === 12 && k === 0 ? 3_100_000 : 700_000 / (k + 1)) * rand(d + k)); return { name, written, read: written * 8, cached: written * 240 }; })),
+    } },
+    prompts: { ...base, prompts: { daily: days((d) => Math.round(70 * rand(d))), hours: Array.from({ length: 168 }, (_, i) => Math.round(18 * work(i % 24) * rand(i) * (i >= 120 ? 0.3 : 1))) } },
+  };
+}
+
 export function Analytics() {
-  const client = useQueryClient();
+  const client = useQueryClient(), navigate = useNavigate();
+  useEffect(() => {
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    if (tab) navigate(`?tab=${tab}`, { replace: true });
+  }, [navigate]);
   useState(() => {
-    client.setQueryData(["cloudroom-account"], { account: { id: "demo", email: "demo@example.invalid" }, planUsage: { plan: "pro", credits: 31_240, creditsLimit: 50_000, resetsAt: null, extraCredits: 0, extraCreditsTotal: 0, og: null } });
+    client.setQueryData(["cloudroom-account"], { account: { id: "demo", email: "demo@example.invalid" }, planUsage: { plan: "pro", credits: 31_240, creditsLimit: 50_000, resetsAt: null, extraCredits: 0, extraCreditsTotal: 0 } });
     client.setQueryData(creditsWaveKey("demo"), sampleWave());
     client.setQueryData(systemSkillUsageQueryKey("90"), skillUsage());
     client.setQueryData(projectSkillsQueryKey(PERSONAL_PROJECT_ID), { skills: SKILLS.map(([name]) => ({ name })) });
+    for (const [metric, usage] of Object.entries(usageAnalytics())) client.setQueryData(systemUsageAnalyticsQueryKey(metric, "30"), usage);
     return null;
   });
   return (
@@ -62,9 +107,8 @@ export function Analytics() {
             <span key={label} className={cn("rounded-md px-2.5 py-1 text-sm text-muted-foreground", label === "Analytics" && "bg-accent text-foreground")}>{label}</span>
           ))}
         </nav>
-        <CreditsUsageSection />
+        <AnalyticsTabs />
       </div>
-      <SkillUsageSection />
     </SettingsStoryChrome>
   );
 }

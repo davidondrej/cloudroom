@@ -446,8 +446,8 @@ export class PluginHostManager {
       kind: "host-data",
     });
     const tempDir = await createPluginProcessTempDir({
-      pluginId: command.pluginId,
       prefix: "bb-host",
+      dataDir,
     });
     const shellPath = this.options.shellEnv?.().PATH;
     const startedAtMs = performance.now();

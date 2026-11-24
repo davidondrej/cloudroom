@@ -1039,6 +1039,18 @@ export const codexHandledEventSchema = z.discriminatedUnion("method", [
       })
       .passthrough(),
   ),
+  // Any field shape parses, so an odd payload is never saved raw (#1045).
+  createCodexEventSchema(
+    "mcpServer/startupStatus/updated",
+    z
+      .object({
+        name: z.unknown().optional(),
+        status: z.unknown().optional(),
+        error: z.unknown().optional(),
+        failureReason: z.unknown().optional(),
+      })
+      .passthrough(),
+  ),
   createCodexEventSchema("deprecationNotice", codexWarningParamsSchema),
   createCodexEventSchema("configWarning", codexWarningParamsSchema),
   createCodexEventSchema(

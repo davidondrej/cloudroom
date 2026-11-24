@@ -13,6 +13,8 @@ await preparePluginRuntime({
   sourceRoot,
   targetDir: resolve(sourceRoot, ".bundled-runtime"),
   bbVersion: bbApp.version,
+  // The server builds its zod into zod-runtime.js; built-in plugins share it.
+  shareZodWith: resolve(import.meta.dirname, "../../../apps/server"),
   toolchain: await resolvePluginBuildToolchain(
     resolve(import.meta.dirname, "../node_modules/.bb-toolchain"),
   ),

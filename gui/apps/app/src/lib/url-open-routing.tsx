@@ -6,7 +6,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { getBbDesktopInfo, isDesktopBrowserAvailable } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo, isDesktopBrowserAvailable } from "@/lib/room-desktop";
 import {
   openUrlByPreference,
   useOpenLinksInAppBrowserPreference,
@@ -28,8 +28,31 @@ const InAppBrowserUrlOpenContext = createContext<OpenInAppBrowserUrl | null>(
   null,
 );
 
+const BILLING_RETURN_WINDOW_MS = 15 * 60_000;
+let openedBillingAt = 0;
+const isBillingUrl = (url: string) =>
+  /^https:\/\/(?:www\.)?cloudroom\.dev\/(?:billing|pricing|welcome)(?:[/?#]|$)/.test(url);
+
+export function noteBillingOpened(url: string): void {
+  if (isBillingUrl(url)) openedBillingAt = Date.now();
+}
+
+export function hasPendingBillingReturn(now = Date.now()): boolean {
+  if (!openedBillingAt) return false;
+  if (now - openedBillingAt > BILLING_RETURN_WINDOW_MS) {
+    openedBillingAt = 0;
+    return false;
+  }
+  return true;
+}
+
+export function clearPendingBillingReturn(): void {
+  openedBillingAt = 0;
+}
+
 export function openUrlInExternalBrowser(url: string): void {
-  const desktopInfo = getBbDesktopInfo();
+  noteBillingOpened(url);
+  const desktopInfo = getRoomDesktopInfo();
   if (desktopInfo !== null) {
     desktopInfo.openExternalUrl(url);
     return;
@@ -70,14 +93,16 @@ function useOpenUrlByPreference(): (url: string) => boolean {
     openInAppBrowser !== null && isDesktopBrowserAvailable();
 
   return useCallback(
-    (url: string) =>
-      openUrlByPreference({
+    (url: string) => {
+      noteBillingOpened(url);
+      return openUrlByPreference({
         desktopBrowserAvailable,
         openExternalBrowser: openUrlInExternalBrowser,
         openInAppBrowser: openInAppBrowser ?? openUrlInExternalBrowser,
         openLinksInAppBrowser,
         url,
-      }),
+      });
+    },
     [desktopBrowserAvailable, openInAppBrowser, openLinksInAppBrowser],
   );
 }

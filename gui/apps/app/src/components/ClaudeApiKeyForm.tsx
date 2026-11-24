@@ -4,7 +4,7 @@ import { Button } from "@cloudroom/shared-ui/button";
 import { sdk } from "@/lib/sdk";
 
 /** Cloud only: the less prominent alternative to a Claude subscription. */
-export function ClaudeApiKeyForm() {
+export function ClaudeApiKeyForm({ inline = false }: { inline?: boolean }) {
   const [open, setOpen] = useState(false);
   const [apiKey, setApiKey] = useState("");
   const client = useQueryClient();
@@ -25,9 +25,14 @@ export function ClaudeApiKeyForm() {
   if (!open)
     return (
       <Button
+        type="button"
         variant="ghost"
         size="sm"
-        className="h-7 w-full text-xs text-muted-foreground"
+        className={
+          inline
+            ? "text-muted-foreground"
+            : "h-7 w-full text-xs text-muted-foreground"
+        }
         onClick={() => setOpen(true)}
       >
         Use an API key instead
@@ -35,7 +40,7 @@ export function ClaudeApiKeyForm() {
     );
   return (
     <form
-      className="space-y-1.5"
+      className={inline ? "w-full max-w-sm space-y-1.5 text-xs" : "space-y-1.5"}
       onSubmit={(event) => {
         event.preventDefault();
         const key = apiKey.trim();

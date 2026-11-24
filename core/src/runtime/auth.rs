@@ -321,6 +321,8 @@ fn redacted(message: &str) -> String {
         .collect();
     words.join(" ").chars().take(200).collect()
 }
+/// Codex refused the saved login (401 or similar), as opposed to having none.
+pub const LOGIN_REJECTED: &str = "Your Codex login is missing or expired. Sign in again.";
 /// A failed check goes to Core's local log with Codex's own words, so we can see why Cloud refused a login.
 /// Only a new error is logged, so a long outage's retries don't fill the log.
 fn failure(error: io::Error) -> Status {
@@ -331,10 +333,7 @@ fn failure(error: io::Error) -> Status {
         *LAST.lock().unwrap() = line;
     }
     if error.kind() == io::ErrorKind::PermissionDenied {
-        Status::new(
-            "missing",
-            Some("Your Codex login is missing or expired. Sign in again."),
-        )
+        Status::new("missing", Some(LOGIN_REJECTED))
     } else {
         Status::new(
             "unavailable",

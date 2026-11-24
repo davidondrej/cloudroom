@@ -15,15 +15,12 @@ import {
 } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { DndContext, DragOverlay, useDroppable } from "@dnd-kit/core";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { createPortal } from "react-dom";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { ProjectResponse } from "@cloudroom/server-contract";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import {
   usePromptDraftHasInput,
   usePromptDraftInputThreadIds,

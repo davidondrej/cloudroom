@@ -416,6 +416,12 @@ impl Process {
             .ok_or_else(|| io::Error::other("workload containment unavailable"))?
             .top_writer(self.pid)
     }
+    pub fn stop_commands(&self) -> io::Result<()> {
+        self.group
+            .as_ref()
+            .ok_or_else(|| io::Error::other("workload containment unavailable"))?
+            .stop_commands(self.pid)
+    }
     pub fn request_shutdown(&self) {
         if let Some(group) = &self.group
             && *group.paused().borrow()

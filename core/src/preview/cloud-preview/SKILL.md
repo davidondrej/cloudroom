@@ -9,6 +9,6 @@ description: 'Show a web app running in a Cloudroom cloud thread through the use
 2. Run `room-cli preview PORT` with its actual port.
 3. Only when the JSON says `state: ready`, post the returned `url` as a Markdown link. Do not guess a localhost port, open the browser automatically, or use BB Connect or other public hosting.
 4. If pending, explain that the paired computer must be connected; use `room-cli preview status PORT` to check again. A failed or pending preview does not stop cloud work.
-5. `room-cli preview close PORT` closes forwarding, not the app. Stop the app separately only when requested.
+5. `room-cli preview close PORT` closes forwarding, not the app. Stop the app separately only when requested, by its own PID or the port's listener (`lsof -t -sTCP:LISTEN -i :PORT`): a plain `lsof -t -i :PORT` also matches Cloudroom's preview forwarding, and killing it can restart Cloudroom and cut off running work.
 
 Local threads use their ordinary localhost server directly. Do not change server security settings to allow all hosts/origins. Never ask for or print SSH private keys, core tokens, or hosting credentials.

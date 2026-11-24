@@ -42,6 +42,8 @@ pub(super) struct Info {
     pub generation: String,
     pub local_port: u16,
     pub relay: bool,
+    /// A tunnel may carry a browser connection's next requests: SSH, or a Core that counts page loads on every read.
+    reuse: bool,
     authority: String,
     loopbacks: Vec<IpAddr>,
     socket_path: PathBuf,
@@ -50,6 +52,9 @@ pub(super) struct Info {
     stopped: AtomicBool,
     /// Core found nothing listening on the port, as after a sleep.
     down: AtomicBool,
+    /// Nothing came back through the last tunnel attempt: turned away, as by the relay in front of a VPS (#1798), failed,
+    /// or no app answer yet, as through a stalled sandbox (#2016). Core's 409 is an answer: nothing listens on the port.
+    refused: AtomicBool,
 }
 
 pub(super) struct Tunnel {
@@ -106,6 +111,7 @@ impl Tunnel {
             generation,
             local_port,
             relay,
+            reuse: !relay || metadata["reuse"] == true,
             authority: format!(
                 "p{port}-{}.localhost:{local_port}",
                 &device[..device.len().min(8)]
@@ -116,6 +122,7 @@ impl Tunnel {
             direct: shared.direct.clone(),
             stopped: AtomicBool::new(false),
             down: AtomicBool::new(false),
+            refused: AtomicBool::new(false),
         });
         let listeners = listeners
             .into_iter()
@@ -328,6 +335,8 @@ async fn serve(listener: TcpListener, info: Arc<Info>) {
         while connections.try_join_next().is_some() {}
         match listener.accept().await {
             Ok((stream, _)) => {
+                // A head and its body go out as separate writes: Nagle would hold the body for the browser's ACK.
+                let _ = stream.set_nodelay(true);
                 connections.spawn(proxy(stream, info.clone()));
             }
             // A client that left first or a full file table passes; only close() ends a preview (#902).
@@ -413,9 +422,19 @@ async fn read_head(
     }
 }
 
+/// Text after a newline in `message` goes only into the page, like the `explain` of Python's `send_error`.
 fn error_page(status: u16, message: &str, head_only: bool) -> Vec<u8> {
+    let (message, explain) =
+        message
+            .split_once('\n')
+            .map_or((message, String::new()), |(message, explain)| {
+                (
+                    message,
+                    format!("<p>Error code explanation: {status} - {explain}.</p>"),
+                )
+            });
     let body = format!(
-        "<!DOCTYPE HTML>\n<html><head><title>Error response</title></head><body><h1>Error response</h1><p>Error code: {status}</p><p>Message: {message}.</p></body></html>\n"
+        "<!DOCTYPE HTML>\n<html><head><title>Error response</title></head><body><h1>Error response</h1><p>Error code: {status}</p><p>Message: {message}.</p>{explain}</body></html>\n"
     );
     let mut out = format!("HTTP/1.1 {status} {message}\r\nConnection: close\r\nContent-Type: text/html;charset=utf-8\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     if !head_only {
@@ -425,43 +444,74 @@ fn error_page(status: u16, message: &str, head_only: bool) -> Vec<u8> {
 }
 
 async fn proxy(mut client: TcpStream, info: Arc<Info>) {
-    // 15 s for the browser to send its request head.
-    let Ok(Ok((head, rest))) =
-        tokio::time::timeout(Duration::from_secs(15), read_head(&mut client, Vec::new())).await
-    else {
-        return;
-    };
-    let Some(request) = Head::parse(&head) else {
-        let _ = client
-            .write_all(&error_page(400, "Bad request syntax", false))
-            .await;
-        return;
-    };
-    let mut parts = request.first.split(' ');
-    let (Some(method), Some(path), Some(version), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        let _ = client
-            .write_all(&error_page(400, "Bad request syntax", false))
-            .await;
-        return;
-    };
-    if version == "HTTP/1.1"
-        && request
-            .get("expect")
-            .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
-    {
-        let _ = client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
-    }
-    if let Err((status, message)) = forward(&mut client, &request, method, path, rest, &info).await
-    {
-        let _ = client
-            .write_all(&error_page(status, &message, method == "HEAD"))
-            .await;
+    // A browser connection keeps its tunnel for its next requests: a new tunnel per request cost every dev module its
+    // own HTTPS upgrade (#2428). Bytes past one request start the next.
+    let (mut rest, mut upstream): (_, Option<Box<dyn Stream>>) = (Vec::new(), None);
+    loop {
+        // 15 s for the browser to send its request head. A kept tunnel the app closed meanwhile ends this connection too,
+        // so the browser's next request opens a new one.
+        let next = tokio::time::timeout(Duration::from_secs(15), async {
+            let mut probe = [0u8; 1];
+            match upstream.as_mut() {
+                Some(app) => tokio::select! {
+                    head = read_head(&mut client, rest) => Some(head),
+                    _ = app.read(&mut probe) => None,
+                },
+                None => Some(read_head(&mut client, rest).await),
+            }
+        });
+        let Ok(Some(Ok((head, more)))) = next.await else {
+            return;
+        };
+        let Some(request) = Head::parse(&head) else {
+            let _ = client
+                .write_all(&error_page(400, "Bad request syntax", false))
+                .await;
+            return;
+        };
+        let mut parts = request.first.split(' ');
+        let (Some(method), Some(path), Some(version), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            let _ = client
+                .write_all(&error_page(400, "Bad request syntax", false))
+                .await;
+            return;
+        };
+        if version == "HTTP/1.1"
+            && request
+                .get("expect")
+                .is_some_and(|expect| expect.eq_ignore_ascii_case("100-continue"))
+        {
+            let _ = client.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await;
+        }
+        let keep =
+            version == "HTTP/1.1" && !request.connection_tokens().iter().any(|t| t == "close");
+        match forward(
+            &mut client,
+            &request,
+            method,
+            path,
+            more,
+            &info,
+            &mut upstream,
+        )
+        .await
+        {
+            Ok(Some(next)) if keep => rest = next,
+            Ok(_) => return,
+            Err((status, message)) => {
+                let _ = client
+                    .write_all(&error_page(status, &message, method == "HEAD"))
+                    .await;
+                return;
+            }
+        }
     }
 }
 
-/// Checks a browser request and forwards it. An error before any answer was sent becomes an error page.
+/// Checks a browser request and forwards it, through `upstream` when an earlier answer kept it. An error before any
+/// answer was sent becomes an error page. Returns the bytes past this request when the tunnel can carry the next one.
 async fn forward(
     client: &mut TcpStream,
     request: &Head,
@@ -469,12 +519,26 @@ async fn forward(
     path: &str,
     rest: Vec<u8>,
     info: &Info,
-) -> std::result::Result<(), (u16, String)> {
+    kept: &mut Option<Box<dyn Stream>>,
+) -> std::result::Result<Option<Vec<u8>>, (u16, String)> {
     let deny = |status: u16, message: &str| Err((status, message.to_owned()));
     let expected = &info.authority;
     let origin = request.get("origin");
     let own = format!("http://{expected}");
     if request.all("host") != [expected.as_str()] || origin.is_some_and(|origin| origin != own) {
+        // A plain loopback visit, like a Windows browser expecting an app in WSL on the same port, learns why (#1879).
+        let port = info.local_port;
+        let direct = ["localhost", "127.0.0.1", "[::1]"]
+            .iter()
+            .any(|host| request.all("host") == [format!("{host}:{port}").as_str()]);
+        if origin.is_none() && direct {
+            return deny(
+                403,
+                &format!(
+                    "Preview origin is not allowed\nCloudroom's preview helper uses this port. Open http://{expected}/ for the preview, or run your own app on another port"
+                ),
+            );
+        }
         return deny(403, "Preview origin is not allowed");
     }
     let navigation = ["GET", "HEAD"].contains(&method)
@@ -513,7 +577,11 @@ async fn forward(
             (502, "Cloud preview unavailable; reconnecting".to_owned())
         }
     };
-    let mut upstream = info.upstream().await.map_err(|_| unavailable())?;
+    let reused = kept.is_some();
+    let mut upstream = match kept.take() {
+        Some(upstream) => upstream,
+        None => info.upstream().await.map_err(|_| unavailable())?,
+    };
     let skip = request.connection_tokens();
     let mut out = format!("{method} {path} HTTP/1.1\r\n");
     for (name, value) in &request.headers {
@@ -525,7 +593,7 @@ async fn forward(
     out += if websocket {
         "Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
     } else {
-        "Connection: close\r\n\r\n"
+        "\r\n"
     };
     let sent: io::Result<Vec<u8>> = async {
         upstream.write_all(&latin1(&out)).await?;
@@ -547,16 +615,21 @@ async fn forward(
     }
     .await;
     let Ok(early) = sent else {
-        return Ok(()); // The browser left mid-upload.
+        return Ok(None); // The browser left mid-upload, or a kept tunnel ended.
     };
     // The app answers within 10 s, as client.py's upstream timeout. 1xx answers other than 101 come before the real one.
     let mut pending = Vec::new();
     let (response, body) = loop {
-        let Ok(Ok((head, rest))) =
+        let Ok(read) =
             tokio::time::timeout(Duration::from_secs(10), read_head(&mut upstream, pending)).await
         else {
             return Err(unavailable());
         };
+        let Ok((head, rest)) = read else {
+            // A kept tunnel the app just closed: the browser retries on a new connection, as after any keep-alive close.
+            return if reused { Ok(None) } else { Err(unavailable()) };
+        };
+        info.refused.store(false, Ordering::SeqCst); // The app's answer came back through the tunnel.
         let Some(response) = Head::parse(&head) else {
             return Err(unavailable());
         };
@@ -578,8 +651,24 @@ async fn forward(
         line.next().unwrap_or(""),
     );
     let upgraded = status == "101";
-    // Transfer-Encoding stays: the body passes through as the app sent it, and the browser decodes it.
+    // Transfer-Encoding stays: the body passes through as the app sent it, and the browser decodes it. A body whose
+    // end is known, `Some(length)` or `Some(None)` for chunks, lets both connections carry the next request; any other
+    // ends with the app's close.
     let skip: Vec<String> = response.connection_tokens();
+    let lengths = response.all("content-length");
+    let length = match response.all("transfer-encoding").last() {
+        _ if method == "HEAD" || status == "204" || status == "304" => Some(Some(0)),
+        Some(coding) => coding
+            .rsplit(',')
+            .next()
+            .is_some_and(|last| last.trim().eq_ignore_ascii_case("chunked"))
+            .then_some(None),
+        None => match lengths[..] {
+            [length] => length.parse::<u64>().ok().map(Some),
+            _ => None,
+        },
+    };
+    let keep = !upgraded && length.is_some();
     let mut out = format!("HTTP/1.1 {status} {reason}\r\n");
     for (name, value) in &response.headers {
         let lower = name.to_lowercase();
@@ -596,14 +685,26 @@ async fn forward(
     );
     out += if upgraded {
         "Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+    } else if keep {
+        "\r\n"
     } else {
         "Connection: close\r\n\r\n"
     };
-    if client.write_all(&latin1(&out)).await.is_err()
-        || client.write_all(&body).await.is_err()
-        || upgraded && !websocket
-    {
-        return Ok(());
+    if client.write_all(&latin1(&out)).await.is_err() || upgraded && !websocket {
+        return Ok(None);
+    }
+    if let Some(length) = length.filter(|_| keep) {
+        let ended = copy_body(&mut upstream, client, body, length).await.ok();
+        // An HTTP/1.0 app, like `python3 -m http.server`, closes after its answer unless it says keep-alive.
+        let closes = skip.iter().any(|token| token == "close")
+            || response.first.starts_with("HTTP/1.0") && !skip.iter().any(|t| t == "keep-alive");
+        if ended == Some(true) && info.reuse && !closes {
+            *kept = Some(upstream);
+        }
+        return Ok(ended.map(|_| early));
+    }
+    if client.write_all(&body).await.is_err() {
+        return Ok(None);
     }
     if upgraded {
         // A WebSocket: bytes both ways until either side ends it.
@@ -615,10 +716,68 @@ async fn forward(
             _ = tokio::io::copy(&mut app_read, &mut browser_write) => {}
         }
     } else {
-        // The app closes after its answer (Connection: close), which ends the body.
+        // No length and no chunks: the app's close ends the body.
         let _ = tokio::io::copy(&mut upstream, client).await;
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Copies one body to the browser as it arrives, starting with bytes already read: `length` bytes, or with `None`
+/// chunks up to the last one and its trailers. Returns whether it ended exactly, so the tunnel can carry more.
+async fn copy_body(
+    upstream: &mut Box<dyn Stream>,
+    client: &mut TcpStream,
+    mut have: Vec<u8>,
+    length: Option<u64>,
+) -> io::Result<bool> {
+    // Copies `count` bytes and returns any read past them.
+    async fn exact(
+        upstream: &mut Box<dyn Stream>,
+        client: &mut TcpStream,
+        mut have: Vec<u8>,
+        count: u64,
+    ) -> io::Result<Vec<u8>> {
+        let past = have.split_off(have.len().min(count as usize));
+        client.write_all(&have).await?;
+        let left = count - have.len() as u64;
+        if tokio::io::copy(&mut upstream.take(left), client).await? < left {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        Ok(past)
+    }
+    // Copies one line of the chunk framing and returns it.
+    async fn line(
+        upstream: &mut Box<dyn Stream>,
+        client: &mut TcpStream,
+        have: &mut Vec<u8>,
+    ) -> io::Result<Vec<u8>> {
+        let mut chunk = [0u8; 8192];
+        while !have.contains(&b'\n') {
+            let read = upstream.read(&mut chunk).await?;
+            if read == 0 || have.len() > HEAD_LIMIT {
+                return Err(io::ErrorKind::UnexpectedEof.into());
+            }
+            have.extend_from_slice(&chunk[..read]);
+        }
+        let rest = have.split_off(have.iter().position(|byte| *byte == b'\n').unwrap() + 1);
+        let line = std::mem::replace(have, rest);
+        client.write_all(&line).await?;
+        Ok(line)
+    }
+    let Some(length) = length else {
+        loop {
+            let size = line(upstream, client, &mut have).await?;
+            let size = String::from_utf8_lossy(&size);
+            let size = u64::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16)
+                .map_err(io::Error::other)?;
+            if size == 0 {
+                while line(upstream, client, &mut have).await?.len() > 2 {}
+                return Ok(have.is_empty());
+            }
+            have = exact(upstream, client, have, size.saturating_add(2)).await?; // The data and its CRLF.
+        }
+    };
+    Ok(exact(upstream, client, have, length).await?.is_empty())
 }
 
 impl Info {
@@ -643,6 +802,7 @@ impl Info {
             ));
         }
         self.down.store(false, Ordering::SeqCst); // Only this attempt's answer counts, never an older one's.
+        self.refused.store(true, Ordering::SeqCst);
         // Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         match self.connect("websocket").await {
             Err(Some(400)) => self.connect("cloudroom-tunnel").await,
@@ -671,6 +831,7 @@ impl Info {
             .map_err(|_| None)?
             .map_err(|_| None)?;
         let status = response.status().as_u16();
+        self.refused.store(status != 409, Ordering::SeqCst);
         if status == 400 {
             return Err(Some(400));
         }
@@ -679,6 +840,11 @@ impl Info {
             return Err(Some(status));
         }
         Ok(Box::new(response.upgrade().await.map_err(|_| None)?))
+    }
+
+    /// Nothing came back through the last tunnel attempt, so a failure says nothing about the app.
+    pub(super) fn refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
     }
 
     /// The browser-facing proxy answers on every loopback for this preview's generation.
@@ -731,6 +897,7 @@ pub(super) async fn test_proxy(
         generation: generation.into(),
         local_port,
         relay: false,
+        reuse: true,
         authority: format!("p3000-test.localhost:{local_port}"),
         loopbacks: listeners
             .iter()
@@ -741,6 +908,7 @@ pub(super) async fn test_proxy(
         direct: reqwest::Client::new(),
         stopped: AtomicBool::new(false),
         down: AtomicBool::new(false),
+        refused: AtomicBool::new(false),
     });
     let tasks = listeners
         .into_iter()

@@ -115,6 +115,54 @@ pub fn with_notice(state_dir: &Path, mut input: Value) -> (Value, Option<String>
     (input, Some(note))
 }
 
+fn session_note(state_dir: &Path, session: &str) -> std::path::PathBuf {
+    state_dir.join("notes").join(session)
+}
+
+/// A note for one session's next prompt: a switched session's history (#237). Kept until a prompt delivers it.
+pub fn add_session_note(state_dir: &Path, session: &str, note: &str) {
+    let path = session_note(state_dir, session);
+    let _ = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(&path, note));
+}
+
+fn history_copy(state_dir: &Path, session: &str) -> std::path::PathBuf {
+    state_dir.join("histories").join(session)
+}
+
+/// Core's own copy of the history a switched session got (#237). The session's next switch reads this one, never the
+/// file in the agent's folder: the agent can replace that with a link to a file only Core may read.
+pub fn save_history(state_dir: &Path, session: &str, history: &str) {
+    let path = history_copy(state_dir, session);
+    let _ = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(&path, history));
+}
+
+pub fn saved_history(state_dir: &Path, session: &str) -> Option<String> {
+    fs::read_to_string(history_copy(state_dir, session)).ok()
+}
+
+/// Adds the session's note to its prompt, once: before the user's text, as the agent should read it first.
+pub fn with_session_note(
+    state_dir: &Path,
+    session: &str,
+    mut input: Value,
+) -> (Value, Option<String>) {
+    let path = session_note(state_dir, session);
+    let Ok(note) = fs::read_to_string(&path) else {
+        return (input, None);
+    };
+    if !input.is_object() || fs::remove_file(&path).is_err() {
+        return (input, None);
+    }
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut) {
+        parts.insert(
+            0,
+            serde_json::json!({"type":"text","text":format!("{note}\n\n")}),
+        );
+    }
+    input["text"] = Value::String(format!("{note}\n\n{}", text(&input)));
+    (input, Some(note))
+}
+
 /// A note whose prompt never reached the agent waits for the next one, after any note written since.
 pub fn put_back_notice(state_dir: &Path, note: &str) {
     add_notice(state_dir, note);

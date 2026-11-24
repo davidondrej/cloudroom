@@ -57,11 +57,15 @@ import {
   useMessageDirectiveRegistry,
   type MarkdownMessageDirectives,
 } from "@/components/ui/markdown-message-directives.js";
+import { DraftMessageProvider } from "./DraftEditor";
 import {
   boundedMarkdownPreview,
   boundedMarkdownTail,
   closeUnterminatedMarkdownCodeSpan,
+  splitMessageContextSegments,
   USER_MESSAGE_CHAR_CAP,
+  type MessageContextBlockSegment,
+  type MessageContextTextSegment,
 } from "@cloudroom/client-core";
 import { turnRequestLabel } from "@cloudroom/client-core";
 import {
@@ -83,6 +87,7 @@ import {
   SelectableMessageProse,
   type MessageProseSelection,
 } from "./SelectableMessageProse.js";
+import { MessageContextGroup } from "./MessageContextChip.js";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
 import type { PromptDraftAttachment } from "@cloudroom/client-core";
 import { buildMarkdownMessageLinkRouting } from "@/components/ui/markdown-message-link-routing";
@@ -532,6 +537,32 @@ function UserConversationMessage({
             originKind: null,
           }
         : null;
+  const hasGeneratedSource = generatedSource !== null;
+  const contextParts = useMemo(() => {
+    if (hasGeneratedSource) return null;
+    const segments = splitMessageContextSegments(text);
+    if (!segments.some((segment) => segment.kind === "context")) {
+      return null;
+    }
+    const grouped: Array<
+      | { kind: "contexts"; items: MessageContextBlockSegment[] }
+      | MessageContextTextSegment
+    > = [];
+    for (const segment of segments) {
+      if (segment.kind === "context") {
+        const previous = grouped.at(-1);
+        if (previous?.kind === "contexts") {
+          previous.items.push(segment);
+        } else {
+          grouped.push({ kind: "contexts", items: [segment] });
+        }
+      } else if (segment.text.trim().length > 0) {
+        grouped.push(segment);
+      }
+    }
+    return grouped;
+  }, [hasGeneratedSource, text]);
+
   if (generatedSource !== null) {
     const body = generatedConversationBodySlice({ initiator, text });
     const bodyMentions = shiftMentionsToTextRange({
@@ -577,7 +608,33 @@ function UserConversationMessage({
         ) : null}
         <div className="flex w-fit max-w-full flex-col items-end">
           <div className="max-w-full rounded-xl bg-background px-4 py-2.5 shadow-message dark:bg-surface-recessed text-sm leading-relaxed text-foreground">
-            {messageText ? (
+            {contextParts !== null ? (
+              <div className="space-y-2">
+                {contextParts.map((part, index) =>
+                  part.kind === "contexts" ? (
+                    <MessageContextGroup key={`ctx-${index}`} items={part.items} />
+                  ) : (
+                    <CollapsibleMessageText
+                      key={`txt-${part.start}`}
+                      mentions={shiftMentionsToTextRange({
+                        mentions,
+                        rangeStart: part.start,
+                        rangeEnd: part.end,
+                      })}
+                      resolveMentionLink={resolveMentionLink}
+                      resolveSegmentLinkHref={resolveSegmentLinkHref}
+                      linkRouting={linkRouting}
+                      text={part.text}
+                      mutePrefixLength={
+                        part.start === 0 && mutePrefixLength > 0
+                          ? Math.min(mutePrefixLength, part.text.length)
+                          : undefined
+                      }
+                    />
+                  ),
+                )}
+              </div>
+            ) : messageText ? (
               <CollapsibleMessageText
                 mentions={mentions}
                 resolveMentionLink={resolveMentionLink}
@@ -644,6 +701,12 @@ function AssistantConversationMessage({
   const contextReport = useMemo(
     () => (streaming ? null : parseClaudeContextReport(text)),
     [streaming, text],
+  );
+  const hasDraft = text.includes("```draft");
+  const draftMessage = useMemo(
+    () =>
+      hasDraft ? { messageId: id, threadId, streaming, onAddToChat } : null,
+    [hasDraft, id, onAddToChat, streaming, threadId],
   );
   const liveMarkdown = useMemo(() => {
     const tail = streamingSplit?.tail ?? text;
@@ -726,31 +789,33 @@ function AssistantConversationMessage({
         <ClaudeContextReportCard report={contextReport} />
       ) : (
         <SelectableMessageProse onSelect={onSelectProse}>
-          <MarkdownPreview
-            className={
-              streamingSplit === null
-                ? undefined
-                : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
-            }
-            content={
-              streamingSplit === null ? liveMarkdown : streamingSplit.settled
-            }
-            incrementalBlocks
-            linkRouting={linkRouting}
-            messageDirectives={messageDirectives}
-            threadMentions={ASSISTANT_THREAD_MENTIONS}
-          />
-          {streamingSplit === null ? null : (
+          <DraftMessageProvider value={draftMessage}>
             <MarkdownPreview
-              className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
-              content={liveMarkdown}
-              sourcePrefix={streamingSplit.settled}
+              className={
+                streamingSplit === null
+                  ? undefined
+                  : STREAMING_SETTLED_MARKDOWN_CLASS_NAME
+              }
+              content={
+                streamingSplit === null ? liveMarkdown : streamingSplit.settled
+              }
               incrementalBlocks
               linkRouting={linkRouting}
               messageDirectives={messageDirectives}
               threadMentions={ASSISTANT_THREAD_MENTIONS}
             />
-          )}
+            {streamingSplit === null ? null : (
+              <MarkdownPreview
+                className={STREAMING_TAIL_MARKDOWN_CLASS_NAME}
+                content={liveMarkdown}
+                sourcePrefix={streamingSplit.settled}
+                incrementalBlocks
+                linkRouting={linkRouting}
+                messageDirectives={messageDirectives}
+                threadMentions={ASSISTANT_THREAD_MENTIONS}
+              />
+            )}
+          </DraftMessageProvider>
         </SelectableMessageProse>
       )}
       <ConversationAttachments

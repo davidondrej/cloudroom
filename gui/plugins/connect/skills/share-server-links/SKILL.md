@@ -32,6 +32,42 @@ the server tunnel. Other enrolled hosts use
 machine was not enrolled through Connect, expose fails with instructions to
 remove and re-add it under Settings > Machines.
 
+## Apps that build absolute URLs
+
+- The app sees `Host: 127.0.0.1:<port>` and `X-Forwarded-Proto: https`.
+- A same-site `Origin` arrives as `http://127.0.0.1:<port>`.
+- No `X-Forwarded-Host` arrives.
+- So Rails redirects to `https://127.0.0.1:<port>` and fails CSRF on form posts.
+- Fix it in the app, in development only.
+- Set `SHARE_URL` to the URL from `room-cli connect shares`.
+- The `https` check leaves local browsing unchanged.
+
+Rails, in `config/environments/development.rb`:
+
+```ruby
+if (share = ENV["SHARE_URL"])
+  config.hosts << URI(share).host
+  config.middleware.insert_before 0, Class.new {
+    define_method(:initialize) { |app| @app = app }
+    define_method(:call) do |env|
+      if env["HTTP_X_FORWARDED_PROTO"] == "https"
+        env["HTTP_X_FORWARDED_HOST"] = URI(share).host
+        env["HTTP_ORIGIN"] = share if env["HTTP_ORIGIN"] == "http://#{env["HTTP_HOST"]}"
+      end
+      @app.call(env)
+    end
+  }
+end
+```
+
+Django:
+
+- Add a first middleware that makes the same two `request.META` changes.
+- Set `ALLOWED_HOSTS = [".localhost", "127.0.0.1", "[::1]", <share host>]`.
+- Keep the first three: a non-empty list turns off Django's local default.
+- Set `USE_X_FORWARDED_HOST = True`.
+- Set `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")`.
+
 ## Agent instructions setting
 
 Settings → Machines → Cloudroom Connect has a "Tell agents about remote access"

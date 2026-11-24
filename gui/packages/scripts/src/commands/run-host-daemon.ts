@@ -2,11 +2,11 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  BB_PROD_HOST_DAEMON_PORT,
+  ROOM_PROD_HOST_DAEMON_PORT,
   resolvePortFromEnv,
   resolveRuntimeDataDir,
   resolveRuntimeMode,
-  type BbRuntimeMode,
+  type RoomRuntimeMode,
 } from "@cloudroom/config/runtime";
 import { loadServerUrlValue } from "@cloudroom/config/server-url";
 import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
@@ -35,7 +35,7 @@ interface CreateAutoJoinRequestArgs {
 }
 
 interface ResolveHostDaemonPortArgs {
-  mode: BbRuntimeMode;
+  mode: RoomRuntimeMode;
   requiresExplicitPort: boolean;
 }
 
@@ -53,13 +53,13 @@ function resolveHostDaemonPort(args: ResolveHostDaemonPortArgs): number {
     defaultPort:
       args.mode === "dev"
         ? resolveDevHostDaemonPort()
-        : BB_PROD_HOST_DAEMON_PORT,
+        : ROOM_PROD_HOST_DAEMON_PORT,
     env: process.env,
     name: "BB_HOST_DAEMON_PORT",
   });
 }
 
-function ensureDevOverridePair(mode: BbRuntimeMode): void {
+function ensureDevOverridePair(mode: RoomRuntimeMode): void {
   if (mode !== "dev") {
     return;
   }
@@ -74,7 +74,7 @@ function ensureDevOverridePair(mode: BbRuntimeMode): void {
 }
 
 export function resolveHostDaemonRuntimeEnvironment(
-  mode: BbRuntimeMode,
+  mode: RoomRuntimeMode,
 ): HostDaemonRuntimeEnvironment {
   ensureDevOverridePair(mode);
   const usesDefaultDevExtraHost =
@@ -110,7 +110,7 @@ export function resolveHostDaemonRuntimeEnvironment(
 }
 
 export function resolveHostDaemonProcessCommand(
-  mode: BbRuntimeMode,
+  mode: RoomRuntimeMode,
 ): HostDaemonProcessCommand {
   if (mode === "dev") {
     return {

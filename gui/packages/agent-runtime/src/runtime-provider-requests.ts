@@ -70,6 +70,15 @@ export class RuntimeToolCalls {
     call.controller.abort();
   }
 
+  hasThread(threadId: string): boolean {
+    for (const calls of this.pending.values()) {
+      for (const call of calls.values()) {
+        if (call.threadId === threadId) return true;
+      }
+    }
+    return false;
+  }
+
   cancelThread(threadId: string, turnId?: string): void {
     for (const [scope, calls] of this.pending) {
       for (const [requestId, call] of calls) {

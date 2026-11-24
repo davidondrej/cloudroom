@@ -20,17 +20,22 @@ You are the lead of a Workflow scan the user started on their own computer. It r
 1. **Data**, on this computer:
    ```
    d=$(mktemp -d); s="<this skill's folder>"
-   python3 "$s/extract.py" index "$d" --days 90 > /dev/null && python3 "$s/extract.py" slices "$d" --n 30 --chars 900
+   for py in "$ROOM_PYTHON" python3 python py; do "$py" -c 'import sys; assert sys.version_info >= (3, 8)' 2>/dev/null && break; py=; done
+   echo "py=${py:?no working Python 3.8+}"
+   "$py" "$s/extract.py" index "$d" --days 90 > /dev/null && "$py" "$s/extract.py" slices "$d" --n 30 --chars 900
    ```
+   Every step below runs scripts with this `$py`.
+   No working Python: stop. Tell the user the scan needs Python 3.8 or newer from python.org.
    If it prints `0 slices`, tell the user no chats were found and stop. Read `$d/stats.json` (counts and `already_automated`). Also run `room-cli loop list` to see existing loops.
 2. **Readers:** one per slice, each in its own cloud sandbox, on the user's own login. Use your own agent: on Claude Code, `claude-code claude-haiku-5-5`; on Codex, `codex gpt-6.1-terra`.
    ```
-   python3 "$s/readers.py" spawn "$d" claude-code claude-haiku-5-5
+   "$py" "$s/readers.py" spawn "$d" claude-code claude-haiku-5-5
    ```
    If it fails partway, run the same command again: it starts only the missing readers.
-3. **Wait:** run `python3 "$s/readers.py" wait "$d"` with a 10-minute command timeout. Repeat until it prints `done`.
-4. **Patterns:** read all of `$d/lines.txt`, then run `python3 "$s/readers.py" archive "$d"`. Find the top 3–4 patterns in how the user works: what they repeat most, their workflows, recurring problems. Lines tagged `agent-written` and work that already runs as a loop don't count.
-5. **The 10/90 step:** pick the 1–3 most obvious loops. For each, read 3–5 example chats: `python3 "$s/extract.py" sessions "$d" --ids ID1,ID2 --chars 5000`. Split its work:
+3. **Wait:** run `"$py" "$s/readers.py" wait "$d"` with a 10-minute command timeout. Repeat until it prints `done`.
+   Readers it names (no output, never started) read nothing. If it prints `N of M readers answered only: …` (such as a usage limit), archive the readers and stop: tell the user that line in plain words, such as when their limit resets. Never guess patterns without lines.
+4. **Patterns:** read all of `$d/lines.txt`, then run `"$py" "$s/readers.py" archive "$d"`. Find the top 3–4 patterns in how the user works: what they repeat most, their workflows, recurring problems. Lines tagged `agent-written` and work that already runs as a loop don't count. `wait` removes chat IDs a reader invented (not in its slice) and says how many.
+5. **The 10/90 step:** pick the 1–3 most obvious loops. For each, read 3–5 example chats: `"$py" "$s/extract.py" sessions "$d" --ids ID1,ID2 --chars 5000`. Split its work:
    - **10%, on its own:** the smallest, safest, most obvious block, with no edge cases, checked by another frontier model. The loop does it and merges to main.
    - **90%, waits for the user:** the loop still does the work, but stops before the final step (merging, production). It explains the problem in 2–3 short plain-English sentences, with the best fix.
 6. **Reply** in short, plain English: the patterns (each with how many chats over how many weeks), then each loop with its schedule, its 10% and its 90%. End with: "Turn these on?"

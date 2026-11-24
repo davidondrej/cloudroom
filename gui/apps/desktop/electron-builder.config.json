@@ -7,7 +7,7 @@
   },
   "afterPack": "scripts/prepare-native-modules.cjs",
   "asar": true,
-  "asarUnpack": ["dist/bb-app-bridge.mjs", "node_modules/**", "!node_modules/npm/**", "!node_modules/bb-app/node_modules/npm/**", "!node_modules/bb-app/app/dist/**"],
+  "asarUnpack": ["dist/launcher-bridge.mjs", "node_modules/**", "!node_modules/npm/**", "!node_modules/bb-app/node_modules/npm/**", "!node_modules/bb-app/app/dist/**"],
   "directories": {
     "buildResources": "assets",
     "output": "release.noindex"
@@ -82,6 +82,9 @@
     "executableName": "gui-cloudroom",
     "icon": "assets/icon.png",
     "syncDesktopName": true,
+    "extraResources": [
+      { "from": ".bundled-runtimes/cloudroom-core", "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/cloudroom-core" }
+    ],
     "target": [{ "target": "AppImage", "arch": ["x64"] }]
   },
   "win": {
@@ -92,7 +95,8 @@
         "from": ".bundled-runtimes/python",
         "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/python",
         "filter": ["**/*", "!**/__pycache__/**", "!**/*.pyc", "!{include,tcl}/**"]
-      }
+      },
+      { "from": ".bundled-runtimes/cloudroom-core", "to": "app.asar.unpacked/node_modules/bb-app/server/dist/assets/cloudroom-core" }
     ],
     "target": [{ "target": "nsis", "arch": ["x64"] }]
   },

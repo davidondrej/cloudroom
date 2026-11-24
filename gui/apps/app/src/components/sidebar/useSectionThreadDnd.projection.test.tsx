@@ -34,6 +34,7 @@ let updateThreadDeferred: {
 vi.mock("@/lib/sdk", () => ({
   sdk: {
     threads: {
+      move: vi.fn(() => new Promise(() => {})),
       update: vi.fn(
         () =>
           new Promise((resolve, reject) => {
@@ -105,7 +106,10 @@ function dragEnd(activeId: string, overId: string): DragEndEvent {
   return { active: { id: activeId }, over: { id: overId } } as DragEndEvent;
 }
 
-function renderSectionThreadDnd(initialRootItems = ROOT_ITEMS) {
+function renderSectionThreadDnd(
+  initialRootItems = ROOT_ITEMS,
+  grouped = false,
+) {
   const queryClient = new QueryClient();
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -118,6 +122,8 @@ function renderSectionThreadDnd(initialRootItems = ROOT_ITEMS) {
         rootItems,
         topLevelSectionOrder: ["pinned", "section:a", "section:b", "threads"],
         onTopLevelSectionOrderChange: vi.fn(),
+        groups: grouped,
+        projectMoves: grouped,
         pinnedReorderPending: false,
         pinnedThreads: [],
         onReorderPinnedThread: vi.fn(),
@@ -365,6 +371,34 @@ describe("useSectionThreadDnd settled drop cleanup", () => {
 
     expect(result.current?.nestTarget).toBeNull();
     expect(result.current?.activeThread).toBeNull();
+  });
+
+  it("clears the ghost on a project drop while the move is still pending (#1252)", () => {
+    const project = (id: string, threadId: string) =>
+      ({
+        kind: "section",
+        group: {
+          id,
+          key: `project:${id}`,
+          name: id,
+          items: buildSectionThreadList(
+            [createThread({ id: threadId, projectId: id })],
+            undefined,
+            [],
+          ),
+        },
+      }) as ProjectThreadItem;
+    const { result } = renderSectionThreadDnd(
+      [project("p1", "dragged"), project("p2", "other")],
+      true,
+    );
+    const props = () => result.current!.dndContextProps;
+
+    act(() => props().onDragStart?.(dragStart("dragged")));
+    act(() => props().onDragOver?.(dragOver("dragged", "project:p2")));
+    act(() => props().onDragEnd?.(dragEnd("dragged", "project:p2")));
+    expect(result.current?.activeThread).toBeNull();
+    expect(result.current?.dragOverParentKey).toBeNull();
   });
 });
 

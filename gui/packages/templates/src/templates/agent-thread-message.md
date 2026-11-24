@@ -8,6 +8,6 @@ variables:
   senderThreadId: The thread ID that sent the message.
   messageText: The original message text sent by the agent.
 ---
-[bb message from thread:{{senderThreadId}}]
+[message from thread:{{senderThreadId}}]
 
 {{messageText}}

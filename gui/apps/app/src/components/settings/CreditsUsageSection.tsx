@@ -1,14 +1,30 @@
-import { useState, type CSSProperties } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { queryOptions, useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router";
 import { z } from "zod";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { ToggleGroup, ToggleGroupItem } from "@cloudroom/shared-ui/toggle-group";
+import { COLORS, REST, RangeToggle, Stat, sum } from "@/components/settings/UsageSection";
+import { WavePlot } from "@/components/settings/WavePlot";
 import { SettingsSection } from "@/components/ui/settings-section.js";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { fetchWithAppSurface } from "@/lib/app-surface";
+import { createLastKnownCache } from "@/lib/last-known-cache";
+import { getThreadRoutePath } from "@/lib/route-paths";
+import { sdk } from "@/lib/sdk";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
-// Settings → Analytics: when Cloud Credits were used, above Skills (design A, David 2026-11-08). The same wave as the
-// website's Usage tab on Plan & billing; the website builds the data (web/lib/credits.ts creditWave).
+const BILLING_URL = "https://www.cloudroom.dev/billing";
+
+// Settings → Analytics: when Cloud Credits were used, the first tab (design A, David 2026-11-08). The same wave as the
+// website's Usage tab on Plan & billing; the website builds the data (web/lib/credits.ts creditWave). Split by thread:
+// colored layers and blocks for the top threads (design E, David 2026-11-15; web/lib/credits.ts creditSplit).
+const splitSchema = z.object({
+  since: z.string(),
+  threads: z.number(),
+  credits: z.number(),
+  top: z.array(z.object({ id: z.string(), name: z.string(), credits: z.number(), points: z.array(z.number()).optional() })),
+});
+type CreditSplit = z.infer<typeof splitSchema>;
 const waveSchema = z.object({
   start: z.string(),
   hours: z.array(z.object({ credits: z.number(), top: z.array(z.object({ name: z.string(), credits: z.number() })) })),
@@ -16,18 +32,36 @@ const waveSchema = z.object({
   daysStart: z.string(),
   standouts: z.array(z.object({ at: z.number(), name: z.string(), credits: z.number() })),
   standouts24h: z.array(z.object({ at: z.number(), name: z.string(), credits: z.number() })),
+  // Missing from older websites, and until the thread-split SQL is applied: then the wave stays one lime layer.
+  split: z.object({ "24h": splitSchema, "7d": splitSchema, "30d": splitSchema }).optional(),
 });
 export type CreditsWave = z.infer<typeof waveSchema>;
 /** Per account, so a sign-out or account switch never shows the last account's threads. */
 export const creditsWaveKey = (accountId: string) => ["cloudroom-credits-wave", accountId];
+// The last wave per account, so the tab opens instantly, even after a restart.
+const waveCache = createLastKnownCache<CreditsWave>({ prefix: "bb.credits-wave", version: "1", schema: waveSchema, maxEntries: 2 });
 
-/** Null when signed out, on an older website, or before hourly data exists: the section then hides. */
+/** Null before hourly data exists. Throws when the request fails, so the last saved wave stays on screen. */
 async function loadWave(signal?: AbortSignal): Promise<CreditsWave | null> {
   const response = await fetchWithAppSurface("/api/v1/cloudroom/account/usage-wave", { signal });
-  if (!response.ok) return null;
-  const parsed = z.object({ wave: waveSchema.nullable() }).safeParse(await response.json().catch(() => null));
-  return parsed.success ? parsed.data.wave : null;
+  if (!response.ok) throw new Error(`Cloud Credits wave: ${response.status}`);
+  return z.object({ wave: waveSchema.nullable() }).parse(await response.json()).wave;
 }
+
+/** One account's wave: its last saved copy at once, then a refresh. Analytics preloads it, the tab shows it. */
+export const creditsWaveQuery = (accountId: string) => queryOptions({
+  queryKey: creditsWaveKey(accountId),
+  queryFn: async ({ signal }) => {
+    const wave = await loadWave(signal);
+    if (wave) waveCache.write(waveCache.key(accountId), wave);
+    return wave;
+  },
+  enabled: accountId !== "",
+  initialData: () => (accountId ? waveCache.read(waveCache.key(accountId)) ?? undefined : undefined),
+  // Saved data counts as stale, so every first visit refetches.
+  initialDataUpdatedAt: 0,
+  staleTime: 60_000,
+});
 
 type Range = "24h" | "7d" | "30d";
 const RANGES: { id: Range; hours: number; long: string }[] = [
@@ -48,52 +82,15 @@ const rangeLabel = (wave: CreditsWave, range: Range) => {
   return range !== "30d" && wave.hours.length < r.hours ? `since ${new Date(wave.start).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : `in the last ${r.long}`;
 };
 
-function smooth(values: number[], sigma: number) {
-  const reach = Math.ceil(sigma * 3);
-  return values.map((_, i) => {
-    let sum = 0, weight = 0;
-    for (let o = -reach; o <= reach; o++) {
-      const v = values[i + o];
-      if (v === undefined) continue;
-      const k = Math.exp(-(o * o) / (2 * sigma * sigma));
-      sum += v * k; weight += k;
-    }
-    return sum / weight;
-  });
-}
-/** Monotone cubic through the points, so the wave never dips below zero. */
-function curve(points: [number, number][]) {
-  const k = points.length, dx: number[] = [], m: number[] = [], t: number[] = [];
-  for (let i = 0; i < k - 1; i++) { dx[i] = points[i + 1]![0] - points[i]![0]; m[i] = (points[i + 1]![1] - points[i]![1]) / dx[i]!; }
-  t[0] = m[0]!; t[k - 1] = m[k - 2]!;
-  for (let i = 1; i < k - 1; i++) t[i] = m[i - 1]! * m[i]! <= 0 ? 0 : (m[i - 1]! + m[i]!) / 2;
-  let d = `M${points[0]![0]},${points[0]![1]}`;
-  for (let i = 0; i < k - 1; i++) {
-    const [x0, y0] = points[i]!, [x1, y1] = points[i + 1]!, h = dx[i]! / 3;
-    d += ` C${x0 + h},${y0 + t[i]! * h} ${x1 - h},${y1 - t[i + 1]! * h} ${x1},${y1}`;
-  }
-  return d;
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex-1 border border-border px-3.5 py-3">
-      <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">{label}</div>
-      <div className="mt-1 font-mono text-xl text-foreground tabular-nums">{value}</div>
-    </div>
-  );
-}
-const Dot = ({ style }: { style?: CSSProperties }) => <span className="pointer-events-none absolute -mt-[5px] -ml-[5px] size-2.5 rounded-full border-2 border-background bg-primary" style={style} />;
-
-/** The wave: the biggest bursts named, and hover shows an hour's credits and its top threads. */
+/** The wave. Split by thread, the top 4 threads are colored layers and the rest one gray layer; hover lists them.
+ *  Without a split, the biggest bursts are named and hover shows an hour's top threads. */
 export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Range }) {
-  const [hover, setHover] = useState<number | null>(null);
   const { points, start, step, standouts } = rangeOf(wave, range), last = points.length - 1;
+  const layered = wave.split?.[range].top.filter((thread) => thread.points?.length === points.length).slice(0, COLORS.length) ?? [];
+  const layers = layered.length === 0 ? undefined : [...layered.map((thread, k) => ({ name: thread.name, color: COLORS[k]!, values: thread.points! })),
+    { name: "Other", color: REST, values: points.map((point, i) => Math.max(0, point.credits - sum(layered.map((thread) => thread.points![i]!)))) }];
   if (!points.some((point) => point.credits > 0)) return <p className="py-10 text-center text-sm text-muted-foreground">No Cloud Credits used {rangeLabel(wave, range)}.</p>;
   if (points.length < 2) return <p className="py-10 text-center text-sm text-muted-foreground">Collecting hourly data. The chart starts after the first full hour.</p>;
-  const values = smooth(points.map((point) => point.credits), range === "7d" ? 1.6 : range === "24h" ? 1 : 0.8), peak = Math.max(...values) * 1.3;
-  const x = (i: number) => (i / last) * 100, y = (v: number) => 100 - (v / peak) * 100;
-  const line = curve(values.map((v, i) => [x(i) * 10, y(v)]));
   const at = (i: number) => new Date(start + i * step), daily = step === DAY;
   const when = (i: number) => daily ? at(i).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", timeZone: "UTC" })
     : `${at(i).toLocaleDateString("en-US", { weekday: "short" })} ${at(i).toLocaleTimeString("en-US", { hour: "numeric" })}`;
@@ -102,65 +99,82 @@ export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Ran
   const labels = range === "7d"
     ? points.flatMap((_, i) => at(i).getHours() === 12 ? [{ i, text: at(i).toDateString() === new Date().toDateString() ? "today" : at(i).toLocaleDateString("en-US", { weekday: "short" }).toLowerCase() }] : [])
     : marks.map((i) => ({ i, text: daily ? at(i).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }).toLowerCase() : at(i).toLocaleTimeString("en-US", { hour: "numeric" }).toLowerCase() }));
-  const focus = hover === null ? null : points[hover]!;
   return (
-    <div>
-      <div
-        className="relative mt-14 h-52 cursor-crosshair"
-        onMouseMove={(event) => {
-          const box = event.currentTarget.getBoundingClientRect();
-          setHover(Math.min(last, Math.max(0, Math.round(((event.clientX - box.left) / box.width) * last))));
-        }}
-        onMouseLeave={() => setHover(null)}
-      >
-        {range === "7d" ? marks.map((i) => <span key={i} className="absolute inset-y-0 w-px bg-border/50" style={{ left: `${x(i)}%` }} />) : null}
-        <svg aria-hidden viewBox="0 0 1000 100" preserveAspectRatio="none" className="absolute inset-0 size-full overflow-visible">
-          <defs>
-            <linearGradient id="credits-wave" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0" stopColor="var(--primary)" stopOpacity="0.45" />
-              <stop offset="1" stopColor="var(--primary)" stopOpacity="0.05" />
-            </linearGradient>
-          </defs>
-          <path d={`${line} L1000,100 L0,100 Z`} fill="url(#credits-wave)" />
-          <path d={line} fill="none" stroke="var(--primary)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
-        </svg>
-        {hover === null
-          ? standouts.map((note) => (
-              <div key={note.at} className="pointer-events-none absolute" style={{ left: `${x(note.at)}%`, top: `${y(values[note.at]!)}%` }}>
-                <Dot />
-                <span className="absolute bottom-2 left-0 h-7 w-px bg-muted-foreground/50" />
-                <span className={cn("absolute bottom-10 font-mono text-xs whitespace-nowrap text-muted-foreground", x(note.at) > 50 ? "-right-2 text-right" : "-left-2")}>
-                  <span className="block text-foreground">{note.name}</span>
-                  {n(note.credits)} credits
-                </span>
-              </div>
-            ))
-          : null}
-        <Dot style={{ left: "100%", top: `${y(values[last]!)}%` }} />
-        {hover !== null && focus ? (
-          <>
-            <span className="pointer-events-none absolute inset-y-0 w-px bg-muted-foreground/60" style={{ left: `${x(hover)}%` }} />
-            <Dot style={{ left: `${x(hover)}%`, top: `${y(values[hover]!)}%` }} />
-            <div
-              className="pointer-events-none absolute top-1 z-10 min-w-52 rounded-md border border-border bg-popover px-3 py-2.5 text-xs text-popover-foreground shadow-md"
-              style={x(hover) > 75 ? { right: `calc(${100 - x(hover)}% + 12px)` } : { left: `calc(${x(hover)}% + 12px)` }}
-            >
-              <div className="text-muted-foreground">{when(hover)}</div>
-              <div className="mt-0.5 mb-1.5 font-mono text-base text-foreground tabular-nums">{n(focus.credits)} credits</div>
-              {focus.top.map((thread) => (
-                <div key={thread.name} className="flex justify-between gap-4 leading-6">
-                  <span>{thread.name}</span>
-                  <span className="font-mono tabular-nums">{n(thread.credits)}</span>
-                </div>
-              ))}
+    <WavePlot
+      points={points.map((point, i) => ({ value: point.credits, top: layers
+        ? layers.map((layer) => ({ name: layer.name, value: layer.values[i]!, color: layer.color })).filter((layer) => Math.round(layer.value) > 0)
+        : point.top.map((thread) => ({ name: thread.name, value: thread.credits })) }))}
+      sigma={range === "7d" ? 1.6 : range === "24h" ? 1 : 0.8}
+      format={n}
+      unit="credits"
+      when={when}
+      labels={labels}
+      marks={range === "7d" ? marks : []}
+      standouts={standouts.map((note) => ({ at: note.at, name: note.name, detail: `${n(note.credits)} credits` }))}
+      layers={layers}
+    />
+  );
+}
+
+/** Blocks sized by area: squarified rows along the shorter side, so blocks stay close to square. */
+function squarify(values: number[], width: number, height: number) {
+  const scale = (width * height) / Math.max(sum(values), 1e-9), areas = values.map((value) => value * scale), rects: { x: number; y: number; w: number; h: number }[] = [];
+  const worst = (row: number[], side: number) => Math.max((side * side * Math.max(...row)) / sum(row) ** 2, sum(row) ** 2 / (side * side * Math.min(...row)));
+  let x = 0, y = 0, w = width, h = height;
+  for (let i = 0; i < areas.length;) {
+    const side = Math.min(w, h);
+    let row = [areas[i]!];
+    while (i + row.length < areas.length && worst([...row, areas[i + row.length]!], side) <= worst(row, side)) row = [...row, areas[i + row.length]!];
+    const thick = sum(row) / side;
+    let offset = 0;
+    for (const area of row) {
+      rects.push(w >= h ? { x, y: y + offset, w: thick, h: area / thick } : { x: x + offset, y, w: area / thick, h: thick });
+      offset += area / thick;
+    }
+    if (w >= h) { x += thick; w -= thick; } else { y += thick; h -= thick; }
+    i += row.length;
+  }
+  return rects;
+}
+const BLOCKS_W = 768, BLOCKS_H = 290;
+const percent = (part: number, all: number) => { const value = all > 0 ? (part / all) * 100 : 0; return `${value >= 10 ? Math.round(value) : value.toFixed(1)}%`; };
+
+/** The range's top threads as blocks sized by credits, in their wave colors, then one gray block for the rest.
+ *  A block opens its thread when this computer has it. */
+export function CreditBlocks({ split, from }: { split: CreditSplit; from: number }) {
+  const navigate = useNavigate(), rest = split.threads - split.top.length;
+  const blocks = [...split.top.map((thread, k) => ({ ...thread, color: COLORS[k] ?? REST })),
+    { id: "", name: `${n(rest)} other thread${rest === 1 ? "" : "s"}`, short: `${n(rest)} more`, credits: rest > 0 ? Math.max(0, split.credits - sum(split.top.map((thread) => thread.credits))) : 0, color: REST }]
+    .filter((block) => block.credits > 0);
+  const rects = squarify(blocks.map((block) => block.credits), BLOCKS_W, BLOCKS_H);
+  const open = (threadId: string) => void sdk.threads.get({ threadId }).then((thread) => navigate(getThreadRoutePath({ projectId: thread.projectId, threadId }))).catch(() => {});
+  return (
+    <div className="pt-1">
+      {/* Thread hours start 2026-11-08, so a range reaching back further is split only from then. */}
+      {Date.parse(split.since) > from + 60_000 ? (
+        <div className="mb-2 text-[11px] tracking-[0.08em] text-muted-foreground uppercase">
+          Threads since {new Date(split.since).toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+        </div>
+      ) : null}
+      <div role="list" aria-label="Credits by thread" className="relative" style={{ aspectRatio: `${BLOCKS_W} / ${BLOCKS_H}` }}>
+        {blocks.map((block, k) => {
+          const r = rects[k]!, big = r.w > 150 && r.h > 110, small = r.w < 84 || r.h < 96, thread = block.id.startsWith("thr_");
+          return (
+            <div key={block.id || block.name} role="listitem" className="absolute p-px" style={{ left: `${(r.x / BLOCKS_W) * 100}%`, top: `${(r.y / BLOCKS_H) * 100}%`, width: `${(r.w / BLOCKS_W) * 100}%`, height: `${(r.h / BLOCKS_H) * 100}%` }}>
+              <button type="button" disabled={!thread} onClick={() => open(block.id)} title={`${block.name}: ${n(block.credits)} credits`}
+                className={cn("flex size-full flex-col justify-between overflow-hidden text-left text-foreground enabled:hover:brightness-125", big ? "p-3.5" : "p-2.5")}
+                style={{ background: `color-mix(in oklab, ${block.color} 46%, var(--background))`, boxShadow: `inset 0 2px 0 ${block.color}` }}>
+                <span className={cn("leading-snug", big ? "text-sm font-medium" : "text-xs", small ? "truncate" : "line-clamp-2", !block.id && "text-muted-foreground")}>{small && "short" in block ? block.short : block.name}</span>
+                {r.h >= 44 ? (
+                  <span className="flex items-baseline gap-2 font-mono tabular-nums">
+                    <span className={big ? "text-2xl tracking-[-0.02em]" : "text-xs"}>{n(block.credits)}</span>
+                    {r.w >= 100 ? <span className="text-[11px] text-foreground/60">{percent(block.credits, split.credits)}</span> : null}
+                  </span>
+                ) : null}
+              </button>
             </div>
-          </>
-        ) : null}
-      </div>
-      <div className="relative mt-2 h-4 font-mono text-[11px] text-muted-foreground">
-        {labels.map((label) => (
-          <span key={label.i} className="absolute whitespace-nowrap" style={{ left: `${x(label.i)}%`, transform: `translateX(${x(label.i) < 4 ? 0 : x(label.i) > 96 ? -100 : -50}%)` }}>{label.text}</span>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -169,10 +183,11 @@ export function CreditsWavePlot({ wave, range }: { wave: CreditsWave; range: Ran
 export function CreditsUsageSection() {
   const account = useCloudroomAccount().data, accountId = account?.account?.id ?? "";
   const [range, setRange] = useState<Range>("30d");
-  const query = useQuery({ queryKey: creditsWaveKey(accountId), queryFn: ({ signal }) => loadWave(signal), enabled: accountId !== "", staleTime: 60_000 });
+  const query = useQuery(creditsWaveQuery(accountId));
   const wave = query.data;
-  if (!accountId || !wave) return null;
-  const usage = account?.planUsage, points = rangeOf(wave, range).points;
+  if (!accountId) return null;
+  if (!wave) return <p className="text-sm text-muted-foreground">{query.isPending ? "Loading…" : query.isError ? "Couldn't load Cloud Credits." : "No Cloud Credits data yet."}</p>;
+  const usage = account?.planUsage, points = rangeOf(wave, range).points, split = wave.split?.[range];
   const left = usage && usage.credits !== null ? Math.max(0, usage.creditsLimit - usage.credits) + Math.max(0, usage.extraCredits ?? 0) : null;
   // Busiest weekday in the range, by local time.
   const byDay = new Map<string, number>(), { start, step } = rangeOf(wave, range);
@@ -184,25 +199,32 @@ export function CreditsUsageSection() {
   return (
     <SettingsSection
       title="Cloud Credits"
-      description="When your credits were used, hour by hour. Hover to see which threads used them."
+      description="When your credits were used, and which threads used them."
       action={
-        <ToggleGroup type="single" aria-label="Time range" value={range} onValueChange={(next) => { if (next) setRange(next as Range); }} className="h-8 gap-0.5 rounded-md border border-input bg-background p-0.5">
-          {RANGES.map((option) => (
-            <ToggleGroupItem key={option.id} value={option.id} className="h-6 rounded-sm px-2.5 text-xs font-medium text-muted-foreground shadow-none hover:bg-state-hover hover:text-foreground data-[state=on]:bg-state-active data-[state=on]:text-foreground data-[state=on]:hover:bg-state-active">
-              {option.id}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
+        <RangeToggle value={range} options={RANGES.map((option) => ({ value: option.id, label: option.id }))} onChange={setRange} />
       }
       plain
     >
       <div className="space-y-5">
         <div className="flex gap-3">
           <Stat label={`Credits · ${range}`} value={n(points.reduce((sum, point) => sum + point.credits, 0))} />
-          <Stat label="Left" value={left === null ? "—" : n(left)} />
+          <div className="min-w-0 flex-1 border border-border px-3.5 py-3">
+            <div className="text-[11px] tracking-[0.08em] text-muted-foreground uppercase">Left</div>
+            <div className="mt-1 flex items-center justify-between gap-2">
+              <span className="truncate font-mono text-xl text-foreground tabular-nums">{left === null ? "—" : n(left)}</span>
+              <button
+                type="button"
+                onClick={() => openUrlInExternalBrowser(BILLING_URL)}
+                className="shrink-0 border border-primary/60 px-1.5 leading-5 text-xs text-primary-text hover:bg-primary/10"
+              >
+                + buy more
+              </button>
+            </div>
+          </div>
           <Stat label="Busiest day" value={busiest && busiest[1] > 0 ? busiest[0] : "—"} />
         </div>
         <CreditsWavePlot wave={wave} range={range} />
+        {split && split.credits > 0 ? <CreditBlocks split={split} from={start} /> : null}
       </div>
     </SettingsSection>
   );

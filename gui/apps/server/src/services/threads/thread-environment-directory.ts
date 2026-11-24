@@ -2,14 +2,18 @@ import { assertEnvironmentPathAvailable } from "../environments/path-admission.j
 import { z } from "zod";
 import {
   createEnvironment,
+  type DbTransaction,
   type EnvironmentRow,
   createEventId,
+  countLiveThreadsInEnvironment,
   environmentHasRestorableThreads,
+  environments,
   findProjectEnvironmentByHostPath,
   getEnvironment,
   getThread,
   updateThread,
 } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 import { applyEnvironmentLifecycleEvent } from "@cloudroom/db/internal-environment-lifecycle";
 import {
   canonicalizeHostPath,
@@ -23,6 +27,7 @@ import type { DynamicTool, Thread, ToolCallResponse } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { trackEnvironmentAttach } from "../environments/environment-engine.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
 import { appendThreadEventInTransaction } from "./thread-events.js";
@@ -191,6 +196,20 @@ function successMessage(path: string): string {
   return `Environment directory updated to ${path}. This applies to future turns; stop work in this turn so the next turn can run from the updated directory.`;
 }
 
+/** A thread moved off this environment. With no open thread left, cleanup
+ *  would delete its folder once any archived one stops, so detach it from its
+ *  provider and the folder stays (#1955). */
+export function detachEnvironmentWithoutOpenThreads(
+  tx: DbTransaction,
+  environmentId: string,
+): void {
+  if (countLiveThreadsInEnvironment(tx, { environmentId }) > 0) return;
+  tx.update(environments)
+    .set({ environmentProviderId: null, retireAt: null })
+    .where(eq(environments.id, environmentId))
+    .run();
+}
+
 function attachReadyEnvironment(
   deps: Pick<AppDeps, "db" | "hub">,
   args: {
@@ -227,6 +246,11 @@ function attachReadyEnvironment(
       updateThread(tx, deps.hub, latestThread.id, {
         environmentId: args.targetEnvironment.id,
       });
+      if (
+        args.currentEnvironment.environmentProviderId ===
+        DEFAULT_ENVIRONMENT_PROVIDER_ID.personalWorkspace
+      )
+        detachEnvironmentWithoutOpenThreads(tx, args.currentEnvironment.id);
       appendThreadEventInTransaction(tx, {
         threadId: latestThread.id,
         environmentId: args.targetEnvironment.id,

@@ -9,8 +9,8 @@ import {
   type MouseEvent,
   type ReactNode,
 } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
-import type { IconSvgElement } from "@hugeicons/react";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
+import type { IconSvgElement } from "@cloudroom/shared-ui/hugeicons-icon";
 import {
   ArrowLeft01Icon,
   ArrowMoveDownLeftIcon,
@@ -525,7 +525,6 @@ const FOOTER_ITEM_RENDERERS: Record<string, () => ReactNode> = {
       </span>
     </span>
   ),
-  "cloudroom-account": () => <span className="text-xs">Sign in</span>,
 };
 
 const SIDEBAR_SECTION_RENDERERS: Record<string, () => ReactNode> = {

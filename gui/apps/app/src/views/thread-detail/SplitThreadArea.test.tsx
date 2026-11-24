@@ -11,11 +11,11 @@ import {
 } from "@testing-library/react";
 import { createStore, Provider as JotaiProvider } from "jotai";
 import { useContext, useMemo, useState, type ReactNode } from "react";
-import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import {
@@ -33,8 +33,8 @@ import {
 } from "@/lib/split-layout";
 import type { PaneContent, SplitLayout } from "@/lib/split-layout";
 import { usePromptDraftStorage } from "@/hooks/usePromptDraftStorage";
-import { createBbDesktopApi } from "@/test/bb-desktop-test-utils";
-import { MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS } from "@/lib/bb-desktop";
+import { createRoomDesktopApi } from "@/test/room-desktop-test-utils";
+import { MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS } from "@/lib/room-desktop";
 import { resourceRouteLabelAtom } from "@/components/layout/resourceRouteLabelAtom";
 import {
   resetPluginSlotStoreForTest,
@@ -54,6 +54,7 @@ const threadStore = vi.hoisted(
     new Map<string, { archivedAt: number | null; deletedAt: number | null }>(),
 );
 const viewportState = vi.hoisted(() => ({ compact: false }));
+const renderedThreadIds = vi.hoisted((): string[] => []);
 const sidebarState = vi.hoisted(() => ({ showing: true }));
 const panelFullScreenState = vi.hoisted(() => ({
   isMainCollapsed: false,
@@ -281,6 +282,7 @@ vi.mock("./ThreadDetailView", () => ({
     projectId: string;
     threadId: string;
   }) => {
+    renderedThreadIds.push(threadId);
     const pane = useContext(PaneContext);
     const [isPanelOpen, setIsPanelOpen] = useState(threadId === "thr-a");
     const composerHost = useMemo<PluginComposerHost>(() => {
@@ -636,6 +638,7 @@ beforeEach(() => {
   panelFullScreenState.isMainCollapsed = false;
   panelGroupLayoutState.layout = [100, 0];
   commandHandlers.clear();
+  renderedThreadIds.length = 0;
   commandPresentationState.isModifierHeld = false;
   commandPresentationState.shortcut = null;
   threadStore.set("thr-a", { archivedAt: null, deletedAt: null });
@@ -653,6 +656,23 @@ afterEach(() => {
 });
 
 describe("SplitThreadArea", () => {
+  it("never renders the stale stored pane when the route changes", () => {
+    renderSplitArea({
+      path: threadPath("thr-a"),
+      layout: {
+        root: {
+          type: "pane",
+          paneId: "pane-1",
+          content: threadContent("thr-b"),
+        },
+        focusedPaneId: "pane-1",
+      },
+    });
+
+    expect(screen.getByTestId("pane-thr-a")).toBeTruthy();
+    expect(renderedThreadIds).not.toContain("thr-b");
+  });
+
   it("hosts Browser-tab navigation on compact plugin-panel routes", async () => {
     viewportState.compact = true;
 
@@ -1832,7 +1852,7 @@ describe("SplitThreadArea", () => {
   });
 
   it("carves a plugin pane drag handle out of the macOS window-drag region", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: null,
       pendingVersion: null,
@@ -1841,7 +1861,7 @@ describe("SplitThreadArea", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createBbDesktopApi(desktopInfo);
+    window.bbDesktop = createRoomDesktopApi(desktopInfo);
     setPluginSlotRegistrations(
       "docs",
       makePluginRegistrationSet({
@@ -1874,7 +1894,7 @@ describe("SplitThreadArea", () => {
   });
 
   it("makes only top-row split headers desktop window-drag regions", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: null,
       pendingVersion: null,
@@ -1883,7 +1903,7 @@ describe("SplitThreadArea", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createBbDesktopApi(desktopInfo);
+    window.bbDesktop = createRoomDesktopApi(desktopInfo);
     setPluginSlotRegistrations(
       "test-plugin",
       makePluginRegistrationSet({
@@ -1922,7 +1942,7 @@ describe("SplitThreadArea", () => {
   });
 
   it("reserves collapsed window-left chrome only for the structural top-left plugin pane", async () => {
-    const desktopInfo: BbDesktopInfo = {
+    const desktopInfo: RoomDesktopInfo = {
       lastCheckedAt: null,
       latestVersion: null,
       pendingVersion: null,
@@ -1931,7 +1951,7 @@ describe("SplitThreadArea", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createBbDesktopApi(desktopInfo);
+    window.bbDesktop = createRoomDesktopApi(desktopInfo);
     sidebarState.showing = false;
     setPluginSlotRegistrations(
       "test-plugin",

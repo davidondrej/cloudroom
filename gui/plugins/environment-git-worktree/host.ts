@@ -1,4 +1,7 @@
-import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
+import {
+  experimental_defineHostEntry,
+  experimental_sanitizeInheritedChildProcessEnv,
+} from "@get-bb/plugin-sdk/host";
 import { readdir } from "node:fs/promises";
 import { hasRef } from "bb-environment-provider-host/git";
 import { createHostProgress } from "bb-environment-provider-host/progress";
@@ -6,11 +9,18 @@ import { worktreeHostContract, worktreeHostSignals } from "./contract.js";
 import { resolveWorktreeBaseBranch } from "./host/base-branch.js";
 import {
   deriveRepoDirName,
+  resolveSpareWorktreePath,
   resolveWorktreeChildPath,
   resolveWorktreesRoot,
   resolveWorktreeAttemptRoot,
   resolveWorktreeTargetPath,
 } from "./host/paths.js";
+import { refreshRemoteBase, type BackgroundWork } from "./host/base-refresh.js";
+import {
+  buildSpareWorktree,
+  claimSpareWorktree,
+  removeUnusedSpares,
+} from "./host/spare.js";
 import {
   createWorktree,
   hasUncommittedWork,
@@ -46,10 +56,17 @@ async function worktreePathsForPathKey(args: {
   }
 }
 
-export function createWorktreeHostEntry() {
+/** `spares: false` builds every worktree from scratch, which keeps tests free of background work. */
+export function createWorktreeHostEntry({ spares = true } = {}) {
+  // Work that outlives its call: a stopping worker waits for it, so a fetch
+  // stopped by the shutdown still removes its lock.
+  const backgroundWork = new Set<Promise<unknown>>();
   return experimental_defineHostEntry({
     contract: worktreeHostContract,
     experimental_signals: worktreeHostSignals,
+    dispose: async () => {
+      await Promise.all(backgroundWork);
+    },
     handlers: {
       async create(input, context) {
         const targetPath =
@@ -80,23 +97,90 @@ export function createWorktreeHostEntry() {
             input.sourcePath,
             input.baseBranch,
           );
+          const worktreesRoot = resolveWorktreesRoot(
+            context.experimental_paths.dataDir,
+          );
+          const onProgress = createHostProgress({
+            operationId: input.operationId,
+            emit: (payload) =>
+              context.experimental_emitSignal("progress", payload),
+          });
+          // For work that outlives this call: it keeps the worker alive and
+          // a copy of the call's environment.
+          const background: BackgroundWork = {
+            env: experimental_sanitizeInheritedChildProcessEnv({
+              env: process.env,
+            }),
+            signal: context.lifecycle.signal,
+            keep(work) {
+              backgroundWork.add(work);
+              void work.then(() => backgroundWork.delete(work));
+              try {
+                const lease = context.experimental_retainWorker();
+                const release = () => lease.dispose().catch(() => undefined);
+                void work.then(release, release);
+              } catch {
+                // The worker is stopping, which aborts the work too.
+              }
+            },
+          };
+          const sparePath = spares
+            ? resolveSpareWorktreePath({
+                dataDir: context.experimental_paths.dataDir,
+                sourcePath: input.sourcePath,
+              })
+            : undefined;
           const created = await createWorktree({
             sourcePath: input.sourcePath,
             targetPath,
             completionPath: completionPathForWorktree(targetPath),
-            ownWorktreesRoot: resolveWorktreesRoot(
-              context.experimental_paths.dataDir,
-            ),
+            refreshBase: (baseBranch) =>
+              refreshRemoteBase({
+                sourcePath: input.sourcePath,
+                baseBranch,
+                background,
+                onProgress,
+                signal: context.signal,
+              }),
+            claimSpare:
+              sparePath === undefined
+                ? undefined
+                : (startPoint) =>
+                    claimSpareWorktree({
+                      sourcePath: input.sourcePath,
+                      sparePath,
+                      targetPath,
+                      branchName: input.branchName,
+                      startPoint,
+                      signal: context.signal,
+                    }),
+            ownWorktreesRoot: worktreesRoot,
             branchName: input.branchName,
             baseBranch,
             branchMode: input.branchMode,
-            onProgress: createHostProgress({
-              operationId: input.operationId,
-              emit: (payload) =>
-                context.experimental_emitSignal("progress", payload),
-            }),
+            onProgress,
             signal: context.signal,
           });
+          // A fork starts from a snapshot of uncommitted work, which the
+          // next thread's spare must not be built from.
+          if (
+            sparePath !== undefined &&
+            created.startPoint !== undefined &&
+            input.diffBase === undefined &&
+            !context.signal.aborted
+          ) {
+            background.keep(
+              buildSpareWorktree({
+                sourcePath: input.sourcePath,
+                sparePath,
+                startPoint: created.startPoint,
+                worktreePath: created.path,
+                worktreesRoot,
+                env: background.env,
+                signal: background.signal,
+              }),
+            );
+          }
           const diffBase = input.diffBase
             ? await resolveWorktreeBaseBranch(input.sourcePath, input.diffBase)
             : baseBranch;
@@ -135,6 +219,14 @@ export function createWorktreeHostEntry() {
             await removeCompletionMarker(completionPathForWorktree(path));
             await removeWorktree({
               path,
+              // An environment's recorded folder may be a checkout in use (#1284).
+              owner:
+                input.path === null
+                  ? undefined
+                  : {
+                      dataDir: context.experimental_paths.dataDir,
+                      pathKey: input.pathKey,
+                    },
               onProgress: createHostProgress({
                 operationId: input.operationId,
                 emit: (payload) =>
@@ -143,6 +235,10 @@ export function createWorktreeHostEntry() {
               signal: context.signal,
             });
           }
+          if (spares)
+            await removeUnusedSpares(
+              resolveWorktreesRoot(context.experimental_paths.dataDir),
+            );
           return { status: "removed" } as const;
         } catch (error) {
           if (context.signal.aborted) throw error;

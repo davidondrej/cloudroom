@@ -1,7 +1,7 @@
-import { BB_PROD_SERVER_PORT } from "@cloudroom/config/runtime";
+import { ROOM_PROD_SERVER_PORT } from "@cloudroom/config/runtime";
 
-const DEFAULT_BB_SERVER_PORT = BB_PROD_SERVER_PORT;
-export const DEFAULT_BB_SERVER_URL = `http://127.0.0.1:${DEFAULT_BB_SERVER_PORT}`;
+const DEFAULT_ROOM_SERVER_PORT = ROOM_PROD_SERVER_PORT;
+export const DEFAULT_ROOM_SERVER_URL = `http://127.0.0.1:${DEFAULT_ROOM_SERVER_PORT}`;
 const DEFAULT_WINDOW_HEIGHT = 900;
 const DEFAULT_WINDOW_WIDTH = 1280;
 export const MIN_WINDOW_HEIGHT = 600;

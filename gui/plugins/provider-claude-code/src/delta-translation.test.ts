@@ -8,6 +8,7 @@ import {
   createClaudeDeltaHarness,
   loadFixture,
   spawningToolUseFor,
+  spawningToolUseMessage,
 } from "./delta-test-harness.js";
 
 const THREAD_ID = "thr_claude_rate_limits";
@@ -57,6 +58,40 @@ describe("claude rate-limit classification (delta path)", () => {
         willRetry: true,
         errorInfo: {
           category: "rate-limit",
+          providerCode: "rate_limit",
+          httpStatusCode: 429,
+        },
+      }),
+    ]);
+  });
+
+  it("treats a provider capacity 429 as an overload, not a plan limit (#2284)", () => {
+    const harness = createClaudeDeltaHarness();
+    const text =
+      "API Error: Request rejected (429) · The Coding Plan capacity pool is momentarily saturated";
+    harness.translate(
+      sdkMessage({
+        type: "assistant",
+        error: "rate_limit",
+        message: { id: "a-1", content: [{ type: "text", text }] },
+      }),
+      { threadId: THREAD_ID },
+    );
+    const events = harness.translate(
+      sdkMessage({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 429,
+        result: text,
+      }),
+      { threadId: THREAD_ID },
+    );
+
+    expect(providerErrors(events)).toEqual([
+      expect.objectContaining({
+        errorInfo: {
+          category: "overloaded",
           providerCode: "rate_limit",
           httpStatusCode: 429,
         },
@@ -185,6 +220,7 @@ describe("claude turn and checkpoint lifecycle", () => {
     const harness = createClaudeDeltaHarness();
     const events = harness.translate({
       type: "assistant",
+      uuid: "hello-checkpoint",
       message: {
         id: "msg-1",
         role: "assistant",
@@ -206,6 +242,7 @@ describe("claude turn and checkpoint lifecycle", () => {
           type: "agentMessage",
           id: expect.stringMatching(ITEM_ID_PATTERN),
           text: "Hello world",
+          providerCheckpointId: "hello-checkpoint",
         }),
       }),
     );
@@ -1858,6 +1895,55 @@ describe("claude error translation", () => {
           httpStatusCode: 529,
         },
       }),
+    );
+  });
+
+  it("fails a turn a hook stopped before Claude replied (#1036)", () => {
+    const hookStop = sdkMessage({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      result: "",
+      terminal_reason: "hook_stopped",
+    });
+    const context = { threadId: THREAD_ID };
+    const silent = createClaudeDeltaHarness();
+    silent.translate(
+      sdkMessage(spawningToolUseMessage({ toolUseId: "t1", toolName: "Bash" })),
+      context,
+    );
+    const silentEvents = silent.translate(hookStop, context);
+    expect(silentEvents).toContainEqual(
+      expect.objectContaining({
+        type: "provider/error",
+        detail:
+          "A Claude Code hook stopped Claude before it replied. Check your Claude Code hooks.",
+      }),
+    );
+    expect(silentEvents).toContainEqual(
+      expect.objectContaining({ type: "turn/completed", status: "failed" }),
+    );
+
+    // Claude replied before the stopped tool call: the turn stays completed.
+    const replied = createClaudeDeltaHarness();
+    replied.translate(
+      sdkMessage({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Diagnosis: …" }] },
+      }),
+      context,
+    );
+    replied.translate(
+      sdkMessage(spawningToolUseMessage({ toolUseId: "t2", toolName: "Bash" })),
+      context,
+    );
+    const repliedEvents = replied.translate(hookStop, context);
+    expect(repliedEvents.map((event) => event.type)).toEqual([
+      "provider/warning",
+      "turn/completed",
+    ]);
+    expect(repliedEvents).toContainEqual(
+      expect.objectContaining({ type: "turn/completed", status: "completed" }),
     );
   });
 

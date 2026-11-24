@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  appOnOtherVolume,
   IDLE_INSTALL_AFTER_MS,
   startIdleInstall,
   type IdleInstallArgs,
@@ -149,5 +150,29 @@ describe("idle update install", () => {
     answer(false);
     await Promise.all([first, second]);
     expect(state.installs).toBe(1);
+  });
+});
+
+describe("app on another disk (#2511)", () => {
+  // /Applications sits on the boot disk's data volume (16); an external drive is 42.
+  const devs: Record<string, number> = {
+    "/Applications": 16,
+    "/Applications/Cloudroom.app": 16,
+    "/Users/a/Applications/Cloudroom.app": 16,
+    "/Volumes/T7/Cloudroom.app": 42,
+  };
+  const stat = (path: string) => {
+    if (devs[path] === undefined) throw new Error("ENOENT");
+    return { dev: devs[path] };
+  };
+  const onOther = (bundle: string) =>
+    appOnOtherVolume(`${bundle}/Contents/MacOS/Cloudroom`, stat);
+
+  it("turns self-update off only for a bundle off the boot disk", () => {
+    expect(onOther("/Applications/Cloudroom.app")).toBe(false);
+    expect(onOther("/Users/a/Applications/Cloudroom.app")).toBe(false);
+    expect(onOther("/Volumes/T7/Cloudroom.app")).toBe(true);
+    expect(onOther("/Volumes/Gone/Cloudroom.app")).toBe(true);
+    expect(appOnOtherVolume("/usr/bin/node", stat)).toBe(false);
   });
 });

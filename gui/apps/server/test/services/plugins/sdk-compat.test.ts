@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import semver from "semver";
-import { BB_APP_COMPAT_VERSION, PLUGIN_SDK_VERSION } from "@cloudroom/domain";
+import { ROOM_APP_COMPAT_VERSION, PLUGIN_SDK_VERSION } from "@cloudroom/domain";
 import {
-  bbCompatAppVersion,
+  roomCompatAppVersion,
   isPluginSdkRangeSatisfied,
 } from "../../../src/services/plugins/sdk-compat.js";
 
@@ -39,10 +39,10 @@ describe("isPluginSdkRangeSatisfied", () => {
 
 describe("bbCompatAppVersion", () => {
   it("reports the BB release that matches the SDK, not the bb-app package version", () => {
-    expect(bbCompatAppVersion("126.0.0")).toBe(BB_APP_COMPAT_VERSION);
+    expect(roomCompatAppVersion("126.0.0")).toBe(ROOM_APP_COMPAT_VERSION);
   });
 
   it("keeps dev builds in dev mode", () => {
-    expect(bbCompatAppVersion("0.0.0-dev")).toBe("0.0.0-dev");
+    expect(roomCompatAppVersion("0.0.0-dev")).toBe("0.0.0-dev");
   });
 });

@@ -3,11 +3,11 @@ import { atom, useAtom } from "jotai";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
-import { BbLogo } from "@/components/ui/bb-logo";
+import { PROMPT_STACK_ON_INPUT_CLASS, PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { useIsNativeBrowserViewShown } from "@/hooks/useBrowserDimmingModal";
 import { fetchWithAppSurface, getAppSurface } from "@/lib/app-surface";
-import { claimStarCard, closeStarCard, usePopup } from "@/lib/popups";
+import { closeStarCard, useCard, useCardBudget, usePopup } from "@/lib/popups";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
 const PATH = "/api/v1/cloudroom/star-prompt";
@@ -52,7 +52,7 @@ export function StarPrompt() {
       <div ref={card} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Star Cloudroom on GitHub" data-testid="star-prompt"
         onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") dismiss(); }}
         className="w-[430px] max-w-full border border-[#e4dcc6] bg-[#f7f3e8] px-[34px] pt-[34px] pb-7 text-[#29251e] shadow-[0_30px_80px_rgba(0,0,0,.55),0_4px_14px_rgba(0,0,0,.3)] outline-none duration-200 animate-in fade-in-0 zoom-in-95">
-        <BbLogo className="size-[58px] -rotate-[4deg]" />
+        <RoomLogo className="size-[58px] -rotate-[4deg]" />
         <p className="mt-[22px] font-serif text-[15px] text-[#6f6655] italic">{data.days > 1 ? `Day ${data.days} with Cloudroom` : "Your first day with Cloudroom"}</p>
         <h2 className="mt-1.5 font-serif text-[40px] leading-[1.05] tracking-[-0.02em]">
           Enjoying <em className="bg-[linear-gradient(transparent_58%,#bfff00_58%,#bfff00_92%,transparent_92%)]">Cloudroom</em>?
@@ -77,6 +77,8 @@ export function StarCard({ active, attached }: { active: boolean; attached: bool
   const desktop = getAppSurface() === "desktop";
   const { data, dataUpdatedAt, refetch } = useStarPrompt("card");
   const [card, setCard] = useAtom(cardAtom);
+  const { claim } = useCardBudget();
+  const first = useCard("star", card !== null || data?.card === true);
   const close = (detail?: "starred" | "opened") => {
     cardClaim.handledAt = Date.now();
     setCard(null);
@@ -89,16 +91,17 @@ export function StarCard({ active, attached }: { active: boolean; attached: bool
   useEffect(() => { if (active && desktop) void refetch(); }, [active, desktop, refetch]);
   useEffect(() => { if (card && data?.done) setCard(null); }, [card, data?.done, setCard]);
   useEffect(() => {
-    if (!data?.card || card || cardClaim.pending || dataUpdatedAt <= cardClaim.handledAt) return;
+    if (!first || !data?.card || card || cardClaim.pending || dataUpdatedAt <= cardClaim.handledAt) return;
     const { url, stars } = data;
     cardClaim.pending = true;
     cardClaim.handledAt = Date.now();
-    void claimStarCard().then((claimed) => { if (claimed) setCard({ url, stars }); }).finally(() => { cardClaim.pending = false; });
-  }, [card, data, dataUpdatedAt, setCard]);
-  if (!card) return null;
+    void claim("star_card").then((claimed) => { if (claimed) setCard({ url, stars }); }).finally(() => { cardClaim.pending = false; });
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- `claim` is new on every render
+  }, [first, card, data, dataUpdatedAt, setCard]);
+  if (!card || !first) return null;
   const count = card.stars?.toLocaleString("en-US");
   return (
-    <PromptStackCard ariaLabel="Star Cloudroom on GitHub" className={cn("mx-3 overflow-hidden rounded-xl border-muted-foreground/15 sm:mx-4", attached && "relative z-10 -mb-5 rounded-b-none border-b-0 pb-3")}>
+    <PromptStackCard ariaLabel="Star Cloudroom on GitHub" className={cn("mx-3 overflow-hidden rounded-xl border-muted-foreground/15 sm:mx-4", attached && PROMPT_STACK_ON_INPUT_CLASS)}>
       <div data-testid="star-card" className="flex min-h-10 items-center gap-2.5 px-3 py-2 text-xs">
         <Icon name="GithubLogo" className="size-4 shrink-0 text-foreground" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate text-foreground">

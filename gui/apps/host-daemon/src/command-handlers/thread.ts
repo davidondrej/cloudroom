@@ -1,9 +1,12 @@
 import fs from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   AgentRuntimeTurnBusyError,
   type AgentRuntimeBridgeLaunch,
 } from "@cloudroom/agent-runtime";
+import { deleteChatFileCopies } from "@cloudroom/config/chat-file-copies";
 import {
   flattenPromptInputGroups,
   isStandaloneBuiltinCompactCommand,
@@ -14,6 +17,7 @@ import type { RuntimeEntry } from "../runtime-manager.js";
 import {
   CommandDispatchError,
   ExpectedCommandDispatchError,
+  getErrorCode,
   resolveRuntimeBridgeLaunch,
   type CommandDispatchOptions,
   type CommandOf,
@@ -27,6 +31,7 @@ import {
   providerInstallationGateKey,
   untilAborted,
 } from "../provider-installation-gate.js";
+import { stopStaleThreadAgents } from "../thread-processes.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
 
 type TurnSubmitCommand = CommandOf<"turn.submit">;
@@ -38,8 +43,8 @@ type ExistingThreadRuntimeCommand =
 const TURN_SUBMIT_ACTIVE_TURN_WAIT_MS = 5_000;
 const TURN_SUBMIT_STEER_ATTEMPTS = 2;
 // The check fetches the bridge, creates the runtime, starts the bridge, and
-// asks provider/installation/status (each up to 30 s), maybe twice after a
-// shell env change. A slow first check after an app update still fits.
+// asks provider/installation/status (each up to 30 s), again after a timeout
+// or a shell env change. A slow first check after an app update still fits.
 const PROVIDER_CLI_CHECK_TIMEOUT_MS = 120_000;
 
 interface ResumeThreadRuntimeIfMissingArgs {
@@ -73,6 +78,7 @@ export async function deleteThreadStorage(
     "Thread storage path escapes the storage root",
   );
   await fs.rm(storagePath, { recursive: true, force: true });
+  await deleteChatFileCopies(options.dataDir, command.threadId);
 }
 
 type ThreadStartRuntimeCommand =
@@ -134,10 +140,19 @@ async function requireSupportedProviderCliForThreadStart({
           command.bridgeLaunch,
           options,
         );
-        return options.providerInstallationStatus({
-          providerId: command.providerId,
-          bridgeLaunch,
-          ...(requirement !== undefined ? { requirement } : {}),
+        const probe = () =>
+          options.providerInstallationStatus({
+            providerId: command.providerId,
+            bridgeLaunch,
+            ...(requirement !== undefined ? { requirement } : {}),
+          });
+        // A busy machine can make one probe miss the bridge's 30 s request
+        // timeout. Ask once more before failing the start (#2251).
+        return probe().catch((error: unknown) => {
+          if ((error as { code?: unknown } | null)?.code !== "rpc_timeout") {
+            throw error;
+          }
+          return probe();
         });
       },
       signal,
@@ -169,10 +184,16 @@ async function requireSupportedProviderCliForThreadStart({
   const currentVersion = status.currentVersion
     ? ` ${status.currentVersion}`
     : "";
+  // Name the file: a Mac can hold several copies, and "update it" must reach this one.
+  const home = homedir() + path.sep;
+  const file = status.executablePath?.startsWith(home)
+    ? `~${path.sep}${status.executablePath.slice(home.length)}`
+    : status.executablePath;
+  const location = file ? ` at ${file}` : "";
   const requiredVersion = status.minimumSupportedVersion ?? "a newer version";
   throw new ExpectedCommandDispatchError(
     "provider_cli_unsupported_version",
-    `Provider "${command.providerId}"${currentVersion} is too old for this operation. Update it to ${requiredVersion} or newer.`,
+    `Provider "${command.providerId}"${currentVersion}${location} is too old for this operation. Update it to ${requiredVersion} or newer.`,
   );
 }
 
@@ -240,20 +261,114 @@ async function resumeThreadRuntimeIfMissing(
     command.resumeContext.bridgeLaunch ?? command.bridgeLaunch,
     options,
   );
-  await entry.runtime.resumeThread({
-    bridgeLaunch,
-    environmentId: command.environmentId,
-    threadId: command.threadId,
-    projectId: resumeContext.projectId,
-    providerThreadId: resumeContext.providerThreadId,
-    providerId: resumeContext.providerId,
-    contributedEnv: resumeContext.contributedEnv,
-    options: command.options,
-    instructions: resumeContext.instructions,
-    dynamicTools: resumeContext.dynamicTools,
-    disallowedTools: resumeContext.disallowedTools,
-    instructionMode: resumeContext.instructionMode,
-  });
+  const resume = () =>
+    entry.runtime.resumeThread({
+      bridgeLaunch,
+      environmentId: command.environmentId,
+      threadId: command.threadId,
+      projectId: resumeContext.projectId,
+      providerThreadId: resumeContext.providerThreadId,
+      providerId: resumeContext.providerId,
+      contributedEnv: resumeContext.contributedEnv,
+      options: command.options,
+      instructions: resumeContext.instructions,
+      dynamicTools: resumeContext.dynamicTools,
+      disallowedTools: resumeContext.disallowedTools,
+      instructionMode: resumeContext.instructionMode,
+    });
+  try {
+    await resume();
+  } catch (error) {
+    if (!(await endStaleCodexWriter(error, command.threadId, options))) {
+      throw error;
+    }
+    await resume();
+  }
+}
+
+// Cursor's CLI never retries its servers: cut off, it hangs (`rpc_timeout`) or gives up (`agent_unreachable`).
+const CURSOR_OUTAGE_CODES = new Set(["rpc_timeout", "agent_unreachable"]);
+const CURSOR_RESUME_RETRY_FOR_MS = 3 * 60_000;
+const CURSOR_RESUME_RETRY_DELAY_MS = 5_000;
+const STOP_CHECK_MS = 500;
+
+/**
+ * Reopens a thread for a message, waiting out a Cursor outage. A failed resume
+ * ends that Cursor and the message is sent only after one succeeds, so a retry
+ * can't send it twice.
+ */
+async function resumeBeforeTurn(
+  args: ResumeThreadRuntimeIfMissingArgs,
+): Promise<void> {
+  const { command, options } = args;
+  const { threadId } = command;
+  const retryUntil = Date.now() + CURSOR_RESUME_RETRY_FOR_MS;
+  const stopped = () => options.isThreadStopPending?.(threadId) === true;
+  for (;;) {
+    try {
+      return await resumeThreadRuntimeIfMissing(args);
+    } catch (error) {
+      if (command.resumeContext.providerId !== "acp-cursor") throw error;
+      const code = getErrorCode(error);
+      if (!stopped()) {
+        if (!CURSOR_OUTAGE_CODES.has(code)) throw error;
+        if (Date.now() >= retryUntil) {
+          throw new CommandDispatchError(
+            code,
+            "Cursor didn't answer after 3 minutes of retries. Your message was not sent; send it again to retry.",
+            { cause: error },
+          );
+        }
+        options.logger.warn(
+          { err: error, threadId },
+          "Cursor didn't answer; reopening the thread",
+        );
+        const nextTryAt = Date.now() + CURSOR_RESUME_RETRY_DELAY_MS;
+        while (!stopped() && Date.now() < nextTryAt) await delay(STOP_CHECK_MS);
+      }
+      if (stopped()) {
+        throw new CommandDispatchError(
+          "stopped_before_send",
+          "Stopped before Cursor reconnected. Your message was not sent.",
+          { cause: error },
+        );
+      }
+    }
+  }
+}
+
+// Codex lets one app-server write a thread (see the Codex bridge).
+const CODEX_ACTIVE_WRITER_PATTERN = /\balready has an active writer\b/i;
+
+/**
+ * Codex refused the thread for another writer while no runtime holds it, so
+ * its holder may be a Codex Cloudroom lost track of, e.g. on a replaced
+ * bridge. Ends that one, found by its thread tags under a provider bridge, so
+ * a retry recovers. Another app's Codex is neither (#1717).
+ */
+async function endStaleCodexWriter(
+  error: unknown,
+  threadId: string,
+  options: CommandDispatchOptions,
+): Promise<boolean> {
+  if (
+    !(error instanceof Error) ||
+    !CODEX_ACTIVE_WRITER_PATTERN.test(error.message) ||
+    options.runtimeManager.holdsThreadAgent(threadId)
+  ) {
+    return false;
+  }
+  const serverUrl = options.runtimeManager.getShellEnv().ROOM_SERVER_URL;
+  const stopped = await stopStaleThreadAgents(threadId, serverUrl).catch(
+    () => 0,
+  );
+  if (stopped > 0) {
+    options.logger.warn(
+      { threadId, stopped },
+      "Ended a stale Codex that held the thread's writer lock; retrying",
+    );
+  }
+  return stopped > 0;
 }
 
 export async function startThread(
@@ -295,6 +410,9 @@ export async function startThread(
       disallowedTools: command.disallowedTools,
       instructionMode: command.instructionMode,
       ...(command.fork ? { fork: command.fork } : {}),
+      ...(command.replacesProviderThreadId
+        ? { replacesProviderThreadId: command.replacesProviderThreadId }
+        : {}),
     });
     return result;
   } catch (error) {
@@ -368,7 +486,11 @@ export async function ensureThreadRuntime(
       `Thread ${command.threadId} still runs a turn in environment ${busyEnvironmentId}`,
     );
   }
-  await resumeThreadRuntimeIfMissing({ command, entry, options });
+  if (command.type === "turn.submit") {
+    await resumeBeforeTurn({ command, entry, options });
+  } else {
+    await resumeThreadRuntimeIfMissing({ command, entry, options });
+  }
   return entry;
 }
 
@@ -529,6 +651,10 @@ export async function submitTurn(
       entry,
       options,
     });
+    // A Stop that arrived while the agent was still starting had no bridge to tell.
+    if (options.isThreadStopPending?.(command.threadId)) {
+      entry.runtime.notifyThreadStopRequested?.(command.threadId, true);
+    }
     const resolvedTurnId = await resolveSubmittedTurnTarget(
       stagedCommand,
       entry,

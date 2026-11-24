@@ -146,6 +146,51 @@ it("preserves the native checkpoint when thread/stop interrupts a turn", async (
   );
 }, 30_000);
 
+it("a keep-session stop interrupts the turn and keeps Codex for the next one", async () => {
+  const providerThreadId = await startSession();
+  harness.sendRequest(2, "turn/start", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    input: [{ type: "text", text: "/wait-for-interrupt", mentions: [] }],
+    clientRequestId: "creq_a2b3c4d5e7",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  await harness.waitForResponse(2);
+  await waitForEvents((events) =>
+    events.some((event) => event.type === "turn/started"),
+  );
+
+  harness.sendRequest(3, "thread/stop", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    intent: "interrupt",
+    activeTurnId: "turn-fx-1",
+    keepSession: true,
+  });
+  expect((await harness.waitForResponse(3)).result).toEqual({
+    ok: true,
+    sessionKept: true,
+  });
+
+  // A released session would refuse this turn.
+  harness.sendRequest(4, "turn/start", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    input: [{ type: "text", text: "/clear", mentions: [] }],
+    clientRequestId: "creq_a2b3c4d5e8",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(4)).error).toBeUndefined();
+  const events = await waitForEvents(
+    (all) => all.filter((event) => event.type === "turn/completed").length === 2,
+  );
+  expect(
+    events.flatMap((event) =>
+      event.type === "turn/completed" ? [event.status] : [],
+    ),
+  ).toEqual(["interrupted", "completed"]);
+}, 30_000);
+
 it("lets a turn/started that lands after the turn/start response win the race", async () => {
   const providerThreadId = await startSession();
   harness.sendRequest(2, "turn/start", {

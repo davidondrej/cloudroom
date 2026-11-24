@@ -78,7 +78,7 @@ interface ThreadActionsMenuItemsProps extends ThreadActionsMenuBaseProps {
 }
 
 export function canTeleportLocalThread(thread: Thread): boolean {
-  return thread.executionTarget === "cloud" && !thread.parentThreadId && thread.archivedAt == null && ["codex", "pi", "claude-code", "acp-cursor", "acp-opencode"].includes(thread.providerId) && (!thread.teleport || ["complete", "cancelled", "error"].includes(thread.teleport.phase));
+  return thread.executionTarget === "cloud" && !thread.parentThreadId && thread.archivedAt == null && ["codex", "pi", "claude-code", "acp-cursor", "acp-opencode", "acp-antigravity"].includes(thread.providerId) && (!thread.teleport || ["complete", "cancelled", "error"].includes(thread.teleport.phase));
 }
 
 /** Each cloud thread works on its own branch; the user decides how the work comes back (docs/scopes/sandboxes.md). */
@@ -88,7 +88,7 @@ export function canReturnCloudWork(thread: Thread): boolean {
 const RETURN_PR_PROMPT = "Commit all your work on this thread's branch, push the branch to origin, and open a pull request into the default branch with gh. Reply with the pull request link.";
 
 export function canTeleportThread(thread: Thread): boolean {
-  return thread.executionTarget !== "cloud" && !thread.parentThreadId && thread.archivedAt == null && ["codex", "pi", "claude-code", "acp-opencode"].includes(thread.providerId) && (!thread.teleport || ["cancelled", "error"].includes(thread.teleport.phase));
+  return thread.executionTarget !== "cloud" && !thread.parentThreadId && thread.archivedAt == null && ["codex", "pi", "claude-code", "acp-opencode", "acp-antigravity"].includes(thread.providerId) && (!thread.teleport || ["cancelled", "error"].includes(thread.teleport.phase));
 }
 
 function ThreadSectionMoveMenu({

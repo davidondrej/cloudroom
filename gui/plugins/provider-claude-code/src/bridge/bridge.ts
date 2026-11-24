@@ -3,7 +3,6 @@ import { ClaudeContextUsageCollector } from "./context-usage.js";
 import { expandClaudeSkillInput } from "./skill-input.js";
 
 import {
-  type PendingInteractionGrantedPermissionProfile,
   type PendingInteractionPayload,
   type PermissionEscalation,
   type ReasoningLevel,
@@ -30,7 +29,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { randomUUID } from "node:crypto";
 import { checkCommand } from "@get-bb/plugin-sdk/internal/command-guard";
-import { join as joinPath, resolve as resolvePath } from "node:path";
+import { join as joinPath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   forkSession,
@@ -58,7 +57,10 @@ import {
   type ClaudeCodeSkillRoot,
 } from "../session-params.js";
 import { SdkSession, type SdkSessionOptions } from "./sdk-session.js";
-import { createClaudeCodeBridgeModelListMemo } from "./model-list.js";
+import {
+  claudeModelCliVersionError,
+  createClaudeCodeBridgeModelListMemo,
+} from "./model-list.js";
 import {
   claudeThreadForkParamsSchema,
   claudeThreadResumeParamsSchema,
@@ -85,6 +87,7 @@ import {
   buildReadonlyDenialMessage,
   buildMutableFlagSettings,
   buildPermissionSessionOptions,
+  claudeSettingsAllowTrustd,
   buildSessionOptions,
   buildWorkspaceWriteDenialMessage,
   toSdkEffort,
@@ -100,7 +103,7 @@ import {
   getAllowedToolNames,
   type ToolCallForwarder,
 } from "./tool-proxy-mcp.js";
-import { BB_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
+import { ROOM_BRIDGE_MCP_SERVER_NAME } from "../tool-classification.js";
 import {
   type ClaudeInteractiveResponse,
   type ClaudePermissionMode,
@@ -109,11 +112,11 @@ import {
   type ClaudeUserQuestionInput,
   type ClaudeUserQuestionRequestParams,
   CLAUDE_EXIT_PLAN_MODE_TOOL_NAME,
+  CLAUDE_SANDBOX_NETWORK_TOOL_NAME,
   CLAUDE_USER_QUESTION_TOOL_NAME,
   claudeExitPlanModeInputSchema,
   claudeSuggestedPermissionUpdateSchema,
   claudeUserQuestionInputSchema,
-  shouldRequestClaudePermissionApproval,
   toPendingInteractionPermissionProfile,
 } from "../interactive-contract.js";
 
@@ -171,7 +174,6 @@ interface PendingInteractiveRequestBase {
 interface PendingPermissionRequest extends PendingInteractiveRequestBase {
   kind: "permission_request";
   originalInput: Record<string, unknown>;
-  permissions: PendingInteractionGrantedPermissionProfile;
   toolName: string;
 }
 
@@ -182,23 +184,6 @@ interface PendingUserQuestionRequest extends PendingInteractiveRequestBase {
 type PendingInteractiveRequest =
   | PendingPermissionRequest
   | PendingUserQuestionRequest;
-
-interface ClaudeSessionPermissionGrant {
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string | null;
-}
-
-interface ClaudeSessionPermissionCoverageArgs {
-  grants: ClaudeSessionPermissionGrant[];
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string;
-}
-
-interface ClaudeSessionPermissionGrantCoverageArgs {
-  grant: ClaudeSessionPermissionGrant;
-  permissions: PendingInteractionGrantedPermissionProfile;
-  toolName: string;
-}
 
 interface ClaudeSessionRestart {
   reason: string;
@@ -211,13 +196,25 @@ interface ThreadSession {
   attachment: ThreadAttachment;
   sessionSerial: number;
   closing: boolean;
+  /** Why Cloudroom is ending this session: its remaining tool calls are denied with it. */
+  closeReason?: string;
   restartBeforeNextTurn: ClaudeSessionRestart | null;
   recoveryHintRaisedThisTurn: "authRequired" | "rateLimited" | null;
   streamEnded: boolean;
+  /** Claude is between a prompt, or a turn it started itself, and that turn's result. */
+  turnRunning: boolean;
+  /** Set while a stopped turn winds down. Called on its result; its other messages are dropped. */
+  interruptedTurn: (() => void) | null;
+  /** Turn setup runs one at a time, so a stopped setup still in flight never overtakes the next turn's. */
+  turnSetup: Promise<void>;
+  /** Set while a new turn is still being set up: a Stop waiting behind it calls this. */
+  cancelTurnSetup: (() => void) | null;
   translator: ClaudeDeltaTranslator;
   pendingInteractiveRequests: Map<string | number, PendingInteractiveRequest>;
   permissionEscalationByAgentId: Map<string, PermissionEscalation | null>;
   permissionEscalationByPromptId: Map<string, PermissionEscalation | null>;
+  /** Steers Claude hasn't started, by prompt ID: visible text, and whether Claude said it queued it (#2137). */
+  unstartedSteers: Map<string, { preview: string; queued: boolean }>;
   permissionEscalationBySubagentParentToolUseId: Map<
     string,
     PermissionEscalation | null
@@ -236,7 +233,8 @@ interface ThreadAttachment {
   liveSettings: ClaudeLiveSessionSettings;
   approvedPlanPermissionMode: ClaudePermissionMode;
   providerThreadId?: string;
-  sessionPermissionGrants: ClaudeSessionPermissionGrant[];
+  /** The user picked "Allow for session" on a sandbox network ask. */
+  sandboxNetworkAllowed: boolean;
   threadIdRef: ThreadIdRef;
 }
 
@@ -298,13 +296,8 @@ interface ReplaceThreadSessionBeforeNextTurnArgs {
 
 interface ClaudeCodeThreadStopResult {
   ok: true;
-}
-
-interface ClaudeCanUseToolDecisionContext {
-  blockedPath: string | undefined;
-  decisionReason: string | undefined;
-  suggestions: ClaudeSuggestedPermissionUpdate[] | undefined;
-  toolName: string;
+  /** Claude is still running, idle, and takes the thread's next turn. */
+  sessionKept?: true;
 }
 
 interface BuildInteractiveRequestParamsArgs {
@@ -379,7 +372,20 @@ function requireSkillPluginsRoot(): string {
 }
 
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
+const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
+/** Same text as `UNDELIVERED_MESSAGE_WARNING` in @cloudroom/domain (the bridge test checks). */
+const UNDELIVERED_MESSAGE_WARNING =
+  "May not have been delivered: the agent stopped before reading it";
+/** How long a new turn waits on its MCP check before Claude gets the prompt. */
+const MCP_CHECK_WAIT_MS = 10_000;
+const THREAD_STOPPED_MESSAGE =
+  "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
+
+/** Claude reads this as the tool's result: it must never pass for the user's rejection (#878). */
+function buildCloudroomCancelMessage(reason: string): string {
+  return `Cloudroom cancelled this tool call; the user did not reject it. Do not retry it; wait for the user's next message. Reason: ${reason}`;
+}
 
 const { send, sendResult, sendError } = createBridgeIo<
   BridgeEventNotification | BridgeToolCallRequest
@@ -387,7 +393,9 @@ const { send, sendResult, sendError } = createBridgeIo<
 
 const threadAttachments = new Map<string, ThreadAttachment>();
 const closingSessions = new Map<string, Promise<void>>();
-const unconfirmedSessionStops = new Map<string, Set<SdkSession>>();
+/** Threads with a Stop on its way: the one new turn that gets here first ends at once. */
+const stopRequestedThreadIds = new Set<string>();
+const unconfirmedSessionStops = new Map<string, Set<ThreadSession>>();
 const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
 const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 
@@ -418,6 +426,29 @@ function applyChromeSetting(
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
       reason: CLAUDE_CHROME_SETTING_RESTART_REASON,
+      showRuntimeNote: false,
+    };
+  }
+}
+
+// The trustd flag follows the user's Claude settings and account, which can
+// change mid-thread, so recheck it each turn and rebuild when it flips (#1117).
+function applyTrustdSetting(attachment: ThreadAttachment): void {
+  const sandbox = attachment.sessionOptions.sandbox;
+  if (!sandbox) return;
+  const allow = claudeSettingsAllowTrustd(
+    attachment.sessionConstructionConfig.sessionOptions.cwd,
+    attachment.sessionOptions.env ?? process.env,
+  );
+  if (allow === (sandbox.enableWeakerNetworkIsolation === true)) return;
+  const { enableWeakerNetworkIsolation: _, ...rest } = sandbox;
+  attachment.sessionOptions.sandbox = allow
+    ? { ...rest, enableWeakerNetworkIsolation: true }
+    : rest;
+  if (attachment.residentSession) {
+    attachment.residentSession.restartBeforeNextTurn ??= {
+      reason:
+        "Claude sandbox settings changed; the session was rebuilt to apply them.",
       showRuntimeNote: false,
     };
   }
@@ -458,7 +489,10 @@ function applyPermissionSetting(
   delete attachment.sessionOptions.additionalDirectories;
   Object.assign(
     attachment.sessionOptions,
-    buildPermissionSessionOptions(sessionOptions),
+    buildPermissionSessionOptions(
+      sessionOptions,
+      attachment.sessionOptions.env ?? process.env,
+    ),
   );
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
@@ -496,6 +530,7 @@ function createForwardToolCall(getThreadId: () => string): ToolCallForwarder {
 
 async function closeThreadSession(args: {
   graceful?: boolean;
+  gracefulTimeoutMs?: number;
   message: string;
   notifyHost?: boolean;
   threadId: string;
@@ -511,9 +546,11 @@ async function closeThreadSession(args: {
   }
 
   attachment.closing = true;
+  stopRequestedThreadIds.delete(args.threadId);
   const threadSession = attachment.residentSession;
   if (threadSession) {
     threadSession.closing = true;
+    threadSession.closeReason = args.message;
     resolvePendingSessionWork(
       threadSession,
       args.message,
@@ -526,17 +563,15 @@ async function closeThreadSession(args: {
         await closeClaudeThreadSession(
           threadSession,
           args.graceful !== false,
+          args.gracefulTimeoutMs,
         ).catch((error: unknown) => {
           if (process.platform === "win32") {
-            holdUnconfirmedSessionStop(args.threadId, threadSession.session);
-            emitSessionError(
-              threadSession,
-              args.threadId,
-              error instanceof Error ? error.message : String(error),
-            );
+            holdUnconfirmedSessionStop(args.threadId, threadSession);
+            warnSessionStopFailed(args.threadId, error);
           }
           throw error;
         });
+        sendEndedTasks(args.threadId, threadSession);
       }
       await retryUnconfirmedSessionStops(args.threadId);
     })
@@ -563,11 +598,22 @@ async function closeThreadSession(args: {
 
 function holdUnconfirmedSessionStop(
   threadId: string,
-  session: SdkSession,
+  threadSession: ThreadSession,
 ): void {
   const sessions = unconfirmedSessionStops.get(threadId) ?? new Set();
-  sessions.add(session);
+  sessions.add(threadSession);
   unconfirmedSessionStops.set(threadId, sessions);
+}
+
+/**
+ * A stopped Claude's background commands, agents, and workflows ended with
+ * it. The next Claude can't see them, so nothing else would end them (#2228).
+ */
+function sendEndedTasks(threadId: string, threadSession: ThreadSession): void {
+  sendThreadDeltas(
+    threadId,
+    threadSession.translator.buildEndedTaskDeltas(threadId),
+  );
 }
 
 /** Stops this thread's earlier Claudes again until each stop is confirmed. */
@@ -575,9 +621,10 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
   const sessions = unconfirmedSessionStops.get(threadId);
   if (!sessions) return;
   const results = await Promise.allSettled(
-    Array.from(sessions, async (session) => {
-      await session.stop();
-      sessions.delete(session);
+    Array.from(sessions, async (held) => {
+      await held.session.stop();
+      sessions.delete(held);
+      sendEndedTasks(threadId, held);
     }),
   );
   if (sessions.size === 0) unconfirmedSessionStops.delete(threadId);
@@ -585,7 +632,7 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
   if (!failure) return;
-  if ([...sessions].some((session) => session.isRunning())) {
+  if ([...sessions].some((held) => held.session.isRunning())) {
     throw new Error(
       "An earlier Claude process for this thread is still running, and Cloudroom is stopping it. Try again in a moment.",
     );
@@ -620,86 +667,6 @@ async function closeReplacedThreadSession(threadId: string): Promise<void> {
   }
 }
 
-function permissionPathCovers(
-  grantPath: string,
-  requestedPath: string,
-): boolean {
-  const normalizedGrantPath = resolvePath(grantPath);
-  const normalizedRequestedPath = resolvePath(requestedPath);
-  if (normalizedGrantPath === normalizedRequestedPath) {
-    return true;
-  }
-  const grantPrefix = normalizedGrantPath.endsWith("/")
-    ? normalizedGrantPath
-    : `${normalizedGrantPath}/`;
-  return normalizedRequestedPath.startsWith(grantPrefix);
-}
-
-function permissionPathListCovers(
-  grantedPaths: string[],
-  requestedPaths: string[],
-): boolean {
-  return requestedPaths.every((requestedPath) =>
-    grantedPaths.some((grantedPath) =>
-      permissionPathCovers(grantedPath, requestedPath),
-    ),
-  );
-}
-
-function fileSystemPermissionsCover(
-  granted: PendingInteractionGrantedPermissionProfile["fileSystem"],
-  requested: PendingInteractionGrantedPermissionProfile["fileSystem"],
-): boolean {
-  if (requested === null) {
-    return true;
-  }
-  if (granted === null) {
-    return false;
-  }
-  const grantedReadPaths = [...granted.read, ...granted.write];
-  return (
-    permissionPathListCovers(grantedReadPaths, requested.read) &&
-    permissionPathListCovers(granted.write, requested.write)
-  );
-}
-
-function networkPermissionsCover(
-  granted: PendingInteractionGrantedPermissionProfile["network"],
-  requested: PendingInteractionGrantedPermissionProfile["network"],
-): boolean {
-  return requested?.enabled === true ? granted?.enabled === true : true;
-}
-
-function sessionPermissionGrantCovers(
-  args: ClaudeSessionPermissionGrantCoverageArgs,
-): boolean {
-  if (args.grant.toolName !== null && args.grant.toolName !== args.toolName) {
-    return false;
-  }
-  return (
-    networkPermissionsCover(
-      args.grant.permissions.network,
-      args.permissions.network,
-    ) &&
-    fileSystemPermissionsCover(
-      args.grant.permissions.fileSystem,
-      args.permissions.fileSystem,
-    )
-  );
-}
-
-function hasClaudeSessionPermissionGrant(
-  args: ClaudeSessionPermissionCoverageArgs,
-): boolean {
-  return args.grants.some((grant) =>
-    sessionPermissionGrantCovers({
-      grant,
-      permissions: args.permissions,
-      toolName: args.toolName,
-    }),
-  );
-}
-
 function shouldCacheClaudeSessionPermission(
   response: ClaudeInteractiveResponse,
 ): boolean {
@@ -719,16 +686,53 @@ function pushPromptInput(
   threadSession: ThreadSession,
   input: string,
   permissionEscalation: PermissionEscalation | null,
+  steerPreview?: string,
 ): Promise<void> {
   const promptId = randomUUID();
   threadSession.permissionEscalationByPromptId.set(
     promptId,
     permissionEscalation,
   );
+  if (steerPreview !== undefined) {
+    threadSession.unstartedSteers.set(promptId, { preview: steerPreview, queued: false });
+  }
   return threadSession.session.pushInput(input, promptId).catch((error) => {
     threadSession.permissionEscalationByPromptId.delete(promptId);
+    threadSession.unstartedSteers.delete(promptId);
     throw error;
   });
+}
+
+/** The steer's text as the timeline shows it: no skill expansion, nothing agent-only. */
+function visibleSteerPreview(input: unknown): string {
+  const text = (Array.isArray(input) ? input : [])
+    .flatMap((raw: unknown) => {
+      const item = promptInputItemSchema.safeParse(raw).data;
+      const agentOnly = (raw as { visibility?: unknown }).visibility === "agent-only";
+      return item?.type === "text" && !agentOnly ? [item.text] : [];
+    })
+    .join("\n");
+  return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+}
+
+/**
+ * At a Stop, each steer Claude said it queued and hasn't started is marked:
+ * Claude may drop it with the turn. Changes nothing Claude does. The server
+ * keeps the mark only for a Stop someone chose (#2137).
+ */
+function warnUnstartedSteers(threadId: string, threadSession: ThreadSession): void {
+  const queued = [...threadSession.unstartedSteers.values()].filter((steer) => steer.queued);
+  threadSession.unstartedSteers.clear();
+  sendThreadDeltas(
+    threadId,
+    queued.map((steer) => ({
+      kind: "provider.warning" as const,
+      category: "general" as const,
+      summary: UNDELIVERED_MESSAGE_WARNING,
+      ...(steer.preview ? { details: steer.preview } : {}),
+      vouchedTurn: true,
+    })),
+  );
 }
 
 async function applyLiveSessionSettings(
@@ -834,6 +838,8 @@ function emitForSession(
     }
     if (delta.kind === "turn.boundary" || delta.kind === "session.reset") {
       threadSession.recoveryHintRaisedThisTurn = null;
+      // Some turns end without a result message.
+      threadSession.turnRunning = false;
     }
   }
 }
@@ -908,6 +914,20 @@ function emitSessionError(
       message,
     },
   });
+}
+
+/**
+ * A closing session's failed stop is only a warning. The bridge `error`
+ * notification would fail the thread's next turn before it starts (#1364).
+ */
+function warnSessionStopFailed(threadId: string, error: unknown): void {
+  sendThreadDeltas(threadId, [
+    {
+      kind: "provider.warning",
+      category: "general",
+      summary: error instanceof Error ? error.message : String(error),
+    },
+  ]);
 }
 
 function emitSessionReplacement(args: {
@@ -1043,7 +1063,7 @@ function createThreadAttachment(
     ...(args.providerThreadId
       ? { providerThreadId: args.providerThreadId }
       : {}),
-    sessionPermissionGrants: [],
+    sandboxNetworkAllowed: false,
     threadIdRef: args.threadIdRef,
   };
   attachment.residentSession = createThreadSession(attachment);
@@ -1066,6 +1086,24 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
       sessionSerial,
       threadIdRef: attachment.threadIdRef,
     }),
+    // Its pending approval's deny doesn't interrupt (#878), so Claude goes on
+    // with its queued tool calls: this session denies each one while closing.
+    {
+      hooks: [
+        async () =>
+          threadSession.closing
+            ? {
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse",
+                  permissionDecision: "deny",
+                  permissionDecisionReason: buildCloudroomCancelMessage(
+                    threadSession.closeReason ?? "Claude session closed",
+                  ),
+                },
+              }
+            : {},
+      ],
+    },
   );
 
   const translator = createClaudeDeltaTranslator({
@@ -1089,10 +1127,15 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
     restartBeforeNextTurn: null,
     recoveryHintRaisedThisTurn: null,
     streamEnded: false,
+    turnRunning: false,
+    interruptedTurn: null,
+    turnSetup: Promise.resolve(),
+    cancelTurnSetup: null,
     translator,
     pendingInteractiveRequests: new Map(),
     permissionEscalationByAgentId: new Map(),
     permissionEscalationByPromptId: new Map(),
+    unstartedSteers: new Map(),
     permissionEscalationBySubagentParentToolUseId: new Map(),
     permissionEscalationByToolUseId: new Map(),
   };
@@ -1337,6 +1380,10 @@ function buildSessionTrackingHooks(
   };
 }
 
+/** The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+ *  20261117-113618). Never on commits. Cloud uses the same line: `PR_FOOTER` in core/src/runtime/claude.rs. */
+const PR_FOOTER = "Built with [Cloudroom](https://cloudroom.dev)";
+
 function buildTrackedSessionOptions(
   params: SessionConstructionParams,
   env: NodeJS.ProcessEnv,
@@ -1353,7 +1400,7 @@ function buildTrackedSessionOptions(
   if (params.stripAiCoAuthorsEnabled !== false) {
     sessionOptions.settings = {
       ...(typeof sessionOptions.settings === "object" ? sessionOptions.settings : {}),
-      attribution: { commit: "", pr: "" },
+      attribution: { commit: "", pr: PR_FOOTER },
     };
   }
   if (params.commandGuardEnabled !== false) {
@@ -1377,6 +1424,7 @@ function buildTrackedSessionOptions(
 
 function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
   args.threadSession.closing = true;
+  args.threadSession.closeReason = args.restart.reason;
   resolvePendingSessionWork(args.threadSession, args.restart.reason);
   emitSessionReplacement({
     providerThreadId: args.providerThreadId,
@@ -1386,13 +1434,9 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
     threadSession: args.threadSession,
   });
   if (process.platform === "win32") {
-    holdUnconfirmedSessionStop(args.threadId, args.threadSession.session);
+    holdUnconfirmedSessionStop(args.threadId, args.threadSession);
     void args.threadSession.session.stop().catch((error: unknown) => {
-      emitSessionError(
-        args.threadSession,
-        args.threadId,
-        error instanceof Error ? error.message : String(error),
-      );
+      warnSessionStopFailed(args.threadId, error);
     });
   } else {
     void args.threadSession.session.stop();
@@ -1523,6 +1567,29 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    const lifecycle = message as { type?: string; command_uuid?: unknown; state?: unknown };
+    const steer =
+      lifecycle.type === "command_lifecycle" && typeof lifecycle.command_uuid === "string"
+        ? threadSession.unstartedSteers.get(lifecycle.command_uuid)
+        : undefined;
+    if (steer && lifecycle.state === "queued") steer.queued = true;
+    else if (steer) threadSession.unstartedSteers.delete(lifecycle.command_uuid as string);
+    if (message.type === "result") {
+      threadSession.turnRunning = false;
+    } else if (
+      (message.type === "assistant" || message.type === "stream_event") &&
+      message.parent_tool_use_id === null
+    ) {
+      threadSession.turnRunning = true;
+    }
+    if (threadSession.interruptedTurn !== null) {
+      // The stopped turn is already settled; only its result still matters.
+      if (message.type === "result") {
+        threadSession.interruptedTurn();
+        threadSession.interruptedTurn = null;
+      }
+      return;
+    }
     if (
       message.type === "assistant" ||
       message.type === "user" ||
@@ -1662,6 +1729,10 @@ function resolvePendingInteractiveRequests(
   message: string,
   notifyHost: boolean,
 ): void {
+  // An interrupting deny makes Claude drop its message and record this and
+  // every other unfinished tool call as "The user doesn't want to ..." (#878).
+  // An ending session stops anyway, so only a kept one interrupts its turn.
+  const interrupt = !threadSession.closing;
   for (const [requestId, pending] of threadSession.pendingInteractiveRequests) {
     threadSession.pendingInteractiveRequests.delete(requestId);
     if (notifyHost) {
@@ -1669,8 +1740,8 @@ function resolvePendingInteractiveRequests(
     }
     pending.resolve({
       behavior: "deny",
-      interrupt: true,
-      message,
+      ...(interrupt ? { interrupt: true } : {}),
+      message: buildCloudroomCancelMessage(message),
       toolUseID: pending.itemId,
     });
   }
@@ -1679,9 +1750,10 @@ function resolvePendingInteractiveRequests(
 async function closeClaudeThreadSession(
   threadSession: ThreadSession,
   graceful: boolean,
+  gracefulTimeoutMs = THREAD_STOP_CLOSE_TIMEOUT_MS,
 ): Promise<void> {
   if (graceful) {
-    await threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS);
+    await threadSession.session.closeGracefully(gracefulTimeoutMs);
   } else {
     await threadSession.session.stop();
   }
@@ -1689,15 +1761,24 @@ async function closeClaudeThreadSession(
 
 function buildSessionEnv(
   envOverrides: Record<string, string>,
+  providerSubagentsEnabled: boolean,
 ): NodeJS.ProcessEnv {
   const sessionEnv: NodeJS.ProcessEnv = {
     ...withoutBridgeRuntimeEnv(process.env),
     ...envOverrides,
     CLAUDE_CODE_ENTRYPOINT: "cli",
   };
+  // Claude can swap WebFetch for a `web-fetch` subagent, which the disabled-
+  // subagents hook denies; keep the direct WebFetch tool instead (#1489).
+  if (!providerSubagentsEnabled) sessionEnv.CLAUDE_CODE_WEB_FETCH_AGENT ??= "0";
   delete sessionEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
-  for (const key of ACCOUNT_ENV_KEYS) if (sessionEnv[key] === "") delete sessionEnv[key];
-  return sessionEnv;
+  return withoutBlankAccountEnv(sessionEnv);
+}
+
+/** A blank account variable means "unset": it clears one the machine's own shell sets. */
+export function withoutBlankAccountEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  for (const key of ACCOUNT_ENV_KEYS) if (env[key] === "") delete env[key];
+  return env;
 }
 
 const ACCOUNT_ENV_KEYS = new Set([
@@ -1749,7 +1830,10 @@ function applyTurnEnvironment(
     ...attachment.sessionConstructionConfig,
     config,
   };
-  attachment.sessionOptions.env = buildSessionEnv(envOverrides);
+  attachment.sessionOptions.env = buildSessionEnv(
+    envOverrides,
+    attachment.liveSettings.providerSubagentsEnabled,
+  );
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
       reason: accountOnly
@@ -1942,7 +2026,6 @@ function createForwardInteractiveRequest(
         kind: "permission_request",
         payload,
         originalInput: args.input,
-        permissions: params.permissions,
         resolve: finish,
         toolName: args.toolName,
       });
@@ -2065,6 +2148,15 @@ function restoreApprovedPlanPermissionMode(threadSession: ThreadSession): void {
     });
 }
 
+// A rule-forced ask has no reason, and Claude's own reason for a sandbox exit
+// is the raw flag name. The card always says the command leaves the sandbox.
+function describeUnsandboxedAsk(reason: string | undefined): string {
+  const note = "Run this command outside the sandbox?";
+  return reason === undefined || reason === "dangerouslyDisableSandbox"
+    ? note
+    : `${note} ${reason}`;
+}
+
 function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
   const forwardInteractiveRequest =
     createForwardInteractiveRequest(threadIdRef);
@@ -2081,6 +2173,16 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       return {
         behavior: "deny",
         message: "Thread session not found",
+        toolUseID: options.toolUseID,
+      };
+    }
+    // An ending session asks the user nothing more; its turn ends with it.
+    if (threadSession.closing) {
+      return {
+        behavior: "deny",
+        message: buildCloudroomCancelMessage(
+          threadSession.closeReason ?? "Claude session closed",
+        ),
         toolUseID: options.toolUseID,
       };
     }
@@ -2136,22 +2238,11 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
     const suggestions = parseClaudeSuggestedPermissionUpdates(
       options.suggestions,
     );
-
-    const requestContext: ClaudeCanUseToolDecisionContext = {
-      toolName,
-      blockedPath: options.blockedPath,
-      decisionReason: options.decisionReason,
-      suggestions,
-    };
-    const requestedPermissions =
-      toPendingInteractionPermissionProfile(requestContext);
+    const runsOutsideSandbox =
+      toolName === "Bash" && input.dangerouslyDisableSandbox === true;
     if (
-      toolName === "Bash" &&
-      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy) &&
-      typeof input === "object" &&
-      input !== null &&
-      (input as { dangerouslyDisableSandbox?: unknown })
-        .dangerouslyDisableSandbox === true
+      runsOutsideSandbox &&
+      shouldAutoDenyInteractiveRequest(interactiveRequestPolicy)
     ) {
       return {
         behavior: "deny",
@@ -2159,30 +2250,20 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
         toolUseID: options.toolUseID,
       };
     }
+    // Claude calls this only for a call it would ask the user about, so
+    // outside Full access every ask reaches the user. "Allow for session"
+    // reaches Claude as a session rule, and Claude still asks when an ask
+    // rule, a safety check or a sandbox exit needs a person. Claude keeps no
+    // such rule for sandbox network asks, so the bridge remembers that one.
     if (
-      hasClaudeSessionPermissionGrant({
-        grants: threadSession.attachment.sessionPermissionGrants,
-        permissions: requestedPermissions,
-        toolName,
-      })
+      toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
+      threadSession.attachment.sandboxNetworkAllowed
     ) {
       return {
         behavior: "allow",
         updatedInput: input,
         toolUseID: options.toolUseID,
         decisionClassification: "user_permanent",
-      };
-    }
-
-    const shouldRequestApproval =
-      shouldRequestClaudePermissionApproval(requestContext) ||
-      (options.suggestions?.length ?? 0) > 0;
-
-    if (!shouldRequestApproval) {
-      return {
-        behavior: "allow",
-        updatedInput: input,
-        toolUseID: options.toolUseID,
       };
     }
 
@@ -2214,7 +2295,9 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       toolName,
       toolUseId: options.toolUseID,
       input,
-      decisionReason: options.decisionReason,
+      decisionReason: runsOutsideSandbox
+        ? describeUnsandboxedAsk(options.decisionReason)
+        : options.decisionReason,
       promptText: options.title ?? options.description,
       blockedPath: options.blockedPath,
       suggestions,
@@ -2293,6 +2376,7 @@ async function handleRequest(request: ClaudeCodeJsonRpcRequest): Promise<void> {
           approvalEnforcedBy: "provider",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "inject",
+          stopsUnopenedTurns: process.platform !== "win32",
           skills: { configure: true },
         },
       };
@@ -2374,7 +2458,10 @@ function attachThreadSession(
   resume: boolean,
 ): void {
   const threadIdRef = { current: params.threadId };
-  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
+  const env = buildSessionEnv(
+    readConfigEnvOverrides(params.config),
+    params.providerSubagentsEnabled ?? true,
+  );
   const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
   if (!resume) {
     sessionOptions.sessionId = providerThreadId;
@@ -2386,7 +2473,7 @@ function attachThreadSession(
       params.dynamicTools,
       createForwardToolCall(() => threadIdRef.current),
     );
-    sessionOptions.mcpServers = { [BB_BRIDGE_MCP_SERVER_NAME]: mcpServer };
+    sessionOptions.mcpServers = { [ROOM_BRIDGE_MCP_SERVER_NAME]: mcpServer };
     sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
   }
 
@@ -2548,6 +2635,7 @@ async function runTurnInput(
     applyChromeSetting(attachment, params.chromeEnabled);
     if (intent === "new-turn") {
       applyPermissionSetting(attachment, params);
+      applyTrustdSetting(attachment);
     }
   }
 
@@ -2558,11 +2646,42 @@ async function runTurnInput(
   }
 
   if (!threadSession.session.canPushInput()) {
-    sendError(id, -32000, "Claude SDK input stream is closed");
+    sendError(
+      id,
+      -32000,
+      "Claude can no longer take messages in this thread. Try restarting Cloudroom on the computer running this thread, or start a new thread.",
+    );
     return;
   }
-  try {
-    promptText = buildPromptText(await expandClaudeSkillInput(
+  const cliTooOld = await claudeModelCliVersionError(
+    params.model ?? threadSession.attachment.liveSettings.model,
+    threadSession.attachment.sessionOptions.pathToClaudeCodeExecutable,
+  );
+  if (cliTooOld !== null) {
+    sendError(id, -32000, cliTooOld);
+    return;
+  }
+  // A Stop can be on its way while this turn is still being set up, which
+  // takes seconds while Claude starts. The turn then ends here, as interrupted,
+  // before Claude ever takes it.
+  let stopped =
+    intent === "new-turn" && stopRequestedThreadIds.delete(params.threadId);
+  const endStoppedTurn = (): void => {
+    sendThreadDeltas(
+      params.threadId,
+      threadSession.translator.cancelInput(
+        params.threadId,
+        acceptance.clientRequestId,
+      ),
+    );
+    sendResult(id, { threadId: params.threadId });
+  };
+  if (stopped) {
+    endStoppedTurn();
+    return;
+  }
+  const setup = threadSession.turnSetup.then(async () => {
+    const text = buildPromptText(await expandClaudeSkillInput(
       params.input,
       threadSession.attachment.sessionOptions,
     ))!;
@@ -2574,19 +2693,47 @@ async function runTurnInput(
         params,
       ),
     );
+    if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
+    if (intent === "new-turn") {
+      // Best effort. Claude still starting, or stuck, must not hold the turn
+      // past the host's wait for turn/start (#1574).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        threadSession.session.reconnectMcpServers().catch((error) => {
+          logBridgeError(
+            `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, MCP_CHECK_WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+    return text;
+  });
+  threadSession.turnSetup = setup.then(
+    () => undefined,
+    () => undefined,
+  );
+  const stopRequested = new Promise<void>((resolve) => {
+    if (intent === "new-turn") threadSession.cancelTurnSetup = resolve;
+  }).then(() => {
+    stopped = true;
+  });
+  try {
+    const text = await Promise.race([setup, stopRequested]);
+    if (text === undefined) {
+      endStoppedTurn();
+      return;
+    }
+    promptText = text;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     sendError(id, -32000, message);
     return;
-  }
-
-  if (intent === "new-turn") {
-    await threadSession.session.reconnectFailedMcpServers().catch((error) => {
-      logBridgeError(
-        `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
+  } finally {
+    threadSession.cancelTurnSetup = null;
   }
 
   try {
@@ -2594,7 +2741,9 @@ async function runTurnInput(
       threadSession,
       promptText,
       params.permissionEscalation,
+      intent === "steer" ? visibleSteerPreview(params.input) : undefined,
     );
+    threadSession.turnRunning = true;
     emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
     threadSession.attachment.permissionEscalation = params.permissionEscalation;
     sendResult(id, { threadId: params.threadId });
@@ -2651,10 +2800,12 @@ async function handleTurnSteer(
 
 async function closeThreadForStop(
   threadId: string,
+  gracefulTimeoutMs?: number,
 ): Promise<ClaudeCodeThreadStopResult> {
   await closeThreadSession({
     graceful: true,
-    message: "Thread stopped while awaiting permission approval",
+    ...(gracefulTimeoutMs === undefined ? {} : { gracefulTimeoutMs }),
+    message: THREAD_STOPPED_MESSAGE,
     threadId,
   });
   return { ok: true };
@@ -2664,18 +2815,115 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParams,
 ): Promise<void> {
+  stopRequestedThreadIds.delete(params.threadId);
   const threadSession = threadAttachments.get(params.threadId)?.residentSession;
+  // Before the turn settles, so the parent's notice can count them.
+  if (params.intent === "interrupt" && threadSession && !threadSession.closing) {
+    warnUnstartedSteers(params.threadId, threadSession);
+  }
   if (
-    params.intent === "interrupt" &&
-    threadSession != null &&
-    !threadSession.closing
+    threadSession == null ||
+    threadSession.closing ||
+    (params.intent !== "interrupt" && params.keepSession !== true)
   ) {
+    sendResult(id, await closeThreadForStop(params.threadId));
+    return;
+  }
+  // Read first: the settlement below marks every task stopped.
+  const runningTaskIds = threadSession.translator.runningTaskIds(
+    params.threadId,
+  );
+  // A keep-session stop can arrive before the turn it stops has opened.
+  if (params.intent === "interrupt" || threadSession.turnRunning) {
     sendThreadDeltas(
       params.threadId,
-      threadSession.translator.buildSessionSettlementDeltas(params.threadId),
+      threadSession.translator.buildSessionSettlementDeltas(
+        params.threadId,
+        true,
+      ),
     );
   }
-  sendResult(id, await closeThreadForStop(params.threadId));
+  const startedAt = Date.now();
+  if (
+    params.keepSession === true &&
+    (await interruptRunningTurn(threadSession)) &&
+    (await stopRunningTasks(threadSession, runningTaskIds)) &&
+    !threadSession.streamEnded
+  ) {
+    // Per-turn state a new session would have started without.
+    threadSession.recoveryHintRaisedThisTurn = null;
+    restoreApprovedPlanPermissionMode(threadSession);
+    sendResult(id, { ok: true, sessionKept: true });
+    return;
+  }
+  // Claude could not be kept, or the caller wants it gone: end it, as before.
+  sendResult(
+    id,
+    await closeThreadForStop(
+      params.threadId,
+      Math.max(500, THREAD_STOP_CLOSE_TIMEOUT_MS - (Date.now() - startedAt)),
+    ),
+  );
+}
+
+/**
+ * An interrupt ends the turn's foreground command but leaves background
+ * commands, agents, and workflows running. Stop ends those too, as it did when
+ * it ended Claude. False when Claude does not confirm every one in time.
+ */
+async function stopRunningTasks(
+  threadSession: ThreadSession,
+  taskIds: readonly string[],
+): Promise<boolean> {
+  if (taskIds.length === 0) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.all(
+        taskIds.map((taskId) => threadSession.session.stopTask(taskId)),
+      ).then(
+        () => true,
+        () => false,
+      ),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), TURN_INTERRUPT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Ends Claude's running turn and waits for Claude to confirm it, as Esc does
+ * in Claude Code. False when Claude does not confirm in time or would start
+ * another turn by itself, so the caller ends the session instead.
+ * Windows always ends Claude's whole process tree.
+ */
+async function interruptRunningTurn(
+  threadSession: ThreadSession,
+): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  // Claude stays up, so the host must hear that its pending approvals ended.
+  resolvePendingSessionWork(threadSession, THREAD_STOPPED_MESSAGE, true);
+  if (!threadSession.turnRunning) return true;
+  const result = new Promise<true>((resolve) => {
+    threadSession.interruptedTurn = () => resolve(true);
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), TURN_INTERRUPT_TIMEOUT_MS);
+  });
+  try {
+    // Claude still holding the prompt would run it: don't wait for that turn.
+    const nothingQueued = await Promise.race([
+      threadSession.session.interrupt().catch(() => false),
+      timedOut,
+    ]);
+    return nothingQueued && (await Promise.race([result, timedOut]));
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function localAttachmentMarker(args: {
@@ -2731,7 +2979,27 @@ function buildPromptText(input: unknown): string | undefined {
   return chunks.length > 0 ? chunks.join("\n") : undefined;
 }
 
+// Runtime notification (no id): a Stop or Archive waits behind this thread's
+// command. Mirrors THREAD_STOP_REQUESTED_METHOD in @cloudroom/agent-runtime.
+const threadStopRequestedNotificationSchema = z.object({
+  method: z.literal("thread/stopRequested"),
+  params: z.object({
+    threadId: z.string().min(1),
+    stop: z.boolean().optional(),
+  }),
+});
+
 function handleParsedMessage(parsed: unknown): void {
+  const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
+  if (stopRequested.success) {
+    const { threadId, stop } = stopRequested.data.params;
+    if (stop !== true) return;
+    const cancelTurnSetup =
+      threadAttachments.get(threadId)?.residentSession?.cancelTurnSetup;
+    if (cancelTurnSetup) cancelTurnSetup();
+    else stopRequestedThreadIds.add(threadId);
+    return;
+  }
   const response = decodeBridgeJsonRpcResponse(parsed);
   if (response && handleToolCallResponse(response)) {
     return;
@@ -2766,12 +3034,10 @@ function handleParsedMessage(parsed: unknown): void {
     }
     if (
       pending.kind === "permission_request" &&
+      pending.toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
       shouldCacheClaudeSessionPermission(interactiveResponse)
     ) {
-      threadSession.attachment.sessionPermissionGrants.push({
-        permissions: pending.permissions,
-        toolName: pending.toolName,
-      });
+      threadSession.attachment.sandboxNetworkAllowed = true;
     }
 
     if (

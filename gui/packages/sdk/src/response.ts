@@ -1,11 +1,16 @@
 import { extractErrorMessage } from "@cloudroom/core-ui";
 
-export const DEFAULT_BB_REQUEST_TIMEOUT_MS = 75_000;
+export const DEFAULT_ROOM_REQUEST_TIMEOUT_MS = 75_000;
 
 export type FetchImplementation = typeof fetch;
 
 export interface RequestTimeoutFetchOptions {
   timeoutMs: number;
+}
+
+/** A call that may take longer than the transport's deadline sets its own `timeoutMs`. */
+export interface SdkRequestInit extends RequestInit {
+  timeoutMs?: number;
 }
 
 interface RequestTimeoutContext {
@@ -63,7 +68,7 @@ function formatRequestTimeoutDuration(timeoutMs: number): string {
   return seconds === 1 ? "1 second" : `${seconds} seconds`;
 }
 
-export class BbRequestTimeoutError extends Error {
+export class RoomRequestTimeoutError extends Error {
   constructor(timeoutMs: number) {
     super(
       `Cloudroom request timed out after ${formatRequestTimeoutDuration(timeoutMs)}.`,
@@ -72,19 +77,19 @@ export class BbRequestTimeoutError extends Error {
   }
 }
 
-export interface BbHttpErrorArgs {
+export interface RoomHttpErrorArgs {
   body: unknown;
   code: string | null;
   message: string;
   status: number;
 }
 
-export class BbHttpError extends Error {
+export class RoomHttpError extends Error {
   readonly body: unknown;
   readonly code: string | null;
   readonly status: number;
 
-  constructor(args: BbHttpErrorArgs) {
+  constructor(args: RoomHttpErrorArgs) {
     super(`HTTP ${args.status}: ${args.message}`);
     this.name = "BbHttpError";
     this.body = args.body;
@@ -98,15 +103,16 @@ export function createRequestTimeoutFetch(
 ): FetchImplementation {
   validateRequestTimeoutMs(options.timeoutMs);
 
-  return async (input, init) => {
-    const timeoutSignal = AbortSignal.timeout(options.timeoutMs);
+  return async (input, init?: SdkRequestInit) => {
+    const timeoutMs = Math.max(options.timeoutMs, init?.timeoutMs ?? 0);
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const requestSignal = init?.signal
       ? AbortSignal.any([init.signal, timeoutSignal])
       : timeoutSignal;
     const context: RequestTimeoutContext = {
       requestSignal,
       timeoutSignal,
-      timeoutMs: options.timeoutMs,
+      timeoutMs,
     };
 
     try {
@@ -114,7 +120,7 @@ export function createRequestTimeoutFetch(
       return wrapRequestTimeoutResponse({ context, response });
     } catch (error) {
       if (isRequestTimeoutError(context, error)) {
-        throw new BbRequestTimeoutError(options.timeoutMs);
+        throw new RoomRequestTimeoutError(timeoutMs);
       }
       throw error;
     }
@@ -151,7 +157,7 @@ export async function resolveResponse<TResponse extends SdkResponseLike>(
   }
   if (!response.ok) {
     const { body, code, message } = await readHttpErrorInfo(response);
-    throw new BbHttpError({ body, code, message, status: response.status });
+    throw new RoomHttpError({ body, code, message, status: response.status });
   }
   return response;
 }
@@ -163,7 +169,7 @@ async function readResponseBodyWithTimeoutMapping<TBody>(
     return await args.read();
   } catch (error) {
     if (isRequestTimeoutError(args.context, error)) {
-      throw new BbRequestTimeoutError(args.context.timeoutMs);
+      throw new RoomRequestTimeoutError(args.context.timeoutMs);
     }
     throw error;
   }
@@ -233,7 +239,7 @@ function wrapRequestTimeoutBody(
         controller.enqueue(result.value);
       } catch (error) {
         if (isRequestTimeoutError(args.context, error)) {
-          controller.error(new BbRequestTimeoutError(args.context.timeoutMs));
+          controller.error(new RoomRequestTimeoutError(args.context.timeoutMs));
           return;
         }
         controller.error(error);
@@ -307,7 +313,7 @@ async function readHttpErrorInfo(
   try {
     rawBody = await response.text();
   } catch (error) {
-    if (error instanceof BbRequestTimeoutError) {
+    if (error instanceof RoomRequestTimeoutError) {
       throw error;
     }
     rawBody = "";

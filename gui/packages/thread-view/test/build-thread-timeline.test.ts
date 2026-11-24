@@ -2,6 +2,7 @@ import { threadScope, turnScope } from "@cloudroom/domain";
 import type {
   ApprovalPendingInteractionResolution,
   JsonObject,
+  JsonValue,
   OwnershipChangeOperationAction,
   PromptInput,
   ProviderErrorInfo,
@@ -29,8 +30,8 @@ import {
   extractThreadTimelineActivePlanTurn,
   type ThreadEventWithMeta,
 } from "../src/index.js";
-import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/accepted-client-request-context.js";
-import { parseOperationMessage } from "../src/parse-operation-message.js";
+import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/events.js";
+import { parseOperationEvent } from "../src/messages.js";
 import {
   createTimelineEventFactory,
   fromRows,
@@ -1072,6 +1073,83 @@ describe("buildThreadTimelineFromEvents", () => {
     },
   );
 
+  it("preserves __proto__ tool argument keys as own properties", () => {
+    const toolArgs = JSON.parse(
+      '{"__proto__":{"polluted":true},"safe":1}',
+    ) as JsonObject;
+    const rows = buildTimelineRows([
+      turnStartedEvent({ seq: 1 }),
+      toolCallItemEvent({
+        seq: 2,
+        tool: "fuzz",
+        toolArgs,
+        type: "item/started",
+      }),
+    ]);
+    const [row] = collectToolRows(rows);
+    const parsed = row?.toolArgs;
+    expect(parsed).toBeDefined();
+    expect(Object.keys(parsed!)).toEqual(["__proto__", "safe"]);
+    expect(Object.getPrototypeOf(parsed!)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(parsed!, "__proto__")?.value,
+    ).toEqual({
+      polluted: true,
+    });
+  });
+
+  it("projects deeply nested tool arguments without overflowing the stack", () => {
+    let value: JsonValue = "leaf";
+    for (let depth = 0; depth < 10_000; depth += 1) value = [value];
+    const rows = buildTimelineRows([
+      turnStartedEvent({ seq: 1 }),
+      toolCallItemEvent({
+        seq: 2,
+        tool: "fuzz",
+        toolArgs: { value },
+        type: "item/started",
+      }),
+    ]);
+    const [row] = collectToolRows(rows);
+    let nested = row?.toolArgs?.value;
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      if (!Array.isArray(nested)) throw new Error(`Missing depth ${depth}`);
+      nested = nested[0];
+    }
+    expect(nested).toBe("leaf");
+  });
+
+  it("rejects cyclic tool arguments but allows shared acyclic values", () => {
+    const shared = { value: "ok" };
+    const rows = buildTimelineRows([
+      turnStartedEvent({ seq: 1 }),
+      toolCallItemEvent({
+        seq: 2,
+        tool: "fuzz",
+        toolArgs: { left: shared, right: shared },
+        type: "item/started",
+      }),
+    ]);
+    expect(collectToolRows(rows)[0]?.toolArgs).toEqual({
+      left: shared,
+      right: shared,
+    });
+
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() =>
+      buildTimelineRows([
+        turnStartedEvent({ seq: 1 }),
+        toolCallItemEvent({
+          seq: 2,
+          tool: "fuzz",
+          toolArgs: cyclic as unknown as JsonObject,
+          type: "item/started",
+        }),
+      ]),
+    ).toThrow("Expected acyclic JSON value");
+  });
+
   it("drops a statusLabels key a row persisted before the field was deleted", () => {
     const rows = buildTimelineRows([
       turnStartedEvent({ seq: 1 }),
@@ -2045,9 +2123,11 @@ describe("buildThreadTimelineFromEvents", () => {
         seq: 1,
       });
 
-      expect(parseOperationMessage(event.event, event.meta)).toMatchObject({
+      expect(
+        parseOperationEvent(event.event, event.meta, { threadName: "" }),
+      ).toMatchObject({
         kind: "operation",
-        title: message,
+        row: { title: message },
       });
     },
   );
@@ -2065,9 +2145,11 @@ describe("buildThreadTimelineFromEvents", () => {
       seq: 1,
     });
 
-    expect(parseOperationMessage(event.event, event.meta)).toMatchObject({
+    expect(
+      parseOperationEvent(event.event, event.meta, { threadName: "" }),
+    ).toMatchObject({
       kind: "operation",
-      title: "Ownership change completed",
+      row: { title: "Ownership change completed" },
     });
   });
 
@@ -2178,6 +2260,46 @@ describe("buildThreadTimelineFromEvents", () => {
     ]);
   });
 
+  it("marks a Cloud Codex refusal so it gets the continue card, then who took over", () => {
+    // The real event from a Cloud loop run (thr_fmewhjg2b5, seq 186).
+    const refusal = systemErrorEvent({
+      code: "cyberPolicy",
+      message: "Codex error (cyberPolicy)",
+      detail:
+        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
+      seq: 2,
+    });
+    const switched = systemOperationEvent({
+      message: "Switched",
+      operation: "harness_switch",
+      metadata: { from: "codex", to: "claude-code", resend: true },
+      seq: 4,
+    });
+    const before = collectSystemRows(
+      buildTimelineRows([turnStartedEvent({ seq: 1 }), refusal]),
+    );
+    const after = collectSystemRows(
+      buildTimelineRows([
+        turnStartedEvent({ seq: 1 }),
+        refusal,
+        turnCompletedEvent({ seq: 3, status: "failed" }),
+        switched,
+      ]),
+    ).find((row) => row.systemKind === "error");
+
+    expect(before).toEqual([
+      expect.objectContaining({
+        title: "Codex error (cyberPolicy)",
+        refusal: true,
+      }),
+    ]);
+    expect(before[0]).not.toHaveProperty("planLimit");
+    expect(after).toMatchObject({
+      refusal: true,
+      planLimitSwitch: { from: "codex", to: "claude-code", resend: true },
+    });
+  });
+
   it.each([
     ["collapse", true],
     ["collapse", false],
@@ -2241,6 +2363,62 @@ describe("buildThreadTimelineFromEvents", () => {
       ]);
     },
   );
+
+  it("drops only the plan-limit echo and catches every limit wording", () => {
+    const said = "You've hit your Fable limit · resets 3pm (UTC)";
+    const event = createTimelineEventFactory({ threadId: "thread-1" });
+    const rows = buildTimelineRows(
+      fromRows([
+        // A finished turn whose short real reply also appears inside the limit text.
+        event.turnStarted({ turnId: "turn-1" }),
+        event.assistantCompleted({ turnId: "turn-1", text: "3" }),
+        event.turnCompleted({ turnId: "turn-1", status: "completed" }),
+        // A repeat Cloud limit: Claude's echo, then Core's thread-scoped error.
+        event.turnStarted({ turnId: "turn-2" }),
+        event.assistantCompleted({ turnId: "turn-2", text: said }),
+        event.turnCompleted({ turnId: "turn-2", status: "failed" }),
+        event.systemError({
+          code: "turn_failed",
+          message: `Claude's plan limit (not Cloudroom's). Switch accounts to keep working. Claude said: ${said}`,
+        }),
+      ]),
+    );
+    const texts = (list: readonly TimelineRow[]): string[] =>
+      list.flatMap((row) =>
+        row.kind === "conversation"
+          ? [row.text]
+          : row.kind === "turn"
+            ? texts(row.children ?? [])
+            : [],
+      );
+
+    expect(texts(rows)).toEqual(["3"]);
+    expect(collectSystemRows(rows)).toEqual([
+      expect.objectContaining({ planLimit: true }),
+    ]);
+    for (const detail of [
+      "You’ve reached your Fable limit",
+      "You've hit your channel's monthly spend limit",
+    ]) {
+      const [row] = collectSystemRows(
+        buildTimelineRows([
+          systemErrorEvent({ message: "Turn failed", detail, seq: 1 }),
+        ]),
+      );
+      expect(row).toMatchObject({ planLimit: true });
+    }
+    const [overload] = collectSystemRows(
+      buildTimelineRows([
+        turnStartedEvent({ seq: 1 }),
+        providerErrorEvent({
+          detail: "You've hit your requests per minute limit",
+          errorInfo: { category: "overloaded", providerCode: null, httpStatusCode: 529 },
+          seq: 2,
+        }),
+      ]),
+    );
+    expect(overload).not.toHaveProperty("planLimit", true);
+  });
 
   it("keeps error rows in the regular timeline", () => {
     const rows = buildTimelineRows([

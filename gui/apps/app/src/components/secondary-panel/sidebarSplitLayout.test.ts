@@ -5,7 +5,7 @@ import {
   createGitDiffFixedPanelTab,
   createThreadInfoFixedPanelTab,
   getFixedPanelTabsStateStorageKey,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   SIDEBAR_FIXED_INFO_TAB_ID,
   createSidebarSplitState,
@@ -30,7 +30,7 @@ import {
   sidebarSplitStorageKey,
   type SidebarSplitState,
   type SidebarSplitStorage,
-} from "./sidebarSplitLayout";
+} from "@/components/right-panel/store/split-state";
 
 const SIDEBAR_DIFF_TAB_ID = createGitDiffFixedPanelTab().id;
 const TABS = [SIDEBAR_FIXED_INFO_TAB_ID, SIDEBAR_DIFF_TAB_ID, "file-a"];

@@ -10,6 +10,7 @@ import {
   type ThreadEventType,
   type QueuedMessageWaitHolder,
   type ThreadQueuedMessage,
+  type SystemThreadInterruptedEventData,
   type ThreadStatus,
   validatePluginMetadata,
 } from "@cloudroom/domain";
@@ -32,6 +33,7 @@ import type {
   PromptHistoryResponse,
   SendQueuedMessageResponse,
   ThreadArchiveAllResponse,
+  ThreadUnarchiveResponse,
   ThreadChildSummaryResponse,
   ThreadConversationOutlineResponse,
   ThreadCountGroupBy,
@@ -81,6 +83,7 @@ import type {
   UpdateThreadRequest,
   UpdateQueuedMessageRequest,
 } from "@cloudroom/server-contract";
+import { RoomHttpError } from "../response.js";
 import { signalRequestArgs, type CreateSdkAreaArgs } from "./common.js";
 
 export const DEFAULT_THREAD_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
@@ -90,6 +93,7 @@ const THREAD_WAIT_QUEUED_IDLE_GRACE_MS = 5_000;
 export interface ThreadListArgs {
   archived?: boolean;
   environmentId?: string;
+  executionTarget?: ThreadListQuery["executionTarget"];
   sectionId?: string;
   hasParent?: boolean;
   includeHidden?: boolean;
@@ -98,9 +102,14 @@ export interface ThreadListArgs {
   originKind?: ThreadListQuery["originKind"];
   originPluginId?: string;
   parentThreadId?: string;
+  pinned?: boolean;
   projectId?: string;
+  providerId?: string;
   signal?: AbortSignal;
+  /** Newest first, by last update or by creation. Omitted keeps the app's order. */
+  sort?: ThreadListQuery["sort"];
   sourceThreadId?: string;
+  status?: ThreadListQuery["status"];
   unsectioned?: boolean;
 }
 
@@ -113,13 +122,15 @@ export interface ThreadSearchArgs extends ThreadSearchQuery {
  * many threads are running on this host" must never page rows through
  * `threads.list`, which would both cost memory and miscount past its limit.
  *
- * Every filter is genuinely absent by default. `parentThreadId` is
- * three-valued: omitted does not filter on parentage at all, the
- * `THREAD_COUNT_ROOT_PARENT` sentinel (`"none"`) counts root threads only, and
- * any other value counts that parent's children. Archived and deleted threads
- * are excluded by the route.
+ * Every filter is genuinely absent by default. `parentThreadId`: omitted does
+ * not filter on parentage at all, the `THREAD_COUNT_ROOT_PARENT` sentinel
+ * (`"none"`) counts root threads only, `THREAD_COUNT_ANY_PARENT` (`"any"`)
+ * counts child threads only, and any other value counts that parent's
+ * children. Deleted threads are never counted, and archived ones only with
+ * `archivedOnly`, which counts nothing else.
  */
 export interface ThreadCountArgs {
+  archivedOnly?: boolean;
   groupBy?: ThreadCountGroupBy;
   hostId?: string;
   parentThreadId?: string;
@@ -171,6 +182,8 @@ export interface ThreadOutputResponse {
   output: string | null;
   /** Why the thread failed; null unless its status is `error`. */
   error?: string | null;
+  /** The recorded stop, when the last turn was interrupted (#1159). */
+  interruption?: SystemThreadInterruptedEventData | null;
 }
 export type ThreadMutationResult = ThreadResponse;
 export type ThreadPluginMetadataResult = ThreadPluginMetadataResponse;
@@ -198,7 +211,7 @@ export type ThreadEditMessageResult = EditMessageResponse;
 export type ThreadStopResult = { ok: true; cancelledRetries: number };
 export type ThreadCompactResult = { ok: true };
 export type ThreadBannerActionResult = { ok: true };
-export type ThreadUnarchiveResult = { ok: true };
+export type ThreadUnarchiveResult = ThreadUnarchiveResponse;
 export type ThreadArchiveAllResult = ThreadArchiveAllResponse;
 export type ThreadReadStateResult = ThreadResponse;
 export type ThreadPinOrderResult = ThreadListResponse;
@@ -313,6 +326,11 @@ export interface ThreadStopArgs extends ThreadActionArgs {
   endProcesses?: boolean;
 }
 
+export interface ThreadCompactArgs extends ThreadActionArgs {
+  /** Sent once compaction ends, so the agent keeps going. */
+  then?: string;
+}
+
 export interface ThreadArchiveAllArgs extends ThreadActionArgs {
   /** Also archive running children. Without it, live children stay open. */
   includeLive?: boolean;
@@ -320,6 +338,8 @@ export interface ThreadArchiveAllArgs extends ThreadActionArgs {
 
 export interface ThreadUnarchiveArgs extends ThreadActionArgs {
   keepParent?: boolean;
+  /** Also restore the threads under it that were archived with it. */
+  withChildren?: boolean;
 }
 
 export interface ThreadGoalSetArgs extends ThreadActionArgs {
@@ -583,7 +603,7 @@ export interface ThreadsArea {
   archive(args: ThreadActionArgs): Promise<ThreadArchiveResult>;
   archiveAll(args: ThreadArchiveAllArgs): Promise<ThreadArchiveAllResult>;
   childSummary(args: ThreadStatusArgs): Promise<ThreadChildSummaryResult>;
-  compact(args: ThreadActionArgs): Promise<ThreadCompactResult>;
+  compact(args: ThreadCompactArgs): Promise<ThreadCompactResult>;
   cancelPlan(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
   clearContext(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
   clearGoal(args: ThreadActionArgs): Promise<ThreadBannerActionResult>;
@@ -592,6 +612,7 @@ export interface ThreadsArea {
     args: ThreadStatusArgs,
   ): Promise<ThreadConversationOutlineResult>;
   count(args?: ThreadCountArgs): Promise<ThreadCountResult>;
+  messageForkPoint(args: ThreadStatusArgs & { sequence: number }): Promise<{ exact: boolean; sequence: number | null }>;
   defaultExecutionOptions(
     args: ThreadStatusArgs,
   ): Promise<ThreadDefaultExecutionOptionsResult>;
@@ -654,6 +675,13 @@ export interface ThreadsArea {
 
 function listQuery(args: ThreadListArgs | undefined): ThreadListQuery {
   return {
+    ...(args?.status ? { status: args.status } : {}),
+    ...(args?.providerId ? { providerId: args.providerId } : {}),
+    ...(args?.executionTarget ? { executionTarget: args.executionTarget } : {}),
+    ...(args?.pinned === undefined
+      ? {}
+      : { pinned: args.pinned ? "true" : "false" }),
+    ...(args?.sort ? { sort: args.sort } : {}),
     ...(args?.projectId ? { projectId: args.projectId } : {}),
     ...(args?.environmentId ? { environmentId: args.environmentId } : {}),
     ...(args?.parentThreadId ? { parentThreadId: args.parentThreadId } : {}),
@@ -688,6 +716,7 @@ function countQuery(args: ThreadCountArgs | undefined): ThreadCountQuery {
       ? {}
       : { parentThreadId: args.parentThreadId }),
     ...(args?.groupBy === undefined ? {} : { groupBy: args.groupBy }),
+    ...(args?.archivedOnly ? { archivedOnly: "true" as const } : {}),
   };
 }
 
@@ -698,8 +727,10 @@ function updateJson(args: ThreadUpdateArgs): UpdateThreadRequest {
     parentThreadId: args.parentThreadId,
     providerId: args.providerId,
     model: args.model,
+    idleSessionOnly: args.idleSessionOnly,
     reasoningLevel: args.reasoningLevel,
     visibility: args.visibility,
+    resend: args.resend,
   };
 }
 
@@ -712,6 +743,7 @@ function sendJson(args: ThreadSendArgs): SendMessageRequest {
     permissionMode: args.permissionMode,
     reasoningLevel: args.reasoningLevel,
     senderThreadId: args.senderThreadId,
+    fromComposer: args.fromComposer,
     serviceTier: args.serviceTier,
     pluginSubmission: args.pluginSubmission,
     executionInputSources: args.executionInputSources,
@@ -803,6 +835,8 @@ function searchQuery(args: ThreadSearchArgs): ThreadSearchQuery {
   return {
     limitPerGroup: args.limitPerGroup,
     query: args.query,
+    ...(args.projectId === undefined ? {} : { projectId: args.projectId }),
+    ...(args.hasParent === undefined ? {} : { hasParent: args.hasParent }),
   };
 }
 
@@ -837,14 +871,19 @@ function sleep(ms: number): Promise<void> {
 // before the server reads the poll already sent on it, so a wait read sees a
 // reset while the server is fine (#1046). Wait reads are GETs, safe to repeat,
 // so retry a few resets in a row before the deadline; all else throws as before.
+// A 504 is retried too: Connect's when a busy host misses its deadline (#2446).
+// `thread wait --children` reuses it for its list reads (#2283).
 const THREAD_WAIT_RESET_RETRIES = 3;
+// Connect gives a reply's headers 30 s (tunnel-do.ts), so each event long poll
+// asks for less, leaving room for transit and a busy host (#2446).
+const THREAD_EVENT_POLL_MS = 20_000;
 const CONNECTION_RESET_CODES = new Set([
   "ECONNRESET",
   "EPIPE",
   "UND_ERR_SOCKET",
 ]);
 
-async function retryConnectionReset<T>(
+export async function retryConnectionReset<T>(
   deadline: number,
   read: () => Promise<T>,
 ): Promise<T> {
@@ -856,11 +895,13 @@ async function retryConnectionReset<T>(
         error instanceof TypeError
           ? (error.cause as { code?: unknown } | null | undefined)?.code
           : undefined;
+      const retryable =
+        (error instanceof RoomHttpError && error.status === 504) ||
+        (typeof code === "string" && CONNECTION_RESET_CODES.has(code));
       if (
         attempt >= THREAD_WAIT_RESET_RETRIES ||
         Date.now() >= deadline ||
-        typeof code !== "string" ||
-        !CONNECTION_RESET_CODES.has(code)
+        !retryable
       ) {
         throw error;
       }
@@ -1173,6 +1214,13 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
         ),
       );
     },
+    async messageForkPoint(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["fork-point"][":sequence"].$get(
+          { param: { id: input.threadId, sequence: String(input.sequence) } }, ...signalRequestArgs(input.signal),
+        ),
+      );
+    },
     async defaultExecutionOptions(input) {
       return transport.readJson(
         transport.api.v1.threads[":id"]["default-execution-options"].$get(
@@ -1307,7 +1355,10 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       return transport.readJson(
         transport.api.v1.threads[":id"].worktree.$post({
           param: { id: input.threadId },
-          json: { carry: input.carry ?? [] },
+          json: {
+            carry: input.carry ?? [],
+            ...(input.self === undefined ? {} : { self: input.self }),
+          },
         }),
       );
     },
@@ -1393,6 +1444,7 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       await transport.readVoid(
         transport.api.v1.threads[":id"].compact.$post({
           param: { id: input.threadId },
+          json: input.then === undefined ? {} : { then: input.then },
         }),
       );
       return { ok: true };
@@ -1506,13 +1558,21 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       );
     },
     async unarchive(input) {
-      await transport.readVoid(
+      return transport.readJson(
         transport.api.v1.threads[":id"].unarchive.$post({
           param: { id: input.threadId },
-          ...(input.keepParent ? { query: { keepParent: "true" } } : {}),
+          ...(input.keepParent || input.withChildren
+            ? {
+                query: {
+                  ...(input.keepParent ? { keepParent: "true" as const } : {}),
+                  ...(input.withChildren
+                    ? { withChildren: "true" as const }
+                    : {}),
+                },
+              }
+            : {}),
         }),
       );
-      return { ok: true };
     },
     async unpin(input) {
       return transport.readJson(
@@ -1594,7 +1654,12 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
             threadId: input.threadId,
             type: target.eventType,
             waitMs: String(
-              Math.floor(Math.min(Math.max(0, deadline - Date.now()), 30_000)),
+              Math.floor(
+                Math.min(
+                  Math.max(0, deadline - Date.now()),
+                  THREAD_EVENT_POLL_MS,
+                ),
+              ),
             ),
           }),
         );

@@ -47,7 +47,7 @@ export function loadBundledMarketplace(
   const manifestPath = path.join(directory, BUNDLED_MARKETPLACE_FILENAME);
   if (!existsSync(manifestPath)) {
     throw new Error(
-      `the bundled marketplace document is missing at ${manifestPath}; run pnpm exec turbo run generate:bb-official-marketplace --filter=@cloudroom/server`,
+      `the bundled marketplace document is missing at ${manifestPath}; run pnpm exec turbo run generate:official-marketplace --filter=@cloudroom/server`,
     );
   }
   const catalog = parseBundledMarketplaceManifestJson(

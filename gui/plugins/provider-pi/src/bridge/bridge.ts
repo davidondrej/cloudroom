@@ -4,7 +4,10 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -52,7 +55,7 @@ import {
   buildPiTurnOptions,
   type PiSessionParams,
 } from "../session-params.js";
-import { BB_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
+import { ROOM_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
 import {
   createExtensionUiCoordinator,
   type ExtensionUiCoordinator,
@@ -71,6 +74,7 @@ import {
   getPiCatalog,
   peekPiCatalog,
 } from "./catalog.js";
+import { SIGKILL_ESCALATION_MS } from "./rpc-child.js";
 import {
   PiRpcSession,
   type PiRpcSessionOptions,
@@ -202,6 +206,8 @@ interface ThreadSession {
   cwd: string;
   construction: PiSessionParams;
   constructionModel: { provider: string; id: string } | undefined;
+  // The sessions this one replaced (rebuildThreadSession) whose pi still runs.
+  retired: PiRpcSession[];
 }
 
 let sessionSerialCounter = 0;
@@ -237,16 +243,18 @@ function requireScratchDir(): string {
   return scratchDir;
 }
 
-// Checked before every pi spawn: the bridge can outlive files in the OS temp
-// dir (macOS can delete ones unused for 3 days), and a missing extension
-// would fail the next session start or respawn.
+// Checked before every pi spawn: a missing extension would fail the next
+// session start or respawn.
 function requireExtensionPath(): string {
   const dir = requireScratchDir();
   const path = join(dir, "bb-pi-extension.mjs");
   if (!existsSync(path)) {
-    // 0700: this may recreate the worker's private mkdtemp root.
+    // This may recreate the worker's temp root. That is safe because the root
+    // sits in a folder that nothing less trusted can write: not another
+    // account, a Read-only Mac command, or an agent sandbox
+    // (createPluginProcessTempDir).
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    writeFileSync(path, BB_PI_EXTENSION_SOURCE, "utf8");
+    writeFileSync(path, ROOM_PI_EXTENSION_SOURCE, "utf8");
   }
   return path;
 }
@@ -280,35 +288,53 @@ async function closeThreadSession(args: {
   message: string;
   threadId: string;
 }): Promise<string | undefined> {
-  const existingClose = closingSessions.get(args.threadId);
-  if (existingClose) {
-    return existingClose;
-  }
   const threadSession = sessions.get(args.threadId);
   if (!threadSession) {
     return;
   }
-  threadSession.closing = true;
-  resolvePendingToolCalls(threadSession, args.message);
-  extensionUi.cancelPendingForScope(threadSession);
-  const closePromise = Promise.resolve()
-    .then(() =>
-      threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS),
-    )
-    .finally(() => {
-      if (sessions.get(args.threadId) === threadSession) {
-        sessions.delete(args.threadId);
-      }
-      closingSessions.delete(args.threadId);
-    });
-  closingSessions.set(args.threadId, closePromise);
-  return closePromise;
+  const deadline = Date.now() + THREAD_STOP_CLOSE_TIMEOUT_MS;
+  let closePromise = closingSessions.get(args.threadId);
+  if (!closePromise) {
+    threadSession.closing = true;
+    resolvePendingToolCalls(threadSession, args.message);
+    extensionUi.cancelPendingForScope(threadSession);
+    closePromise = Promise.resolve()
+      .then(() =>
+        threadSession.session.closeGracefully(THREAD_STOP_CLOSE_TIMEOUT_MS),
+      )
+      .catch(() => undefined);
+    closingSessions.set(args.threadId, closePromise);
+  }
+  const providerCheckpointId = await closePromise;
+  // A pi still shutting down appends to the transcript, which a move swaps
+  // next (repointSessionCwd). So a close ends only once every pi of the thread
+  // exited: in the time a Stop already takes, or once the kill that follows
+  // landed (its SIGKILL comes within SIGKILL_ESCALATION_MS). A retry waits for
+  // the same ones.
+  const pis = [threadSession.session, ...threadSession.retired];
+  const exited = await Promise.all(
+    pis.map((pi) => pi.waitForExit(deadline - Date.now())),
+  );
+  if (exited.includes(false)) {
+    for (const pi of pis) pi.kill();
+    const killed = await Promise.all(
+      pis.map((pi) => pi.waitForExit(SIGKILL_ESCALATION_MS + 1_000)),
+    );
+    if (killed.includes(false)) {
+      throw new Error("Pi is still shutting down. Try again in a few seconds.");
+    }
+  }
+  if (sessions.get(args.threadId) === threadSession) {
+    sessions.delete(args.threadId);
+  }
+  closingSessions.delete(args.threadId);
+  return providerCheckpointId;
 }
 
 async function closeThreadSessionsGracefully(message: string): Promise<void> {
   await Promise.all(
     Array.from(sessions.keys()).map((threadId) =>
-      closeThreadSession({ message, threadId }),
+      closeThreadSession({ message, threadId }).catch(() => undefined),
     ),
   );
 }
@@ -531,6 +557,7 @@ async function handleRequest(
           approvalEnforcedBy: "runtime",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "inject",
+          stopsUnopenedTurns: false,
           skills: { configure: true },
         },
       };
@@ -640,6 +667,10 @@ async function handleModelList(
       gate.status === "not_installed"
         ? "Could not find the pi CLI on this host. Install @earendil-works/pi-coding-agent and retry."
         : (gate.statusMessage ?? "Pi is not supported on this host."),
+      // A spawn ENOENT's code, so a spawn is refused before its thread exists (#2226).
+      gate.status === "not_installed" && gate.launchMissing
+        ? { reason: "missing_executable" }
+        : undefined,
     );
     return;
   }
@@ -780,6 +811,7 @@ async function constructPiThreadSession(
   providerThreadId: string,
   params: PiSessionParams,
 ): Promise<ThreadSession> {
+  repointSessionCwd(providerThreadId, params.cwd);
   const sessionSerial = nextSessionSerial();
   const sessionOptions = await buildSessionOptions({
     params,
@@ -801,6 +833,7 @@ async function constructPiThreadSession(
     cwd: usablePersistedSessionCwd(providerThreadId) ?? params.cwd,
     construction: params,
     constructionModel: sessionOptions.model,
+    retired: [],
   };
   sessions.set(threadId, threadSession);
   try {
@@ -860,6 +893,9 @@ async function rebuildThreadSession(
     throw error;
   }
   retireReplacedPiChild(previous);
+  replacement.retired = [previous.session, ...previous.retired].filter(
+    (pi) => !pi.exited,
+  );
   return replacement;
 }
 
@@ -898,6 +934,46 @@ async function handleThreadConstruction(
 function resumedSessionMissingCwd(providerThreadId: string): string | null {
   const cwd = persistedSessionCwd(providerThreadId);
   return cwd !== null && !existsSync(cwd) ? cwd : null;
+}
+
+// Pi runs its tools in the session header's cwd, not the one it starts in, and
+// refuses to open a session whose saved cwd is gone. So once the thread moved
+// (a new worktree, an updated directory), point the header at its new cwd, or
+// Pi keeps editing the old folder (#1811, #2072). No pi writes the transcript
+// by now: the bridge that ran the thread answered its release, or this bridge
+// closed it, only once its pi exited (closeThreadSession). And no handle is
+// open at the rename, which Windows refuses over an open file.
+function repointSessionCwd(providerThreadId: string, cwd: string): void {
+  const saved = persistedSessionCwd(providerThreadId);
+  if (saved === null || !existsSync(cwd) || sameFolder(saved, cwd)) return;
+  const sessionFile = resolvePiSessionFilePath({
+    env: process.env,
+    threadId: providerThreadId,
+  });
+  const text = readFileSync(sessionFile, "utf8");
+  const end = text.indexOf("\n");
+  const header = JSON.parse(end === -1 ? text : text.slice(0, end)) as object;
+  const temp = `${sessionFile}.${randomUUID()}.tmp`;
+  try {
+    // Keep the transcript's own mode: a private one must stay private.
+    writeFileSync(
+      temp,
+      JSON.stringify({ ...header, cwd }) + (end === -1 ? "" : text.slice(end)),
+      { flag: "wx", mode: statSync(sessionFile).mode & 0o777 },
+    );
+    renameSync(temp, sessionFile);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
+}
+
+function sameFolder(left: string, right: string): boolean {
+  try {
+    return realpathSync.native(left) === realpathSync.native(right);
+  } catch {
+    return false;
+  }
 }
 
 function usablePersistedSessionCwd(providerThreadId: string): string | null {
@@ -1272,7 +1348,14 @@ export async function experimental_closeAllForTests(): Promise<void> {
   }
 }
 
-export const experimental_providerBridge = experimental_defineProviderBridge({
+/**
+ * The bridge's parts, so another plugin can run Pi under its own provider:
+ * Cloudroom Agent wraps `handleLine` and `start`
+ * (plugins/provider-cloudroom-agent/src/host.ts).
+ */
+export const piProviderBridgeDefinition: Parameters<
+  typeof experimental_defineProviderBridge
+>[0] = {
   handleLine,
   start: (context) => {
     scratchDir = join(context.tempDir, "pi");
@@ -1295,4 +1378,8 @@ export const experimental_providerBridge = experimental_defineProviderBridge({
       process.exit(0);
     });
   },
-});
+};
+
+export const experimental_providerBridge = experimental_defineProviderBridge(
+  piProviderBridgeDefinition,
+);

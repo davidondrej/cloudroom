@@ -1015,26 +1015,26 @@ describe("tasks app shell", () => {
   });
 
   it("does not mount New project queries until the dialog opens", async () => {
-    let bbProjectCalls = 0;
+    let roomProjectCalls = 0;
     const slot = renderSlot(
       navigationRegistration,
       { subPath: "all" },
       {
         rpc: seededRpc({
           listBbProjects: () => {
-            bbProjectCalls += 1;
+            roomProjectCalls += 1;
             return { bbProjects: [] };
           },
         }),
       },
     );
     await slot.findByRole("button", { name: "New project" });
-    expect(bbProjectCalls).toBe(0);
+    expect(roomProjectCalls).toBe(0);
 
     fireEvent.click(slot.getByRole("button", { name: "New project" }));
 
     await slot.findByText("Projects group tasks under a shared key prefix.");
-    expect(bbProjectCalls).toBeGreaterThan(0);
+    expect(roomProjectCalls).toBeGreaterThan(0);
   });
 
   it("routes 'manage' to the manage panel from right-panel navigation", async () => {

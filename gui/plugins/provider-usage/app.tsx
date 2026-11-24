@@ -1,4 +1,5 @@
 import { COMPUTER_TITLE } from "@cloudroom/domain/computer-name";
+import { installPercent } from "@cloudroom/domain/install-progress";
 import {
   type CSSProperties,
   useCallback,
@@ -35,6 +36,7 @@ import {
   formatUsdCents,
   usageBarColorClass,
 } from "@cloudroom/shared-ui/lib/usage-format";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { LIST_HOVER_TRANSITION } from "@cloudroom/shared-ui/motion";
 import {
   OPTION_BASE_CLASS_NAME,
@@ -81,6 +83,7 @@ let storeSnapshot: UsageStoreSnapshot = {
 let activeRefreshCount = 0;
 let lastMachineId: string | null = null;
 let lastPlan: PlanSummary | null = null;
+let lastPlanAt = 0;
 
 function updateStore(next: UsageStoreSnapshot): void {
   storeSnapshot = next;
@@ -220,14 +223,19 @@ function UsageBlocks({ usedPercent }: { usedPercent: number }) {
 
 /** A row's short label. A model's weekly row ("Weekly · Fable") reads "7d fable"; narrow cards drop its "7d". */
 function rowLabel(label: string): { prefix: string | null; label: string } {
+  const fiveHourModel = /^Five-hour · (.+)$/u.exec(label)?.[1];
+  if (fiveHourModel) return { prefix: "5h", label: fiveHourModel };
   const model = /^Weekly · (.+)$/u.exec(label)?.[1];
   if (model) return { prefix: "7d", label: model };
+  const planModel = /^Plan · (.+)$/u.exec(label)?.[1];
+  if (planModel) return { prefix: "plan", label: planModel };
   return {
     prefix: null,
     label: label
       .replace(/^Five-hour limit$|^5 hours$/u, "5h")
       .replace(/^Weekly limit$|^Weekly/u, "7d")
       .replace(/^Daily limit$/u, "1d")
+      .replace(/^Limit hit$/u, "limit")
       .replace(/^Plan usage$/u, "plan")
       .replace(/^On-demand spend$/u, "spend"),
   };
@@ -297,20 +305,11 @@ function UsageLine({
   );
 }
 
-function PlanUsage({
-  plan,
-  className,
-}: {
-  plan: PlanSummary;
-  className?: string;
-}) {
+function PlanUsage({ plan }: { plan: PlanSummary }) {
   return (
     <section
       aria-label="Cloudroom plan"
-      className={cn(
-        "border-b border-dashed border-sidebar-border pb-1.5",
-        className,
-      )}
+      className="border-b border-dashed border-sidebar-border pb-1.5"
     >
       {/* Too narrow for one line, "+ buy more" wraps whole onto its own; the plan name gives way first. */}
       <h2 className="flex min-w-0 flex-wrap items-center gap-x-2 font-normal">
@@ -319,17 +318,16 @@ function PlanUsage({
         <span className="min-w-0 flex-1 truncate text-subtle-foreground">
           {plan.plan}
         </span>
-        {/* Paid plans buy credit packs or upgrade on the billing page (ADR 0317). */}
-        {plan.plan === "free" ? null : (
-          <UrlLink
-            href={BILLING_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="ml-auto shrink-0 border border-primary/60 px-1.5 leading-5 text-primary-text no-underline hover:bg-primary/10"
-          >
-            + buy more
-          </UrlLink>
-        )}
+        {/* Every plan can buy extra credits or upgrade on the billing page (ADR 20261112-235440). */}
+        <UrlLink
+          href={BILLING_URL}
+          target="_blank"
+          rel="noreferrer"
+          onClick={() => { lastPlanAt = 0; }}
+          className="ml-auto shrink-0 border border-primary/60 px-1.5 leading-5 text-primary-text no-underline hover:bg-primary/10"
+        >
+          + buy more
+        </UrlLink>
       </h2>
       {plan.meters.map((meter, index) => (
         <p
@@ -364,9 +362,11 @@ function PlanUsage({
 function UsageWindow({
   window,
   last,
+  trailing,
 }: {
   window: UsageWindowValue;
   last: boolean;
+  trailing?: React.ReactNode;
 }) {
   const [showReset, setShowReset] = useState(false);
   const reset = formatUsageReset(window.resetsAt);
@@ -378,10 +378,13 @@ function UsageWindow({
         " / " +
         formatUsdCents(window.cost.limitUsdCents, false);
   const { prefix, label } = rowLabel(window.label);
-  return (
+  const row = (
     <button
       type="button"
-      className="block w-full rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+      className={cn(
+        "block rounded-sm text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring",
+        trailing ? "min-w-0 flex-1" : "w-full",
+      )}
       title={`${window.label} · ${reset ?? "Reset time not reported"}`}
       aria-label={`${window.label}: ${value}. ${reset ?? "Reset time not reported"}`}
       aria-expanded={showReset}
@@ -401,6 +404,13 @@ function UsageWindow({
         </span>
       ) : null}
     </button>
+  );
+  if (!trailing) return row;
+  return (
+    <div className="flex items-start">
+      {row}
+      {trailing}
+    </div>
   );
 }
 
@@ -447,49 +457,103 @@ function UsageNote({ children }: { children: string }) {
   );
 }
 
-async function signInMacCodex(): Promise<void> {
+/** Signs in on this Mac; a missing Codex installs first, and `onInstall` gets when that began (ADR 20261111-123959). */
+async function signInMacCodex(onInstall: (since: number | null) => void): Promise<void> {
   const call = async (method: "GET" | "POST") => {
     const response = await fetch("/api/v1/cloudroom/mac/codex-login", method === "POST" ? { method, headers: { "content-type": "application/json" }, body: "{}" } : {});
     if (!response.ok) throw new Error("Codex sign-in could not start.");
-    return (await response.json()) as { state: string; message?: string };
+    return (await response.json()) as { state: string; message?: string; installing_since?: number | null };
   };
   let status = await call("POST");
   while (status.state === "waiting") {
+    onInstall(status.installing_since ?? null);
     await new Promise((resolve) => setTimeout(resolve, 2000));
     status = await call("GET");
   }
   if (status.state === "error") throw new Error(status.message ?? "Codex sign-in failed.");
 }
 
-function CodexSignIn({ onSignedIn }: { onSignedIn: () => void }) {
+/** "sign in" next to the note, styled like "+ buy more" in grey (David, 2026-11-16). */
+const SIGN_IN_CLASS =
+  "shrink-0 border border-subtle-foreground/70 px-1.5 leading-5 text-sidebar-foreground tabular-nums hover:bg-sidebar-accent disabled:opacity-60";
+
+/** Sign in instead of "run `codex` in a terminal" (ADR 20261111-123959). */
+function CodexSignIn({ label, onSignedIn }: { label: string; onSignedIn: () => void }) {
   const [state, setState] = useState<"idle" | "waiting" | "error">("idle");
+  // Each 2 s poll refreshes the percent.
+  const [installing, setInstalling] = useState<number | null>(null);
   const [error, setError] = useState("");
   const signIn = () => {
     setState("waiting");
-    signInMacCodex().then(
-      () => { setState("idle"); onSignedIn(); },
-      (cause: unknown) => { setState("error"); setError(cause instanceof Error ? cause.message : String(cause)); },
+    signInMacCodex((since) => setInstalling(since === null ? null : installPercent(since))).then(
+      () => { setState("idle"); setInstalling(null); onSignedIn(); },
+      (cause: unknown) => { setState("error"); setInstalling(null); setError(cause instanceof Error ? cause.message : String(cause)); },
     );
   };
   return (
     <div>
-      <div className="flex items-center justify-between gap-2">
-        <UsageNote>{state === "waiting" ? "finish in your browser" : "session expired"}</UsageNote>
-        <Button type="button" size="sm" className="h-6 px-2.5 text-xs" disabled={state === "waiting"} onClick={signIn}>
-          {state === "waiting" ? "Waiting…" : "Sign in"}
-        </Button>
+      <div className="flex items-center gap-2">
+        <UsageNote>{installing !== null ? "installing codex" : state === "waiting" ? "finish in your browser" : label}</UsageNote>
+        <button type="button" className={SIGN_IN_CLASS} disabled={state === "waiting"} onClick={signIn}>
+          {installing !== null ? `installing ${installing}%` : state === "waiting" ? "waiting…" : "sign in"}
+        </button>
       </div>
       {state === "error" ? <p role="alert" className="text-destructive">{error}</p> : null}
     </div>
   );
 }
 
-function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvider; onCodexSignedIn?: () => void }) {
+/** Other agents sign in with their own login command in the app's login terminal, like the model picker. */
+function TerminalSignIn({ label, providerId, signIn }: { label: string; providerId: string; signIn: UsageSignIn }) {
+  return (
+    <div className="flex items-center gap-2">
+      <UsageNote>{label}</UsageNote>
+      <button
+        type="button"
+        className={SIGN_IN_CLASS}
+        onClick={() =>
+          window.dispatchEvent(
+            new CustomEvent("cloudroom:provider-login", {
+              detail: { providerId, hostId: signIn.hostId, onDone: signIn.onSignedIn },
+            }),
+          )
+        }
+      >
+        sign in
+      </button>
+    </div>
+  );
+}
+
+/** Sign-in runs on the computer running Cloudroom, so other machines and stored accounts keep their hint. */
+type UsageSignIn = { hostId: string; onSignedIn: () => void };
+
+/** Antigravity's and Cursor's third-party model limits fold under a chevron (Cursor: F#5982). */
+const COLLAPSIBLE_EXTRA = new Set(["acp-antigravity", "acp-cursor"]);
+
+function isExtraWindow(label: string): boolean {
+  return /\b3p\b/iu.test(label);
+}
+
+function ProviderUsageBody({ provider, signIn }: { provider: UsageProvider; signIn?: UsageSignIn | undefined }) {
+  const [showExtra, setShowExtra] = useState(false);
   const usage = provider.usage;
   if (usage === null) return <UsageNote>Usage not reported.</UsageNote>;
   switch (usage.status) {
-    case "ok":
-      return usage.windows.length === 0 ? (
+    case "ok": {
+      const hasCollapsibleExtra =
+        COLLAPSIBLE_EXTRA.has(provider.providerId) &&
+        usage.windows.some((window) => isExtraWindow(window.label));
+      const primaryWindows = hasCollapsibleExtra
+        ? usage.windows.filter((window) => !isExtraWindow(window.label))
+        : usage.windows;
+      const shownWindows =
+        hasCollapsibleExtra && !showExtra ? primaryWindows : usage.windows;
+      const toggleAnchorLabel =
+        hasCollapsibleExtra && primaryWindows.length > 0
+          ? primaryWindows[primaryWindows.length - 1]!.label
+          : null;
+      return shownWindows.length === 0 ? (
         usage.credits ? (
           <CreditsNote detail={usage.credits.detail} />
         ) : (
@@ -497,26 +561,53 @@ function ProviderUsageBody({ provider, onCodexSignedIn }: { provider: UsageProvi
         )
       ) : (
         <div>
-          {usage.windows.map((window, index) => (
+          {shownWindows.map((window, index) => (
             <UsageWindow
               key={window.label}
               window={window}
-              last={!usage.credits && index === usage.windows.length - 1}
+              last={!usage.credits && index === shownWindows.length - 1}
+              trailing={
+                toggleAnchorLabel === window.label ? (
+                  <button
+                    type="button"
+                    aria-label={
+                      showExtra
+                        ? "Hide third-party limits"
+                        : "Show third-party limits"
+                    }
+                    aria-expanded={showExtra}
+                    title={
+                      showExtra
+                        ? "Hide third-party model limits"
+                        : "Show third-party model limits"
+                    }
+                    onClick={() => setShowExtra((open) => !open)}
+                    className="ml-1 mt-[1px] flex size-4 shrink-0 items-center justify-center rounded text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+                  >
+                    <Icon
+                      name={showExtra ? "ChevronUp" : "ChevronDown"}
+                      aria-hidden="true"
+                      className="size-3"
+                    />
+                  </button>
+                ) : undefined
+              }
             />
           ))}
           {usage.credits ? <CreditsNote detail={usage.credits.detail} /> : null}
         </div>
       );
+    }
     case "not_installed":
       return <UsageNote>Not installed on this machine.</UsageNote>;
     case "unauthenticated":
-      return <UsageNote>{provider.signInHint}</UsageNote>;
-    case "expired":
-      return provider.providerId === "codex" && onCodexSignedIn ? (
-        <CodexSignIn onSignedIn={onCodexSignedIn} />
-      ) : (
-        <UsageNote>{provider.expiredHint}</UsageNote>
-      );
+    case "expired": {
+      const label = usage.status === "expired" ? "session expired" : "signed out";
+      if (signIn && provider.providerId === "codex")
+        return <CodexSignIn label={label} onSignedIn={signIn.onSignedIn} />;
+      if (signIn) return <TerminalSignIn label={label} providerId={provider.providerId} signIn={signIn} />;
+      return <UsageNote>{usage.status === "expired" ? provider.expiredHint : provider.signInHint}</UsageNote>;
+    }
     case "error":
       return <UsageNote>{usage.message}</UsageNote>;
   }
@@ -530,7 +621,12 @@ function accountName(account: UsageProvider): string | null {
 }
 
 /** Agents whose accounts live on Settings → Agents → Accounts (the Accounts plugin). */
-const ACCOUNT_AGENTS = new Set(["claude-code", "codex", "acp-cursor"]);
+const ACCOUNT_AGENTS = new Set([
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+]);
 
 /** A quiet grey "+" at the end of an agent's row: opens the Accounts page on that agent. */
 function AddAccountButton({
@@ -565,7 +661,13 @@ function AccountChip({
   const shown =
     accounts.find((account) => account.inUse) ??
     (accounts.length === 1 ? accounts[0] : undefined);
-  const label = shown ? accountName(shown) : null;
+  // Privacy mode hides emails. A name the user wrote stays.
+  const [privacy] = usePrivacyMode();
+  const name = (account: UsageProvider) => {
+    const label = accountName(account);
+    return label === null ? null : hideEmail(label, privacy);
+  };
+  const label = shown ? name(shown) : null;
   const switchable = accounts.filter((account) => account.accountId);
   const chip = "block min-w-0 truncate font-normal text-subtle-foreground";
   if (label === null) return null;
@@ -582,6 +684,7 @@ function AccountChip({
       body: JSON.stringify({
         provider: account.providerId,
         id: account.accountId,
+        where: "usage_box",
       }),
     }).catch(() => undefined);
     refresh();
@@ -608,7 +711,7 @@ function AccountChip({
             className="flex items-center gap-2"
           >
             <span className="min-w-0 flex-1 truncate">
-              {accountName(account) ?? `This ${COMPUTER_TITLE}`}
+              {name(account) ?? `This ${COMPUTER_TITLE}`}
             </span>
             <Icon
               name="Check"
@@ -748,32 +851,12 @@ function TimeInCloudroom() {
 }
 
 const PLAN_RETRY_MS = 10_000;
+// Hovering the footer button mounts the card early, so a plan read this recently is reused instead of asking the website again.
+const PLAN_REUSE_MS = 60_000;
 const MONO_CLASS = "font-mono text-[10.5px] leading-[1.75]";
 const CARD_HEADER_CLASS =
   "mx-1.5 flex h-9 min-w-0 shrink-0 items-center gap-1 border-b border-sidebar-border pr-1 font-mono text-[10.5px] text-subtle-foreground";
-const USAGE_CARD_CLASS =
-  "overflow-hidden rounded-xl border border-border bg-card text-sidebar-foreground";
 const BILLING_URL = "https://www.cloudroom.dev/billing";
-const FREE_WITHOUT_CREDITS = [
-  "new cloud agents",
-  "idle cloud threads",
-  "sleeping sandboxes",
-  "waiting for you",
-  "local threads",
-  "your ai tokens",
-  "your own computers",
-  "chat history",
-  "archived threads",
-  "spare sandboxes",
-  "the cloud queue",
-  "desktop app",
-  "phone app",
-  "plugins and skills",
-  "voice input",
-  "share links",
-  "inviting friends",
-  "reviewing diffs",
-];
 
 function usePlanSummary(): [PlanSummary | null, () => void] {
   const [plan, setPlan] = useState(lastPlan);
@@ -790,13 +873,17 @@ function usePlanSummary(): [PlanSummary | null, () => void] {
       loadPlanSummary(controller.signal).then(
         (summary) => {
           lastPlan = summary;
+          lastPlanAt = Date.now();
           setPlan(summary);
           next(summary);
         },
         () => next(null),
       );
     };
-    load();
+    const age = Date.now() - lastPlanAt;
+    if (reloads === 0 && lastPlan !== null && age < PLAN_REUSE_MS)
+      timer = window.setTimeout(load, CARD_MAX_AGE_MS - age);
+    else load();
     return () => {
       controller.abort();
       if (timer !== null) window.clearTimeout(timer);
@@ -812,13 +899,14 @@ export function ProviderUsageStatusContent({
   plan = null,
   reloadPlan,
   refreshEnabled = true,
-}: Partial<ExperimentalSidebarFooterDisclosureProps> & {
+}: ExperimentalSidebarFooterDisclosureProps & {
   snapshot: UsageStoreSnapshot;
   threadMachineId: string | null;
   plan?: PlanSummary | null;
   reloadPlan?: () => void;
   refreshEnabled?: boolean;
 }) {
+  const [privacy] = usePrivacyMode();
   const [, refreshCountdowns] = useState(0);
   useEffect(() => {
     const timer = window.setInterval(
@@ -843,6 +931,13 @@ export function ProviderUsageStatusContent({
     >();
     for (const account of activeMachine?.providers ?? []) {
       if (account.usage?.status === "not_installed") continue;
+      // This computer's Antigravity login appears only while connected (David, 2026-11-21). Added accounts always do.
+      if (
+        account.providerId === "acp-antigravity" &&
+        (!account.accountId || account.accountId === "local") &&
+        account.usage?.status !== "ok"
+      )
+        continue;
       const group = groups.get(account.providerId);
       if (group) group.accounts.push(account);
       else
@@ -901,7 +996,8 @@ export function ProviderUsageStatusContent({
   }, []);
 
   return (
-    <div className={cn("flex flex-col", dismiss && "max-h-80")}>
+    // Grows to fit every subscription; only a very short window scrolls the list (David, 2026-11-21).
+    <div className="flex max-h-[calc(100dvh-8rem)] flex-col">
       <div data-provider-usage-header="" className={CARD_HEADER_CLASS}>
         <div className="flex min-w-0 flex-1">
           <MachineSelector
@@ -933,16 +1029,14 @@ export function ProviderUsageStatusContent({
             }
           />
         </button>
-        {dismiss ? (
-          <button
-            type="button"
-            aria-label="Collapse provider usage"
-            className="flex size-6 shrink-0 items-center justify-center rounded-md text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
-            onClick={dismiss}
-          >
-            <Icon name="ChevronDown" aria-hidden="true" className="size-3.5" />
-          </button>
-        ) : null}
+        <button
+          type="button"
+          aria-label="Collapse provider usage"
+          className="flex size-6 shrink-0 items-center justify-center rounded-md text-subtle-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          onClick={dismiss}
+        >
+          <Icon name="ChevronDown" aria-hidden="true" className="size-3.5" />
+        </button>
       </div>
       <div
         className={cn(
@@ -956,6 +1050,7 @@ export function ProviderUsageStatusContent({
         {feedback === null ? null : (
           <UsageFeedback
             message={feedback}
+            compact={!!dismiss && feedback === usageFeedbackMessages.refreshFailed}
             loading={feedback === usageFeedbackMessages.loading}
           />
         )}
@@ -1009,10 +1104,10 @@ export function ProviderUsageStatusContent({
                     provider.accounts.length === 1 ||
                     account.accountId ? null : (
                       <h3
-                        title={account.accountLabel}
+                        title={hideEmail(account.accountLabel, privacy)}
                         className="truncate text-subtle-foreground"
                       >
-                        {account.accountLabel}
+                        {hideEmail(account.accountLabel, privacy)}
                       </h3>
                     )}
                     {account.usage === null && snapshot.isRefreshing ? (
@@ -1024,17 +1119,19 @@ export function ProviderUsageStatusContent({
                     ) : (
                       <ProviderUsageBody
                         provider={account}
-                        onCodexSignedIn={
-                          activeMachine?.id.startsWith("source:") ||
+                        signIn={
+                          !activeMachine?.primary ||
                           (account.accountId && account.accountId !== "local")
                             ? undefined
-                            : () =>
-                                void refreshUsage({
-                                  force: true,
-                                  machineIds:
-                                    activeMachineId === null ? null : [activeMachineId],
-                                  maxAgeMs: 0,
-                                })
+                            : {
+                                hostId: activeMachine.id,
+                                onSignedIn: () =>
+                                  void refreshUsage({
+                                    force: true,
+                                    machineIds: [activeMachine.id],
+                                    maxAgeMs: 0,
+                                  }),
+                              }
                         }
                       />
                     )}
@@ -1044,130 +1141,6 @@ export function ProviderUsageStatusContent({
         ))}
       </div>
     </div>
-  );
-}
-
-function PriceChip({ label, className }: { label: string; className: string }) {
-  return (
-    <span
-      className={cn(
-        "rounded-[3px] px-1.5 font-bold tracking-wider text-primary-foreground",
-        className,
-      )}
-    >
-      {label}
-    </span>
-  );
-}
-
-function CreditsPriceList() {
-  const columnLength = Math.ceil(FREE_WITHOUT_CREDITS.length / 2);
-  return (
-    <section aria-label="What uses credits" className={USAGE_CARD_CLASS}>
-      <h2 className={cn(CARD_HEADER_CLASS, "pl-[5px] font-normal")}>
-        ~/what uses credits
-      </h2>
-      <div
-        className={cn(
-          "grid gap-x-4 gap-y-3 px-[11px] pb-2.5 pt-2 sm:grid-cols-3",
-          MONO_CLASS,
-        )}
-      >
-        <div>
-          <p className="mb-1 flex items-center gap-2">
-            <PriceChip label="PAID" className="bg-primary" />
-            <span className="text-subtle-foreground">uses credits</span>
-          </p>
-          <p className="flex gap-[7px] font-bold text-foreground">
-            <span
-              aria-hidden="true"
-              className="font-normal text-subtle-foreground"
-            >
-              └
-            </span>
-            agents actively running
-          </p>
-        </div>
-        <div className="sm:col-span-2 sm:border-l sm:border-dashed sm:border-border sm:pl-4">
-          <p className="mb-1 flex items-center gap-2">
-            <PriceChip label="FREE" className="bg-success" />
-            <span className="text-subtle-foreground">0 credits</span>
-          </p>
-          <ul className="grid gap-x-6 sm:auto-cols-fr sm:grid-flow-col sm:grid-rows-9">
-            {FREE_WITHOUT_CREDITS.map((item, index) => (
-              <li key={item} className="flex min-w-0 gap-[7px]">
-                <span aria-hidden="true" className="text-subtle-foreground">
-                  {(index + 1) % columnLength === 0 ||
-                  index === FREE_WITHOUT_CREDITS.length - 1
-                    ? "└"
-                    : "├"}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item}</span>
-                <span className="font-bold text-success">0</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export function UsagePageContent({
-  snapshot,
-  plan,
-  reloadPlan,
-  refreshEnabled = true,
-}: {
-  snapshot: UsageStoreSnapshot;
-  plan: PlanSummary | null;
-  reloadPlan?: () => void;
-  refreshEnabled?: boolean;
-}) {
-  return (
-    <div className="space-y-3 [zoom:1.25]">
-      {plan === null || plan.meters.length === 0 ? null : (
-        <div
-          className={cn(
-            USAGE_CARD_CLASS,
-            "flex items-start gap-3 px-[11px] py-2",
-            MONO_CLASS,
-          )}
-        >
-          <PlanUsage plan={plan} className="min-w-0 flex-1 border-0 pb-0" />
-          <UrlLink
-            href={BILLING_URL}
-            target="_blank"
-            rel="noreferrer"
-            className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 text-foreground no-underline hover:bg-muted"
-          >
-            billing
-            <Icon name="ExternalLink" aria-hidden="true" className="size-3" />
-          </UrlLink>
-        </div>
-      )}
-      <CreditsPriceList />
-      <div className={USAGE_CARD_CLASS}>
-        <ProviderUsageStatusContent
-          snapshot={snapshot}
-          threadMachineId={null}
-          reloadPlan={reloadPlan}
-          refreshEnabled={refreshEnabled}
-        />
-      </div>
-    </div>
-  );
-}
-
-function UsageSettings() {
-  const snapshot = useSyncExternalStore(
-    subscribeStore,
-    getStoreSnapshot,
-    getStoreSnapshot,
-  );
-  const [plan, reloadPlan] = usePlanSummary();
-  return (
-    <UsagePageContent snapshot={snapshot} plan={plan} reloadPlan={reloadPlan} />
   );
 }
 
@@ -1198,7 +1171,6 @@ function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
 }
 
 export default definePluginApp((app) => {
-  app.slots.settingsSection({ id: "usage", component: UsageSettings });
   const footer = app.experimental_sidebarFooter.register({
     kind: "disclosure",
     id: "usage",

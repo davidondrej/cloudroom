@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -10,11 +10,17 @@ import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contr
 import { cursorAuthFile, execPortableFile, findCliExecutable, killPortableProcess, spawnPortableProcess, tarCommand, userEnvironmentEntries } from "@cloudroom/process-utils";
 import { rawThreadIdSchema, reasoningLevelSchema, COMPUTER, type ThreadCreateOrigin } from "@cloudroom/domain";
 import { z } from "zod";
+import { threadCreditMinutesSchema } from "./thread-credits.js";
+import type { WorkSessionDeps } from "../../types.js";
+import { requirePrimaryHostId } from "../hosts/primary-host.js";
+import { resolveBuiltinSkillsRootPath, resolveSharedBuiltinSkillsRootPath } from "../skills/builtin-skills-copy.js";
 import { hasSupportedFrontmatterDelimiter, parseFrontmatter } from "../skills/injected-skills.js";
+import { runProviderCliInstall } from "../system/provider-installations.js";
 import { macClaudeSignedIn } from "./claude-token.js";
-import { CloudroomConnectionError, CloudroomError } from "./client.js";
+import { CloudroomConnectionError, CloudroomError, type SessionRecord } from "./client.js";
 import { macHarnessVersions } from "./harness-versions.js";
 import { cancelMcpSignIns, isRemoteMcp, mcpSignInKey, needsMcpSignIn, type McpSignIn, type RemoteMcpServer } from "./mcp-login.js";
+import { reportCliInstall } from "./setup-telemetry.js";
 
 export const SANDBOX_PREFIX = "sandbox:";
 export const sandboxThread = (coreUrl: string) => coreUrl.startsWith(SANDBOX_PREFIX) ? coreUrl.slice(SANDBOX_PREFIX.length) : null;
@@ -35,6 +41,16 @@ const runSchema = z.object({ thread: rawThreadIdSchema, project: z.string(), tit
   // The website's parent link (ADR 20261104-015709); missing from websites before 20261107-093805.
   parent: z.string().nullable().optional().catch(undefined) });
 export type AutomationRun = z.infer<typeof runSchema>;
+/** A Cloud thread of the account as every computer follows it (#237, web `threadChanges`). */
+const threadChangeSchema = z.object({
+  thread: rawThreadIdSchema, session: z.string().regex(/^cr_[A-Za-z0-9_-]{1,80}$/), project: z.string(), project_name: z.string().nullable(),
+  repository: z.string().nullable(), title: z.string().nullable(), state: z.enum(["open", "archived", "deleted", "local"]), sandbox: z.string().nullable(),
+  harness: z.string().nullable(), model: z.string().nullable(), reasoning: z.string().nullable(), parent: z.string().nullable(),
+  parent_state: z.enum(["open", "closed"]).nullable(), loop: z.boolean(), pinned_at: z.string().nullable().optional().default(null), created_at: z.string(), woke_at: z.string().nullable(), updated_at: z.string(),
+});
+export type ThreadChange = z.infer<typeof threadChangeSchema>;
+const threadPageSchema = z.object({ threads: z.array(threadChangeSchema), next: z.string(), more: z.boolean(), recheck_ms: z.number().int().positive().default(3_600_000), recheck_offline_ms: z.number().int().positive().default(600_000) });
+export type ThreadPage = z.infer<typeof threadPageSchema>;
 const awakeSchema = z.object({
   sandboxes: z.array(z.object({ thread: z.string(), origin: z.string().url(), token: z.string() })),
   runs: z.array(runSchema).catch([]).default([]),
@@ -42,6 +58,14 @@ const awakeSchema = z.object({
 });
 export type SandboxAccount = { website: string; userId: string; token: string };
 type AccountRequest = { account: SandboxAccount; signal: AbortSignal };
+const ACCOUNT_CHANGED = "The Cloudroom account changed. Try again.";
+/** Throws when a reset aborted `signal`; a caller's own timeout is left to fail as before. */
+const cancelled = (signal: AbortSignal) => { if (signal.reason instanceof CloudroomError) throw signal.reason; };
+/** Throws once a reset cancelled `only`, or `account`, just read, is not `only`'s. Call it after the last await before a write. */
+const check = (only: AccountRequest, account: SandboxAccount | null) => {
+  cancelled(only.signal);
+  if (account?.userId !== only.account.userId || account.website !== only.account.website) throw new CloudroomError(ACCOUNT_CHANGED);
+};
 export type SandboxConnection = { url: string; token: string };
 export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "thread_typing" | "thread_view" | "teleport_local";
 /** Why a sleeping thread wakes before any work is sent: the user opened it or started typing (ADR 0176), or its work
@@ -49,27 +73,97 @@ export type SandboxTrigger = "app_launch" | "app_activity" | "composer" | "threa
 export type SandboxWakeTrigger = Extract<SandboxTrigger, "thread_typing" | "thread_view" | "teleport_local">;
 type FirstWake = { target?: "vps" | "cloud"; launch?: ThreadCreateOrigin; launcher?: string };
 /** Logins the website keeps for every sandbox of an account (ADR 0145). */
-export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "openclaw";
+export type SandboxLogin = "claude" | "codex" | "pi" | "github" | "cursor" | "opencode" | "mcp" | "hermes" | "devin" | "kimi" | "antigravity" | "openclaw" | "agent-zero";
 /** GitHub projects also name their repository and cloud folder, so the website can build a template. */
 export type SandboxProject = { id: string; repository: string | null; folder: string };
 const RECHECK_MS = 60_000;
+const DEEPAPI_RECHECK_MS = 30 * 60_000;
+const DEEPAPI_FOLDER = () => join(homedir(), ".deepapi");
+const DEEPAPI_MARK = "# Added by Cloudroom.";
+const DEEPAPI_CMD_MARK = ":: Added by Cloudroom.";
+/** The files DeepAPI's own installer writes, `env` for bash and zsh and `env.ps1` for PowerShell, marked with the
+ *  Cloudroom account the key belongs to. */
+function deepapiFiles(userId: string): Record<string, (key: string) => string> {
+  const mark = `${DEEPAPI_MARK} Account ${userId}. Settings → General → DeepAPI turns it off.`;
+  return {
+    env: key => `${mark}\nexport DEEPAPI_API_BASE_URL="https://deepapi.co"\nexport DEEPAPI_API_KEY="${key}"\nexport PATH="$HOME/.deepapi:$PATH"\n`,
+    ...(process.platform === "win32" ? { "env.ps1": (key: string) => `${mark}\r\n$env:DEEPAPI_API_BASE_URL = 'https://deepapi.co'\r\n$env:DEEPAPI_API_KEY = '${key}'\r\n$env:Path = "$HOME\\.deepapi;$env:Path"\r\n` } : {}),
+  };
+}
+
+/** Installs or removes the bundled `deepapi` CLI next to `~/.deepapi/env`. Never overwrites a user's own CLI. */
+async function syncDeepapiCli(enabled: boolean): Promise<void> {
+  const folder = DEEPAPI_FOLDER();
+  const win = process.platform === "win32";
+  const targets = win
+    ? [{ name: "deepapi.ps1", mark: DEEPAPI_MARK, mode: 0o600 }, { name: "deepapi.cmd", mark: DEEPAPI_CMD_MARK, mode: 0o600 }]
+    : [{ name: "deepapi", mark: DEEPAPI_MARK, mode: 0o700 }];
+  if (!enabled) {
+    await Promise.all(targets.map(({ name, mark }) => readFile(join(folder, name), "utf8")
+      .then(text => text.includes(mark) ? rm(join(folder, name), { force: true }) : undefined, () => undefined)));
+    return;
+  }
+  const binDir = (() => {
+    try { return join(resolveSharedBuiltinSkillsRootPath(resolveBuiltinSkillsRootPath()), "deepapi", "bin"); }
+    catch { return null; }
+  })();
+  if (!binDir) return;
+  const payloads: Record<string, string | null> = win
+    ? {
+        "deepapi.ps1": await readFile(join(binDir, "deepapi.ps1"), "utf8").then(s => `${s.trimEnd()}\r\n${DEEPAPI_MARK}\r\n`, () => null),
+        "deepapi.cmd": `@echo off\r\n${DEEPAPI_CMD_MARK}\r\npowershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0deepapi.ps1" %*\r\n`,
+      }
+    : {
+        deepapi: await readFile(join(binDir, "deepapi"), "utf8").then(s => `${s.trimEnd()}\n${DEEPAPI_MARK}\n`, () => null),
+      };
+  await mkdir(folder, { recursive: true, mode: 0o700 });
+  for (const { name, mark, mode } of targets) {
+    const content = payloads[name];
+    if (!content) continue;
+    const file = join(folder, name);
+    const existing = await readFile(file, "utf8").catch(() => null);
+    if (existing === content) {
+      if (!win) await chmod(file, mode).catch(() => undefined);
+      continue;
+    }
+    if (existing !== null && !existing.includes(mark)) continue;
+    if (existing !== null) await rm(file, { force: true });
+    await writeFile(file, content, { mode, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    if (!win) await chmod(file, mode).catch(() => undefined);
+  }
+}
 // After "Run now": check the awake list every 2 s for 90 s, so the run's new thread shows within seconds.
 const SOON_MS = 2_000, SOON_FOR_MS = 90_000;
 const insideLoginLock = new AsyncLocalStorage<true>();
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
-/** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale.
- *  `og` is the OG letter, which the website sends only to OGs still on the free Pro it gave them (ADR 0218). */
+/** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale. */
 /** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
  *  left in live packs (ADR 0317): 0 from older websites. */
-export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number; og: { name: string | null; endsAt: string } | null };
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number };
+/** A thread family burning credits fast, shown under its top thread in the sidebar (docs/scopes/credit-burn.md): credits
+ *  in the last hour, and how many subagents used most of them (0: the thread itself did). */
+export type CreditBurn = { credits: number; subagents: number };
+const burningSchema = z.array(z.object({ thread: z.string(), credits: z.number(), hot: z.boolean(), subagents: z.number() })).catch([]);
+/** The switch in Settings → General → DeepAPI (ADR 20261115-235507). */
+export type DeepapiState = { enabled: boolean };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
 export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
+/** An outage holds the thread, and it has an older copy it can continue from instead (ADR 20261113-202742). */
+const OUTAGE_CHOICE = "sandbox_outage";
 export const CLOUD_REGION = "cloud_region";
+/** A wake the website holds until the sandbox's server can take it (web/lib/sandboxes.ts): restarting, restoring,
+ *  repairing, full, or an outage. The thread shows the website's words as a notice, never an error, and tries again each minute. */
+/** The website's database can't answer: an outage, or planned work like a Postgres upgrade (web/lib/model.ts). */
+const CLOUD_PAUSED = "cloud_paused";
+export const cloudPausedError = (error: unknown) => error instanceof CloudroomError && error.code === CLOUD_PAUSED;
+const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE, CLOUD_PAUSED]);
+/** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
+const SIGNED_OUT = "desktop_signed_out";
 export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
 // The Mac's skills and global instructions that sandboxes receive, one way (docs/scopes/sandboxes.md).
 const SKILL_ROOTS = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"];
@@ -105,19 +199,74 @@ export function codexLoginFailure(output: string): string {
   return `Codex on this ${COMPUTER} only allows API-key login, but Cloudroom needs ChatGPT sign-in. Remove \`forced_login_method = "api"\` from ${config}, then click Connect again. If the file is locked, run \`chflags nouchg ${config}\` first.`;
 }
 
-type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean };
+/** `installingSince` is set while a missing Codex installs before sign-in, in ms since 1970. */
+type MacCodexLogin = { child: ChildProcess | null; url: string | null; error: string | null; done: boolean; installingSince: number | null };
 let macCodexLoginRun: MacCodexLogin | null = null;
 // Most Windows PCs have no Node, so npm would fail there (#475).
 const codexInstallHint = () => process.platform === "win32" ? "Install it in PowerShell with `irm https://chatgpt.com/codex/install.ps1 | iex`" : "Install it with `npm i -g @openai/codex`";
 const codexMissing = () => `Codex is not installed on this ${COMPUTER}.${process.platform === "darwin" ? " Cloudroom never runs the copy inside Codex.app or ChatGPT.app." : ""} ${codexInstallHint()}, then click Connect again.`;
+
+type InstallEvents = Awaited<ReturnType<typeof runProviderCliInstall>>;
+let codexInstall: Promise<void> | null = null;
+/** Installs Codex on this Mac with the provider's own installer, the one Local threads use. A sign-in started after a
+ *  cancel joins the install still running, instead of queueing a second one that fails once Codex is there. */
+function installMacCodex(deps: WorkSessionDeps): Promise<void> {
+  codexInstall ??= runMacCodexInstall(deps).finally(() => { codexInstall = null; });
+  return codexInstall;
+}
+
+async function runMacCodexInstall(deps: WorkSessionDeps): Promise<void> {
+  const started = Date.now();
+  const events = await runProviderCliInstall(deps, { hostId: requirePrimaryHostId(deps), provider: "codex", actionKind: "install" });
+  const ok = events.some(event => event.type === "completed" && event.success);
+  const message = ok ? null : installFailure(events);
+  // A second "started" means the normal command failed and the official installer ran.
+  reportCliInstall("codex", events.filter(event => event.type === "started").length > 1 ? "repair" : "codex_connect", ok ? "ok" : "failed", Date.now() - started, message);
+  if (message) throw new Error(message);
+}
+
+/** Why an install failed: its error, else the last command's final output lines and exit, without colors or npm's spinner. */
+function installFailure(events: InstallEvents): string {
+  const error = events.filter(event => event.type === "error").at(-1);
+  if (error?.type === "error") return error.message;
+  const lastStart = events.map(event => event.type).lastIndexOf("started");
+  const tail = events.slice(lastStart + 1).map(event => event.type === "output" ? event.text : "").join("")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]|[⠀-⣿]/gu, "").split("\n").map(line => line.trim()).filter(Boolean).slice(-3).join(" ").slice(-300);
+  const done = events.filter(event => event.type === "completed").at(-1);
+  const exit = done?.type !== "completed" ? "it stopped early" : done.exitCode !== null ? `exit code ${done.exitCode}` : `signal ${done.signal ?? "unknown"}`;
+  return tail ? `${tail} (${exit})` : `The installer failed (${exit})`;
+}
+
 /** Runs `codex login` on this Mac. Codex opens the default browser and saves the login itself; one run at a time, 10 minutes at most.
- *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). */
-export function startMacCodexLogin(): MacCodexLogin {
+ *  No Codex found means not installed: a bare `codex` could reach the one inside Codex.app through PATH (#96). A missing Codex is
+ *  installed first, and the run reports the install while it lasts, never a silent wait (ADR 20261111-123959). */
+export function startMacCodexLogin(deps: WorkSessionDeps): MacCodexLogin {
   if (macCodexLoginRun && !macCodexLoginRun.done) return macCodexLoginRun;
+  const run: MacCodexLogin = { child: null, url: null, error: null, done: false, installingSince: null };
+  macCodexLoginRun = run;
   const codex = findCliExecutable("codex");
-  if (!codex) return macCodexLoginRun = { child: null, url: null, error: codexMissing(), done: true };
-  const child = spawnPortableProcess({ command: codex, args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000 });
-  const run: MacCodexLogin = { child, url: null, error: null, done: false };
+  if (codex) {
+    runCodexLogin(run, codex);
+    return run;
+  }
+  run.installingSince = Date.now();
+  installMacCodex(deps).then(() => {
+    run.installingSince = null;
+    // Cancelled while installing: the install stays, the sign-in doesn't start.
+    if (macCodexLoginRun !== run) return;
+    const installed = findCliExecutable("codex");
+    if (installed) runCodexLogin(run, installed);
+    else Object.assign(run, { done: true, error: codexMissing() });
+  }, (error: unknown) => {
+    const reason = (error instanceof Error ? error.message : String(error)).trim().replace(/[^.!?]$/, "$&.");
+    Object.assign(run, { installingSince: null, done: true, error: `Codex could not be installed on this ${COMPUTER}: ${reason} Try again.` });
+  });
+  return run;
+}
+
+function runCodexLogin(run: MacCodexLogin, codex: string): void {
+  const child = spawnPortableProcess({ command: codex, args: ["login"], stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60_000, windowsHide: true });
+  run.child = child;
   let output = "";
   const read = (chunk: Buffer) => { output += chunk.toString(); run.url ??= output.match(/https:\/\/auth\.openai\.com\/\S+/)?.[0] ?? null; };
   child.stdout?.on("data", read);
@@ -128,8 +277,6 @@ export function startMacCodexLogin(): MacCodexLogin {
   });
   // A cancel or the 10-minute timeout kills Codex (code null); only a real exit has an error worth showing.
   child.on("exit", code => { run.done = true; if (code !== 0) run.error ??= codexLoginFailure(code === null ? "" : output); });
-  macCodexLoginRun = run;
-  return run;
 }
 /** The current `codex login` run; a finished run is returned once, then forgotten. */
 export function macCodexLogin(): MacCodexLogin | null {
@@ -159,7 +306,7 @@ export async function macCodexLoginExpired(): Promise<boolean> {
   const codex = findCliExecutable("codex");
   if (!codex) return false;
   return new Promise(resolve => {
-    const child = spawnPortableProcess({ command: codex, args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000 });
+    const child = spawnPortableProcess({ command: codex, args: ["app-server"], stdio: ["pipe", "pipe", "ignore"], timeout: 20_000, windowsHide: true });
     const end = (expired: boolean) => { resolve(expired); killPortableProcess(child, "SIGTERM"); };
     const send = (message: object) => child.stdin?.write(`${JSON.stringify(message)}\n`);
     child.stdin?.on("error", () => end(false));
@@ -198,20 +345,105 @@ function contentDigest(tar: Buffer): string {
 export async function macOpencodeLogin(): Promise<string | null> {
   const binary = findCliExecutable("opencode");
   const version = (await macHarnessVersions()).opencode;
+  const dataHome = process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share");
   const value = binary && version && !version.startsWith("1.")
     ? (await execPortableFile(binary, ["auth", "export", "--standalone"], { timeoutMs: 20_000, maxBuffer: 1024 * 1024 }).catch(() => null))?.stdout ?? null
-    : await readFile(join(process.env.XDG_DATA_HOME || join(homedir(), ".local/share"), "opencode/auth.json"), "utf8").catch(() => null);
+    : await readFile(join(dataHome, "opencode", "auth.json"), "utf8").catch(() => null);
   try { const parsed: unknown = value && JSON.parse(value); return parsed && (!Array.isArray(parsed) || parsed.length) ? value : null; } catch { return null; }
 }
 
-/** What Cloud gets for OpenCode: its login, plus the custom providers in its global opencode.json (feedback #547).
- *  The rest of that file, such as MCP servers, plugins, and permissions, belongs to this computer. */
-async function macOpencodeCloudLogin(): Promise<string | null> {
-  const [auth, text] = await Promise.all([macOpencodeLogin(), readFile(join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode/opencode.json"), "utf8").catch(() => null)]);
-  let provider: unknown;
-  try { provider = text ? (JSON.parse(text) as { provider?: unknown }).provider : undefined; } catch { /* Comments: copy the login only. */ }
-  if (!provider || typeof provider !== "object" || !Object.keys(provider).length) return auth;
-  const config = JSON.stringify({ provider });
+/** Parses JSON or JSONC (line/block comments and trailing commas) without altering string literals. */
+function parseJsonc(text: string): unknown {
+  const src = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  let stripped = "";
+  let inString = false;
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]!;
+    if (inString) {
+      stripped += ch;
+      if (ch === "\\" && i + 1 < src.length) { stripped += src[++i]!; }
+      else if (ch === "\"") { inString = false; }
+      continue;
+    }
+    if (ch === "\"") { inString = true; stripped += ch; continue; }
+    if (ch === "/" && src[i + 1] === "/") {
+      while (i + 1 < src.length && src[i + 1] !== "\n") i += 1;
+      continue;
+    }
+    if (ch === "/" && src[i + 1] === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i += 1;
+      i += 1;
+      continue;
+    }
+    stripped += ch;
+  }
+  let clean = "";
+  inString = false;
+  for (let i = 0; i < stripped.length; i += 1) {
+    const ch = stripped[i]!;
+    if (inString) {
+      clean += ch;
+      if (ch === "\\" && i + 1 < stripped.length) { clean += stripped[++i]!; }
+      else if (ch === "\"") { inString = false; }
+      continue;
+    }
+    if (ch === "\"") { inString = true; clean += ch; continue; }
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < stripped.length && /\s/.test(stripped[j]!)) j += 1;
+      if (stripped[j] === "}" || stripped[j] === "]") continue;
+    }
+    clean += ch;
+  }
+  return JSON.parse(clean);
+}
+
+function opencodeConfigPaths(): string[] {
+  const base = join(process.env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config"), "opencode");
+  const paths = [join(base, "opencode.json"), join(base, "opencode.jsonc")];
+  // Match OpenCode's own precedence: base config -> OPENCODE_CONFIG -> OPENCODE_CONFIG_DIR.
+  const customFile = process.env.OPENCODE_CONFIG?.trim();
+  if (customFile) paths.push(customFile);
+  const customDir = process.env.OPENCODE_CONFIG_DIR?.trim();
+  if (customDir && customDir !== base) {
+    paths.push(join(customDir, "opencode.json"), join(customDir, "opencode.jsonc"));
+  }
+  return paths;
+}
+
+function mergeProviderEntries(target: Record<string, unknown>, incoming: Record<string, unknown>): void {
+  for (const [name, entry] of Object.entries(incoming)) {
+    const existing = target[name];
+    target[name] =
+      existing && typeof existing === "object" && !Array.isArray(existing) && entry && typeof entry === "object" && !Array.isArray(entry)
+        ? { ...(existing as Record<string, unknown>), ...(entry as Record<string, unknown>) }
+        : entry;
+  }
+}
+
+/** What Cloud gets for OpenCode: its login, plus the custom providers in its global opencode.json(c) (feedback #547).
+ *  Reads both `provider` (v1) and `providers` (v2). The rest of those files belongs to this computer. */
+export async function macOpencodeCloudLogin(): Promise<string | null> {
+  const [auth, texts] = await Promise.all([
+    macOpencodeLogin(),
+    Promise.all(opencodeConfigPaths().map(file => readFile(file, "utf8").catch(() => null))),
+  ]);
+  const provider: Record<string, unknown> = {};
+  const providers: Record<string, unknown> = {};
+  for (const text of texts) {
+    if (!text) continue;
+    let parsed: unknown;
+    try { parsed = parseJsonc(text); } catch { continue; }
+    const obj = record(parsed);
+    mergeProviderEntries(provider, record(obj.provider));
+    mergeProviderEntries(providers, record(obj.providers));
+  }
+  const picked: Record<string, Record<string, unknown>> = {};
+  if (Object.keys(provider).length) picked.provider = provider;
+  if (Object.keys(providers).length) picked.providers = providers;
+  if (!Object.keys(picked).length) return auth;
+  const config = JSON.stringify(picked);
   return JSON.stringify(auth ? { auth, config } : { config });
 }
 
@@ -249,6 +481,25 @@ export async function macKimiLogin(): Promise<string | null> {
   const config = await read("config.toml");
   if (!config.trim() || (!Object.keys(credentials).length && !/^\s*api_key\s*=\s*\S/m.test(config))) return null;
   return JSON.stringify({ config, credentials });
+}
+
+/** A server only this computer or its network reaches: localhost, Docker's host name, or a private address. */
+const localAgentZero = (host: string) => /^(https?:\/\/)?([^@/]*@)?(localhost|[^/:]*\.localhost|[^/:]*\.local|host\.docker\.internal|127\.|0\.0\.0\.0|\[::1?\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/i.test(host);
+
+/** This computer's `a0` login for Cloud (ADR 20261116-153548): the Agent Zero server in ~/.agent-zero/.env, else the
+ *  only remote one `a0` has a session for, with that session's cookies. A named local server travels too, so Cloud
+ *  stops using an older one and Core explains why it can't reach it. The rest of `a0`'s settings stays here. */
+export async function macAgentZeroLogin(): Promise<string | null> {
+  const home = join(homedir(), ".agent-zero");
+  const [env, saved] = await Promise.all([readFile(join(home, ".env"), "utf8").catch(() => ""), readFile(join(home, "session_cookies.json"), "utf8").catch(() => "")]);
+  let sessions: Record<string, unknown> = {};
+  try { const hosts = (JSON.parse(saved) as { hosts?: unknown }).hosts; if (hosts && typeof hosts === "object" && !Array.isArray(hosts)) sessions = hosts as Record<string, unknown>; } catch { /* no sessions */ }
+  const named = [...env.matchAll(/^\s*(?:export\s+)?AGENT_ZERO_HOST\s*=\s*["']?([^"'\s#]+)/gm)].at(-1)?.[1]?.replace(/\/+$/, "");
+  const remote = Object.keys(sessions).filter(host => !localAgentZero(host));
+  const host = named ?? (remote.length === 1 ? remote[0] : undefined);
+  if (!host) return null;
+  const cookies = Array.isArray(sessions[host]) ? sessions[host] : undefined;
+  return JSON.stringify({ host, ...(cookies ? { cookies } : {}) });
 }
 
 /** This computer's Devin CLI login file, or null when Devin is signed out here. */
@@ -336,9 +587,10 @@ export async function cursorKeyRejected(apiKey: string): Promise<boolean> {
 
 /** "" on any failure, including spawn errors execFile throws instead of rejecting (an Intel binary without Rosetta). */
 const output = async (command: string, args: string[]) => {
-  try { return (await promisify(execFile)(command, args, { timeout: 10_000 })).stdout.trim(); } catch { return ""; }
+  try { return (await promisify(execFile)(command, args, { timeout: 10_000, windowsHide: true })).stdout.trim(); } catch { return ""; }
 };
-export const githubAccountSchema = z.object({ login: z.string(), name: z.string().nullable(), avatarUrl: z.string().nullable() });
+/** `reposUrl` comes with a login that reaches only the repos its owner picked: GitHub's page for changing them. */
+export const githubAccountSchema = z.object({ login: z.string(), name: z.string().nullable(), avatarUrl: z.string().nullable(), reposUrl: z.string().startsWith("https://github.com/").optional() });
 export type GithubAccount = z.infer<typeof githubAccountSchema>;
 /** This Mac's GitHub CLI token, or "" when `gh` is missing or signed out. */
 export const macGithubToken = () => output("gh", ["auth", "token", "--hostname", "github.com"]);
@@ -352,6 +604,8 @@ const environmentSchema = z.object({
   variables: z.array(z.object({ name: z.string(), hint: z.string() })), setup: z.string(),
   repos: z.array(z.string()).default([]), mcp: z.array(z.string()).default([]), available: z.array(z.string()).optional(), pushed: z.record(z.string(), z.number()).optional(), ids: z.record(z.string(), z.number()).optional(), login: z.string().optional(),
   loops: z.record(z.string(), z.number()).optional(),
+  repoSync: z.array(z.object({ repo: z.string(), branch: z.string(), every: z.number(), on: z.boolean() })).default([]),
+  branches: z.array(z.string()).optional(),
 });
 export type CloudEnvironment = z.infer<typeof environmentSchema>;
 export const cloudEnvironmentRequestSchema = z.discriminatedUnion("action", [
@@ -362,6 +616,9 @@ export const cloudEnvironmentRequestSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("addRepo"), repo: z.string().min(1) }),
   z.object({ action: z.literal("removeRepo"), repo: z.string().min(1) }),
   z.object({ action: z.literal("githubRepos") }),
+  // RepoSync (docs/scopes/repo-sync.md): one repo's row, and the branches its picker offers.
+  z.object({ action: z.literal("repoSync"), repo: z.string().min(1), on: z.boolean().optional(), branch: z.string().min(1).optional(), every: z.number().optional(), remove: z.boolean().optional() }),
+  z.object({ action: z.literal("githubBranches"), repo: z.string().min(1) }),
 ]);
 /** One MCP server in Claude Code's format, as the website stores it for sandboxes. */
 export type McpServer = { type: "stdio"; command: string; args: string[]; env: Record<string, string> } | { type: "http" | "sse"; url: string; headers: Record<string, string> };
@@ -500,6 +757,8 @@ export function revokeDesktopToken(account: SandboxAccount): void {
   }).then(response => response.body?.cancel(), () => {});
 }
 
+const AGENT_GRANT_RENEW_MS = 86_400_000, AGENT_GRANT_RETRY_MS = 5_000, AGENT_GRANT_RETRY_MAX_MS = 300_000;
+
 /** Each cloud thread's own sandbox, managed by the website (docs/scopes/sandboxes.md). Lookups never wake it. */
 export class SandboxDirectory {
   private readonly views = new Map<string, View>();
@@ -526,34 +785,75 @@ export class SandboxDirectory {
   private uploaded = new Map<string, string>();
   /** Gets the threads automations started, from each awake check; the app shows the ones it doesn't have yet. */
   onRuns: (runs: AutomationRun[]) => void = () => {};
+  /** Gets the token the website refused as signed out, so the app signs out too and asks to sign in again. */
+  onSignedOut: (token: string) => void = () => {};
   /** `woke` runs after each wake, so the Mac helper lists the new sandbox now instead of at its next minute check. */
   constructor(readonly account: () => Promise<SandboxAccount | null>, private readonly woke: (thread: string) => void = () => {}) {}
 
-  /** `only` sends the request solely for that account, so a login started under one account never reaches another. */
-  private async call(body: Record<string, unknown>, path = "sandboxes", only?: AccountRequest): Promise<unknown> {
+  /** Aborted by each reset (#1940): requests sent before an account switch or sign-out never fill the next one's state. */
+  private session = new AbortController();
+  /** Binds login work to the account signed in now, or nowhere once `signal` is aborted (#1940). */
+  private async bind(signal = this.session.signal): Promise<AccountRequest> {
     const account = await this.account();
     if (!account) throw new CloudroomError("Sign in to Cloudroom to use cloud sandboxes.");
-    if (only && (account.userId !== only.account.userId || account.website !== only.account.website)) throw new CloudroomError("The Cloudroom account changed. Try again.");
+    cancelled(signal);
+    return { account, signal };
+  }
+
+  /** `only` sends the request solely for that account, so a login started under one account never reaches another. */
+  private async call(body: Record<string, unknown>, path = "sandboxes", only?: AccountRequest): Promise<unknown> {
+    // A reset cancels it, unless the caller bound it to an account itself. Either way, a late reply changes no state.
+    const session = this.session.signal, cancel = only?.signal ?? session;
+    const account = await this.account();
+    if (!account) throw new CloudroomError("Sign in to Cloudroom to use cloud sandboxes.", 401);
+    // Checked and sent with the same read, so an A → B → A switch can't send A's request as B.
+    if (only) check(only, account);
     let response: Response;
     try {
       response = await fetch(`${account.website}/api/desktop/${path}`, {
-        method: "POST", redirect: "error", signal: only ? AbortSignal.any([only.signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
+        method: "POST", redirect: "error", signal: AbortSignal.any([cancel, AbortSignal.timeout(path === "antigravity" ? 305_000 : 120_000)]),
         headers: { "Content-Type": "application/json", Authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` },
         body: JSON.stringify(body),
       });
-    } catch (error) { throw new CloudroomConnectionError(`Cloudroom could not reach the website to manage this thread's sandbox: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) {
+      cancelled(cancel);
+      throw new CloudroomConnectionError(`Cloudroom could not reach the website to manage this thread's sandbox: ${error instanceof Error ? error.message : String(error)}`);
+    }
     const value = await response.json().catch(() => ({})) as { error?: unknown; code?: unknown };
+    // A reply that comes after a reset is dropped, or answers only its bound caller, before it changes anything (#1940).
+    cancelled(cancel);
+    const stale = session.aborted;
     if (!response.ok) {
       const message = typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`;
-      if (response.status === 409 && /busy/i.test(message)) throw new CloudroomConnectionError(message);
+      if (path !== "gitlab" && response.status === 409 && /busy/i.test(message)) throw new CloudroomConnectionError(message);
       const code = typeof value.code === "string" ? value.code : null;
+      if (stale) throw new CloudroomError(message, path !== "gitlab" && response.status >= 500 ? null : response.status, code);
       if (code === USAGE_LIMIT) this.limit = { on: true, at: Date.now() };
       // Refused for the cloud queue or the region: ask again soon, so the composer shows the right card.
       if (code === CLOUD_QUEUE || code === CLOUD_REGION) this.mode = null;
-      throw new CloudroomError(message, response.status >= 500 ? null : response.status, code);
+      if (code === SIGNED_OUT) this.onSignedOut(account.token);
+      // A 4xx (say, "This account is not enabled") means the database answered: Cloud is back, whatever the answer.
+      if (code === CLOUD_PAUSED) this.pausedAnswers += 1;
+      else if (response.status < 500) this.cloudAnswered(path);
+      throw new CloudroomError(message, path !== "gitlab" && response.status >= 500 ? null : response.status, code);
     }
+    if (!stale) this.cloudAnswered(path);
     return value;
   }
+
+  /** Every `sandboxes` action reads the database, so its answer ends a pause. Other routes can answer while it's down
+   *  (search, project suggestions, Wrapped), so they never do: the banner would flicker. */
+  private cloudAnswered(path: string): void {
+    if (path !== "sandboxes") return;
+    this.pausedAnswers = 0;
+    // Threads that waited for the paused Cloud wake at once, not after their backoff: the wait was the database's.
+    for (const [thread, waiting] of this.backoff) if (cloudPausedError(waiting.refusal)) this.backoff.delete(thread);
+  }
+
+  private pausedAnswers = 0;
+  /** The website said its database can't answer, twice in a row with no real answer between: one failed
+   *  query is a blip, not a pause. The minute mode check keeps asking, so this clears within a minute of Cloud's return. */
+  cloudPaused(): boolean { return this.pausedAnswers >= 2; }
 
   private limit: { on: boolean; at: number } | null = null;
   private checkingLimit = false;
@@ -586,6 +886,16 @@ export class SandboxDirectory {
     return this.call(body, "popups");
   }
 
+  /** Monthly Wrapped: this account's "Top N%" by agents started in a finished month, or null (docs/scopes/wrapped.md). */
+  async wrappedTop(month: string): Promise<number | null> {
+    return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
+  }
+
+  /** Whether the website ranks this account in the bottom 20% by skills run per agent (docs/scopes/skill-suggestions.md). */
+  async skillBottom(): Promise<boolean> {
+    return z.object({ bottom: z.boolean() }).parse(await this.call({}, "skill-rank")).bottom;
+  }
+
   /** Whether the website judges a generated thread title too vague to keep, at the user's sensitivity (2–5). */
   async titleTooVague(check: { title: string; firstMessage: string; agentReply: string; sensitivity: number }): Promise<boolean> {
     const value = await this.call({ ...check, sensitivity: String(check.sensitivity) }, "thread-title");
@@ -614,15 +924,53 @@ export class SandboxDirectory {
   async transcribe(file: File): Promise<string | null> {
     const account = await this.account();
     if (!account) return null;
-    const body = new FormData();
-    body.set("file", file, file.name);
-    const response = await fetch(`${account.website}/api/desktop/transcribe`, {
-      method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
-      headers: { Authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` },
-      body,
+    const auth = `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}`;
+    const url = `${account.website}/api/desktop/transcribe`;
+    if (file.size <= 4 * 1024 * 1024) {
+      const body = new FormData();
+      body.set("file", file, file.name);
+      return await this.readTranscriptionResponse(
+        await fetch(url, {
+          method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
+          headers: { Authorization: auth },
+          body,
+        }),
+      );
+    }
+    const uploadRes = await fetch(url, {
+      method: "POST", redirect: "error", signal: AbortSignal.timeout(30_000),
+      headers: { Authorization: auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "upload", bytes: file.size }),
     });
+    const upload = await uploadRes.json().catch(() => ({})) as { key?: unknown; url?: unknown; error?: unknown };
+    if (!uploadRes.ok || typeof upload.key !== "string" || typeof upload.url !== "string") {
+      throw new CloudroomError(typeof upload.error === "string" ? upload.error : `The website returned HTTP ${uploadRes.status}.`);
+    }
+    const putRes = await fetch(upload.url, {
+      method: "PUT", redirect: "error", signal: AbortSignal.timeout(60_000),
+      headers: { "Content-Length": String(file.size) },
+      body: Buffer.from(await file.arrayBuffer()),
+    });
+    if (!putRes.ok) throw new CloudroomError(`Backup audio upload failed (HTTP ${putRes.status}).`);
+    return await this.readTranscriptionResponse(
+      await fetch(url, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(110_000),
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "transcribe",
+          key: upload.key,
+          filename: file.name || "recording.webm",
+          mimeType: file.type || "audio/webm",
+        }),
+      }),
+    );
+  }
+
+  private async readTranscriptionResponse(response: Response): Promise<string> {
     const value = await response.json().catch(() => ({})) as { text?: unknown; error?: unknown };
-    if (!response.ok || typeof value.text !== "string") throw new CloudroomError(typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`);
+    if (!response.ok || typeof value.text !== "string") {
+      throw new CloudroomError(typeof value.error === "string" ? value.error : `The website returned HTTP ${response.status}.`);
+    }
     return value.text;
   }
 
@@ -678,6 +1026,17 @@ export class SandboxDirectory {
     }
     await this.awakeCheck;
     return this.awake;
+  }
+
+  /** One authoritative, read-only snapshot for an archive. Old addresses in views may already be asleep. */
+  async awakeForArchive(signal: AbortSignal) {
+    const only = await this.bind(AbortSignal.any([signal, this.session.signal]));
+    const listed = awakeSchema.parse(await this.call({ action: "awake" }, "sandboxes", only));
+    return {
+      accountId: only.account.userId,
+      signal: only.signal,
+      connections: new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { url: origin, token }])),
+    };
   }
 
   /** Finds threads the website started (Loop runs, top-level launches) even when no known thread sleeps, so none
@@ -739,10 +1098,12 @@ export class SandboxDirectory {
         const quick = tries <= 3 && error instanceof CloudroomError && error.status === null;
         // A thread moving to Cloud continues there in about a minute: keep checking.
         const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
-        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, 300_000);
+        // A server back from a restart takes it within a minute, not up to 5.
+        const wait = error instanceof CloudroomError && WAIT_CODES.has(error.code ?? "");
+        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, wait ? 60_000 : 300_000);
         // Out of Cloud Credits: wait until the minute mode check sees credits again (checkMode clears it), not every 5 minutes.
         const held = error instanceof CloudroomError && error.code === USAGE_LIMIT;
-        this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && error.status !== null ? error : null });
+        this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && (error.status !== null || wait) ? error : null });
         throw error;
       }).finally(() => this.wakes.delete(thread));
       this.wakes.set(thread, pending);
@@ -766,6 +1127,7 @@ export class SandboxDirectory {
       queue: z.object({ position: z.number(), total: z.number() }).nullable().default(null), region_blocked: z.boolean().default(false),
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
+    const usageChanged = Boolean((this.limit?.on && !value.limited) || (this.plan && value.plan !== this.plan));
     this.plan = value.plan;
     const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
     if (cleared(this.refused?.code)) this.refused = null;
@@ -774,6 +1136,8 @@ export class SandboxDirectory {
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
     this.queue = value.queue || value.region_blocked ? { position: value.queue?.position ?? 0, total: value.queue?.total ?? 0, regionBlocked: value.region_blocked } : null;
+    // Limit cleared or plan changed (bought credits or upgraded): refresh credits now instead of waiting up to 10 minutes.
+    if (usageChanged && this.usage) { this.usage = { ...this.usage, next: 0 }; this.planUsage(true); }
     return value.sandboxes;
   }
 
@@ -836,34 +1200,61 @@ export class SandboxDirectory {
   private plan: string | null = null;
   currentPlan(): string | null { return this.plan; }
   private usage: { value: PlanUsage | null; next: number } | null = null;
-  private checkingUsage = false;
+  private usageRefresh: Promise<void> | null = null;
+  private lastForcedUsageAt = 0;
+  private fetchUsage(): Promise<void> {
+    if (this.usageRefresh) return this.usageRefresh;
+    this.usageRefresh = this.call({ action: "usage" }).then((value) => {
+      // A website without credits (say, rolled back) shows no card rather than old units.
+      const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
+        extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0) }).safeParse(value);
+      const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
+      // The website returns awake families above its low mark, and marks the hot ones. A line, once shown, stays
+      // until its family drops below that mark, so it never blinks on and off. Older websites send none; `null` means
+      // the website couldn't read it, so the lines stay as they are.
+      const sent = (value as { burning?: unknown } | null)?.burning;
+      if (sent !== null) this.burning = new Map(burningSchema.parse(sent ?? []).filter((row) => row.hot || this.burning.has(row.thread)).map((row) => [row.thread, { credits: row.credits, subagents: row.subagents }]));
+      this.usage = {
+        value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
+          extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
+        next: Date.now() + Math.max(recheck, 60) * 1000,
+      };
+    }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.usageRefresh = null; });
+    return this.usageRefresh;
+  }
+  /** Refreshes plan, limit state, and Cloud Credits right away when returning from /billing, at most once per 15 s. */
+  async refreshUsageNow(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastForcedUsageAt < 15_000) return;
+    this.lastForcedUsageAt = now;
+    await this.checkMode().catch(() => {});
+    if (!this.plan || this.queue) return;
+    if (this.usage) this.usage = { ...this.usage, next: 0 };
+    await this.fetchUsage();
+  }
   /** The account's usage; null while billing is off, in the cloud queue, or before the website answers. Its plan is
    *  refreshed with forNewThreads(); the usage itself as often as the website says, unless `refresh` is false. */
   planUsage(refresh = true): PlanUsage | null {
     if (!this.plan || this.queue) return null;
-    if (refresh && !this.checkingUsage && Date.now() >= (this.usage?.next ?? 0)) {
-      this.checkingUsage = true;
-      void this.call({ action: "usage" }).then((value) => {
-        // A website without credits (say, rolled back) shows no card rather than old units.
-        const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
-          extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0),
-          og: z.object({ name: z.string().nullable(), ends_at: z.string() }).nullable().catch(null) }).safeParse(value);
-        const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
-        this.usage = {
-          value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
-            extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total,
-            og: parsed.data.plan === "pro" && parsed.data.og ? { name: parsed.data.og.name, endsAt: parsed.data.og.ends_at } : null } : null,
-          next: Date.now() + Math.max(recheck, 60) * 1000,
-        };
-      }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.checkingUsage = false; });
-    }
+    if (refresh && !this.usageRefresh && Date.now() >= (this.usage?.next ?? 0)) void this.fetchUsage();
     // A plan change shows nothing until the next check, never the old plan's card.
     return this.usage?.value?.plan === this.plan ? this.usage.value : null;
+  }
+
+  private burning = new Map<string, CreditBurn>();
+  /** Thread families burning credits fast, by top thread; refreshed with planUsage(), empty when it shows nothing. */
+  creditBurn(): Record<string, CreditBurn> {
+    return this.planUsage(false) ? Object.fromEntries(this.burning) : {};
   }
 
   /** When the account's credits were used, hour by hour (Settings → Analytics). Asked only while that page is open. */
   async usageWave(): Promise<unknown> {
     return z.object({ wave: z.unknown() }).parse(await this.call({ action: "usage_wave" })).wave ?? null;
+  }
+
+  /** One Cloud thread's billed credits and its sandbox's CPU per minute, for the purpose card. Asked when it opens. */
+  async threadCredits(thread: string) {
+    return threadCreditMinutesSchema.parse(await this.call({ action: "thread_credits", thread }));
   }
 
   /** What the account's cloud offers, read by the website from a running spare or sandbox. Null until one runs. */
@@ -891,17 +1282,23 @@ export class SandboxDirectory {
 
   /** Forgets what was learned under the last account: sandbox tokens, uploaded logins and config, and its settings. */
   reset(): void {
+    this.session.abort(new CloudroomError(ACCOUNT_CHANGED));
+    this.session = new AbortController();
     cancelMcpSignIns();
     this.signIns = null;
     this.mcpNames = null;
     this.mcpAt = 0;
     this.mcpDigest = "";
+    this.deepapiNext = 0;
+    this.deepapi = null;
     this.views.clear();
+    this.burning.clear();
     this.awake = new Map();
     this.awakeNext = 0;
     this.awakeIssue = null;
     this.awakeCheck = null;
     this.backoff.clear();
+    this.pausedAnswers = 0;
     this.uploaded.clear();
     this.mode = null;
     this.limit = null;
@@ -915,14 +1312,21 @@ export class SandboxDirectory {
     this.warmed = null;
     this.copiedAt = 0;
     this.pulledAt = 0;
+    this.githubAt = 0;
+    this.githubRun = null;
     cloudClaude = null;
     this.configAt = 0;
     this.configDigest = "";
     this.configIssue = null;
+    // The next sign-in asks again whether the website lists threads, instead of keeping an old "no" for an hour.
+    this.threadsSupport = null;
+    this.threadsFailed = 0;
   }
 
   /** A broken stream or failed request may mean the sandbox went to sleep; look it up again next time. */
   forget(thread: string): void { this.views.delete(thread); this.awake.delete(thread); }
+  /** What the website says the thread's sandbox is doing. Never wakes it; the answer isn't kept. */
+  async state(thread: string): Promise<View["state"]> { return viewSchema.parse(await this.call({ action: "lookup", thread })).state; }
 
   /** Whether each thread runs on the user's own VPS (ADR 0319), from the website's last answer about it. */
   private placed = new Map<string, boolean>();
@@ -940,6 +1344,14 @@ export class SandboxDirectory {
   /** A VPS thread's move to Cloud: under way, or failed (the copy didn't finish, so it stayed on the VPS). */
   private moves = new Map<string, "moving" | "failed">();
   moveState(thread: string): "moving" | "failed" | null { return this.moves.get(thread) ?? null; }
+  /** True while an outage holds the thread and the user may continue from its older copy instead. */
+  copyChoice(thread: string): boolean { return this.backoff.get(thread)?.refusal?.code === OUTAGE_CHOICE && !this.isAwake(thread); }
+  /** The user's pick during an outage: the website restores the thread from its copy on the backup at its next wake,
+   *  which goes right away. Newer work in the old sandbox is lost. */
+  async continueFromCopy(thread: string): Promise<void> {
+    await this.call({ action: "from_copy", thread });
+    this.backoff.delete(thread);
+  }
   /** Moves a VPS thread to Cloud: the website copies it off the VPS, and its next wake starts it in Cloud. Looks it up
    *  every 5 s (a lookup never wakes) until it lands in Cloud or the copy fails, for up to 35 minutes. */
   async move(thread: string): Promise<void> {
@@ -960,11 +1372,51 @@ export class SandboxDirectory {
     setTimeout(check, 5_000).unref();
   }
   coolingDown(thread: string | null): boolean { return Boolean(thread && (this.backoff.get(thread)?.until ?? 0) > Date.now()); }
+  /** The website's words for a wake that waits on its server ("The server running this thread is restarting…"), until
+   *  a wake gets through or the sandbox is seen awake. Null otherwise. */
+  waitNotice(thread: string): string | null {
+    const refusal = this.backoff.get(thread)?.refusal;
+    return refusal && WAIT_CODES.has(refusal.code ?? "") && !this.isAwake(thread) ? refusal.message : null;
+  }
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the
-   *  website (ADR 0182, 0239, 0256). */
-  async label(thread: string, label: { title: string | null; project_name: string | null; project: string; session: string; harness: string; model: string | null; parent?: string | null; moved?: true }): Promise<boolean> {
+   *  website (ADR 0182, 0239, 0256). A `v: 2` label (#237) changes only the fields it sends, and its session only fills
+   *  an empty one; the whole label is for websites before that. */
+  async label(thread: string, label: { title?: string | null; project_name?: string | null; project?: string; session?: string; harness?: string; model?: string | null; parent?: string | null; moved?: true; v?: 2 }): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "label", thread, ...label })).saved;
+  }
+  /** The account's Cloud threads changed since `since` (#237), `null` for all of them, 500 a page. */
+  async threads(since: string | null, options?: { pinnedOnly?: boolean }): Promise<ThreadPage> {
+    const page = threadPageSchema.parse(await this.call({ action: "threads", ...(since ? { since } : {}), ...(options?.pinnedOnly ? { pinned_only: true } : {}) }));
+    this.threadsSupport = { ok: true, at: Date.now() };
+    this.threadsFailed = 0;
+    return page;
+  }
+  private threadsSupport: { ok: boolean; at: number } | null = null;
+  /** Whether the website lists the account's Cloud threads (#237): then it takes `v: 2` labels and the other new calls.
+   *  Asked once, and again hourly while it doesn't. */
+  /** Whether the website lists threads (#237): asked once, then again hourly while it doesn't. Callers share a question
+   *  in flight. `null`: it didn't answer (a blip), remembered for a minute; never read as an older website. */
+  async followsThreads(): Promise<boolean | null> {
+    const known = this.threadsSupport;
+    if (known && (known.ok || Date.now() - known.at < 3_600_000)) return known.ok;
+    if (Date.now() - this.threadsFailed < 60_000) return null;
+    return this.threadsAsking ??= this.threads(`${new Date().toISOString()}~`).then(() => true, (error: unknown) => {
+      // Only a website before #237 says no: it refuses the unknown `since` with a 400. Anything else is a blip asked again
+      // in a minute (#1655): no answer, a timeout, a busy website, an unreadable body, a proxy's page, a sign-in that ended.
+      if (!(error instanceof CloudroomError && error.status === 400)) {
+        this.threadsFailed = Date.now();
+        return null;
+      }
+      this.threadsSupport = { ok: false, at: Date.now() };
+      return false;
+    }).finally(() => { this.threadsAsking = null; });
+  }
+  private threadsAsking: Promise<boolean | null> | null = null;
+  private threadsFailed = 0;
+  /** A page of a Cloud thread's saved records, as Core streams them (#237). Never wakes the thread. */
+  async records(thread: string, session: string, after: number): Promise<{ records: SessionRecord[]; more: boolean }> {
+    return z.object({ records: z.array(z.unknown()), more: z.boolean() }).parse(await this.call({ action: "records", thread, session, after, limit: 1000 })) as { records: SessionRecord[]; more: boolean };
   }
   /** Teleport to Local closed `session`: the website stops sending this thread's Cloud subagents' reports there. */
   async markLocal(thread: string, session: string): Promise<boolean> {
@@ -973,11 +1425,12 @@ export class SandboxDirectory {
   async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
-  async restore(thread: string): Promise<void> {
+  async restore(thread: string, session?: string): Promise<void> {
     this.forget(thread);
     this.backoff.delete(thread);
     for (let tries = 1; ; tries++) {
-      try { return void await this.call({ action: "restore", thread }); }
+      // `session`: the one the user restored, so its loops the archive paused run again (#237; older websites ignore it).
+      try { return void await this.call({ action: "restore", thread, ...(session ? { session } : {}) }); }
       catch (error) { if (!(error instanceof CloudroomConnectionError) || tries >= 30) throw error; }
       await new Promise(resolve => setTimeout(resolve, 3_000));
     }
@@ -986,25 +1439,29 @@ export class SandboxDirectory {
 
   /** Saves a login for every sandbox of this account (ADR 0145), skipping values already uploaded. */
   /** A `background` save (not one the user just asked for) is dropped while the login is disconnected (ADR 0327).
+   *  `chosen` marks a GitHub login the user just connected by hand: only that may replace a picked-repos login (#2084).
    *  Answers whether the website now holds the value. */
-  saveLogin(name: SandboxLogin, value: string, only?: AccountRequest, background = false): Promise<boolean> {
+  saveLogin(name: SandboxLogin, value: string, only?: AccountRequest, background = false, chosen = false): Promise<boolean> {
+    const signal = this.session.signal;
     return this.withLogins(async () => {
       if (background && (await this.skipLogins()).has(name)) return false;
-      await this.putLogin(name, value, only);
+      await this.putLogin(name, value, only ?? await this.bind(signal), chosen);
       return true;
     });
   }
 
-  private async putLogin(name: SandboxLogin, value: string, only?: AccountRequest): Promise<void> {
+  private async putLogin(name: SandboxLogin, value: string, only: AccountRequest, chosen = false): Promise<void> {
     const digest = createHash("sha256").update(value).digest("hex");
     if (this.uploaded.get(name) === digest) return;
-    await this.call({ name, value }, "logins", only);
-    this.uploaded.set(name, digest);
+    const session = this.session.signal;
+    await this.call(chosen ? { name, value, chosen } : { name, value }, "logins", only);
+    // A caller-bound save outlives a reset, but its digest never fills the next account's cache.
+    if (!session.aborted) this.uploaded.set(name, digest);
   }
 
-  /** The account's Codex accounts, which only the website renews (codex-accounts.ts). */
-  codexAccounts(body: Record<string, unknown>): Promise<unknown> {
-    return this.call(body, "codex-accounts");
+  /** The account's Codex accounts, which only the website renews (codex-accounts.ts). Sent to `account` or nowhere. */
+  codexAccounts(body: Record<string, unknown>, account: SandboxAccount): Promise<unknown> {
+    return this.call(body, "codex-accounts", { account, signal: AbortSignal.timeout(120_000) });
   }
 
   /** The account's Cloud environment, shared with the website: variables (names only), repos, and the setup script. */
@@ -1039,14 +1496,58 @@ export class SandboxDirectory {
     return value;
   }
 
+  /** Snippets use local account identity and the existing membership cache before contacting hosting. */
+  async snippets(body: Record<string, unknown>): Promise<unknown> {
+    if (body.action === "identity") return (await this.account())?.userId ?? null;
+    if (body.action === "team" && (await this.orgMember()) === false) return { org: null, items: [] };
+    const bound = await this.bind();
+    return this.call(body, "snippets", { ...bound, signal: AbortSignal.any([bound.signal, AbortSignal.timeout(8_000)]) });
+  }
+
   /** Organizations live on the website (docs/scopes/organizations.md); the Organization plugin's requests pass through. */
   async org(body: Record<string, unknown>): Promise<unknown> {
     return this.call(body, "org");
   }
 
+  /** Shared projects live on the website (docs/scopes/shared-projects.md); the Shared projects plugin's requests pass through. */
+  async projectShares(body: Record<string, unknown>): Promise<unknown> {
+    return this.call(body, "project-shares");
+  }
+
   /** GPU sessions live on the website (docs/scopes/gpus.md): `room-cli gpu` steps, and the cards and answers of GpuApprovals. */
   async gpu(body: Record<string, unknown>): Promise<unknown> {
     return this.call(body, "gpu");
+  }
+
+  private agentGrant: { key: string; value: unknown; until: number; delay: number; error: unknown } | null = null;
+  /** Cloudroom Agent (docs/scopes/cloudroom-agent.md): a token that can only buy inference, tied to this sign-in. Its
+   *  plugin asks every few seconds, so an account change is seen at once. The website is asked once a day per sign-in,
+   *  and after a failure with growing waits. */
+  async inference(): Promise<unknown> {
+    const account = await this.account();
+    if (!account) {
+      this.agentGrant = null;
+      throw new CloudroomError("Sign in to Cloudroom to use Cloudroom Agent.", 401);
+    }
+    const key = `${account.website} ${account.userId} ${account.token}`, now = Date.now();
+    const saved = this.agentGrant?.key === key ? this.agentGrant : null;
+    if (saved && now < saved.until) {
+      if (saved.value) return saved.value;
+      throw saved.error;
+    }
+    try {
+      const value = await this.call({}, "inference", { account, signal: this.session.signal });
+      this.agentGrant = { key, value, until: now + AGENT_GRANT_RENEW_MS, delay: 0, error: null };
+      return value;
+    } catch (error) {
+      const refused = error instanceof CloudroomError && (error.status === 401 || error.status === 403);
+      const old = saved?.value as { expiresAt?: number } | null | undefined;
+      const value = !refused && old?.expiresAt && old.expiresAt > now ? old : null;
+      const delay = Math.min(saved?.delay ? saved.delay * 2 : AGENT_GRANT_RETRY_MS, AGENT_GRANT_RETRY_MAX_MS);
+      this.agentGrant = { key, value, until: now + delay, delay, error };
+      if (value) return value;
+      throw error;
+    }
   }
 
   private member: { userId: string; value: boolean; at: number } | null = null;
@@ -1130,20 +1631,44 @@ export class SandboxDirectory {
   }
 
   /** Which logins the website holds for this account's sandboxes. */
-  async logins(): Promise<Record<SandboxLogin, boolean>> {
+  async logins(only?: AccountRequest): Promise<Record<SandboxLogin, boolean>> {
     // Missing names mean an older website that cannot hold that login yet.
-    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), openclaw: z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins"));
+    return z.object({ claude: z.boolean(), codex: z.boolean(), pi: z.boolean(), github: z.boolean(), cursor: z.boolean().default(false), opencode: z.boolean().default(false), mcp: z.boolean().default(false), hermes: z.boolean().default(false), devin: z.boolean().default(false), kimi: z.boolean().default(false), antigravity: z.boolean().default(false), openclaw: z.boolean().default(false), "agent-zero": z.boolean().default(false) }).parse(await this.call({ action: "status" }, "logins", only));
   }
 
   /** Who the account's GitHub login belongs to, or null when GitHub or an older website can't tell. */
+  async gitlabConnection(action: "status" | "start" | "cancel" | "disconnect") {
+    const state = z.object({ available:z.boolean(), login:z.string().nullable(), expired:z.boolean(), waiting:z.boolean(), url:z.string().optional() }).parse(await this.call({action},"gitlab"));
+    if (state.url) {
+      const account = await this.account(), url = new URL(state.url);
+      if (!account || url.origin !== new URL(account.website).origin || url.pathname !== "/api/gitlab/authorize") throw new Error("Unexpected GitLab connection URL.");
+    }
+    return state;
+  }
+  async gitlabBranches(repo: string) {
+    return z.object({ defaultBranch:z.string().nullable(), branches:z.array(z.string()) }).parse(await this.call({action:"branches", repo},"gitlab"));
+  }
+  async gitlabCheck(repo: string) {
+    return z.object({ accessible:z.boolean() }).parse(await this.call({action:"check",repo},"gitlab"));
+  }
   async githubAccount(): Promise<GithubAccount | null> {
     return z.object({ account: githubAccountSchema.nullable() }).parse(await this.call({ action: "github" }, "logins")).account;
   }
 
   /** Forgets one of the account's logins for every sandbox. */
+  async antigravityLogin(input: Record<string, unknown>) {
+    const only = await this.bind();
+    if (input.action === "disconnect") {
+      await this.call({action:"remove", name:"antigravity"}, "logins", only);
+      return {connected:false, catalog:null};
+    }
+    return z.object({ restart: z.boolean().optional(), refreshDue: z.boolean().optional(), connected: z.boolean().optional(), catalog: z.string().nullable().optional(), url: z.string().url().optional(), ticket: z.string().optional(), cancelled: z.boolean().optional() }).parse(await this.call(input, "antigravity", only));
+  }
+
   removeLogin(name: Exclude<SandboxLogin, "mcp">): Promise<void> {
+    const signal = this.session.signal;
     return this.withLogins(async () => {
-      await this.call({ action: "remove", name }, "logins");
+      await this.call({ action: "remove", name }, "logins", await this.bind(signal));
       this.uploaded.delete(name);
       if (name === "claude") cloudClaude = null;
     });
@@ -1163,35 +1688,58 @@ export class SandboxDirectory {
 
   private copiedAt = 0;
   get loginsCopied(): boolean { return this.copiedAt > 0; }
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
+  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Agent Zero, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
    *  At most once a minute, unless the user just clicked Connect. */
   copyMacLogins(force = false): Promise<void> {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
     this.copiedAt = Date.now();
-    return this.withLogins(() => this.uploadMacLogins());
+    const signal = this.session.signal;
+    return this.withLogins(async () => this.uploadMacLogins(await this.bind(signal)));
+  }
+
+  private githubAt = 0;
+  private githubRun: Promise<void> | null = null;
+  /** With "Auth my agents" off, GitHub still follows its own card in Settings, so a clone's login survives sleep (#1628).
+   *  It only fills a gap: a GitHub login Cloud holds, maybe another computer's or account's, is never replaced.
+   *  At most once a minute, and callers meanwhile wait for the running copy; Disconnect or another account skips it. */
+  copyMacGithubLogin(): Promise<void> {
+    if (this.githubRun) return this.githubRun;
+    if (Date.now() - this.githubAt < RECHECK_MS) return Promise.resolve();
+    this.githubAt = Date.now();
+    const signal = this.session.signal;
+    const run = this.githubRun = this.withLogins(async () => {
+      // Bound to the account it started under: a switch during the status check must not fill the new account's login.
+      const account = await this.account();
+      const token = account && !(await this.skipLogins()).has("github") ? await macGithubToken() : "";
+      const only = account && { account, signal };
+      // Once this app saved it, Cloud holds a login, so no status check is needed.
+      if (only && token && !this.uploaded.has("github") && !(await this.logins(only)).github) await this.putLogin("github", await sandboxGithubLogin(token), only);
+    }).finally(() => { if (this.githubRun === run) this.githubRun = null; });
+    return run;
   }
 
   /** Sends this Mac's Codex login again, even unchanged: Cloud's copy may have died while this one still works.
    *  Answers the digest it sent, or null when there was nothing to send (no login, or Disconnect stopped it). */
   resendMacCodexLogin(): Promise<string | null> {
+    const signal = this.session.signal;
     return this.withLogins(async () => {
       if ((await this.skipLogins()).has("codex")) return null;
       const value = await readFile(codexAuthPath(), "utf8").catch(() => null);
       try { if (!value || !JSON.parse(value)) return null; } catch { return null; }
       const digest = createHash("sha256").update(value).digest("hex");
       this.uploaded.delete("codex");
-      await this.putLogin("codex", value);
+      await this.putLogin("codex", value, await this.bind(signal));
       return digest;
     });
   }
 
-  private async uploadMacLogins(): Promise<void> {
+  private async uploadMacLogins(only: AccountRequest): Promise<void> {
     const skip = await this.skipLogins();
     const piHome = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi/agent");
     const files = [["codex", codexAuthPath()], ["pi", join(piHome, "auth.json")]] as const;
     // One failed login never stops the others; all failures are reported together.
     const failed: string[] = [];
-    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor" | "github", value: string) => this.putLogin(name, value).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
+    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor" | "github", value: string) => this.putLogin(name, value, only).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
     for (const [name, path] of files) {
       if (skip.has(name)) continue;
       const value = await readFile(path, "utf8").catch(() => null);
@@ -1199,7 +1747,7 @@ export class SandboxDirectory {
       try { JSON.parse(value); } catch { continue; }
       await save(name, value);
     }
-    const copy = async (name: "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "cursor", read: () => Promise<string | null>) => {
+    const copy = async (name: "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor", read: () => Promise<string | null>) => {
       if (skip.has(name)) return;
       const value = await read().catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); return null; });
       if (value) await save(name, value);
@@ -1209,6 +1757,7 @@ export class SandboxDirectory {
     await copy("devin", macDevinLogin);
     await copy("kimi", macKimiLogin);
     await copy("openclaw", macOpenclawLogin);
+    await copy("agent-zero", macAgentZeroLogin);
     await copy("cursor", macCursorLogin);
     const githubToken = skip.has("github") ? "" : await macGithubToken();
     if (githubToken) await save("github", await sandboxGithubLogin(githubToken));
@@ -1221,29 +1770,95 @@ export class SandboxDirectory {
   copyCloudLogins(force = false): Promise<void> {
     if (!force && Date.now() - this.pulledAt < RECHECK_MS) return Promise.resolve();
     this.pulledAt = Date.now();
-    return this.withLogins(() => this.downloadCloudLogins());
+    const signal = this.session.signal;
+    return this.withLogins(() => this.downloadCloudLogins(signal));
   }
 
-  private async downloadCloudLogins(): Promise<void> {
+  private async downloadCloudLogins(signal: AbortSignal): Promise<void> {
     const skip = await this.skipLogins();
     const [claudeHere, codexHere] = await Promise.all([macClaudeSignedIn(), hasMacCodexLogin()]);
     if (claudeHere || skip.has("claude")) cloudClaude = null;
     const claude = claudeHere === false && !skip.has("claude");
     const codex = !codexHere && !skip.has("codex");
     if (!claude && !codex) return;
-    const saved = await this.logins();
+    // One account for the whole copy, checked again right before each write (#1940).
+    const only = await this.bind(signal);
+    const saved = await this.logins(only);
     if (claude) {
-      const value = saved.claude ? await this.cloudLogin("claude") : null;
+      const value = saved.claude ? await this.cloudLogin("claude", only) : null;
+      cancelled(only.signal);
       cloudClaude = value ? claudeVariables(value) : null;
     }
     if (codex && saved.codex) {
-      const value = await this.cloudLogin("codex");
+      const value = await this.cloudLogin("codex", only);
       if (!value) return;
       await mkdir(dirname(codexAuthPath()), { recursive: true, mode: 0o700 });
+      check(only, await this.account());
       // `wx` never replaces a login Codex saved meanwhile.
-      await writeFile(codexAuthPath(), value, { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
-      this.uploaded.set("codex", createHash("sha256").update(value).digest("hex"));
+      const wrote = await writeFile(codexAuthPath(), value, { mode: 0o600, flag: "wx" }).then(() => true, (error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; return false; });
+      // Switched during the write: take the file back before the next account's copy (queued behind this one) reads it.
+      if (wrote && only.signal.aborted) {
+        if (await readFile(codexAuthPath(), "utf8").catch(() => null) === value) await rm(codexAuthPath(), { force: true });
+        cancelled(only.signal);
+      }
+      if (!only.signal.aborted) this.uploaded.set("codex", createHash("sha256").update(value).digest("hex"));
     }
+  }
+
+  private deepapiNext = 0;
+  private deepapi: DeepapiState | null = null;
+  /** The DeepAPI switch, from the last key check. Null hides the switch: signed out, before the website
+   *  offers it, or when this computer uses its own DeepAPI setup. */
+  deepapiState(): DeepapiState | null { return this.deepapi; }
+
+  /** Gives this computer the signed-in account's DeepAPI key for the built-in DeepAPI skill, paid from Cloud Credits
+   *  (ADR 20261115-235507). Our files name their account, so another account's key is replaced. The user's own DeepAPI
+   *  setup always wins and is never touched. Every 30 minutes; after a failure, at most once a minute. `enabled` is the
+   *  switch in Settings → General → DeepAPI, saved on the website. */
+  async copyDeepapiKey(enabled?: boolean): Promise<void> {
+    if (enabled === undefined && Date.now() < this.deepapiNext) return;
+    this.deepapiNext = Date.now() + RECHECK_MS;
+    // Bound to the account signed in now: its key and its name in the files belong together.
+    const only = await this.bind().catch(() => null);
+    if (!only) return;
+    const files = deepapiFiles(only.account.userId);
+    const found = await Promise.all(Object.keys(files).map(name => readFile(join(DEEPAPI_FOLDER(), name), "utf8").then(text => text.startsWith(DEEPAPI_MARK) ? text : "theirs", () => null)));
+    const theirs = found.includes("theirs") || (!found.some(text => text?.startsWith(DEEPAPI_MARK)) && Boolean((await macVariables()).DEEPAPI_API_KEY));
+    if (theirs && enabled === undefined) {
+      this.deepapi = null;
+      this.deepapiNext = Date.now() + DEEPAPI_RECHECK_MS;
+      return;
+    }
+    // The key goes into shell files, so only the letters of a DeepAPI key are accepted.
+    const answer = z.object({ key: z.string().regex(/^[\w-]+$/).nullable(), enabled: z.boolean().optional() })
+      .parse(await this.call({ action: "deepapi", ...(enabled === undefined ? {} : { enabled }) }, "logins", only));
+    this.deepapi = answer.enabled === undefined || theirs ? null : { enabled: answer.enabled };
+    this.deepapiNext = Date.now() + DEEPAPI_RECHECK_MS;
+    if (theirs) return;
+    const names = Object.keys(files), wanted = answer.key;
+    if (wanted && names.every((name, i) => found[i] === files[name]!(wanted))) {
+      await syncDeepapiCli(true);
+      return;
+    }
+    // Our old files go first: no key (the switch is off), another account's key, or a new key.
+    await Promise.all(names.map((name, i) => found[i] ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined));
+    if (!wanted) {
+      await syncDeepapiCli(false);
+      return;
+    }
+    await mkdir(DEEPAPI_FOLDER(), { recursive: true, mode: 0o700 });
+    // `wx` never replaces a key DeepAPI's own installer wrote meanwhile.
+    for (const name of names) {
+      await writeFile(join(DEEPAPI_FOLDER(), name), files[name]!(wanted), { mode: 0o600, flag: "wx" }).catch((error: NodeJS.ErrnoException) => { if (error.code !== "EEXIST") throw error; });
+    }
+    await syncDeepapiCli(true);
+  }
+
+  /** Signing out removes the key Cloudroom wrote, so the next person on this computer never spends this account's credits. */
+  async removeDeepapiKey(): Promise<void> {
+    await Promise.all(Object.keys(deepapiFiles("")).map(name => readFile(join(DEEPAPI_FOLDER(), name), "utf8")
+      .then(text => text.startsWith(DEEPAPI_MARK) ? rm(join(DEEPAPI_FOLDER(), name), { force: true }) : undefined, () => undefined)));
+    await syncDeepapiCli(false);
   }
 
   private async cloudLogin(name: "claude" | "codex" | "mcp", only?: AccountRequest): Promise<string | null> {
@@ -1274,8 +1889,10 @@ export class SandboxDirectory {
     const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
     const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
     const files = await configFiles(home, present);
+    // A computer with no skills or instructions never replaces the account's bundle on its own (#237); only a Settings change may empty it.
+    if (!files.length && !force) { this.configIssue = null; return; }
     const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
-      { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
+      { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, windowsHide: true, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
     run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");
     const tar = run ? (await run).stdout : Buffer.alloc(1024);
     const digest = contentDigest(tar);

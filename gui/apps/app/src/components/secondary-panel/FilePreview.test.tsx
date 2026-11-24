@@ -13,9 +13,9 @@ import {
   FilePreview,
   buildCsvPreviewData,
   getCsvTruncationNote,
-} from "./FilePreview";
+} from "@/components/right-panel/tabs/file-preview";
 import { SOURCE_CODE_MAX_LINES } from "@/components/code/source-code-budget";
-import { SecondaryPanelFilePreview } from "./ThreadStorageFilePreview";
+import { SecondaryPanelFilePreview } from "@/components/right-panel/tabs/file-preview";
 import {
   PierreWorkerPoolGateContext,
   type PierreWorkerPoolGate,

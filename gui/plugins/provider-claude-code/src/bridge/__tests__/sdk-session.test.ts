@@ -9,6 +9,8 @@ const mockQueryInstance = {
   applyFlagSettings: vi.fn(),
   close: vi.fn(),
   interrupt: vi.fn(),
+  mcpServerStatus: vi.fn(),
+  reconnectMcpServer: vi.fn(),
   setModel: vi.fn(),
   setPermissionMode: vi.fn(),
   [Symbol.asyncIterator]: vi.fn(),
@@ -203,6 +205,9 @@ describe("SdkSession", () => {
     try {
       await expect(session.stop()).rejects.toThrow("could not confirm");
       await expect(session.stop()).rejects.toThrow("could not confirm");
+      // A failed list (no rows) keeps tracking tool 200 for the next retry.
+      processes = "";
+      await expect(session.stop()).rejects.toThrow("could not confirm");
       processes = "4 0 1000\r\n";
       await expect(session.stop()).resolves.toBeUndefined();
 
@@ -217,6 +222,17 @@ describe("SdkSession", () => {
       Object.assign(late, { windowsChild: running, windowsSpawnedAt: 2000 });
       onTaskkill = () => (processes += "400 300 6000\r\n");
       await expect(late.stop()).rejects.toThrow("could not confirm");
+
+      // Never listed while Claude ran: its tree is unknown, so it stays blocked.
+      const unlisted = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+      Object.assign(unlisted, {
+        windowsChild: running,
+        windowsSpawnedAt: 2000,
+      });
+      [running.exitCode, processes, onTaskkill] = [null, "", () => {}];
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
+      processes = "4 0 1000\r\n";
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
     } finally {
       Object.defineProperty(process, "platform", platform);
     }
@@ -250,6 +266,33 @@ describe("SdkSession", () => {
     await closePromise;
 
     expect(mockQueryInstance.close).not.toHaveBeenCalled();
+  });
+
+  it("reconnects failed and needs-auth MCP servers, backing off after a failed retry", async () => {
+    keepSdkStreamOpen();
+    mockQueryInstance.mcpServerStatus.mockResolvedValue([
+      { name: "linear", status: "needs-auth" },
+      { name: "figma", status: "failed" },
+      { name: "doop", status: "connected" },
+      { name: "slow", status: "pending" },
+    ]);
+    mockQueryInstance.reconnectMcpServer.mockRejectedValue(
+      new Error("Server status: needs-auth"),
+    );
+    const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+    session.start();
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer.mock.calls).toEqual([
+      ["linear"],
+      ["figma"],
+    ]);
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer).toHaveBeenCalledTimes(2);
+    session.stop();
   });
 
   it("forwards local plugins to the SDK without a skills allowlist", () => {

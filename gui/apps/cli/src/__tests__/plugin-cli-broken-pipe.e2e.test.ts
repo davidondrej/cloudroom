@@ -76,7 +76,8 @@ describe.skipIf(process.platform === "win32")(
             delete env[key];
           const injection =
             writeError === null
-              ? ""
+              ? // A forced exit after the request can abort Node on Windows (#828): the CLI must exit on its own.
+                ` --import ${shellQuote(`data:text/javascript,${encodeURIComponent(`const exit = process.exit; process.exit = (code) => { process.stderr.write("forced exit\\n"); exit(code); };`)}`)}`
               : ` --import ${shellQuote(`data:text/javascript,${encodeURIComponent(`process.stdout._write = (_chunk, _encoding, callback) => callback(Object.assign(new Error(${JSON.stringify(writeError)}), { code: ${JSON.stringify(writeError)} }));`)}`)}`;
           const pipeline = `${shellQuote(process.execPath)} --conditions=source --import tsx${injection} ${shellQuote(cliEntry)} ${command} list${channel === "stderr" ? " 2>&1" : ""} | ${earlyClose ? "head -n 1" : "wc -c"}`;
           const result = await new Promise<{

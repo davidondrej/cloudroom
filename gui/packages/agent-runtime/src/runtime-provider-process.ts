@@ -1,7 +1,9 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  createPluginProcessTempDir,
   sanitizeInheritedChildProcessEnv,
   killProcessGroup,
   spawnPortablePipedProcess,
@@ -39,6 +41,7 @@ export interface RuntimeProviderProcess {
   providerId: string;
   stderrLineTail: Buffer;
   stderrTail: Buffer;
+  tempDir: string;
 }
 
 interface RuntimeProviderProcessLineArgs {
@@ -102,6 +105,7 @@ interface TerminateProviderProcessArgs {
 
 interface SpawnProviderArgs {
   adapter: BridgeProtocolAdapter;
+  tempDir: string;
   processKey: string;
   providerId: string;
 }
@@ -172,12 +176,33 @@ export class RuntimeProviderProcessManager {
     }
 
     const startPromise = (async () => {
-      const adapter = this.getAdapter(args.providerId, args.bridgeLaunch);
-      const providerProcess = this.spawnProvider({
-        adapter,
-        processKey: args.processKey,
-        providerId: args.providerId,
+      // The bridge cleans its temp folder up on SIGTERM, but on Windows
+      // SIGTERM is TerminateProcess and no cleanup runs there. So the runtime
+      // makes the folder, and on Windows removes it once a stop confirms the
+      // bridge and all its children are gone (#1578).
+      const tempDir = await createPluginProcessTempDir({
+        prefix: "bb-provider-bridge",
+        dataDir: args.bridgeLaunch.dataDir,
       });
+      if (this.shuttingDown) return removeTempDir(tempDir);
+      let providerProcess: RuntimeProviderProcess;
+      try {
+        const adapter = this.getAdapter(
+          args.providerId,
+          args.bridgeLaunch,
+          tempDir,
+        );
+        providerProcess = this.spawnProvider({
+          adapter,
+          processKey: args.processKey,
+          providerId: args.providerId,
+          tempDir,
+        });
+      } catch (error) {
+        await removeTempDir(tempDir);
+        throw error;
+      }
+      const { adapter } = providerProcess;
 
       try {
         if (hasChildProcessExited(providerProcess.child)) {
@@ -332,7 +357,7 @@ export class RuntimeProviderProcessManager {
             child: providerProcess.child,
             timeoutMs: 5000,
             killGraceMs: 0,
-          }).then((result) => this.reportUnconfirmedStop(result)),
+          }).then((result) => this.afterStop(providerProcess, result)),
         );
       }
       for (const [, pending] of providerProcess.pending) {
@@ -352,11 +377,13 @@ export class RuntimeProviderProcessManager {
   private getAdapter(
     providerId: string,
     bridgeLaunch: AgentRuntimeBridgeLaunch,
+    bridgeTempDir: string,
   ): BridgeProtocolAdapter {
     const adapterOptions = {
       additionalWorkspaceWriteRoots: this.args.additionalWorkspaceWriteRoots,
       bridgeLaunch,
       bridgeBundleDir: this.args.bridgeBundleDir,
+      bridgeTempDir,
       ...(this.args.bridgeNodeEnv !== undefined
         ? { bridgeNodeEnv: this.args.bridgeNodeEnv }
         : {}),
@@ -407,6 +434,7 @@ export class RuntimeProviderProcessManager {
       providerId: args.providerId,
       stderrLineTail: Buffer.alloc(0),
       stderrTail: Buffer.alloc(0),
+      tempDir: args.tempDir,
     };
 
     readBoundedLines({
@@ -535,13 +563,32 @@ export class RuntimeProviderProcessManager {
       return;
     }
 
-    this.reportUnconfirmedStop(
+    await this.afterStop(
+      args.providerProcess,
       await stopProcessGroupLeaderFirst({
         child: args.providerProcess.child,
         timeoutMs: args.timeoutMs ?? 5000,
         killGraceMs: 1000,
       }),
     );
+  }
+
+  // A child that outlived the bridge may still run files from its temp folder
+  // (Codex's Command Guard), so it goes only once taskkill /T ended the tree
+  // and the bridge exited. A bridge that died on its own keeps it, as before
+  // #1578. Not on POSIX: the bridge's own cleanup runs there, and a confirmed
+  // stop does not cover a child in its own process group.
+  private async afterStop(
+    providerProcess: RuntimeProviderProcess,
+    result: ProcessStopResult,
+  ): Promise<void> {
+    this.reportUnconfirmedStop(result);
+    if (
+      process.platform === "win32" &&
+      result.treeTermination === "confirmed"
+    ) {
+      await removeTempDir(providerProcess.tempDir);
+    }
   }
 
   // Windows can't always confirm a process tree ended (taskkill failed, or
@@ -634,6 +681,12 @@ export class RuntimeProviderProcessManager {
       args.providerProcess
     );
   }
+}
+
+function removeTempDir(tempDir: string): Promise<void> {
+  return rm(tempDir, { recursive: true, force: true, maxRetries: 3 }).catch(
+    () => undefined,
+  );
 }
 
 export function hasChildProcessExited(child: ChildProcess): boolean {

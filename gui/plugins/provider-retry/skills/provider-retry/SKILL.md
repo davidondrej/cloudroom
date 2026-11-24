@@ -15,4 +15,4 @@ it with `room-cli thread queue list <thread-id>` and inspect the failed turn bef
 manually retrying it; avoid duplicating an existing queued retry.
 
 Use the core `room-cli thread retry` command for an intentional manual retry. Follow
-its live help for selection and scheduling flags.
+its live help for selection and scheduling flags. Cloud threads have no `thread retry`: retry a rejected start with `room-cli cloud retry-start <id>`; otherwise check `thread show` and `thread output` first, and send a follow-up only if work is really unfinished.

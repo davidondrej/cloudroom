@@ -1,4 +1,4 @@
-import { z } from "zod/mini";
+import { z } from "zod";
 
 export interface PlanMeter {
   label: string;
@@ -14,7 +14,7 @@ export interface PlanSummary {
   period: string;
   /** When plan credits refill (ADR 20261108-142517); null from older websites, whose rows show credits left instead. */
   resetsAt: string | null;
-  /** Plan credits left, for the line under the meters, e.g. "478,265 credits left"; null without `resetsAt`. */
+  /** Plan + extra credits left, for the line under the meters, e.g. "478,265 credits left"; null without `resetsAt`. */
   left: string | null;
   meters: PlanMeter[];
 }
@@ -37,7 +37,7 @@ export function fromCredits(usage: z.infer<typeof creditsSchema>): PlanSummary {
     plan: usage.plan,
     period: "this month",
     resetsAt: usage.resetsAt ?? null,
-    left: usage.resetsAt && usage.credits !== null ? planMeterLeft({ label: "plan", ...plan }) : null,
+    left: usage.resetsAt && usage.credits !== null ? `${(Math.max(0, Math.floor(plan.limit - plan.used)) + Math.floor(extra)).toLocaleString("en-US")} credits left` : null,
     meters: usage.credits === null
       ? []
       : extra > 0

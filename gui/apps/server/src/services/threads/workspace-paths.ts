@@ -1,7 +1,7 @@
 import path from "node:path";
 import { isHostPathWithin, isWindowsHostPath, joinHostPath } from "@cloudroom/domain";
 
-export function isBbManagedWorkspacePath(args: {
+export function isRoomManagedWorkspacePath(args: {
   dataDir: string;
   path: string;
 }): boolean {

@@ -86,9 +86,10 @@ The agent tool accepts script, scriptPath, or name. The CLI accepts --script,
 After a successful agent-tool call, copy its previewDirective into the
 assistant response as one standalone line. Do not edit or repeat it.
 
-Use `room-cli workflows status <run-id>` for compact progress. Redirect bounded
-history pages into ROOM_THREAD_STORAGE before inspection because history can
-contain full prompts and results.
+Use `room-cli workflows status <run-id>` for compact progress. A run that stays
+queued reports why in `queue.reason` and what to do in `queue.recovery`.
+Redirect bounded history pages into ROOM_THREAD_STORAGE before inspection
+because history can contain full prompts and results.
 
 ## Quality check
 

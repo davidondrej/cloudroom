@@ -2,11 +2,12 @@ import {
   CALLER_PROOF_STATUS_HEADER,
   CALLER_TOKEN_HEADER,
   proveLocalCaller,
+  readMachineProxyUrl,
   SERVER_CALLER_PROOF_PATH,
 } from "@cloudroom/config/caller-proof";
 import http from "node:http";
 import { once } from "node:events";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, stat } from "node:fs/promises";
 import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -465,9 +466,9 @@ describe("startMachineAuthProxy", () => {
     }
   });
 
-  // Linux reports which uid owns each loopback connection. Here the proxy
+  // Linux and macOS tell which user owns each loopback connection. Here the proxy
   // takes another uid as its own, so this test's process is the other user.
-  it.runIf(process.platform === "linux")(
+  it.runIf(process.platform === "linux" || process.platform === "darwin")(
     "refuses open reads from another OS user on this machine",
     async () => {
       const received: string[] = [];
@@ -548,6 +549,22 @@ describe("startMachineAuthProxy", () => {
     }
     // An unhandled socket error would have crashed the daemon before this.
     expect(await rawStatus(proxyUrl, "/api/v1/threads")).toBe(200);
+  });
+
+  it("publishes its URL owner-only for room-cli outside a thread (#1564)", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "machine-auth-proxy-"));
+    const proxy = await startMachineAuthProxy({
+      dataDir,
+      serverHeaders: { "x-bb-connect-machine": "bbcm_machine" },
+      serverUrl: "http://server.test",
+    });
+    expect(readMachineProxyUrl(dataDir)).toBe(proxy.serverUrl);
+    if (process.platform !== "win32") {
+      const { mode } = await stat(join(dataDir, "machine-proxy-url"));
+      expect(mode & 0o777).toBe(0o600);
+    }
+    await proxy.close();
+    expect(readMachineProxyUrl(dataDir)).toBeNull();
   });
 
   it("rejects loudly when its loopback port cannot be bound", async () => {

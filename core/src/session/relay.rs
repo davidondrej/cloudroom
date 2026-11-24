@@ -3,18 +3,18 @@
 //! own records, wakes the other sandbox and calls its `/relay`. This Core keeps each turn report until the website
 //! takes it, and stays awake for it.
 use super::{
-    Local, Manager,
-    children::{FINISHED, NOTICE_REPLY_CHARS, notice, notice_ids},
+    Local, Manager, Session, SessionState,
+    children::{NOTICE_REPLY_CHARS, changed_or_due, notice, notice_ids, untold},
     history::ApiError,
     thread::{
-        Failure, NO_PARENT, archive_under, deliver, fail, random_key, record, retire,
-        session_failure, start_error, starting, website_failure,
+        Failure, NO_PARENT, archive_under, compact_note, deliver, fail, random_key, record, retire,
+        revive, session_failure, start_error, starting, website_failure,
     },
 };
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
 };
 use serde::Deserialize;
@@ -27,17 +27,26 @@ use std::{
 
 /// Since when reports have failed. After `GIVE_UP_AWAKE`, the sandbox may sleep; the next wake retries them.
 static FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+/// The same for a thread's own reports to the website (#237).
+static THREAD_FAILING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
 const GIVE_UP_AWAKE: Duration = Duration::from_secs(30 * 60);
 /// The child starts a task drives right now, by session and request ID, so each has one.
 static DRIVING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 /// The spawns still waiting for their child's ID, by session and request ID: a refusal reaches the agent through one,
 /// and through a notice once none waits (thread.rs).
 pub(super) static WAITING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+/// The website's last failure of each start a task drives, by session and request ID, newest last, until it settles
+/// (#1957). Only in memory: a restart forgets it until the next try.
+static LAST_TRY: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+/// Outages can leave many starts waiting: the oldest reasons go first.
+const LAST_TRIES: usize = 200;
 const APP_NOTE: &str = "Passed to the user's Cloudroom app, which applies it while it is open.";
 /// Core can't tell whether the app counts this thread as the caller's child: the user may have moved it there.
 const MAYBE_NOTE: &str = "Not linked to this thread, so it went to the user's Cloudroom app. The app applies it only to a thread this one started (such as one the user moved here), while it is open; otherwise nothing happens.";
 /// The website's answer when the parent's Core refused the message (web/lib/mobile.ts).
 const PARENT_BUSY: &str = "The other thread's Cloudroom is busy or updating. Try again shortly.";
+/// The website's answer when the other thread's disk is full or unmeasured (web/lib/mobile.ts, #309): a refusal.
+const DISK_FULL: &str = "Not delivered: the other thread's cloud disk is full or can't be measured, so its work is paused. The user can free space there with Clear caches & builds.";
 fn unconfirmed(why: &str) -> String {
     format!(
         "Could not confirm your parent got it ({why}). It may have, so sending it again may deliver it twice."
@@ -46,7 +55,17 @@ fn unconfirmed(why: &str) -> String {
 /// The website's answer for a thread that moved to the Mac (web/lib/mobile.ts, `threadCore`).
 const MOVED: &str = "This thread moved to the Mac.";
 const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
-const STARTING: &str = "This child is still starting in its own sandbox. Retry in a few seconds.";
+const STARTING: &str = "This child is still starting in its own sandbox.";
+/// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
+/// older Core ignores it and steers, as before (#1517).
+const QUEUE: &str = "_queue";
+/// `thread archive` when the website only queued it (web/lib/mobile.ts `relayKept`), which tries for about two minutes
+/// and then tries to tell this thread if it failed. A parent that moved to the Mac meanwhile never hears.
+fn archive_queued(id: &str) -> String {
+    format!(
+        "Archive queued, not confirmed yet: the child's sandbox can't take it right now. Cloudroom keeps trying for a few minutes and tries to tell this thread if it doesn't go through. If you haven't heard back in about 10 minutes and still want it archived, run room-cli thread archive {id} again. Meanwhile thread list hides it, and thread show {id} and thread list --include-archived say archived; they may keep saying so even if it fails."
+    )
+}
 
 /// The website delivers here, with this Core's token.
 pub fn routes() -> Router<Arc<Manager>> {
@@ -99,6 +118,80 @@ fn note_unless(
     true
 }
 
+/// How long `thread list` hides a child archived here that the website still lists: it tries a queued archive for 2
+/// minutes, then says if it failed.
+const ARCHIVING_MS: u64 = 10 * 60_000;
+
+/// Whether a report from `child` leaves it archived. One the archived child had in flight never shows it again
+/// (#1000). A queued archive can't name those, so while it may still land, no report shows it again. Any other
+/// report updates it, say from a session that replaced it after a restore.
+fn holds_archive(s: &super::Session, child: &str, request: &str, now: u64) -> bool {
+    s.child_states.get(child).is_some_and(|s| s == "archived")
+        && match s.late_reports.get(child) {
+            Some(late) => late.contains(request),
+            None => (s.child_archived_at.get(child))
+                .is_some_and(|at| *at > now.saturating_sub(ARCHIVING_MS)),
+        }
+}
+
+/// Why a start's try failed, as a fixed sentence: the website's own text may name hosts or carry tokens.
+fn try_failure(error: &ApiError) -> String {
+    let ApiError::Status(status, _) = error else {
+        return "the website could not be reached".to_owned();
+    };
+    let why = match status {
+        500 => "the website hit an error",
+        502 => "a step of its setup failed",
+        503 => "the website is busy or unavailable",
+        504 => "the website took too long",
+        _ => "the website failed",
+    };
+    format!("HTTP {status}, {why}")
+}
+
+/// Keeps `why` as the last failure of a start still pending; a try that ends after the start settled is ignored. The
+/// check and the write share the session lock a settle is recorded under.
+fn note_try(m: &Manager, session: &str, request: &str, why: String) {
+    let local = m.local.lock().unwrap();
+    if !pending_in(&local, session, request) {
+        return;
+    }
+    let key = format!("{session}/{request}");
+    let mut last = LAST_TRY.lock().unwrap();
+    last.retain(|(k, _)| *k != key);
+    last.push((key, why));
+    if last.len() > LAST_TRIES {
+        last.remove(0);
+    }
+}
+
+/// How long this Core has repeated the start of `child` the website hasn't finished, and why it waits (#1957).
+pub(super) fn waiting_start(m: &Manager, parent: &str, child: &str) -> Option<String> {
+    let (key, at) = {
+        let local = m.local.lock().unwrap();
+        let starts = local.sessions.get(parent)?.child_starts.iter();
+        let mut waiting = starts.filter(|(_, s)| !s.done && s.error.is_none());
+        let (request, start) = waiting.find(|(_, s)| s.child.as_deref() == Some(child))?;
+        (format!("{parent}/{request}"), start.at_ms)
+    };
+    let minutes = crate::observability::now_ms().saturating_sub(at) / 60_000;
+    let long = if at > 0 {
+        format!(" for {minutes} min")
+    } else {
+        String::new()
+    };
+    let last = LAST_TRY
+        .lock()
+        .unwrap()
+        .iter()
+        .rfind(|(k, _)| *k == key)
+        .map(|(_, why)| why.clone());
+    let last = last.unwrap_or_else(|| "its sandbox is being set up".to_owned());
+    Some(format!(
+        "Cloudroom has been starting it{long} and keeps trying (last: {last})."
+    ))
+}
+
 /// `tell`, `stop` or `archive` from the calling session to a child in a sandbox of its own. `to_parent`: a
 /// `tell --parent`, which the website sends to the parent it saved now, not `id`, this session's first one (#968).
 pub(super) async fn command(
@@ -108,6 +201,7 @@ pub(super) async fn command(
     action: &str,
     text: Option<&str>,
     to_parent: bool,
+    queue: bool,
 ) -> Result<Json<Value>, Failure> {
     // A caller sharing another thread's sandbox has no link of its own on the website: its children in sandboxes of
     // their own are linked to this sandbox's thread (ADR 20261104-015709), so commands for them go through the
@@ -143,12 +237,18 @@ pub(super) async fn command(
         );
     };
     let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    let body = json!({"action":action,"thread":id,"text":text,"request_id":format!("relay_{key}"),"label":other,"parent":to_parent});
+    let request = format!("relay_{key}{}", if queue { QUEUE } else { "" });
+    let body = json!({"action":action,"thread":id,"text":text,"request_id":request,"label":other,"parent":to_parent});
     let failed = start_error(m, caller, id).filter(|_| action != "archive");
     let mut answer = match api.post_waking("relay", &body).await {
         // The website may not know a child that just started yet (#317).
         Err(ApiError::Status(404, _)) if starting(m, caller, true).iter().any(|c| c == id) => {
-            return Err(fail(StatusCode::SERVICE_UNAVAILABLE, STARTING));
+            let why = waiting_start(m, caller, id).map(|why| format!("{why} Retry later."));
+            let why = why.unwrap_or_else(|| "Retry in a few seconds.".to_owned());
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &format!("{STARTING} {why}"),
+            ));
         }
         // Its start was refused, so no agent runs there to message or stop. A stop of one that never woke gets the
         // website's 409 "it may still start" instead, which a final refusal makes untrue (#1058).
@@ -176,6 +276,12 @@ pub(super) async fn command(
         // Core had no parent, and the website has none it can reach: as before (#994).
         Err(ApiError::Status(404, _)) if id == "parent" => {
             return Err(fail(StatusCode::CONFLICT, NO_PARENT));
+        }
+        Err(ApiError::Status(503, ref message)) if id == "parent" && message == DISK_FULL => {
+            return Err(fail(
+                StatusCode::CONFLICT,
+                "Not delivered: your parent's cloud disk is full or can't be measured, so its work is paused. The user can free space in your parent's thread with Clear caches & builds; send it again after that.",
+            ));
         }
         // The parent may have it already, and a resend gets a new request ID, so never ask for one. Only the
         // website's own "parent busy" 503 means the parent refused it.
@@ -209,6 +315,71 @@ pub(super) async fn command(
         let late = answer["late"].take();
         note_child(m, caller, id, state, &late);
     }
+    // Noted as archived above, as before, though the website only queued it (#1947): the agent hears so.
+    if action == "archive" && answer["state"] == "queued" {
+        answer["note"] = json!(archive_queued(id));
+    }
+    answer["id"] = json!(id);
+    Ok(Json(answer))
+}
+
+/// `thread compact` on a child in a sandbox of its own, through the website only: older apps refuse it as a
+/// `child_command`.
+pub(super) async fn compact(
+    m: &Manager,
+    caller: &str,
+    id: &str,
+    then: Option<&str>,
+) -> Result<Json<Value>, Failure> {
+    // A session sharing this sandbox reaches through the website as its thread: only its own children.
+    let foreign = (m.local.lock().unwrap().sessions.get(caller))
+        .is_some_and(|s| s.parent_session.is_some() && !s.child_states.contains_key(id));
+    if foreign {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Only the thread that started this child can compact it.",
+        ));
+    }
+    let Some(api) = m.history.api.as_ref() else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Cloudroom's website is unavailable, so this child can't be compacted.",
+        ));
+    };
+    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let body =
+        json!({"action":"compact","thread":id,"text":then,"request_id":format!("relay_{key}")});
+    let mut answer = (api.post_waking("relay", &body).await)
+        .map_err(|error| website_failure(error, "reach the child"))?;
+    // `thread wait --children` waits for its follow-up turn, which reports back like any other.
+    if then.is_some() {
+        note_child(m, caller, id, "running", &Value::Null);
+    }
+    answer["id"] = json!(id);
+    Ok(Json(answer))
+}
+
+/// `thread pin` on a child in a sandbox of its own, through the website only: older apps refuse it as a
+/// `child_command`, and the website pins it without waking its sandbox.
+pub(super) async fn pin(m: &Manager, caller: &str, id: &str) -> Result<Json<Value>, Failure> {
+    let foreign = (m.local.lock().unwrap().sessions.get(caller))
+        .is_some_and(|s| s.parent_session.is_some() && !s.child_states.contains_key(id));
+    if foreign {
+        return Err(fail(
+            StatusCode::FORBIDDEN,
+            "Only the thread that started this child can pin it.",
+        ));
+    }
+    let Some(api) = m.history.api.as_ref() else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Cloudroom's website is unavailable, so this child can't be pinned.",
+        ));
+    };
+    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let body = json!({"action":"pin","thread":id,"request_id":format!("relay_{key}")});
+    let mut answer = (api.post("relay", &body).await)
+        .map_err(|error| website_failure(error, "reach the child"))?;
     answer["id"] = json!(id);
     Ok(Json(answer))
 }
@@ -254,6 +425,7 @@ struct Relayed {
 async fn receive(
     State(m): State<Arc<Manager>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(input): Json<Relayed>,
 ) -> Result<Json<Value>, Failure> {
     let bad = |message: &str| fail(StatusCode::BAD_REQUEST, message);
@@ -270,10 +442,7 @@ async fn receive(
     // messages go to the session that started it.
     let from = match input.action.as_str() {
         "report" => input.child.clone(),
-        "tell" => input.text.as_deref().and_then(|t| {
-            let rest = t.strip_prefix("[bb message from thread:")?;
-            Some(rest[..rest.find(']')?].to_owned())
-        }),
+        "tell" => input.text.as_deref().and_then(tell_sender),
         _ => None,
     };
     let owner = from.as_deref().and_then(|child| starter(&m, child));
@@ -286,14 +455,9 @@ async fn receive(
         ));
     }
     let id = owner.unwrap_or(id);
-    let archived = m
-        .local
-        .lock()
-        .unwrap()
-        .sessions
-        .get(&id)
-        .map(|s| s.archived)
-        .ok_or_else(|| fail(StatusCode::NOT_FOUND, "Unknown session"))?;
+    if !m.local.lock().unwrap().sessions.contains_key(&id) {
+        return Err(fail(StatusCode::NOT_FOUND, "Unknown session"));
+    }
     let text = match input.action.as_str() {
         "tell" => input
             .text
@@ -308,13 +472,9 @@ async fn receive(
                 "interrupted" => "stopped",
                 _ => "error",
             };
-            // A report the archived child had in flight never shows it again (#1000). Any other report updates it,
-            // say from a session that replaced it after a restore.
+            let now = crate::observability::now_ms();
             note_unless(&m, &id, &child, known, |s| {
-                s.child_states.get(&child).is_some_and(|s| s == "archived")
-                    && s.late_reports
-                        .get(&child)
-                        .is_some_and(|l| l.contains(&request))
+                holds_archive(s, &child, &request, now)
             });
             notice(&child, input.title, state, input.error, input.reply)
         }
@@ -329,18 +489,28 @@ async fn receive(
             }
             return Ok(Json(json!({"id":id,"state":receipt.state})));
         }
+        // From its parent's `thread compact`: now, or once the running turn ends, then its follow-up.
+        "compact" => {
+            let then = input.text.as_deref();
+            if then.is_some_and(|t| t.len() > super::MAX_PROMPT) {
+                return Err(bad("invalid text"));
+            }
+            let receipt = (m.compact_then(&id, request, then)).map_err(session_failure)?;
+            let note = compact_note(&receipt);
+            return Ok(Json(json!({"id":id,"state":receipt.state,"note":note})));
+        }
         // Like `thread archive --self`: the app archives it whenever it next reads the thread.
         "archive" => {
             retire(&m, &id)?;
             let kept = archive_under(&m, &id)?;
-            if !archived {
-                let _ = record(
-                    &m,
-                    &id,
-                    "archive",
-                    json!({"archived":true,"kept_live":kept}),
-                )?;
-            }
+            // Even when an older archive is recorded: a restore while the sandbox slept never reached this Core, so
+            // only a new record, reported with this wake, archives the thread again (#1634).
+            let _ = record(
+                &m,
+                &id,
+                "archive",
+                json!({"archived":true,"kept_live":kept,"wake":m.wake_id()}),
+            )?;
             // Archived, it sends no new reports, but one may be in flight, and an earlier session of this thread (say,
             // before a harness switch) may still send its own: the parent holds the archive against those.
             let local = m.local.lock().unwrap();
@@ -349,14 +519,42 @@ async fn receive(
                 .values()
                 .filter(|s| s.session_id == id || (!s.archived && s.parent_thread().is_some()));
             let late: Vec<String> = sending
-                .flat_map(|s| unreported(s).map(|r| notice_ids(&s.session_id, &r.request_id).1))
+                .flat_map(|s| {
+                    unreported(s)
+                        .into_iter()
+                        .map(|(r, _)| notice_ids(&s.session_id, &r.request_id).1)
+                })
                 .collect();
             drop(local);
             return Ok(Json(json!({"id":id,"state":"archived","late":late})));
         }
         _ => return Err(bad("unknown action")),
     };
-    let answer = deliver(&m, &id, &request, &text, true).await?;
+    // The thread that sent a tell, from the website's own records (web/lib/mobile.ts): the app then shows it as that
+    // agent's message, as in Local (#1369). A header, since older Cores refuse unknown body fields.
+    let sender = headers
+        .get("x-cloudroom-sender")
+        .and_then(|v| v.to_str().ok());
+    let mut prompt = json!({"text":text});
+    if let Some(sender) = sender.filter(|s| input.action == "tell" && thread_id(s)) {
+        prompt["sender_thread_id"] = json!(sender);
+    }
+    let queue = input.action == "tell" && request.ends_with(QUEUE);
+    // A full or unmeasured disk refuses a tell, also where the user's own message would wait (#606), so its sender
+    // hears why (web/lib/mobile.ts, #309) instead of waiting on a paused agent. A retry of one already accepted
+    // gets its receipt from `deliver`, so its sender never sends it twice.
+    let known = || {
+        let steer = m.receipt(&id, &format!("{request}_steer"));
+        m.receipt(&id, &request).is_some() || steer.is_some_and(|s| s.state != "failed")
+    };
+    if input.action == "tell" && m.storage.blocks() && !known() {
+        let refused = super::Error::Conflict("storage unsafe; new execution is blocked");
+        return Err(session_failure(refused));
+    }
+    if input.action == "tell" && from.is_none() {
+        revive(&m, &id, &request, None);
+    }
+    let answer = deliver(&m, &id, &request, prompt, true, None, queue).await?;
     // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     let steering = m.receipt(&id, &format!("{request}_steer"));
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
@@ -366,6 +564,15 @@ async fn receive(
         ));
     }
     Ok(answer)
+}
+
+/// The thread a relayed message names as its sender. `[bb message ...]` is what every sender writes today; the plain
+/// tag is read too, so senders can drop the "bb" once every Core reads both.
+fn tell_sender(text: &str) -> Option<String> {
+    let rest = text
+        .strip_prefix("[bb message from thread:")
+        .or_else(|| text.strip_prefix("[message from thread:"))?;
+    Some(rest[..rest.find(']')?].to_owned())
 }
 
 /// The session sharing this sandbox that started `child` through the website. The thread's own sessions take what
@@ -389,25 +596,26 @@ fn unnamed_start(local: &Local) -> bool {
     })
 }
 
-/// A session's finished turns not yet reported to its parent in another sandbox.
-fn unreported(s: &super::Session) -> impl Iterator<Item = &super::Receipt> {
-    s.receipts.values().filter(|r| {
-        r.command == "prompt"
-            && FINISHED.contains(&r.state.as_str())
-            && !s.reported.contains(&r.request_id)
-    })
+/// A session's finished turns not yet reported to its parent in another sandbox, each with when it is due.
+fn unreported(s: &Session) -> Vec<(&super::Receipt, u64)> {
+    untold(s, |r| s.reported.contains(&r.request_id))
 }
 
-/// The first finished turn not yet reported, of a session whose parent runs in another sandbox. An archived one
-/// reports only the turn it archived itself in, so its parent hears how its task ended.
-fn next_report(local: &Local) -> Option<(String, String, Value)> {
+/// The turns a session whose parent runs in another sandbox still owes it, each with when it is due. An archived one
+/// owes only the turn it archived itself in, so its parent hears how its task ended.
+fn owed(s: &Session) -> impl Iterator<Item = (&super::Receipt, u64)> {
+    (unreported(s).into_iter())
+        .filter(move |(r, _)| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))
+}
+
+/// The first owed turn due by `now`, and its report.
+fn next_report(local: &Local, now: u64) -> Option<(String, String, Value)> {
     local
         .sessions
         .values()
         .filter(|s| s.parent_thread().is_some())
         .find_map(|s| {
-            let r = unreported(s)
-                .find(|r| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))?;
+            let (r, _) = owed(s).find(|(_, at)| *at <= now)?;
             let reply = s
                 .replies
                 .iter()
@@ -420,15 +628,35 @@ fn next_report(local: &Local) -> Option<(String, String, Value)> {
         })
 }
 
+/// When the next owed turn falls due: a held one once its child is quiet, `u64::MAX` while it runs a turn.
+fn next_due(local: &Local) -> Option<u64> {
+    let parented = local
+        .sessions
+        .values()
+        .filter(|s| s.parent_thread().is_some());
+    parented.flat_map(|s| owed(s).map(|(_, at)| at)).min()
+}
+
 /// `thread list` also shows children in sandboxes of their own, at any depth, from the website's links (ADR 0256):
 /// what this thread last heard of each, or else its sandbox's state. Ones started in the last few minutes show as
-/// `starting` until their sandbox wakes, linked or not.
-pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answer: &mut Value) {
+/// `starting` until their sandbox wakes, linked or not. `wait` caps the website's answer: `status` must not hang on it.
+pub(super) async fn own_children(
+    m: &Manager,
+    caller: &str,
+    archived: bool,
+    answer: &mut Value,
+    wait: Duration,
+) {
     // The website links every child started here to this sandbox's thread: each session lists the ones it started,
     // and the sandbox's thread also those an older app started.
-    let (shared, known, mine, others) = {
+    let (shared, known, mine, others, archiving) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
+        let since = crate::observability::now_ms().saturating_sub(ARCHIVING_MS);
+        let archiving: HashSet<String> = (session.into_iter())
+            .flat_map(|s| s.child_archived_at.iter().filter(|(_, at)| **at > since))
+            .map(|(child, _)| child.clone())
+            .collect();
         // Only sessions sharing the sandbox keep theirs apart: the thread lists what its earlier sessions started.
         let others: HashSet<String> = local
             .sessions
@@ -441,6 +669,7 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
             session.map(|s| s.child_states.clone()).unwrap_or_default(),
             session.map(|s| s.started.clone()).unwrap_or_default(),
             others,
+            archiving,
         )
     };
     let Some(api) = m
@@ -453,7 +682,9 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     };
     let flag = if archived { "1" } else { "0" };
     // Without the website's list, the children started in the last few minutes still show.
-    let found = match api.get("children", &[("archived", flag)]).await {
+    let asked = tokio::time::timeout(wait, api.get("children", &[("archived", flag)])).await;
+    let late = || ApiError::Network(format!("no answer within {} s", wait.as_secs()));
+    let found = match asked.unwrap_or_else(|_| Err(late())) {
         Ok(found) => found,
         Err(error) => {
             answer["note"] = json!(format!(
@@ -476,15 +707,28 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
             continue;
         }
         let sandbox = child["state"].as_str().unwrap_or("unknown");
-        let state = match sandbox {
-            "archived" | "deleted" => "archived",
-            "new" if recent.iter().any(|c| c == id) => "starting",
-            _ => known.get(id).map_or(sandbox, String::as_str),
-        };
-        let mut item = json!({"id":id,"title":child["title"],"state":state,"parent":child["parent"],"sandbox":"own"});
+        let starting = recent.iter().any(|c| c == id);
+        let state = shown(
+            sandbox,
+            known.get(id).map(String::as_str),
+            starting,
+            archiving.contains(id),
+        );
+        // The website may still list a child that was archived a moment ago.
+        if state == "archived" && !archived {
+            continue;
+        }
+        let status = super::children::status(state, false);
+        let mut item = json!({"id":id,"threadId":id,"title":child["title"],"state":state,"status":status,"parent":child["parent"],"sandbox":"own"});
         // Its sandbox didn't start yet, say after a failed wake, or its start was refused (#1058).
         let refused = start_error(m, caller, id).filter(|_| state == "error");
-        if let Some(issue) = refused.as_deref().or(child["issue"].as_str()) {
+        let why = waiting_start(m, caller, id).filter(|_| state == "starting");
+        let issue = [
+            refused.as_deref().or(child["issue"].as_str()),
+            why.as_deref(),
+        ];
+        let issue = issue.into_iter().flatten().collect::<Vec<_>>().join(" ");
+        if !issue.is_empty() {
             item["issue"] = json!(issue);
         }
         list.push(item);
@@ -493,8 +737,28 @@ pub(super) async fn own_children(m: &Manager, caller: &str, archived: bool, answ
     for id in recent {
         let archived = known.get(&id).is_some_and(|s| s == "archived");
         if !archived && !list.iter().any(|c| c["id"] == id.as_str()) {
-            list.push(json!({"id":id,"title":null,"state":"starting","sandbox":"own"}));
+            let mut item = json!({"id":id,"threadId":id,"title":null,"state":"starting","status":"active","sandbox":"own"});
+            // Not linked yet: the website hasn't made its sandbox (#1957).
+            if let Some(why) = waiting_start(m, caller, &id) {
+                item["issue"] = json!(why);
+            }
+            list.push(item);
         }
+    }
+}
+
+/// A child's state in `thread list`: its sandbox's, or what this thread last heard of it. `archiving`: this thread
+/// archived it a moment ago.
+fn shown<'a>(sandbox: &'a str, known: Option<&'a str>, starting: bool, archiving: bool) -> &'a str {
+    match sandbox {
+        "archived" | "deleted" => "archived",
+        // The website lists it until the archive lands, and an asleep one's waits for a wake (#1430). Later, asleep
+        // means it never landed or the user restored it.
+        _ if archiving => "archived",
+        "new" if starting => "starting",
+        // A sandbox that sleeps or failed runs nothing, whatever its last report here said.
+        "asleep" | "failed" => sandbox,
+        _ => known.unwrap_or(sandbox),
     }
 }
 
@@ -508,10 +772,51 @@ fn failed(now: bool) {
     };
 }
 
-/// A report still waits for the website, so the sandbox must not sleep yet, unless it has failed for a long time.
+/// A report still waits for the website, so the sandbox must not sleep yet, unless it has failed for a long time. One
+/// held until its child is quiet (#217) never keeps it awake: a drain sends it at once instead (`flush_held`).
 pub(super) fn report_pending(local: &Local) -> bool {
-    let failing = FAILING_SINCE.lock().unwrap();
-    next_report(local).is_some() && failing.is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
+    let fresh = |failing: &Mutex<Option<Instant>>| {
+        failing
+            .lock()
+            .unwrap()
+            .is_none_or(|since| since.elapsed() < GIVE_UP_AWAKE)
+    };
+    (next_report(local, crate::observability::now_ms()).is_some() && fresh(&FAILING_SINCE))
+        || (next_thread_report(local).is_some() && fresh(&THREAD_FAILING_SINCE))
+}
+
+/// The next change a thread owes the website (#237), oldest first. A switch's new session waits until its `continue`
+/// landed. An archive waits for the end of its turn and for every other visible thread in the sandbox (a child, a
+/// side chat) to be archived too, since the website row is the whole sandbox (docs/scopes/sandboxes.md).
+fn next_thread_report(local: &Local) -> Option<(String, Value)> {
+    let visible = |s: &Session| {
+        !s.archived
+            && s.close_request.is_none()
+            && !matches!(
+                s.state,
+                SessionState::Closing
+                    | SessionState::Closed
+                    | SessionState::Failed
+                    | SessionState::ProcessLost
+                    | SessionState::SavedHistoryOnly
+            )
+    };
+    local.sessions.values().find_map(|s| {
+        let report = s.thread_reports.first()?;
+        let waiting = local
+            .sessions
+            .values()
+            .any(|o| o.continuing.as_deref() == Some(&s.session_id));
+        let archive = report["kind"] == "archived";
+        let others = || {
+            local
+                .sessions
+                .values()
+                .any(|o| o.session_id != s.session_id && visible(o))
+        };
+        (!waiting && s.parent_session.is_none() && !(archive && (s.busy() || others())))
+            .then(|| (s.session_id.clone(), report.clone()))
+    })
 }
 
 /// Child starts the website hasn't finished, by session, request ID and the request to repeat. An archived thread's
@@ -542,7 +847,9 @@ pub(super) fn start_pending(local: &Local) -> bool {
 
 /// Whether this start still waits: not settled, not cancelled, and its thread not archived.
 fn still_pending(m: &Manager, session: &str, request: &str) -> bool {
-    let local = m.local.lock().unwrap();
+    pending_in(&m.local.lock().unwrap(), session, request)
+}
+fn pending_in(local: &Local, session: &str, request: &str) -> bool {
     local.sessions.get(session).is_some_and(|s| {
         !s.archived
             && s.child_starts
@@ -615,7 +922,7 @@ async fn drive_start(
             }
             // Refused for good: out of credits, a missing login, an archived parent.
             Err(ApiError::Status(status, error)) if status < 500 => break Some(error),
-            Err(_) => {}
+            Err(error) => note_try(&m, &session, &request, try_failure(&error)),
         }
         tokio::time::sleep(wait).await;
         wait = (wait * 2).min(Duration::from_secs(300));
@@ -649,14 +956,44 @@ async fn drive_start(
                     "[Cloudroom] The child thread you spawned with request ID {request} could not be started: {error}."
                 ),
             };
-            let id: String = request.chars().take(40).collect();
-            let _ = deliver(&m, &session, &format!("start_{id}"), &text, true).await;
+            let id = format!("start_{}", request.chars().take(40).collect::<String>());
+            let prompt = json!({"text":text});
+            let _ = deliver(&m, &session, &id, prompt, true, None, false).await;
         }
     }
+    let key = format!("{session}/{request}");
+    LAST_TRY.lock().unwrap().retain(|(k, _)| *k != key);
     DRIVING
         .lock()
         .unwrap()
         .remove(&format!("{session}/{request}"));
+}
+
+impl super::Session {
+    /// The agent's own rename or effort, owed to the website (#237). Only the latest of each, and never a session
+    /// sharing another's sandbox: the website row belongs to the sandbox's thread.
+    /// Only a record that names its wake is owed: older Cores' records, replayed after an upgrade, and the user's own
+    /// changes (which the app sent) never are. The website drops a report from an earlier wake.
+    pub(super) fn owe(&mut self, kind: &str, data: &Value, sequence: u64) {
+        let value = if kind == "archived" {
+            Value::Bool(true)
+        } else {
+            data[kind].clone()
+        };
+        self.thread_reports.retain(|report| report["kind"] != kind);
+        if self.parent_session.is_some()
+            || !data["wake"].is_string()
+            || data["user"] == true
+            || value.is_null()
+        {
+            return;
+        }
+        let mut report = json!({"kind":kind,"value":value,"seq":sequence,"wake":data["wake"]});
+        if let Some(at) = data["at"].as_u64() {
+            report["at"] = json!(at);
+        }
+        self.thread_reports.push(report);
+    }
 }
 
 impl Manager {
@@ -692,6 +1029,61 @@ impl Manager {
         });
     }
 
+    /// Reports this thread's own changes to the website, which every computer follows (#237): its agent's rename and
+    /// effort, and its archive. Kept until the website takes or refuses it; one task for this Core's life.
+    pub(super) fn watch_thread_reports(self: &Arc<Self>, local: &Local) {
+        let Some(api) = self.history.api.clone() else {
+            return;
+        };
+        let manager = self.clone();
+        let mut changed = local.changed.subscribe();
+        tokio::spawn(async move {
+            let mut wait = Duration::from_secs(5);
+            while !manager.is_stopping() {
+                let due = next_thread_report(&manager.local.lock().unwrap());
+                let Some((session, report)) = due else {
+                    if changed.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                };
+                let (seq, kind) = (
+                    report["seq"].clone(),
+                    report["kind"].as_str().unwrap_or_default().to_owned(),
+                );
+                // The wake the change was made in: one from an earlier wake (the thread may have been archived
+                // and restored meanwhile) is dropped by the website.
+                let mut body = json!({"request_id":format!("report_{seq}"),"session":session,"wake":report["wake"]});
+                body[kind.as_str()] = report["value"].clone();
+                if let Some(at) = report["at"].as_u64() {
+                    body["at"] = json!(at);
+                }
+                // Taken, or refused for good (409: not the thread's session now): never sent again.
+                let done = match api.post("thread", &body).await {
+                    Ok(_) | Err(ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => manager
+                        .note(&session, "thread_report", json!({"seq":seq}))
+                        .is_ok(),
+                    Err(_) => false,
+                };
+                // Its own give-up clock, apart from the turn reports' (`failed`).
+                {
+                    let mut failing = THREAD_FAILING_SINCE.lock().unwrap();
+                    *failing = if done {
+                        None
+                    } else {
+                        Some(failing.unwrap_or_else(Instant::now))
+                    };
+                }
+                if done {
+                    wait = Duration::from_secs(5);
+                    continue;
+                }
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(300));
+            }
+        });
+    }
+
     /// Reports each finished turn of a child whose parent runs in another sandbox, until the website takes it.
     /// One task for this Core's life: a report that fails waits and retries, so later ones keep their order.
     pub(super) fn watch_reports(self: &Arc<Self>, local: &Local) {
@@ -703,13 +1095,21 @@ impl Manager {
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(5);
             while !manager.is_stopping() {
-                let due = next_report(&manager.local.lock().unwrap());
+                let (due, held) = {
+                    let local = manager.local.lock().unwrap();
+                    let now = crate::observability::now_ms();
+                    (next_report(&local, now), next_due(&local))
+                };
                 let Some((session, turn, body)) = due else {
-                    if changed.changed().await.is_err() {
+                    if !changed_or_due(&mut changed, held).await {
                         return;
                     }
                     continue;
                 };
+                // The parent reads this turn with `thread output`, from saved history: save it first (#1410). The
+                // uploader's own upload, 2 s after idle, also takes the harness's last lines, so one covers the turn.
+                // While uploads fail, the report goes at once.
+                manager.flush_history(Duration::from_secs(5), true).await;
                 // Taken, or refused for good (410: the parent is gone or archived): never sent again.
                 let done = match api.post_waking("relay", &body).await {
                     Ok(_) | Err(ApiError::Status(400 | 403 | 410, _)) => manager
@@ -732,6 +1132,126 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relayed_message_names_its_sender_with_or_without_bb() {
+        for tag in ["[bb message from thread:", "[message from thread:"] {
+            let text = format!("{tag}thr_child]\n\nDone.");
+            assert_eq!(tell_sender(&text).as_deref(), Some("thr_child"));
+        }
+        assert_eq!(tell_sender("Done."), None);
+    }
+
+    /// A thread's own rename and archive reach the website once each (#237); a thread sharing its sandbox never
+    /// reports, the archive waits for that thread to be archived too, and a user's later prompt cancels it.
+    #[test]
+    fn a_thread_reports_its_own_changes_once_and_never_for_a_session_sharing_its_sandbox() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-thread-reports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = |parent: Option<&str>| json!({"request_id":"s","command":"start","state":"completed","input":{"parent_session":parent}});
+        local.append("main", "receipt", start(None), None).unwrap();
+        local
+            .append("kid", "receipt", start(Some("main")), None)
+            .unwrap();
+        for id in ["main", "kid"] {
+            local
+                .append(id, "state", json!({"state":"idle"}), None)
+                .unwrap();
+            local
+                .append(
+                    id,
+                    "title",
+                    json!({"title":format!("{id} title"),"wake":"w1"}),
+                    None,
+                )
+                .unwrap();
+        }
+        // An older Core's record (no wake, replayed after an upgrade) and a user's own rename are never owed.
+        local
+            .append("main", "title", json!({"title":"old"}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        local
+            .append(
+                "main",
+                "title",
+                json!({"title":"main title","wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        let (session, report) = next_thread_report(&local).unwrap();
+        assert_eq!(
+            (
+                session.as_str(),
+                report["kind"].as_str(),
+                report["value"].as_str(),
+                report["wake"].as_str()
+            ),
+            ("main", Some("title"), Some("main title"), Some("w1"))
+        );
+        local
+            .append("main", "thread_report", json!({"seq":report["seq"]}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        // Archived while the child still shows, the thread waits; once the child is archived, it reports.
+        local
+            .append(
+                "main",
+                "archive",
+                json!({"archived":true,"self":true,"wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        assert!(next_thread_report(&local).is_none());
+        local
+            .append("kid", "archive", json!({"archived":true,"user":true}), None)
+            .unwrap();
+        // Sent with the wake it was made in, also after a restart: a later wake's report would undo an Undo.
+        drop(local);
+        let mut local = Local::open(&dir).unwrap();
+        let (_, archive) = next_thread_report(&local).unwrap();
+        // A user's restore (the website tells a running Core on Undo) drops it; archived again, it's owed again.
+        local
+            .append("main", "unarchive", json!({"user":true}), None)
+            .unwrap();
+        assert!(next_thread_report(&local).is_none() && !local.sessions["main"].archived);
+        local
+            .append(
+                "main",
+                "archive",
+                json!({"archived":true,"self":true,"wake":"w1"}),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            (archive["kind"].as_str(), archive["wake"].as_str()),
+            (Some("archived"), Some("w1"))
+        );
+        // A loop's prompt leaves it owed; the user's own (restored and used again) cancels it, also after a restart.
+        let prompt = |id: &str| json!({"request_id":id,"command":"prompt","state":"accepted","input":{"text":"hi"}});
+        local
+            .append("main", "receipt", prompt("auto_0123_1"), None)
+            .unwrap();
+        assert!(
+            local.sessions["main"]
+                .thread_reports
+                .iter()
+                .any(|r| r["kind"] == "archived")
+        );
+        local
+            .append("main", "receipt", prompt("app_0123456789ab_x"), None)
+            .unwrap();
+        drop(local);
+        let local = Local::open(&dir).unwrap();
+        assert!(local.sessions["main"].thread_reports.is_empty());
+        assert_eq!(
+            local.sessions["main"].last_app_prompt.as_ref().unwrap()["request_id"],
+            "app_0123456789ab_x"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A child that archives itself still reports the turn it did that in, and only that one, also after a
     /// restart. One archived by its parent reports nothing more.
@@ -757,12 +1277,195 @@ mod tests {
         }
         drop(local);
         let mut local = Local::open(&dir).unwrap();
-        let (session, turn, _) = next_report(&local).unwrap();
+        let (session, turn, _) = next_report(&local, 0).unwrap();
         assert_eq!((session.as_str(), turn.as_str()), ("self", "p2"));
         local
             .append("self", "parent_report", json!({"request_id":"p2"}), None)
             .unwrap();
-        assert!(next_report(&local).is_none());
+        assert!(next_report(&local, u64::MAX).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #217: a turn the child's harness began itself reports at once if it failed. One that replied waits until the
+    /// child is quiet; then only the newest reports, also once later replies pushed it out of the cache and after a
+    /// restart, unless a newer prompt's answer went first. An empty one, or one from before the update (no `report`
+    /// mark), never does. Nothing reports twice, and reports go in the order their turns ended.
+    #[test]
+    fn a_child_reports_its_own_turns_once_when_quiet_but_not_empty_or_old_ones() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s","command":"start","state":"completed","input":{"parent_thread":"thr_p"}});
+        local.append("kid", "receipt", start, None).unwrap();
+        let turn = |local: &mut Local, id: &str, input: Value, error: Option<&str>, text: &str| {
+            if !text.is_empty() {
+                let reply = json!({"request_id":id,"text":text});
+                local.append("kid", "child_reply", reply, None).unwrap();
+            }
+            let command = if id.starts_with("auto") {
+                "auto"
+            } else {
+                "prompt"
+            };
+            let state = if error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            let receipt = json!({"request_id":id,"command":command,"state":state,"input":input,"error":error});
+            local.append("kid", "receipt", receipt, None).unwrap();
+        };
+        let ended = |at: u64, replied: bool| json!({"report":true,"ended":at,"replied":replied});
+        let failed = json!({"report":true,"ended":2});
+        turn(&mut local, "p1", json!({"ended":1}), None, "");
+        turn(&mut local, "auto_old", json!({}), None, "old news");
+        turn(&mut local, "auto_failed", failed, Some("boom"), "");
+        turn(
+            &mut local,
+            "auto_check",
+            ended(3, true),
+            None,
+            "still running",
+        );
+        turn(
+            &mut local,
+            "auto_final",
+            ended(4, true),
+            None,
+            "Final report",
+        );
+        // An empty wake after it reports nothing, but the child isn't quiet until it ended.
+        turn(&mut local, "auto_empty", ended(5, false), None, "");
+        let mut sent = vec![];
+        let mut send = |local: &mut Local, now: u64| {
+            while let Some((_, turn, body)) = next_report(local, now) {
+                sent.push((
+                    turn.clone(),
+                    body["reply"].as_str().unwrap_or_default().to_owned(),
+                ));
+                let done = json!({"request_id":turn});
+                local.append("kid", "parent_report", done, None).unwrap();
+            }
+        };
+        let quiet = 5 + super::super::children::QUIET_MS;
+        send(&mut local, quiet - 1);
+        let waiting = owed(&local.sessions["kid"]).count();
+        assert_eq!(waiting, 1, "only the newest self-started turn waits");
+        send(&mut local, quiet);
+        turn(
+            &mut local,
+            "auto_later",
+            ended(6, true),
+            None,
+            "Done at last",
+        );
+        for n in 0..8 {
+            let reply = json!({"request_id":format!("other{n}"),"text":"x"});
+            local.append("kid", "child_reply", reply, None).unwrap();
+        }
+        for _ in 0..2 {
+            drop(local);
+            local = Local::open(&dir).unwrap();
+            send(&mut local, u64::MAX);
+        }
+        // A held one is moot once a newer prompt's answer ends: the parent hears only the answer.
+        turn(
+            &mut local,
+            "auto_moot",
+            ended(7, true),
+            None,
+            "still running",
+        );
+        let p2 = json!({"request_id":"p2","command":"prompt","state":"accepted","input":{}});
+        local.append("kid", "receipt", p2, None).unwrap();
+        local.finish_receipt("kid", "p2", "completed").unwrap();
+        send(&mut local, u64::MAX);
+        let sent: Vec<_> = sent.iter().map(|(t, r)| (t.as_str(), r.as_str())).collect();
+        let expected = [
+            ("p1", ""),
+            ("auto_failed", ""),
+            ("auto_final", "Final report"),
+            ("auto_later", ""),
+            ("p2", ""),
+        ];
+        assert_eq!(sent, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A self-pin sets `session.pinned` and queues one website report carrying its stable `at` timestamp for main
+    /// threads, while shared-sandbox children stay local to their session snapshot.
+    #[test]
+    fn a_pin_sets_session_pinned_and_reports_a_stable_timestamp_for_main_only() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-pin-report-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = |parent: Option<&str>| json!({"request_id":"s","command":"start","state":"completed","input":{"parent_session":parent}});
+        local.append("main", "receipt", start(None), None).unwrap();
+        local
+            .append("kid", "receipt", start(Some("main")), None)
+            .unwrap();
+        let pin = json!({"pinned": true, "at": 1795290000123_u64, "wake": "0123456789abcdef"});
+        local.append("main", "pin", pin.clone(), None).unwrap();
+        local.append("kid", "pin", pin, None).unwrap();
+        assert!(local.sessions["main"].pinned);
+        assert!(local.sessions["kid"].pinned);
+        let (session, report) = next_thread_report(&local).expect("main pin report");
+        assert_eq!(session, "main");
+        assert_eq!(report["kind"], "pinned");
+        assert_eq!(report["value"], true);
+        assert_eq!(report["at"], 1795290000123_u64);
+        assert!(local.sessions["kid"].thread_reports.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed try is shown as its status in fixed words, never the website's own text (#1957).
+    #[test]
+    fn a_start_failure_shows_only_fixed_words() {
+        let leaky = "upload failed: getaddrinfo ENOTFOUND internal-storage fd00::1:443 Bearer abcdefghijklmnopqrstuv";
+        let shown = try_failure(&ApiError::Status(502, leaky.into()));
+        assert_eq!(shown, "HTTP 502, a step of its setup failed");
+        let shown = try_failure(&ApiError::Network("dns error: storage.example".into()));
+        assert_eq!(shown, "the website could not be reached");
+    }
+
+    /// An in-flight report never shows a child its parent archived again: a taken archive holds against the reports
+    /// it named, a queued one against any while it may still land. Also after a restart.
+    #[test]
+    fn a_report_in_flight_never_shows_an_archived_child_again() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let archive = |late: Value| json!({"child":"thr_kid","state":"archived","late":late});
+        local
+            .append("taken", "child_state", archive(json!(["r1"])), None)
+            .unwrap();
+        local
+            .append("nothing_late", "child_state", archive(json!([])), None)
+            .unwrap();
+        local
+            .append("queued", "child_state", archive(Value::Null), None)
+            .unwrap();
+        for _ in 0..2 {
+            let now = crate::observability::now_ms();
+            let holds = |id: &str, request: &str, now: u64| {
+                holds_archive(&local.sessions[id], "thr_kid", request, now)
+            };
+            assert!(holds("taken", "r1", now) && !holds("taken", "r2", now));
+            assert!(!holds("nothing_late", "r1", now));
+            assert!(holds("queued", "r1", now) && holds("queued", "r2", now));
+            assert!(!holds("queued", "r1", now + ARCHIVING_MS));
+            drop(local);
+            local = Local::open(&dir).unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A child this thread archived stays archived while the website still lists it as asleep (#1430), but not once
+    /// that archive is old: the user may have restored it.
+    #[test]
+    fn a_child_archived_here_stays_hidden_while_its_archive_is_queued() {
+        assert_eq!(shown("asleep", Some("archived"), false, true), "archived");
+        assert_eq!(shown("asleep", Some("archived"), false, false), "asleep");
+        assert_eq!(shown("asleep", Some("replied"), false, false), "asleep");
     }
 }
