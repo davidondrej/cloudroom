@@ -86,10 +86,11 @@ export class CloudQueue {
     return this.queuedMessage(binding(this.rt.host.db, thread.id)!, command(this.rt.host.db, id)!);
   }
 
-  queue(threadId: string) {
+  /** `unsent` adds messages that never reached Core, such as ones sent while the sandbox could not start. */
+  queue(threadId: string, unsent = false) {
     const saved = binding(this.rt.host.db, threadId);
     if (!saved) return [];
-    return queuedPrompts(this.rt.host.db, threadId).map((c) => this.queuedMessage(saved, c));
+    return queuedPrompts(this.rt.host.db, threadId, unsent).map((c) => this.queuedMessage(saved, c));
   }
 
   private queuedMessage(saved: Binding, c: Command) {

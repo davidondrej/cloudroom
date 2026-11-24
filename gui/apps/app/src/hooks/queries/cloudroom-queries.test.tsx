@@ -3,10 +3,13 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import { BbHttpError } from "@cloudroom/sdk/browser";
+import { appToast } from "@/components/ui/app-toast";
 import { sdk } from "@/lib/sdk";
-import { cloudReasoningLevels, cloudroomStatusSchema, useCloudroomThreadWorkspace } from "./cloudroom-queries";
+import { cloudReasoningLevels, cloudroomStatusSchema, useCloudroomThreadWorkspace, useTeleportLocal } from "./cloudroom-queries";
 
-vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { threadWorkspace: vi.fn() } } }));
+vi.mock("@/lib/sdk", async () => ({ BbHttpError: (await import("@cloudroom/sdk/browser")).BbHttpError, sdk: { cloudroom: { threadWorkspace: vi.fn(), teleportLocal: vi.fn() } } }));
+vi.mock("@/components/ui/app-toast", () => ({ appToast: { success: vi.fn(), error: vi.fn(), message: vi.fn() } }));
 const clients: QueryClient[] = [];
 afterEach(() => { cleanup(); clients.forEach(client => client.clear()); clients.length = 0; vi.resetAllMocks(); });
 function mount(enabled = false) {
@@ -49,4 +52,23 @@ it("keeps an unavailable core distinct from an empty folder", async () => {
   vi.mocked(sdk.cloudroom.threadWorkspace).mockResolvedValue({ path: "/code/project", branch: null, head: null });
   await act(() => hook.result.current.refetch());
   await waitFor(() => expect(hook.result.current.isError).toBe(false));
+});
+
+it("offers to move without cloud changes when the sandbox can't start, and moves only when asked", async () => {
+  const message = "You used your Super plan's 150,000 Cloud Credits for the last 30 days.";
+  vi.mocked(sdk.cloudroom.teleportLocal).mockRejectedValueOnce(new BbHttpError({ status: 409, code: "teleport_cloud_unavailable", message, body: { code: "teleport_cloud_unavailable", message } }));
+  vi.mocked(sdk.cloudroom.teleportLocal).mockResolvedValueOnce({ conflicts: 0 });
+  const client = new QueryClient(); clients.push(client);
+  const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+  const hook = renderHook(() => useTeleportLocal("thread"), { wrapper });
+  act(() => hook.result.current.mutate());
+  await waitFor(() => expect(appToast.error).toHaveBeenCalled());
+  const [title, options] = vi.mocked(appToast.error).mock.calls[0]!;
+  expect([title, options?.description]).toEqual(["Could not teleport to Local", message]);
+  expect(sdk.cloudroom.teleportLocal).toHaveBeenCalledTimes(1);
+  const action = options?.action as { label: string; onClick: () => void };
+  expect(action.label).toBe("Move without cloud changes");
+  act(() => action.onClick());
+  await waitFor(() => expect(appToast.success).toHaveBeenCalledWith("Moved to this computer."));
+  expect(vi.mocked(sdk.cloudroom.teleportLocal).mock.calls).toEqual([["thread", undefined], ["thread", { withoutCloud: true }]]);
 });

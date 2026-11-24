@@ -231,7 +231,7 @@ class CloudroomService {
   send(thread: Thread, payload: SendMessageRequest) { return this.messaging.send(thread, payload); }
   control(threadId: string, action: "stop" | "resume", offline?: boolean) { return this.messaging.control(threadId, action, offline); }
   queueMessage(thread: Thread, payload: SendMessageRequest) { return this.queueEngine.queueMessage(thread, payload); }
-  queue(threadId: string) { return this.queueEngine.queue(threadId); }
+  queue(threadId: string, unsent = false) { return this.queueEngine.queue(threadId, unsent); }
   editQueued(thread: Thread, queuedMessageId: string, payload: { input: PromptInput[]; expectedUpdatedAt: number }) { return this.queueEngine.editQueued(thread, queuedMessageId, payload); }
   cancelQueued(thread: Thread, queuedMessageId: string) { return this.queueEngine.cancelQueued(thread, queuedMessageId); }
   reorderQueued(thread: Thread, request: { queuedMessageId: string; previousQueuedMessageId: string | null; nextQueuedMessageId: string | null }) { return this.queueEngine.reorderQueued(thread, request); }

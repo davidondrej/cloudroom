@@ -55,7 +55,7 @@ import {
   type SandboxWakeTrigger,
 } from "./sandboxes.js";
 import { CloudSecrets } from "./secrets.js";
-import { binding, command, coreInUse, saveBinding, type Binding } from "./store.js";
+import { abandonedSessions, binding, command, coreInUse, forgetAbandonedSession, saveBinding, type Binding } from "./store.js";
 import { copyMacGithub, copyMacLogin, loginMarkers, markLogin, stopSync } from "./sync.js";
 
 /** Unified per-thread ephemeral runtime state. */
@@ -433,6 +433,7 @@ export class CloudRuntime implements SyncHost {
         return this.sandboxes.connection(sandbox, project, wake, trigger, fresh, parent);
       });
       if (!found) throw new SandboxAsleep();
+      await this.closeAbandoned(SANDBOX_PREFIX + sandbox, found);
       return found;
     }
     const connection = await this.connection();
@@ -440,6 +441,22 @@ export class CloudRuntime implements SyncHost {
       throw new ApiError(409, "cloudroom_connection_changed", "This thread belongs to a different core connection. Restore its connection before continuing.");
     }
     return connection;
+  }
+
+  /** Before any other work reaches a sandbox, closes the sessions threads left there when they moved to Local without
+   *  it, so Core never runs their old work (#107). One that can't be closed now is tried again next time. */
+  private async closeAbandoned(coreUrl: string, connection: { url: string; token: string; gateToken?: string }): Promise<void> {
+    const left = abandonedSessions(this.host.db, coreUrl);
+    if (!left.length) return;
+    const client = new CloudroomClient(connection);
+    for (const { threadId, sessionId } of left) {
+      try { await client.close(sessionId, randomUUID()); }
+      catch (error) {
+        // A 4xx means Core has no such open session, so nothing of it can run.
+        if (!(error instanceof CloudroomError && error.status !== null && error.status < 500)) { this.host.warn("A session left behind by Teleport to Local could not be closed yet", error, { threadId }); continue; }
+      }
+      forgetAbandonedSession(this.host.db, threadId, sessionId);
+    }
   }
 
   /** A thread's Core. Sandbox threads wake only when `wake` is true, for work that must be sent; a function is asked

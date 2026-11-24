@@ -44,7 +44,7 @@ import type { CloudQueue } from "./queue.js";
 import type { CloudRuntime } from "./runtime.js";
 import { CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, sandboxThread, startRefused } from "./sandboxes.js";
 import type { CloudStatusPreviews } from "./status-previews.js";
-import { baseBranch, binding, bindings, command, commands, openBinding, openBindings, projectCopyProgress, saveBinding, saveCommandState, TIMED_OUT, unsentDeletes, type Binding, type Command, type OpenBinding } from "./store.js";
+import { baseBranch, binding, bindings, command, commands, localTeleports, openBinding, openBindings, projectCopyProgress, saveBinding, saveCommandState, TIMED_OUT, unsentDeletes, type Binding, type Command, type OpenBinding } from "./store.js";
 import type { CloudStream } from "./stream.js";
 import { importCodexLogin, setupSync } from "./sync.js";
 import type { CloudTransfers } from "./transfers.js";
@@ -211,11 +211,16 @@ export class CloudDelivery {
     return noted;
   }
 
+  /** Teleport to Local is moving the thread off its sandbox, so delivery must not wake it or send it work. */
+  private leavingCloud(threadId: string): boolean {
+    return localTeleports.get(threadId) === "switching";
+  }
+
   private async deliverPending(threadId: string): Promise<void> {
     this.rt.state(threadId).sleptAtCheck = undefined;
     this.messaging.holdRejectedStart(threadId);
     let saved = binding(this.rt.host.db, threadId);
-    if (!saved || this.rt.stopped || await this.rt.otherAccountThread(saved)) return;
+    if (!saved || this.rt.stopped || this.leavingCloud(threadId) || await this.rt.otherAccountThread(saved)) return;
     const firstCommand = command(this.rt.host.db, `first_${threadId}`);
     if (!saved.sessionId && (commands(this.rt.host.db, threadId).some((item) => item.command === "teleport") || firstCommand?.state === "failed" || (firstCommand?.command === "side_chat" && firstCommand.state === "completed" && !commands(this.rt.host.db, threadId, "sending").length) || this.messaging.mustNotStart(threadId))) return;
     const epoch = this.rt.epoch;
@@ -225,7 +230,7 @@ export class CloudDelivery {
     try {
       const bound = saved;
       let catchUp = false;
-      const client = await this.rt.client(saved, () => !bound.sessionId || unsentWork(this.rt.host.db, threadId) || (catchUp ||= this.children.catchUpForParent(bound)));
+      const client = await this.rt.client(saved, () => !this.leavingCloud(threadId) && (!bound.sessionId || unsentWork(this.rt.host.db, threadId) || (catchUp ||= this.children.catchUpForParent(bound))));
       ctx.client = client;
       ctx.step = "capabilities";
       if (epoch !== this.rt.epoch) return;
