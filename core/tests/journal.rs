@@ -207,6 +207,8 @@ fn queued_records_save_together_and_a_full_disk_changes_nothing() {
     assert!(journal.append_all(&[b"a", b"b", b"c"]).is_err());
     assert_eq!(journal.last(), 1);
     assert!(!dir.0.join("00000000000000000002.record").exists());
+    assert!(!dir.0.join("pending.tmp").exists());
+    assert!(!dir.0.join("pending.1.tmp").exists());
     fs::remove_dir(dir.0.join("pending.2.tmp")).unwrap();
     assert_eq!(journal.append_all(&[b"a", b"b", b"c"]).unwrap(), 4);
     drop(journal);

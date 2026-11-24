@@ -285,7 +285,8 @@ impl Journal {
         // A write refused for space deletes the reserve kept for history (`Guard::reserve`) and tries again (#606).
         match self.write_atomic(&files) {
             Err(error)
-                if no_space(&error)
+                if self.writable
+                    && no_space(&error)
                     && fs::remove_file(self.directory.join(crate::workspace::storage::RESERVE))
                         .is_ok() =>
             {
