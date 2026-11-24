@@ -25,6 +25,8 @@ const SMALL: u64 = LIMIT as u64 - MIB;
 const SHA: &str = "{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64";
 /// Read-only Mac access may write in /tmp.
 const MKTEMP: &str = "mktemp -d /tmp/cloudroom.XXXXXX";
+/// Starts each pull's random mark, the line its archive follows.
+const MARK: &str = "cloudroom-copy-";
 /// Turns a source `$p` of `.`, `..`, `dir/.`, or `link/` into the real folder it names, and its entry name into
 /// `$n`, as `realpath` would.
 const RESOLVE: &str = "case $p in */) [ -L \"${p%/}\" ] && p=$p.;; esac; \
@@ -35,10 +37,20 @@ pub(super) async fn pull(socket: &str, source: &str, target: &str) -> io::Result
     // a logout's after (#1012). The Mac temp folder is named after the same mark, so cleanup never trusts the output.
     let mut random = [0; 8];
     fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
-    let mark = format!("cloudroom-copy-{}", hex(&random));
+    let mark = format!("{MARK}{}", hex(&random));
     let dir = format!("/tmp/{mark}");
     let copy = copy_in(socket, source, target, &mark, &dir);
     stoppable(socket, Some(&dir), copy).await
+}
+
+/// A copy a disconnect cut off says to run it again, only once the whole copy fails: a piece retries first (#1936).
+fn rerun(error: io::Error) -> io::Error {
+    match error.kind() {
+        io::ErrorKind::ConnectionAborted => io::Error::other(
+            "The Mac disconnected during this copy, so nothing was copied. Run the copy again once room-cli mac status shows the Mac connected.",
+        ),
+        _ => error,
+    }
 }
 
 /// Runs a copy until it ends or `kill` stops room-cli (SIGTERM, #1274). Stopping drops the copy: its VM temp files go,
@@ -51,10 +63,10 @@ pub(super) async fn stoppable(
 ) -> io::Result<i32> {
     use tokio::signal::unix::{SignalKind, signal};
     let Ok(mut term) = signal(SignalKind::terminate()) else {
-        return copy.await;
+        return copy.await.map_err(rerun);
     };
     tokio::select! {
-        copied = copy => return copied,
+        copied = copy => return copied.map_err(rerun),
         _ = term.recv() => {},
     }
     if let Some(dir) = dir {
@@ -97,7 +109,7 @@ async fn copy_in(
     // so only a regular file is measured; anything else passes, since a login profile may set errexit.
     let size = "$([ ! -f \"$n\" ] || [ -L \"$n\" ] || wc -c < \"$n\")";
     let pack = format!(
-        "p={}; {RESOLVE} t={dir}; mkdir -m 700 \"$t\" || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
+        "p={}; {RESOLVE} t={dir}; (umask 077 && mkdir \"$t\") || exit 1; cd -- \"$(dirname -- \"$p\")\" || {{ rm -rf \"$t\"; exit 1; }}; \
          b={size} || {{ rm -rf \"$t\"; exit 1; }}; \
          {{ COPYFILE_DISABLE=1 tar --no-xattrs -czf - -- \"$n\" || touch \"$t/failed\"; }} \
          | head -c {} > \"$t/a.tgz\"; s=$(wc -c < \"$t/a.tgz\" | tr -d ' '); \
@@ -310,8 +322,28 @@ pub(super) async fn push(socket: &str, source: &str, target: &str) -> io::Result
             }
         }
     };
-    let to = String::from_utf8_lossy(&out);
-    println!("{}", json!({"copied":source,"to":last_line(&to)}));
+    let out = String::from_utf8_lossy(&out);
+    let to = last_line(&out);
+    let mut printed = json!({"copied":source,"to":to});
+    // Like cp, pushing `outputs` again to an existing `.../outputs` lands in `.../outputs/outputs`, so the files
+    // one level up keep their old bytes (#1292). Say so, since agents read that as a failed overwrite.
+    let folder = Path::new(to).parent().filter(|folder| {
+        Path::new(to).file_name() == Some(name)
+            && folder.file_name() == Some(name)
+            && parent
+                .join(name)
+                .symlink_metadata()
+                .is_ok_and(|m| m.is_dir())
+    });
+    if let Some(folder) = folder {
+        let parent = literal(&format!("{}/", folder.parent().unwrap_or(folder).display()));
+        eprintln!(
+            "Note: this went inside {}, so files directly in it were not replaced. To replace them, push to its parent folder: {parent}",
+            folder.display()
+        );
+        printed["nested"] = json!(true);
+    }
+    println!("{printed}");
     Ok(0)
 }
 
@@ -343,12 +375,21 @@ async fn run(
     copy: Value,
 ) -> io::Result<(Option<i32>, Vec<u8>, Vec<u8>)> {
     let mut body = json!({"command":command,"stdin":hex(stdin),"write":write});
-    if !copy.is_null() {
+    let unpack = !copy.is_null();
+    if unpack {
         body["copy"] = copy;
     }
     let value = request(socket, "POST", "/jobs", Some(body)).await?;
     if let Some(id) = value["job"].as_str().filter(|_| value["state"] == "done") {
         let _ = request(socket, "DELETE", &format!("/jobs/{id}"), None).await;
+    }
+    // Only a push's unpack may still land after a disconnect, and `mac result` shows where. Any other copy job's
+    // output is copy data or nothing, which `mac result` can't use (#1936), so `rerun` advises.
+    if value["state"] == "unknown" && !unpack {
+        return Err(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "The Mac disconnected during this copy",
+        ));
     }
     finished(value)
 }
@@ -420,6 +461,48 @@ fn framed<'a>(stdout: &'a [u8], mark: &str) -> io::Result<(&'a str, &'a [u8])> {
     let end = rest.iter().position(|&b| b == b'\n').ok_or_else(invalid)?;
     let line = std::str::from_utf8(&rest[..end]).map_err(|_| invalid())?;
     Ok((line, &rest[end + 1..]))
+}
+
+/// A pull job's output (#1936): its mark line, then a size and the gzip archive, a staged archive's size and SHA-256,
+/// or an empty line and a binary piece. Text that only names a mark, like `ls /tmp`, is no pull.
+pub(super) fn archive(stdout: &[u8]) -> bool {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+    // One UTF-8 pass answers every empty header's binary-piece check without rescanning its suffix.
+    let mut last_invalid = None;
+    let mut offset = 0;
+    for chunk in stdout.utf8_chunks() {
+        let valid = chunk.valid().len();
+        if !chunk.invalid().is_empty() {
+            last_invalid = Some(offset + valid);
+        }
+        offset += valid + chunk.invalid().len();
+    }
+    let mut seen = std::collections::HashSet::new();
+    let marks = stdout
+        .split(|&b| b == b'\n')
+        .scan(0usize, |offset, line| {
+            let start = *offset;
+            *offset += line.len() + 1;
+            Some((start, line))
+        })
+        .filter(|(_, line)| line.starts_with(MARK.as_bytes()));
+    marks
+        .filter_map(|(start, line)| std::str::from_utf8(line).ok().map(|mark| (start, mark)))
+        // A duplicate mark always names its first frame, as it did when framed searched from the start.
+        .filter(|(_, mark)| seen.insert(*mark))
+        // Start at the mark itself instead of rescanning all prior output for every mark.
+        .any(|(start, mark)| match framed(&stdout[start..], mark) {
+            Ok(("", data)) => {
+                last_invalid.is_some_and(|invalid| stdout.len() - data.len() <= invalid)
+            }
+            Ok((head, data)) => match head.split_once(' ') {
+                Some((size, sha)) => {
+                    digits(size) && sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_hexdigit())
+                }
+                None => digits(head) && data.starts_with(b"\x1f\x8b"),
+            },
+            Err(_) => false,
+        })
 }
 
 fn invalid() -> io::Error {
@@ -497,6 +580,41 @@ impl Drop for Temp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_handles_many_distinct_marks_quickly() {
+        let output = (0..10_000)
+            .map(|i| format!("cloudroom-copy-{i:016x}\ninvalid\n"))
+            .collect::<String>();
+        let start = std::time::Instant::now();
+        assert!(!super::archive(output.as_bytes()));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "400 KB of marker-heavy output took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn archive_checks_binary_suffixes_quickly() {
+        let output = (0..50_000)
+            .map(|i| format!("cloudroom-copy-{i:016x}\n\n"))
+            .collect::<String>();
+        let start = std::time::Instant::now();
+        assert!(!super::archive(output.as_bytes()));
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "1.55 MB of blank archive headers took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn archive_uses_the_first_frame_for_duplicate_marks() {
+        assert!(!super::archive(
+            b"cloudroom-copy-a\ninvalid\ncloudroom-copy-a\n2\n\x1f\x8b"
+        ));
+    }
+
     #[test]
     fn framed_skips_login_shell_text_and_forged_marks() {
         let mark = "cloudroom-copy-00ff";

@@ -6,10 +6,7 @@ import {
   type CSSProperties,
 } from "react";
 import { DndContext, useDroppable } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import type { NeighborReorderRequest } from "@cloudroom/client-core";
 import {
   DropPreviewRow,

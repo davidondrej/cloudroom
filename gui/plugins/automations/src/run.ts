@@ -17,6 +17,7 @@ import {
   setAutomationEnabled,
   setAutomationRunSentId,
   setAutomationRunThread,
+  REFUSED,
   THREAD_ARCHIVED_ERROR,
   type AutomationRow,
   type AutomationRunRow,
@@ -96,11 +97,15 @@ function isProjectGoneError(error: unknown): boolean {
   return projectGoneErrorSchema.safeParse(error).success;
 }
 
+/** The header names the loop, so the chat shows it as a "Loop run" divider (LoopRunMarker.tsx). Keep the prefix:
+ *  the server finds loop runs by it. */
 function renderAutomationDueMessage(args: {
   automationId: string;
+  name: string;
   prompt: string;
 }): string {
-  return `[room-cli automation due:${args.automationId}]\n\n${args.prompt}`;
+  const name = args.name.replace(/["\]\s]+/g, " ").trim();
+  return `[room-cli automation due:${args.automationId}${name ? ` "${name}"` : ""}]\n\n${args.prompt}`;
 }
 
 /** The loop's prompt with its webhook events as data, as cloud loops send it (ADR 0262). */
@@ -156,32 +161,39 @@ export function memoryText(notes: string[]): string {
   return `${past}\n\n${NOTE_ASK}`;
 }
 
-/** The newest notes from the loop's earlier runs, dated. A run whose reply can't be read is skipped. */
+/** The newest notes from the loop's earlier runs, dated. A run whose reply can't be read is skipped. Failed, skipped,
+ *  or note-less runs don't push older notes out (#1777): up to 100 runs are scanned, their replies read in parallel
+ *  batches sized to the notes still missing, until 20 notes are found. */
 async function pastNotes(
   room: AgentRunApi,
   db: Db,
   automationId: string,
 ): Promise<string[]> {
-  const runs = listAutomationRuns(db, { automationId, limit: NOTES }).filter(
-    (run) => run.threadId !== null,
-  );
-  const notes = await Promise.all(
-    runs.map(async (run) => {
-      try {
-        const reply = await room.sdk.threads.output?.({
-          threadId: run.threadId!,
-        });
-        const note = lastNote(reply?.output ?? "");
-        return (
-          note &&
-          `${new Date(run.startedAt).toISOString().slice(0, 10)}: ${note}`
-        );
-      } catch {
-        return null;
-      }
-    }),
-  );
-  return notes.filter((note): note is string => Boolean(note));
+  const runs = listAutomationRuns(db, {
+    automationId,
+    limit: NOTES * 5,
+  }).filter((run) => run.threadId !== null);
+  const notes: string[] = [];
+  for (let i = 0; i < runs.length && notes.length < NOTES;) {
+    const batch = await Promise.all(
+      runs.slice(i, (i += NOTES - notes.length)).map(async (run) => {
+        try {
+          const reply = await room.sdk.threads.output?.({
+            threadId: run.threadId!,
+          });
+          const note = lastNote(reply?.output ?? "");
+          return (
+            note &&
+            `${new Date(run.startedAt).toISOString().slice(0, 10)}: ${note}`
+          );
+        } catch {
+          return null;
+        }
+      }),
+    );
+    notes.push(...batch.filter((note): note is string => Boolean(note)));
+  }
+  return notes.slice(0, NOTES);
 }
 
 interface AgentRunArgs {
@@ -219,7 +231,7 @@ export async function executeAgentRun(
         args.events,
       ),
       title: args.automation.name,
-      ...(await loopAgent(room.sdk, args.automation, args.execution)),
+      ...(await loopAgent(room.sdk, db, args.automation, args.execution)),
       permissionMode: args.execution.permissionMode,
     };
     let spawned: unknown;
@@ -388,6 +400,7 @@ async function reuseTargetThreadForRun(
         type: "text",
         text: renderAutomationDueMessage({
           automationId: args.automation.id,
+          name: args.automation.name,
           prompt: withEvents(args.execution.prompt + ask, args.events),
         }),
         mentions: [],
@@ -504,12 +517,14 @@ export async function closeAutomationRunForSettledThread(
     status: "idle" | "failed";
     error?: string | null;
     rateLimited?: boolean;
+    /** The provider refused the work: the run fails, and its retry goes to the other provider (fallback.ts). */
+    refused?: boolean;
   },
 ): Promise<void> {
   const runs = listRunningAutomationRunsByThread(db, args.threadId);
   const now = Date.now();
   const changedProjects = new Set<string>();
-  const error = args.error ?? "Turn failed";
+  const error = `${args.refused ? REFUSED : ""}${args.error ?? "Turn failed"}`;
   for (const run of runs) {
     const stopped =
       args.status === "idle" &&

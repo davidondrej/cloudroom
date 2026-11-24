@@ -22,7 +22,7 @@ export const THREAD_WAIT_EXIT_CODE_UNREACHABLE = 4;
 export const DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS =
   DEFAULT_THREAD_WAIT_TIMEOUT_MS / 1000;
 
-const SERVICE_TIERS: ServiceTier[] = ["fast", "default"];
+const SERVICE_TIERS: ServiceTier[] = ["fast", "ultrafast", "default"];
 export const PERMISSION_MODE_HELP =
   "Permission mode: accept-edits, auto, or full";
 export const PLAN_HELP =
@@ -165,8 +165,8 @@ export function parseThreadWaitTimeoutSeconds(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS;
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
     throw new Error("Timeout must be a non-negative number of seconds.");
   }
   return parsed;
@@ -176,8 +176,8 @@ export function parseThreadWaitPollIntervalMs(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isInteger(parsed) || parsed < 1) {
     throw new Error(
       "Poll interval must be a positive integer number of milliseconds.",
     );

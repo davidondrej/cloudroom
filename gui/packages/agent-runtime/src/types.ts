@@ -70,6 +70,8 @@ export interface AgentRuntimeOptions {
     intervalMs?: number;
     stopAfterMs?: number;
   };
+  /** Checked on the turn-start watchdog's interval. */
+  turnSilenceWatchdog?: { thresholdMs?: number };
   rateLimitRetry?: { delaysMs?: readonly number[] };
   threadCreation?: { requestTimeoutMs?: number };
 
@@ -141,6 +143,8 @@ export interface StartThreadArgs {
     sourceProviderThreadId: string;
     sourceProviderCheckpointId?: string;
   };
+  /** A message edit replaces this native session and keeps its Goal (#857). */
+  replacesProviderThreadId?: string;
 }
 
 export interface StartThreadResult {

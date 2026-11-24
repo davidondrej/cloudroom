@@ -3,6 +3,7 @@ import { isReviewThread, migrations } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
 import { pluginDataDirFromDb } from "./path.js";
 import { automationRpcContract, createRpcHandlers } from "./rpc.js";
+import type { TrackScan } from "./rpc-types.js";
 import {
   closeAutomationRunForSettledThread,
   disableAutomationsForDeletedThreadEvent,
@@ -35,11 +36,16 @@ export default async function plugin(room: BbPluginApi) {
     serverUrl: resolveServerUrl(),
   });
 
+  const trackScan: TrackScan = (action, properties = {}) =>
+    room.experimental_telemetry.capture("workflow_scan", { action, ...properties });
   room.rpc.register(
     automationRpcContract,
-    createRpcHandlers(service, room.sdk, db),
+    createRpcHandlers(service, room.sdk, db, trackScan, { kv: room.storage.kv, pluginId: room.pluginId }, {
+      sdk: room.sdk, kv: room.storage.kv, service,
+      track: (action, properties = {}) => room.experimental_telemetry.capture("plan_loops", { action, ...properties }),
+    }),
   );
-  registerAutomationCli({ bb: room, service });
+  registerAutomationCli({ bb: room, service, trackScan });
 
   const reviewChanged = (threadId: string) => {
     if (isReviewThread(db, threadId)) {
@@ -67,6 +73,7 @@ export default async function plugin(room: BbPluginApi) {
       status: "failed",
       error,
       rateLimited: errorInfo?.category === "rate-limit",
+      refused: errorInfo?.category === "policy",
     });
     reviewChanged(thread.id);
   });

@@ -13,7 +13,7 @@ import {
   ThreadCommitsRow,
   ChangedFilesRow,
   ThreadMetadataCard,
-} from "./ThreadMetadataContent";
+} from "@/components/right-panel/tabs/thread-info";
 import {
   PanelStage,
   baseProps,
@@ -23,7 +23,7 @@ import {
   makePullRequest,
   makeThread,
   makeWorkspaceStatus,
-} from "./ThreadMetadataContent.fixtures";
+} from "@/components/right-panel/tabs/thread-info.fixtures";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 
 export default {

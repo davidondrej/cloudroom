@@ -52,6 +52,15 @@ const GIT_TAG_PREFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const MAX_GIT_TAG_PREFIX_LENGTH = 128;
 const NPM_NAME_PATTERN = /^(@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 const BUILTIN_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+// A login before the host's "/": checked before the ref split, which would take
+// the login's "@" in `https://TOKEN@host/repo` and echo TOKEN in its error.
+const GIT_URL_LOGIN_PATTERN = /^(?:https?:[/\\]*)?[^/?#\\]+@/iu;
+const GIT_URL_CREDENTIALS_ERROR =
+  "git url must not contain a username, password, or token — remove it and sign in through Git's credential helper (https://git-scm.com/docs/gitcredentials)";
+// scp-style `git@host:org/repo` is SSH, which git: sources never took.
+const GIT_SCP_URL_PATTERN = /^[^/?#\\:@]+@[^/?#\\:@]+:/u;
+const GIT_AUTH_FAILURE_PATTERN =
+  /could not read Username|Authentication failed|terminal prompts disabled/iu;
 
 export function isCommitSha(ref: string): boolean {
   return COMMIT_SHA_PATTERN.test(ref);
@@ -155,6 +164,13 @@ function parseGitSelector(spec: string): ParsedGitSelector {
 }
 
 function parseGitSource(spec: string): ParsedPluginSource {
+  if (GIT_URL_LOGIN_PATTERN.test(spec)) {
+    throw new Error(
+      GIT_SCP_URL_PATTERN.test(spec)
+        ? "ssh git urls are not supported — use the repository's https URL"
+        : GIT_URL_CREDENTIALS_ERROR,
+    );
+  }
   const at = spec.lastIndexOf("@");
   if (at === spec.length - 1) {
     throw new Error("git source has an empty ref");
@@ -182,7 +198,7 @@ function parseGitSource(spec: string): ParsedPluginSource {
   ) {
     throw new Error(`invalid git repository path "${urlish}"`);
   }
-  if (/^https?:\/\//.test(urlish)) {
+  if (/^https?:\/\//iu.test(urlish)) {
     const parsed = new URL(urlish);
     url = urlish;
     host = parsed.host;
@@ -215,6 +231,12 @@ function parseGitSource(spec: string): ParsedPluginSource {
     repoPath = parsed.pathname.replace(/^\/+/, "").replace(/\.git$/, "");
   } else {
     throw new Error(`invalid git url "${urlish}"`);
+  }
+  if (/^https?:\/\//iu.test(url)) {
+    const { username, password } = new URL(url);
+    if (username !== "" || password !== "") {
+      throw new Error(GIT_URL_CREDENTIALS_ERROR);
+    }
   }
   if (repoPath.length === 0) {
     throw new Error(`git url "${urlish}" has no repository path`);
@@ -672,9 +694,13 @@ export async function runInstallCommand(
         return;
       }
       const tail = stderr.trim().slice(-1000);
+      const hint =
+        command === "git" && GIT_AUTH_FAILURE_PATTERN.test(tail)
+          ? " — for a private repository, sign in through Git's credential helper (https://git-scm.com/docs/gitcredentials)"
+          : "";
       reject(
         new Error(
-          `${command} ${args[0]} failed (exit ${code ?? "signal"})${tail ? `: ${tail}` : ""}`,
+          `${command} ${args[0]} failed (exit ${code ?? "signal"})${tail ? `: ${tail}` : ""}${hint}`,
         ),
       );
     });

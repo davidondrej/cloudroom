@@ -23,6 +23,7 @@ describe("Codex Command Guard", () => {
     const config = prepareCodexGuard(fixture.directory);
     const group = config["hooks.PreToolUse"][0]!;
     expect(group.matcher).toBe("Bash");
+    expect(group.hooks[0]!.timeout).toBe(process.platform === "win32" ? 30 : 10);
     const identity = {
       event_name: "pre_tool_use",
       hooks: group.hooks,

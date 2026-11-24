@@ -6,6 +6,7 @@ import {
   type RuntimePermissionPolicy,
   type ServiceTier,
   buildShellEnvOverrides,
+  experimental_privateDataPaths as privateDataPaths,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import fs from "node:fs";
 import path from "node:path";
@@ -134,6 +135,7 @@ type GitHeadState =
 interface CodexInstructionSource {
   approvalPolicy?: AskForApproval;
   instructionMode: "append" | "replace";
+  platform?: NodeJS.Platform;
   options: {
     instructions?: string;
     permissionScope?: CodexSessionOptions["permissionScope"];
@@ -155,6 +157,11 @@ const CODEX_PLAIN_CHAT =
 const CODEX_READ_ONLY_GIT =
   "Your sandbox keeps .agents and .codex read-only. git switch, checkout, reset, merge, pull or stash can leave old files there even with exit 0, so run them with escalation. Record git status --porcelain first. After a sandboxed command, preserve pre-existing edits and staged changes, inspect .agents and .codex against that command's intended result, and fix only verified stale files before committing. For merge, pull or stash recovery, do not restore from HEAD or clean; that can discard intended changes. If the intended state is unclear, stop and tell the user.";
 
+// #1805. Codex's Windows sandbox grants itself read access to the user profile
+// in the background, minutes after the first command, so room-cli can't be found yet.
+const CODEX_WINDOWS_ROOM_CLI =
+  "On Windows, Codex's sandbox can take minutes to get read access to Cloudroom's install folder. If room-cli or room-cli.cmd is \"not recognized\" inside the sandbox, rerun the same command with escalation instead of retrying or giving up.";
+
 // #1456. With approval "never" (Full Access), Codex rejects any command that a
 // prompt rule matches (user, project or managed .rules), and the model can't ask.
 const CODEX_NEVER_ASKS =
@@ -167,6 +174,10 @@ export function resolveCodexInstructionOverrides(
     CODEX_PLAIN_CHAT,
     ...(command.options.permissionScope === "workspace"
       ? [CODEX_READ_ONLY_GIT]
+      : []),
+    ...(command.options.permissionScope === "workspace" &&
+    (command.platform ?? process.platform) === "win32"
+      ? [CODEX_WINDOWS_ROOM_CLI]
       : []),
     ...(command.approvalPolicy === "never" ? [CODEX_NEVER_ASKS] : []),
   ].join("\n\n");
@@ -668,7 +679,7 @@ export function toCodexPermissionSettings(
 
 export function toCodexServiceTier(
   tier: ServiceTier | undefined,
-): "fast" | null | undefined {
+): "fast" | "ultrafast" | null | undefined {
   return tier === "default" ? null : tier;
 }
 
@@ -819,6 +830,7 @@ export function buildCodexConfig(
     config["features.multi_agent"] = false;
     config["features.multi_agent_v2.max_concurrent_threads_per_session"] = 1;
   }
+  Object.assign(config, buildPrivateDataDenyConfig(args.options?.envVars));
   config["memories.use_memories"] = args.options?.memoryEnabled ?? true;
   config["memories.generate_memories"] = args.options?.memoryEnabled ?? true;
   if (args.options?.permissionScope === "workspace") {
@@ -831,6 +843,38 @@ export function buildCodexConfig(
     }
   }
   return Object.keys(config).length > 0 ? config : undefined;
+}
+
+const CLOUDROOM_PERMISSION_PROFILE = "cloudroom";
+
+/**
+ * A Codex permission profile that denies sandboxed commands Cloudroom's
+ * credential files (#2191). Each turn's `sandboxPolicy` still sets writes and
+ * network, and Codex keeps this profile's deny entries on top. A thread-level
+ * `sandbox` mode would replace the profile, so the bridge leaves it out while
+ * this profile is set. Not on Windows, whose sandbox was not tested.
+ */
+export function buildPrivateDataDenyConfig(
+  envVars: Record<string, string> | undefined,
+  platform: NodeJS.Platform = process.platform,
+): { [key in string]?: JsonValue } {
+  const paths = platform === "win32" ? [] : privateDataPaths(envVars?.ROOM_DATA_DIR);
+  if (paths.length === 0) return {};
+  return {
+    default_permissions: CLOUDROOM_PERMISSION_PROFILE,
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.filesystem`]: {
+      ":root": "read",
+      ":workspace_roots": { ".": "write" },
+      ...Object.fromEntries(paths.map((entry) => [entry, "deny"])),
+    },
+    [`permissions.${CLOUDROOM_PERMISSION_PROFILE}.network.enabled`]: true,
+  };
+}
+
+export function usesPrivateDataDenyProfile(
+  config: { [key in string]?: JsonValue } | undefined,
+): boolean {
+  return config?.default_permissions === CLOUDROOM_PERMISSION_PROFILE;
 }
 
 interface CodexDynamicToolInput {

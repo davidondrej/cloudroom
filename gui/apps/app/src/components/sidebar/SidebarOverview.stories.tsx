@@ -11,7 +11,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { createStore, Provider } from "jotai";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
 import {

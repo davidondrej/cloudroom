@@ -4,16 +4,14 @@
   "type": "registry:ui",
   "title": "separator",
   "description": "BB ui \"separator\" — vendored from the BB app's own source (version-matched to this BB release).",
-  "dependencies": [
-    "@radix-ui/react-separator"
-  ],
   "registryDependencies": [
+    "@bb/slot",
     "@bb/utils"
   ],
   "files": [
     {
       "path": "registry/components/ui/separator.tsx",
-      "content": "import * as React from \"react\";\nimport * as SeparatorPrimitive from \"@radix-ui/react-separator\";\n\nimport { cn } from \"../../lib/utils\";\n\nconst Separator = React.forwardRef<\n  React.ComponentRef<typeof SeparatorPrimitive.Root>,\n  React.ComponentPropsWithoutRef<typeof SeparatorPrimitive.Root>\n>(\n  (\n    { className, orientation = \"horizontal\", decorative = true, ...props },\n    ref,\n  ) => (\n    <SeparatorPrimitive.Root\n      ref={ref}\n      decorative={decorative}\n      orientation={orientation}\n      className={cn(\n        \"shrink-0 bg-border\",\n        orientation === \"horizontal\" ? \"h-[1px] w-full\" : \"h-full w-[1px]\",\n        className,\n      )}\n      {...props}\n    />\n  ),\n);\nSeparator.displayName = SeparatorPrimitive.Root.displayName;\n\nexport { Separator };\n",
+      "content": "import * as React from \"react\";\nimport { Slot } from \"./slot\";\n\nimport { cn } from \"../../lib/utils\";\n\ntype SeparatorProps = React.ComponentPropsWithoutRef<\"div\"> & {\n  orientation?: \"horizontal\" | \"vertical\";\n  decorative?: boolean;\n  asChild?: boolean;\n};\n\nconst Separator = React.forwardRef<HTMLDivElement, SeparatorProps>(\n  (\n    {\n      className,\n      orientation = \"horizontal\",\n      decorative = true,\n      asChild,\n      ...props\n    },\n    ref,\n  ) => {\n    const Root = asChild ? Slot : \"div\";\n    // Like Radix: an unknown orientation falls back to horizontal.\n    const direction = orientation === \"vertical\" ? \"vertical\" : \"horizontal\";\n    return (\n      <Root\n        ref={ref}\n        data-orientation={direction}\n        role={decorative ? \"none\" : \"separator\"}\n        aria-orientation={\n          !decorative && direction === \"vertical\" ? \"vertical\" : undefined\n        }\n        className={cn(\n          \"shrink-0 bg-border\",\n          orientation === \"horizontal\" ? \"h-[1px] w-full\" : \"h-full w-[1px]\",\n          className,\n        )}\n        {...props}\n      />\n    );\n  },\n);\nSeparator.displayName = \"Separator\";\n\nexport { Separator };\n",
       "type": "registry:ui",
       "target": "components/ui/separator.tsx"
     }

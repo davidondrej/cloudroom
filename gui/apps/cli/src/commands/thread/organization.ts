@@ -270,7 +270,7 @@ export function registerOrganizationCommands(
   ] as const) {
     parent
       .command(`${name} [id]`)
-      .description(`Mark a thread ${name}`)
+      .description(`Mark a thread ${name} (prints no messages; use thread log)`)
       .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
       .option("--json", "Print machine-readable JSON output")
       .action(

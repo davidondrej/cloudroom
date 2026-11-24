@@ -39,6 +39,7 @@ const INSTALLED_ONLY_PROVIDER_IDS = new Set([
   "acp-kilo",
   "acp-cline",
   "acp-kimi",
+  "acp-agent-zero",
 ]);
 
 function healthForInstalledOnlyProvider(
@@ -68,10 +69,11 @@ describe("getProviderStates", () => {
       });
 
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
       ]);
       expect(result.providers).toEqual(
         expect.arrayContaining([
@@ -183,14 +185,15 @@ describe("getProviderStates", () => {
       });
 
       expect(result.providers.map((provider) => provider.providerId)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
         "acp-opencode",
       ]);
       expect(result.providers[0]).toMatchObject({
-        providerId: "codex",
+        providerId: "claude-code",
         status: "ready",
       });
 
@@ -335,13 +338,13 @@ describe("getProviderStates", () => {
         environmentId: environment.id,
       });
 
-      expect(result.providers[0]?.providerId).toBe("codex");
+      expect(result.providers[0]?.providerId).toBe("claude-code");
       expect(primaryCalls).toBe(0);
       expect(healthCwds.filter((cwd) => cwd === undefined)).toHaveLength(
         INSTALLED_ONLY_PROVIDER_IDS.size,
       );
       expect(healthCwds.filter((cwd) => cwd !== undefined)).toEqual(
-        Array(4).fill(environment.path),
+        Array(5).fill(environment.path),
       );
     });
   });

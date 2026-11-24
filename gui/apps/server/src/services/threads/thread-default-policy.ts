@@ -15,6 +15,7 @@ import {
   clampPermissionModeToCeiling,
   defaultReasoningLevel,
   isLocalPathProjectSource,
+  reconcileReasoningLevel,
 } from "@cloudroom/domain";
 import type {
   EnvironmentArgs,
@@ -34,6 +35,7 @@ import {
   worktreeProviderInputs,
 } from "./thread-environment-placement.js";
 import { isLiveParentThread, type ParentThread } from "./thread-parent.js";
+import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
 
 export const DEFAULT_SERVICE_TIER: ServiceTier = "default";
 export const DEFAULT_REASONING_LEVEL: ReasoningLevel =
@@ -219,6 +221,29 @@ export function resolveCreateThreadExecutionDefaults(
       (id) => id !== providerId,
     ),
   };
+}
+
+/** A level that is not passed in explicitly, like the model's own default or a
+ *  saved one, can be one the provider rejects, like opencode's "none" (#2239).
+ *  Moves it to the nearest level both the model and the provider accept, and
+ *  keeps it when they share none. */
+export function supportedReasoningLevel(
+  registry: ProviderRegistryService,
+  args: { level: ReasoningLevel; model: AvailableModel; providerId: string },
+): ReasoningLevel {
+  const providerLevels = getSupportedReasoningLevelsForProvider(
+    registry,
+    args.providerId,
+  );
+  if (providerLevels.length === 0 || providerLevels.includes(args.level)) {
+    return args.level;
+  }
+  const shared = args.model.supportedReasoningEfforts
+    .map((effort) => effort.reasoningEffort)
+    .filter((level) => providerLevels.includes(level));
+  return shared.length > 0
+    ? reconcileReasoningLevel(args.level, shared)
+    : args.level;
 }
 
 export function buildProviderThreadExecutionDefaults(

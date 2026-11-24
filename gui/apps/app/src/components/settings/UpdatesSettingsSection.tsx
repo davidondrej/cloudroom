@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import type { SystemVersionResponse } from "@cloudroom/server-contract";
@@ -32,6 +32,7 @@ import {
   ResourceRow,
 } from "@cloudroom/shared-ui/resource-list";
 import {
+  autoUpdateProgress,
   canAutoUpdateProviderCli,
   hasProviderCliAction,
   isProviderCliUpdateIssue,
@@ -1147,7 +1148,8 @@ export function MachineUpdatesRows({
 
   const rows = providerEntries.map(({ provider, status }) => {
     const issue = issuesByProvider.get(provider) ?? null;
-    const state = providerRowState({ issue });
+    const state = status.autoUpdateState === "failed" ? "failed" : providerRowState({ issue });
+    const progress = autoUpdateProgress(status);
     const jobKey = providerCliJobKey(host.id, provider);
     const running = runningJobKey === jobKey;
     const queued = queuedJobKeys.has(jobKey);
@@ -1218,6 +1220,8 @@ export function MachineUpdatesRows({
               <RowStateControl live state="in-progress" />
             ) : queued ? (
               <RowStateControl live state="in-progress" />
+            ) : progress ? (
+              <span role="status" className="text-xs text-muted-foreground">{progress}</span>
             ) : failure !== null ? (
               <span className="flex items-center gap-1">
                 <UpdateActionButton
@@ -1242,10 +1246,10 @@ export function MachineUpdatesRows({
                 state={state}
                 actionLabel={
                   actionable
-                    ? `${issue.action.label} ${status.displayName} on ${host.name}`
+                    ? `${state === "failed" ? "Retry" : issue.action.label} ${status.displayName} on ${host.name}`
                     : undefined
                 }
-                actionTooltip={actionable ? issue.action.label : undefined}
+                actionTooltip={actionable ? (state === "failed" ? "Retry" : issue.action.label) : undefined}
                 onClick={
                   actionable ? () => onStartInstall(host.id, issue) : undefined
                 }

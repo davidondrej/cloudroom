@@ -460,7 +460,7 @@ describe("desktop browser public API", () => {
     });
   });
 
-  it("requires explicit personal handoff and rejects missing or foreign tabs", async () => {
+  it("never leases personal tabs and rejects missing or foreign tabs", async () => {
     await withBrowserTest(async (test) => {
       const tab = { ...test.tab(), profile: { kind: "personal" as const } };
       test.setTabs([tab]);
@@ -471,15 +471,25 @@ describe("desktop browser public API", () => {
       });
       expect(denied.status).toBe(403);
       expect(await denied.json()).toMatchObject({
-        code: "desktop_personal_handoff_required",
+        code: "desktop_personal_tab",
       });
+      // The old handoff flag is gone: the strict schema rejects it outright.
+      expect(
+        (
+          await test.post("acquire", {
+            ...test.scope,
+            tabIds: [tab.tabId],
+            controllerLabel: "Agent",
+            allowPersonal: true,
+          })
+        ).status,
+      ).toBe(400);
       expect(
         (
           await test.post("acquire", {
             ...test.scope,
             tabIds: ["missing"],
             controllerLabel: "Agent",
-            allowPersonal: true,
           })
         ).status,
       ).toBe(403);
@@ -488,10 +498,6 @@ describe("desktop browser public API", () => {
           ({ command }) => command.type === "desktop.browser.list_tabs",
         ),
       ).toBe(true);
-      const lease = await test.acquire({ allowPersonal: true });
-      expect(lease.tabIds).toEqual([tab.tabId]);
-      expect(lease.controllerLabel).toBe("Test agent");
-      expect(lease.expiresAt - Date.now()).toBeGreaterThan(290000);
     });
   });
 
@@ -573,7 +579,7 @@ describe("desktop browser public API", () => {
     });
   });
 
-  it("lists import sources and forwards cookie imports with a personal default target", async () => {
+  it("lists import sources and imports cookies only into the personal profile", async () => {
     await withBrowserTest(async (test) => {
       const instance = {
         hostId: test.scope.hostId,
@@ -618,6 +624,13 @@ describe("desktop browser public API", () => {
         sourceProfileDirectory: "Profiles/p1",
       });
       expect(rejected.status).toBe(400);
+      const intoAgent = await test.post("import-cookies", {
+        ...instance,
+        sourceId: "firefox",
+        sourceProfileDirectory: "Profiles/p1",
+        profile: { kind: "automation", id: "agent" },
+      });
+      expect(intoAgent.status).toBe(400);
     });
   });
 

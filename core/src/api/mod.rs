@@ -52,6 +52,7 @@ pub fn router(manager: Arc<Manager>, token: String) -> Router {
         .route("/v1/accounts/cursor/switched", post(cursor_switched))
         .route("/v1/accounts/codex/cancel", post(codex_cancel))
         .route("/v1/workspaces/{id}", get(workspace))
+        .route("/v1/workspaces/{id}/alive", post(workspace_alive))
         .route("/v1/settings", get(crate::sync::settings))
         .route("/v1/sync", post(crate::sync::check_in))
         .route("/v1/sync/{id}", get(crate::sync::scan))
@@ -297,17 +298,25 @@ struct Drain {
 }
 /// Sandbox hosts call this before stopping the machine (see session::sleep).
 async fn drain(State(manager): State<Arc<Manager>>, Json(input): Json<Drain>) -> Json<Value> {
+    let started = std::time::Instant::now();
     let mut answer = manager.drain(input.hold);
+    // A report held until its child is quiet (#217) was just sent instead: once it is out, this same call drains, so
+    // it never keeps the sandbox awake. Not out within a few seconds, it refuses the drain, as a due report does.
+    if answer["reason"] == "report_held" {
+        manager.held_out(std::time::Duration::from_secs(4)).await;
+        answer = manager.drain(input.hold);
+        if answer["reason"] == "report_held" {
+            answer["reason"] = json!("report_pending");
+        }
+    }
     // The sandbox stops next: save what's pending first. Anything left stays in the journal for the next wake.
     if answer["drained"] == true {
         // Plan limits seen here reach the website before the sandbox stops (ADR 0292), alongside the history
         // flush and within its budget: the website gives the whole drain 10 s.
+        let left = |secs| std::time::Duration::from_secs(secs).saturating_sub(started.elapsed());
         let (sent, pending) = tokio::join!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(7),
-                manager.send_plan_reports()
-            ),
-            manager.flush_history(std::time::Duration::from_secs(8), false),
+            tokio::time::timeout(left(7), manager.send_plan_reports()),
+            manager.flush_history(left(8), false),
         );
         if sent.is_err() {
             manager.delay_plan_reports();
@@ -537,6 +546,14 @@ impl IntoResponse for session::Error {
         let (status, error) = match self {
             Self::NotFound => (StatusCode::NOT_FOUND, "session not found"),
             Self::Conflict(message) => (StatusCode::CONFLICT, message),
+            Self::Refused(message) => {
+                let body = json!({"error": message, "code": "request_rejected"});
+                return (StatusCode::CONFLICT, Json(body)).into_response();
+            }
+            Self::NeverStarted(message) => {
+                let body = json!({"error": message, "code": "never_started"});
+                return (StatusCode::CONFLICT, Json(body)).into_response();
+            }
             Self::Effort(_) => {
                 let body = json!({"error": self.message(), "code": "invalid_reasoning_effort"});
                 return (StatusCode::CONFLICT, Json(body)).into_response();
@@ -599,6 +616,7 @@ impl IntoResponse for session::Error {
             "extra credits are off for loops" => "plan_credits",
             "Codex account could not be verified" => "codex_auth_unavailable",
             "connect Cursor before starting cloud work" => "cursor_auth_required",
+            crate::runtime::antigravity::SIGN_IN => "antigravity_auth_required",
             "Cursor account could not be verified" => "cursor_auth_unavailable",
             "close Cursor sessions before changing the cloud login" => "cursor_auth_busy",
             "finish active Codex work before signing in" => "codex_auth_busy",
@@ -610,6 +628,14 @@ impl IntoResponse for session::Error {
 
 type Result<T> = std::result::Result<T, session::Error>;
 
+/// `then` is sent once compaction ends (`compact_after_turn`).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Compact {
+    request_id: String,
+    #[serde(default)]
+    then: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RequestId {
@@ -632,6 +658,9 @@ struct Start {
     parent_session: Option<String>,
     /// The app's parent thread in another sandbox, which this session reports its turns to (relay.rs).
     parent_thread: Option<String>,
+    /// The app's IDs for this thread and its project, exported to the agent's shells (#199).
+    thread_id: Option<String>,
+    project_id: Option<String>,
     prompt: Option<String>,
     title: Option<String>,
     /// Starts a side chat on a copy of this session's conversation, or a `fresh` one with none; it inherits the source's settings.
@@ -646,6 +675,30 @@ async fn workspace(
 ) -> impl IntoResponse {
     match manager.workspaces.get(&id) {
         Ok(Some(workspace)) => (StatusCode::OK, Json(json!(workspace))),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error":"workspace not found"})),
+        ),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error":format!("workspace unavailable: {error}")})),
+        ),
+    }
+}
+
+/// The app's project copy heartbeat for `room-cli files wait` (#2168). Like Mac helper reports, good ones stay local.
+async fn workspace_alive(
+    State(manager): State<Arc<Manager>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match manager.workspaces.get(&id) {
+        Ok(Some(workspace)) => match manager.workspaces.alive(&workspace).await {
+            Ok(()) => (StatusCode::ACCEPTED, Json(json!({}))),
+            Err(error) => (
+                StatusCode::CONFLICT,
+                Json(json!({"error":format!("heartbeat failed: {error}")})),
+            ),
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({"error":"workspace not found"})),
@@ -814,7 +867,16 @@ async fn stop(
             ));
         }
     }
-    let receipt = manager.command(&id, body.request_id, "stop", json!({}))?;
+    let receipt = manager.command(&id, body.request_id.clone(), "stop", json!({}))?;
+    if manager.stop_frees(&id) {
+        let base = &body.request_id[..body.request_id.len().min(59)];
+        let _ = manager.command(
+            &id,
+            format!("{base}_free"),
+            "sleep",
+            json!({"end_jobs":true}),
+        );
+    }
     Ok(accepted(&manager, &id, receipt))
 }
 
@@ -935,10 +997,12 @@ async fn health(State(manager): State<Arc<Manager>>) -> Json<Value> {
 }
 async fn start(
     State(manager): State<Arc<Manager>>,
+    headers: HeaderMap,
     Json(body): Json<Start>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
     manager.mac.expect();
+    manager.mac.note_using(&headers);
     if body.provider.as_ref().is_some_and(|p| {
         p.is_empty()
             || p.chars()
@@ -986,9 +1050,10 @@ async fn start(
         let (switching, request) = (manager.clone(), body.request_id);
         let agent = (body.harness, body.model, body.reasoning, body.provider);
         let place = (body.workspace, body.workspace_name);
+        let ids = (body.thread_id, body.project_id);
         let (id, receipt, pending) = tokio::spawn(async move {
             switching
-                .continue_session(request, from, agent, place)
+                .continue_session(request, from, agent, place, ids)
                 .await
         })
         .await
@@ -998,24 +1063,42 @@ async fn start(
         return Ok((status, Json(answer)));
     }
     if let Some(fork) = body.fork {
-        if body.parent_session.is_some()
+        let disallowed_shared = body.parent_session.is_some()
             || body.prompt.is_some()
             || body.title.is_some()
-            || body.model.is_some()
-            || body.reasoning.is_some()
             || body.workspace.is_some()
             || body.workspace_name.is_some()
-            || body.provider.is_some()
             || body.command_guard_enabled.is_some()
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
-            || body.parent_thread.is_some()
-        {
-            return Err(session::Error::Conflict(
-                "a side chat takes only harness and fork",
-            ));
+            || body.parent_thread.is_some();
+        let disallowed_copy = !fork.fresh
+            && (body.model.is_some()
+                || body.reasoning.is_some()
+                || body.provider.is_some()
+                || body.thread_id.is_some()
+                || body.project_id.is_some());
+        if disallowed_shared || disallowed_copy {
+            return Err(session::Error::Conflict(if fork.fresh {
+                "a fresh side chat inherits its source's folder and settings"
+            } else {
+                "a side chat takes only harness and fork"
+            }));
         }
-        let (id, receipt) = manager.fork(body.request_id, body.harness, fork).await?;
+        let (id, receipt) = manager
+            .fork(
+                body.request_id,
+                body.harness,
+                fork,
+                session::ForkOptions {
+                    model: body.model,
+                    reasoning: body.reasoning,
+                    provider: body.provider,
+                    thread_id: body.thread_id,
+                    project_id: body.project_id,
+                },
+            )
+            .await?;
         return Ok(accepted(&manager, &id, receipt));
     }
     if let Some(parent) = body.parent_session {
@@ -1030,6 +1113,8 @@ async fn start(
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
             || body.parent_thread.is_some()
+            || body.thread_id.is_some()
+            || body.project_id.is_some()
             || title.as_ref().is_some_and(|t| {
                 t.is_empty() || t.chars().count() > 200 || t.chars().any(char::is_control)
             })
@@ -1048,6 +1133,7 @@ async fn start(
             title,
             prompt,
             service_tier: None,
+            pin: false,
         };
         let (id, receipt) = manager
             .spawn_child(&parent, &body.request_id, spawn)
@@ -1072,6 +1158,7 @@ async fn start(
                 body.strip_ai_co_authors,
                 body.system_prompt,
                 body.parent_thread,
+                (body.thread_id, body.project_id),
             ),
         )
         .await?;
@@ -1214,9 +1301,11 @@ fn prompt_input(
 async fn prompt(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Prompt>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
+    manager.mac.note_using(&headers);
     let mut input = prompt_input(
         body.text,
         body.content,
@@ -1240,8 +1329,22 @@ async fn prompt(
             .await?;
         manager.check_prompt_service_tier(&id, body.service_tier.as_deref())?;
     }
-    let receipt = manager.command(&id, body.request_id, "prompt", input)?;
+    let receipt = manager
+        .command(&id, body.request_id, "prompt", input)
+        .map_err(|error| preserve_start_failure(&manager, &id, error))?;
     Ok(accepted(&manager, &id, receipt))
+}
+
+fn preserve_start_failure(manager: &Manager, id: &str, error: session::Error) -> session::Error {
+    match (&error, manager.failed_start_reason(id)) {
+        (session::Error::Conflict(session::GONE), Some(why))
+            if why == crate::runtime::antigravity::SIGN_IN =>
+        {
+            session::Error::Conflict(crate::runtime::antigravity::SIGN_IN)
+        }
+        (session::Error::Conflict(session::GONE), Some(why)) => session::Error::NeverStarted(why),
+        _ => error,
+    }
 }
 
 async fn edit(
@@ -1303,6 +1406,8 @@ async fn reorder(
 #[serde(deny_unknown_fields)]
 struct Model {
     request_id: String,
+    #[serde(default)]
+    idle_only: bool,
     model: String,
     reasoning: Option<String>,
 }
@@ -1328,7 +1433,10 @@ async fn model(
                 .await?,
         )
     };
-    let input = json!({"model":body.model,"reasoning":reasoning});
+    let mut input = json!({"model":body.model,"reasoning":reasoning});
+    if body.idle_only {
+        input["idle_only"] = json!(true);
+    }
     let receipt = manager.command(&id, body.request_id, "model", input)?;
     Ok(accepted(&manager, &id, receipt))
 }
@@ -1345,12 +1453,14 @@ async fn steer(
             "prompt must contain 1-262144 bytes of text",
         ));
     }
-    let receipt = manager.command(
-        &id,
-        body.request_id,
-        "steer",
-        json!({"target_request_id":body.target_request_id,"text":body.text}),
-    )?;
+    let receipt = manager
+        .command(
+            &id,
+            body.request_id,
+            "steer",
+            json!({"target_request_id":body.target_request_id,"text":body.text}),
+        )
+        .map_err(|error| preserve_start_failure(&manager, &id, error))?;
     Ok(accepted(&manager, &id, receipt))
 }
 
@@ -1393,10 +1503,19 @@ async fn goal(
 async fn compact(
     State(manager): State<Arc<Manager>>,
     Path(id): Path<String>,
-    Json(body): Json<RequestId>,
+    Json(body): Json<Compact>,
 ) -> Result<impl IntoResponse> {
     key(&body.request_id)?;
-    let receipt = manager.command(&id, body.request_id, "compact", json!({}))?;
+    if body
+        .then
+        .as_ref()
+        .is_some_and(|text| text.len() > session::MAX_PROMPT)
+    {
+        return Err(session::Error::Conflict(
+            "then must be at most 262144 bytes",
+        ));
+    }
+    let receipt = manager.compact_then(&id, body.request_id, body.then.as_deref())?;
     Ok(accepted(&manager, &id, receipt))
 }
 

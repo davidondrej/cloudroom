@@ -39,6 +39,8 @@ import {
   allPluginContributionsQueryKeyPrefix,
   allPluginListQueryKeyPrefix,
   pluginSafeModeQueryKey,
+  humanClickRequestsQueryKey,
+  oneClickScanStateQueryKey,
   allPluginSettingsQueryKeyPrefix,
   allPluginSettingsViewQueryKeyPrefix,
   allPluginSourceQueryKeyPrefix,
@@ -485,6 +487,7 @@ export const REALTIME_THREAD_CHANGE_REGISTRY = {
       dirtyThreadDetailQueries,
       dirtyThreadTimelineQueries,
       dirtyProjectPromptHistoryQueries,
+      () => [oneClickScanStateQueryKey()],
     ],
   },
   "events-appended": {
@@ -1391,6 +1394,7 @@ function dirtyPluginManagementQueries(): QueryKey[] {
     allPluginSourceQueryKeyPrefix(),
     allPluginCatalogSearchQueryKeyPrefix(),
     pluginSafeModeQueryKey(),
+    humanClickRequestsQueryKey(),
   ];
 }
 

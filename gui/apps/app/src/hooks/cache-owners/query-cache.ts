@@ -307,35 +307,33 @@ function mapSidebarNavigationProjectThreads(
   };
 }
 
+export function mapSidebarNavigationThreads(
+  navigation: SidebarBootstrapResponse,
+  mapper: SidebarNavigationThreadMapper,
+): SidebarBootstrapResponse {
+  return {
+    ...navigation,
+    ...(navigation.runningThreads
+      ? {
+          runningThreads: mapper(navigation.runningThreads).filter(
+            isRunningThread,
+          ),
+        }
+      : {}),
+    projects: navigation.projects.map((project) =>
+      mapSidebarNavigationProjectThreads(project, mapper),
+    ),
+    personalProject: mapSidebarNavigationProjectThreads(navigation.personalProject, mapper),
+  };
+}
+
 export function applyToCachedSidebarNavigationThreads({
   mapper,
   queryClient,
 }: ApplyToCachedSidebarNavigationThreadsArgs): void {
   queryClient.setQueryData<SidebarBootstrapResponse>(
     sidebarNavigationQueryKey(),
-    (currentNavigation) => {
-      if (!currentNavigation) {
-        return currentNavigation;
-      }
-      return {
-        ...currentNavigation,
-        ...(currentNavigation.runningThreads
-          ? {
-              runningThreads: mapper(currentNavigation.runningThreads).filter(
-                isRunningThread,
-              ),
-            }
-          : {}),
-        sections: currentNavigation.sections,
-        projects: currentNavigation.projects.map((project) =>
-          mapSidebarNavigationProjectThreads(project, mapper),
-        ),
-        personalProject: mapSidebarNavigationProjectThreads(
-          currentNavigation.personalProject,
-          mapper,
-        ),
-      };
-    },
+    (current) => current && mapSidebarNavigationThreads(current, mapper),
   );
 }
 

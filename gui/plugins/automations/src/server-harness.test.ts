@@ -45,7 +45,13 @@ const rpcMethods = [
   "account_plan",
   "paused_loops",
   "scans_agent_sessions",
+  "scans_card",
+  "plan_loops",
+  "plan_loops_enable",
+  "plan_loops_event",
   "scans_start",
+  "scans_state",
+  "scans_upgrade_clicked",
 ].sort();
 
 function project(projectId = PROJECT_ID) {

@@ -6,6 +6,7 @@ import {
 } from "@cloudroom/domain";
 import {
   threadCountGroupBySchema,
+  THREAD_COUNT_ANY_PARENT,
   THREAD_COUNT_ROOT_PARENT,
   type ThreadCountGroupBy,
 } from "@cloudroom/server-contract";
@@ -16,6 +17,7 @@ import { columnWidths, printBorderlessTable } from "../../table.js";
 import { joinValues, outputJson } from "../helpers.js";
 
 interface ThreadCountCommandOptions {
+  archived?: boolean;
   by?: string;
   host?: string;
   json?: boolean;
@@ -38,8 +40,9 @@ export function registerCountCommand(
   parent
     .command("count")
     .description(
-      "Count threads without listing them; excludes archived and hidden threads",
+      "Count threads without listing them; excludes hidden threads, and archived ones unless --archived",
     )
+    .option("--archived", "Count archived threads only")
     .option(
       "--status <status>",
       `Count threads in this status: ${joinValues(threadStatusValues)}`,
@@ -48,8 +51,8 @@ export function registerCountCommand(
     .option("--provider <id>", "Count threads running on this provider")
     .option("--project <id>", "Count threads in this project")
     .option(
-      "--parent <id|none>",
-      `Count children of this thread, or '${THREAD_COUNT_ROOT_PARENT}' for threads with no parent`,
+      "--parent <id|none|any>",
+      `Count children of this thread, '${THREAD_COUNT_ROOT_PARENT}' for threads with no parent, or '${THREAD_COUNT_ANY_PARENT}' for every child thread`,
     )
     .option("--by <dimension>", "Group the count by host, provider, or project")
     .option("--json", "Print machine-readable JSON output")
@@ -63,6 +66,7 @@ export function registerCountCommand(
           ...(opts.project ? { projectId: opts.project } : {}),
           ...(opts.parent ? { parentThreadId: opts.parent } : {}),
           ...(groupBy ? { groupBy } : {}),
+          ...(opts.archived ? { archivedOnly: true } : {}),
         });
         if (outputJson(opts, result)) return;
         printThreadCount(result, groupBy);

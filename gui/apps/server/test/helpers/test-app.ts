@@ -22,7 +22,10 @@ import { initDb } from "../../src/db.js";
 import { createApp } from "../../src/server.js";
 import { PendingInteractionLifecycle } from "../../src/services/interactions/pending-interactions.js";
 import { createMachineAuthService } from "../../src/services/machine-auth.js";
-import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
+import {
+  createProviderRegistryService,
+  createProviderUsageReader,
+} from "../../src/services/providers/provider-registry.js";
 import { registerFirstPartyProviders } from "./provider-registry.js";
 import { validatePluginProviderDeclaration } from "@get-bb/plugin-sdk/internal/host-policy";
 import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
@@ -181,13 +184,11 @@ export async function createTestAppHarness(
   const watchInterests = new WatchInterestCoordinator({ db, hub });
   const sharedPorts = new HostSharedPortCoordinator({ db, hub });
   const workspaceReadCaches = new WorkspaceReadCaches({ hub });
+  const readProviderUsage = createProviderUsageReader(db, 0);
   const providerRegistry = createProviderRegistryService({
     readUserProviderPreferences: () => {
-      const settings = getAppSettings(db);
-      return {
-        providerOrder: settings.providerOrder,
-        defaultProviderId: settings.defaultProviderId,
-      };
+      const { defaultProviderId, hiddenProviderIds, customProviderOrder } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, customOrder: customProviderOrder, usage: readProviderUsage() };
     },
   });
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
@@ -329,7 +330,7 @@ export async function createTestAppHarness(
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
-      await rm(dataDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     },
   };
 }

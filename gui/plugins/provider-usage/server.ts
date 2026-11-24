@@ -156,10 +156,48 @@ function resourceProvider(
   };
 }
 
+function accountUsage(
+  account: z.infer<typeof accountViewsSchema>[number],
+  native: ProviderUsage | null = null,
+): ProviderUsage | null {
+  if (native && native.status !== "ok") return native;
+  const windows = account.windows.length
+    ? account.windows.map((window) => ({
+        label: window.label,
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt === null ? null : new Date(window.resetsAt).toISOString(),
+        cost: null,
+      }))
+    : [...(native?.windows ?? [])];
+  // Add one fallback bar for a real rejection that none of the measured windows shows.
+  if (
+    account.limitedUntil &&
+    account.limitedUntil > Date.now() &&
+    !windows.some((window) => Math.round(window.usedPercent) >= 100)
+  ) {
+    windows.push({
+      label: "Limit hit",
+      usedPercent: 100,
+      resetsAt: new Date(account.limitedUntil).toISOString(),
+      cost: null,
+    });
+  }
+  const credits = account.windows.length ? account.credits : (account.credits ?? native?.credits);
+  if (!windows.length && !credits) return native;
+  return {
+    status: "ok",
+    accountEmail: account.email ?? native?.accountEmail ?? null,
+    planLabel: account.plan ?? native?.planLabel ?? null,
+    credits: credits ? { detail: credits.detail || null } : null,
+    windows,
+  };
+}
+
 export default function providerUsagePlugin(room: BbPluginApi): void {
   const mergeAccounts = async (
     machines: UsageMachine[],
     providers: Provider[],
+    refreshClaude: boolean,
   ): Promise<void> => {
     const sources = (
       await room.sdk.plugins
@@ -167,14 +205,20 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         .catch(() => [])
     ).filter((source) => source.method === ACCOUNTS_LIST_METHOD);
     for (const source of sources)
-      for (const providerId of ["claude-code", "codex", "acp-cursor"]) {
+      for (const providerId of [
+        "claude-code",
+        "codex",
+        "acp-cursor",
+        "acp-antigravity",
+      ]) {
         const raw: unknown = await room.sdk.plugins
           .callRpc({
             pluginId: source.pluginId,
             method: ACCOUNTS_LIST_METHOD,
-            input: { provider: providerId },
+            input: providerId === "claude-code" && refreshClaude
+              ? { provider: providerId, refresh: true } : { provider: providerId },
             outputSchema: accountViewsSchema,
-            signal: AbortSignal.timeout(10_000),
+            signal: AbortSignal.timeout(providerId === "claude-code" && refreshClaude ? 40_000 : 10_000),
           })
           .catch(() => []);
         const parsed = accountViewsSchema.safeParse(raw);
@@ -182,13 +226,26 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           (account) => !account.needsSignIn,
         );
         // The name the user gave "This Mac" belongs to this computer's own login, not another machine's.
-        const localName = accounts.find((account) => account.id === "local")?.name;
-        const named = (machine: UsageMachine, entry: UsageProvider) =>
-          machine.primary && localName ? { ...entry, accountLabel: localName } : entry;
+        const mac = accounts.find((account) => account.id === "local");
+        const localEntry = (machine: UsageMachine, entry: UsageProvider) => {
+          if (!machine.primary || !mac) return entry;
+          const measuredEmail =
+            entry.usage?.status === "ok" ? entry.usage.accountEmail : null;
+          const sameLogin =
+            !mac.email ||
+            !measuredEmail ||
+            mac.email.trim().toLowerCase() === measuredEmail.trim().toLowerCase();
+          return {
+            ...entry,
+            accountLabel: (sameLogin ? mac.name : null) ?? entry.accountLabel,
+            usage: providerId === "claude-code" && mac.email && (mac.inUse || mac.limitedUntil)
+              ? accountUsage(mac, entry.usage) : entry.usage,
+          };
+        };
         if (!accounts.some((account) => account.id !== "local")) {
           for (const machine of machines)
             machine.providers = machine.providers.map((entry) =>
-              entry.providerId === providerId ? named(machine, entry) : entry,
+              entry.providerId === providerId ? localEntry(machine, entry) : entry,
             );
           continue;
         }
@@ -208,55 +265,12 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           const entries = accounts.flatMap((account): UsageProvider[] => {
             if (account.id === "local")
               return local
-                ? [named(machine, { ...local, accountId: "local", inUse: account.inUse })]
+                ? [localEntry(machine, { ...local, accountId: "local", inUse: account.inUse })]
                 : [];
-            // Accounts that report no usage still show when they hit a limit.
-            // So does a limit no bar shows as full, like one model's weekly limit.
-            // Rounded as the box shows it: 99.6% reads "100%" and counts as full.
-            const windows = [
-              ...account.windows,
-              ...(account.limitedUntil &&
-              !account.windows.some(
-                (window) => Math.round(window.usedPercent) >= 100,
-              )
-                ? [
-                    {
-                      label: "Limit hit",
-                      usedPercent: 100,
-                      resetsAt: account.limitedUntil,
-                    },
-                  ]
-                : []),
-            ];
-            return [
-              {
-                ...base,
-                id: `accounts:${account.id}`,
-                accountLabel: account.name ?? account.email,
-                accountId: account.id,
-                inUse: account.inUse,
-                usage:
-                  windows.length === 0 && !account.credits
-                    ? null
-                    : {
-                        status: "ok",
-                        accountEmail: account.email,
-                        planLabel: account.plan,
-                        credits: account.credits
-                          ? { detail: account.credits.detail || null }
-                          : null,
-                        windows: windows.map((window) => ({
-                          label: window.label,
-                          usedPercent: window.usedPercent,
-                          resetsAt:
-                            window.resetsAt === null
-                              ? null
-                              : new Date(window.resetsAt).toISOString(),
-                          cost: null,
-                        })),
-                      },
-              },
-            ];
+            return [{
+              ...base, id: `accounts:${account.id}`, accountLabel: account.name ?? account.email,
+              accountId: account.id, inUse: account.inUse, usage: accountUsage(account),
+            }];
           });
           if (index < 0) machine.providers.push(...entries);
           else machine.providers.splice(index, 1, ...entries);
@@ -309,7 +323,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
   };
   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
     const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
-    const [hosts, sources, providers, config] = await Promise.all([
+    const [hosts, sources, usageProviders, config] = await Promise.all([
       room.sdk.hosts
         .list()
         .then((hosts) => hosts.filter((host) => host.type !== "ephemeral")),
@@ -360,6 +374,28 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         }),
       );
     }
+    // A source may report a provider without native usage (Kimi). Look up
+    // just its name and icon: the registry answers without checking any host.
+    const others = [
+      ...new Set(
+        [...inventories.values()].flatMap((source) =>
+          source.resources.map((resource) => resource.providerId),
+        ),
+      ),
+    ].filter((id) => !usageProviders.some((provider) => provider.id === id));
+    const providers = [
+      ...usageProviders,
+      ...(
+        await Promise.all(
+          others.map((providerId) =>
+            room.sdk.providers
+              .list({ providerId })
+              .then((list) => list.filter((item) => item.id === providerId))
+              .catch(() => []),
+          ),
+        )
+      ).flat(),
+    ];
     const keys = new Set(
       [...inventories.values()].flatMap((source) =>
         source.resources.map((resource) => keyOf(source.pluginId, resource.id)),
@@ -473,7 +509,10 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           machine.error = "Some usage could not be refreshed.";
       }
     }
-    await mergeAccounts(machines, providers);
+    const refreshClaude = request.force && (request.providerId === null || request.providerId === "claude-code") &&
+      machines.some((machine) => !machine.id.startsWith("source:") &&
+        (request.machineIds === null || request.machineIds.includes(machine.id)));
+    await mergeAccounts(machines, providers, refreshClaude);
     const providerOrder = new Map(
       providers.map((provider, index) => [provider.id, index]),
     );

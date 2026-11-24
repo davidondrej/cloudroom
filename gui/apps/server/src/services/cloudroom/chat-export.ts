@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { and, asc, eq, gte, isNull, notLike } from "drizzle-orm";
 import { events, projects, threads } from "@cloudroom/db";
+import { maskStoredShellEnvValues } from "@cloudroom/domain";
 import { folderOpenerCommand } from "@cloudroom/process-utils";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
@@ -54,7 +55,7 @@ function markdown(deps: Pick<AppDeps, "db">, thread: ExportedThread, title: stri
 function json(deps: Pick<AppDeps, "db">, thread: ExportedThread, title: string): string {
   const history = deps.db.select({ type: events.type, itemKind: events.itemKind, data: events.data, createdAt: events.createdAt }).from(events)
     .where(and(eq(events.threadId, thread.id), notLike(events.type, "%delta"))).orderBy(asc(events.sequence)).all();
-  return JSON.stringify({ ...thread, title, ...(downloaded(deps, thread) ? {} : { downloaded: false }), events: history.map((event) => ({ ...event, data: JSON.parse(event.data) as unknown })) }, null, 2);
+  return JSON.stringify({ ...thread, title, ...(downloaded(deps, thread) ? {} : { downloaded: false }), events: history.map((event) => ({ ...event, data: maskStoredShellEnvValues(event.type, JSON.parse(event.data) as unknown) })) }, null, 2);
 }
 
 /** Writes one file per thread into a new folder in ~/Downloads, one subfolder per project, then opens it. */

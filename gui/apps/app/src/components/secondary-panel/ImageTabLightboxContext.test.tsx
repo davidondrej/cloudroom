@@ -3,9 +3,9 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it } from "vitest";
-import { FilePreview } from "./FilePreview";
-import { ImageTabLightboxProvider } from "./ImageTabLightboxContext";
-import type { SecondaryPanelRenderableTab } from "./secondaryPanelTab";
+import { FilePreview } from "@/components/right-panel/tabs/file-preview";
+import { ImageTabLightboxProvider } from "@/components/right-panel/tabs/image-lightbox";
+import type { SecondaryPanelRenderableTab } from "@/components/right-panel/store/tab-ops";
 
 afterEach(cleanup);
 

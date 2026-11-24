@@ -197,11 +197,15 @@ status|branches|paths|diff|diff-files|diff-file|diff-patch <id>` and
   answering from its last stored list. Check `room-cli machine provider-cli status MACHINE
 --json` for installed executables. Installed does not mean authenticated; a Claude
   login error requires the user to run `claude` and `/login`.
-- If Cursor's model list fails, Codex's looks stale after a CLI upgrade, or
-  Pi's after a `models.json` edit,
-  `room-cli provider models acp-cursor --restart` (or `codex`/`pi --restart`)
+- If Cursor's model list fails, Codex's looks stale after a CLI upgrade, Pi's
+  after a `models.json` edit, or OpenCode's after an `opencode.json` edit,
+  `room-cli provider models acp-cursor --restart` (or any `acp-*`, `codex`, `pi`)
   restarts model discovery and reloads the list on the selected machine. It
   does not stop threads, reinstall the CLI, or change credentials.
+- OpenCode and Kilo Code list models per project, since a project's
+  `opencode.json` can hide providers. `provider models` lists the calling
+  thread's project; pass `--project <id>` for the list a new thread in another
+  project gets, or `--environment <id>` for a thread there.
 - Top-level `customModels` in the same `config.json` registers extra picker
   models. Use a provider ID returned by the target host's catalog. Acceptance
   of unlisted models is provider-specific; consult that provider's skill.

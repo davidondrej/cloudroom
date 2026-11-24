@@ -15,12 +15,16 @@ pub(super) const KIMI: cursor::Flavor = cursor::Flavor {
     // Resume uses `session/resume`, which replays nothing; Cloudroom already has the conversation.
     replay: false,
     explain_stops: true,
-    empty_turn: None,
+    // Kimi ends a turn whose model request failed without a word, as Local threads say (#1785).
+    empty_turn: Some(
+        "Kimi Code ended the turn without replying. Kimi does this when its model request fails, such as hitting a plan limit, a network error or a server error. The reason is in Kimi's session log, in ~/.kimi-code/sessions in this Cloud sandbox.",
+    ),
+    cumulative_text: false,
 };
 const SESSIONS: &str = "sessions";
 /// The efforts Local threads offer for Kimi (provider-acp reads its `thinking` option); Kimi offers some of them per model.
 pub const REASONING_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
-const SIGNED_OUT: &str = "Kimi Code is signed out in Cloud. Sign in with `kimi login` on your Mac; Cloudroom copies that login to Cloud.";
+const SIGNED_OUT: &str = "Kimi Code is signed out in Cloud. Sign in with `kimi login` on your computer and turn on \"Auth my agents in the cloud automatically\" in Settings → Cloud environment; Cloudroom copies that login to Cloud when a sandbox wakes.";
 
 fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)

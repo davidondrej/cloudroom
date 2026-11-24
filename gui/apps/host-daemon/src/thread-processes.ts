@@ -221,6 +221,31 @@ export async function stopThreadProcesses(
 }
 
 /**
+ * Ends the thread's own agent CLIs that provider bridges still run, not what
+ * they run: only an explicit stop ends those (#607). Call it only when no
+ * runtime holds the thread, so such a CLI is a leftover, like a Codex that
+ * keeps the thread's writer lock (#1717).
+ */
+export async function stopStaleThreadAgents(
+  threadId: string,
+  serverUrl: string | undefined,
+  table = TABLES[process.platform],
+): Promise<number> {
+  if (!table) return 0;
+  const rows = await table.list();
+  const bridges = new Set(
+    rows.filter((row) => row.ppid === process.pid).map((row) => row.pid),
+  );
+  const agents = pickThreadProcesses(rows, {
+    threadId,
+    serverUrl,
+    selfPid: process.pid,
+    scope: "agent",
+  }).filter((row) => bridges.has(row.ppid));
+  return endProcesses(agents, table);
+}
+
+/**
  * Before a stop releases the thread's agent: lists the agent and what it runs
  * while they are still attached, and answers a function that ends whichever of
  * them outlive the release (#607).

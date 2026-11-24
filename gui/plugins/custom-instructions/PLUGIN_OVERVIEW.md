@@ -1,21 +1,10 @@
-Tell every agent on this Cloudroom host the things you would otherwise repeat in each thread. Examples: your coding conventions, the tools you prefer, and the projects it should know about.
+Set a global default in Settings → Prompts → Custom instructions. Use **Add instructions** to select a harness and either **All models** or one model. Each target has one editable rule. Turning the plugin off keeps the saved text.
 
-## What you get
+Local and Cloud threads receive the global text, then the matching harness rule, then the matching model rule. Each part is optional. The combined text can contain up to 4,096 characters. Changes reach the next eligible message.
 
-- One text field in Settings, up to 4,096 characters.
-- The text is added to the instructions of every agent task on this host, for every provider and every project.
-- Changes apply to the next task. You do not restart anything.
+## CLI
 
-## How it works
-
-Write the instructions as plain text or Markdown. Leave the field empty to add nothing. Cloudroom appends your text to the instructions it already gives the agent.
-
-## For agents and scripts
-
-Use the `room-cli instructions` command:
-
-- `room-cli instructions get` prints the current text.
-- `room-cli instructions set <text...>` replaces it.
-- `room-cli instructions clear` removes it.
-
-Add `--json` for machine-readable output.
+- `room-cli instructions get|set|clear` reads, changes, or clears the global text.
+- `room-cli instructions list --json` lists the saved rules.
+- `room-cli instructions set-rule <harness> <model> <text...>` creates or updates a rule. Use a quoted `'*'` for all models.
+- `room-cli instructions clear-rule <harness> <model>` removes that rule.

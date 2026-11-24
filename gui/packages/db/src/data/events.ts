@@ -1320,7 +1320,8 @@ export interface GetLatestThreadOutputEventRowArgs {
   threadId: string;
   /** Only look inside this turn; omitted means the whole thread. */
   turnId?: string;
-  /** Also match an empty assistant message, so a turn that ended on one has no output (#1670). */
+  /** Also match an empty assistant message after a tool step, so a turn that ended on one has no output (#1670).
+   *  One right after a nonempty reply doesn't hide that reply (#1834). */
   includeEmpty?: boolean;
 }
 
@@ -3414,7 +3415,27 @@ export function getLatestThreadOutputEventRow(
         OR (
           ${events.type} = 'item/completed'
           AND ${events.itemKind} = 'agentMessage'
-          ${args.includeEmpty === true ? sql`` : sql`AND COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''`}
+          AND (
+            COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''
+            ${
+              args.includeEmpty === true
+                ? sql`OR COALESCE((
+              SELECT previous.item_kind = 'agentMessage'
+              FROM events previous INDEXED BY events_thread_turn_type_item_sequence_idx
+              WHERE previous.thread_id = ${events.threadId}
+                AND previous.turn_id IS ${events.turnId}
+                AND previous.type = 'item/completed'
+                AND previous.sequence < ${events.sequence}
+                AND (
+                  previous.item_kind NOT IN ('agentMessage', 'reasoning')
+                  OR COALESCE(json_extract(previous.data, '$.item.text'), '') <> ''
+                )
+              ORDER BY previous.sequence DESC
+              LIMIT 1
+            ), 0) = 0`
+                : sql``
+            }
+          )
         )
       )`,
       )

@@ -1,4 +1,4 @@
-import type { IconSvgElement } from "@hugeicons/react";
+import type { IconSvgElement } from "./hugeicons-icon";
 import {
   AiBrain01Icon,
   ServerStack01Icon,

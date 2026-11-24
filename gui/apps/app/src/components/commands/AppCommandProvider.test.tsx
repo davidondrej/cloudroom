@@ -7,7 +7,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BbDesktopApi } from "@cloudroom/desktop-contract";

@@ -47,6 +47,10 @@ function browsesHistory({ event, editor, history }: PromptKeyContext): boolean {
 
 const typeaheadKeys: PromptKeyHandler = (context) => {
   const { event, typeahead } = context;
+  if (event.key === "Enter" && !hasModifier(event) && typeahead.guardSubmit(context.submitAfterRender)) {
+    event.preventDefault();
+    return true;
+  }
   if (!typeahead.isOpen) return false;
   const hasRows = typeahead.suggestions.length > 0;
   // An open menu always owns the arrows. History never competes for them:

@@ -7,10 +7,6 @@ import {
 import type { ApplicationMenuAccelerators } from "./desktop-menu-shortcuts.js";
 import type { ComputersFailure } from "./computers.js";
 
-const SERVER_DAEMON_LOGS_MENU_LABEL =
-  process.platform === "linux"
-    ? "Server && Daemon Logs"
-    : "Server & Daemon Logs";
 const OPEN_NEW_TAB_MENU_LABEL = "New Tab";
 const REOPEN_CLOSED_TAB_MENU_LABEL = "Reopen Closed Tab";
 const NEW_THREAD_MENU_LABEL = "New Thread";
@@ -23,9 +19,9 @@ const TOGGLE_DEVELOPER_TOOLS_MENU_LABEL = "Toggle Developer Tools";
 const TOGGLE_DEVELOPER_TOOLS_ACCELERATOR = "Command+Option+I";
 const RELOAD_ACCELERATOR = "CommandOrControl+R";
 const FORCE_RELOAD_ACCELERATOR = "CommandOrControl+Shift+R";
-// Electron gives each zoom role one key. On Linux, Ctrl+=, numpad −, and
-// numpad 0 don't match it, so add them as hidden duplicates.
-const LINUX_EXTRA_ZOOM_ITEMS: MenuItemConstructorOptions[] = [
+// Electron gives each zoom role one key. Outside macOS, Ctrl+= and numpad +,
+// −, and 0 don't match it, so add them as hidden duplicates.
+const EXTRA_ZOOM_ITEMS: MenuItemConstructorOptions[] = [
   { role: "zoomIn", accelerator: "CommandOrControl+=", visible: false },
   { role: "zoomIn", accelerator: "CommandOrControl+numadd", visible: false },
   { role: "zoomOut", accelerator: "CommandOrControl+numsub", visible: false },
@@ -84,7 +80,8 @@ function createServerDaemonLogsMenuItems(
     { type: "separator" },
     {
       enabled: args.serverDaemonLogsMenuEnabled,
-      label: SERVER_DAEMON_LOGS_MENU_LABEL,
+      // Windows and Linux menus read "&" as an access-key marker; "&&" shows one.
+      label: args.isMac ? "Server & Daemon Logs" : "Server && Daemon Logs",
       click() {
         args.openServerDaemonLogs();
       },
@@ -238,7 +235,9 @@ export function buildApplicationMenuTemplate(
       label: "View",
       submenu: [
         {
-          accelerator: RELOAD_ACCELERATOR,
+          // Only macOS handles Cmd+R (desktop-reload-shortcut.ts). Elsewhere
+          // Ctrl+R belongs to terminals and pages, so don't advertise it.
+          ...(args.isMac ? { accelerator: RELOAD_ACCELERATOR } : {}),
           label: "Reload",
           registerAccelerator: false,
           click(_menuItem, browserWindow) {
@@ -246,7 +245,7 @@ export function buildApplicationMenuTemplate(
           },
         },
         {
-          accelerator: FORCE_RELOAD_ACCELERATOR,
+          ...(args.isMac ? { accelerator: FORCE_RELOAD_ACCELERATOR } : {}),
           label: "Force Reload",
           registerAccelerator: false,
           click(_menuItem, browserWindow) {
@@ -264,7 +263,7 @@ export function buildApplicationMenuTemplate(
         { role: "resetZoom" },
         { role: "zoomIn" },
         { role: "zoomOut" },
-        ...(args.isLinux ? LINUX_EXTRA_ZOOM_ITEMS : []),
+        ...(args.isMac ? [] : EXTRA_ZOOM_ITEMS),
         ...(args.isMac || args.isLinux
           ? []
           : [

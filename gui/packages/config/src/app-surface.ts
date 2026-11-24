@@ -14,6 +14,7 @@ export type RequestAppSurface = (typeof REQUEST_APP_SURFACE_VALUES)[number];
 export const APP_SURFACE_DESKTOP: AppSurface = "desktop";
 export const APP_SURFACE_WEB: AppSurface = "web";
 export const APP_SURFACE_API: RequestAppSurface = "api";
+export const APP_SURFACE_MOBILE: RequestAppSurface = "mobile";
 
 export function parseAppSurface(
   value: string | null | undefined,

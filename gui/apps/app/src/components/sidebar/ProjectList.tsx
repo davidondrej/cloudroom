@@ -8,7 +8,7 @@ import {
   type PointerEventHandler,
   type ReactNode,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useAtom, useAtomValue, useSetAtom, useStore } from "jotai";
 import type {
   ProjectResponse,
@@ -613,7 +613,11 @@ export function ProjectListSearchThreadsAction({
 export function ProjectListShell({ children }: ProjectListShellProps) {
   return (
     <SidebarStickyStack data-sidebar-sticky-density="compact-actions">
-      <SidebarGroupContent>{children}</SidebarGroupContent>
+      <SidebarGroupContent>
+        {/* A plugin's own row above Pinned (the Director draws into it). */}
+        <div data-sidebar-top-slot="" />
+        {children}
+      </SidebarGroupContent>
     </SidebarStickyStack>
   );
 }
@@ -1599,7 +1603,7 @@ function ProjectListComponent({
         sectionId={sectionId}
         onNewThread={
           sectionId === "pinned"
-            ? openRootCompose
+            ? () => openRootCompose("pinned")
             : handleCreateProjectlessThread
         }
         open={openSidebarMenu === menuId}
@@ -1809,6 +1813,10 @@ function ProjectListComponent({
   const pinnedSection: BuiltInSidebarSectionOptions = {
     activity: getCollapsedChildActivity(pinnedSectionThreads, draftThreadIds),
     collapsedThreads: pinnedSectionThreads,
+    collapsedNavigation: pinnedRootThreads.map((thread) => ({
+      threadId: thread.id,
+      projectId: thread.projectId,
+    })),
     label: "Pinned",
     content: pinnedSectionContent,
     actions: renderSectionDisplayOptions("pinned", "Pinned"),

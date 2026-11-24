@@ -15,7 +15,7 @@ import {
 } from "../cache-owners/system-cache-effects";
 import {
   beginKeyboardSettingsCacheTransaction,
-  readCachedProviderOrder,
+  readCachedDefaultProviderId,
   readCachedStreamerMode,
   rollbackKeyboardSettingsCacheTransaction,
 } from "../cache-owners/system-config-cache-owner";
@@ -46,18 +46,13 @@ export function useUpdateGeneralSettings() {
       sdk.system.updateGeneralSettings(settings),
     onSuccess: (_settings, written) => {
       const previousStreamerMode = readCachedStreamerMode(queryClient);
-      const previousProviderOrder = readCachedProviderOrder(queryClient);
+      const previousDefaultProviderId = readCachedDefaultProviderId(queryClient);
       invalidateGeneralSettingsDependencies({ queryClient });
       if (previousStreamerMode !== written.streamerMode) {
         void resetModelCatalogsAfterStreamerModeChange({ queryClient });
       }
-      const providerOrderChanged =
-        previousProviderOrder === undefined ||
-        previousProviderOrder.length !== written.providerOrder.length ||
-        previousProviderOrder.some(
-          (providerId, index) => providerId !== written.providerOrder[index],
-        );
-      if (providerOrderChanged) {
+      // The default harness leads the harness list, so a new default reorders it.
+      if (previousDefaultProviderId !== written.defaultProviderId) {
         return invalidateSystemProviders({ queryClient });
       }
     },

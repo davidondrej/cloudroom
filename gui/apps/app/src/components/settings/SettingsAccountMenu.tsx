@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -8,16 +8,19 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
+import { hideEmail, usePrivacyMode } from "@cloudroom/shared-ui/lib/privacy-mode";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CreditsBar } from "@/components/CloudQueue";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
-import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
+import { CLOUD_CREDITS_SETTINGS_PATH } from "@/lib/route-paths";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { SignOutDialog } from "./CloudroomAccountSettings";
 import { getSettingsSectionRoutePath } from "./settings-sections";
 
 const BILLING_URL = "https://www.cloudroom.dev/billing";
+// The one booking page for paying customers, like Settings → Account. The website picks the calendar.
+const CALL_URL = "https://www.cloudroom.dev/call?from=app";
 const ROW_CLASS =
   "flex w-full items-center gap-2.5 rounded-md px-2 text-left text-sm text-sidebar-foreground hover:bg-sidebar-accent";
 
@@ -25,10 +28,12 @@ function Avatar({
   email,
   ready,
   inMenu,
+  hidden,
 }: {
   email: string;
   ready: boolean;
   inMenu?: boolean;
+  hidden: boolean;
 }) {
   return (
     <span
@@ -38,7 +43,11 @@ function Avatar({
         inMenu ? "size-8 text-xs" : "size-6 text-[11px]",
       )}
     >
-      {email.charAt(0).toUpperCase()}
+      {hidden ? (
+        <Icon name="UserRound" className="size-3.5" />
+      ) : (
+        email.charAt(0).toUpperCase()
+      )}
       <span
         className={cn(
           "absolute -right-0.5 -bottom-0.5 size-2 rounded-full ring-2",
@@ -74,11 +83,12 @@ function MenuItem({
   );
 }
 
-export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
+export function SettingsAccountMenu() {
   const status = useCloudroomAccount().data;
   const navigate = useNavigate();
   const closeOnMobile = useCloseMobileSidebar();
   const [signOutOpen, setSignOutOpen] = useState(false);
+  const [privacy] = usePrivacyMode();
   const email = status?.signingIn ? undefined : status?.account?.email;
   const account = getSettingsSectionRoutePath("account");
 
@@ -107,6 +117,8 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
     );
   }
 
+  // Privacy mode hides the email here too, and the avatar's first letter with it.
+  const shown = hideEmail(email, privacy);
   const ready = status?.ready === true;
   const plan = status?.plan
     ? `${status.plan.charAt(0).toUpperCase()}${status.plan.slice(1)} plan`
@@ -137,8 +149,8 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
               "h-10 data-[state=open]:bg-sidebar-accent",
             )}
           >
-            <Avatar email={email} ready={ready} />
-            <span className="min-w-0 flex-1 truncate">{email}</span>
+            <Avatar email={email} ready={ready} hidden={privacy} />
+            <span className="min-w-0 flex-1 truncate">{shown}</span>
             <Icon
               name="ChevronsUpDown"
               className="size-3.5 shrink-0 text-muted-foreground"
@@ -152,25 +164,28 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
           className="w-[var(--radix-dropdown-menu-trigger-width)] min-w-60 border-foreground/10 p-1.5"
         >
           <div className="flex items-center gap-2.5 px-2 pt-1.5 pb-2">
-            <Avatar email={email} ready={ready} inMenu />
+            <Avatar email={email} ready={ready} inMenu hidden={privacy} />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm text-foreground">
-                {email}
+                {shown}
               </span>
               <span className="block truncate text-xs text-muted-foreground">
                 {plan ? `${plan} · ${connection}` : connection}
               </span>
             </span>
           </div>
-          {/* Paid plans see their credits and buy packs or upgrade on the billing page (ADR 0317). */}
-          {usage && usage.plan !== "free" && creditsLeft !== null && (
+          {/* Every plan sees its credits and can buy top-ups or upgrade on the billing page (ADR 20261112-235440). */}
+          {usage && creditsLeft !== null && (
             <div className="px-2 pb-2.5">
               <div className="flex items-baseline justify-between gap-2 text-xs">
-                <span className="text-muted-foreground tabular-nums">
+                <span
+                  title={extra > 0 ? `${creditsLeft.toLocaleString("en-US")} Cloud Credits left` : `${creditsLeft.toLocaleString("en-US")} of ${usage.creditsLimit.toLocaleString("en-US")} Cloud Credits left`}
+                  className="min-w-0 truncate text-muted-foreground tabular-nums"
+                >
                   <span className="font-semibold text-foreground">
                     {creditsLeft.toLocaleString("en-US")}
                   </span>{" "}
-                  {extra > 0 ? "credits left" : `of ${usage.creditsLimit.toLocaleString("en-US")} credits left`}
+                  {extra > 0 ? "credits left" : `/ ${usage.creditsLimit.toLocaleString("en-US")} left`}
                 </span>
                 <button
                   type="button"
@@ -220,15 +235,7 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
                   </span>
                 )
               }
-              onSelect={() =>
-                usagePage
-                  ? go(
-                      getPluginConfigurationRoutePath({
-                        pluginId: "provider-usage",
-                      }),
-                    )
-                  : openUrlInExternalBrowser(BILLING_URL)
-              }
+              onSelect={() => go(CLOUD_CREDITS_SETTINGS_PATH)}
             />
           )}
           <MenuItem
@@ -243,6 +250,21 @@ export function SettingsAccountMenu({ usagePage }: { usagePage: boolean }) {
             }
             onSelect={() => openUrlInExternalBrowser(BILLING_URL)}
           />
+          {/* Paid plans include a 1:1 call (docs/scopes/calls.md#one-booking-page). */}
+          {status?.plan && status.plan !== "free" && (
+            <MenuItem
+              icon="Calendar"
+              label="Book a 1:1 call"
+              detail={
+                <Icon
+                  name="ExternalLink"
+                  className="size-3.5 shrink-0 text-muted-foreground"
+                  aria-hidden
+                />
+              }
+              onSelect={() => openUrlInExternalBrowser(CALL_URL)}
+            />
+          )}
           <DropdownMenuSeparator />
           <MenuItem
             icon="LogOut"

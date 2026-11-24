@@ -472,6 +472,7 @@ function buildTerminalSelection({
 
   const selection: MessageProseSelection = {
     text: trimmedText,
+    copyText: text,
     rect:
       anchor === null
         ? containerElement.getBoundingClientRect()

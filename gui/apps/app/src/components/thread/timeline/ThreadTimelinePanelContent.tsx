@@ -6,6 +6,7 @@ import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/pr
 import { ConversationTimeline } from "@/components/ui/conversation.js";
 import { useThread } from "@/hooks/queries/thread-queries";
 import { BbHttpError } from "@/lib/sdk";
+import { BackgroundCommandBubbles } from "./BackgroundCommandBubble.js";
 import {
   ThreadTimelineSurface,
   type ThreadTimelineSurfaceProps,
@@ -120,6 +121,11 @@ export function ThreadTimelinePanelContent({
       onOpenLocalFileLink={onOpenLocalFileLink}
       projectId={projectId}
       resolveMentionLink={resolveMentionLink}
+      trailingContent={
+        <BackgroundCommandBubbles
+          rows={resolvedTimeline.activeBackgroundCommands}
+        />
+      }
       showOngoingIndicator={showOngoingIndicator}
       ongoingIndicatorLabel={ongoingIndicatorLabel}
       ongoingIndicatorShimmer={backgroundOnlyIndicatorLabel === undefined}

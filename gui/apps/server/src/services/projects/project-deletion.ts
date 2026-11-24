@@ -98,6 +98,7 @@ function tombstoneProjectThreadsForDeletion(
   cloudroom(deps).archiveInTurn(result.deletedThreads.filter((thread) => thread.executionTarget === "cloud" && !thread.archivedAt).map((thread) => thread.id));
   // Its rows are never adopted back, even if those archives don't all land (cloudDeletedProjects).
   void cloudroom(deps).sync.projectDeleted(args.projectId);
+  void cloudroom(deps).pauseProjectLoops(args.projectId);
   return result;
 }
 

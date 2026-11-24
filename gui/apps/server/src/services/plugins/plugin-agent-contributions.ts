@@ -62,10 +62,7 @@ export async function resolvePluginAgentConfiguration(args: {
   return active.resolveAgentConfiguration(args);
 }
 
-export function listPluginInstructionContributions(): Array<{
-  pluginId: string;
-  provider: (ctx: { threadId: string; projectId: string }) => string | null;
-}> {
+export function listPluginInstructionContributions() {
   return contributions?.listInstructionContributions() ?? [];
 }
 

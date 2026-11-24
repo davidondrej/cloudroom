@@ -77,7 +77,8 @@ export function CreditsBar({ plan, limit, extra, extraTotal, className, planClas
   );
 }
 
-/** Free accounts always see their Cloud Credits left (ADR 0307). The chevron shrinks the card to the one-line meter for
+/** Free accounts see their Cloud Credits left once plan + extra credits left drop under 20% of the plan (ADR
+ *  20261118-090000): a new user isn't greeted by a meter. Then the chevron shrinks the card to the one-line meter for
  *  72 hours on this Mac, then it opens again. It also opens once credits run low (80% used, no extra credits): a shrink
  *  from before then doesn't count, but one made while low survives a refill. Extra credits (ADR 0328) count like
  *  Settings. Paid plans see the meter once plan + extra credits left drop under 25% of the plan, so a big pack hides it. */
@@ -85,11 +86,11 @@ const SHRUNK_KEY = "cloudroom.planCard.shrunkUntil", SHRUNK_LOW_KEY = "cloudroom
 const SHRINK_MS = 72 * 3_600_000;
 
 export function PlanCard() {
-  const usage = useCloudroomAccount().data?.planUsage ?? null;
+  const account = useCloudroomAccount().data, usage = account?.planUsage ?? null;
   const calmShrink = useHiddenUntil(SHRUNK_KEY), lowShrink = useHiddenUntil(SHRUNK_LOW_KEY);
   const used = usage?.credits ?? null, limit = usage?.creditsLimit ?? 0;
   const free = usage?.plan === "free";
-  const hidden = !usage || used === null || (!free && Math.max(0, limit - used) + Math.max(0, usage.extraCredits ?? 0) > 0.25 * limit);
+  const hidden = !usage || used === null || Math.max(0, limit - used) + Math.max(0, usage.extraCredits ?? 0) > (free ? 0.2 : 0.25) * limit;
   useUpgradePromptViewed(hidden ? null : "plan_card");
   if (!usage || used === null || hidden) return null;
   if (!free) return <PlanMeter plan={usage.plan} used={used} limit={limit} extra={usage.extraCredits ?? 0} extraTotal={usage.extraCreditsTotal ?? 0} />;
@@ -113,10 +114,10 @@ export function PlanCard() {
         <p className="mb-1.5 text-sm text-foreground"><span className={cn("font-semibold", low && "text-warning")}>{Math.floor(planLeft + extra).toLocaleString("en-US")}</span> Cloud Credits left</p>
         {extra > 0
           ? <CreditsBar className="h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName="bg-primary" edgeClassName="border-surface-raised-solid" />
-          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(used, limit) * 100}%` }} /></div>}
+          : <div className="h-1 overflow-hidden rounded-full bg-foreground/10"><div className={cn("h-full rounded-full", low ? "bg-warning" : "bg-primary")} style={{ width: `${share(planLeft, limit) * 100}%` }} /></div>}
       </div>
       <div className="mt-3 flex justify-end">
-        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Upgrade to Pro<Icon name="ArrowRight" aria-hidden /></Button>
+        <Button type="button" size="sm" className="h-7 gap-1 px-2.5 text-xs" onClick={() => openUpgrade("plan_card")}>Get more credits<Icon name="ArrowRight" aria-hidden /></Button>
       </div>
     </section>
   );
@@ -142,7 +143,7 @@ function PlanMeter({ plan, used, limit, extra, extraTotal, onExpand }: { plan: s
       {extra > 0
         ? <CreditsBar className="mt-1.5 h-1 bg-foreground/10" plan={planLeft} limit={limit} extra={extra} extraTotal={extraTotal} planClassName={calm ? "bg-primary" : "bg-warning"} edgeClassName="border-sidebar" />
         : <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-foreground/10">
-          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(used, limit) * 100}%` }} />
+          <div className={cn("h-full rounded-full", out ? "bg-destructive" : calm ? "bg-primary" : "bg-warning")} style={{ width: `${share(planLeft, limit) * 100}%` }} />
         </div>}
     </div>
   );

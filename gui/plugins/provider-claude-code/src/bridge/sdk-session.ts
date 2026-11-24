@@ -578,8 +578,11 @@ export class SdkSession {
       this.endSession();
     }
     if (!ended) {
-      throw new Error(
-        "Claude stopped, but Cloudroom could not confirm its tool processes ended. Some may still be running.",
+      throw Object.assign(
+        new Error(
+          "Claude stopped, but Cloudroom could not confirm its tool processes ended. Some may still be running.",
+        ),
+        { code: "stop_unconfirmed" },
       );
     }
   }

@@ -42,6 +42,8 @@ export const noopEventSink: Pick<EventSink, "emit" | "flush"> = {
 };
 
 export interface CommandDispatchOptions {
+  /** Set for `environment.attach`: aborted by a cancel received after it (#2171). */
+  attachCancelSignal?: AbortSignal;
   /** An interrupting Stop for this thread is waiting behind the command now running. */
   isThreadStopPending?: (threadId: string) => boolean;
   emitEnvironmentHookProgress?: (
@@ -190,6 +192,10 @@ export function getErrorCode(error: unknown): string {
   if (isStructuredSpawnMissingExecutableError(error)) {
     return "missing_executable";
   }
+  // An agent bridge's own code (`cli_missing`), carried across its JSON-RPC answer.
+  if (error instanceof Error && "reason" in error && typeof error.reason === "string" && error.reason) {
+    return error.reason;
+  }
   if (
     error instanceof Error &&
     "code" in error &&
@@ -228,6 +234,9 @@ function isMessageOnlySpawnMissingExecutableError(error: unknown): boolean {
   );
 }
 
+export const busyWorkspaceMessage = (path: string): string =>
+  `Threads are still running in ${path}. Try again when they finish.`;
+
 export async function requireWorkspaceEnvironment(
   args: {
     environmentId: string;
@@ -240,10 +249,13 @@ export async function requireWorkspaceEnvironment(
   const existing = await runtimeManager.getOrAwait(args.environmentId);
   if (existing) {
     if (existing.path !== args.workspaceContext.workspacePath) {
-      await runtimeManager.forgetEnvironment(args.environmentId);
+      const forgotten = await runtimeManager.forgetIdleEnvironment(
+        args.environmentId,
+        args.targetThreadId,
+      );
       throw new ExpectedCommandDispatchError(
         "workspace_type_mismatch",
-        `Loaded environment ${args.environmentId} is bound to ${existing.path}, not ${args.workspaceContext.workspacePath}`,
+        `Loaded environment ${args.environmentId} is bound to ${existing.path}, not ${args.workspaceContext.workspacePath}${forgotten ? "" : `. ${busyWorkspaceMessage(existing.path)}`}`,
       );
     }
   }

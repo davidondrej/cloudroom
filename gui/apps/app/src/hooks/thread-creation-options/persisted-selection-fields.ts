@@ -2,7 +2,12 @@ import { atom, useAtom, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { atomFamily } from "jotai-family";
 import { useCallback } from "react";
-import type { PermissionMode, ReasoningLevel, ServiceTier } from "@cloudroom/domain";
+import {
+  serviceTierSchema,
+  type PermissionMode,
+  type ReasoningLevel,
+  type ServiceTier,
+} from "@cloudroom/domain";
 import {
   createTabScopedStorage,
   withLocalStorage,
@@ -72,7 +77,7 @@ function isPermissionMode(value: string): value is PermissionMode {
 }
 
 function isServiceTier(value: string): value is ServiceTier {
-  return value === "fast" || value === "default";
+  return serviceTierSchema.safeParse(value).success;
 }
 
 function isStoredServiceTier(value: string): value is StoredServiceTier {

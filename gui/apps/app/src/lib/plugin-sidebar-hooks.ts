@@ -113,7 +113,7 @@ export function useSidebarThreads(): PluginSidebarThreadsState {
         settingsHref: getSettingsProjectRoutePath(project.id),
       })),
       experimental_archived: null,
-      sections: [],
+      sections: data.sections,
     };
   }, [data, hostNamesById, query.isError]);
 }

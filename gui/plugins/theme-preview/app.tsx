@@ -8,7 +8,7 @@ import {
   COARSE_POINTER_ROW_HEIGHT_CLASS,
 } from "@cloudroom/shared-ui/coarse-pointer-sizing";
 import { Moon02Icon, Sun03Icon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
 import {
   Dialog,
   DialogClose,

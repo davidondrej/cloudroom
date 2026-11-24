@@ -16,19 +16,19 @@ import {
   type ThreadListEntry,
 } from "@cloudroom/domain";
 import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
-import { getThreadConversationCollapsedAtom } from "@/components/secondary-panel/threadSecondaryPanelAtoms";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
 import { SidebarStickyTier } from "@/components/ui/sidebar.js";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import {
   ThreadActionsContextMenu,
   ThreadActionsMenu,
   ThreadArchiveQuickAction,
 } from "@/components/thread/ThreadActionsMenu";
 import { useThreadActions } from "@/components/thread/ThreadActionsProvider";
-import { useTeleportDirection } from "@/hooks/queries/cloudroom-queries";
+import { useTeleportDirection, useThreadCreditBurn } from "@/hooks/queries/cloudroom-queries";
 import { useQuery } from "@tanstack/react-query";
 import { usePrefetchThreadOnHover } from "@/hooks/queries/thread-queries";
 import { threadPendingInteractionsQueryKey } from "@/hooks/queries/query-keys";
@@ -81,6 +81,7 @@ import {
   SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
   SIDEBAR_ROW_SELECTED_STATE_CLASS,
   SIDEBAR_CONTROL_BUTTON_CLASS,
+  SIDEBAR_ROW_COMPUTER_USE_STATE_CLASS,
   SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
   SIDEBAR_SUCCESS_STATUS_COLOR_CLASS,
   SIDEBAR_SUCCESS_STATUS_DOT_CLASS,
@@ -89,7 +90,7 @@ import {
 } from "./sidebarRowClasses";
 import type { ConsumeDragClickSuppression } from "@/components/ui/use-drag-click-suppression";
 import type { SidebarSortableDragBindings } from "./sortableMotion";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import type {
   SidebarNestTargetState,
   SidebarReorderPlacement,
@@ -107,6 +108,7 @@ import {
   useThreadTitleDisplayText,
 } from "@/components/thread/ThreadTitleMentions";
 import { pluginIconName } from "@/components/plugin/PluginIcon";
+import { useComputerUseActivity } from "@/lib/computer-use-active";
 import { usePluginThreadRowStatus } from "@/lib/plugin-thread-row-status";
 import { harnessIconModeAtom } from "@/components/settings/HarnessIconsSetting";
 import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
@@ -369,6 +371,7 @@ function renderThreadRowContainer({
 
 interface ThreadStatusGlyphProps extends ThreadListIndicatorState {
   hideIdleDraftLabel?: boolean;
+  isComputerUseActive?: boolean;
 }
 
 export function ThreadStatusGlyph({
@@ -379,6 +382,7 @@ export function ThreadStatusGlyph({
   hideIdleDraftLabel = false,
   isBackgroundAgentActive,
   isBackgroundCommandActive,
+  isComputerUseActive = false,
   isGoalActive,
   isPlanModeActive,
   isRuntimeActive,
@@ -445,7 +449,9 @@ export function ThreadStatusGlyph({
           name="Loading"
           className={cn(
             "animate-spin",
-            SIDEBAR_WORKING_STATUS_COLOR_CLASS,
+            isComputerUseActive
+              ? "bb-sidebar-computer-use-spinner"
+              : SIDEBAR_WORKING_STATUS_COLOR_CLASS,
             COARSE_POINTER_ICON_SIZE_CLASS,
           )}
           aria-label={getThreadListIndicatorLabel(kind) ?? undefined}
@@ -561,6 +567,8 @@ function ThreadTrailingIndicator({
   );
 }
 
+type CreditBurn = { credits: number; subagents: number };
+
 function ThreadRowComponent({
   projectId,
   thread,
@@ -570,7 +578,8 @@ function ThreadRowComponent({
   onProjectSelect,
   options,
   waiting,
-}: ThreadRowProps & { waiting: WaitingRequest | null }) {
+  burn,
+}: ThreadRowProps & { waiting: WaitingRequest | null; burn: CreditBurn | null }) {
   const [isDropdownActionsOpen, setIsDropdownActionsOpen] = useState(false);
   const [isContextActionsOpen, setIsContextActionsOpen] = useState(false);
   const { renameThread } = useThreadActions();
@@ -643,8 +652,16 @@ function ThreadRowComponent({
     parentOptions?.childActivity ?? NO_COLLAPSED_CHILD_ACTIVITY;
   const hasChildren = childCount > 0;
   const hasHiddenChildren = isParentRow && isParentCollapsed && hasChildren;
-  // A two-line waiting row would break the pinned stack, so it scrolls like a normal row.
-  const stickyLevel = waiting ? undefined : parentOptions?.stickyLevel;
+  // A thread family burning credits fast gets a red second line and a red bottom edge (David, 2026-11-23, design D2,
+  // docs/scopes/credit-burn.md). A red GPU row wins.
+  const burnLine =
+    burn && !waiting
+      ? burn.subagents > 0
+        ? `${burn.subagents} subagent${burn.subagents === 1 ? "" : "s"} using lots of credits`
+        : `Using a lot of credits · ${burn.credits.toLocaleString("en-US")}/hr`
+      : null;
+  // A two-line row would break the pinned stack, so it scrolls like a normal row.
+  const stickyLevel = waiting || burnLine ? undefined : parentOptions?.stickyLevel;
   const trailingIndicatorState: ThreadListIndicatorState = {
     hasPendingInteraction:
       hasPendingInteraction || (hasHiddenChildren && childActivity.pending),
@@ -687,13 +704,24 @@ function ThreadRowComponent({
   const splitIndicatorLabel = trailingIndicatorResolution.accessibleLabel
     ? `${labelTitle} — open in split; ${trailingIndicatorResolution.accessibleLabel}`
     : `${labelTitle} — open in split`;
+  const computerUse = useComputerUseActivity(thread.id);
+  const computerUseActive = computerUse !== null;
+  const computerUseLabel = computerUse
+    ? computerUse.appName
+      ? `Using ${computerUse.appName}`
+      : "Using your computer"
+    : null;
   const linkLabel = waiting
     ? `Open ${labelTitle} (${waiting.label})`
     : needsYou
       ? `Open ${labelTitle} (needs you)`
-      : hasComposerDraft
-      ? `Open ${labelTitle} (unsubmitted draft)`
-        : `Open ${labelTitle}`;
+      : computerUseLabel
+        ? `Open ${labelTitle} (${computerUseLabel})`
+        : burnLine
+          ? `Open ${labelTitle} (${burnLine})`
+          : hasComposerDraft
+            ? `Open ${labelTitle} (unsubmitted draft)`
+            : `Open ${labelTitle}`;
   const rowDragBindings = options.dragBindings;
   const nestTargetState = options.nestDrop?.state ?? null;
   const reorderPlacement = options.nestDrop?.reorderPlacement ?? null;
@@ -713,9 +741,14 @@ function ThreadRowComponent({
     showActive
       ? SIDEBAR_ROW_SELECTED_STATE_CLASS
       : SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
-    // A waiting row's red or yellow wins over the quiet split tint, which would paint over it when pinned.
+    // A waiting row's red or yellow wins over computer-use and split tints.
     !showActive &&
       !flagged &&
+      computerUseActive &&
+      SIDEBAR_ROW_COMPUTER_USE_STATE_CLASS,
+    !showActive &&
+      !flagged &&
+      !computerUseActive &&
       splitIndicator.isOpenInSplit &&
       SIDEBAR_ROW_OPEN_IN_SPLIT_STATE_CLASS,
     !showActive && "has-[[data-state=open]]:bg-sidebar-accent",
@@ -724,6 +757,8 @@ function ThreadRowComponent({
     reorderPlacement && REORDER_PLACEMENT_CLASS[reorderPlacement],
     waiting &&
       "h-auto py-1.5 max-md:pointer-coarse:h-auto bg-destructive/20 hover:bg-destructive/25 shadow-[inset_3px_0_0_var(--destructive)]",
+    burnLine &&
+      cn("h-auto flex-wrap gap-y-0 pt-0.5 pb-1.5 max-md:pointer-coarse:h-auto shadow-[inset_0_-2px_0_var(--destructive)]", !showActive && "bg-sidebar-accent/60"),
     // Opaque, so a pinned row never shows rows scrolling under it.
     needsYou &&
       "bg-[color-mix(in_oklab,var(--attention)_10%,var(--sidebar))] hover:bg-[color-mix(in_oklab,var(--attention)_15%,var(--sidebar))]",
@@ -759,13 +794,36 @@ function ThreadRowComponent({
         )}
       />
     </span>
+  ) : computerUseLabel !== null ? (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          data-sidebar-thread-computer-use-icon=""
+          role="img"
+          aria-label={computerUseLabel}
+          className="relative z-10 flex shrink-0 items-center"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            rowLinkRef.current?.click();
+          }}
+        >
+          <Icon
+            name="Laptop"
+            aria-hidden
+            className="size-3.5 shrink-0 bb-sidebar-computer-use-laptop"
+          />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{computerUseLabel}</TooltipContent>
+    </Tooltip>
   ) : (
     <Icon
       name={showCloudIcon ? "Cloud" : "Laptop"}
       aria-label={thread.executionTarget === "cloud" ? "Cloud thread" : "Local thread"}
       className={cn(
         "pointer-events-none size-3.5 shrink-0",
-        showCloudIcon ? "text-primary [&_path]:stroke-[1.9]" : "text-muted-foreground opacity-50",
+        showCloudIcon ? "cloud-icon-sidebar" : "text-muted-foreground opacity-50",
       )}
     />
   );
@@ -778,6 +836,8 @@ function ThreadRowComponent({
         {locationIcon}
         {harnessIcon}
       </>
+    ) : computerUseActive ? (
+      locationIcon
     ) : harnessIconMode === "instead" ? (
       harnessIcon
     ) : (
@@ -963,6 +1023,7 @@ function ThreadRowComponent({
                     hideIdleDraftLabel={
                       !hasHiddenChildren && trailingIndicatorKind === "draft"
                     }
+                    isComputerUseActive={computerUseActive}
                     pluginStatus={pluginThreadRowStatus}
                   />
                 )}
@@ -1006,6 +1067,12 @@ function ThreadRowComponent({
           </span>
         )}
       </span>
+      {burnLine ? (
+        // A second line under the title, the row's full width (design D2).
+        <span className="-mt-1 basis-full truncate pr-2 pl-5 text-xs font-medium text-destructive">
+          {burnLine}
+        </span>
+      ) : null}
     </>
   );
 
@@ -1047,7 +1114,7 @@ function ThreadRowComponent({
  * useChildThreadPendingAttention: the thread list's interactions-changed message keeps it
  * fresh, and no thread-detail subscription tells the server the thread is open.
  */
-function WaitingThreadRow(props: ThreadRowProps) {
+function WaitingThreadRow(props: ThreadRowProps & { burn: CreditBurn | null }) {
   const threadId = props.thread.id;
   const { data } = useQuery({
     queryKey: threadPendingInteractionsQueryKey(threadId),
@@ -1065,12 +1132,14 @@ function WaitingThreadRow(props: ThreadRowProps) {
 
 function ThreadRowWithChildProgress(props: ThreadRowProps) {
   const cells = useHiddenChildCells(props.thread);
+  // Only top threads: subagents' burn shows on their parent's row.
+  const burn = useThreadCreditBurn(props.thread.id, !props.thread.parentThreadId);
   // The open thread shows its own card, so its row stays normal (docs/scopes/sidebar.md).
   const row =
     props.thread.hasPendingInteraction && !props.isActive ? (
-      <WaitingThreadRow {...props} />
+      <WaitingThreadRow {...props} burn={burn} />
     ) : (
-      <ThreadRowComponent {...props} waiting={null} />
+      <ThreadRowComponent {...props} waiting={null} burn={burn} />
     );
   if (!cells) return row;
   return (

@@ -22,10 +22,12 @@ import {
   seedTurnStarted,
 } from "../helpers/seed.js";
 import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
+import { createTestDaemonEventEnvelope, internalAuthHeaders } from "../helpers/commands.js";
+import { groupHostDaemonEvents } from "@cloudroom/host-daemon-contract";
 
 function seedCompactableThread(
   harness: TestAppHarness,
-  args: { providerId: string; providerThreadId: string },
+  args: { providerId: string; providerThreadId: string; status?: "active" },
 ) {
   const { host, session } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, {
@@ -39,7 +41,7 @@ function seedCompactableThread(
     environmentId: environment.id,
     projectId: project.id,
     providerId: args.providerId,
-    status: "idle",
+    status: args.status ?? "idle",
   });
   seedThreadRuntimeState(harness.deps, {
     environmentId: environment.id,
@@ -315,7 +317,89 @@ describe("public thread compaction", () => {
     });
   });
 
-  it("rejects manual compaction for unsupported providers and active threads", async () => {
+  it("queues a busy thread's compaction, then its follow-up (`room-cli thread compact --self`)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedCompactableThread(harness, {
+        providerId: "pi",
+        providerThreadId: "provider-thread-busy",
+        status: "active",
+      });
+      const responder = registerSuccessfulTurnResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+
+      const post = (path: string, body: object) =>
+        harness.app.request(`/api/v1/threads/${thread.id}/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      await post("send", { mode: "queue-if-active", input: [{ type: "text", text: "Older message" }] });
+
+      const response = await post("compact", { then: "Keep going" });
+      expect(
+        response.status,
+        JSON.stringify(await readJson(response.clone())),
+      ).toBe(200);
+      expect(
+        responder.requests.filter(({ command }) => command.type === "turn.submit"),
+      ).toHaveLength(0);
+      // Compaction and its follow-up go before older messages.
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) => JSON.parse(row.content)),
+      ).toMatchObject([
+        createStandaloneBuiltinCompactCommandInput(),
+        [{ type: "text", text: "Keep going" }],
+        [{ type: "text", text: "Older message" }],
+      ]);
+      expect((await post("compact", {})).status).toBe(409);
+    });
+  });
+
+  it("tells the follow-up how compaction went once its turn ends", async () => {
+    await withTestHarness(async (harness) => {
+      const providerThreadId = "provider-thread-follow-up";
+      const { host, session, thread } = seedCompactableThread(harness, { providerId: "pi", providerThreadId });
+      const responder = registerSuccessfulTurnResponder(harness, { hostId: host.id, sessionId: session.id });
+      const submits = () => responder.requests.filter(({ command }) => command.type === "turn.submit");
+
+      const response = await harness.app.request(`/api/v1/threads/${thread.id}/compact`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ then: "Keep going" }),
+      });
+      expect(response.status).toBe(200);
+      const compact = submits()[0]?.command;
+      if (compact?.type !== "turn.submit" || !thread.environmentId) throw new Error("Expected the compaction turn");
+      seedAcceptedProviderTurn(harness, {
+        clientRequestId: compact.requestId,
+        environmentId: thread.environmentId,
+        providerThreadId,
+        threadId: thread.id,
+        turnId: "turn-compact",
+      });
+      const scope = turnScope("turn-compact");
+      const events = await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId: session.id,
+          eventGroups: groupHostDaemonEvents([
+            createTestDaemonEventEnvelope({ event: { type: "thread/compacted", threadId: thread.id, providerThreadId, scope } }),
+            createTestDaemonEventEnvelope({
+              event: { type: "turn/completed", threadId: thread.id, providerThreadId, scope, status: "completed" },
+            }),
+          ]),
+        }),
+      });
+      expect(events.status).toBe(200);
+      await expect.poll(() => submits().length).toBe(2);
+      expect(JSON.stringify(submits()[1]?.command)).toContain("Your context was compacted.\\n\\nKeep going");
+    });
+  });
+
+  it("rejects manual compaction for unsupported providers", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps);
       const { project } = seedProjectWithSource(harness.deps, {
@@ -325,11 +409,6 @@ describe("public thread compaction", () => {
         projectId: project.id,
         providerId: "acp-cursor",
         status: "idle",
-      });
-      const activeThread = seedThread(harness.deps, {
-        projectId: project.id,
-        providerId: "codex",
-        status: "active",
       });
 
       const unsupportedResponse = await harness.app.request(
@@ -341,16 +420,6 @@ describe("public thread compaction", () => {
         message: expect.stringContaining(
           "does not support manual context compaction",
         ),
-      });
-
-      const activeResponse = await harness.app.request(
-        `/api/v1/threads/${activeThread.id}/compact`,
-        { method: "POST" },
-      );
-      expect(activeResponse.status).toBe(409);
-      await expect(readJson(activeResponse)).resolves.toMatchObject({
-        message:
-          "Context can only be compacted while the thread is idle or errored",
       });
     });
   });

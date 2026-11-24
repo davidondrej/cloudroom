@@ -1,13 +1,13 @@
 import {
   ThreadMetadataContent,
   type ThreadMetadataContentProps,
-} from "./ThreadMetadataContent";
+} from "@/components/right-panel/tabs/thread-info";
 import {
   PanelStage,
   baseProps,
   makePullRequest,
   makeThread,
-} from "./ThreadMetadataContent.fixtures";
+} from "@/components/right-panel/tabs/thread-info.fixtures";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 
 export default {

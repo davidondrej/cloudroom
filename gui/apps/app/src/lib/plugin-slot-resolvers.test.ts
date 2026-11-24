@@ -177,6 +177,22 @@ describe("replacement resolvers", () => {
     ).toEqual({ kind: "owner" });
     expect(
       resolveFileOpenerReplacement({
+        registrations: [{ ...text, extensions: ["html"] }],
+        path: "C:/example/report.HTML",
+      }),
+    ).toEqual({ kind: "owner" });
+    expect(
+      resolveFileOpenerReplacement({
+        registrations: [{ ...text, extensions: ["html"] }],
+        path: "report.html",
+        builtInRendersHtml: false,
+      }),
+    ).toEqual({
+      kind: "plugin",
+      registration: { ...text, extensions: ["html"] },
+    });
+    expect(
+      resolveFileOpenerReplacement({
         registrations: [markdown, text],
         path: "notes.txt",
       }),

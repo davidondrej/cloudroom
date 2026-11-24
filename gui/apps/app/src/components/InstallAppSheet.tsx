@@ -52,7 +52,7 @@ export function InstallAppSheet() {
   const prompt = useInstallPrompt();
   const [guide] = useState(installGuide);
   const [visible, setVisible] = useState(false);
-  const popup = usePopup("install", guide !== null && !installed && getAppSurface() === "web");
+  const popup = usePopup("install", guide !== null && !installed && getAppSurface() !== "desktop");
   useEffect(() => {
     if (!popup.open) return;
     const timer = setTimeout(() => setVisible(true), 1_200);

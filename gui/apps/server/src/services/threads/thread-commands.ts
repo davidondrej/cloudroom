@@ -272,7 +272,11 @@ export async function buildThreadStartCommand(
     environment: args.environment,
     model: args.execution.model,
   });
-  const bridgeLaunch = requireBridgeLaunchForProviderId(deps, args.providerId);
+  const bridgeLaunch = requireBridgeLaunchForProviderId(
+    deps,
+    args.providerId,
+    args.environment.hostId,
+  );
   return {
     type: "thread.start",
     environmentId: args.environment.id,
@@ -286,7 +290,7 @@ export async function buildThreadStartCommand(
     requestId: args.requestId,
     ...prepareCustomInstructionInput(
       deps.db,
-      { threadId: args.thread.id, projectId: args.projectId },
+      { threadId: args.thread.id, projectId: args.projectId, experimental_execution: { providerId: args.providerId, model: args.execution.model } },
       args,
       true,
     ),
@@ -314,6 +318,7 @@ function buildPreparedTurnSubmitCommandPayload(
   const bridgeLaunch = requireBridgeLaunchForProviderId(
     args.deps,
     args.runtimeContext.providerId,
+    args.hostId,
   );
   return {
     type: "turn.submit",
@@ -322,7 +327,7 @@ function buildPreparedTurnSubmitCommandPayload(
     bridgeLaunch,
     ...prepareCustomInstructionInput(
       args.deps.db,
-      { threadId: args.threadId, projectId: args.runtimeContext.projectId },
+      { threadId: args.threadId, projectId: args.runtimeContext.projectId, experimental_execution: { providerId: args.runtimeContext.providerId, model: args.execution.model } },
       args,
     ),
     options: toRuntimeExecutionOptions({

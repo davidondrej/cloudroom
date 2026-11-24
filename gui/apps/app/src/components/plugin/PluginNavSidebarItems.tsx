@@ -10,13 +10,10 @@ import {
   type PointerEventHandler,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useAtom } from "jotai";
 import { DndContext, type DragEndEvent } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";

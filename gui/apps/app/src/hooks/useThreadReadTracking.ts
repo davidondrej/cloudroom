@@ -1,8 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import type { Thread } from "@cloudroom/domain";
 import { isThreadRead, type ThreadReadState } from "@cloudroom/client-core";
 import {
-  isDocumentVisible,
+  isDocumentAttended,
+  subscribeToDocumentVisibility,
   useDocumentVisibilityRevision,
 } from "@/lib/document-visibility";
 
@@ -38,7 +39,12 @@ export function useThreadReadTracking({
   const suppressedManualUnreadKeysRef = useRef<Set<string>>(new Set());
   const previousSnapshotRef = useRef<ReadTrackingSnapshot | null>(null);
   const visibilityRevision = useDocumentVisibilityRevision();
-  const isVisible = isDocumentVisible();
+  // A hook, not a plain call: the React Compiler caches a plain call's result from the first render.
+  const isVisible = useSyncExternalStore(
+    subscribeToDocumentVisibility,
+    isDocumentAttended,
+    isDocumentAttended,
+  );
 
   useEffect(() => {
     const controllers = pendingReadControllersRef.current;

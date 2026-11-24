@@ -853,32 +853,49 @@ describe("workspace command dispatch", () => {
     });
   });
 
-  it("enforces the 10 MB image read limit", async () => {
+  it("reads images larger than 10 MB and enforces the 50 MB read limit", async () => {
     const tempDir = await makeTempDir("bb-dispatch-host-read-large-image-");
-    const imagePath = path.join(tempDir, "large.png");
-    await fs.writeFile(imagePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+    const okImagePath = path.join(tempDir, "ok-12mb.png");
+    const okImageBytes = Buffer.alloc(12 * 1024 * 1024);
+    await fs.writeFile(okImagePath, okImageBytes);
 
     const harness = createHarness();
+    const okResult = await dispatchOnlineRpcCommand(
+      {
+        type: "host.read_file",
+        path: okImagePath,
+        rootPath: tempDir,
+      },
+      harness.dispatchOptions(),
+    );
+    expect(okResult).toMatchObject({
+      contentEncoding: "base64",
+      mimeType: "image/png",
+      sizeBytes: okImageBytes.byteLength,
+    });
+
+    const tooLargePath = path.join(tempDir, "too-large.png");
+    await fs.writeFile(tooLargePath, Buffer.alloc(50 * 1024 * 1024 + 1));
 
     await expect(
       dispatchOnlineRpcCommand(
         {
           type: "host.read_file",
-          path: imagePath,
+          path: tooLargePath,
           rootPath: tempDir,
         },
         harness.dispatchOptions(),
       ),
     ).rejects.toMatchObject({
       code: "file_too_large",
-      message: expect.stringContaining("10 MB"),
+      message: expect.stringContaining("50 MB"),
     });
   });
 
-  it("enforces the 25 MB non-image read limit", async () => {
+  it("enforces the 50 MB non-image read limit", async () => {
     const tempDir = await makeTempDir("bb-dispatch-host-read-large-file-");
     const filePath = path.join(tempDir, "large.bin");
-    await fs.writeFile(filePath, Buffer.alloc(25 * 1024 * 1024 + 1));
+    await fs.writeFile(filePath, Buffer.alloc(50 * 1024 * 1024 + 1));
 
     const harness = createHarness();
 
@@ -893,7 +910,7 @@ describe("workspace command dispatch", () => {
       ),
     ).rejects.toMatchObject({
       code: "file_too_large",
-      message: expect.stringContaining("25 MB"),
+      message: expect.stringContaining("50 MB"),
     });
   });
 

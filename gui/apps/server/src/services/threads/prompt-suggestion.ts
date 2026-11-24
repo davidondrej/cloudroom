@@ -59,7 +59,7 @@ export function promptSuggestion(
   return value;
 }
 
-function lastTurn(db: DbConnection, threadId: string) {
+export function lastTurn(db: DbConnection, threadId: string) {
   const row = db
     .select({
       seq: events.sequence,

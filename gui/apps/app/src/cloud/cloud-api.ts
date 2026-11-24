@@ -27,7 +27,12 @@ export interface CloudListeners {
 export interface CloudApi {
   threads(): Promise<CloudThreadSummary[]>;
   history(threadId: string, after: number): Promise<CloudHistory>;
-  send(threadId: string, text: string, requestId?: string): Promise<void>;
+  send(
+    threadId: string,
+    text: string,
+    requestId?: string,
+    surface?: string,
+  ): Promise<void>;
   stop(threadId: string): Promise<void>;
   create(body: CloudCreate): Promise<CloudThreadSummary>;
   warm(): Promise<void>;
@@ -48,6 +53,8 @@ export interface CloudCreate {
   reasoning?: string;
   service_tier?: string;
   target?: string;
+  /** Set only while usage data is on: the website then counts the message as sent from this surface. */
+  surface?: string;
 }
 
 export class SignedOutError extends Error {}
@@ -96,11 +103,12 @@ export const cloudApi: CloudApi = {
     request<CloudHistory>(`threads/${threadId}?after=${after}`, {
       signal: AbortSignal.timeout(HISTORY_TIMEOUT_MS),
     }),
-  send: async (threadId, text, requestId) =>
+  send: async (threadId, text, requestId, surface) =>
     void (await post(threadId, {
       action: "send",
       text,
       request_id: requestId,
+      surface,
     })),
   stop: async (threadId) => void (await post(threadId, { action: "stop" })),
   create: async (body) =>

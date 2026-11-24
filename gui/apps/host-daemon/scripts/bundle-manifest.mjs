@@ -17,14 +17,23 @@ const NODE_ESM_REQUIRE_BANNER = [
 // Inside Cloudroom.app, the Linux app, or the Windows app (Git Bash), run room-cli
 // on the app's own runtime, so the computer needs no Node (ADR 0202). Elsewhere,
 // use `node`. Line 2 is valid sh and, to JS, a string plus a comment.
+// Git Bash gives a /c/... path, and with MSYS_NO_PATHCONV=1 it hands that to the exe as is,
+// which Node can't load, so pass the Windows form from cygpath when it names this file (#2004).
+// Git's usr/bin/bash.exe started directly has no /usr/bin on PATH, hence the full path too.
+// When Windows won't start Cloudroom.exe (Smart App Control, an IT policy), exec fails with 126,
+// like the CLI's own 126. So on Windows (cygpath found), execfail keeps the shell after a failed
+// exec, and it runs on node instead, as room-cli.cmd does (#1583). "|| exit" stops it reading
+// the JS below as sh when node is missing too.
 export const ROOM_CLI_HASHBANG = [
   "#!/bin/sh",
-  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly "${f%/resources/app.asar.unpacked/*}"/Cloudroom.exe "${f%/resources/app.asar.unpacked/*}/Cloudroom Nightly.exe"; do [ -x "$e" ] && ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; done; exec node "$f" "$@"',
+  '":" //; f=$(realpath "$0" 2>/dev/null || readlink "$0" || echo "$0"); for c in cygpath /usr/bin/cygpath; do command -v "$c" >/dev/null && w=$("$c" -m "$f" 2>/dev/null) && [ -f "$w" ] && f=$w && { shopt -s execfail 2>/dev/null; break; }; done; for e in "${f%/Contents/Resources/app.asar.unpacked/*}"/Contents/MacOS/* "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom "${f%/resources/app.asar.unpacked/*}"/gui-cloudroom-nightly "${f%/resources/app.asar.unpacked/*}"/Cloudroom.exe "${f%/resources/app.asar.unpacked/*}/Cloudroom Nightly.exe"; do [ -x "$e" ] && { ELECTRON_RUN_AS_NODE=1 exec "$e" "$f" "$@"; unset ELECTRON_RUN_AS_NODE; echo "room-cli: Windows blocked Cloudroom.exe. Smart App Control or an IT policy can do this. Trying Node.js instead." >&2; }; done; exec node "$f" "$@" || exit',
 ].join("\n");
 
 // The same for cmd.exe and PowerShell, from
 // <app>\resources\app.asar.unpacked\node_modules\bb-app\host-daemon\dist.
 // %* stays outside parentheses: a ")" in an argument would end the block.
+// When Windows won't start Cloudroom.exe, cmd.exe sets its error: 4551 for Smart App Control or
+// App Control, 1260 for a group policy. The CLI never exits with these, so run it on node (#1583).
 const APP_DIR = '"%~dp0..\\..\\..\\..\\..\\..\\';
 export const ROOM_CLI_CMD = [
   "@echo off",
@@ -32,12 +41,16 @@ export const ROOM_CLI_CMD = [
   'set "ROOM_CLI_APP="',
   `for %%e in (${APP_DIR}Cloudroom.exe" ${APP_DIR}Cloudroom Nightly.exe") do if not defined ROOM_CLI_APP if exist %%e set "ROOM_CLI_APP=%%~fe"`,
   "if defined ROOM_CLI_APP goto app",
+  ":node",
   'node "%~dp0room-cli" %*',
   "exit /b %ERRORLEVEL%",
   ":app",
   "set ELECTRON_RUN_AS_NODE=1",
   '"%ROOM_CLI_APP%" "%~dp0room-cli" %*',
-  "exit /b %ERRORLEVEL%",
+  "if %ERRORLEVEL% neq 4551 if %ERRORLEVEL% neq 1260 exit /b %ERRORLEVEL%",
+  "set ELECTRON_RUN_AS_NODE=",
+  ">&2 echo room-cli: Windows blocked Cloudroom.exe. Smart App Control or an IT policy can do this. Trying Node.js instead.",
+  "goto node",
   "",
 ].join("\r\n");
 

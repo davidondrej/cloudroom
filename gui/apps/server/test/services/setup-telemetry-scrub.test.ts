@@ -1,6 +1,6 @@
 import { homedir } from "node:os";
 import { expect, it } from "vitest";
-import { scrub } from "../../src/services/cloudroom/setup-telemetry.js";
+import { scrub, scrubFeedback } from "../../src/services/cloudroom/setup-telemetry.js";
 
 // Telemetry never sends paths or secrets (ADR 0198). Every setup message, Windows error, and crash log goes through scrub().
 it("drops private paths and credentials, but keeps tool paths, sign-in URLs, and plain errors", () => {
@@ -22,4 +22,21 @@ it("drops private paths and credentials, but keeps tool paths, sign-in URLs, and
   }
   expect(scrub("Open https://claude.com/cai/oauth/authorize?code=secret")).toBe("Open https://claude.com/cai/oauth/authorize");
   expect(scrub("Claude sign-in timed out. Run /login, and/or retry in 1/2 a minute.")).toBe("Claude sign-in timed out. Run /login, and/or retry in 1/2 a minute.");
+});
+
+it("scrubFeedback removes secrets and private paths while keeping multiline feedback and identifiers", () => {
+  const padding = "x ".repeat(200);
+  const raw = [
+    "provider-cli-unsupported-version hit in ~/.local/bin/claude",
+    `Failed reading ${homedir()}/secret-client/app.ts with ghp_1234567890abcdef and alice@example.com`,
+    ["BEGIN", "END"].map((edge) => `-----${edge} RSA PRIVATE ${"KEY"}-----`).join("\nMIIEpAIBAAKCAQEA\n"),
+    `Detail: ${padding}`,
+  ].join("\n");
+  const clean = scrubFeedback(raw);
+  expect(clean.length).toBeGreaterThan(300);
+  expect(clean).toContain("\n");
+  expect(clean).toContain("provider-cli-unsupported-version");
+  expect(clean).toContain("~/.local/bin/claude");
+  expect(clean).toContain("<private-key>");
+  expect(clean).not.toMatch(/secret-client|ghp_|alice@example\.com|MIIEpAIBAAKCAQEA/);
 });

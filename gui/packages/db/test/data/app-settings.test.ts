@@ -48,7 +48,6 @@ describe("app settings data", () => {
       ...defaultAppSettings,
       showKeyboardHints: false,
       steerActiveThreadOnEnter: true,
-      providerOrder: ["pi"],
       defaultProviderId: "pi",
     });
     setAppKeybindingOverrides(db, overrides);
@@ -57,7 +56,6 @@ describe("app settings data", () => {
       ...defaultAppSettings,
       showKeyboardHints: false,
       steerActiveThreadOnEnter: true,
-      providerOrder: ["pi"],
       defaultProviderId: "pi",
     });
     expect(getAppKeybindingOverrides(db)).toEqual(overrides);

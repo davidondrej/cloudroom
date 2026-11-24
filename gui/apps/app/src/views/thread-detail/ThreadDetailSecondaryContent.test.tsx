@@ -3,7 +3,7 @@
 import { useMemo, type ComponentProps, type ReactNode } from "react";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { CompactViewportOverrideProvider } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
   usePluginComposerHost,
@@ -93,12 +93,12 @@ vi.mock("react-resizable-panels", async () => {
 });
 
 vi.mock(
-  "@/components/secondary-panel/ThreadMetadataContent",
+  "@/components/right-panel/tabs/thread-info",
   async (importOriginal) => {
     const React = await import("react");
     const actual =
       await importOriginal<
-        typeof import("@/components/secondary-panel/ThreadMetadataContent")
+        typeof import("@/components/right-panel/tabs/thread-info")
       >();
 
     return {
@@ -120,12 +120,12 @@ vi.mock(
 );
 
 vi.mock(
-  "@/components/secondary-panel/ThreadSecondaryPanel",
+  "@/components/right-panel/shell/panel-shell",
   async (importOriginal) => {
     const React = await import("react");
     const actual =
       await importOriginal<
-        typeof import("@/components/secondary-panel/ThreadSecondaryPanel")
+        typeof import("@/components/right-panel/shell/panel-shell")
       >();
 
     const ThreadSecondaryPanel = ({

@@ -245,6 +245,7 @@ interface TurnPlan {
   toolName: string | null;
   toolTurnResolved: boolean;
   holdTurn: boolean;
+  retryTurn: boolean;
   failure: { text: string; beforeTurn: boolean } | null;
   recoverKind: ProviderRecoveryHint["kind"] | null;
   recoverNowKind: ProviderRecoveryHint["kind"] | null;
@@ -300,6 +301,7 @@ function parseTurnPlan(inputText: string): TurnPlan {
     toolName: toolMatch?.[1] ?? null,
     toolTurnResolved: unresolvedToolMatch === null,
     holdTurn: holdMatch !== null,
+    retryTurn: /(?:^|\s)retry_turn(?:\s|$)/u.test(inputText),
     failure:
       failureText === undefined
         ? null
@@ -582,6 +584,23 @@ function beginTurn(args: {
 
   if (plan.holdTurn) {
     emitRecoveryHint(session.threadId, plan.recoverKind);
+    return;
+  }
+  if (plan.retryTurn) {
+    // Transport retries with no progress, like Codex's "Reconnecting... n/5" (#1853).
+    let attempt = 0;
+    session.activeTurn.timer = setInterval(() => {
+      attempt += 1;
+      emitDeltas(session.threadId, [
+        {
+          kind: "provider.error",
+          message: "Provider error",
+          detail: `Reconnecting... ${attempt}/5`,
+          willRetry: true,
+          providerTurnId,
+        },
+      ]);
+    }, 20);
     return;
   }
   if (plan.failure !== null) {

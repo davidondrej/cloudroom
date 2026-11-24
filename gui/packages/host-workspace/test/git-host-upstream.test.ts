@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runGit } from "../src/git.js";
-import { Workspace } from "../src/workspace.js";
+import { provisionWorkspace } from "../src/provision.js";
 
 const execFileAsync = promisify(execFile);
 const tempDirs: string[] = [];
@@ -171,7 +171,7 @@ describe("pull request lookup for differently named upstream branches", () => {
   it("uses the managed local branch when it tracks the origin base branch", async () => {
     const workspacePath = await createManagedBaseTrackedWorkspace();
     const { logPath } = await installFakeGh("found");
-    const workspace = new Workspace(workspacePath);
+    const workspace = await provisionWorkspace({ path: workspacePath });
 
     await expect(workspace.getPullRequest()).resolves.toMatchObject({
       outcome: "found",
@@ -192,7 +192,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     const { logPath } = await installFakeGh("found");
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toMatchObject({ outcome: "found" });
 
     const calls = await readGhCalls(logPath);
@@ -205,7 +205,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     const { logPath } = await installFakeGh("found");
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toMatchObject({
       outcome: "found",
       pullRequest: {
@@ -232,7 +232,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     vi.stubEnv("GH_ENTERPRISE_TOKEN", "dummy-enterprise-token");
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toEqual({
       outcome: "unavailable",
       message:
@@ -244,7 +244,7 @@ describe("pull request lookup for differently named upstream branches", () => {
   it("uses a changed remote URL on the next lookup", async () => {
     const workspacePath = await createTrackedForkWorkspace();
     const { logPath } = await installFakeGh("found");
-    const workspace = new Workspace(workspacePath);
+    const workspace = await provisionWorkspace({ path: workspacePath });
 
     await expect(workspace.getPullRequest()).resolves.toMatchObject({
       outcome: "found",
@@ -267,7 +267,7 @@ describe("pull request lookup for differently named upstream branches", () => {
   it("uses the qualified upstream target for ready, draft, and merge actions", async () => {
     const workspacePath = await createTrackedForkWorkspace();
     const { logPath } = await installFakeGh("found");
-    const workspace = new Workspace(workspacePath);
+    const workspace = await provisionWorkspace({ path: workspacePath });
 
     await workspace.runPullRequestAction({ operation: "ready" });
     await workspace.runPullRequestAction({ operation: "draft" });
@@ -288,7 +288,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     await installFakeGh("none");
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toEqual({ outcome: "none" });
   });
 
@@ -297,7 +297,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     await installFakeGh("auth");
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toEqual({
       outcome: "unavailable",
       message: expect.stringContaining("gh auth login"),
@@ -314,7 +314,7 @@ describe("pull request lookup for differently named upstream branches", () => {
     vi.stubEnv("PATH", binPath);
 
     await expect(
-      new Workspace(workspacePath).getPullRequest(),
+      provisionWorkspace({ path: workspacePath }).then((workspace) => workspace.getPullRequest()),
     ).resolves.toEqual({
       outcome: "unavailable",
       message: "GitHub CLI is not available",

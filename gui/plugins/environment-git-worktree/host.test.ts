@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorktreeHostEntry } from "./host.js";
+import { withWorktreeMetadataLock } from "bb-environment-provider-host/locks";
+import { allowLongPaths } from "./host/worktree.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryRoots: string[] = [];
@@ -51,7 +53,9 @@ async function createSourceRepository(repositoryName = "repo"): Promise<{
   temporaryRoots.push(root);
   const sourcePath = join(root, repositoryName);
   const dataDir = join(root, "plugin-data");
-  await execFileAsync("mkdir", ["-p", sourcePath, dataDir]);
+  await Promise.all(
+    [sourcePath, dataDir].map((dir) => mkdir(dir, { recursive: true })),
+  );
   await git(sourcePath, "init", "--initial-branch=main");
   await writeFile(join(sourcePath, "README.md"), "hello\n");
   await git(sourcePath, "add", ".");
@@ -69,7 +73,9 @@ async function createDetachedSingleBranchRepository(): Promise<{
   const originPath = join(root, "origin");
   const sourcePath = join(root, "repo");
   const dataDir = join(root, "plugin-data");
-  await execFileAsync("mkdir", ["-p", originPath, dataDir]);
+  await Promise.all(
+    [originPath, dataDir].map((dir) => mkdir(dir, { recursive: true })),
+  );
   await git(originPath, "init", "--initial-branch=main");
   await writeFile(join(originPath, "README.md"), "hello\n");
   await git(originPath, "add", ".");
@@ -162,6 +168,53 @@ describe("worktree host entry", () => {
       ).toEqual({ status: "removed" });
       expect(existsSync(join(dataDir, "worktrees", pathKey))).toBe(false);
       await harness.experimental_dispose();
+    },
+  );
+
+  it.each([
+    ["win32", null, "true"],
+    ["win32", "false", "false"],
+    ["linux", null, ""],
+    ["darwin", null, ""],
+  ] as const)(
+    "turns on core.longpaths on %s when it is set to %s (#1806)",
+    async (platform, existing, expected) => {
+      const { root, sourcePath } = await createSourceRepository();
+      // Only this repository's config counts, not the machine's.
+      const globalConfig = join(root, "gitconfig");
+      await writeFile(globalConfig, "");
+      vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig);
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+      try {
+        if (existing !== null)
+          await git(sourcePath, "config", "core.longpaths", existing);
+        const value = async () =>
+          (
+            await git(
+              sourcePath,
+              "config",
+              "--local",
+              "--default",
+              "",
+              "--get",
+              "core.longpaths",
+            )
+          ).trim();
+        // It waits for the lock `worktree add` holds while it writes config.
+        let release = () => {};
+        const held = withWorktreeMetadataLock(
+          join(sourcePath, ".git"),
+          () => new Promise<void>((resolve) => (release = resolve)),
+        );
+        const allowed = allowLongPaths(sourcePath, undefined, platform);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await value()).toBe(existing ?? "");
+        release();
+        await Promise.all([held, allowed]);
+        expect(await value()).toBe(expected);
+      } finally {
+        vi.unstubAllEnvs();
+      }
     },
   );
 

@@ -1,7 +1,6 @@
 import { StoryCard, StoryRow } from "../../apps/app/.ladle/story-card.js";
 import {
   ProviderUsageStatusContent,
-  UsagePageContent,
   type UsageStoreSnapshot,
 } from "./app.js";
 import { fromCredits, type PlanSummary } from "./plan-usage.js";
@@ -213,18 +212,6 @@ function storySnapshot(name: ScenarioName): UsageStoreSnapshot {
   };
 }
 
-function SettingsPreview({ scenario }: { scenario: ScenarioName }) {
-  return (
-    <div className="w-full max-w-3xl rounded-lg bg-background p-5">
-      <UsagePageContent
-        snapshot={storySnapshot(scenario)}
-        plan={fromCredits(plans[1]!)}
-        refreshEnabled={false}
-      />
-    </div>
-  );
-}
-
 function FooterPreview({
   scenario,
   plan = null,
@@ -271,18 +258,6 @@ const storyRows: readonly { label: string; scenario: ScenarioName }[] = [
   { label: "missing provider", scenario: "missingProvider" },
   { label: "failed refresh", scenario: "failedRefresh" },
 ];
-
-export function Settings() {
-  return (
-    <StoryCard labelWidth="180px">
-      {storyRows.map(({ label, scenario }) => (
-        <StoryRow key={scenario} label={label} hint={descriptions[scenario]}>
-          <SettingsPreview scenario={scenario} />
-        </StoryRow>
-      ))}
-    </StoryCard>
-  );
-}
 
 export function Disclosure() {
   return (

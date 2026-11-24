@@ -87,13 +87,20 @@ export const experimental_aiVoiceTranscribeInputSchema = z
   .object({
     serviceId: z.string().min(1),
     model: z.string().min(1),
-    audioBase64: z.string().min(1),
+    audioBase64: z.string().min(1).optional(),
+    /** Server-relative path (e.g. `/internal/voice-audio/<token>`) or URL to pull audio bytes when too large for inline RPC. */
+    audioUrl: z.string().min(1).optional(),
     mimeType: z.string().min(1),
     filename: z.string().min(1),
     prompt: z.string().nullable(),
     timeoutMs: z.number().int().positive(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.audioBase64 !== undefined || value.audioUrl !== undefined,
+    { message: "Either audioBase64 or audioUrl is required" },
+  );
 export type ExperimentalAiVoiceTranscribeInput = z.infer<
   typeof experimental_aiVoiceTranscribeInputSchema
 >;

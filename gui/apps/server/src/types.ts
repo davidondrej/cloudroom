@@ -29,6 +29,8 @@ export interface ServerRuntimeConfig {
   dataDir: string;
   featureFlags: FeatureFlags;
   hostDaemonPort: number;
+  /** The desktop app's public key for human clicks (ADR 0260). Unset when the app didn't start this server. */
+  humanClickPublicKey?: string;
   inheritedSkillsRootPaths: string[];
   inferenceFallbackModel: string;
   inferenceModel: string;
@@ -37,6 +39,8 @@ export interface ServerRuntimeConfig {
   openAiApiKey: string;
   serverPort: number;
   sharedSkillRoots: ProviderNativeSkillRoots;
+  /** False when opted out via BB_TELEMETRY=false, CLOUDROOM_TELEMETRY=false, or DO_NOT_TRACK=1. */
+  telemetryAllowed?: boolean;
   transcriptionModel: string;
   /** Cloudroom's own user skills folder, `~/.cloudroom/skills`. */
   userSkillsRootPath: string;

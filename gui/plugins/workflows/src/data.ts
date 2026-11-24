@@ -504,9 +504,56 @@ export function getCallByChildThread(
 
 export function listCallsForRun(db: Db, runId: string): WorkflowCallRow[] {
   return db
-    .prepare(`${CALL_SELECT} WHERE run_id = ? ORDER BY call_index`)
+    .prepare(
+      `${CALL_SELECT} WHERE run_id = ? AND call_index >= 0 ORDER BY call_index`,
+    )
     .all(runId)
     .map(callRow);
+}
+
+/**
+ * A restarted call's earlier failed or cancelled attempts. They keep their row
+ * at -(index + SUPERSEDED_STRIDE * n), below the live 0..999 index range.
+ */
+const SUPERSEDED_STRIDE = 1_000_000;
+
+export type SupersededCallRow = Pick<
+  WorkflowCallRow,
+  | "id"
+  | "runId"
+  | "callIndex"
+  | "status"
+  | "childThreadId"
+  | "repairAttempts"
+  | "providerRetryAttempts"
+  | "error"
+  | "createdAt"
+  | "startedAt"
+  | "finishedAt"
+>;
+
+/** Metadata only: the live call already carries the prompt and options. */
+export function listSupersededCalls(
+  db: Db,
+  args: { runId: string; firstCallIndex: number; lastCallIndex: number },
+): SupersededCallRow[] {
+  return db
+    .prepare(
+      `SELECT id, run_id AS runId,
+         -call_index % ${SUPERSEDED_STRIDE} AS callIndex, status,
+         child_thread_id AS childThreadId, repair_attempts AS repairAttempts,
+         provider_retry_attempts AS providerRetryAttempts, error,
+         created_at AS createdAt, started_at AS startedAt,
+         finished_at AS finishedAt
+       FROM workflow_calls WHERE run_id = ? AND call_index < 0
+         AND -call_index % ${SUPERSEDED_STRIDE} BETWEEN ? AND ?
+       ORDER BY rowid`,
+    )
+    .all(
+      args.runId,
+      args.firstCallIndex,
+      args.lastCallIndex,
+    ) as SupersededCallRow[];
 }
 
 export function listCallsForRunPage(
@@ -535,6 +582,23 @@ export function countCallsForRun(db: Db, runId: string): WorkflowCallCounts {
     )
     .get(runId) as WorkflowCallCounts;
   return row;
+}
+
+/** A run's running workers, ids only, so a caller can inspect or stop them (#2240). */
+export function listRunningWorkersForRun(
+  db: Db,
+  runId: string,
+  limit: number,
+): Array<{ callIndex: number; threadId: string }> {
+  return db
+    .prepare(
+      `SELECT call_index AS callIndex, child_thread_id AS threadId
+       FROM workflow_calls INDEXED BY workflow_calls_run_idx
+       WHERE run_id = ? AND status = 'running'
+         AND child_thread_id IS NOT NULL
+       ORDER BY call_index LIMIT ?`,
+    )
+    .all(runId, limit) as Array<{ callIndex: number; threadId: string }>;
 }
 
 export function listRunningCalls(db: Db, limit: number): WorkflowCallRow[] {
@@ -580,8 +644,19 @@ export function startCall(
       throw new Error(`Workflow run ${args.runId} is not running`);
     }
     const existing = getCall(db, args.runId, args.callIndex);
+    const supersede =
+      existing?.status === "failed" || existing?.status === "cancelled";
+    if (supersede) {
+      // Keep the failed or cancelled attempt for history instead of overwriting it (#2196).
+      db.prepare(
+        `UPDATE workflow_calls SET call_index = -(call_index + @stride * (1 + (
+           SELECT COUNT(*) FROM workflow_calls WHERE run_id = @runId AND call_index < 0
+         ))) WHERE id = @id`,
+      ).run({ stride: SUPERSEDED_STRIDE, runId: args.runId, id: existing.id });
+    }
     const now = Date.now();
-    const id = existing?.id ?? `wfc_${randomUUID()}`;
+    const id =
+      existing !== null && !supersede ? existing.id : `wfc_${randomUUID()}`;
     db.prepare(
       `INSERT INTO workflow_calls (
        id, run_id, call_index, cache_key, prompt, options_json,

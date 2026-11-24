@@ -205,7 +205,11 @@ describe("Claude Code login expiry", () => {
 
     expect(health).toEqual({
       supported: true,
-      health: expect.objectContaining({ status: "unauthenticated" }),
+      health: expect.objectContaining({
+        status: "unauthenticated",
+        // The claude this machine has, by full path, or plain `claude`.
+        loginCommand: expect.stringMatching(/(^|\/)claude auth login$/u),
+      }),
     });
     expect(usage).toEqual({
       supported: true,

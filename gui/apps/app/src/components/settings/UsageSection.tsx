@@ -4,6 +4,9 @@ import { SettingsSection } from "@/components/ui/settings-section.js";
 
 // Parts every Settings → Analytics tab shares.
 
+/** One color per model or thread, picked so color-blind readers can tell them apart. Lime is the app's own; gray is the rest. */
+export const COLORS = ["var(--primary)", "#3987e5", "#d95926", "#2bb5a0"], REST = "color-mix(in oklab, var(--foreground) 38%, var(--background))";
+
 export function Stat({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
     <div className="min-w-0 flex-1 border border-border px-3.5 py-3">

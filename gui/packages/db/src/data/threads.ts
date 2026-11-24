@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   getTableColumns,
+  gte,
   inArray,
   isNotNull,
   isNull,
@@ -114,6 +115,9 @@ export interface ThreadSearchResults {
 export interface SearchThreadsWithPendingInteractionStateArgs {
   query: string;
   limitPerGroup: number;
+  /** Both narrow the matches before `limitPerGroup` cuts them. */
+  projectId?: string;
+  hasParent?: boolean;
 }
 
 export interface UpsertThreadTitleSearchSegmentsArgs {
@@ -149,6 +153,8 @@ interface ThreadSearchTokenMatch {
 interface ListThreadSearchMatchRowsArgs {
   limitPerGroup: number;
   tokenMatches: readonly ThreadSearchTokenMatch[];
+  projectId?: string;
+  hasParent?: boolean;
 }
 
 interface ThreadSearchMatchRow {
@@ -999,6 +1005,16 @@ function listThreadSearchMatchRows(
     `,
   );
   const isTitleSegment = sql`s.source_kind IN ('title', 'title_fallback')`;
+  const inProject =
+    args.projectId === undefined
+      ? sql``
+      : sql`AND t.project_id = ${args.projectId}`;
+  const withParent =
+    args.hasParent === undefined
+      ? sql``
+      : args.hasParent
+        ? sql`AND t.parent_thread_id IS NOT NULL`
+        : sql`AND t.parent_thread_id IS NULL`;
 
   return db.all<ThreadSearchMatchRow>(sql`
     WITH matched_segments AS MATERIALIZED (
@@ -1028,6 +1044,8 @@ function listThreadSearchMatchRows(
       JOIN threads AS t ON t.id = token_matches.threadId
       WHERE t.deleted_at IS NULL
         AND t.visibility = 'visible'
+        ${inProject}
+        ${withParent}
       GROUP BY threadId
       HAVING COUNT(*) = ${args.tokenMatches.length}
     ),
@@ -1168,6 +1186,8 @@ export function searchThreadsWithPendingInteractionState(
   const rows = listThreadSearchMatchRows(db, {
     limitPerGroup,
     tokenMatches,
+    ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
+    ...(args.hasParent !== undefined ? { hasParent: args.hasParent } : {}),
   });
 
   return {
@@ -1191,17 +1211,24 @@ export interface CountThreadsOptions {
   providerId?: string;
   projectId?: string;
   /**
-   * `{ kind: "root" }` counts threads with no parent, `{ kind: "id" }` counts
-   * one parent's children, and omitting the option does not filter on
-   * parentage. Three states, three shapes — a nullable string would have made
-   * "no parent" and "no filter" the same value.
+   * `{ kind: "root" }` counts threads with no parent, `{ kind: "child" }`
+   * counts threads with any parent, `{ kind: "id" }` counts one parent's
+   * children, and omitting the option does not filter on parentage. A nullable
+   * string would have made "no parent" and "no filter" the same value.
    */
-  parent?: { kind: "root" } | { kind: "id"; parentThreadId: string };
+  parent?:
+    | { kind: "root" }
+    | { kind: "child" }
+    | { kind: "id"; parentThreadId: string };
   groupBy?: CountThreadsGroupBy;
   /** Archived rows are excluded unless this is true; deleted rows always are. */
   includeArchived?: boolean;
+  /** Count archived rows only (the Archived threads page). Wins over `includeArchived`. */
+  archivedOnly?: boolean;
   /** Hidden rows are excluded unless this is true. */
   includeHidden?: boolean;
+  /** Only threads created at or after this time (ms since epoch). */
+  createdAfter?: number;
 }
 
 export interface ThreadCountGroupRow {
@@ -1232,7 +1259,11 @@ export function countThreads(
     options.hostId !== undefined || options.groupBy === "host";
   const filters = [
     nonDeletedThreads(),
-    options.includeArchived === true ? undefined : isNull(threads.archivedAt),
+    options.archivedOnly === true
+      ? isNotNull(threads.archivedAt)
+      : options.includeArchived === true
+        ? undefined
+        : isNull(threads.archivedAt),
     options.includeHidden === true
       ? undefined
       : eq(threads.visibility, "visible"),
@@ -1249,9 +1280,14 @@ export function countThreads(
       ? undefined
       : options.parent.kind === "root"
         ? isNull(threads.parentThreadId)
-        : eq(threads.parentThreadId, options.parent.parentThreadId),
+        : options.parent.kind === "child"
+          ? isNotNull(threads.parentThreadId)
+          : eq(threads.parentThreadId, options.parent.parentThreadId),
     options.hostId !== undefined
       ? eq(environments.hostId, options.hostId)
+      : undefined,
+    options.createdAfter !== undefined
+      ? gte(threads.createdAt, options.createdAfter)
       : undefined,
   ].filter((value) => value !== undefined);
 
@@ -1465,6 +1501,7 @@ export function listUnarchivedAssignedChildThreads(
   );
 }
 
+/** A thread's open side chats. One with a parent of its own belongs to that parent instead, even after a move (#2136). */
 export function listUnarchivedHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1474,6 +1511,22 @@ export function listUnarchivedHiddenSourceThreads(
     liveThreads(
       eq(threads.sourceThreadId, args.sourceThreadId),
       eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
+    ),
+  );
+}
+
+/** A thread's side chats, archived or not, without a parent of their own. */
+export function listHiddenSourceThreads(
+  db: ThreadWriteConnection,
+  args: ListUnarchivedHiddenSourceThreadsArgs,
+): ThreadRow[] {
+  return listThreadsWhere(
+    db,
+    nonDeletedThreads(
+      eq(threads.sourceThreadId, args.sourceThreadId),
+      eq(threads.visibility, "hidden"),
+      isNull(threads.parentThreadId),
     ),
   );
 }

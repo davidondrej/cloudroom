@@ -3,6 +3,10 @@ import type { AvailableModel } from "@cloudroom/domain";
 import type { SystemProviderInfo } from "@cloudroom/server-contract";
 import { action } from "../action.js";
 import { createCliRoomSdk } from "../client.js";
+import {
+  resolveContextProjectId,
+  resolveExplicitIdFlag,
+} from "../context-env.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { resolveMachineEnvironmentRouting } from "./machine.js";
@@ -20,6 +24,7 @@ interface ProviderModelsCommandOptions {
   host?: string;
   json?: boolean;
   machine?: string;
+  project?: string;
   selectedModel?: string;
   restart?: boolean;
 }
@@ -80,6 +85,10 @@ export function registerProviderCommands(
     .description("List available models for a provider")
     .option("--json", "Print machine-readable JSON output")
     .option(
+      "--project <id>",
+      "List the models a new thread in this project gets (default: this thread's project)",
+    )
+    .option(
       "--restart",
       "Restart this provider's model discovery without stopping threads",
     )
@@ -101,16 +110,38 @@ export function registerProviderCommands(
             opts,
             serverUrl,
           );
-          const executionOptions =
-            opts.restart && providerId
-              ? await sdk.providers.restartModelDiscovery({
+          // A project's opencode.json or Pi config can hide models: list where its threads start (#1236).
+          const explicitProjectId = resolveExplicitIdFlag({
+            flagName: "--project",
+            value: opts.project,
+          });
+          const contextProjectId =
+            explicitProjectId === undefined
+              ? resolveContextProjectId()
+              : undefined;
+          const load = (projectId: string | undefined) => {
+            const project = projectId === undefined ? {} : { projectId };
+            return opts.restart && providerId
+              ? sdk.providers.restartModelDiscovery({
                   ...routing,
+                  ...project,
                   providerId,
                 })
-              : await sdk.providers.models({
+              : sdk.providers.models({
                   ...routing,
+                  ...project,
                   ...(providerId ? { providerId } : {}),
                 });
+          };
+          // A thread whose project folder moved lists nothing there: show the machine's list.
+          const executionOptions =
+            contextProjectId === undefined
+              ? await load(explicitProjectId)
+              : await load(contextProjectId).then(
+                  (result) =>
+                    result.models.length > 0 ? result : load(undefined),
+                  () => load(undefined),
+                );
           // The server falls back to the first provider for an unknown ID,
           // which printed Codex's models for a typo (feedback #479).
           if (

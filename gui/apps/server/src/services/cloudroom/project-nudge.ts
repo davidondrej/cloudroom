@@ -11,6 +11,7 @@ import {
   setProjectSummaries,
   threads,
 } from "@cloudroom/db";
+import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { CommandResultSideEffectsDeps } from "../../internal/command-result-side-effects.js";
 import type { AppDeps } from "../../types.js";
@@ -176,7 +177,7 @@ async function writeSummary(deps: Deps, projectId: string, name: string, folder:
 
 /** A known key prefix, or a long random-looking word with letters and digits. */
 export function looksSecret(text: string): boolean {
-  return /\b(?:sk-|sk_live_|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|AIza)[\w-]{12,}/.test(text) ||
+  return /\b(?:sk-|sk_live_|ghp_|gho_|ghu_|github_pat_|xox[abpr]-|AKIA|AIza)[\w-]{12,}/.test(text) ||
     text.split(/[^\w+=-]+/).some((word) => word.length >= 32 && /\d/.test(word) && /[a-z]/i.test(word));
 }
 
@@ -213,7 +214,7 @@ async function repoContext(folder: string): Promise<string> {
   };
   await list(folder, "", 1);
   parts.push(`## Folders\n${lines.slice(0, 300).join("\n")}`);
-  const commits = await run("git", ["-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000 })
+  const commits = await run("git", [...gitSafetyArgs(), "-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000, windowsHide: true })
     .then((result) => result.stdout.trim(), () => "");
   if (commits) parts.push(`## Recent commits\n${commits}`);
   return parts.join("\n\n");

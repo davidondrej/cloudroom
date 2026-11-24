@@ -363,10 +363,10 @@ impl Observability {
                     eprintln!("Cloudroom diagnostic file write failed");
                 }
                 for record in batch {
-                    // The Mac helper reports once a minute: a good report stays in the local files only, so it adds
-                    // no website rows (db-load-budget).
+                    // The Mac helper reports, and a copy's heartbeat beats (#2168), once a minute: a good one stays in the
+                    // local files only, so it adds no website rows (db-load-budget).
                     if matches!(&record.signal, Signal::Api { method, route, status, duration_ms }
-                        if *method == "POST" && route == "/v1/mac/helper" && (200..400).contains(status) && *duration_ms < SLOW_API_MS)
+                        if *method == "POST" && matches!(route.as_str(), "/v1/mac/helper" | "/v1/workspaces/{id}/alive") && (200..400).contains(status) && *duration_ms < SLOW_API_MS)
                     {
                         continue;
                     }
@@ -377,13 +377,15 @@ impl Observability {
                         status,
                         duration_ms,
                     } = &record.signal
-                        && (*method == "GET"
+                        && ((*method == "GET"
                             || (*method == "POST"
                                 && matches!(
                                     route.as_str(),
                                     "/v1/sync" | "/v1/previews/device" | "/v1/previews/report"
                                 )))
-                        && (200..400).contains(status)
+                            && (200..400).contains(status)
+                            // `mac status` checks the Mac with a job Core never keeps, so its confirm gets 404 (#608).
+                            || (*method == "POST" && route == "/v1/mac/results/{id}" && *status == 404))
                         && *duration_ms < SLOW_API_MS
                     {
                         let summary = summaries

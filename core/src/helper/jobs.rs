@@ -27,11 +27,97 @@ const SCRIPT_TYPES: [&str; 10] = [
 ];
 // Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
 pub(super) const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+const NOT_APPROVED: &str =
+    "The user did not approve this command on their Mac. Do not retry it unless they ask you to.";
+const CHANGED: &str = "The folder changed after it was approved, so this command did not run.";
+const UNWANTED: &str =
+    "The Mac stopped taking commands from this sandbox, so this command did not run.";
+
+/// The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..` never
+/// skips a missing part, and its real path must be that same folder. The error is the one starting there would give.
+pub(super) fn real_folder(path: &Path) -> std::result::Result<(String, [u64; 2]), String> {
+    use std::os::unix::fs::MetadataExt;
+    let info = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !info.is_dir() {
+        return Err(std::io::Error::from_raw_os_error(20).to_string()); // ENOTDIR
+    }
+    let real = disk_path(path).unwrap_or_else(|| realpath(path));
+    match std::fs::metadata(&real) {
+        Ok(same) if (same.dev(), same.ino()) == (info.dev(), info.ino()) => Ok((
+            real.to_string_lossy().into_owned(),
+            [info.dev(), info.ino()],
+        )),
+        _ => {
+            Err("The folder changed while the Mac checked it, so this command did not run.".into())
+        }
+    }
+}
+
+/// macOS: an open folder's real path in the letter case stored on disk, as `pwd -P` shows it (F_GETPATH). realpath
+/// keeps the typed case, such as ~/CODE for ~/code. None if it can't tell.
+#[cfg(target_os = "macos")]
+pub(super) fn disk_path(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawFd};
+    unsafe extern "C" {
+        fn fcntl(fd: i32, command: i32, ...) -> i32;
+    }
+    const F_GETPATH: i32 = 50;
+    // Only a folder: a FIFO swapped in at this path would block the open forever.
+    const O_DIRECTORY: i32 = 0x100000;
+    let folder = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_DIRECTORY)
+        .open(path)
+        .ok()?;
+    let mut buffer = [0u8; 1024]; // MAXPATHLEN
+    if unsafe { fcntl(folder.as_raw_fd(), F_GETPATH, buffer.as_mut_ptr()) } == -1 {
+        return None;
+    }
+    let end = buffer.iter().position(|&byte| byte == 0)?;
+    (end > 0).then(|| PathBuf::from(std::ffi::OsStr::from_bytes(&buffer[..end])))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(super) fn disk_path(_: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same folder,
+/// such as other letter case, still counts.
+pub(super) fn in_temp(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let id = |path: &Path| {
+        std::fs::metadata(path)
+            .ok()
+            .map(|info| (info.dev(), info.ino()))
+    };
+    let roots: Vec<_> = TEMP_FOLDERS
+        .iter()
+        .filter_map(|root| id(Path::new(root)))
+        .collect();
+    folder.ancestors().any(|path| {
+        TEMP_FOLDERS.iter().any(|root| path == Path::new(root))
+            || id(path).is_some_and(|path| roots.contains(&path))
+    })
+}
 // A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when PATH puts GNU tar first.
 const COPY_TAR: &str = if cfg!(target_os = "macos") {
     "/usr/bin/tar"
 } else {
     "tar"
+};
+// Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
+const COPY_MODE: &str = if cfg!(target_os = "macos") {
+    "/usr/bin/stat -Lf %OLp"
+} else {
+    "stat -Lc %a"
+};
+// Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
+// attributes hides that +, so also its entries, each on its own line.
+const COPY_ACL: &str = if cfg!(target_os = "macos") {
+    "/bin/ls -ldeL"
+} else {
+    "ls -ldL"
 };
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
@@ -143,7 +229,7 @@ fn expanduser(text: &str, home: &Path) -> PathBuf {
 }
 
 /// Python's `shlex.quote`.
-pub(super) fn quote(text: &str) -> String {
+pub(crate) fn quote(text: &str) -> String {
     if text.is_empty() {
         return "''".into();
     }
@@ -268,20 +354,30 @@ pub(super) fn popup_text(job: &Value, home: &Path) -> String {
     } else {
         String::new()
     };
+    // The folder is the real path the command runs in (refusal resolves it), so `.`, `..` and links can't hide it.
+    let cwd = job["cwd"]
+        .as_str()
+        .filter(|cwd| !cwd.is_empty())
+        .unwrap_or("~");
+    let shown = match Path::new(cwd).strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.to_string_lossy()),
+        _ => cwd.to_owned(),
+    };
+    let (folder, cut) = visible(&shown, 200, 1);
+    if cut > 0 {
+        warnings += &format!(
+            "Warning: {} more characters of the folder are not shown.\n\n",
+            thousands(cut)
+        );
+    }
     if ["/tmp", "/var/folders", "TMPDIR"]
         .iter()
         .any(|word| raw.contains(word))
+        || in_temp(Path::new(cwd))
     {
         warnings += "Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n";
     }
-    let (folder, cut) = visible(
-        job["cwd"]
-            .as_str()
-            .filter(|cwd| !cwd.is_empty())
-            .unwrap_or("~"),
-        200,
-        1,
-    );
     let mut text = format!(
         "Command:\n{}\n\nFolder: {folder}{}",
         block(&command),
@@ -418,11 +514,38 @@ pub(super) fn copy_command(
     command += r#"[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc '\000' | wc -c) )) = 1 ]; }; "#;
     command += r#"then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; "#;
     command += "if [ $c = 0 ]; then ";
-    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there.
+    // The sandbox makes every file private, so its modes never count (#1066). New files and folders get this Mac's own
+    // (its umask), and executables stay executable. Any failed stat or chmod fails the push before it places anything.
+    command += r#"[ -L "$x/i/$n" ] || chmod -R '=rwX' "$x/i/$n" || { clean; exit 1; }; "#;
+    // A hard-linked file that replaces one here first gets its own copy, so its modes can't reach a linked file.
+    command += r#"find "$x/i/$n" -type f -links +1 -exec sh -c 'h=$1/h p=$2 t=$3; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += r#"[ ! -e "$d" ] || { cp -p -- "$f" "$h" && mv -f -- "$h" "$f"; } || exit; done' sh "$x" "$x/i/$n" "$to" {} + "#;
+    // A file that replaces one here, even through a link, gets its modes, so it is never more readable. The owner can
+    // always read, and an executable runs wherever readable. One stat for each batch, then one chmod per mode for the
+    // files whose mode changes. One with an ACL stops the push, named: the new file would drop it, and its group bits,
+    // which on Linux show the ACL's mask, would let its whole group read it. One listing for each batch.
+    command += r#"|| { clean; exit 1; }; find "$x/i/$n" -type f -exec sh -c 'x=$1 p=$2 t=$3 e="^.{10}[+]|^ [0-9]+: "; shift 3; for f; do d=$t${f#"$p"}; "#;
+    command += &format!(
+        r#"if [ -f "$d" ]; then printf "%s\0" "$d" >&3; else d=$f; fi; printf "%s\0" "$d" "$f"; done 3>"$x/r" | xargs -0 {COPY_MODE} >"$x/s" || exit; "#
+    );
+    command += &format!(
+        r#"[ ! -s "$x/r" ] || {{ xargs -0 {COPY_ACL} <"$x/r" >"$x/a" || exit; ! grep -Eq "$e" "$x/a" || for f; do d=$t${{f#"$p"}}; "#
+    );
+    command += &format!(
+        r#"[ -f "$d" ] && {COPY_ACL} "$d" | grep -Eq "$e" && {{ printf "%s has an access control list (ACL) that replacing it would drop, so nothing was copied\n" "$d" >&2; exit 1; }}; done; }}; "#
+    );
+    command += r#"for f; do read -r m && read -r o || exit; "#;
+    command += r#"m=$((0$m & 0777 | 0400)); [ -x "$f" ] && m=$((m | (m & 0444) >> 2)); [ $m = $((0$o)) ] || printf "%s\0" "$f" >>"$x/m$m"; "#;
+    command += r#"done <"$x/s"; for g in "$x"/m*; do [ -f "$g" ] || break; xargs -0 chmod "$(printf %o "${g#"$x"/m}")" <"$g" || exit; done; rm -f "$x"/m*' "#;
+    command += r#"sh "$x" "$x/i/$n" "$to" {} + || { clean; exit 1; }; "#;
+    // Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there, and
+    // unpacked with exactly its modes, under umask 0 in a subshell, so the login shell's exit hooks keep the user's. A
+    // push never changes a folder already there, sticky and setgid bits included: bsdtar (macOS, some Linux) leaves it as
+    // is without -p and ignores TAR_OPTIONS; GNU tar does only with both of these options.
     if inside {
         command += r#"{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; } || { (cd -- "$x/i" && "#;
         command += &format!(
-            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && {COPY_TAR} -xf "$x/p.tar" -C "$b"; }}; "#
+            r#"COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && (umask 0 && TAR_OPTIONS="--no-overwrite-dir -p" {COPY_TAR} -xf "$x/p.tar" -C "$b"); }}; "#
         );
     } else {
         command += &format!(r#"{taken} && mv -- "$x/i/$n" "$to"; "#);
@@ -567,6 +690,34 @@ struct Passwd {
     shell: *mut c_char,
     #[cfg(target_os = "macos")]
     expire: i64,
+}
+
+/// This computer's name as the user knows it, as client.py's computer_name (#608).
+fn computer_name() -> String {
+    unsafe extern "C" {
+        fn gethostname(name: *mut c_char, length: usize) -> i32;
+    }
+    let scutil = cfg!(target_os = "macos")
+        .then(|| {
+            let output = std::process::Command::new("/usr/sbin/scutil")
+                .args(["--get", "ComputerName"])
+                .output()
+                .ok()?;
+            Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+        .flatten()
+        .filter(|name| !name.is_empty());
+    let name = scutil.unwrap_or_else(|| {
+        let mut buffer = [0 as c_char; 256];
+        let code = unsafe { gethostname(buffer.as_mut_ptr(), buffer.len() - 1) };
+        if code != 0 {
+            return String::new();
+        }
+        unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    });
+    name.chars().take(64).collect()
 }
 
 /// This user's login shell, as `pwd.getpwuid(os.getuid()).pw_shell`.
@@ -788,6 +939,8 @@ struct Sandbox {
 pub(super) struct Jobs {
     shared: Arc<Shared>,
     folder: PathBuf,
+    /// This computer's name, sent with the job stream so `mac run` and `mac status` say which Mac runs commands (#608).
+    name: String,
     /// Read-only commands carry this helper's mark (from its folder, as its LaunchAgent label: a dev build's helper has
     /// another), this run's (`boot`), and their own (`read_only`).
     mark: String,
@@ -861,6 +1014,7 @@ impl Jobs {
         };
         Jobs {
             folder: shared.folder.clone(),
+            name: computer_name(),
             mark,
             boot,
             contained: AtomicBool::new(false),
@@ -1062,8 +1216,10 @@ impl Jobs {
         opened: &mut bool,
     ) -> Result<()> {
         let url = format!(
-            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true",
-            core.url, self.shared.boot
+            "{}/v1/mac/jobs?device={device}&boot={}&fetch=true&name={}",
+            core.url,
+            self.shared.boot,
+            quote_url(&self.name)
         );
         let mut request = self
             .shared
@@ -1260,6 +1416,10 @@ impl Jobs {
 
     /// Why this job may not run as asked, or None. Everything else that is not full access runs read-only.
     pub(super) async fn refusal(&self, core: &Core, job: &mut Value) -> Option<String> {
+        // Only Ask first's own check below approves a folder, never the job itself.
+        if let Some(fields) = job.as_object_mut() {
+            fields.remove("approvedFolder");
+        }
         let (current, closed) = self.closed(core).await;
         if closed.is_some() {
             return closed;
@@ -1280,7 +1440,23 @@ impl Jobs {
         if current == "read-only" {
             return Some("Mac access is Read-only, so this command cannot change the Mac. The user can switch it to Ask first or Full in the Cloudroom sidebar.".into());
         }
-        if current == "ask" && self.approve(core, job).await {
+        if current != "ask" {
+            return Some(NOT_APPROVED.into());
+        }
+        // Ask first shows, and then runs in, the same real folder: never the agent's text, whose `..` or links could point
+        // elsewhere, such as a temp folder it filled.
+        let cwd = job["cwd"]
+            .as_str()
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or("~");
+        match real_folder(&home().join(expanduser(cwd, &home()))) {
+            Ok((real, id)) => {
+                job["cwd"] = json!(real);
+                job["approvedFolder"] = json!(id);
+            }
+            Err(error) => return Some(error),
+        }
+        if self.approve(core, job).await {
             // The user may have lowered Mac access while the popup was open.
             let now = level(&self.enabled().unwrap_or(Value::Null));
             return if ["ask", "full"].contains(&now) {
@@ -1289,7 +1465,7 @@ impl Jobs {
                 Some("Mac access was lowered, so this command did not run.".into())
             };
         }
-        Some("The user did not approve this command on their Mac. Do not retry it unless they ask you to.".into())
+        Some(NOT_APPROVED.into())
     }
 
     async fn approve(&self, core: &Core, job: &Value) -> bool {
@@ -1446,6 +1622,10 @@ impl Jobs {
             Some(reason) => {
                 json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(reason.as_bytes()), "truncated": false})
             }
+            // Approved after its sandbox slept, a write command would change the Mac with nobody to read the result.
+            None if !self.wanted.lock().unwrap().contains(&core.key) => {
+                json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(UNWANTED.as_bytes()), "truncated": false})
+            }
             None => {
                 let sandbox = sandboxed.then_some(&core.key);
                 self.run(
@@ -1515,15 +1695,38 @@ impl Jobs {
         }
         let raw = job["command"].as_str().unwrap_or_default();
         // Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
-        // hands the unchanged command to sh.
-        let line = if fish {
-            format!(
-                "exec /bin/sh -c '{}'",
-                raw.replace('\\', "\\\\").replace('\'', "\\'")
-            )
+        // hands the unchanged command to sh. Inside fish's '…' only \ and ' are special.
+        let fish_quote =
+            |text: &str| format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"));
+        let mut line = if fish {
+            format!("exec /bin/sh -c {}", fish_quote(raw))
         } else {
             raw.to_owned()
         };
+        // An approved command must start in its folder, whatever the login files did: builtins, so their functions can't
+        // pose as cd, and the folder checked once there (#2470). zsh's `command` skips builtins; dash and ksh have no
+        // `builtin`, so other shells use `command`.
+        let approved = job["cwd"]
+            .as_str()
+            .filter(|_| !job["approvedFolder"].is_null());
+        if let Some(cwd) = approved {
+            line = if fish {
+                let (cwd, changed) = (fish_quote(cwd), fish_quote(CHANGED));
+                format!(
+                    "builtin cd {cwd}; and builtin test (builtin pwd -P) = {cwd}; or begin; builtin echo {changed} >&2; builtin exit 126; end; {line}"
+                )
+            } else {
+                let (cwd, changed) = (quote(cwd), quote(CHANGED));
+                let b = if login.ends_with("/zsh") {
+                    "builtin"
+                } else {
+                    "command"
+                };
+                format!(
+                    "{b} cd -- {cwd} && {b} test \"$({b} pwd -P)\" = {cwd} || {{ {b} echo {changed} >&2; {b} exit 126; }}; {line}"
+                )
+            };
+        }
         let mut argv = match &mark {
             Some(mark) => read_only(data, &home(), &[&self.mark, &self.boot, mark]),
             None => Vec::new(),
@@ -1536,6 +1739,16 @@ impl Jobs {
                 .unwrap_or("~"),
             &home(),
         ));
+        // The folder the user approved must still be the same folder, at the same real path.
+        if let Some(cwd) = approved
+            && real_folder(&folder)
+                != Ok((
+                    cwd.to_owned(),
+                    serde_json::from_value(job["approvedFolder"].clone()).unwrap_or_default(),
+                ))
+        {
+            return json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(CHANGED.as_bytes()), "truncated": false});
+        }
         let mut result =
             json!({"state": "done", "code": 127, "stdout": "", "stderr": "", "truncated": false});
         let spawned = {
@@ -1555,9 +1768,7 @@ impl Jobs {
                 )
             } else if sandbox.is_some_and(|key| !self.wanted.lock().unwrap().contains(key)) {
                 // end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
-                denied(
-                    "The Mac stopped taking commands from this sandbox, so this command did not run.",
-                )
+                denied(UNWANTED)
             } else {
                 let spawned = command(&argv[0])
                     .args(&argv[1..])

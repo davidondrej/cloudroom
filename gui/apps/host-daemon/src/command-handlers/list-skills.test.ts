@@ -498,7 +498,7 @@ describe("discoverSkills marks the linked flag per root shape", () => {
     }
   });
 
-  it("skill-recursive: only the root being a symlink counts; nested links are not walked", async () => {
+  it("skill-recursive: user roots follow nested links and mark them linked", async () => {
     const plainRoot = path.join(tempRoot, "recursive");
     await writeSkill(
       path.join(plainRoot, "category", "nested", "SKILL.md"),
@@ -531,6 +531,11 @@ describe("discoverSkills marks the linked flag per root shape", () => {
           "nested",
           linked,
           path.join(rootPath, "category", "nested", "SKILL.md"),
+        ],
+        [
+          "linked-category",
+          true,
+          path.join(rootPath, "linked-category", "SKILL.md"),
         ],
       ]);
     }

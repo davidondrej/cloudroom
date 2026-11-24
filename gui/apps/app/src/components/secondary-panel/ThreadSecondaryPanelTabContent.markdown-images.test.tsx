@@ -8,7 +8,7 @@ import {
   ProjectFilePreviewTabContent,
   ThreadStorageFilePreviewTabContent,
   WorkspaceFilePreviewTabContent,
-} from "./ThreadSecondaryPanelTabContent";
+} from "@/components/right-panel/shell/file-preview-tabs";
 import type { FilePreview } from "@cloudroom/client-core";
 
 function markdownPreview(path: string, url = `/content/${path}`): FilePreview {
@@ -58,6 +58,12 @@ vi.mock("@/hooks/queries/thread-queries", () => ({
   ) => previewQuery(path),
   useThreadStorageFilePreview: (_threadId: string, path: string) =>
     previewQuery(path),
+  useThread: () => ({ data: undefined }),
+  useThreadTimeline: () => ({ data: undefined }),
+}));
+
+vi.mock("@/hooks/queries/system-queries", () => ({
+  useSystemProviders: () => ({ data: undefined }),
 }));
 
 vi.mock("@/hooks/queries/host-file-preview-query", () => ({

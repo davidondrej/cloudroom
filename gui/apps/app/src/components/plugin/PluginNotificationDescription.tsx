@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation } from "react-router";
 import { appToast } from "@/components/ui/app-toast";
 import {
   getPluginDetailRoutePath,

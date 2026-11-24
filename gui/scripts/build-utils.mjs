@@ -17,10 +17,7 @@ const NATIVE_EXTERNAL_PACKAGES = [
   "bufferutil",
   "fsevents",
   "node-pty",
-  "pino",
-  "pino-pretty",
   "pino-roll",
-  "thread-stream",
   "utf-8-validate",
   // jiti loads plugin server entries as TypeScript at runtime and lazily
   // require()s its own transform files (babel.cjs); bundling it breaks that

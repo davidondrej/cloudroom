@@ -19,7 +19,7 @@ async function machineId(): Promise<string> {
       return /"IOPlatformUUID" = "([^"]+)"/.exec(stdout)?.[1] ?? "";
     }
     if (process.platform === "win32") {
-      const { stdout } = await run("reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"], { timeout: 5_000 });
+      const { stdout } = await run("reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"], { timeout: 5_000, windowsHide: true });
       return /MachineGuid\s+REG_SZ\s+(\S+)/.exec(stdout)?.[1] ?? "";
     }
     return (await readFile("/etc/machine-id", "utf8").catch(() => readFile("/var/lib/dbus/machine-id", "utf8"))).trim();

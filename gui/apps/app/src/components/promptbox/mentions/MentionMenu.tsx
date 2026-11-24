@@ -45,7 +45,7 @@ export interface ReasoningCommandSuggestion {
 
 export interface FastModeCommandSuggestion {
   kind: "fast-mode";
-  name: "fast";
+  name: "fast" | "ultrafast";
   description: string;
 }
 

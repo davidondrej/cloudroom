@@ -1140,6 +1140,26 @@ describe("workflow service policy integration", () => {
     ).rejects.toThrow("different environment or workspace");
   });
 
+  it("lists only this run's running workers, without ending them (#2240)", async () => {
+    const test = setup();
+    harnesses.push(test.harness);
+    const run = await test.start(
+      source(`return await Promise.all([agent("one"), agent("two")]);`),
+    );
+    expiredRunWithWorkers(test.db, "finished-run", ["old-1"]);
+    const controller = new AbortController();
+    const worker = test.service.runWorker(controller.signal);
+    await eventually(() => expect(test.childCount()).toBe(2));
+    expect(test.service.runningWorkers(run.id)).toEqual([
+      { callIndex: 0, threadId: "child-1" },
+      { callIndex: 1, threadId: "child-2" },
+    ]);
+    expect(test.service.runningWorkers("finished-run")).toEqual([]);
+    expect(getRunRequired(test.db, run.id).status).toBe("running");
+    controller.abort();
+    await worker;
+  });
+
   it("reconciles missed idle and deleted events from persisted running calls", async () => {
     const idle = setup();
     harnesses.push(idle.harness);

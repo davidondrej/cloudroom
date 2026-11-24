@@ -45,16 +45,20 @@ export class ProviderResponseEncodeError extends Error {
 export class JsonRpcResponseError extends Error {
   readonly code: number;
   readonly recovery: ProviderRecoveryHint | null;
+  /** The failure's own code from the bridge (`cli_missing`), when it sent one. */
+  readonly reason: string | null;
 
   constructor(
     code: number,
     message: string,
     recovery: ProviderRecoveryHint | null = null,
+    reason: string | null = null,
   ) {
     super(message);
     this.name = "JsonRpcResponseError";
     this.code = code;
     this.recovery = recovery;
+    this.reason = reason;
   }
 }
 
@@ -160,6 +164,7 @@ function jsonRpcResponseError(error: unknown): Error {
       error.code,
       error.message,
       decodeRecoveryHint(error.data),
+      bridgeErrorDataSchema.safeParse(error.data).data?.reason ?? null,
     );
   }
   return new Error(formatJsonRpcErrorMessage(error));
@@ -302,7 +307,7 @@ export function sendJsonRpcRequest<TResult>(
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       args.pending.delete(id);
-      reject(new Error(`JSON-RPC request timed out: ${message.method}`));
+      reject(Object.assign(new Error(`JSON-RPC request timed out: ${message.method}`), { code: "rpc_timeout" }));
     }, args.timeoutMs ?? 30_000);
     args.pending.set(id, {
       resolve: (result) => {

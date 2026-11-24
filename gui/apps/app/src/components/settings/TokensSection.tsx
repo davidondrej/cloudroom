@@ -1,6 +1,6 @@
 import { useId, useState } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { RangeToggle, UsageSection, dayText, dayTicks, short, sum } from "@/components/settings/UsageSection";
+import { COLORS, REST, RangeToggle, UsageSection, dayText, dayTicks, short, sum } from "@/components/settings/UsageSection";
 import { useUsageAnalytics } from "@/hooks/queries/system-queries";
 
 // Settings → Analytics → Tokens: dots (David 2026-11-11). Each column is a day, each dot a batch of tokens.
@@ -16,8 +16,6 @@ type Use<T> = { written: T; read: T; cached: T };
 const of = (use: Use<number>, kind: Kind) => (kind === "all" ? use.written + use.read + use.cached : use[kind]);
 const daily = (use: Use<number[]>, kind: Kind) => use.written.map((written, day) => of({ written, read: use.read[day]!, cached: use.cached[day]! }, kind));
 
-// One color per model, picked so color-blind readers can tell them apart. Lime is the app's own; gray is the rest.
-const COLORS = ["var(--primary)", "#3987e5", "#d95926", "#2bb5a0"], REST = "color-mix(in oklab, var(--foreground) 38%, var(--background))";
 const kept = new Map<string, number>();
 /** A model keeps its color when the range changes, so the eye can follow it. New models take a free one. */
 function paint(names: string[]) {

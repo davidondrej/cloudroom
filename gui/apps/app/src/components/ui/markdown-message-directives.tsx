@@ -5,12 +5,11 @@ import {
   type ReactNode,
 } from "react";
 import type { Nodes, Parent, RootContent } from "mdast";
-import type {} from "mdast-util-to-hast";
 import type {
   BbNavigate,
   PluginMessageDirectiveProps,
 } from "@get-bb/plugin-sdk";
-import { visit } from "unist-util-visit";
+import { visit } from "./markdown-visit.js";
 import { PluginSlotMount } from "@/components/plugin/PluginSlotMount.js";
 import { PluginThreadPanelNavigationProvider } from "@/components/plugin/plugin-thread-panel-navigation.js";
 import {

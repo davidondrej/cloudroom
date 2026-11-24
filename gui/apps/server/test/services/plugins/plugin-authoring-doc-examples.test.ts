@@ -32,7 +32,7 @@ const pluginSdkEntry = join(
   "src",
   "index.ts",
 );
-const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
+const tsc = join(repoRoot, "node_modules", ".bin", "tsc6");
 
 interface SdkReference {
   path: string;

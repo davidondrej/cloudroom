@@ -34,6 +34,13 @@ export interface Wrapped {
   top: number | null;
 }
 
+/** Which rows of `threads AS t` are agents: visible ones. An imported chat counts once its agent has run here (ADR 20261102-073449). */
+export const countsAsAgent = sql`t.visibility = 'visible' AND NOT EXISTS (
+  SELECT 1 FROM events AS i
+  WHERE i.thread_id = t.id AND i.type = 'system/operation'
+    AND json_extract(i.data, '$.operation') = ${THREAD_IMPORT_OPERATION}
+    AND NOT EXISTS (SELECT 1 FROM events AS r WHERE r.thread_id = t.id AND r.type = 'turn/started' AND r.sequence > i.sequence))`;
+
 // A finished month's rank never changes, so each account asks the website once per app run.
 const ranks = new Map<string, number | null>();
 
@@ -58,17 +65,12 @@ export async function readWrapped(deps: AppDeps, query: { month: string; utcOffs
   const range: Range = { start: Date.UTC(year, month - 1, 1) - offset, days: new Date(Date.UTC(year, month, 0)).getUTCDate(), offset };
   const end = range.start + range.days * DAY_MS;
 
-  // Every thread started in the month is one agent. An imported chat counts once its agent has run here (ADR 20261102-073449).
+  // Every thread started in the month is one agent.
   const harnesses = deps.db.all<{ provider: string; agents: number; cloud: number; subagents: number }>(sql`
     SELECT t.provider_id AS provider, count(*) AS agents,
       sum(t.execution_target = 'cloud') AS cloud, sum(t.parent_thread_id IS NOT NULL) AS subagents
     FROM threads AS t
-    WHERE t.created_at >= ${range.start} AND t.created_at < ${end} AND t.visibility = 'visible'
-      AND NOT EXISTS (
-        SELECT 1 FROM events AS i
-        WHERE i.thread_id = t.id AND i.type = 'system/operation'
-          AND json_extract(i.data, '$.operation') = ${THREAD_IMPORT_OPERATION}
-          AND NOT EXISTS (SELECT 1 FROM events AS r WHERE r.thread_id = t.id AND r.type = 'turn/started' AND r.sequence > i.sequence))
+    WHERE t.created_at >= ${range.start} AND t.created_at < ${end} AND ${countsAsAgent}
     GROUP BY t.provider_id ORDER BY agents DESC
   `);
   const total = (pick: (row: (typeof harnesses)[number]) => number) => harnesses.reduce((sum, row) => sum + pick(row), 0);

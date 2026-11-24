@@ -65,6 +65,40 @@ describe("claude rate-limit classification (delta path)", () => {
     ]);
   });
 
+  it("treats a provider capacity 429 as an overload, not a plan limit (#2284)", () => {
+    const harness = createClaudeDeltaHarness();
+    const text =
+      "API Error: Request rejected (429) · The Coding Plan capacity pool is momentarily saturated";
+    harness.translate(
+      sdkMessage({
+        type: "assistant",
+        error: "rate_limit",
+        message: { id: "a-1", content: [{ type: "text", text }] },
+      }),
+      { threadId: THREAD_ID },
+    );
+    const events = harness.translate(
+      sdkMessage({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 429,
+        result: text,
+      }),
+      { threadId: THREAD_ID },
+    );
+
+    expect(providerErrors(events)).toEqual([
+      expect.objectContaining({
+        errorInfo: {
+          category: "overloaded",
+          providerCode: "rate_limit",
+          httpStatusCode: 429,
+        },
+      }),
+    ]);
+  });
+
   it("defers a hard rejection into one terminal rate-limit error on the result", () => {
     const harness = createClaudeDeltaHarness();
 
@@ -186,6 +220,7 @@ describe("claude turn and checkpoint lifecycle", () => {
     const harness = createClaudeDeltaHarness();
     const events = harness.translate({
       type: "assistant",
+      uuid: "hello-checkpoint",
       message: {
         id: "msg-1",
         role: "assistant",
@@ -207,6 +242,7 @@ describe("claude turn and checkpoint lifecycle", () => {
           type: "agentMessage",
           id: expect.stringMatching(ITEM_ID_PATTERN),
           text: "Hello world",
+          providerCheckpointId: "hello-checkpoint",
         }),
       }),
     );

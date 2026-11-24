@@ -53,6 +53,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginHomepageSectionProps`
 - `PluginSettingsSectionProps`
 - `ExperimentalAppOverlayProps`
+- `ExperimentalProjectActionProps`
 - `PluginNavPanelProps`
 - `PluginThreadPanelProps`
 - `PluginNewThreadPanelProps`
@@ -99,6 +100,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginHomepageSectionRegistration`
 - `PluginSettingsSectionRegistration`
 - `ExperimentalAppOverlayRegistration`
+- `ExperimentalProjectActionRegistration`
 - `ExperimentalFixedTabTargetContract`
 - `ExperimentalPluginFixedTabReference`
 - `PluginFixedTabRegistration`

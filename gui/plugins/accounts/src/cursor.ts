@@ -94,7 +94,13 @@ const amount = z
   .nullish();
 const usageSchema = z.object({
   billingCycleEnd: amount,
-  planUsage: z.object({ totalPercentUsed: z.number().nullish() }).nullish(),
+  planUsage: z
+    .object({
+      totalPercentUsed: z.number().nullish(),
+      autoPercentUsed: z.number().nullish(),
+      apiPercentUsed: z.number().nullish(),
+    })
+    .nullish(),
   spendLimitUsage: z
     .object({
       overallLimit: amount,
@@ -113,12 +119,14 @@ export async function cursorUsage(apiKey: string): Promise<UsageWindow[]> {
   const resetsAt = usage.billingCycleEnd ?? null;
   const windows: UsageWindow[] = [];
   const percent = (value: number) => Math.max(0, Math.min(100, value));
-  if (usage.planUsage?.totalPercentUsed != null)
-    windows.push({
-      label: "Plan usage",
-      usedPercent: percent(usage.planUsage.totalPercentUsed),
-      resetsAt,
-    });
+  // Cursor's own models and 3P models use separate pools (F#5982); the 3P bar is display only, like the Mac's.
+  const auto = usage.planUsage?.autoPercentUsed;
+  const api = usage.planUsage?.apiPercentUsed;
+  const total = auto != null && api != null ? auto : usage.planUsage?.totalPercentUsed;
+  if (total != null)
+    windows.push({ label: "Plan usage", usedPercent: percent(total), resetsAt });
+  if (auto != null && api != null)
+    windows.push({ label: "Plan · 3P", usedPercent: percent(api), resetsAt, model: "3p" });
   const spend = usage.spendLimitUsage;
   const limit = spend?.overallLimit ?? spend?.individualLimit;
   const used =

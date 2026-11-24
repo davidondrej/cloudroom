@@ -3,7 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { dispatchCommand } from "../../../../apps/host-daemon/src/command-dispatch.js";
-import { createHarness } from "../../../../apps/host-daemon/test/command/dispatch-helpers.js";
+import {
+  commitHooks,
+  createHarness,
+} from "../../../../apps/host-daemon/test/command/dispatch-helpers.js";
 
 const tempPaths: string[] = [];
 
@@ -18,7 +21,7 @@ afterEach(async () => {
 async function createSetupPath(name: string, script: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), name));
   tempPaths.push(path);
-  await writeFile(join(path, ".bb-env-setup.sh"), script);
+  await commitHooks(path, { setup: script });
   return path;
 }
 
@@ -93,7 +96,7 @@ describe("environment attach recovery", () => {
   it("can retry attachment after setup fails", async () => {
     const path = await createSetupPath(
       "bb-attach-retry-",
-      "echo failed > first-attempt\nexit 7\n",
+      "if [ -f ready ]; then echo completed > second-attempt; exit 0; fi\necho failed > first-attempt\nexit 7\n",
     );
     const harness = createHarness({ workspacePath: path });
     const options = harness.dispatchOptions({ dataDir: path });
@@ -110,10 +113,8 @@ describe("environment attach recovery", () => {
       "failed with exit code 7",
     );
     expect(harness.provisions).toEqual([]);
-    await writeFile(
-      join(path, ".bb-env-setup.sh"),
-      "echo completed > second-attempt\n",
-    );
+    // What the committed script was waiting for appears before the retry.
+    await writeFile(join(path, "ready"), "");
 
     await expect(dispatchCommand(command, options)).resolves.toMatchObject({
       path,

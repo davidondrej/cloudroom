@@ -7,7 +7,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { ExpandableLine } from "@/components/ui/expandable-line.js";

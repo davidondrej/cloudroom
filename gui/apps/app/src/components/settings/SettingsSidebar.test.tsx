@@ -3,7 +3,7 @@
 import type { ComponentProps } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import {
@@ -22,7 +22,6 @@ const pluginEntries = [
   "provider-claude-code",
   "provider-codex",
   "provider-retry",
-  "provider-usage",
   "push-notifications",
 ].map((id) => ({ id, label: id, icon: null }));
 

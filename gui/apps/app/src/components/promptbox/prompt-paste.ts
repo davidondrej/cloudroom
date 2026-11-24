@@ -171,12 +171,17 @@ function valueFromHtml(html: string): {
       text += " ";
     }
   };
+  // An explicit stack keeps hostile clipboard HTML from overflowing the JS call stack.
+  const pending: Array<Node | (() => void)> = [];
   const addLine = (write: () => void) => {
     endLine();
+    pending.push(endLine);
     write();
-    endLine();
   };
-  const visitChildren = (parent: Node) => parent.childNodes.forEach(visit);
+  const visitChildren = (parent: Node) => {
+    for (let index = parent.childNodes.length - 1; index >= 0; index--)
+      pending.push(parent.childNodes[index]!);
+  };
   const visit = (node: Node): void => {
     if (node.nodeType === Node.TEXT_NODE) {
       return addInlineText(node.textContent ?? "");
@@ -206,6 +211,11 @@ function valueFromHtml(html: string): {
     }
   };
   visitChildren(new DOMParser().parseFromString(html, "text/html").body);
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    if (typeof next === "function") next();
+    else visit(next);
+  }
 
   if (mentions.length > 0) {
     const trimmed = text.replace(/\n+$/u, "");

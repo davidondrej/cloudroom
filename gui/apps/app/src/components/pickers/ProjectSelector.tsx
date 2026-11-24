@@ -1,6 +1,11 @@
+import { useCloudroomSignIn } from "@/hooks/queries/cloudroom-queries";
+import { useQuery } from "@tanstack/react-query";
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
+import { appToast } from "@/components/ui/app-toast";
+import { sdk } from "@/lib/sdk";
 import { useThisComputer } from "@/hooks/useHostDaemon";
-import { COMPUTER_TITLE, getHostPathComparisonKey, getHostPathDirname } from "@cloudroom/domain";
-import { useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { COMPUTER_TITLE, gitlabRepository, getHostPathComparisonKey, getHostPathDirname } from "@cloudroom/domain";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { RepoSuggestion } from "@cloudroom/sdk/browser";
 import { Button } from "@cloudroom/shared-ui/button";
 import {
@@ -134,7 +139,9 @@ export function ProjectSelector({
       .filter((entry) => !entry.projectId || !listed.has(entry.projectId))
       .slice(0, FOLDER_SEARCH_ROWS);
   }, [filteredProjects, folders.results]);
-  const visibleRepos = useMemo(() => {
+  const pasted = suggestions && open ? gitlabRepository(searchQuery) : null;
+  const visibleRepos = useMemo<readonly RepoSuggestion[]>(() => {
+    if (pasted) return [{source:"gitlab",repo:pasted,name:pasted.split("/").at(-1)!,updatedAt:null}];
     // A Mac repo found by the folder search shows once, with the folders.
     const found = new Set(folderResults.map((entry) => getHostPathComparisonKey(entry.path)));
     const repos = (suggestions?.repos ?? []).filter(
@@ -145,7 +152,7 @@ export function ProjectSelector({
       query: searchQuery,
       getLabel: (repo) => repo.name,
     }).slice(0, VISIBLE_REPO_SUGGESTIONS);
-  }, [folderResults, searchQuery, suggestions?.repos]);
+  }, [folderResults, searchQuery, suggestions?.repos, pasted]);
   const folderRows = pathMode ? folders.matches : folderResults;
   const topFolder = pathMode
     ? folders.leaf
@@ -232,7 +239,7 @@ export function ProjectSelector({
   };
   const addRepo = (repo: RepoSuggestion) => {
     if (!suggestions || suggestions.addingKey !== null) return;
-    void suggestions.onAdd(repo).then(
+    return suggestions.onAdd(repo).then(
       () => handleOpenChange(false),
       () => {},
     );
@@ -302,7 +309,9 @@ export function ProjectSelector({
       onSelect={() => pickFolder(entry)}
     />
   ));
-  const repoRows = visibleRepos.map((repo) => (
+  const repoRows = visibleRepos.map((repo) => repo.source === "gitlab" ? (
+    <GitlabRepoRow key={repo.repo} repo={repo} addingKey={addingKey} onAdd={addRepo}/>
+  ) : (
     <RepoRow
       key={`repo:${repoKey(repo)}`}
       repo={repo}
@@ -528,6 +537,7 @@ interface AddRowProps {
   name: string;
   /** Where it lives, on the right. */
   detail: ReactNode;
+  repositoryUrl?: string;
   action?: string;
   dim: boolean;
   adding: boolean;
@@ -536,7 +546,7 @@ interface AddRowProps {
 }
 
 /** A repo or folder that is not a project yet. */
-function AddRow({ value, name, detail, action = "Add", dim, adding, disabled, onSelect }: AddRowProps) {
+function AddRow({ value, name, detail, repositoryUrl, action = "Add", dim, adding, disabled, onSelect }: AddRowProps) {
   return (
     <CommandItem
       value={value}
@@ -545,6 +555,7 @@ function AddRow({ value, name, detail, action = "Add", dim, adding, disabled, on
       onSelect={onSelect}
       className={cn(PICKER_ROW_CLASS_NAME, "animate-in fade-in duration-300 motion-reduce:animate-none")}
     >
+      {repositoryUrl && <img className="size-4 shrink-0" src="/gitlab.svg" alt=""/>}
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
@@ -552,14 +563,15 @@ function AddRow({ value, name, detail, action = "Add", dim, adding, disabled, on
         )}
       >
         {name}
+        {repositoryUrl && <small className="block truncate text-2xs font-normal text-muted-foreground">{repositoryUrl}</small>}
       </span>
-      {adding ? null : (
+      {adding || repositoryUrl ? null : (
         <span className={cn(PICKER_DETAIL_CLASS_NAME, "flex shrink-0 items-center gap-2 group-data-[selected=true]:hidden")}>
           {detail}
           <Icon name="Plus" className="size-3.5!" aria-hidden />
         </span>
       )}
-      <RowAction label={action} busy={adding} />
+      <RowAction label={action} busy={adding} visible={Boolean(repositoryUrl)} />
     </CommandItem>
   );
 }
@@ -569,6 +581,91 @@ interface RepoRowProps {
   dim: boolean;
   addingKey: string | null;
   onAdd: (repo: RepoSuggestion) => void;
+}
+
+function GitlabRepoRow({
+  repo,
+  addingKey,
+  onAdd,
+}: Pick<RepoRowProps, "addingKey" | "onAdd"> & {
+  repo: RepoSuggestion & { repo: string };
+}) {
+  const connection = useGitlabConnection();
+  const signIn = useCloudroomSignIn();
+  const submitting = useRef(false);
+  const [checking, setChecking] = useState(false);
+  useEffect(() => {
+    if (connection.error) appToast.error(connection.error);
+  }, [connection.error]);
+  const [settled, setSettled] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(repo.repo), 400);
+    return () => clearTimeout(timer);
+  }, [repo.repo]);
+  const check = useQuery({
+    queryKey: [
+      "gitlab-project-access",
+      connection.accountId,
+      repo.repo,
+      connection.state?.login,
+      connection.state?.waiting,
+      connection.state?.expired,
+    ],
+    enabled: connection.ready && settled === repo.repo,
+    queryFn: ({ signal }) => sdk.cloudroom.gitlabCheck(repo.repo, signal),
+    retry: false,
+    staleTime: 30_000,
+  });
+  const connect =
+    check.data?.accessible === false && connection.state?.available;
+  const waiting = Boolean(connection.state?.waiting);
+  return (
+    <AddRow
+      value={"repo:" + repoKey(repo)}
+      name={repo.name}
+      detail={null}
+      repositoryUrl={repo.repo
+        .replace("https://", "")
+        .split("/")
+        .slice(0, -1)
+        .join("/")}
+      action={
+        !connection.accountId ? "Sign in to Cloudroom" : connect
+          ? waiting
+            ? "Open GitLab"
+            : connection.state?.login && !connection.state.expired
+              ? "Switch account"
+              : "Connect GitLab"
+          : "Add"
+      }
+      dim={false}
+      adding={addingKey === repoKey(repo) || connection.busy || checking || signIn.isPending}
+      disabled={addingKey !== null || connection.busy || checking || signIn.isPending || Boolean(connection.accountId && !connection.ready)}
+      onSelect={async () => {
+        if (submitting.current) return;
+        submitting.current = true;
+        setChecking(true);
+        try {
+          if (!connection.accountId) {
+            await signIn.mutateAsync("signIn");
+            return;
+          }
+          const access = check.data ?? (await check.refetch({ throwOnError: true })).data;
+          if (access?.accessible === false && connection.state?.available) {
+            if (waiting) connection.open();
+            else connection.change("start");
+          } else if (access?.accessible === false) {
+            appToast.error("Check the GitLab URL and your access to this project.");
+          } else await onAdd(repo);
+        } catch (error) {
+          if (connection.accountId) appToast.error(error instanceof Error ? error.message : "Could not check this project.");
+        } finally {
+          submitting.current = false;
+          setChecking(false);
+        }
+      }}
+    />
+  );
 }
 
 function RepoRow({ repo, dim, addingKey, onAdd }: RepoRowProps) {

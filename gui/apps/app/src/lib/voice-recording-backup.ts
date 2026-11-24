@@ -90,3 +90,21 @@ export function createRecordingFile(chunks: Blob[], mimeType: string): File {
       : "webm";
   return new File(chunks, `recording.${extension}`, { type: mimeType });
 }
+
+export function downloadVoiceRecording(file: File, recordingId?: number): void {
+  const extension = file.name.split(".").pop() || "webm";
+  const filename =
+    recordingId && recordingId > 0
+      ? `voice-${new Date(recordingId).toISOString().replace(/[:.]/g, "-")}.${extension}`
+      : file.name;
+  const url = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.rel = "noopener";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Delay revoking so mobile browsers finish opening the blob download.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}

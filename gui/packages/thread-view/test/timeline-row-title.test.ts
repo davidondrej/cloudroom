@@ -21,11 +21,11 @@ import {
   type TimelineViewTurnRow,
   type TimelineViewWorkRow,
 } from "../src/index.js";
-import { formatTimelineDecorationText } from "../src/timeline-row-title.js";
+import { formatTimelineDecorationText } from "../src/titles.js";
 import type {
   TimelineViewDelegationWorkRow,
   TimelineWorkSummaryRow,
-} from "../src/timeline-view.js";
+} from "../src/view.js";
 
 const DEFAULT_OPTIONS: BuildTimelineRowTitleOptions = {
   summaryStyle: "bundle",

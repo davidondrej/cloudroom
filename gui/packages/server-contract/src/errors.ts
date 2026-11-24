@@ -40,6 +40,8 @@ export const threadNotWritableErrorDetailsSchema = z.object({
   reason: threadNotWritableReasonSchema,
   archivedAt: z.number().int().nonnegative().nullable(),
   threadStatus: threadStatusSchema,
+  /** The refused thread, so a caller sees which one (#1276). Older servers omit it. */
+  threadId: z.string().optional(),
 });
 export type ThreadNotWritableErrorDetails = z.infer<
   typeof threadNotWritableErrorDetailsSchema

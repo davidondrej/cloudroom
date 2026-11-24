@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { AnalyticsTabs } from "@/components/settings/AnalyticsTabs";
@@ -26,11 +26,23 @@ function sampleWave(): CreditsWave {
   const hours = Array.from({ length: 168 }, (_, i) => {
     const top = THREADS.map(([name, at], k) => ({ name, credits: Math.round(at(Math.floor(i / 24), i % 24) * rand(i + k * 300)) }))
       .filter((thread) => thread.credits > 0).sort((a, b) => b.credits - a.credits);
-    return { credits: top.reduce((sum, thread) => sum + thread.credits, 0), top: top.slice(0, 3) };
+    return { credits: top.reduce((sum, thread) => sum + thread.credits, 0), top: top.slice(0, 3), threads: top };
   });
-  const days = Array.from({ length: 30 }, (_, i) => Math.round(1100 * (0.4 + rand(i * 7)) * ([0, 6].includes(new Date(Date.now() - (29 - i) * 86_400_000).getUTCDay()) ? 0.3 : 1)));
-  return { start: new Date(start).toISOString(), hours, days, daysStart: new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10),
-    standouts: [{ at: 24 + 15, name: "Fine-tune the ranker", credits: 2700 }, { at: 3 * 24 + 21, name: "Speed up cold starts", credits: 1560 }], standouts24h: [] };
+  // Threads per day exist for the last 7 days only, as on a new account.
+  const day = (i: number) => 29 - Math.floor((167 - i) / 24);
+  const days = Array.from({ length: 30 }, (_, i) => i >= 23 ? 0 : Math.round(1100 * (0.4 + rand(i * 7)) * ([0, 6].includes(new Date(Date.now() - (29 - i) * 86_400_000).getUTCDay()) ? 0.3 : 1)));
+  hours.forEach((hour, i) => { days[day(i)]! += hour.credits; });
+  /** The website's split: threads ranked by credits, the top 4 with a series, plus 9 small threads not shown. */
+  const splitOf = (series: { name: string; points: number[] }[], since: string) => {
+    const ranked = series.map((thread) => ({ id: `thr_${thread.name.length}demo`, name: thread.name, credits: thread.points.reduce((a, b) => a + b, 0), points: thread.points }))
+      .filter((thread) => thread.credits > 0).sort((a, b) => b.credits - a.credits);
+    return { since, threads: ranked.length + 9, credits: ranked.reduce((total, thread) => total + thread.credits, 0) + 380, top: ranked.slice(0, 8).map((thread, k) => (k < 4 ? thread : { ...thread, points: undefined })) };
+  };
+  const perHour = (from: number) => THREADS.map(([name]) => ({ name, points: hours.slice(from).map((hour) => hour.threads.find((thread) => thread.name === name)?.credits ?? 0) }));
+  const perDay = THREADS.map(([name]) => ({ name, points: Array.from({ length: 30 }, (_, d) => hours.reduce((total, hour, i) => total + (day(i) === d ? hour.threads.find((thread) => thread.name === name)?.credits ?? 0 : 0), 0)) }));
+  return { start: new Date(start).toISOString(), hours: hours.map(({ credits, top }) => ({ credits, top })), days, daysStart: new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10),
+    standouts: [{ at: 24 + 15, name: "Fine-tune the ranker", credits: 2700 }, { at: 3 * 24 + 21, name: "Speed up cold starts", credits: 1560 }], standouts24h: [],
+    split: { "24h": splitOf(perHour(144), new Date(start + 144 * 3_600_000).toISOString()), "7d": splitOf(perHour(0), new Date(start).toISOString()), "30d": splitOf(perDay, new Date(start).toISOString()) } };
 }
 
 const SKILLS: [string, number][] = [["self-archive", 1907], ["room-cli", 1503], ["read-prod-database", 1290], ["deepapi", 942], ["rename", 913], ["triage-bug-reports", 681], ["gpt-review", 490], ["state", 389]];

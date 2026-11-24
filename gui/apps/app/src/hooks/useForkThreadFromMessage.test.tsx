@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook } from "@testing-library/react";
 import type { ReactNode } from "react";
 import type { Thread } from "@cloudroom/domain";
 import { makeThread as makeThreadFixture } from "@cloudroom/test-helpers/domain-fixtures";
@@ -11,11 +11,13 @@ import {
 } from "@cloudroom/client-core";
 import { getRootComposeRoutePath } from "@/lib/route-paths";
 import { getPromptDraftAccessor } from "@/hooks/usePromptDraftStorage";
+import { appToast } from "@/components/ui/app-toast";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { useForkThreadFromMessage } from "./useForkThreadFromMessage";
 
 const mocks = vi.hoisted(() => ({
   fetchQuery: vi.fn(),
+  forkPoint: vi.fn(async ({ sequence }: { sequence: number }): Promise<{ exact: boolean; sequence: number | null }> => ({ exact: true, sequence })),
   navigate: vi.fn(),
   setRootComposeProjectId: vi.fn(),
   queryClient: {
@@ -36,8 +38,12 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("@/lib/sdk", () => ({
+  sdk: { threads: { messageForkPoint: mocks.forkPoint } },
+}));
+
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return {
     ...actual,
     useNavigate: () => mocks.navigate,
@@ -73,6 +79,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.clearAllMocks();
 });
 
@@ -105,7 +112,7 @@ describe("useForkThreadFromMessage", () => {
     });
 
     expect(getPromptDraftAccessor({ kind: "new-thread" }).getCurrent()).toMatchObject({
-      text: "<context> [message #4 - 3 words] </context>\n\n",
+      text: "<context> [message #4 - 3 words] </context>\n",
       contexts: [{ label: "[message #4 - 3 words]", text: "fork from here" }],
     });
     expect(mocks.setRootComposeProjectId).toHaveBeenCalledWith("proj_source");
@@ -161,5 +168,26 @@ describe("useForkThreadFromMessage", () => {
       | ForkThreadCreateSeed
       | undefined;
     expect(seed?.sourceThreadTitle).toBe("Renamed source");
+
+    mocks.forkPoint.mockResolvedValueOnce({ exact: true, sequence: 4 });
+    await act(() => first({ sourceSeqEnd: 4 }));
+    expect(mocks.navigate.mock.lastCall?.[1]?.state).toMatchObject({
+      [FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY]: { sourceSeqEnd: 4 },
+    });
+    mocks.navigate.mockClear();
+    const notice = vi.spyOn(appToast, "message").mockReturnValue("fork");
+    mocks.forkPoint.mockResolvedValueOnce({ exact: false, sequence: null });
+    await act(() => first({ sourceSeqEnd: 4 }));
+    expect(notice).toHaveBeenCalledWith("No saved reply is available to fork here yet.");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    mocks.forkPoint.mockResolvedValueOnce({ exact: false, sequence: 3 });
+    await act(() => first({ sourceSeqEnd: 4 }));
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    const action = notice.mock.lastCall?.[1]?.action;
+    expect(action?.label).toBe("Use previous finished turn");
+    const button = render(<button onClick={action?.onClick}>{action?.label}</button>);
+    fireEvent.click(button.getByRole("button", { name: "Use previous finished turn" }));
+    expect(mocks.navigate.mock.lastCall?.[1]?.state[FORK_THREAD_CREATE_SEED_LOCATION_STATE_KEY].sourceSeqEnd).toBe(3);
   });
 });

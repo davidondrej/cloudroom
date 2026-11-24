@@ -32,6 +32,7 @@
  *                              advertising a thought_level config option
  * - FAKE_ACP_SET_CONFIG_MODEL_ERROR=1
  *                            → fail session/set_config_option for model values
+ * - FAKE_ACP_NO_SET_MODEL=1  → answer session/set_model with "Method not found"
  * - FAKE_ACP_SET_CONFIG_FAST_ERROR=1
  *                            → fail session/set_config_option for Fast values
  * - FAKE_ACP_CURSOR_PARAMETERIZED_MODELS=1
@@ -59,6 +60,7 @@
  * - FAKE_ACP_READY_FILE      → written once the agent process is up
  * - FAKE_ACP_SIGNAL_FILE     → written with "SIGTERM" when the agent is reaped
  * - FAKE_ACP_WRITE_PATH      → target path for the "write-file" prompt
+ * - FAKE_ACP_READ_PATH       → target path for the "read-file" prompt
  * - FAKE_ACP_LAUNCH_LOG      → append one line per process launch (used to
  *                              count model-discovery spawns in cache/TTL tests)
  * - FAKE_ACP_PROMPT_LOG      → append one JSON-encoded prompt text per request
@@ -67,12 +69,24 @@
  *                            → like Cursor (#890): the first launch (file not
  *                              yet written) fails every prompt after the first
  *                              with "WritableIterable is closed"
+ * - FAKE_ACP_CLOSED_STREAM_ERROR
+ *                            → JSON error object for those prompts instead;
+ *                              "{session}" becomes the prompt's session id
+ * - FAKE_ACP_WAKE_FILE       → after a "wake-later" prompt, send each JSON
+ *                              list of updates the test writes to this file
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
 
 import { createInterface } from "node:readline";
-import { appendFileSync, existsSync, renameSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 
 const failLoad = process.env.FAKE_ACP_FAIL_LOAD === "1";
 const loadSession = process.env.FAKE_ACP_LOAD_SESSION === "1" || failLoad;
@@ -93,6 +107,7 @@ const acceptNativeReasoning =
   process.env.FAKE_ACP_ACCEPT_NATIVE_REASONING === "1";
 const setConfigModelError = process.env.FAKE_ACP_SET_CONFIG_MODEL_ERROR === "1";
 const setConfigFastError = process.env.FAKE_ACP_SET_CONFIG_FAST_ERROR === "1";
+const noSetModel = process.env.FAKE_ACP_NO_SET_MODEL === "1";
 const cursorParameterizedModels =
   process.env.FAKE_ACP_CURSOR_PARAMETERIZED_MODELS === "1";
 const requestLog = process.env.FAKE_ACP_REQUEST_LOG;
@@ -408,6 +423,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+let sendingWakeFileUpdates = false;
+
+/**
+ * Like agy after a background command finishes: sends updates whether or not a prompt is open. Each time the test
+ * writes a JSON list of updates to FAKE_ACP_WAKE_FILE, sends them and removes the file.
+ */
+async function sendWakeFileUpdates() {
+  if (sendingWakeFileUpdates) return;
+  sendingWakeFileUpdates = true;
+  const path = process.env.FAKE_ACP_WAKE_FILE;
+  for (;;) {
+    if (existsSync(path)) {
+      const updates = JSON.parse(readFileSync(path, "utf8"));
+      rmSync(path);
+      for (const update of updates) notifyUpdate(update);
+    }
+    await sleep(10);
+  }
+}
+
 function promptText(prompt) {
   return (Array.isArray(prompt) ? prompt : [])
     .filter((block) => block && block.type === "text")
@@ -439,11 +474,18 @@ async function handlePrompt(message) {
     send({
       jsonrpc: "2.0",
       id: message.id,
-      error: {
-        code: -32603,
-        message: "Internal error",
-        data: { details: "WritableIterable is closed" },
-      },
+      error: process.env.FAKE_ACP_CLOSED_STREAM_ERROR
+        ? JSON.parse(
+            process.env.FAKE_ACP_CLOSED_STREAM_ERROR.replaceAll(
+              "{session}",
+              message.params?.sessionId,
+            ),
+          )
+        : {
+            code: -32603,
+            message: "Internal error",
+            data: { details: "WritableIterable is closed" },
+          },
     });
     return;
   }
@@ -506,6 +548,43 @@ async function handlePrompt(message) {
       outcome = "error";
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
+  } else if (text.includes("request-kimi-permission")) {
+    // Kimi Code 2.5.2 asks before tool.call.started: the call has only the title "Bash" and the
+    // streamed args JSON. ":other-id" asks for a different call; ":structured" also sends rawInput;
+    // ":titled" names the command in the title; ":output" sends rawOutput with the permission.
+    const args = JSON.stringify({ command: "git diff --stat" });
+    notifyUpdate({
+      sessionUpdate: "tool_call",
+      toolCallId: "kimi-call-1",
+      title: text.includes(":titled") ? "git status" : "Bash",
+      kind: "execute",
+      status: "pending",
+      ...(text.includes(":structured")
+        ? { rawInput: { command: "git status" } }
+        : {}),
+      content: [{ type: "content", content: { type: "text", text: "" } }],
+    });
+    notifyUpdate({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "kimi-call-1",
+      status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: args } }],
+    });
+    const otherId = text.includes(":other-id");
+    const result = await requestClient("session/request_permission", {
+      sessionId: activeSessionId,
+      toolCall: {
+        toolCallId: otherId ? "kimi-call-2" : "kimi-call-1",
+        title: "Bash",
+        ...(otherId ? { kind: "execute" } : {}),
+        ...(text.includes(":output") ? { rawOutput: args } : {}),
+      },
+      options: [
+        { optionId: "approve_once", name: "Approve once", kind: "allow_once" },
+        { optionId: "reject", name: "Reject", kind: "reject_once" },
+      ],
+    }).catch(() => undefined);
+    notifyUpdate(messageChunk(`permission:${result?.outcome?.optionId}`));
   } else if (text.includes("request-permission")) {
     const backgroundPermission = process.env.FAKE_ACP_BACKGROUND_PERMISSION;
     if (backgroundPermission) {
@@ -555,18 +634,34 @@ async function handlePrompt(message) {
     notifyUpdate(messageChunk(`permission:${outcome}`));
   } else if (text.includes("write-file")) {
     try {
-      await requestClient("fs/write_text_file", {
+      const ack = await requestClient("fs/write_text_file", {
         sessionId: activeSessionId,
         path: process.env.FAKE_ACP_WRITE_PATH,
         content: "hello from agent\n",
       });
-      notifyUpdate(messageChunk("write:ok"));
+      // Rust ACP SDKs (Devin) reject a null ack as a Parse error (#2061).
+      notifyUpdate(messageChunk(ack === null ? "write:bad-ack" : "write:ok"));
     } catch {
       notifyUpdate(messageChunk("write:denied"));
     }
+  } else if (text.includes("read-file")) {
+    try {
+      const result = await requestClient("fs/read_text_file", {
+        sessionId: activeSessionId,
+        path: process.env.FAKE_ACP_READ_PATH,
+      });
+      notifyUpdate(messageChunk(`read:${result.content}`));
+    } catch {
+      notifyUpdate(messageChunk("read:denied"));
+    }
+  } else if (text.includes("wake-later")) {
+    notifyUpdate(messageChunk(`echo:${text}`));
+    void sendWakeFileUpdates();
   } else if (text.includes("hang")) {
     // Stay pending until the client sends session/cancel.
     return;
+  } else if (text.includes("no-reply")) {
+    // Ends the turn without output, as Kimi does when its model request fails.
   } else if (text.includes("die")) {
     process.exit(7);
   } else if (text.includes("slow")) {
@@ -771,6 +866,14 @@ async function handleMessage(message) {
       const availableModels = cursorParameterizedModels
         ? cursorModelOptions()
         : fakeModels;
+      if (noSetModel) {
+        send({
+          jsonrpc: "2.0",
+          id: message.id,
+          error: { code: -32601, message: "Method not found" },
+        });
+        return;
+      }
       if (
         (!cursorParameterizedModels && !modelConfig && !modelsField) ||
         typeof modelId !== "string" ||

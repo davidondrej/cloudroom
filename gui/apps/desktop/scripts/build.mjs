@@ -100,7 +100,7 @@ await Promise.all([
   build({
     ...commonOptions,
     entryPoints: [resolve(packageRoot, "src", "main.ts")],
-    external: ["electron"],
+    external: ["electron", "original-fs"],
     format: "cjs",
     outfile: resolve(distDir, "main.js"),
   }),

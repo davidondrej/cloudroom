@@ -20,6 +20,8 @@ const guardedWriteTails = new Map<string, Promise<void>>();
 interface ResolvedWriteTarget {
   writePath: string;
   parentMissing: boolean;
+  /** The first part realpath couldn't find exists: a symlink to a missing target, which a write would follow. */
+  danglingLink?: boolean;
 }
 
 export async function resolveWriteTarget(
@@ -39,9 +41,16 @@ export async function resolveWriteTarget(
   for (;;) {
     try {
       const realAncestor = await fs.realpath(ancestor);
+      const danglingLink = await fs
+        .lstat(path.join(realAncestor, missingSegments[0]!))
+        .then(
+          () => true,
+          () => false,
+        );
       return {
         writePath: path.join(realAncestor, ...missingSegments),
         parentMissing: missingSegments.length > 1,
+        danglingLink,
       };
     } catch (error) {
       if (!isFsErrorWithCode(error, "ENOENT")) {
@@ -100,7 +109,10 @@ async function writeResolvedHostFile(
       }
       throw error;
     }
-    if (!isPathWithinDirectory(realRootPath, target.writePath)) {
+    if (
+      target.danglingLink ||
+      !isPathWithinDirectory(realRootPath, target.writePath)
+    ) {
       throw new CommandDispatchError(
         "invalid_path",
         `Path "${command.path}" escapes write root`,

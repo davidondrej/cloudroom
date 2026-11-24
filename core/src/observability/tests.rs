@@ -70,6 +70,7 @@ async fn api_outage_keeps_local_diagnostics_and_overload_is_visible() {
         storage: None,
         rpc_timeout: Duration::from_secs(30),
         diagnostic_upload: Duration::from_secs(1),
+        previous_exit_wait: Duration::ZERO,
     };
     // Nothing listens on port 1: every upload fails, as in an outage.
     let api = crate::session::history::History::new(&config).unwrap().api;

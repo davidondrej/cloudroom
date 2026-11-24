@@ -1,7 +1,7 @@
 import { useRef, useState } from "react";
 import { isBackgroundAgentTaskType } from "@cloudroom/domain";
 import type { TimelineWorkflowWorkRow } from "@cloudroom/server-contract";
-import { useResizeObserver } from "usehooks-ts";
+import { useResizeObserver } from "@/hooks/useElementObservers";
 import { AnimatedBody } from "@/components/promptbox/banner/AnimatedBody";
 import { PromptStackCardChevron } from "@/components/promptbox/banner/PromptStackCard";
 import { LiveDurationText } from "@/components/thread/timeline/LiveDurationText";

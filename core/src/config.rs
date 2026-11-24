@@ -30,6 +30,8 @@ pub struct Config {
     pub rpc_timeout: Duration,
     /// How often diagnostics are uploaded. Long, so hundreds of idle cores cost the website little.
     pub diagnostic_upload: Duration,
+    /// How long a starting Core waits for the previous one to free its port and state directory (#1968).
+    pub previous_exit_wait: Duration,
 }
 
 impl Config {
@@ -86,7 +88,9 @@ impl Config {
             "devin" => Kind::Devin,
             "droid" => Kind::Droid,
             "kimi" => Kind::Kimi,
+            "antigravity" => Kind::Antigravity,
             "openclaw" => Kind::OpenClaw,
+            "agent-zero" => Kind::AgentZero,
             _ => return Err(io::Error::other("unsupported CLOUDROOM_HARNESS")),
         };
         let account_home: PathBuf = required("CLOUDROOM_ACCOUNT_HOME")?.into();
@@ -157,6 +161,9 @@ impl Config {
             (Kind::Devin, "devin", ".local/share/devin"),
             (Kind::Droid, "droid", ".factory"),
             (Kind::Kimi, "kimi", ".kimi-code"),
+            (Kind::Antigravity, "agy", ".gemini/antigravity-cli"),
+            // Agent Zero's bridge; the agent itself is the user's own server (ADR 20261116-153548).
+            (Kind::AgentZero, "a0", ".agent-zero"),
         ] {
             let home = account_home.join(home);
             let binary = [
@@ -201,6 +208,8 @@ impl Config {
             rpc_timeout,
             // Unprotected tests check uploads within seconds.
             diagnostic_upload: Duration::from_secs(if unprotected_test_mode { 1 } else { 300 }),
+            // Unprotected tests check the give-up in seconds.
+            previous_exit_wait: Duration::from_secs(if unprotected_test_mode { 3 } else { 60 }),
             default_harness,
             harnesses,
             listen,

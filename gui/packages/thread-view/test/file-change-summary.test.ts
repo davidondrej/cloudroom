@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getFileChangeDiffStats,
   isPatchMetadataLine,
-} from "../src/file-change-summary.js";
+} from "../src/utils.js";
 
 describe("file-change-summary", () => {
   it("recognizes patch metadata lines without treating content as metadata", () => {

@@ -1,14 +1,21 @@
 import {
   clearQueuedThreadMessageWaitingOn,
   createQueuedThreadMessageInTransaction,
+  getThread,
+  hasQueuedRetryOfTurnRequest,
+  listStoredClientTurnRequestRowsByKeys,
+  listStoredTurnRejectedRowsByClientRequestIds,
   requeueClaimedQueuedThreadMessage,
   type ClaimedQueuedThreadMessageRow,
   type DbConnection,
   type DbNotifier,
   type DbQueryConnection,
+  type DbTransaction,
   type QueuedThreadMessageRow,
 } from "@cloudroom/db";
+import { permissionModeSchema } from "@cloudroom/domain";
 import type {
+  ClientTurnRequestId,
   PromptInput,
   QueuedMessagePayload,
   QueuedMessageSystemNotice,
@@ -22,6 +29,10 @@ import {
   emitPluginMessageDispatched,
   emitPluginMessageQueued,
 } from "../plugins/plugin-thread-events.js";
+import {
+  parseStoredTurnRequestEvent,
+  type TurnRequestRetryMarker,
+} from "./thread-events.js";
 import { toThreadQueuedMessage } from "./thread-queued-messages.js";
 
 type QueueWaitDeps = { db: DbQueryConnection; hub: DbNotifier };
@@ -187,4 +198,138 @@ export function clearQueuedMessageWait(
     id: args.queuedMessageId,
     threadId: args.threadId,
   });
+}
+
+const UNCONFIRMED_SEND_REASON =
+  "The computer disconnected before confirming this message. It may still arrive. Send it again if it doesn't.";
+
+/**
+ * Puts back a claimed row whose turn was saved and sent, then rejected because
+ * the computer disconnected before confirming it (#2279). The computer may
+ * still have it, so the row is held by its failure reason: only the user sends
+ * it again. It retries the original request, which refuses a second retry.
+ */
+export function holdUnconfirmedQueuedMessage(
+  deps: { db: DbConnection; hub: DbNotifier },
+  args: {
+    claimed: ClaimedQueuedThreadMessageRow;
+    requestId: ClientTurnRequestId;
+    retryOf: TurnRequestRetryMarker | undefined;
+  },
+): void {
+  const { claimed } = args;
+  const threadId = claimed.threadId;
+  const original = args.retryOf?.requestId ?? args.requestId;
+  const thread = getThread(deps.db, threadId);
+  if (
+    thread === null ||
+    thread.archivedAt !== null ||
+    thread.deletedAt !== null ||
+    listStoredTurnRejectedRowsByClientRequestIds(deps.db, {
+      threadId,
+      clientRequestIds: [args.requestId],
+      afterSequence: 0,
+    }).length === 0 ||
+    hasQueuedRetryOfTurnRequest(deps.db, {
+      threadId,
+      retryOfTurnRequestId: original,
+    })
+  ) {
+    return;
+  }
+  const row = deps.db.transaction(
+    (tx) =>
+      createQueuedThreadMessageInTransaction(tx, {
+        threadId,
+        // Agent-only like any retry: the user's message stays in the chat.
+        content: toThreadQueuedMessage(claimed).content.map((block) => ({
+          ...block,
+          visibility: "agent-only" as const,
+        })),
+        senderThreadId: claimed.senderThreadId,
+        model: claimed.model,
+        reasoningLevel: claimed.reasoningLevel,
+        permissionMode: claimed.permissionMode,
+        serviceTier: claimed.serviceTier,
+        waitingOn: null,
+        sendAt: null,
+        payload: {
+          kind: "retry",
+          retryOfTurnRequestId: original,
+          attempt: (args.retryOf?.attempt ?? 1) + 1,
+          reason: "Computer disconnected",
+        },
+        systemNotice: null,
+        hardQueue: claimed.hardQueue,
+        sortKey: claimed.sortKey,
+        failureReason: UNCONFIRMED_SEND_REASON,
+      }),
+    { behavior: "immediate" },
+  );
+  emitPluginMessageQueued(toThreadQueuedMessage(row));
+  deps.hub.notifyThread(threadId, ["queue-changed"]);
+}
+
+/**
+ * Puts back the message of a start the host refused, untouched, because the
+ * thread was already running a turn (#1584). It joins that turn once it
+ * starts, or follows it, so it still arrives once. Agent-only like any retry:
+ * the original message stays in the chat.
+ */
+export function requeueRefusedTurnRequest(
+  deps: { db: DbTransaction; hub: DbNotifier },
+  args: { requestId: ClientTurnRequestId; threadId: string },
+): ThreadQueuedMessage | null {
+  const [row] = listStoredClientTurnRequestRowsByKeys(deps.db, {
+    keys: [args],
+  });
+  if (row === undefined) return null;
+  const request = parseStoredTurnRequestEvent(row);
+  const original = request.retryOfRequestId ?? request.requestId;
+  const permissionMode = permissionModeSchema.safeParse(
+    request.execution.permissionMode,
+  ).data;
+  if (
+    request.input.length === 0 ||
+    permissionMode === undefined ||
+    hasQueuedRetryOfTurnRequest(deps.db, {
+      threadId: args.threadId,
+      retryOfTurnRequestId: original,
+    })
+  ) {
+    return null;
+  }
+  const queued = createQueuedThreadMessageInTransaction(deps.db, {
+    threadId: args.threadId,
+    content: request.input.map((block) => ({
+      ...block,
+      visibility: "agent-only" as const,
+    })),
+    senderThreadId: request.senderThreadId,
+    model: request.execution.model,
+    reasoningLevel: request.execution.reasoningLevel,
+    permissionMode,
+    serviceTier: request.execution.serviceTier,
+    waitingOn: { kind: "turn-starting" },
+    sendAt: null,
+    // Ahead of what queued since, so it keeps its order (#1584).
+    queuedAt: row.createdAt,
+    payload: {
+      kind: "retry",
+      retryOfTurnRequestId: original,
+      attempt: (request.retryAttempt ?? 1) + 1,
+      reason: "Another turn was running",
+    },
+    // Only a parent's notice is one: a retry is `system` too, and a stored
+    // kind defaults to "unlabeled", so other messages keep their own path.
+    systemNotice:
+      request.initiator === "system" && request.retryOfRequestId === undefined
+        ? {
+            kind: request.systemMessageKind ?? "unlabeled",
+            subject: request.systemMessageSubject ?? null,
+          }
+        : null,
+  });
+  deps.hub.notifyThread(args.threadId, ["queue-changed"]);
+  return toThreadQueuedMessage(queued);
 }

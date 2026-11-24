@@ -133,7 +133,7 @@ it("pairs through a loopback callback, keeps secrets out of status, persists/rec
     expect((await finish(await start())).status).toBe(200);
     expect(await account.status()).toMatchObject({ ready: true, account: owners[1] });
     expect(harness.db.select().from(cloudroomThreads).get()?.accountId).toBe(owners[0]!.id);
-    await expect(cloudroom(harness.deps).control(thread.id, "stop")).rejects.toThrow("another Cloudroom account");
+    await expect(cloudroom(harness.deps).control(thread.id, "stop")).rejects.toThrow("Sign in to the account that owns this thread.");
     await account.logout();
     owner = owners[0]!;
     expect((await finish(await start())).status).toBe(200);

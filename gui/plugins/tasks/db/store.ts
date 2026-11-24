@@ -515,6 +515,18 @@ export function createTasksStore(db: PluginDatabase) {
   const getTaskThreadRow = db.prepare<[string], TaskThreadRow>(
     "SELECT * FROM task_threads WHERE id = ?",
   );
+  const unfinishedThreadFilter = "tt.live_status <> 'completed'";
+  const findUnfinishedThread = db.prepare<[]>(
+    `SELECT 1 FROM task_threads tt WHERE ${unfinishedThreadFilter} LIMIT 1`,
+  );
+  // Drive the join from links so preserving task order never scans the whole board.
+  const unfinishedThreadRows = db.prepare<[], TaskThreadRow>(`
+    SELECT tt.* FROM task_threads tt
+    CROSS JOIN tasks t ON t.id = tt.task_id
+    WHERE ${unfinishedThreadFilter}
+    ORDER BY t.project_id, t.status, t.position, t.id,
+      tt.live_status = 'failed', tt.attached_at DESC, tt.id DESC
+  `);
   const getPresetRow = db.prepare<[string], PresetRow>(
     "SELECT * FROM presets WHERE id = ?",
   );
@@ -1891,6 +1903,9 @@ export function createTasksStore(db: PluginDatabase) {
     getTaskThreadByThreadId,
     listTaskThreadsByThreadId,
     listTaskThreads,
+    hasUnfinishedTaskThreads: () => findUnfinishedThread.get() !== undefined,
+    listUnfinishedTaskThreads: () =>
+      unfinishedThreadRows.all().map(taskThreadFromRow),
     getTaskMetadata,
     updateTaskThreadStatus,
     deleteTaskThread,

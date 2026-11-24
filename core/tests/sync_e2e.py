@@ -340,6 +340,16 @@ class SyncTests(unittest.TestCase):
             with self.assertRaises(Conflict): tree.apply('file', old, entry, data)
         self.assertEqual((self.local / 'file').read_text(), 'concurrent edit')
 
+    def test_malformed_native_uploads_are_rejected(self):
+        session = {'type': 'session', 'id': '01a1b544-cd8e-7663-b01e-2cfebbb19098', 'cwd': '/old', 'version': 3}
+        cases = [('pi', [], '/code/demo'), ('codex', {'type': 'session_meta', 'payload': []}, '/code/demo'), ('pi', session, [])]
+        for index, (harness, header, cwd) in enumerate(cases):
+            data = json.dumps(header).encode() + b'\n'
+            request = {'path': 'rollout.jsonl', 'size': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                       'native': {'harness': harness, 'id': session['id'], 'cwd': cwd}}
+            with self.subTest(harness=harness, header=header, cwd=cwd), self.assertRaises(ValueError):
+                Tree(self.root / str(index), create=True).install_transfer(request, io.BytesIO(data))
+
     def test_cross_platform_codex_teleport_maps_workspace_roots(self):
         native = {'harness': 'codex', 'id': '01a1b544-cd8e-7663-b01e-2cfebbb19098', 'cwd': '/code/demo'}
         for index, (source, roots, expected) in enumerate([('C:\\demo', ['C:\\demo', 'D:\\x', '/kept'], ['/code/demo', '/kept']),

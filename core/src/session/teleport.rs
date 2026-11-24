@@ -74,6 +74,11 @@ pub struct Manifest {
     pub strip_ai_co_authors: Option<bool>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// The app's IDs for the thread and its project, exported to the agent's shells (#199).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub workspace: String,
     pub workspace_name: String,
     pub files: Vec<Entry>,
@@ -156,6 +161,11 @@ fn validate(manifest: &Manifest) -> Result<()> {
             .system_prompt
             .as_ref()
             .is_some_and(|p| p.trim().is_empty() || p.len() > 32768 || p.contains('\0'))
+        || manifest
+            .thread_id
+            .as_deref()
+            .is_some_and(|t| !super::relay::thread_id(t))
+        || manifest.project_id.as_deref().is_some_and(|p| !valid_id(p))
         || manifest.queued.iter().any(|prompt| {
             prompt.input()["text"]
                 .as_str()
@@ -335,12 +345,19 @@ impl Manager {
         if let Err(error) = self.harness_ready(check.harness).await {
             return fail("login_required", error.message(), None);
         }
-        if check.service_tier.as_deref() == Some("fast") && !check.harness.fast() {
-            let error = format!("Cloud {harness} has no Fast mode; turn Fast off, then Teleport");
+        if let Some(tier @ ("fast" | "ultrafast")) = check.service_tier.as_deref()
+            && !check.harness.tier(tier)
+        {
+            let name = if tier == "fast" { "Fast" } else { "Ultra Fast" };
+            let error =
+                format!("Cloud {harness} has no {name} mode; turn {name} off, then Teleport");
             return fail("setting_unavailable", error, None);
         }
         let reasoning = check.reasoning.as_deref();
-        if matches!(check.harness, runtime::Kind::Codex | runtime::Kind::Claude) {
+        if matches!(
+            check.harness,
+            runtime::Kind::Codex | runtime::Kind::Claude | runtime::Kind::Antigravity
+        ) {
             let models = match self.model_catalog(check.harness).await {
                 Ok(models) => models,
                 Err(error) => return fail("models_unavailable", error.message(), None),
@@ -459,7 +476,7 @@ impl Manager {
                 }
             }
             if let Some(tier) = input["service_tier"].as_str()
-                && (tier != "default" && !(tier == "fast" && manifest.harness.fast()))
+                && !manifest.harness.tier(tier)
             {
                 return Err(Error::Conflict("invalid service tier"));
             }
@@ -838,7 +855,7 @@ impl Manager {
         let receipt = Receipt {
             request_id: id.into(),
             command: "start".into(),
-            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt}),
+            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt,"thread_id":manifest.thread_id,"project_id":manifest.project_id}),
             state: "completed".into(),
             model: Some(manifest.model.clone()),
             provider: manifest.provider.clone(),
@@ -889,7 +906,7 @@ impl Manager {
             )
             .await?;
         let handoff = format!(
-            "[Teleport handoff]\n{}\n\nCloud workspace: {}\nThe local executor and its children are stopped. You are the only continuing parent. Complete their combined work. Old Mac paths, GUI tools and local-only instructions are not usable here. Use your current cloud tools. Never repeat an uncertain tool action blindly. Project dependencies are yours to resolve within existing permissions.\nFull file index: {}. Child context files are already available. Project files and attachments are uploading separately and might never arrive if the laptop disconnects. The index lists expected destinations, not proof of arrival: check whether each needed file exists. Work on whatever you can, and wait only when an essential file is missing. Different cloud originals are never overwritten; incoming versions remain at the indexed paths. An upload-completion follow-up will let you continue any blocked work.\n",
+            "[Teleport handoff]\n{}\n\nCloud workspace: {}\nThe local executor and its children are stopped. You are the only continuing parent. Complete their combined work. Old Mac paths, GUI tools and local-only instructions are not usable here. Use your current cloud tools. Never repeat an uncertain tool action blindly. Project dependencies are yours to resolve within existing permissions.\nFull file index: {}. Child context files are already available. Indexed files and attachments are uploading separately and might never arrive if the laptop disconnects. The index lists expected destinations, not proof of arrival: check whether each needed file exists. Work on whatever you can, and wait only when an essential one is missing. The project copy itself is different: run `room-cli files wait` before touching project files; it returns at once if no copy is running. Different cloud originals are never overwritten; incoming versions remain at the indexed paths. An upload-completion follow-up will let you continue any blocked work.\n",
             manifest.handoff,
             transfer.workspace.path.display(),
             index["path"].as_str().unwrap_or_default()

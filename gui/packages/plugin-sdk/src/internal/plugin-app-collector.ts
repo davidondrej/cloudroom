@@ -31,6 +31,7 @@ import type {
   PluginSourceCodeRendererRegistration,
   PluginThreadHeaderActionRegistration,
   PluginThreadActionRegistration,
+  ExperimentalProjectActionRegistration,
   ExperimentalPluginBrowserToolbarActionRegistration,
   PluginThreadListRegistration,
   PluginThreadPanelActionRegistration,
@@ -369,6 +370,7 @@ export interface CollectedPluginAppRegistrations {
   threadLists: PluginThreadListRegistration[];
   threadHeaderActions: PluginThreadHeaderActionRegistration[];
   threadActions: PluginThreadActionRegistration<unknown>[];
+  projectActions: ExperimentalProjectActionRegistration[];
   browserToolbarActions: ExperimentalPluginBrowserToolbarActionRegistration[];
   fileOpeners: PluginFileOpenerRegistration[];
   sourceCodeRenderers: PluginSourceCodeRendererRegistration[];
@@ -496,6 +498,7 @@ export function collectPluginAppRegistrations(
     threadLists: [],
     threadHeaderActions: [],
     threadActions: [],
+    projectActions: [],
     browserToolbarActions: [],
     fileOpeners: [],
     sourceCodeRenderers: [],
@@ -527,6 +530,7 @@ export function collectPluginAppRegistrations(
     threadList: new Set<string>(),
     threadHeaderAction: new Set<string>(),
     threadAction: new Set<string>(),
+    projectAction: new Set<string>(),
     browserToolbarAction: new Set<string>(),
     fileOpener: new Set<string>(),
     sourceCodeRenderer: new Set<string>(),
@@ -824,6 +828,19 @@ export function collectPluginAppRegistrations(
         collected.threadHeaderActions.push({
           id,
           title: requireNonEmptyString(kind, "title", registration.title),
+          component: requireComponent(kind, registration.component),
+        });
+      },
+      experimental_projectAction(registration) {
+        const kind = "slots.experimental_projectAction";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.projectAction, id);
+        const badge = requireOptionalString(kind, "badge", registration.badge);
+        collected.projectActions.push({
+          id,
+          title: requireNonEmptyString(kind, "title", registration.title),
+          icon: requireNonEmptyString(kind, "icon", registration.icon),
+          ...(badge !== undefined ? { badge } : {}),
           component: requireComponent(kind, registration.component),
         });
       },
