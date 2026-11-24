@@ -71,6 +71,7 @@ const THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX = 100;
 interface ThreadOutputCommandOptions {
   json?: boolean;
   self?: boolean;
+  all?: boolean;
 }
 
 interface ThreadStatusPayload {
@@ -531,83 +532,7 @@ export function registerShowCommand(
       action(async (id: string | undefined, opts: ThreadLogCommandOptions) => {
         const threadId = requireThreadIdOrSelf(id, opts);
         const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
-        const format = resolveThreadTimelineTextFormat(opts);
-
-        if (opts.all && opts.limit !== undefined) {
-          throw new Error("--all cannot be combined with --limit");
-        }
-        if (format !== "json" && opts.afterSeq !== undefined) {
-          throw new Error("--after-seq is only supported with --format json");
-        }
-
-        if (format === "json") {
-          const events = opts.all
-            ? await listAllThreadLogEvents(sdk, threadId, opts.afterSeq)
-            : await listThreadLogEventsPage(sdk, {
-                threadId,
-                limit: parseThreadLogLimit(
-                  opts.limit,
-                  THREAD_LOG_DEFAULT_EVENT_LIMIT,
-                ),
-                afterSeq: opts.afterSeq,
-              });
-          console.log(JSON.stringify(events.rows, null, 2));
-          if (events.hasMore) {
-            const lastSeq = events.rows[events.rows.length - 1]?.seq;
-            console.error(
-              `Showing the oldest ${events.rows.length} events${
-                opts.afterSeq === undefined ? "" : ` after seq ${opts.afterSeq}`
-              }; more exist. Use --after-seq ${lastSeq} for the next page or --all for the whole thread.`,
-            );
-          }
-          return;
-        }
-
-        const segmentLimit = opts.all
-          ? THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX
-          : parseThreadLogLimit(opts.limit, null);
-        if (
-          segmentLimit !== null &&
-          segmentLimit > THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX
-        ) {
-          throw new Error(
-            `--limit must be at most ${THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX} for minimal/verbose formats; use --all for the whole thread.`,
-          );
-        }
-        const timelineQuery = {
-          threadId,
-          ...(format === "verbose"
-            ? { includeNestedRows: "true" as const }
-            : {}),
-          ...(segmentLimit === null
-            ? {}
-            : { segmentLimit: String(segmentLimit) }),
-        };
-        const timeline: ThreadTimelineResponse =
-          await sdk.threads.timeline(timelineQuery);
-        let rows = timeline.rows;
-        let page = timeline.timelinePage;
-        while (opts.all && page.hasOlderRows && page.olderCursor !== null) {
-          const older: ThreadTimelineResponse = await sdk.threads.timeline({
-            ...timelineQuery,
-            beforeAnchorSeq: String(page.olderCursor.anchorSeq),
-            beforeAnchorId: page.olderCursor.anchorId,
-          });
-          rows = prependOlderTimelineRows({
-            olderRows: older.rows,
-            loadedRows: rows,
-          });
-          page = older.timelinePage;
-        }
-        const color = process.stdout.isTTY === true && !process.env.NO_COLOR;
-        const text = formatThreadTimelineText(rows, {
-          verbose: format === "verbose",
-          color,
-        });
-        const notice = page.hasOlderRows
-          ? `(Showing the newest ${page.returnedSegmentCount} user-message turns; older history omitted. Use --limit <n> (max ${THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX}) or --all to see more.)`
-          : null;
-        console.log(notice === null ? text : `${text}\n\n${notice}`);
+        await printThreadLog(sdk, threadId, opts);
       }),
     );
 
@@ -616,11 +541,22 @@ export function registerShowCommand(
     .description("Get the final output of a thread")
     .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
     .option("--json", "Print machine-readable JSON output")
+    .option(
+      "--all",
+      "Print the whole thread by paging through every entry (same as thread log --all)",
+    )
     .action(
       action(
         async (id: string | undefined, opts: ThreadOutputCommandOptions) => {
           const threadId = requireThreadIdOrSelf(id, opts);
           const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
+          if (opts.all) {
+            await printThreadLog(sdk, threadId, {
+              all: true,
+              json: opts.json,
+            });
+            return;
+          }
           const result = await sdk.threads.output({ threadId });
           if (outputJson(opts, result)) return;
           if (result.output) {
@@ -631,6 +567,86 @@ export function registerShowCommand(
         },
       ),
     );
+}
+
+async function printThreadLog(
+  sdk: BbSdk,
+  threadId: string,
+  opts: ThreadLogCommandOptions,
+): Promise<void> {
+  const format = resolveThreadTimelineTextFormat(opts);
+
+  if (opts.all && opts.limit !== undefined) {
+    throw new Error("--all cannot be combined with --limit");
+  }
+  if (format !== "json" && opts.afterSeq !== undefined) {
+    throw new Error("--after-seq is only supported with --format json");
+  }
+
+  if (format === "json") {
+    const events = opts.all
+      ? await listAllThreadLogEvents(sdk, threadId, opts.afterSeq)
+      : await listThreadLogEventsPage(sdk, {
+          threadId,
+          limit: parseThreadLogLimit(
+            opts.limit,
+            THREAD_LOG_DEFAULT_EVENT_LIMIT,
+          ),
+          afterSeq: opts.afterSeq,
+        });
+    console.log(JSON.stringify(events.rows, null, 2));
+    if (events.hasMore) {
+      const lastSeq = events.rows[events.rows.length - 1]?.seq;
+      console.error(
+        `Showing the oldest ${events.rows.length} events${
+          opts.afterSeq === undefined ? "" : ` after seq ${opts.afterSeq}`
+        }; more exist. Use --after-seq ${lastSeq} for the next page or --all for the whole thread.`,
+      );
+    }
+    return;
+  }
+
+  const segmentLimit = opts.all
+    ? THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX
+    : parseThreadLogLimit(opts.limit, null);
+  if (
+    segmentLimit !== null &&
+    segmentLimit > THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX
+  ) {
+    throw new Error(
+      `--limit must be at most ${THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX} for minimal/verbose formats; use --all for the whole thread.`,
+    );
+  }
+  const timelineQuery = {
+    threadId,
+    ...(format === "verbose" ? { includeNestedRows: "true" as const } : {}),
+    ...(segmentLimit === null ? {} : { segmentLimit: String(segmentLimit) }),
+  };
+  const timeline: ThreadTimelineResponse =
+    await sdk.threads.timeline(timelineQuery);
+  let rows = timeline.rows;
+  let page = timeline.timelinePage;
+  while (opts.all && page.hasOlderRows && page.olderCursor !== null) {
+    const older: ThreadTimelineResponse = await sdk.threads.timeline({
+      ...timelineQuery,
+      beforeAnchorSeq: String(page.olderCursor.anchorSeq),
+      beforeAnchorId: page.olderCursor.anchorId,
+    });
+    rows = prependOlderTimelineRows({
+      olderRows: older.rows,
+      loadedRows: rows,
+    });
+    page = older.timelinePage;
+  }
+  const color = process.stdout.isTTY === true && !process.env.NO_COLOR;
+  const text = formatThreadTimelineText(rows, {
+    verbose: format === "verbose",
+    color,
+  });
+  const notice = page.hasOlderRows
+    ? `(Showing the newest ${page.returnedSegmentCount} user-message turns; older history omitted. Use --limit <n> (max ${THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX}) or --all to see more.)`
+    : null;
+  console.log(notice === null ? text : `${text}\n\n${notice}`);
 }
 
 function printThreadStatus(
