@@ -105,7 +105,7 @@ describe("toPluginSidebarThread", () => {
       }),
     );
     expect(mapped.isUnread).toBe(true);
-    expect(mapped.indicator).toBe("none");
+    expect(mapped.indicator).toBe("unread-success");
   });
 
   it("treats a never-read thread as unread", () => {

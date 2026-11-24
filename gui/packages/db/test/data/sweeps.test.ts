@@ -184,7 +184,6 @@ describe("pruneDestroyedEnvironments", () => {
     });
     const thread = createThread(db, noopNotifier, {
       projectId: project.id,
-      environmentId: environment.id,
       providerId: "codex",
     });
     for (let sequence = 1; sequence <= 3; sequence++) {
@@ -238,7 +237,6 @@ describe("pruneDestroyedEnvironments", () => {
       .run();
     const thread = createThread(db, noopNotifier, {
       projectId: project.id,
-      environmentId: environment.id,
       providerId: "codex",
       status: "idle",
     });
@@ -441,7 +439,6 @@ describe("pruneDestroyedEnvironments", () => {
     const fresh = createDestroyedEnvironment("/tmp/destroyed-fresh", 0);
     const oldestThread = createThread(db, noopNotifier, {
       projectId: project.id,
-      environmentId: tenDaysOld.id,
       providerId: "codex",
       status: "idle",
     });
@@ -517,11 +514,15 @@ describe("pruneDestroyedEnvironments", () => {
     expect(remainingIds()).toEqual([fresh.id]);
   });
 
-  it("nulls event and thread environment pointers only for the pruned environment", () => {
+  it("prunes only environments no live thread points at, nulling pointers of the pruned one", () => {
     const { db, host, project } = setup();
     const now = Date.now();
 
-    function createDestroyedEnvironmentWithThread(path: string, updatedAt: number) {
+    function createDestroyedEnvironmentWithThread(
+      path: string,
+      updatedAt: number,
+      threadDeleted: boolean,
+    ) {
       const environment = createEnvironment(db, noopNotifier, {
       providerOwnsPath: false,
         projectId: project.id,
@@ -539,6 +540,12 @@ describe("pruneDestroyedEnvironments", () => {
         status: "idle",
         environmentId: environment.id,
       });
+      if (threadDeleted) {
+        db.update(threads)
+          .set({ deletedAt: now })
+          .where(eq(threads.id, thread.id))
+          .run();
+      }
       const eventId = createEventId();
       db.insert(events)
         .values({
@@ -556,12 +563,19 @@ describe("pruneDestroyedEnvironments", () => {
     }
 
     const stale = createDestroyedEnvironmentWithThread(
-      "/tmp/stale-with-thread",
+      "/tmp/stale-with-deleted-thread",
       now - 8 * 24 * 60 * 60_000,
+      true,
+    );
+    const live = createDestroyedEnvironmentWithThread(
+      "/tmp/stale-with-live-thread",
+      now - 9 * 24 * 60 * 60_000,
+      false,
     );
     const fresh = createDestroyedEnvironmentWithThread(
-      "/tmp/fresh-with-thread",
+      "/tmp/fresh-with-deleted-thread",
       now,
+      true,
     );
 
     const result = pruneDestroyedEnvironments(db, noopNotifier, {
@@ -588,10 +602,12 @@ describe("pruneDestroyedEnvironments", () => {
 
     expect(environmentPointer(threads, stale.thread.id)).toBeNull();
     expect(environmentPointer(events, stale.eventId)).toBeNull();
+    expect(environmentPointer(threads, live.thread.id)).toBe(live.environment.id);
+    expect(environmentPointer(events, live.eventId)).toBe(live.environment.id);
     expect(environmentPointer(threads, fresh.thread.id)).toBe(fresh.environment.id);
     expect(environmentPointer(events, fresh.eventId)).toBe(fresh.environment.id);
     expect(
-      db.select({ id: environments.id }).from(environments).all().map((row) => row.id),
-    ).toEqual([fresh.environment.id]);
+      db.select({ id: environments.id }).from(environments).all().map((row) => row.id).sort(),
+    ).toEqual([live.environment.id, fresh.environment.id].sort());
   });
 });

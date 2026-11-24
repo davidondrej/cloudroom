@@ -9,7 +9,7 @@ Ask a side question without adding noise to the main conversation. A side chat i
 
 ## How it works
 
-A side chat copies no conversation, so it opens at once and replies fast. It reuses the same workspace. The quoted text is its only context. Its agent starts in the background; messages sent before it is ready wait in the queue. Side chats stay hidden from the sidebar.
+A side chat copies no conversation, so it opens at once and lets you pick or switch to any agent harness and model. It reuses the same workspace. The quoted text is its only context. Its agent starts when you send your first message. Side chats stay hidden from the sidebar.
 
 Once per hour, the plugin looks for side chats older than 24 hours. A side chat with no user message and no queued message is archived. A side chat you used is kept.
 

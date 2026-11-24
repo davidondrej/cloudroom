@@ -16,7 +16,7 @@ import {
   buildTimelineWorkSummaryLabel,
   type TimelineBundleSummaryRow,
   type TimelineStepSummaryRow,
-} from "../src/timeline-view.js";
+} from "../src/view.js";
 
 let nextSeq = 1;
 

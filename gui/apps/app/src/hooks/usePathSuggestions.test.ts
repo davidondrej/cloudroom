@@ -1,6 +1,27 @@
+// @vitest-environment jsdom
+
+import { cleanup, renderHook } from "@testing-library/react";
 import type { WorkspacePathEntry } from "@cloudroom/server-contract";
-import { describe, expect, it } from "vitest";
-import { buildPathSuggestions } from "./usePathSuggestions";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { buildPathSuggestions, usePathSuggestions } from "./usePathSuggestions";
+
+const mocks = vi.hoisted(() => ({
+  useEnvironmentPathSuggestions: vi.fn(),
+  useProjectPathSuggestions: vi.fn(),
+  useThreadStoragePaths: vi.fn(),
+}));
+
+vi.mock("./queries/environment-queries", () => ({
+  useEnvironmentPathSuggestions: mocks.useEnvironmentPathSuggestions,
+}));
+vi.mock("./queries/project-queries", () => ({
+  useProjectPathSuggestions: mocks.useProjectPathSuggestions,
+}));
+vi.mock("./queries/thread-queries", () => ({
+  useThreadStoragePaths: mocks.useThreadStoragePaths,
+}));
+
+afterEach(cleanup);
 
 interface PathEntryFixture {
   kind?: WorkspacePathEntry["kind"];
@@ -55,6 +76,37 @@ describe("buildPathSuggestions", () => {
     ).toEqual([
       { source: "workspace", path: "packages/db/README.md" },
       { source: "thread-storage", path: "README.md" },
+    ]);
+  });
+});
+
+describe("usePathSuggestions", () => {
+  it("searches the project folder for Cloud threads, which have no environment", () => {
+    const idle = { data: undefined, isPending: false, isFetching: false, isError: false };
+    mocks.useEnvironmentPathSuggestions.mockReturnValue(idle);
+    mocks.useThreadStoragePaths.mockReturnValue(idle);
+    mocks.useProjectPathSuggestions.mockReturnValue({
+      ...idle,
+      data: { paths: [makePathEntry({ kind: "directory", path: "src", score: 5 })] },
+    });
+
+    const { result } = renderHook(() =>
+      usePathSuggestions({
+        projectId: "proj_1",
+        query: "src",
+        environmentId: null,
+        includeDirectories: true,
+      }),
+    );
+
+    expect(mocks.useProjectPathSuggestions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ projectId: "proj_1", includeDirectories: true }),
+    );
+    expect(mocks.useEnvironmentPathSuggestions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ environmentId: undefined }),
+    );
+    expect(result.current.suggestions).toEqual([
+      expect.objectContaining({ source: "workspace", entryKind: "directory", path: "src" }),
     ]);
   });
 });

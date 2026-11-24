@@ -16,6 +16,7 @@ pub(super) const DROID: cursor::Flavor = cursor::Flavor {
     replay: false,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 const SESSIONS: &str = "sessions";
 /// The efforts Local threads offer for Droid (provider-acp); Droid offers some of them per model.

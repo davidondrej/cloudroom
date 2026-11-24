@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   removeFixedRightTerminalTabInState,
   upsertTerminalTab,
-} from "./fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import {
   createBrowserFixedPanelTab,
   createEmptyFixedPanelTabsState,
   createPluginPanelFixedPanelTab,
   createTerminalFixedPanelTab,
-} from "./fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 
 describe("plugin right-panel Terminal tabs", () => {
   it("preserves the explicit target when selecting a sibling session", () => {

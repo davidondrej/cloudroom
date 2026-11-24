@@ -1,3 +1,4 @@
+import { getThreadEventRewriteGeneration } from "@cloudroom/db";
 import type { ThreadTimelineResponse } from "@cloudroom/server-contract";
 import type { CompletedTurnDisplay, ThreadStatus } from "@cloudroom/domain";
 import type { ThreadTimelinePageRequest } from "./timeline-pagination.js";
@@ -106,5 +107,6 @@ export function buildThreadTimelineParamsKey(
 export function buildThreadTimelineCacheKey(
   args: ThreadTimelineCacheKeyArgs,
 ): string {
-  return `${args.maxSeq}|${buildThreadTimelineParamsKey(args)}`;
+  // Pruning deletes rows without adding one, so the newest sequence alone would keep serving the page built before it.
+  return `${args.maxSeq}|${getThreadEventRewriteGeneration(args.threadId)}|${buildThreadTimelineParamsKey(args)}`;
 }

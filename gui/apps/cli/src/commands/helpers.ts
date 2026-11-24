@@ -1,4 +1,6 @@
+import { readFileSync, statSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
+import type { Command } from "commander";
 import {
   reasoningLevelSchema,
   reasoningLevelValues,
@@ -22,6 +24,60 @@ export function outputJson(opts: JsonOutputOptions, data: unknown): boolean {
   if (!opts.json) return false;
   console.log(JSON.stringify(data, null, 2));
   return true;
+}
+
+const PROMPT_FILE_MAX_BYTES = 1024 * 1024;
+
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    // Strict UTF-8; the decoder also drops a byte order mark (Windows PowerShell 5.1 writes one).
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("not UTF-8 text; save it as UTF-8");
+  }
+}
+
+function readPromptFile(path: string): string {
+  const stat = statSync(path);
+  if (!stat.isFile()) throw new Error("not a regular file");
+  if (stat.size > PROMPT_FILE_MAX_BYTES) throw new Error("larger than 1 MB");
+  return decodeUtf8(readFileSync(path));
+}
+
+// Long text skips shell and Windows launcher argument limits through a file or stdin ("-") (#1220).
+export async function readTextFileOrStdin(path: string): Promise<string> {
+  if (path !== "-") return readPromptFile(path);
+  if (process.stdin.isTTY) throw new Error("pipe the text to stdin");
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  for await (const chunk of process.stdin) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bytes += buffer.byteLength;
+    if (bytes > PROMPT_FILE_MAX_BYTES) throw new Error("larger than 1 MB");
+    chunks.push(buffer);
+  }
+  // Drop the newline that echo and PowerShell pipes add.
+  return decodeUtf8(Buffer.concat(chunks)).replace(/\r?\n$/u, "");
+}
+
+// Multiline prompts survive Windows' room-cli.cmd only through a file (#974).
+export function addPromptFileOption(command: Command): Command {
+  const both = "error: choose only one of --prompt and --prompt-file";
+  return command
+    .option("--prompt-file <path>", "Read --prompt from a UTF-8 file (use it for multiline prompts on Windows)")
+    .on("option:prompt", () => {
+      if (command.getOptionValue("promptFile") !== undefined) command.error(both);
+    })
+    .on("option:prompt-file", (path: string) => {
+      if (command.getOptionValue("prompt") !== undefined) command.error(both);
+      let prompt: string;
+      try {
+        prompt = readPromptFile(path);
+      } catch (error) {
+        command.error(`error: --prompt-file ${path}: ${getErrorMessage(error)}`);
+      }
+      command.setOptionValueWithSource("prompt", prompt, "cli");
+    });
 }
 
 export function collectOption(value: string, previous: string[]): string[] {

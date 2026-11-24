@@ -100,8 +100,22 @@ describe("thread command dispatch", () => {
       instructionMode: "append",
     };
 
+    // A busy runtime keeps running: shutting it down would end its turns with no notice (#912).
+    harness.threadControls.setActiveTurn("thread-busy", "turn-busy");
     await expect(
       dispatchCommand(command, harness.dispatchOptions()),
+    ).rejects.toMatchObject({
+      code: "workspace_type_mismatch",
+      message: expect.stringContaining("Threads are still running"),
+    });
+    expect(harness.runtimeState.shutdownCount).toBe(0);
+    harness.threadControls.endActiveTurn("thread-busy");
+
+    await expect(
+      dispatchCommand(
+        { ...command, requestId: nextClientRequestId() },
+        harness.dispatchOptions(),
+      ),
     ).rejects.toMatchObject({
       code: "workspace_type_mismatch",
     });
@@ -1049,14 +1063,14 @@ describe("thread command dispatch", () => {
     ).rejects.toThrow();
   });
 
-  it("cleans up staged thread.start attachments when runtime start fails", async () => {
+  it("keeps staged thread.start attachments when a runtime start times out", async () => {
     const threadStorageRootPath = await makeTempDir(
       "bb-runtime-failed-start-attachments-",
     );
     const harness = createHarness();
     const requestId = nextClientRequestId();
     harness.runtime.startThread = async () => {
-      throw new Error("runtime start failed");
+      throw new Error("JSON-RPC request timed out: turn/start");
     };
     const fetchProjectAttachment = vi.fn<FetchProjectAttachment>(async () => ({
       bytes: Buffer.from("content"),
@@ -1097,7 +1111,8 @@ describe("thread command dispatch", () => {
           fetchProjectAttachment,
         },
       ),
-    ).rejects.toThrow("runtime start failed");
+    ).rejects.toThrow("JSON-RPC request timed out: turn/start");
+    // The provider can still start the turn late and read the file (#1047).
     await expect(
       fs.stat(
         path.join(
@@ -1107,17 +1122,17 @@ describe("thread command dispatch", () => {
           "runtime-failed-uploaded.txt",
         ),
       ),
-    ).rejects.toThrow();
+    ).resolves.toBeTruthy();
   });
 
-  it("cleans up staged turn.submit attachments when runtime turn fails", async () => {
+  it("keeps staged turn.submit attachments when a runtime turn times out", async () => {
     const threadStorageRootPath = await makeTempDir(
       "bb-runtime-failed-turn-attachments-",
     );
     const harness = createHarness();
     const requestId = nextClientRequestId();
     harness.runtime.runTurn = async () => {
-      throw new Error("runtime turn failed");
+      throw new Error("JSON-RPC request timed out: turn/start");
     };
     const fetchProjectAttachment = vi.fn<FetchProjectAttachment>(async () => ({
       bytes: Buffer.from("content"),
@@ -1163,7 +1178,7 @@ describe("thread command dispatch", () => {
           fetchProjectAttachment,
         },
       ),
-    ).rejects.toThrow("runtime turn failed");
+    ).rejects.toThrow("JSON-RPC request timed out: turn/start");
     await expect(
       fs.stat(
         path.join(
@@ -1173,7 +1188,7 @@ describe("thread command dispatch", () => {
           "runtime-turn-uploaded.txt",
         ),
       ),
-    ).rejects.toThrow();
+    ).resolves.toBeTruthy();
   });
 
   it("covers thread lifecycle commands", async () => {
@@ -1344,16 +1359,29 @@ describe("thread command dispatch", () => {
     expect(harness.runtimeState.stoppedThreadId).toBeUndefined();
   });
 
-  it("stops the runtime and deletes only the requested thread storage", async () => {
+  it("stops the runtime and deletes only the requested thread storage and chat file copies", async () => {
     const threadStorageRootPath = await makeTempDir(
       "bb-thread-storage-delete-",
     );
+    const dataDir = await makeTempDir("bb-chat-file-copies-delete-");
     const storagePath = path.join(threadStorageRootPath, "thread-delete");
     const siblingPath = path.join(threadStorageRootPath, "thread-sibling");
-    await fs.mkdir(storagePath);
-    await fs.mkdir(siblingPath);
+    const copiesPath = path.join(dataDir, "chat-file-copies", "thread-delete");
+    const siblingCopiesPath = path.join(
+      dataDir,
+      "chat-file-copies",
+      "thread-sibling",
+    );
+    for (const folder of [storagePath, siblingPath]) {
+      await fs.mkdir(folder);
+    }
+    for (const folder of [copiesPath, siblingCopiesPath]) {
+      await fs.mkdir(folder, { recursive: true });
+    }
     await fs.writeFile(path.join(storagePath, "artifact.txt"), "delete me");
     await fs.writeFile(path.join(siblingPath, "artifact.txt"), "keep me");
+    await fs.writeFile(path.join(copiesPath, "copy.png"), "delete me");
+    await fs.writeFile(path.join(siblingCopiesPath, "copy.png"), "keep me");
     const harness = createHarness();
 
     await dispatchCommand(
@@ -1393,14 +1421,17 @@ describe("thread command dispatch", () => {
           environmentId: "env-1",
           threadId: "thread-delete",
         },
-        harness.dispatchOptions({ threadStorageRootPath }),
+        harness.dispatchOptions({ dataDir, threadStorageRootPath }),
       ),
     ).resolves.toEqual({ providerCheckpointId: null });
-    await expect(fs.stat(storagePath)).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    for (const folder of [storagePath, copiesPath]) {
+      await expect(fs.stat(folder)).rejects.toMatchObject({ code: "ENOENT" });
+    }
     await expect(
       fs.readFile(path.join(siblingPath, "artifact.txt"), "utf8"),
+    ).resolves.toBe("keep me");
+    await expect(
+      fs.readFile(path.join(siblingCopiesPath, "copy.png"), "utf8"),
     ).resolves.toBe("keep me");
     expect(harness.runtimeState.stoppedThreadId).toBe("thread-delete");
     expect(harness.runtime.hasThread("thread-delete")).toBe(false);

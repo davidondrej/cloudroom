@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { recordRecentItem, type ThreadRecentItem } from "./threadRecentItems";
+import {
+  recordRecentItem,
+  type ThreadRecentItem,
+} from "@/components/right-panel/store/panel-atoms";
 
 describe("recordRecentItem", () => {
   it("prepends a newly opened item so the list reads newest-first", () => {

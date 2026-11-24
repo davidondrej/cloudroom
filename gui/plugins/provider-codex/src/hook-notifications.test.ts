@@ -65,18 +65,50 @@ describe("Codex lifecycle notification diagnostics", () => {
     },
   );
 
-  it.each(["failed", "blocked", "stopped"])(
-    "preserves %s hook diagnostics",
-    (status) => {
+  it.each([
+    ["failed", "error"],
+    ["blocked", "feedback"],
+    ["stopped", "stop"],
+  ])(
+    "shows a %s hook as one warning with its raw notification",
+    (status, kind) => {
       const translate = createHarness();
-      expect(translate("hook/completed", { run: { status } })).toEqual([
-        expect.objectContaining({
-          type: "provider/unhandled",
-          rawType: "hook/completed",
-        }),
-      ]);
+      const run = {
+        status,
+        eventName: "preToolUse",
+        sourcePath: "/tmp/hooks.json",
+        statusMessage: "Checking lint",
+        entries: [
+          { kind: "context", text: "Remember the lint rules" },
+          { kind, text: "lint-guard: not found\nstack" },
+        ],
+      };
+      const timing = { id: "r1", startedAt: 1, completedAt: 2, durationMs: 1 };
+      const [event] = translate("hook/completed", {
+        run: { ...run, ...timing },
+      });
+      expect(event).toMatchObject({
+        type: "provider/warning",
+        summary: `preToolUse hook in hooks.json ${status}: lint-guard: not found`,
+      });
+      expect(
+        JSON.parse(event?.type === "provider/warning" ? event.details! : ""),
+      ).toEqual({
+        method: "hook/completed",
+        params: { run },
+      });
     },
   );
+
+  it.each([
+    ["account/updated", { authMode: "chatgpt", planType: "pro" }],
+    ["item/reasoning/summaryPartAdded", { itemId: "i1", summaryIndex: 1 }],
+    ["thread/readState/changed", { readState: { firstUnread: null } }],
+  ])("suppresses routine %s notifications", (method, params) => {
+    expect(
+      createHarness()(method, { threadId: "thread-test", ...params }),
+    ).toEqual([]);
+  });
 
   it("preserves unknown notifications as diagnostics", () => {
     const translate = createHarness();

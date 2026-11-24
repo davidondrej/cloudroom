@@ -11,7 +11,7 @@ export type PresentationIconValidationDeps = Pick<
   "db" | "logger" | "providerRegistry"
 >;
 
-const BB_TOOL_SERVER = "bb";
+const ROOM_TOOL_SERVER = "bb";
 
 interface PresentationIconSite {
   glyph: string;
@@ -36,9 +36,9 @@ function presentationIconSiteOf(
   return { glyph, glyphPluginId: parsed.pluginId, event };
 }
 
-function isRegisteredBbToolIcon(site: PresentationIconSite): boolean {
+function isRegisteredRoomToolIcon(site: PresentationIconSite): boolean {
   const { item } = site.event;
-  if (item.type !== "toolCall" || item.server !== BB_TOOL_SERVER) {
+  if (item.type !== "toolCall" || item.server !== ROOM_TOOL_SERVER) {
     return false;
   }
   const tool = findPluginAgentTool(item.tool);
@@ -54,7 +54,7 @@ function presentationIconProblem(
   site: PresentationIconSite,
   providerId: string | null,
 ): string | null {
-  if (isRegisteredBbToolIcon(site)) {
+  if (isRegisteredRoomToolIcon(site)) {
     return null;
   }
   const registration =

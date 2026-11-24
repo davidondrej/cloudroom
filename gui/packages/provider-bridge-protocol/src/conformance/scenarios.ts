@@ -40,7 +40,7 @@ interface ScenarioContext {
   fixture: ConformanceSessionFixture;
   resolveProviderTurnId: (
     threadId: string,
-    bbTurnId: string,
+    roomTurnId: string,
   ) => string | undefined;
   fork: BridgeCapabilities["fork"];
   providerThreadId?: string;
@@ -963,9 +963,9 @@ async function runInterruptStopScenario(
       ),
     ];
   }
-  const bbTurnId = started.scope.turnId;
+  const roomTurnId = started.scope.turnId;
   const providerTurnId =
-    context.resolveProviderTurnId(threadId, bbTurnId) ?? bbTurnId;
+    context.resolveProviderTurnId(threadId, roomTurnId) ?? roomTurnId;
 
   const stopId = client.request(BRIDGE_REQUEST_METHODS.threadStop, {
     threadId,
@@ -998,7 +998,7 @@ async function runInterruptStopScenario(
       (entry) =>
         entry.threadId === threadId &&
         entry.event.type === "turn/completed" &&
-        getThreadEventScopeTurnId(entry.event.scope) === bbTurnId,
+        getThreadEventScopeTurnId(entry.event.scope) === roomTurnId,
     )?.logIndex ?? -1;
   if (completedIndex === -1) {
     return [

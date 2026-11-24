@@ -3,12 +3,13 @@ import { useQueries } from "@tanstack/react-query";
 import type { Host } from "@cloudroom/domain";
 import type { ProviderCliStatusResponse } from "@cloudroom/host-daemon-contract";
 import type { SystemVersionResponse } from "@cloudroom/server-contract";
-import type { BbDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   buildProviderCliIssue,
   isProviderCliIssue,
   isProviderCliUpdateIssue,
   providerCliEntries,
+  withAutoUpdateSetting,
   type ProviderCliIssue,
 } from "@/components/provider-cli/provider-cli-install";
 import { useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
@@ -38,7 +39,7 @@ export interface UpdateInventoryMachine {
 export interface UpdateInventory {
   isLoading: boolean;
   systemVersion: SystemVersionResponse | undefined;
-  desktopInfo: BbDesktopInfo | null;
+  desktopInfo: RoomDesktopInfo | null;
   appUpdateAvailable: boolean;
   desktopUpdateReady: boolean;
   machines: UpdateInventoryMachine[];
@@ -107,7 +108,21 @@ export function useUpdateInventory(
 
   const machines: UpdateInventoryMachine[] = updateHosts.map((host) => {
     const statusQuery = providerStatusByHostId.get(host.id);
-    const providerStatus = statusQuery?.data ?? null;
+    const reported = statusQuery?.data ?? null;
+    const autoUpdate =
+      systemConfigQuery.data?.generalSettings?.providerAutoUpdate;
+    const providerStatus =
+      reported &&
+      autoUpdate &&
+      host.type === "persistent" &&
+      host.lifecycle.phase === "active"
+        ? Object.fromEntries(
+            Object.entries(reported).map(([id, status]) => [
+              id,
+              withAutoUpdateSetting(status, autoUpdate.includes(id)),
+            ]),
+          )
+        : reported;
     const issues =
       providerStatus === null
         ? []

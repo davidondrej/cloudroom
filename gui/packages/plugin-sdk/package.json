@@ -1,6 +1,6 @@
 {
   "name": "@get-bb/plugin-sdk",
-  "version": "0.6.49",
+  "version": "0.6.53",
   "homepage": "https://github.com/get-bb/bb#readme",
   "bugs": {
     "url": "https://github.com/get-bb/bb/issues"
@@ -37,6 +37,12 @@
       "types": "./bundled-types/bb-plugin-sdk-ai-services.d.ts",
       "import": "./dist/ai-services.js",
       "default": "./dist/ai-services.js"
+    },
+    "./provider-usage": {
+      "source": "./src/provider-usage.ts",
+      "types": "./bundled-types/bb-plugin-sdk-provider-usage.d.ts",
+      "import": "./dist/provider-usage.js",
+      "default": "./dist/provider-usage.js"
     },
     "./provider-bridge/testing": {
       "source": "./src/provider-bridge-testing.ts",
@@ -140,10 +146,10 @@
     "build": "node scripts/build-runtime.mjs",
     "build:runtime": "node scripts/build-runtime.mjs",
     "build:types": "node scripts/build-bundled-dts.mjs",
-    "clean": "rimraf bundled-types dist tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs bundled-types dist tsconfig.tsbuildinfo",
     "prepack": "node scripts/build-bundled-dts.mjs && node scripts/build-runtime.mjs",
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "cross-spawn": "^7.0.6",
@@ -164,14 +170,13 @@
     "better-sqlite3": "12.10.0",
     "cron-parser": "^5.5.0",
     "esbuild": "^0.28.0",
-    "hono": "4.11.9",
+    "hono": "4.13.16",
     "jsdom": "^29.0.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "rollup": "^4.62.2",
     "rollup-plugin-dts": "^6.4.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   },
   "peerDependencies": {

@@ -202,6 +202,18 @@ describe("pi delta translation equivalence", () => {
     expect(harness.translate(loadFixture("agent-start.json"))).toEqual([]);
   });
 
+  it("handles deeply nested sdk/message envelopes without a stack overflow", () => {
+    const harness = createHarness();
+    let event: unknown = loadFixture("agent-start.json");
+    for (let depth = 0; depth < 10_000; depth += 1) {
+      event = sdkMessage(event);
+    }
+
+    expect(harness.translate(event)).toEqual([
+      expect.objectContaining({ type: "turn/started", threadId: "" }),
+    ]);
+  });
+
   it("agent_end emits agentMessage + turn/completed", () => {
     const harness = createHarness();
     harness.translate(loadFixture("agent-start.json"));
@@ -446,6 +458,81 @@ describe("pi delta translation equivalence", () => {
         status: "completed",
       }),
     );
+  });
+
+  it("agent_end fails a reply cut off by the output limit, keeping its text (#1900)", () => {
+    const harness = createHarness();
+    harness.translate(loadFixture("agent-start.json"));
+    const turnId = harness.openTurnId();
+
+    const events = harness.translate({
+      type: "agent_end",
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "Planning" },
+            { type: "text", text: "Partial answer" },
+          ],
+          stopReason: "length",
+          usage: { output: 8192 },
+        },
+      ],
+      providerCheckpointId: "leaf-capped",
+      willRetry: false,
+    });
+
+    expect(events.map((event) => event.type)).toEqual([
+      "item/completed",
+      "thread/tokenUsage/updated",
+      "provider/error",
+      "turn/completed",
+    ]);
+    expect(events[0]).toMatchObject({
+      item: { type: "agentMessage", text: "Partial answer" },
+    });
+    expect(events.slice(2)).toEqual([
+      expect.objectContaining({
+        message: "Output limit reached",
+        detail: expect.stringContaining('Send "continue"'),
+      }),
+      // Its checkpoint stays, so the partial reply can still be forked.
+      expect.objectContaining({
+        scope: turnScope(turnId),
+        status: "failed",
+        providerCheckpointId: "leaf-capped",
+      }),
+    ]);
+  });
+
+  it.each([
+    ["Pi compacted it for an overflow", 5, true],
+    ["nothing came out (Pi's isContextOverflow)", 0, false],
+  ])("agent_end completes a length stop when %s", (_, output, compacted) => {
+    const harness = createHarness();
+    harness.translate(loadFixture("agent-start.json"));
+    if (compacted) {
+      harness.translate({ type: "compaction_start", reason: "overflow" });
+    }
+
+    const events = harness.translate({
+      type: "agent_end",
+      messages: [
+        {
+          role: "assistant",
+          content: [],
+          stopReason: "length",
+          usage: { output },
+        },
+      ],
+      willRetry: false,
+    });
+
+    expect(events.some((event) => event.type === "provider/error")).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: "turn/completed",
+      status: "completed",
+    });
   });
 
   it("compaction_start emits a compaction item in the open turn", () => {

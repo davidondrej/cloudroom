@@ -10,7 +10,7 @@ Use one Cloudroom workspace with the coding agents you already run on your machi
 
 ## How it works
 
-The plugin launches the agent command on the host machine and talks to it over ACP. Cursor is always visible. The other agents appear after Cloudroom finds their command on a connected host. Until then, Settings → Providers lists the ones with an unattended official installer under More agents, with a one-click install. A background probe checks what each installed agent supports and updates the provider.
+The plugin launches the agent command on the host machine and talks to it over ACP. Cursor is always visible. The other agents appear after Cloudroom finds their command on a connected host. Until then, Settings → Agents → Harness lists the ones with an unattended official installer under More agents, with a one-click install. A background probe checks what each installed agent supports and updates the provider.
 
 ## Requirements
 

@@ -24,7 +24,9 @@ import {
   type ProviderOperationContext,
 } from "../environments/environment-engine.js";
 import {
+  environmentHasLiveThreads,
   getPreparingEnvironment,
+  listEnvironments,
   reserveEnvironment,
   updatePreparingEnvironment,
 } from "@cloudroom/db";
@@ -96,8 +98,30 @@ import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js
 
 type PlacementDeps = LoggedPendingInteractionWorkSessionDeps;
 
-export function worktreeProviderInputs(branch: GitBranchSelection): JsonValue {
-  return { branch };
+export function worktreeProviderInputs(
+  branch: GitBranchSelection,
+  sourcePath?: string,
+  diffBase?: GitBranchSelection,
+): JsonValue {
+  return {
+    branch,
+    ...(sourcePath === undefined ? {} : { sourcePath }),
+    ...(diffBase ? { diffBase } : {}),
+  };
+}
+
+/** The Git checkout a worktree starts from when it is not the project's (#971). */
+export function worktreeSourcePath(
+  environmentProviderId: string | null,
+  inputs: unknown,
+): string | undefined {
+  if (environmentProviderId !== DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree)
+    return undefined;
+  const sourcePath =
+    typeof inputs === "object" && inputs !== null && "sourcePath" in inputs
+      ? inputs.sourcePath
+      : undefined;
+  return typeof sourcePath === "string" ? sourcePath : undefined;
 }
 
 export function checkoutProviderInputs(
@@ -329,7 +353,9 @@ export async function validateProviderSelection(
   if (requires.gitCheckout && projectCheckout !== null) {
     const availability = await resolveGitCheckoutAvailability(deps, {
       hostId: host.id,
-      path: projectCheckout.path,
+      path:
+        worktreeSourcePath(environmentProviderId, args.inputs) ??
+        projectCheckout.path,
     });
     if (availability.status !== "available") {
       throw new ApiError(
@@ -737,8 +763,66 @@ export async function resolveProviderOperationContext(
   });
 }
 
+/** Context to rebuild a thread's parked worktree where it was, with the inputs it was created with. */
+export async function resolveRestoreOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  environment: EnvironmentRow,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
+  const host = getNonDestroyedHostWithStatus(deps, environment.hostId);
+  if (host === null)
+    throw new Error("The machine that held this worktree no longer exists.");
+  return existingHostOperationContext(
+    deps,
+    thread,
+    host,
+    environment.environmentProviderSelection?.inputs ?? null,
+    record,
+  );
+}
+
+/** Context to create a fresh worktree for a Local thread that already runs in another folder (`room-cli thread worktree`). */
+export async function resolveNewWorktreeOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  hostId: string,
+  inputs: JsonValue,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
+  const host = getNonDestroyedHostWithStatus(deps, hostId);
+  if (host === null)
+    throw new ApiError(409, "host_unavailable", "This computer is not connected to Cloudroom.");
+  const context = await existingHostOperationContext(deps, thread, host, inputs, record);
+  // A new worktree, not a rebuild of the folder the thread is in now.
+  return { ...context, environment: null };
+}
+
+async function existingHostOperationContext(
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
+  thread: Thread,
+  host: NonNullable<ReturnType<typeof getNonDestroyedHostWithStatus>>,
+  inputs: JsonValue | null,
+  record: PluginEnvironmentProviderRecord,
+): Promise<ProviderOperationContext> {
+  const project = requirePublicProject(deps.db, thread.projectId);
+  return buildProviderOperationContext(deps, {
+    host,
+    inputs: await parseProviderInputs(record, inputs),
+    machine: { type: "existing", hostId: host.id },
+    project,
+    projectCheckout: toProviderProjectCheckout(deps.db, {
+      checkout: getProjectSourceByHost(deps.db, project.id, host.id),
+      hostId: host.id,
+      projectId: project.id,
+    }),
+    record,
+    thread,
+  });
+}
+
 function buildProviderOperationContext(
-  deps: ThreadProvisioningDeps,
+  deps: Pick<ThreadProvisioningDeps, "db" | "hub">,
   args: Pick<
     ProviderOperationContext,
     "host" | "inputs" | "machine" | "project" | "projectCheckout"
@@ -1199,6 +1283,40 @@ export function prepareProviderEnvironment(
       policy.pathKeys === "per-attempt" || context.environment !== null
         ? `${context.thread.id}-${attempt}`
         : context.thread.id;
+    // A per-attempt create (a worktree) may replace the folder at its path
+    // key, so never aim one at a folder a thread is using (#576).
+    const live =
+      policy.pathKeys === "per-attempt"
+        ? listEnvironments(deps.db, {
+            environmentProviderId: record.provider.id,
+            hostId: context.host.id,
+            instanceKey: pathKey,
+          }).find(
+            (other) =>
+              other.id !== row?.id &&
+              other.status !== "destroyed" &&
+              other.teardownStatus !== "removed" &&
+              environmentHasLiveThreads(deps.db, other.id),
+          )
+        : undefined;
+    if (live !== undefined) {
+      deps.logger.warn(
+        {
+          threadId: context.thread.id,
+          threadStatus: context.thread.status,
+          threadEnvironmentId: context.thread.environmentId,
+          liveEnvironmentId: live.id,
+          pathKey,
+          stack: new Error().stack,
+        },
+        "Refused a duplicate environment create over a live environment",
+      );
+      return {
+        action: "reject",
+        message:
+          "This thread's workspace is already in use, so it was not re-created.",
+      };
+    }
     row = reserveEnvironment(deps.db, {
       projectId: context.project.id,
       ownerThreadId: context.thread.id,

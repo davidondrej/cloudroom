@@ -55,6 +55,7 @@ impl Fixture {
             storage: None,
             rpc_timeout: Duration::from_secs(30),
             diagnostic_upload: Duration::from_secs(1),
+            previous_exit_wait: Duration::ZERO,
         };
         Self { root, config }
     }
@@ -294,6 +295,30 @@ async fn pi_native_identity_exists_before_first_prompt_and_resume_never_creates_
     assert!(runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved.clone())).is_err());
     fs::write(&path, original.replace(&native, "wrong-native-id")).unwrap();
     assert!(runtime::Handle::spawn(&fixture.config, Kind::Pi, Some(saved)).is_err());
+}
+
+#[tokio::test]
+async fn pi_names_a_model_it_does_not_know() {
+    // #952: Pi reshapes an unlisted nested ID (`openrouter/openrouter/pareto-code`), so it can't start.
+    let mut fixture = Fixture::new(Kind::Pi);
+    fixture.config.harnesses.get_mut(&Kind::Pi).unwrap().model = "fixture/nested".into();
+    let (handle, _events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    let error = handle.start_session().await.unwrap_err().to_string();
+    assert_eq!(
+        error,
+        "This Pi doesn't know the selected model. Pick another model"
+    );
+    handle.request_shutdown();
+    // #1580: a model Pi lists as text-only would get a placeholder instead of the image.
+    fixture.config.harnesses.get_mut(&Kind::Pi).unwrap().model = "text-only".into();
+    fs::write(fixture.root.join("shot.png"), b"png").unwrap();
+    let (handle, _events) = runtime::Handle::spawn(&fixture.config, Kind::Pi, None).unwrap();
+    handle.start_session().await.unwrap();
+    let input =
+        serde_json::json!({"text":"see","attachments":[{"kind":"image","path":"shot.png"}]});
+    let error = handle.send_prompt("image", &input).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    handle.request_shutdown();
 }
 
 #[tokio::test]

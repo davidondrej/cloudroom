@@ -715,7 +715,7 @@ function validateProviderStrings(
       field: `strings.${field}`,
       value: record[field],
     });
-  const optional = (field: "brandPrefix" | "planModeCopy") =>
+  const optional = (field: "signInCommand" | "brandPrefix" | "planModeCopy") =>
     record[field] === undefined
       ? undefined
       : requireNonBlankString({
@@ -747,12 +747,14 @@ function validateProviderStrings(
       }),
     });
   }
+  const signInCommand = optional("signInCommand");
   const brandPrefix = optional("brandPrefix");
   const planModeCopy = optional("planModeCopy");
   return Object.freeze({
     signInHint: required("signInHint"),
     expiredHint: required("expiredHint"),
     installUrl: required("installUrl"),
+    ...(signInCommand === undefined ? {} : { signInCommand }),
     ...(brandPrefix === undefined ? {} : { brandPrefix }),
     ...(planModeCopy === undefined ? {} : { planModeCopy }),
     ...(iconTint === undefined ? {} : { iconTint }),
@@ -1541,6 +1543,14 @@ export function validatePluginProviderDeclaration(
     }
   }
   if (
+    capabilities.resumesInNewFolder !== undefined &&
+    typeof capabilities.resumesInNewFolder !== "boolean"
+  ) {
+    throw new Error(
+      `provider "${id}" capabilities.resumesInNewFolder must be a boolean`,
+    );
+  }
+  if (
     !(PROVIDER_FORK_VALUES as readonly string[]).includes(capabilities.fork)
   ) {
     throw new Error(
@@ -1552,6 +1562,7 @@ export function validatePluginProviderDeclaration(
     supportsNativeUserQuestion: capabilities.supportsNativeUserQuestion,
     fork: capabilities.fork,
     supportsManualCompaction: capabilities.supportsManualCompaction,
+    resumesInNewFolder: capabilities.resumesInNewFolder ?? false,
     supportsThreadArchive: capabilities.supportsThreadArchive,
     supportsThreadRename: capabilities.supportsThreadRename,
     permissionModes: validateProviderLiteralArray({

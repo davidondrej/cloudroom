@@ -1,8 +1,7 @@
 import { execFile, spawn, type ExecFileException } from "node:child_process";
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { gitSafetyArgs } from "bb-environment-provider-host/git";
 import {
   createGitBranchQueries,
   resolvePreferredLocalDefaultBranch,
@@ -40,6 +39,8 @@ export interface RunGitOptions extends GitProcessOptions {
   maxBufferBytes?: number;
   allowTruncatedStdout?: boolean;
   onStderr?: (chunk: string) => void;
+  /** Runs hooks, as the user's own `git clone` would. */
+  hooks?: boolean;
 }
 
 interface ResolveGitProcessEnvArgs {
@@ -66,11 +67,6 @@ interface BranchRefsWithDefaults {
   remoteBranches: string[];
 }
 
-interface RunShellPipelineOptions extends GitTimeoutOptions {
-  cwd: string;
-  allowFailure?: boolean;
-  signal?: AbortSignal;
-}
 
 export interface GitCommandResult {
   stdout: string;
@@ -78,12 +74,7 @@ export interface GitCommandResult {
   exitCode: number;
 }
 
-export type GitNullRecordFormat = "single" | "name-status" | "numstat";
 
-export interface GitNullRecordLimitResult extends GitCommandResult {
-  recordCount: number;
-  recordLimitReached: boolean;
-}
 
 type ActiveWorkspaceGitOperationKind = Exclude<
   WorkspaceGitOperation["kind"],
@@ -227,26 +218,7 @@ function createGitCommandCancelledError(
   );
 }
 
-function createShellPipelineTimedOutError(
-  timeoutMs: number,
-  cause?: unknown,
-): WorkspaceError {
-  return new WorkspaceError(
-    "shell_pipeline_timeout",
-    `shell pipeline timed out after ${timeoutMs}ms`,
-    { cause },
-  );
-}
 
-function createShellPipelineCancelledError(cause?: unknown): WorkspaceError {
-  return new WorkspaceError(
-    "provision_cancelled",
-    "Shell pipeline was cancelled",
-    {
-      cause,
-    },
-  );
-}
 
 function createGitCommandFailedError(
   args: string[],
@@ -268,6 +240,7 @@ export async function runGit(
   if (options.signal?.aborted) {
     throw createGitCommandCancelledError(args, options.signal.reason);
   }
+  const gitArgs = [...gitSafetyArgs(options.hooks), ...args];
   try {
     const processOptions = {
       cwd: options.cwd,
@@ -279,16 +252,17 @@ export async function runGit(
       maxBuffer: options.maxBufferBytes ?? DEFAULT_BUFFER_BYTES,
       signal: options.signal,
       timeout: options.timeoutMs,
+      windowsHide: true,
     } as const;
     const stderrListener = options.onStderr;
     const result =
       stderrListener === undefined
-        ? await execFileAsync("git", args, processOptions)
+        ? await execFileAsync("git", gitArgs, processOptions)
         : await new Promise<{ stdout: string; stderr: string }>(
             (resolve, reject) => {
               const child = execFile(
                 "git",
-                args,
+                gitArgs,
                 processOptions,
                 (error, stdout, stderr) => {
                   if (error) {
@@ -346,154 +320,6 @@ export async function runGit(
   }
 }
 
-export async function runGitWithNullRecordLimit(
-  args: string[],
-  options: RunGitOptions,
-  recordFormat: GitNullRecordFormat,
-  maxRecords: number,
-): Promise<GitNullRecordLimitResult> {
-  if (!Number.isInteger(maxRecords) || maxRecords <= 0) {
-    throw new WorkspaceError(
-      "invalid_request",
-      "maxRecords must be a positive integer",
-    );
-  }
-  if (options.signal?.aborted) {
-    throw createGitCommandCancelledError(args, options.signal.reason);
-  }
-
-  return new Promise((resolve, reject) => {
-    const child = spawn("git", args, {
-      cwd: options.cwd,
-      env: resolveGitProcessEnv({
-        env: options.env,
-        shellPath: options.shellPath,
-      }),
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    const stdoutRecords: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
-    let pending = Buffer.alloc(0);
-    let currentRecord: Buffer[] = [];
-    let expectedTokens = recordFormat === "single" ? 1 : 0;
-    let recordCount = 0;
-    let recordLimitReached = false;
-    let aborted = false;
-    let timedOut = false;
-    let spawnError: Error | undefined;
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-
-    const stopChild = (): void => {
-      child.stdout.pause();
-      child.kill();
-    };
-    const onAbort = (): void => {
-      if (recordLimitReached) return;
-      aborted = true;
-      stopChild();
-    };
-
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    if (options.signal?.aborted) onAbort();
-    if (options.timeoutMs !== undefined) {
-      timeout = setTimeout(() => {
-        if (recordLimitReached) return;
-        timedOut = true;
-        stopChild();
-      }, options.timeoutMs);
-    }
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      if (recordLimitReached) return;
-      const input =
-        pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
-      let tokenStart = 0;
-      for (let index = 0; index < input.length; index += 1) {
-        if (input[index] !== 0) continue;
-
-        const token = Buffer.from(input.subarray(tokenStart, index));
-        currentRecord.push(token);
-        if (currentRecord.length === 1) {
-          if (recordFormat === "name-status") {
-            const statusLetter = token[0];
-            expectedTokens = statusLetter === 82 || statusLetter === 67 ? 3 : 2;
-          } else if (recordFormat === "numstat") {
-            const firstTab = token.indexOf(9);
-            const secondTab = token.indexOf(9, firstTab + 1);
-            expectedTokens = secondTab === token.length - 1 ? 3 : 1;
-          }
-        }
-
-        if (currentRecord.length === expectedTokens) {
-          for (const recordToken of currentRecord) {
-            stdoutRecords.push(recordToken, Buffer.from([0]));
-          }
-          currentRecord = [];
-          expectedTokens = recordFormat === "single" ? 1 : 0;
-          recordCount += 1;
-          if (recordCount === maxRecords) {
-            recordLimitReached = true;
-            pending = Buffer.alloc(0);
-            stopChild();
-            return;
-          }
-        }
-        tokenStart = index + 1;
-      }
-      pending = Buffer.from(input.subarray(tokenStart));
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderrChunks.push(chunk);
-    });
-    child.once("error", (error) => {
-      spawnError = error;
-    });
-    child.once("close", (code) => {
-      if (timeout !== undefined) clearTimeout(timeout);
-      options.signal?.removeEventListener("abort", onAbort);
-
-      const stdout = Buffer.concat(stdoutRecords).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      if (recordLimitReached) {
-        resolve({
-          stdout,
-          stderr,
-          exitCode: 0,
-          recordCount,
-          recordLimitReached: true,
-        });
-        return;
-      }
-      if (aborted || options.signal?.aborted) {
-        reject(createGitCommandCancelledError(args, options.signal?.reason));
-        return;
-      }
-      if (timedOut && options.timeoutMs !== undefined) {
-        reject(createGitCommandTimedOutError(args, options.timeoutMs));
-        return;
-      }
-      if (spawnError !== undefined) {
-        reject(
-          createGitCommandFailedError(args, trimOutput(stderr), spawnError),
-        );
-        return;
-      }
-
-      const exitCode = code ?? 1;
-      if (exitCode === 0 || options.allowFailure === true) {
-        resolve({
-          stdout,
-          stderr,
-          exitCode,
-          recordCount,
-          recordLimitReached: false,
-        });
-        return;
-      }
-      reject(createGitCommandFailedError(args, trimOutput(stderr)));
-    });
-  });
-}
 
 export async function getAbsoluteGitDir(
   cwd: string,
@@ -531,65 +357,7 @@ export async function getGitCommonDir(
   return path.resolve(cwd, commonDir);
 }
 
-export async function runShellPipeline(
-  script: string,
-  positionalArgs: string[],
-  options: RunShellPipelineOptions,
-): Promise<GitCommandResult> {
-  if (options.signal?.aborted) {
-    throw createShellPipelineCancelledError(options.signal.reason);
-  }
-  try {
-    const result = await execFileAsync(
-      "/bin/sh",
-      ["-c", script, "sh", ...positionalArgs],
-      {
-        cwd: options.cwd,
-        encoding: "utf8",
-        env: resolveGitProcessEnv({
-          env: undefined,
-          shellPath: options.shellPath,
-        }),
-        maxBuffer: DEFAULT_BUFFER_BYTES,
-        signal: options.signal,
-        timeout: options.timeoutMs,
-      },
-    );
-    return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
-  } catch (error) {
-    if (options.signal?.aborted) {
-      throw createShellPipelineCancelledError(error);
-    }
-    const execError = toExecError(error);
-    const timeoutMs = readCommandTimeoutMs(execError, options.timeoutMs);
-    if (timeoutMs !== null) {
-      throw createShellPipelineTimedOutError(timeoutMs, error);
-    }
-    if (options.allowFailure) {
-      return {
-        stdout: execError?.stdout ?? "",
-        stderr: execError?.stderr ?? "",
-        exitCode: getExitCode(execError),
-      };
-    }
-    const stderr = trimOutput(execError?.stderr ?? "");
-    const detail = stderr ? `: ${stderr}` : "";
-    throw new WorkspaceError(
-      "shell_pipeline_failed",
-      `shell pipeline failed${detail}`,
-      { cause: error },
-    );
-  }
-}
 
-export function parsePatchId(line: string | undefined): string | undefined {
-  const trimmed = line?.trim();
-  if (!trimmed) {
-    return undefined;
-  }
-  const [patchId] = trimmed.split(/\s+/);
-  return patchId || undefined;
-}
 
 async function findWorkspaceGitOperationMarker(
   gitDir: string,
@@ -910,7 +678,7 @@ export async function readWorkspaceGitState(
         "--no-optional-locks",
         "status",
         "--porcelain=v1",
-        "--untracked-files=all",
+        "--untracked-files=no",
       ],
       { cwd, ...options },
     ),
@@ -927,127 +695,13 @@ export async function readWorkspaceGitState(
   };
 }
 
-interface NameStatusEntry {
-  path: string;
-  status: string;
-}
 
-export interface NameStatusSourceEntry extends NameStatusEntry {
-  previousPath: string | null;
-}
 
-export function parseNameStatusSourceEntries(
-  output: string,
-): NameStatusSourceEntry[] {
-  const tokens = output.split("\0");
-  const entries: NameStatusSourceEntry[] = [];
-  let index = 0;
-  while (index < tokens.length) {
-    const statusToken = tokens[index];
-    if (!statusToken) {
-      index += 1;
-      continue;
-    }
-    const statusLetter = statusToken[0] ?? "";
-    const isRenameOrCopy = statusLetter === "R" || statusLetter === "C";
-    if (isRenameOrCopy) {
-      const oldPath = tokens[index + 1];
-      const newPath = tokens[index + 2];
-      if (newPath) {
-        entries.push({
-          path: newPath,
-          status: statusLetter,
-          previousPath: oldPath ?? null,
-        });
-      }
-      index += 3;
-    } else {
-      const pathToken = tokens[index + 1];
-      if (pathToken) {
-        entries.push({
-          path: pathToken,
-          status: statusLetter,
-          previousPath: null,
-        });
-      }
-      index += 2;
-    }
-  }
-  return entries;
-}
 
-export function parseNameStatusEntries(output: string): NameStatusEntry[] {
-  return parseNameStatusSourceEntries(output).map(({ path, status }) => ({
-    path,
-    status,
-  }));
-}
 
-export function summarizeNumstat(output: string): {
-  changedFiles: number;
-  insertions: number;
-  deletions: number;
-} {
-  const lines = output.split("\n").filter(Boolean);
 
-  return lines.reduce(
-    (summary, line) => {
-      const [insertionsText, deletionsText] = line.split("\t");
-      const insertions = Number.parseInt(insertionsText ?? "", 10);
-      const deletions = Number.parseInt(deletionsText ?? "", 10);
 
-      return {
-        changedFiles: summary.changedFiles + 1,
-        insertions:
-          summary.insertions + (Number.isFinite(insertions) ? insertions : 0),
-        deletions:
-          summary.deletions + (Number.isFinite(deletions) ? deletions : 0),
-      };
-    },
-    { changedFiles: 0, insertions: 0, deletions: 0 },
-  );
-}
 
-export interface NumstatEntry {
-  path: string;
-  insertions: number | null;
-  deletions: number | null;
-}
-
-export function parseNumstatEntriesZ(output: string): NumstatEntry[] {
-  const entries: NumstatEntry[] = [];
-  let cursor = 0;
-  while (cursor < output.length) {
-    const firstTab = output.indexOf("\t", cursor);
-    if (firstTab < 0) break;
-    const secondTab = output.indexOf("\t", firstTab + 1);
-    if (secondTab < 0) break;
-    const insertions = parseNumstatCount(output.slice(cursor, firstTab));
-    const deletions = parseNumstatCount(output.slice(firstTab + 1, secondTab));
-
-    let path: string;
-    if (output[secondTab + 1] === "\0") {
-      const oldEnd = output.indexOf("\0", secondTab + 2);
-      if (oldEnd < 0) break;
-      const newEnd = output.indexOf("\0", oldEnd + 1);
-      if (newEnd < 0) break;
-      path = output.slice(oldEnd + 1, newEnd);
-      cursor = newEnd + 1;
-    } else {
-      const end = output.indexOf("\0", secondTab + 1);
-      if (end < 0) break;
-      path = output.slice(secondTab + 1, end);
-      cursor = end + 1;
-    }
-    entries.push({ path, insertions, deletions });
-  }
-  return entries;
-}
-
-function parseNumstatCount(text: string): number | null {
-  const value = Number.parseInt(text, 10);
-  return Number.isFinite(value) ? value : null;
-}
 
 const {
   readDefaultBranch,
@@ -1063,8 +717,9 @@ async function fetchRemoteBranchesNonInteractively(
   cwd: string,
   options: GitTimeoutOptions,
 ): Promise<FetchRemoteBranchesResult> {
+  const args = [...gitSafetyArgs(), "fetch", "--all", "--prune", "--quiet"];
   return new Promise((resolve) => {
-    const child = spawn("git", ["fetch", "--all", "--prune", "--quiet"], {
+    const child = spawn("git", args, {
       cwd,
       detached: supportsProcessGroups(),
       windowsHide: true,
@@ -1142,51 +797,8 @@ export async function fetchRemoteBranches(
 
 /** Agents push straight to GitHub, so a local branch like `main` lags behind; compare against `origin/<branch>` when it
  *  exists. Returns a full ref, so tags can't shadow it and resolving it again changes nothing. */
-export async function comparisonRef(
-  cwd: string,
-  branch: string,
-  options: GitTimeoutOptions = {},
-): Promise<string> {
-  if (branch.startsWith("refs/")) return branch;
-  for (const ref of [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]) {
-    const found = await runGit(
-      ["rev-parse", "-q", "--verify", `${ref}^{commit}`],
-      { cwd, ...options, allowFailure: true },
-    );
-    if (found.exitCode === 0) return ref;
-  }
-  return branch;
-}
 
-export async function readMergeBaseRef(
-  cwd: string,
-  ref: string,
-  options: GitTimeoutOptions = {},
-): Promise<string | undefined> {
-  await ensureGitRepo(cwd, options);
-  const base = await comparisonRef(cwd, ref, options);
-  const result = await runGit(["merge-base", base, "HEAD"], {
-    cwd,
-    ...options,
-    allowFailure: true,
-  });
-  if (result.exitCode !== 0) {
-    return undefined;
-  }
 
-  const mergeBaseRef = trimOutput(result.stdout);
-  return mergeBaseRef || undefined;
-}
-
-export async function revParse(
-  cwd: string,
-  ref: string,
-  options: GitProcessOptions = {},
-): Promise<string> {
-  await ensureGitRepo(cwd, options);
-  const result = await runGit(["rev-parse", ref], { cwd, ...options });
-  return trimOutput(result.stdout);
-}
 
 interface ReadGitBlobResult {
   contents: Buffer | null;
@@ -1268,9 +880,11 @@ export async function readGitBlob(
     );
   }
 
+  const args = [...gitSafetyArgs(), "cat-file", "blob", target];
   try {
-    const result = await execFileAsync("git", ["cat-file", "blob", target], {
+    const result = await execFileAsync("git", args, {
       cwd,
+      windowsHide: true,
       encoding: "buffer",
       env: resolveGitProcessEnv({
         env: undefined,
@@ -1372,6 +986,3 @@ export async function hasUncommittedChanges(
   return status.stdout.trim().length > 0;
 }
 
-export async function createTempDir(prefix: string): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), prefix));
-}

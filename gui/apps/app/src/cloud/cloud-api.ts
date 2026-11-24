@@ -7,6 +7,8 @@ export interface CloudThreadSummary {
   project_name: string | null;
   state: string;
   woke_at: string | null;
+  /** Missing from older websites and from create replies. */
+  parent_thread_id?: string | null;
 }
 
 export interface CloudHistory {
@@ -25,8 +27,15 @@ export interface CloudListeners {
 export interface CloudApi {
   threads(): Promise<CloudThreadSummary[]>;
   history(threadId: string, after: number): Promise<CloudHistory>;
-  send(threadId: string, text: string, requestId?: string): Promise<void>;
+  send(
+    threadId: string,
+    text: string,
+    requestId?: string,
+    surface?: string,
+  ): Promise<void>;
   stop(threadId: string): Promise<void>;
+  create(body: CloudCreate): Promise<CloudThreadSummary>;
+  warm(): Promise<void>;
   listen(
     threadId: string,
     after: number,
@@ -34,7 +43,31 @@ export interface CloudApi {
   ): () => void;
 }
 
+export interface CloudCreate {
+  project: string;
+  request_id?: string;
+  text: string;
+  title?: string;
+  harness?: string;
+  model?: string;
+  reasoning?: string;
+  service_tier?: string;
+  target?: string;
+  /** Set only while usage data is on: the website then counts the message as sent from this surface. */
+  surface?: string;
+}
+
 export class SignedOutError extends Error {}
+
+export class CloudError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(message);
+  }
+}
 
 const HISTORY_TIMEOUT_MS = 120_000;
 
@@ -45,10 +78,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (response.status === 401) throw new SignedOutError("Sign in again.");
   const value = (await response.json().catch(() => null)) as
-    | (T & { error?: string })
+    | (T & { error?: string; code?: string })
     | null;
   if (!response.ok || value === null)
-    throw new Error(value?.error ?? "Cloudroom is unreachable. Try again.");
+    throw new CloudError(
+      value?.error ?? "Cloudroom is unreachable. Try again.",
+      response.ok ? 502 : response.status,
+      value?.code ?? null,
+    );
   return value;
 }
 
@@ -66,13 +103,24 @@ export const cloudApi: CloudApi = {
     request<CloudHistory>(`threads/${threadId}?after=${after}`, {
       signal: AbortSignal.timeout(HISTORY_TIMEOUT_MS),
     }),
-  send: async (threadId, text, requestId) =>
+  send: async (threadId, text, requestId, surface) =>
     void (await post(threadId, {
       action: "send",
       text,
       request_id: requestId,
+      surface,
     })),
   stop: async (threadId) => void (await post(threadId, { action: "stop" })),
+  create: async (body) =>
+    (
+      await request<{ thread: CloudThreadSummary }>("threads", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    ).thread,
+  warm: async () =>
+    void (await request<{ ok: true }>("warm", { method: "POST" })),
   listen(threadId, after, listeners) {
     const source = new EventSource(
       `/__cloud/threads/${threadId}/stream?after=${after}`,

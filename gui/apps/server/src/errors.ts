@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { HTTPException } from "hono/http-exception";
 import type { ThreadEventScopeKind, ThreadEventType } from "@cloudroom/domain";
 import { CloudroomError } from "./services/cloudroom/client.js";
@@ -78,6 +79,7 @@ export class TurnStartGuardError extends ApiError {
 export function errorToResponse(
   error: unknown,
   logger: ServerLogger,
+  request?: { method: string; path: string },
 ): Response {
   if (error instanceof TurnStartGuardError) {
     logger.warn(
@@ -87,9 +89,8 @@ export function errorToResponse(
     return error.toResponse();
   }
   if (error instanceof ApiError) {
-    return error.toResponse();
-  }
-  if (error instanceof HTTPException) {
+    if (error.status !== 500) return error.toResponse();
+  } else if (error instanceof HTTPException) {
     return new Response(
       JSON.stringify({
         code: "internal_error",
@@ -103,11 +104,24 @@ export function errorToResponse(
       },
     );
   }
-  logger.error({ err: error }, "Unhandled server error");
+  // The caller can't see why a 500 happened; this ID finds its log line (#1341).
+  const errorId = randomUUID().slice(0, 8);
+  logger.error(
+    { err: error, errorId, method: request?.method, path: request?.path },
+    "Unhandled server error",
+  );
   return new Response(
     JSON.stringify({
-      code: "internal_error",
-      message: error instanceof CloudroomError ? error.message : "Internal server error",
+      ...(error instanceof ApiError
+        ? error.body
+        : {
+            code: "internal_error",
+            message:
+              error instanceof CloudroomError
+                ? error.message
+                : "Internal server error",
+          }),
+      errorId,
     }),
     {
       status: 500,

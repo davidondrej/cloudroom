@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { getAppSettings, setAppSettings, updateHost } from "@cloudroom/db";
+import {
+  getAppSettings,
+  heartbeatSession,
+  setAppSettings,
+  updateHost,
+} from "@cloudroom/db";
 import { createDeferredPromise } from "@cloudroom/test-helpers";
 import {
   hostDaemonServerWsMessageSchema,
@@ -44,6 +49,10 @@ const INSTALLED_ONLY_PROVIDER_IDS = [
   "acp-openclaw",
   "acp-devin",
   "acp-droid",
+  "acp-kilo",
+  "acp-cline",
+  "acp-kimi",
+  "acp-agent-zero",
 ] as const;
 
 function registerInstalledOnlyProviderFixtures(harness: TestAppHarness): void {
@@ -308,7 +317,7 @@ describe("resolveSystemExecutionOptions", () => {
           providerId: "codex",
         });
 
-        expect(response.providers[0]).toEqual(
+        expect(response.providers[1]).toEqual(
           expect.objectContaining({ id: "codex", available: false }),
         );
         expect(response.models).toEqual([]);
@@ -610,10 +619,11 @@ describe("resolveSystemExecutionOptions", () => {
       });
 
       expect(response.providers.map((provider) => provider.id)).toEqual([
-        "codex",
         "claude-code",
-        "pi",
+        "codex",
+        "acp-antigravity",
         "acp-cursor",
+        "pi",
       ]);
       expect(response.modelLoadError).toEqual({
         providerId: "codex",
@@ -978,6 +988,7 @@ describe("resolveSystemExecutionOptions", () => {
         });
         expect(response.models.map((model) => model.model)).toEqual([
           "claude-opus-5-5[1m]",
+          "claude-fable-5-2",
           "claude-fable-5-1",
           "claude-opus-5[1m]",
           "claude-opus-4-8[1m]",
@@ -1111,6 +1122,7 @@ describe("resolveSystemExecutionOptions", () => {
       });
       expect(response.models.map((model) => model.model)).toEqual([
         "claude-opus-5-5[1m]",
+        "claude-fable-5-2",
         "claude-fable-5-1",
         "claude-opus-5[1m]",
         "claude-opus-4-8[1m]",
@@ -1313,7 +1325,7 @@ describe("resolveSystemExecutionOptions", () => {
         registry.markRegistrationsSettled();
 
         expect((await providersPromise).map((provider) => provider.id)).toEqual(
-          ["codex", "claude-code", "pi", "acp-cursor"],
+          ["claude-code", "codex", "acp-antigravity", "acp-cursor", "pi"],
         );
       },
     );
@@ -1601,9 +1613,20 @@ describe("resolveSystemExecutionOptions provider model catalog", () => {
         path: "/tmp/memo-pi-b",
       });
 
-      for (const environmentId of [environmentA, environmentA, environmentB]) {
+      // A new thread has no environment yet: it lists in its project's checkout (#1236).
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/memo-pi-project",
+      });
+
+      for (const route of [
+        { environmentId: environmentA },
+        { environmentId: environmentA },
+        { environmentId: environmentB },
+        { hostId: host.id, projectId: project.id },
+      ]) {
         await resolveSystemExecutionOptions(harness.deps, {
-          environmentId,
+          ...route,
           providerId: "pi",
         });
       }
@@ -1613,7 +1636,7 @@ describe("resolveSystemExecutionOptions provider model catalog", () => {
           .map((request) => request.command)
           .filter((command) => command.type === "provider.list_models")
           .map((command) => command.cwd),
-      ).toEqual(["/tmp/memo-pi-a", "/tmp/memo-pi-b"]);
+      ).toEqual(["/tmp/memo-pi-a", "/tmp/memo-pi-b", "/tmp/memo-pi-project"]);
     });
   });
 
@@ -1691,6 +1714,8 @@ describe("resolveSystemExecutionOptions provider model catalog", () => {
         expect(probeCount).toBeGreaterThan(1);
 
         vi.setSystemTime(1_800_000_000_000 + 5 * 60_000);
+        // A live daemon heartbeats through the jump (#2171).
+        heartbeatSession(harness.db, session.id, Date.now() + 30_000);
         expired = true;
         expect(await listIds()).toContain("acp-opencode");
         await vi.waitFor(() => {

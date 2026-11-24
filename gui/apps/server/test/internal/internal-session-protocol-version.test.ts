@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
   createHostDaemonClient,
@@ -27,6 +28,7 @@ describe("internal session protocol version", () => {
             headers: {
               authorization: `Bearer ${hostKey}`,
               "content-type": "application/json",
+              [CALLER_TOKEN_HEADER]: server.callerToken,
             },
             body: JSON.stringify({
               hostId,
@@ -68,6 +70,7 @@ describe("internal session protocol version", () => {
         headers: {
           authorization: `Bearer ${hostKey}`,
           "content-type": "application/json",
+          [CALLER_TOKEN_HEADER]: server.callerToken,
         },
         body: JSON.stringify({
           hostId,
@@ -99,6 +102,7 @@ describe("internal session protocol version", () => {
         const daemon = createHostDaemonClient(
           server.baseUrl,
           createTestDaemonHostKey({ hostId }),
+          { [CALLER_TOKEN_HEADER]: server.callerToken },
         );
         const response = await daemon.session.open.$post({
           json: {
@@ -137,7 +141,9 @@ describe("internal session protocol version", () => {
         id: "host-protocol",
         name: "Protocol Host",
       });
-      const daemonClient = createHostDaemonClient(server.baseUrl, hostKey);
+      const daemonClient = createHostDaemonClient(server.baseUrl, hostKey, {
+        [CALLER_TOKEN_HEADER]: server.callerToken,
+      });
       const staleProtocolVersion = HOST_DAEMON_PROTOCOL_VERSION - 1;
 
       const priorProtocolResponse = await fetch(
@@ -147,6 +153,7 @@ describe("internal session protocol version", () => {
           headers: {
             authorization: `Bearer ${hostKey}`,
             "content-type": "application/json",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
           },
           body: JSON.stringify({
             hostId: "host-protocol",
@@ -184,6 +191,7 @@ describe("internal session protocol version", () => {
           headers: {
             authorization: `Bearer ${hostKey}`,
             "content-type": "application/json",
+            [CALLER_TOKEN_HEADER]: server.callerToken,
           },
           body: JSON.stringify({
             hostId: "host-protocol",
@@ -239,9 +247,9 @@ describe("internal session protocol version", () => {
         getHost(server.db, "host-protocol")?.lastRejectedProtocolVersion,
       ).toBe(staleProtocolVersion);
       await expect(
-        fetch(`${server.baseUrl}/api/v1/hosts/host-protocol`).then((result) =>
-          result.json(),
-        ),
+        fetch(`${server.baseUrl}/api/v1/hosts/host-protocol`, {
+          headers: { [CALLER_TOKEN_HEADER]: server.callerToken },
+        }).then((result) => result.json()),
       ).resolves.toMatchObject({
         lastRejectedProtocolVersion: staleProtocolVersion,
       });
@@ -302,9 +310,9 @@ describe("internal session protocol version", () => {
         getHost(server.db, "host-protocol")?.lastRejectedProtocolVersion,
       ).toBeNull();
       await expect(
-        fetch(`${server.baseUrl}/api/v1/hosts/host-protocol`).then((result) =>
-          result.json(),
-        ),
+        fetch(`${server.baseUrl}/api/v1/hosts/host-protocol`, {
+          headers: { [CALLER_TOKEN_HEADER]: server.callerToken },
+        }).then((result) => result.json()),
       ).resolves.toMatchObject({ lastRejectedProtocolVersion: null });
     } finally {
       await server.close();

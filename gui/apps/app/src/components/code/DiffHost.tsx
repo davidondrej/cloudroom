@@ -2,8 +2,10 @@ import { Suspense, lazy, useMemo, type ReactNode } from "react";
 import type { ExperimentalDiffFullFileContents } from "@get-bb/plugin-sdk";
 import { PluginReplacementSlot } from "@/components/plugin/PluginReplacementSlot";
 import { deprecatedOriginalAlias } from "@/lib/plugin-sdk-deprecated-aliases";
-import type { ParsedGitDiffFile } from "@/components/git-diff/git-diff-parsing";
-import { buildFileDiffPatchText } from "@/components/git-diff/git-diff-patch-text";
+import {
+  buildFileDiffPatchText,
+  type ParsedGitDiffFile,
+} from "@/components/diff/patch-utils";
 import { useDiffRendererReplacement } from "./codeRendererProvider";
 import {
   DEFAULT_CODE_OVERFLOW,
@@ -13,7 +15,7 @@ import {
 
 const DIFF_RENDERER_SLOT_KIND = "diffRenderer";
 
-const BbDiff = lazy(() => import("./BbDiff"));
+const RoomDiff = lazy(() => import("./RoomDiff"));
 
 interface DiffHostProps extends Partial<DiffPresentation> {
   file: ParsedGitDiffFile;
@@ -44,7 +46,7 @@ export function DiffHost({
 
   const original = (
     <Suspense fallback={fallback}>
-      <BbDiff
+      <RoomDiff
         file={file}
         patchText={patchText}
         fullFileContents={fullFileContents}

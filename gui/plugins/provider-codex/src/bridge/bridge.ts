@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { mkdtempSync } from "node:fs";
+import { open } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
+  isRecord,
   isStandaloneBuiltinCompactCommand,
   approvalInteractionOutcomeSchema,
   type DynamicTool,
@@ -48,6 +54,9 @@ import {
   type ProviderRuntimeEvent,
   experimental_defineProviderBridge,
   experimental_findBrokenCliLink as findBrokenCliLink,
+  experimental_findCliExecutable as findCliExecutable,
+  experimental_compareVersions as compareVersions,
+  experimental_versionFrom as versionFrom,
   type ProviderRecoveryHint,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -61,17 +70,22 @@ import {
   extractCodexMacOsPermissionRequest,
   type CodexMacOsPermissionRequest,
 } from "../interactive-requests.js";
+import { codexMcpStartupReason } from "../delta-translation.js";
 import { parseModelsResponse } from "../models.js";
 import { macOsPermissionPresentation } from "../presentation.js";
 import {
+  codexManagedPolicyError,
+  keepShellEnvironmentSetKeys,
+  shareThreadIdentityWithMcpServers,
   resolveCodexInstructionOverrides,
   toCodexDynamicTools,
   toCodexPermissionSettings,
   toCodexServiceTier,
+  usesPrivateDataDenyProfile,
   toCodexThreadPermissionSettings,
   toCodexUserInput,
-  type BbThreadForkParams,
-  type BbThreadStartParams,
+  type RoomThreadForkParams,
+  type RoomThreadStartParams,
   type CodexSessionOptions,
 } from "../session-params.js";
 import type { ThreadResumeParams } from "../generated/codex-app-server/schema/v2/ThreadResumeParams.js";
@@ -86,15 +100,16 @@ import {
   type CodexAppServerExitInfo,
   type CodexAppServerRequestResponder,
 } from "./app-server-connection.js";
+import { codexLinuxSandboxError } from "./linux-sandbox.js";
 import {
-  codexExecutable,
+  codexBrokenInstallHint,
   getCodexProviderHealth,
   getCodexProviderInstallationRun,
   getCodexProviderInstallationStatus,
   getCodexProviderUsage,
 } from "./provider-maintenance.js";
 
-type BbThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
+type RoomThreadResumeParams = ThreadResumeParams & { excludeTurns: boolean };
 
 const codexBridgeCommandSchema = z.discriminatedUnion("method", [
   z.object({
@@ -306,15 +321,39 @@ const CODEX_INITIALIZE_PARAMS = {
 };
 
 const CHILD_REQUEST_TIMEOUT_MS = 60_000;
+// A new session gets the runtime's 2-minute creation budget, since on a busy
+// Mac thread/start alone can pass 60 s (#1618). Ending 10 s early lets this
+// error, which names the step that hung, beat the runtime's generic timeout.
+const THREAD_CREATION_BUDGET_MS = 110_000;
+const MANAGED_REQUIREMENTS_TIMEOUT_MS = 3_000;
+// Optional startup reads (rate limits) go to the network. When it is slow they
+// must not hold thread/resume past the runtime's 30 s timeout (#1816).
+const OPTIONAL_POST_INITIALIZE_WAIT_MS = 5_000;
+// A broken MCP server slows each retry, so retry it at most once a minute.
+const MCP_RELOAD_INTERVAL_MS = 60_000;
+// Before 0.146.0, config/mcpServer/reload sent Op::RefreshMcpServers, which
+// reconnects every MCP server. From 0.146.0 it keeps healthy connections and
+// restarts only failed or changed ones (openai/codex #35204, #35213). On
+// 0.146.x the next turn still waits a hung server's full startup timeout.
+const CODEX_MCP_RELOAD_MINIMUM_VERSION = "0.147.0";
 const INTERRUPT_SETTLEMENT_TIMEOUT_MS = 5_000;
 const CODEX_ARCHIVED_SESSION_ERROR_PATTERN =
-  /\b(?:session|thread)\s+\S+\s+is archived\b/i;
+  /\b(?:session|thread)\s+(\S+)\s+is archived\b/i;
 const CODEX_ALREADY_ARCHIVED_ERROR_PATTERN =
   /\bno rollout found for thread id\b/i;
 const CODEX_NOT_ARCHIVED_ERROR_PATTERN =
   /\bno archived rollout found for thread id\b/i;
 const CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN = /\brollout at .+ is empty\b/i;
+const CODEX_NO_ACTIVE_TURN_ERROR_PATTERN = /\bno active turn to steer\b/i;
 const CODEX_RENAME_RETRY_DELAYS_MS = [50, 200] as const;
+// Codex lets one app-server write a thread. Another holder (often another
+// Codex app on the same ~/.codex) may let go soon, so retry for ~10 s.
+const CODEX_ACTIVE_WRITER_ERROR_PATTERN = /\balready has an active writer\b/i;
+const CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS = [
+  250, 500, 1_000, 2_000, 3_000, 3_000,
+] as const;
+const CODEX_ACTIVE_WRITER_GUIDANCE =
+  "Another Codex app (ChatGPT, the Codex app, VS Code or a terminal) has this thread open. Close it there, wait a minute, then retry.";
 const CODEX_AUTH_REQUIRED_TEXT_PATTERN =
   /\b(?:40[13]|auth(?:entication|orization)?|unauthori[sz]ed)\b/i;
 const CODEX_RATE_LIMITED_TEXT_PATTERN =
@@ -345,41 +384,80 @@ function classifyTerminalAccountError(
   return null;
 }
 
+/** Codex thread ids Codex refused as archived; unarchive repairs them (#1808). */
+const codexArchivedRefusals = new Set<string>();
+
 function archivedSessionHint(message: string): ProviderRecoveryHint | null {
-  return CODEX_ARCHIVED_SESSION_ERROR_PATTERN.test(message)
-    ? { kind: "sessionArchived", message, retryable: true }
-    : null;
+  const archived = CODEX_ARCHIVED_SESSION_ERROR_PATTERN.exec(message);
+  if (archived?.[1] === undefined) {
+    return null;
+  }
+  codexArchivedRefusals.add(archived[1]);
+  return { kind: "sessionArchived", message, retryable: true };
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
+/**
+ * Resends a request while Codex fails it with `pattern`, waiting each delay in
+ * turn. Once `signal` aborts, it stops at once with the last error, even if
+ * the attempt in flight succeeds, so a waiting Stop never gets a turn first.
+ */
+async function retryOnCodexError<T>(
+  sendOnce: () => Promise<T>,
+  pattern: RegExp,
+  delaysMs: readonly number[],
+  describeRetry: (delayMs: number) => string,
+  signal?: AbortSignal,
+): Promise<T> {
+  const stopped = (): boolean => signal?.aborted === true;
+  let lastError: Error | null = null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      const result = await sendOnce();
+      if (lastError === null || !stopped()) return result;
+    } catch (error) {
+      if (!(error instanceof Error) || !pattern.test(error.message)) {
+        throw error;
+      }
+      lastError = error;
+    }
+    const delayMs = delaysMs[attempt];
+    if (delayMs === undefined || stopped()) throw lastError;
+    process.stderr.write(`${describeRetry(delayMs)}\n`);
+    await sleep(delayMs, undefined, { signal }).catch(() => undefined);
+    if (stopped()) throw lastError;
+  }
 }
+
 function missingCodexCliGuidance(): string {
   const brokenLink = findBrokenCliLink("codex");
   const cause =
     brokenLink === null
       ? ""
       : ` \`${brokenLink}\` points to a file that no longer exists.`;
-  return `Cloudroom could not find the Codex CLI on this machine.${cause} Install Codex (https://developers.openai.com/codex/cli) or put \`codex\` on PATH, then retry.`;
+  return `Cloudroom could not find the Codex CLI on this machine.${cause} Install Codex (https://developers.openai.com/codex/cli) or put \`codex\` on PATH, then retry. Cloudroom never runs the copy inside Codex.app or ChatGPT.app.`;
 }
 
 export function resolveAppServerLaunch(
   env: NodeJS.ProcessEnv = process.env,
-  codexCommand = "codex",
 ): {
   command: string;
   args: string[];
 } {
-  const command = env[CODEX_APP_SERVER_COMMAND_ENV];
+  const override = env[CODEX_APP_SERVER_COMMAND_ENV];
   const rawArgs = env[CODEX_APP_SERVER_ARGS_ENV];
-  const args = command
+  const command = override || findCliExecutable("codex", env);
+  if (!command) {
+    // describeCodexLaunchError shows the install guidance, as for a failed spawn.
+    throw new CodexAppServerExitedError("codex is not installed", {
+      spawnFailed: true,
+    });
+  }
+  const args = override
     ? rawArgs
       ? z.array(z.string()).parse(JSON.parse(rawArgs))
       : []
     : ["app-server"];
-  return { command: command ?? codexCommand, args };
+  return { command, args };
 }
 
 function buildAppServerEnv(): NodeJS.ProcessEnv {
@@ -394,7 +472,19 @@ function describeCodexLaunchError(error: unknown): string {
   if (error instanceof CodexAppServerExitedError && error.spawnFailed) {
     return missingCodexCliGuidance();
   }
-  return error instanceof Error ? error.message : String(error);
+  const brokenHint =
+    error instanceof CodexAppServerExitedError
+      ? codexBrokenInstallHint(error.message)
+      : null;
+  if (brokenHint !== null && error instanceof Error) {
+    // "spawn" and "ENOENT" make the host daemon report missing_executable, so
+    // the server and CLI say "reinstall" instead of "retry" or "sign in" (#907).
+    return `Codex is installed but broken: it could not spawn its native binary (ENOENT). ${brokenHint}\n\n${error.message}`;
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return CODEX_ACTIVE_WRITER_ERROR_PATTERN.test(message)
+    ? `${message}. ${CODEX_ACTIVE_WRITER_GUIDANCE}`
+    : message;
 }
 
 interface CodexSessionConstruction {
@@ -417,15 +507,32 @@ interface CodexBridgeSession {
   identityAnnounced: boolean;
   pendingPreIdentityDeltas: ThreadDelta[];
   rebuildBeforeNextTurnReason: string | null;
+  /** Failed MCP servers and the reason last shown for each (#1045). */
+  mcpFailures: Map<string, string>;
+  /** Codex reported a failed MCP server since the last reload. */
+  mcpRetryPending: boolean;
+  /** Infinity when this Codex's reload would reset healthy MCP servers. */
+  nextMcpReloadAt: number;
   closing: boolean;
   previousChildExit: Promise<void> | null;
   releasePromise: Promise<void> | null;
+  /** Aborted when a Stop or Archive waits for this thread or it is released. */
+  stopRequested: AbortController;
 }
 
-const sessionsByBbThreadId = new Map<string, CodexBridgeSession>();
+const sessionsByRoomThreadId = new Map<string, CodexBridgeSession>();
 const maintenanceConnections = new Set<CodexAppServerConnection>();
 let sessionSerialCounter = 0;
 let configuredSkillExtraRoots: string[] | null = null;
+let bridgeTempDir: string | null = null;
+
+// The worker entry's start() supplies a temp folder that nothing less trusted
+// can write (createPluginProcessTempDir). Tests that import this module
+// directly get their own folder.
+function commandGuardDir(): string {
+  bridgeTempDir ??= mkdtempSync(join(tmpdir(), "bb-codex-bridge-"));
+  return join(bridgeTempDir, "command-guard");
+}
 
 const LEGACY_BRIDGE_MINTED_ID_PATTERN = /^bt[0-9a-f]{8}-\d+-/;
 
@@ -435,10 +542,10 @@ function stripLegacyBridgeIdPrefix(id: string): string {
 }
 
 function currentSession(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
 ): CodexBridgeSession | undefined {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (!session || session.serial !== serial || session.closing) {
     return undefined;
   }
@@ -450,8 +557,9 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
     return session.releasePromise;
   }
   session.closing = true;
-  if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
-    sessionsByBbThreadId.delete(session.bbThreadId);
+  session.stopRequested.abort();
+  if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
+    sessionsByRoomThreadId.delete(session.bbThreadId);
   }
   const previousChildExit = session.previousChildExit;
   session.previousChildExit = null;
@@ -605,12 +713,12 @@ function toProviderRuntimeEvent(
 }
 
 function handleChildNotification(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -618,6 +726,20 @@ function handleChildNotification(
     const parsed = codexThreadStartedNotificationSchema.safeParse(params);
     if (parsed.success) {
       announceSessionIdentity(session, parsed.data.thread.id);
+    }
+  }
+  if (
+    method === "mcpServer/startupStatus/updated" &&
+    isRecord(params) &&
+    typeof params.name === "string"
+  ) {
+    // Show each MCP failure once per session, again only if its reason changes.
+    if (params.status === "ready") session.mcpFailures.delete(params.name);
+    if (params.status === "failed") {
+      session.mcpRetryPending = true;
+      const reason = codexMcpStartupReason(params);
+      if (session.mcpFailures.get(params.name) === reason) return;
+      session.mcpFailures.set(params.name, reason);
     }
   }
   const deltas = session.translator.translateEvent(
@@ -661,13 +783,13 @@ const codexChildToolCallParamsSchema = z.object({
 });
 
 function handleChildRequest(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   method: string,
   params: unknown,
   responder: CodexAppServerRequestResponder,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     responder.error(
       BRIDGE_JSON_RPC_ERRORS.BRIDGE_ERROR,
@@ -786,11 +908,11 @@ function buildMacOsPermissionItemDelta(
 }
 
 function handleChildExit(
-  bbThreadId: string,
+  roomThreadId: string,
   serial: number,
   info: CodexAppServerExitInfo,
 ): void {
-  const session = currentSession(bbThreadId, serial);
+  const session = currentSession(roomThreadId, serial);
   if (!session) {
     return;
   }
@@ -834,45 +956,70 @@ function spawnChildConnection(callbacks: {
     responder: CodexAppServerRequestResponder,
   ) => void;
   onExit: (info: CodexAppServerExitInfo) => void;
+  /** The thread's env; its identity tags mark this Codex as the thread's own. */
+  threadEnv?: Readonly<Record<string, string>> | undefined;
 }): CodexAppServerConnection {
-  const launch = resolveAppServerLaunch(process.env, codexExecutable(process.env));
+  const { threadEnv, ...connectionCallbacks } = callbacks;
+  const launch = resolveAppServerLaunch();
+  // Tagged like the thread's commands, so Stop and the daemon's stale-writer
+  // recovery can find a Codex Cloudroom lost track of (#607, #1717).
+  const tags: Record<string, string> = {};
+  for (const key of ["ROOM_THREAD_ID", "ROOM_SERVER_URL"]) {
+    const value = threadEnv?.[key];
+    if (value !== undefined) tags[key] = value;
+  }
   return createCodexAppServerConnection({
     command: launch.command,
     args: launch.args,
     cwd: process.cwd(),
-    env: buildAppServerEnv(),
-    ...callbacks,
+    env: { ...buildAppServerEnv(), ...tags },
+    ...connectionCallbacks,
   });
 }
 
 const ignoredChildResultSchema = z.unknown();
 
+/** Returns the running Codex version from its user agent, e.g. "bb/0.167.1 (...)". */
 async function initializeChild(
   connection: CodexAppServerConnection,
   postInitializeRequests?: readonly ProviderPostInitializeRequest[],
-): Promise<void> {
-  await connection.request({
+  onLateResult?: () => void,
+): Promise<string | null> {
+  const initialized = await connection.request({
     method: "initialize",
     params: CODEX_INITIALIZE_PARAMS,
     resultSchema: ignoredChildResultSchema,
     timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
   });
   for (const request of postInitializeRequests ?? []) {
-    try {
-      const result = await connection.request({
+    let late = false;
+    const applied = connection
+      .request({
         method: request.plan.method,
         ...("params" in request.plan && request.plan.params !== undefined
           ? { params: request.plan.params }
           : {}),
         resultSchema: ignoredChildResultSchema,
         timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+      })
+      .then((result) => {
+        request.onResult(result);
+        if (late) onLateResult?.();
       });
-      request.onResult(result);
-    } catch (error) {
-      if (request.required) {
-        throw error;
-      }
+    if (request.required) {
+      await applied;
+      continue;
     }
+    // Stop waiting, not reading: a later reply still applies (#1816).
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      applied.catch(() => undefined),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, OPTIONAL_POST_INITIALIZE_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    late = true;
   }
   if (configuredSkillExtraRoots !== null) {
     await connection.request({
@@ -882,19 +1029,125 @@ async function initializeChild(
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
   }
+  return isRecord(initialized) && typeof initialized.userAgent === "string"
+    ? versionFrom(initialized.userAgent)
+    : null;
 }
 
 const codexThreadIdentityResultSchema = z
-  .object({ thread: z.object({ id: z.string().min(1) }).passthrough() })
+  .object({
+    thread: z
+      .object({
+        id: z.string().min(1),
+        path: z.string().nullish().catch(null),
+      })
+      .passthrough(),
+  })
   .passthrough();
 
+const codexRolloutMetaSchema = z.object({
+  type: z.literal("session_meta"),
+  payload: z.object({
+    dynamic_tools: z.array(z.object({ name: z.string() })).nullish(),
+  }),
+});
+
+// Cloudroom's built-in tools (RESERVED_AGENT_TOOL_NAMES in the plugin SDK's
+// host-policy). Core starts Cloud threads without them, so a Teleported thread
+// never has them; only plugin tools are worth a notice.
+const CLOUDROOM_BUILT_IN_TOOL_NAMES = new Set(["update_environment_directory"]);
+
+// Last notice per native thread, so a rebuild doesn't repeat it.
+const missingToolNotices = new Map<string, string>();
+
+// Codex keeps the tools thread/start gave a thread: resume and fork ignore
+// new ones, and no request adds them (#2097). The rollout's first line lists
+// the kept ones; Core drops that list when it uploads a Cloud thread.
+async function toolsMissingFromCodexThread(
+  rolloutPath: string | null | undefined,
+  dynamicTools: readonly DynamicTool[] | undefined,
+): Promise<string[]> {
+  const wanted = (dynamicTools ?? [])
+    .map((tool) => tool.name)
+    .filter((name) => !CLOUDROOM_BUILT_IN_TOOL_NAMES.has(name));
+  if (!rolloutPath || wanted.length === 0) return [];
+  try {
+    const file = await open(rolloutPath, "r");
+    try {
+      const { buffer, bytesRead } = await file.read({
+        buffer: Buffer.alloc(1024 * 1024),
+        position: 0,
+      });
+      const firstLine = buffer.toString("utf8", 0, bytesRead).split("\n", 1)[0];
+      const meta = codexRolloutMetaSchema.safeParse(
+        JSON.parse(firstLine ?? ""),
+      );
+      if (!meta.success) return [];
+      const kept = new Set(
+        (meta.data.payload.dynamic_tools ?? []).map((tool) => tool.name),
+      );
+      return wanted.filter((name) => !kept.has(name));
+    } finally {
+      await file.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+const codexConfigReadResultSchema = z
+  .object({
+    config: z
+      .object({
+        model: z.string().nullish().catch(null),
+        features: z.object({ hooks: z.boolean().optional() }).nullish(),
+        shell_environment_policy: z
+          .object({
+            include_only: z.array(z.string()).nullish(),
+            filters: z.record(z.string(), z.string()).nullish(),
+          })
+          .nullish()
+          .catch(null),
+        mcp_servers: z
+          .record(
+            z.string(),
+            z
+              .object({
+                command: z.string().nullish(),
+                env: z.record(z.string(), z.string()).nullish(),
+              })
+              .passthrough(),
+          )
+          .nullish()
+          .catch(null),
+      })
+      .optional(),
+  })
+  .passthrough();
+const codexConfigRequirementsReadResultSchema = z
+  .object({
+    requirements: z
+      .object({
+        allowedApprovalPolicies: z.array(z.unknown()).nullish(),
+        allowedApprovalsReviewers: z.array(z.unknown()).nullish(),
+        allowedSandboxModes: z.array(z.unknown()).nullish(),
+        autoReview: z
+          .object({ requiredOnModels: z.array(z.string()).nullish() })
+          .nullish(),
+      })
+      .nullish(),
+  })
+  .catch({ requirements: null });
+
+
 type CodexSessionConstructionRequest =
-  | { kind: "start" }
+  | { kind: "start"; replacesProviderThreadId?: string }
   | { kind: "resume"; providerThreadId: string }
   | {
       kind: "fork";
       sourceProviderThreadId: string;
       sourceProviderCheckpointId?: string;
+      replacesProviderThreadId?: string;
     };
 
 interface ConstructThreadSessionArgs {
@@ -914,7 +1167,8 @@ interface ConstructedCodexSession {
 async function constructThreadSession(
   args: ConstructThreadSessionArgs,
 ): Promise<ConstructedCodexSession> {
-  const existing = sessionsByBbThreadId.get(args.threadId);
+  const creationDeadline = Date.now() + THREAD_CREATION_BUDGET_MS;
+  const existing = sessionsByRoomThreadId.get(args.threadId);
   const decoded = decodeCodexOptions(args.options);
   sessionSerialCounter += 1;
   const serial = sessionSerialCounter;
@@ -951,11 +1205,15 @@ async function constructThreadSession(
     identityAnnounced: false,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
+    mcpFailures: new Map(),
+    mcpRetryPending: false,
+    nextMcpReloadAt: 0,
     closing: false,
     previousChildExit: null,
     releasePromise: null,
+    stopRequested: new AbortController(),
   };
-  sessionsByBbThreadId.set(args.threadId, session);
+  sessionsByRoomThreadId.set(args.threadId, session);
   if (existing) {
     const previousChildExit = releaseSession(existing);
     session.previousChildExit = previousChildExit;
@@ -976,29 +1234,82 @@ async function constructThreadSession(
   }
   sendThreadDeltas(session, [{ kind: "session.reset" }]);
 
-  const connection = spawnChildConnection({
-    recordThreadId: args.threadId,
-    onNotification: (method, params) =>
-      handleChildNotification(args.threadId, serial, method, params),
-    onRequest: (method, params, responder) =>
-      handleChildRequest(args.threadId, serial, method, params, responder),
-    onExit: (info) => handleChildExit(args.threadId, serial, info),
-  });
-  session.connection = connection;
-
+  let spawned: CodexAppServerConnection | null = null;
   try {
-    await initializeChild(connection, translator.buildPostInitializeRequests());
+    const connection = spawnChildConnection({
+      recordThreadId: args.threadId,
+      threadEnv: decoded.sessionOptions.envVars,
+      onNotification: (method, params) =>
+        handleChildNotification(args.threadId, serial, method, params),
+      onRequest: (method, params, responder) =>
+        handleChildRequest(args.threadId, serial, method, params, responder),
+      onExit: (info) => handleChildExit(args.threadId, serial, info),
+    });
+    spawned = connection;
+    session.connection = connection;
+
+    const codexVersion = await initializeChild(
+      connection,
+      translator.buildPostInitializeRequests(),
+      () => {
+        if (currentSession(args.threadId, serial) !== session) return;
+        sendThreadDeltas(session, translator.takeLateSeedDeltas());
+      },
+    );
+    if (
+      codexVersion === null ||
+      compareVersions(codexVersion, CODEX_MCP_RELOAD_MINIMUM_VERSION) < 0
+    ) {
+      session.nextMcpReloadAt = Number.POSITIVE_INFINITY;
+    }
     await signInCloudroomAccount(connection, decoded.sessionOptions.envVars);
-    if (args.options.providerOptions?.commandGuardEnabled !== false) {
-      const settings = await connection.request({
+    const commandGuardEnabled =
+      args.options.providerOptions?.commandGuardEnabled !== false;
+    const settings = await connection
+      .request({
         method: "config/read",
         params: { cwd: args.cwd, includeLayers: false },
-        resultSchema: z.object({ config: z.object({ features: z.object({ hooks: z.boolean().optional() }).nullish() }).optional() }).passthrough(),
+        resultSchema: codexConfigReadResultSchema,
         timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+      })
+      .catch((error: unknown) => {
+        if (commandGuardEnabled) throw error;
+        return null;
       });
-      if (settings.config?.features?.hooks === false) {
-        throw new Error("Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.");
-      }
+    if (commandGuardEnabled && settings?.config?.features?.hooks === false) {
+      throw new Error(
+        "Codex hooks are disabled. Enable them in Codex or disable Cloudroom Command Guard before starting a new session.",
+      );
+    }
+    const managed = await connection
+      .request({
+        method: "configRequirements/read",
+        params: undefined,
+        resultSchema: codexConfigRequirementsReadResultSchema,
+        // Optional check: stay well under the caller's 30 s resume deadline.
+        timeoutMs: MANAGED_REQUIREMENTS_TIMEOUT_MS,
+      })
+      .catch(() => null);
+    const policyError = codexManagedPolicyError(
+      decoded.sessionOptions,
+      managed?.requirements,
+      // Resume and fork keep the saved thread model, which we do not know.
+      decoded.sessionOptions.model ??
+        (args.request.kind === "start"
+          ? (settings?.config?.model ?? null)
+          : null),
+    );
+    if (policyError !== null) throw new Error(policyError);
+    if (
+      process.platform === "linux" &&
+      decoded.sessionOptions.permissionScope === "workspace"
+    ) {
+      const sandboxError = await codexLinuxSandboxError({
+        codexCommand: findCliExecutable("codex", process.env) ?? "codex",
+        cwd: args.cwd,
+        env: buildAppServerEnv(),
+      });
+      if (sandboxError !== null) throw new Error(sandboxError);
     }
 
     const preparedGitRoots = translator.prepareWorkspaceWriteGitRoots({
@@ -1010,30 +1321,42 @@ async function constructThreadSession(
     });
     const dynamicTools = toCodexDynamicTools(args.dynamicTools);
     const instructionOverrides = resolveCodexInstructionOverrides({
+      approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       instructionMode: args.instructionMode,
       options: decoded.sessionOptions,
     });
     const sharedConstructionParams = {
       approvalPolicy: preparedGitRoots.permissionSettings.approvalPolicy,
       approvalsReviewer: preparedGitRoots.permissionSettings.approvalsReviewer,
-      sandbox: preparedGitRoots.permissionSettings.sandbox,
+      // Each turn sets the sandbox; a thread-level mode would drop the deny profile.
+      ...(usesPrivateDataDenyProfile(preparedGitRoots.config)
+        ? {}
+        : { sandbox: preparedGitRoots.permissionSettings.sandbox }),
       cwd: args.cwd,
       ...instructionOverrides,
       model: decoded.sessionOptions.model ?? undefined,
       serviceTier: toCodexServiceTier(decoded.sessionOptions.serviceTier),
       config: {
         ...preparedGitRoots.config,
-        ...(args.options.providerOptions?.commandGuardEnabled === false ? {} : prepareCodexGuard()),
+        ...keepShellEnvironmentSetKeys(
+          preparedGitRoots.config ?? {},
+          settings?.config?.shell_environment_policy,
+        ),
+        ...shareThreadIdentityWithMcpServers(
+          preparedGitRoots.config ?? {},
+          settings?.config?.mcp_servers,
+        ),
+        ...(commandGuardEnabled ? prepareCodexGuard(commandGuardDir()) : {}),
       },
       ...(dynamicTools && dynamicTools.length > 0 ? { dynamicTools } : {}),
     };
 
     let method: string;
-    let params: BbThreadStartParams | BbThreadResumeParams | BbThreadForkParams;
+    let params: RoomThreadStartParams | RoomThreadResumeParams | RoomThreadForkParams;
     switch (args.request.kind) {
       case "start": {
         method = "thread/start";
-        const startParams: BbThreadStartParams = {
+        const startParams: RoomThreadStartParams = {
           ...sharedConstructionParams,
           ephemeral: false,
           experimentalRawEvents: true,
@@ -1043,7 +1366,7 @@ async function constructThreadSession(
       }
       case "resume": {
         method = "thread/resume";
-        const resumeParams: BbThreadResumeParams = {
+        const resumeParams: RoomThreadResumeParams = {
           threadId: args.request.providerThreadId,
           excludeTurns: true,
           ...sharedConstructionParams,
@@ -1053,7 +1376,7 @@ async function constructThreadSession(
       }
       case "fork": {
         method = "thread/fork";
-        const forkParams: BbThreadForkParams = {
+        const forkParams: RoomThreadForkParams = {
           threadId: args.request.sourceProviderThreadId,
           excludeTurns: true,
           ...(args.request.sourceProviderCheckpointId !== undefined
@@ -1070,14 +1393,59 @@ async function constructThreadSession(
       }
     }
 
-    const result = await connection.request({
-      method,
-      params,
-      resultSchema: codexThreadIdentityResultSchema,
-      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
-    });
+    const result = await retryOnCodexError(
+      () =>
+        connection.request({
+          method,
+          params,
+          resultSchema: codexThreadIdentityResultSchema,
+          timeoutMs:
+            args.request.kind === "resume"
+              ? CHILD_REQUEST_TIMEOUT_MS
+              : Math.max(
+                  CHILD_REQUEST_TIMEOUT_MS,
+                  creationDeadline - Date.now(),
+                ),
+        }),
+      CODEX_ACTIVE_WRITER_ERROR_PATTERN,
+      args.request.kind === "resume" ? CODEX_ACTIVE_WRITER_RETRY_DELAYS_MS : [],
+      (delayMs) =>
+        `codex thread has another active writer; retrying ${method} in ${delayMs}ms.`,
+      session.stopRequested.signal,
+    );
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
+    if (args.request.kind !== "start") {
+      const missing = await toolsMissingFromCodexThread(
+        result.thread.path,
+        args.dynamicTools,
+      );
+      const summary = `This Codex thread started without ${missing.join(", ")}, and Codex can't add tools to an existing thread. Start a new thread to use ${missing.length === 1 ? "it" : "them"}.`;
+      if (
+        missing.length > 0 &&
+        missingToolNotices.get(codexThreadId) !== summary
+      ) {
+        missingToolNotices.set(codexThreadId, summary);
+        sendThreadDeltas(session, [
+          { kind: "provider.warning", category: "general", summary },
+        ]);
+      }
+    }
+    // A message edit's start or fork replaces the thread's current native
+    // session and keeps its Goal. A fork into a new Cloudroom thread starts
+    // without one.
+    if (
+      args.request.kind !== "resume" &&
+      args.request.replacesProviderThreadId !== undefined
+    ) {
+      const replaced = args.request.replacesProviderThreadId;
+      if (await carryGoalIntoEdit(connection, replaced, codexThreadId)) {
+        // Drops a Goal the kept history still shows.
+        handleChildNotification(args.threadId, serial, "thread/goal/cleared", {
+          threadId: codexThreadId,
+        });
+      }
+    }
     translator.activateThreadGitWritableRoots({
       providerThreadId: codexThreadId,
       threadId: args.threadId,
@@ -1086,11 +1454,11 @@ async function constructThreadSession(
     return { session, codexThreadId };
   } catch (error) {
     const released = session.closing;
-    if (sessionsByBbThreadId.get(args.threadId) === session) {
-      sessionsByBbThreadId.delete(args.threadId);
+    if (sessionsByRoomThreadId.get(args.threadId) === session) {
+      sessionsByRoomThreadId.delete(args.threadId);
     }
     session.closing = true;
-    await connection.kill();
+    await spawned?.kill();
     throw released ? new CodexSessionReleasedError(error) : error;
   }
 }
@@ -1105,12 +1473,12 @@ class CodexSessionReleasedError extends Error {
 function registerResumableSession(session: CodexBridgeSession): void {
   if (
     session.codexThreadId === null ||
-    sessionsByBbThreadId.has(session.bbThreadId)
+    sessionsByRoomThreadId.has(session.bbThreadId)
   ) {
     return;
   }
   sessionSerialCounter += 1;
-  sessionsByBbThreadId.set(session.bbThreadId, {
+  sessionsByRoomThreadId.set(session.bbThreadId, {
     bbThreadId: session.bbThreadId,
     codexThreadId: session.codexThreadId,
     serial: sessionSerialCounter,
@@ -1124,9 +1492,13 @@ function registerResumableSession(session: CodexBridgeSession): void {
     identityAnnounced: session.identityAnnounced,
     pendingPreIdentityDeltas: [],
     rebuildBeforeNextTurnReason: null,
+    mcpFailures: new Map(),
+    mcpRetryPending: false,
+    nextMcpReloadAt: 0,
     closing: false,
     previousChildExit: null,
     releasePromise: null,
+    stopRequested: new AbortController(),
   });
 }
 
@@ -1193,10 +1565,10 @@ async function withMaintenanceChild<T>(
 }
 
 async function withChildForThread<T>(
-  bbThreadId: string,
+  roomThreadId: string,
   fn: (connection: CodexAppServerConnection) => Promise<T>,
 ): Promise<T> {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (
     session &&
     !session.closing &&
@@ -1226,6 +1598,7 @@ function handleInitialize(id: string | number): void {
       approvalEnforcedBy: "runtime",
       grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
       steerMode: "inject",
+      stopsUnopenedTurns: false,
       skills: { configure: true },
     },
   };
@@ -1305,7 +1678,7 @@ interface LiveSessionForTurn {
 async function requireLiveSessionForTurn(
   params: TurnStartParamsShape,
 ): Promise<LiveSessionForTurn> {
-  let session = sessionsByBbThreadId.get(params.threadId);
+  let session = sessionsByRoomThreadId.get(params.threadId);
   if (!session || session.closing) {
     throw new Error(`No active codex session for thread "${params.threadId}"`);
   }
@@ -1424,6 +1797,23 @@ async function handleTurnStart(
         ),
         options: decoded.sessionOptions,
       });
+      if (session.mcpRetryPending && Date.now() >= session.nextMcpReloadAt) {
+        // Codex keeps a failed MCP server down for the thread. Reloading makes
+        // this turn retry it, so a sign-in or config fix takes effect. A server
+        // that is gone after the reload reports nothing, so retries stop.
+        session.mcpRetryPending = false;
+        session.nextMcpReloadAt = Date.now() + MCP_RELOAD_INTERVAL_MS;
+        await connection
+          .request({
+            method: "config/mcpServer/reload",
+            params: undefined,
+            resultSchema: ignoredChildResultSchema,
+            timeoutMs: MANAGED_REQUIREMENTS_TIMEOUT_MS,
+          })
+          .catch(() => {
+            session.mcpRetryPending = true;
+          });
+      }
       const result = await connection.request({
         method: "turn/start",
         params: {
@@ -1462,7 +1852,7 @@ async function handleTurnSteer(
   id: string | number,
   params: TurnSteerParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
   if (
     !session ||
     session.closing ||
@@ -1497,7 +1887,56 @@ async function handleTurnSteer(
     ]);
     sendResult(id, { threadId: params.threadId });
   } catch (error) {
-    rejectWithCodexError(id, error);
+    const message = error instanceof Error ? error.message : String(error);
+    if (!CODEX_NO_ACTIVE_TURN_ERROR_PATTERN.test(message)) {
+      rejectWithCodexError(id, error);
+      return;
+    }
+    // Codex already ended the turn Cloudroom still shows open (#986). It
+    // refuses steers before its end-of-turn steps send turn/completed, so wait
+    // as long as Stop does for that, then end the turn as failed. The
+    // stale-turn reply starts this input as a new turn; the ended turn's work
+    // is not replayed. A Stop meanwhile ends it as interrupted and starts
+    // nothing, like a resume retry (#104).
+    const providerTurnId = params.expectedTurnId;
+    const stop = session.stopRequested.signal;
+    const settled = await waitForCodexTurnSettlement(
+      session,
+      providerTurnId,
+      INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+      stop,
+    );
+    if (!settled && !session.closing) {
+      const ended = "Codex ended this turn without reporting its result";
+      sendThreadDeltas(
+        session,
+        stop.aborted
+          ? [{ kind: "turn.boundary", providerTurnId, status: "interrupted" }]
+          : [
+              {
+                kind: "provider.error",
+                message: ended,
+                detail:
+                  "Its work may be incomplete. New messages start a new turn.",
+                willRetry: false,
+                providerTurnId,
+              },
+              {
+                kind: "turn.boundary",
+                providerTurnId,
+                status: "failed",
+                error: { message: ended },
+              },
+            ],
+      );
+    }
+    if (stop.aborted) {
+      rejectWithCodexError(id, error);
+      return;
+    }
+    sendError(id, BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN, message, {
+      recovery: { kind: "staleTurn", message, retryable: false },
+    });
   }
 }
 
@@ -1505,7 +1944,7 @@ async function handleThreadStop(
   id: string | number,
   params: ThreadStopParamsShape,
 ): Promise<void> {
-  const session = sessionsByBbThreadId.get(params.threadId);
+  const session = sessionsByRoomThreadId.get(params.threadId);
 
   if (params.intent === "release") {
     if (session) {
@@ -1560,19 +1999,63 @@ async function handleThreadStop(
       },
     ]);
   }
-  sendThreadDeltas(
-    session,
-    session.translator.clearExitedChildThreadState({
-      providerThreadId: session.codexThreadId,
-    }),
-  );
+  const openSubAgents = session.translator.clearExitedChildThreadState({
+    providerThreadId: session.codexThreadId,
+  });
+  sendThreadDeltas(session, openSubAgents);
+  // Codex stays up for the next turn once nothing of this thread still runs.
+  // Sub-agents only end with Codex itself.
+  if (
+    params.keepSession === true &&
+    settled &&
+    openSubAgents.length === 0 &&
+    (await endBackgroundTerminals(session.connection, session.codexThreadId))
+  ) {
+    session.stopRequested = new AbortController();
+    sendResult(id, { ok: true, sessionKept: true });
+    return;
+  }
   await releaseSession(session);
   sendResult(id, { ok: true });
+}
+
+/**
+ * Ends the commands a stopped turn left running in the background. False when
+ * Codex can't (an older CLI), so the caller ends Codex instead.
+ */
+async function endBackgroundTerminals(
+  connection: CodexAppServerConnection,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    await connection.request({
+      method: "thread/backgroundTerminals/clean",
+      params: { threadId: codexThreadId },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const goalClearResultSchema = z.object({ cleared: z.boolean() }).passthrough();
 const goalGetResultSchema = z
   .object({ goal: z.object({ status: z.string() }).passthrough().nullable() })
+  .passthrough();
+const carriedGoalResultSchema = z
+  .object({
+    goal: z
+      .object({
+        status: z.string(),
+        objective: z.string(),
+        tokenBudget: z.number().nullish(),
+        tokensUsed: z.number(),
+      })
+      .passthrough()
+      .nullable(),
+  })
   .passthrough();
 
 /** User goal changes carry `origin: "user"` so Codex treats them as the user's instruction. */
@@ -1638,16 +2121,65 @@ async function pauseActiveGoal(
   }
 }
 
+/**
+ * Codex keeps a Goal per native thread, and a message edit forks a new one
+ * (#857). Never active, or it would start a Goal turn at once. Codex cannot
+ * set the usage counters, so the budget becomes what was left (at least 1,
+ * Codex's minimum). Resolves true when the replaced session has no Goal.
+ */
+async function carryGoalIntoEdit(
+  connection: CodexAppServerConnection,
+  replacedCodexThreadId: string,
+  codexThreadId: string,
+): Promise<boolean> {
+  try {
+    const { goal } = await connection.request({
+      method: "thread/goal/get",
+      params: { threadId: replacedCodexThreadId },
+      resultSchema: carriedGoalResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+    if (goal === null) return true;
+    await connection.request({
+      method: "thread/goal/set",
+      params: {
+        threadId: codexThreadId,
+        objective: goal.objective,
+        status: goal.status === "active" ? "paused" : goal.status,
+        tokenBudget:
+          goal.tokenBudget == null
+            ? null
+            : Math.max(1, goal.tokenBudget - goal.tokensUsed),
+        origin: "user",
+      },
+      resultSchema: ignoredChildResultSchema,
+      timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `could not carry the Goal into the edit: ${String(error)}\n`,
+    );
+  }
+  return false;
+}
+
+/** Resolves false on timeout, or at once when `signal` aborts. */
 function waitForCodexTurnSettlement(
   session: CodexBridgeSession,
   codexTurnId: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   if (!session.openCodexTurnIds.has(codexTurnId)) {
     return Promise.resolve(true);
   }
+  if (signal?.aborted) {
+    return Promise.resolve(false);
+  }
   return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
+    const giveUp = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", giveUp);
       const waiters = session.turnSettledWaiters.get(codexTurnId);
       if (waiters !== undefined) {
         session.turnSettledWaiters.set(
@@ -1656,10 +2188,13 @@ function waitForCodexTurnSettlement(
         );
       }
       resolve(false);
-    }, timeoutMs);
+    };
+    const timer = setTimeout(giveUp, timeoutMs);
     timer.unref?.();
+    signal?.addEventListener("abort", giveUp, { once: true });
     const onSettled = (): void => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", giveUp);
       resolve(true);
     };
     const waiters = session.turnSettledWaiters.get(codexTurnId) ?? [];
@@ -1684,7 +2219,7 @@ async function handleThreadMaintenance(
 ): Promise<void> {
   const settle = async (): Promise<void> => {
     if (options?.releaseAfter) {
-      const session = sessionsByBbThreadId.get(params.threadId);
+      const session = sessionsByRoomThreadId.get(params.threadId);
       if (session) {
         await releaseSession(session);
       }
@@ -1722,35 +2257,44 @@ async function sendMaintenanceRequestWithRetries(
   connection: CodexAppServerConnection,
   request: { method: string; params: Record<string, unknown> },
 ): Promise<void> {
-  const sendOnce = (): Promise<unknown> =>
+  const sendOnce = (method = request.method): Promise<unknown> =>
     connection.request({
-      method: request.method,
+      method,
       params: request.params,
       resultSchema: ignoredChildResultSchema,
       timeoutMs: CHILD_REQUEST_TIMEOUT_MS,
     });
+  if (request.method === "thread/unarchive") {
+    const threadId = String(request.params.threadId);
+    try {
+      await sendOnce();
+    } catch (error) {
+      // Codex refused this thread as archived, yet finds no archived rollout:
+      // its state DB still marks the active rollout archived, so even
+      // `codex unarchive` fails (#1808). Archiving it first puts both in step.
+      if (
+        !codexArchivedRefusals.has(threadId) ||
+        !(error instanceof Error) ||
+        !CODEX_NOT_ARCHIVED_ERROR_PATTERN.test(error.message)
+      ) {
+        throw error;
+      }
+      await sendOnce("thread/archive");
+      await sendOnce();
+    }
+    codexArchivedRefusals.delete(threadId);
+    return;
+  }
   if (request.method !== "thread/name/set") {
     await sendOnce();
     return;
   }
-  for (const retryDelayMs of CODEX_RENAME_RETRY_DELAYS_MS) {
-    try {
-      await sendOnce();
-      return;
-    } catch (error) {
-      if (
-        !(error instanceof Error) ||
-        !CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN.test(error.message)
-      ) {
-        throw error;
-      }
-      process.stderr.write(
-        `codex rollout is not ready; retrying rename in ${retryDelayMs}ms.\n`,
-      );
-      await delay(retryDelayMs);
-    }
-  }
-  await sendOnce();
+  await retryOnCodexError(
+    sendOnce,
+    CODEX_EMPTY_ROLLOUT_RENAME_ERROR_PATTERN,
+    CODEX_RENAME_RETRY_DELAYS_MS,
+    (delayMs) => `codex rollout is not ready; retrying rename in ${delayMs}ms.`,
+  );
 }
 
 async function handleSkillsConfigure(
@@ -1759,7 +2303,7 @@ async function handleSkillsConfigure(
 ): Promise<void> {
   configuredSkillExtraRoots = params.roots.map((root) => root.path);
   try {
-    for (const session of sessionsByBbThreadId.values()) {
+    for (const session of sessionsByRoomThreadId.values()) {
       if (
         session.closing ||
         session.connection === null ||
@@ -1815,6 +2359,11 @@ async function handleRequest(
     case "thread/start":
       await handleThreadConstruction(request.id, request.params, {
         kind: "start",
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
+            }
+          : {}),
       });
       break;
     case "thread/resume":
@@ -1831,6 +2380,11 @@ async function handleRequest(
           ? {
               sourceProviderCheckpointId:
                 request.params.sourceProviderCheckpointId,
+            }
+          : {}),
+        ...(request.params.replacesProviderThreadId !== undefined
+          ? {
+              replacesProviderThreadId: request.params.replacesProviderThreadId,
             }
           : {}),
       });
@@ -1899,7 +2453,20 @@ async function handleRequest(
   }
 }
 
+// Runtime notification (no id): a Stop or Archive waits for this thread.
+// Mirrors THREAD_STOP_REQUESTED_METHOD in @cloudroom/agent-runtime.
+const threadStopRequestedNotificationSchema = z.object({
+  method: z.literal("thread/stopRequested"),
+  params: z.object({ threadId: z.string().min(1) }),
+});
+
 function handleParsedMessage(parsed: unknown): void {
+  const stopRequested = threadStopRequestedNotificationSchema.safeParse(parsed);
+  if (stopRequested.success) {
+    const { threadId } = stopRequested.data.params;
+    sessionsByRoomThreadId.get(threadId)?.stopRequested.abort();
+    return;
+  }
   const response = decodeBridgeJsonRpcResponse(parsed);
   if (response && typeof response.id === "number") {
     const pending = pendingRuntimeRequests.get(response.id);
@@ -1936,12 +2503,12 @@ function handleParsedMessage(parsed: unknown): void {
 export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 function killAllChildren(): void {
-  for (const session of sessionsByBbThreadId.values()) {
+  for (const session of sessionsByRoomThreadId.values()) {
     session.closing = true;
     session.connection?.kill();
     session.connection = null;
   }
-  sessionsByBbThreadId.clear();
+  sessionsByRoomThreadId.clear();
   for (const connection of maintenanceConnections) {
     connection.kill();
   }
@@ -1953,6 +2520,9 @@ export const experimental_killAllChildrenForTests = killAllChildren;
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
+  start: (context) => {
+    bridgeTempDir = context.tempDir;
+  },
   onClose: () => {
     killAllChildren();
     process.exit(0);

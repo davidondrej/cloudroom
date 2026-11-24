@@ -1,25 +1,19 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type { FileContents } from "@pierre/diffs";
 import type { DiffPresentation } from "@/components/code/code-rendering";
-import { GitDiffCard } from "../git-diff/GitDiffCard";
-import type {
-  DiffFileContentsResult,
-  RequestDiffFileContents,
-} from "@/components/git-diff/GitDiffCardBody";
+import { GitDiffCard } from "@/components/diff/diff-card";
+import type { DiffFileContentsResult, RequestDiffFileContents } from "@/components/diff/diff-store";
 import {
   DEFAULT_CODE_OVERFLOW_MODE,
   type CodeOverflowMode,
 } from "@/lib/code-overflow-mode";
-import {
-  GitDiffToolbar,
-  type GitDiffDisplayMode,
-  type GitDiffSelectionOption,
-} from "./GitDiffToolbar";
+import { GitDiffToolbar } from "@/components/diff/diff-panel";
+import type { GitDiffDisplayMode, GitDiffSelectionOption } from "@/components/diff/diff-store";
 import {
   parseGitDiffFiles,
   summarizeGitDiffFile,
   type ParsedGitDiffFile,
-} from "../git-diff/git-diff-parsing";
+} from "@/components/diff/patch-utils";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 import { appToast } from "@/components/ui/app-toast";
 

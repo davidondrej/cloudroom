@@ -18,11 +18,11 @@ import {
   HEADER_PANE_ACTION_ICON_BUTTON_CLASS,
 } from "@/components/layout/AppPageHeader";
 import {
-  getBbDesktopInfo,
+  getRoomDesktopInfo,
   MACOS_APP_REGION_NO_DRAG_CLASS,
   MACOS_WINDOW_NO_DRAG_CLASS,
   shouldUseMacosDesktopChrome,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useAppCommandShortcut } from "@/components/commands/AppCommandProvider";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
@@ -30,8 +30,8 @@ import { useInlineThreadTitle } from "@/components/thread/InlineThreadTitle";
 import { useThreadActions } from "@/components/thread/ThreadActionsProvider";
 import { ThreadPurposeHoverCard } from "@/components/thread/ThreadPurposeHoverCard";
 import { ThreadTitleMentions } from "@/components/thread/ThreadTitleMentions";
-import { SecondaryPanelHostLayoutContext } from "@/components/secondary-panel/SecondaryPanelHostLayoutContext";
-import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/secondary-panel/panelToggleControlState";
+import { SecondaryPanelHostLayoutContext } from "@/components/right-panel/shell/panel-tokens";
+import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/right-panel/shell/panel-tokens";
 import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@cloudroom/shared-ui/chrome-style-tokens";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { dimInactiveSplitsAtom } from "@/lib/split-layout/atoms";
@@ -82,7 +82,7 @@ export function ThreadDetailHeader({
     resetKey: threadId,
     title: threadTitle,
   });
-  const [desktopInfo] = useState(getBbDesktopInfo);
+  const [desktopInfo] = useState(getRoomDesktopInfo);
   const dimsInactiveSplits = useAtomValue(dimInactiveSplitsAtom);
   const panelShortcut = useAppCommandShortcut("panel.toggle");
   const usesDesktopChrome = shouldUseMacosDesktopChrome(desktopInfo);
@@ -129,7 +129,10 @@ export function ThreadDetailHeader({
           isSplitPaneHeader && isFocused && CONTEXT_SELECTION_SURFACE_CLASS,
         )}
       >
-        <ThreadPurposeHoverCard purpose={isEditing ? null : threadPurpose}>
+        <ThreadPurposeHoverCard
+          purpose={isEditing ? null : threadPurpose}
+          threadId={threadId}
+        >
           <p
             className={cn(
               "relative min-w-0 text-xs font-normal text-foreground/70 transition-colors",

@@ -14,7 +14,7 @@ import {
 import {
   SecondaryPanelLayout,
   type SecondaryPanelRenderArgs,
-} from "./SecondaryPanelLayout";
+} from "@/components/right-panel/shell/responsive-panel-host";
 
 type DrawerShellCallback = (open: boolean) => void;
 
@@ -67,7 +67,7 @@ vi.mock("react-resizable-panels", async () => {
   return { Panel, PanelGroup };
 });
 
-vi.mock("./CompactSecondaryPanelShelf", async () => {
+vi.mock("@/components/right-panel/shell/mobile-drawer", async () => {
   const React = await import("react");
 
   const CompactSecondaryPanelShelf = ({

@@ -9,6 +9,22 @@ but keep terms like "PR" or "AGI" as they are... no need to rewrite that as "pul
 
 the name should contain unique things about that thread, like a specific name of a user, or feature name, or clear description of the bug -- so it's obvious how that thread is unique at a first glance`;
 
+export const DEFAULT_PROMPT_SUGGESTION_PROMPT = `Predict the next message this user will type to their coding agent: what they would type, not what they should do. The test: would they think "I was just about to type that"?
+
+Return:
+- suggestion: 2 to 12 words in this user's style, or an empty string.
+
+Examples:
+- Bug fixed, tests not run yet: "run the tests"
+- Code was written: "try it out"
+- The agent offered options: the one this user would pick
+- The agent asks whether to continue: "yes" or "go ahead"
+- Task done, next step obvious: "commit and push"
+
+Never repeat the user's latest message. Never suggest praise, questions, the agent's voice ("Let me...", "I'll..."), new ideas, or more than one sentence.
+Return an empty string after an error, when the next step isn't obvious, or for anything sensitive (credentials, security, private data, harm).
+Copy the user's length, tone, capitalization, and wording.`;
+
 export const THREAD_PURPOSE_CLAUDE_MODEL = "claude-code/claude-haiku-5-5";
 export const THREAD_PURPOSE_CODEX_MODEL = "codex/gpt-6-luna";
 
@@ -79,10 +95,15 @@ export const UI_PREFERENCE_KEYS = [
   "threadPurpose.showInSidebar",
   "threadPurpose.model",
   "threadPurpose.reasoningEffort",
+  "promptSuggestions.enabled",
+  "promptSuggestions.prompt",
+  "skillSuggestions.enabled",
   "projectNudge.enabled",
   "projectNudge.confidence",
+  "search.smart",
   "appearance.theme",
   "defaults.startingMachine",
+  "defaults.showUltraEfforts",
 ] as const;
 export type UiPreferenceKey = (typeof UI_PREFERENCE_KEYS)[number];
 const uiPreferenceKeySchema = z.enum(UI_PREFERENCE_KEYS);
@@ -243,6 +264,21 @@ export const uiPreferenceDefinitions = {
     true,
     "Keep a short purpose and percent done on each thread, refreshed after every reply. Shown when hovering the thread title, or a sidebar thread for 1.5s (see threadPurpose.showInSidebar).",
   ),
+  "promptSuggestions.enabled": defineUiPreference(
+    z.boolean(),
+    true,
+    "After each reply, show the user's likely next prompt as faint text in the open thread's empty composer; Tab inserts it. Uses Haiku 5.5 on Claude Code, else GPT-6 Luna on Codex, at low effort.",
+  ),
+  "promptSuggestions.prompt": defineUiPreference(
+    z.string().trim().min(1).max(THREAD_NAMING_RULES_MAX_LENGTH),
+    DEFAULT_PROMPT_SUGGESTION_PROMPT,
+    "The instructions the small model follows when predicting the user's next prompt.",
+  ),
+  "skillSuggestions.enabled": defineUiPreference(
+    z.boolean(),
+    true,
+    "When a thread finishes a job the user keeps asking for by hand, offer to save it as a skill, on a card above the chat input. Uses Haiku 5.5 on Claude Code, else GPT-6 Luna on Codex, at low effort, at most once a day.",
+  ),
   "threadPurpose.showInSidebar": defineUiPreference(
     z.boolean(),
     true,
@@ -268,6 +304,11 @@ export const uiPreferenceDefinitions = {
     70,
     "How sure Jev must be, in percent (1–99), before the hint suggests another project. Lower shows it more often.",
   ),
+  "search.smart": defineUiPreference(
+    z.boolean().nullable(),
+    null,
+    "Cmd+K search asks Jev to rank results, sending a short card for each open thread to the website. null is on for paid plans and off for Free.",
+  ),
   "appearance.theme": defineUiPreference(
     z.enum(["light", "dark", "system"]),
     "system",
@@ -276,7 +317,12 @@ export const uiPreferenceDefinitions = {
   "defaults.startingMachine": defineUiPreference(
     z.enum(["cloud", "last"]),
     "last",
-    "Where new threads start: last for the machine used last (Cloud on a fresh install), or cloud.",
+    "Where new threads start: last for Cloud, except a project where Local was picked in the last 24 hours, or cloud for always Cloud.",
+  ),
+  "defaults.showUltraEfforts": defineUiPreference(
+    z.boolean(),
+    false,
+    "Show Claude Ultracode and Codex Ultra in the effort menu. A thread already on one keeps it visible.",
   ),
 } as const satisfies Record<UiPreferenceKey, UiPreferenceDefinition>;
 

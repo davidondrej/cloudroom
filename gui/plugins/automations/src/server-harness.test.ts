@@ -39,11 +39,19 @@ const rpcMethods = [
   "automations_review_mark",
   "automations_link_thread",
   "cloud_automations",
+  "cloud_keys",
   "cloud_template_add",
+  "templates_usage",
   "account_plan",
   "paused_loops",
   "scans_agent_sessions",
+  "scans_card",
+  "plan_loops",
+  "plan_loops_enable",
+  "plan_loops_event",
   "scans_start",
+  "scans_state",
+  "scans_upgrade_clicked",
 ].sort();
 
 function project(projectId = PROJECT_ID) {
@@ -535,11 +543,11 @@ describe("automations server plugin harness", () => {
   it.each([
     {
       supported: ["accept-edits", "auto", "full"] as const,
-      expected: "auto",
+      expected: "full",
     },
     {
-      supported: ["accept-edits", "full"] as const,
-      expected: "full",
+      supported: ["accept-edits", "auto"] as const,
+      expected: "auto",
     },
   ])(
     "defaults agent automations to $expected for provider capabilities",
@@ -570,6 +578,45 @@ describe("automations server plugin harness", () => {
         mode: "agent",
         permissionMode: expected,
       });
+      await harness.dispose();
+    },
+  );
+
+  it.each([
+    ["C:\\work\\sample", "unmanaged"],
+    ["C:/work/sample", "unmanaged"],
+    ["\\\\server\\share\\sample", "unmanaged"],
+    ["env_routed", "reuse"],
+  ])(
+    "routes --environment %s as %s on create and update",
+    async (value, kind) => {
+      const { harness } = await bootAutomationsPlugin();
+      const expected =
+        kind === "reuse"
+          ? { type: "reuse", environmentId: value }
+          : {
+              type: "host",
+              hostId: "host_test",
+              workspace: { type: "unmanaged", path: value },
+            };
+      const created = await createAgentAutomation(harness);
+      const create =
+        "create --name Env --in 1h --prompt hi --provider codex --model gpt-5";
+      for (const command of [create.split(" "), ["update", created.id]]) {
+        const result = await harness.runCli([
+          ...command,
+          "--project",
+          PROJECT_ID,
+          "--environment",
+          value,
+          "--json",
+        ]);
+        expect(result.exitCode).toBe(0);
+        expect(
+          automationResponseSchema.parse(JSON.parse(result.stdout ?? ""))
+            .execution,
+        ).toMatchObject({ environment: expected });
+      }
       await harness.dispose();
     },
   );

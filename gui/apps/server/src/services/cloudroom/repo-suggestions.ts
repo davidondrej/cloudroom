@@ -1,8 +1,10 @@
+import { gitlabRepository } from "@cloudroom/domain";
+import { ApiError } from "../../errors.js";
 import { z } from "zod";
 import { createRemoteProject, getProject, listProjectSourcesByProjectIds, listPublicProjects, setProjectGithubRepo, setProjectHidden, type ProjectRow } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import { cloudroom } from "./commands.js";
-import { localRepos } from "./local-repos.js";
+import { localRepos, type LocalRepo } from "./local-repos.js";
 import { githubRepository } from "./project-copy.js";
 import { macGithubToken } from "./sandboxes.js";
 
@@ -59,7 +61,7 @@ async function projectRepo(deps: AppDeps, project: ProjectRow, token: string | n
   if (!repo?.id) return { id: project.githubRepoId, repo: name };
   if (repo.id !== project.githubRepoId || repo.repo.toLowerCase() !== name) {
     const gitRemoteUrl = project.gitRemoteUrl.replace(/[\w.-]+\/[\w.-]+?(\.git)?\/?$/, (_, git: string | undefined) => `${repo.repo}${git ?? ""}`);
-    setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: repo.id, gitRemoteUrl });
+    setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: repo.id, gitRemoteUrl }, project.gitRemoteUrl);
   }
   return repo;
 }
@@ -71,13 +73,29 @@ function matcher(repos: (GithubRepo | null)[]) {
   return (repo: GithubRepo | null) => Boolean(repo && ((repo.id && ids.has(repo.id)) || names.has(repo.repo.toLowerCase())));
 }
 
+const macSuggestion = ({ name, path, updatedAt }: LocalRepo): RepoSuggestion => ({ source: "mac", name, path, updatedAt });
+/** Lower-cased folders that projects already use. */
+const projectPaths = (deps: AppDeps, projects: ProjectRow[]) =>
+  new Set(listProjectSourcesByProjectIds(deps.db, projects.map((project) => project.id)).map((source) => source.path.toLowerCase()));
+
+/** Only this Mac's repos, with no network calls, so the picker shows them while GitHub answers.
+ *  Matches projects by folder and remote `owner/name`; the full answer also catches renamed repos. */
+export async function macRepoSuggestions(deps: AppDeps): Promise<{ repos: RepoSuggestion[] }> {
+  const projects = listPublicProjects(deps.db);
+  const paths = projectPaths(deps, projects);
+  const remoteKey = (url:string|null) => gitlabRepository(url)?.toLowerCase() ?? repoName(url);
+  const names = new Set(projects.map((project) => remoteKey(project.gitRemoteUrl)).filter(Boolean));
+  const mac = await localRepos(LIMIT * 2);
+  return { repos: mac.filter((repo) => !paths.has(repo.path.toLowerCase()) && !names.has(remoteKey(repo.remote))).slice(0, LIMIT).map(macSuggestion) };
+}
+
 /** Recently updated repos on this Mac and GitHub that no project uses yet. A repo on both shows once, as the Mac folder, since it needs no clone. */
 export async function repoSuggestions(deps: AppDeps): Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }> {
   const token = await macGithubToken() || null;
   const [mac, github] = await Promise.all([localRepos(LIMIT * 2), githubRepos(deps, token)]);
   for (const repo of github.repos) if (repo.id) known.set(repo.repo.toLowerCase(), Promise.resolve(repo)).set(`#${repo.id}`, Promise.resolve(repo));
   const projects = listPublicProjects(deps.db);
-  const paths = new Set(listProjectSourcesByProjectIds(deps.db, projects.map((project) => project.id)).map((source) => source.path.toLowerCase()));
+  const paths = projectPaths(deps, projects);
   const macRemote = (remote: string | null) => {
     const name = repoName(remote);
     return name ? lookup(name, token).then((repo) => repo ?? { id: null, repo: name }) : null;
@@ -87,12 +105,13 @@ export async function repoSuggestions(deps: AppDeps): Promise<{ githubConnected:
     Promise.all(mac.map((repo) => macRemote(repo.remote))),
   ]);
   const isUsed = matcher(used), isOnMac = matcher(onMac);
-  const macRepos = mac.filter((repo, index) => !paths.has(repo.path.toLowerCase()) && !isUsed(onMac[index] ?? null));
+  const labs = new Set(projects.map(p=>gitlabRepository(p.gitRemoteUrl)?.toLowerCase()).filter(Boolean));
+  const macRepos = mac.filter((repo, index) => !paths.has(repo.path.toLowerCase()) && !labs.has(gitlabRepository(repo.remote)?.toLowerCase() ?? "") && !isUsed(onMac[index] ?? null));
   const githubOnly = github.repos.filter((repo) => !isUsed(repo) && !isOnMac(repo));
   return {
     githubConnected: github.connected,
     repos: [
-      ...macRepos.slice(0, LIMIT).map(({ name, path, updatedAt }) => ({ source: "mac" as const, name, path, updatedAt })),
+      ...macRepos.slice(0, LIMIT).map(macSuggestion),
       ...githubOnly.slice(0, LIMIT).map(({ repo, updatedAt }) => ({ source: "github" as const, name: repo.split("/")[1] ?? repo, repo, updatedAt })),
     ],
   };
@@ -114,12 +133,40 @@ export async function addGithubRepo(deps: AppDeps, repo: string): Promise<{ proj
   return { projectId: createRemoteProject(deps.db, deps.hub, { name: name.split("/")[1] ?? name, gitRemoteUrl: `https://github.com/${name}.git`, ...(found?.id ? { githubRepoId: found.id } : {}) }).id };
 }
 
+export async function addGitlabRepo(
+  deps: AppDeps,
+  remote: string,
+): Promise<{ projectId: string }> {
+  const repository = gitlabRepository(remote);
+  if (!repository)
+    throw new ApiError(400, "invalid_repo", "Paste a GitLab.com project URL.");
+  const access = await cloudroom(deps).sandboxes.gitlabCheck(repository);
+  if (!access.accessible) throw new ApiError(409, "no_repo_access", "Check the GitLab project URL and connect an account that can read it in Cloud settings.");
+  const existing = listPublicProjects(deps.db, "all").find(
+    (p) =>
+      gitlabRepository(p.gitRemoteUrl)?.toLowerCase() ===
+      repository.toLowerCase(),
+  );
+  if (existing) {
+    setProjectHidden(deps.db, deps.hub, existing.id, false);
+    return { projectId: existing.id };
+  }
+  const project = createRemoteProject(deps.db, deps.hub, {
+    name: repository.split("/").at(-1)!,
+    gitRemoteUrl: repository + ".git",
+  });
+  return { projectId: project.id };
+}
+
 const branchListSchema = z.array(z.object({ name: z.string() }));
 const BRANCH_PAGES = 10;
 
-/** A project's branches on GitHub, for the Cloud branch picker when no Mac folder lists them (ADR 0181). Empty when GitHub can't be read. */
-export async function githubBranches(projectId: string, deps: AppDeps): Promise<{ defaultBranch: string | null; branches: string[] }> {
-  const repo = githubRepository(getProject(deps.db, projectId)?.gitRemoteUrl ?? null)?.replace(/\.git$/, "");
+/** Remote branches for the Cloud picker, using the connected account for that host. */
+export async function projectBranches(projectId: string, deps: AppDeps): Promise<{ defaultBranch: string | null; branches: string[] }> {
+  const remote = getProject(deps.db, projectId)?.gitRemoteUrl ?? null;
+  const lab = gitlabRepository(remote);
+  if (lab) return cloudroom(deps).sandboxes.gitlabBranches(lab);
+  const repo = githubRepository(remote)?.replace(/\.git$/, "");
   if (!repo) return { defaultBranch: null, branches: [] };
   const token = await macGithubToken();
   const read = (path: string) => fetch(repo.replace("https://github.com/", "https://api.github.com/repos/") + path, {

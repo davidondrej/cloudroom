@@ -3,7 +3,7 @@ import type {
   CreateExecutionInputSources,
   ExecutionInputFieldSource,
   ExistingThreadExecutionInputSources,
-  SystemProvidersQuery,
+  SystemExecutionOptionsQuery,
 } from "@cloudroom/server-contract";
 import type {
   StoredPermissionMode,
@@ -17,7 +17,7 @@ export interface ThreadPromptSelections {
   selectedProviderId: string;
   selectedModel: string;
   serviceTier: ServiceTier | undefined;
-  reasoningLevel: ReasoningLevel;
+  reasoningLevel: ReasoningLevel | undefined;
   permissionMode: PermissionMode;
   environmentSelectionValue: string;
 }
@@ -29,6 +29,7 @@ export type ScopedExecutionInputSources =
   | ExistingThreadExecutionInputSources;
 
 export interface UsePromptModelReasoningOptions {
+  cloud?: boolean;
   enabled?: boolean;
   environmentId?: string;
   environmentHostId?: string;
@@ -44,7 +45,8 @@ export interface UsePromptModelReasoningOptions {
   preferenceProjectId?: string | null;
   resolveProviderRouting?: (
     environmentSelectionValue: string,
-  ) => SystemProvidersQuery;
+    providerId: string,
+  ) => SystemExecutionOptionsQuery;
 }
 
 export interface UseNewThreadCreationOptions extends UsePromptModelReasoningOptions {
@@ -135,7 +137,7 @@ export function getInitialThreadPromptSelections(
     selectedProviderId: options?.initialProviderId ?? "",
     selectedModel: options?.initialModel ?? "",
     serviceTier: options?.initialServiceTier,
-    reasoningLevel: options?.initialReasoningLevel ?? "medium",
+    reasoningLevel: options?.initialReasoningLevel,
     permissionMode: options?.initialPermissionMode ?? "full",
     environmentSelectionValue: options?.initialEnvironmentSelectionValue ?? "",
   };

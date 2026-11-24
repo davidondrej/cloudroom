@@ -50,6 +50,11 @@ import {
 } from "./markdown-katex-loader.js";
 import { CopyButton } from "./copy-button.js";
 import { useClipboardCopy } from "@/lib/clipboard";
+import {
+  DraftEditor,
+  useDraftMessage,
+} from "@/components/thread/timeline/DraftEditor";
+import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { usePortalScopeProps } from "@cloudroom/shared-ui/lib/portal-scope";
 import { usePersistentOverlayFocus } from "@cloudroom/shared-ui/responsive-overlay";
@@ -280,6 +285,7 @@ type MarkdownImageRenderAttributes = Omit<
   "alt" | "children" | "className" | "node" | "src"
 >;
 type MarkdownListItemProps = ComponentPropsWithoutRef<"li"> & ExtraProps;
+type MarkdownInputProps = ComponentPropsWithoutRef<"input"> & ExtraProps;
 type MarkdownOrderedListProps = ComponentPropsWithoutRef<"ol"> & ExtraProps;
 type MarkdownParagraphProps = ComponentPropsWithoutRef<"p"> & ExtraProps;
 type MarkdownPreProps = ComponentPropsWithoutRef<"pre"> & ExtraProps;
@@ -755,17 +761,28 @@ function MarkdownCode({
   const codeText = String(children ?? "").replace(/\n$/, "");
   const language = getMarkdownCodeLanguage({ className: codeClassName });
   const isBlock = isMarkdownCodeBlock({ codeText, language });
+  const draftMessage = useDraftMessage();
+  const isDraft = isBlock && language === "draft" && draftMessage !== null;
   const highlightedHtml = useMemo(
     () =>
-      isBlock && language !== "mermaid"
+      isBlock && !isDraft && language !== "mermaid"
         ? highlightMarkdownCode({ code: codeText, language })
         : null,
-    [isBlock, language, codeText],
+    [isBlock, isDraft, language, codeText],
   );
   const highlightedMarkup = useMemo(
     () => (highlightedHtml === null ? null : { __html: highlightedHtml }),
     [highlightedHtml],
   );
+  if (isDraft) {
+    return (
+      <DraftEditor
+        block={String(_node?.position?.start.offset ?? 0)}
+        code={codeText}
+        message={draftMessage}
+      />
+    );
+  }
   if (isBlock) {
     if (language === "mermaid" && imagePolicy === "render") {
       return (
@@ -777,7 +794,7 @@ function MarkdownCode({
     }
 
     return (
-      <div className="my-2 overflow-clip rounded-md border border-border bg-surface-recessed">
+      <div className="group/codeblock my-2 overflow-clip rounded-md border border-border bg-surface-recessed">
         <div className="sticky top-2 z-[2] mt-2 h-0">
           <MarkdownCodeCopyButton codeText={codeText} />
         </div>
@@ -848,14 +865,15 @@ function MarkdownCodeCopyButton({ codeText }: { codeText: string }) {
           <button
             type="button"
             aria-label="Copy code"
-            onClick={() => {
-              void copy();
-            }}
-            className="absolute right-2 top-0 inline-flex size-7 cursor-pointer items-center justify-center rounded-md border border-border bg-surface-recessed-solid text-muted-foreground shadow-sm transition-colors hover:bg-muted hover:text-foreground"
+            onClick={copy}
+            className="absolute right-2 top-0 inline-flex size-5.5 cursor-pointer items-center justify-center rounded-md border border-transparent bg-surface-recessed-solid text-subtle-foreground transition-[width,height,color,background-color,border-color,box-shadow] duration-200 ease-out group-hover/codeblock:size-7 group-hover/codeblock:border-border group-hover/codeblock:text-muted-foreground group-hover/codeblock:shadow-sm hover:bg-muted hover:text-foreground pointer-coarse:size-7 pointer-coarse:border-border pointer-coarse:shadow-sm"
           >
             <Icon
               name={copied ? "Check" : "Copy"}
-              className={cn("size-4", copied && "text-success")}
+              className={cn(
+                "size-3.5 transition-[width,height] duration-200 ease-out group-hover/codeblock:size-4 pointer-coarse:size-4",
+                copied && "text-success",
+              )}
             />
           </button>
         </TooltipTrigger>
@@ -873,14 +891,10 @@ function MarkdownInlineCode({
   ...props
 }: ComponentPropsWithoutRef<"code"> & { codeText: string }) {
   const { copied, copy } = useClipboardCopy({ text: codeText });
-  const [iconMovesCode, setIconMovesCode] = useState(false);
   return (
     <code
       {...props}
-      className="group/code cursor-pointer rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs hover:bg-muted"
-      onMouseEnter={(event) =>
-        setIconMovesCode(showingIconMovesCode(event.currentTarget))
-      }
+      className="group/code relative cursor-pointer rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs hover:bg-muted"
       onClick={(event) => {
         // Links keep their own click, and drag-selecting part of the code still works.
         if (
@@ -889,38 +903,26 @@ function MarkdownInlineCode({
         ) {
           return;
         }
-        void copy();
+        void copy(event);
       }}
     >
       {children}
+      {/* Out of flow, over the text after the chip. An in-flow icon can rewrap
+          the line, and while the chat is pinned to the bottom that moves the
+          chip away from the pointer, so hover flickers on and off forever.
+          Keep it `inline`: `block` would place it at the start of the line. */}
       <Icon
         name={copied ? "Check" : "Copy"}
         aria-hidden
         className={cn(
-          "ml-1 size-3 align-[-0.125em] in-[a]:hidden",
-          iconMovesCode
-            ? "hidden"
-            : copied
-              ? "inline text-success"
-              : "hidden text-muted-foreground group-hover/code:inline",
+          "absolute bottom-0 z-10 box-content size-3 rounded-r bg-muted py-[3px] pl-1 pr-1.5 in-[a]:hidden",
+          copied
+            ? "inline text-success"
+            : "hidden text-muted-foreground group-hover/code:inline",
         )}
       />
     </code>
   );
-}
-
-function showingIconMovesCode(code: HTMLElement): boolean {
-  const icon = code.querySelector<SVGElement>(":scope > [data-icon]");
-  if (icon === null) {
-    return false;
-  }
-  const top = () => code.getClientRects()[0]?.top ?? 0;
-  icon.style.display = "none";
-  const hiddenTop = top();
-  icon.style.display = "inline";
-  const shownTop = top();
-  icon.style.display = "";
-  return Math.abs(shownTop - hiddenTop) > 1;
 }
 
 function MarkdownPre({ children }: MarkdownPreProps) {
@@ -988,6 +990,17 @@ function MarkdownParagraph({
   );
 }
 
+// GFM task lists ("- [ ] item"): a checkbox replaces the bullet.
+function isTaskListItem(node: MarkdownHastNode | undefined): boolean {
+  const first = node?.children?.find((child) => child.type === "element");
+  if (first?.tagName === "input") return true;
+  return (
+    first?.tagName === "p" &&
+    first.children?.find((child) => child.type === "element")?.tagName ===
+      "input"
+  );
+}
+
 function MarkdownUnorderedList({ children }: MarkdownUnorderedListProps) {
   return <ul className="mb-2 list-disc pl-5 text-foreground">{children}</ul>;
 }
@@ -1018,8 +1031,31 @@ function MarkdownOrderedList({
   );
 }
 
-function MarkdownListItem({ children }: MarkdownListItemProps) {
-  return <li className="mb-1 text-foreground">{children}</li>;
+function MarkdownListItem({ children, node }: MarkdownListItemProps) {
+  return (
+    <li
+      className={cn(
+        "mb-1 text-foreground",
+        // Only a checkbox item drops its bullet; the box sits in the
+        // bullet's column and wrapped lines hang under the text.
+        isTaskListItem(node) && "-ml-5 list-none pl-6 -indent-6",
+      )}
+    >
+      {children}
+    </li>
+  );
+}
+
+function MarkdownInput({ node: _node, ...inputProps }: MarkdownInputProps) {
+  if (inputProps.type !== "checkbox") return <input {...inputProps} />;
+  return (
+    <Checkbox
+      checked={Boolean(inputProps.checked)}
+      disabled
+      aria-label={inputProps.checked ? "Done" : "Not done"}
+      className="mr-2 inline-flex align-[-3px] indent-0 disabled:cursor-default disabled:opacity-100"
+    />
+  );
 }
 
 function MarkdownBlockquote({ children }: MarkdownBlockquoteProps) {
@@ -1649,6 +1685,7 @@ function buildMarkdownComponents({
     h6: MarkdownH6,
     hr: MarkdownHr,
     img: MarkdownImage,
+    input: MarkdownInput,
     li: MarkdownListItem,
     ol: MarkdownOrderedList,
     p: MarkdownParagraph,

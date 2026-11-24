@@ -1,6 +1,9 @@
 import { intendedThreadHostId } from "../../src/services/threads/dispatch-attempt.js";
 import { dispatchTurnDuringReprovision } from "../../src/services/threads/thread-turn-dispatch.js";
-import { requestThreadStopForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
+import {
+  hasLiveThreadStartInFlight,
+  requestThreadStopForCurrentState,
+} from "../../src/services/threads/thread-lifecycle.js";
 import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import { eq } from "drizzle-orm";
 import {
@@ -60,7 +63,7 @@ import {
 import { installFakeEnvironmentProvider } from "../helpers/environment-provider.js";
 import { withTestHarness } from "../helpers/test-app.js";
 import { handleDaemonSocketClosed } from "../../src/internal/session-owner-side-effects.js";
-import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../src/constants.js";
+import { DAEMON_SETUP_DISCONNECT_GRACE_MS } from "../../src/constants.js";
 import { onDaemonSocketOpen } from "../../src/ws/daemon-protocol.js";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 
@@ -934,7 +937,85 @@ it("resumes workspace setup when the same daemon reconnects", async () => {
   });
 });
 
-it("fails workspace setup only after the active-work disconnect grace", async () => {
+it("keeps a thread start that was in flight when the same daemon reconnects running it", async () => {
+  await withTestHarness(async (harness) => {
+    const { host, session } = seedHostSession(harness.deps, {
+      id: "host-thread-start-blip",
+    });
+    const { project } = seedProjectWithSource(harness.deps, {
+      hostId: host.id,
+    });
+    const environment = seedEnvironment(harness.deps, {
+      hostId: host.id,
+      projectId: project.id,
+      path: "/tmp/thread-start-blip",
+      status: "ready",
+    });
+    const thread = seedThread(harness.deps, {
+      projectId: project.id,
+      environmentId: environment.id,
+      status: "starting",
+    });
+    requestThreadProvision(harness.deps, {
+      thread,
+      environmentIntent: { type: "reuse", environmentId: environment.id },
+      execution: THREAD_START_EXECUTION,
+      fork: null,
+      input: textInput("start through a blip"),
+      startedOnBehalfOf: null,
+      titleProvided: true,
+    });
+    await advanceThreadProvisioning(harness.deps, { threadId: thread.id });
+    await waitForQueuedCommand(
+      harness,
+      ({ command }) => command.type === "thread.start",
+    );
+
+    handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(getThread(harness.db, thread.id)?.status).toBe("starting");
+    const response = await harness.app.request("/internal/session/open", {
+      method: "POST",
+      headers: internalAuthHeaders(harness, { hostId: host.id }),
+      body: JSON.stringify({
+        hostId: host.id,
+        instanceId: session.instanceId,
+        hostName: host.name,
+        hasMachineCredential: false,
+        platform: "darwin",
+        dataDir: "/tmp/thread-start-blip-host-data",
+        localApiPort: null,
+        protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+        activeThreads: [{ threadId: thread.id }],
+      }),
+    });
+    expect(response.status).toBe(201);
+    const reconnected = getLatestSessionForHost(harness.db, {
+      hostId: host.id,
+    })!;
+    onDaemonSocketOpen(harness.deps, {
+      hostId: host.id,
+      sessionId: reconnected.id,
+      socket: registerTestHostRpcCapture(harness, {
+        hostId: host.id,
+        sessionId: reconnected.id,
+      }),
+    });
+
+    await vi.waitFor(() =>
+      expect(hasLiveThreadStartInFlight(thread.id)).toBe(false),
+    );
+    expect(getThread(harness.db, thread.id)?.status).toBe("active");
+    expect(
+      listEvents(harness.db, { threadId: thread.id }).map((row) => row.type),
+    ).not.toContain("system/error");
+    expect(
+      listQueuedThreadCommands(harness, "thread.start", thread.id),
+    ).toEqual([]);
+  });
+});
+
+it("fails workspace setup only after the setup disconnect grace", async () => {
   await withTestHarness(async (harness) => {
     const { host, session } = seedHostSession(harness.deps, {
       id: "host-provision-disconnect-grace",
@@ -967,9 +1048,7 @@ it("fails workspace setup only after the active-work disconnect grace", async ()
     vi.useFakeTimers();
     try {
       handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
-      await vi.advanceTimersByTimeAsync(
-        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 1,
-      );
+      await vi.advanceTimersByTimeAsync(DAEMON_SETUP_DISCONNECT_GRACE_MS - 1);
       expect(getEnvironment(harness.db, environment.id)?.status).toBe(
         "provisioning",
       );

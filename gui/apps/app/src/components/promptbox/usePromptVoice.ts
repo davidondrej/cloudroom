@@ -7,12 +7,19 @@ async function requestVoiceTranscription({
   file,
   promptContext,
   signal,
+  clientId,
 }: {
   file: File;
   promptContext?: string;
   signal?: AbortSignal;
+  clientId?: string;
 }): Promise<string> {
-  const transcription = await transcribeVoiceInput(file, promptContext, signal);
+  const transcription = await transcribeVoiceInput(
+    file,
+    promptContext,
+    signal,
+    clientId,
+  );
   return transcription.text;
 }
 

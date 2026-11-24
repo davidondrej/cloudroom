@@ -3,7 +3,7 @@ import { openAppFixedTabFromDestinations } from "@/lib/app-fixed-tab-navigation"
 import {
   createGitDiffFixedTabDestination,
   GIT_DIFF_FIXED_TAB_REFERENCE,
-} from "./git-diff-fixed-tab-navigation";
+} from "@/components/diff/diff-store";
 
 describe("createGitDiffFixedTabDestination", () => {
   it("routes core Changes targets through the generic controller while the owner validates them", () => {

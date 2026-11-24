@@ -1,4 +1,4 @@
-import { useLayoutEffect, useState, type RefObject } from "react";
+import { useLayoutEffect, useState, type Ref, type RefObject } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 
 interface UseOverflowMeasurementArgs {
@@ -80,6 +80,7 @@ function observeOverflow(
 }
 
 interface ConversationMessageOverflowToggleProps {
+  buttonRef?: Ref<HTMLButtonElement>;
   expanded: boolean;
   onToggle: () => void;
 }
@@ -130,13 +131,54 @@ export function useIsOverflowing(args: UseOverflowMeasurementArgs): boolean {
   return useOverflowMeasurement(args) === "overflowing";
 }
 
+/**
+ * Lines hidden in a collapsed message, recounted whenever its size changes.
+ * When only part of the text renders (`scale` > 1), its height is scaled up.
+ */
+export function useHiddenLineCount({
+  elementRef,
+  enabled,
+  measurementKey,
+  scale,
+  visibleLines,
+}: UseOverflowMeasurementArgs & {
+  scale: number;
+  visibleLines: number;
+}): number | null {
+  const [count, setCount] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    const element = elementRef.current;
+    if (!enabled || !element) {
+      setCount(null);
+      return;
+    }
+    const measure = () => {
+      if (!element.isConnected) return;
+      const lineHeight = Number.parseFloat(
+        getComputedStyle(element).lineHeight,
+      );
+      const lines =
+        Math.round((element.scrollHeight * scale) / lineHeight) - visibleLines;
+      setCount(Number.isFinite(lines) && lines > 0 ? lines : null);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    return observeOverflow(element, measure);
+  }, [elementRef, enabled, measurementKey, scale, visibleLines]);
+
+  return count;
+}
+
 export function ConversationMessageOverflowToggle({
+  buttonRef,
   expanded,
   onToggle,
 }: ConversationMessageOverflowToggleProps) {
   return (
     <div className="mt-1 flex justify-end">
       <button
+        ref={buttonRef}
         type="button"
         onClick={onToggle}
         className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground"
@@ -144,6 +186,38 @@ export function ConversationMessageOverflowToggle({
       >
         {expanded ? "Show less" : "Show more"}
       </button>
+    </div>
+  );
+}
+
+/** Sits between the start and the end of a collapsed message; click to expand. */
+export function ConversationMessageCollapsedDivider({
+  approximate,
+  buttonRef,
+  hiddenLines,
+  onExpand,
+}: {
+  /** The count is estimated from part of the text. */
+  approximate: boolean;
+  buttonRef?: Ref<HTMLButtonElement>;
+  hiddenLines: number | null;
+  onExpand: () => void;
+}) {
+  return (
+    <div className="flex h-[2lh] items-center">
+      <span className="h-px flex-1 bg-gradient-to-l from-foreground/13 to-transparent" />
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={onExpand}
+        className="mx-2 inline-flex h-5.5 cursor-pointer items-center whitespace-nowrap rounded-full bg-background px-2.5 text-xs font-medium text-muted-foreground ring-1 ring-foreground/13 ring-inset hover:text-foreground"
+        aria-expanded={false}
+      >
+        {hiddenLines === null
+          ? "Show more"
+          : `${approximate ? "~" : ""}${hiddenLines.toLocaleString("en-US")} more ${hiddenLines === 1 ? "line" : "lines"}`}
+      </button>
+      <span className="h-px flex-1 bg-gradient-to-r from-foreground/13 to-transparent" />
     </div>
   );
 }

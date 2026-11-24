@@ -12,6 +12,8 @@ const OUTPUT = 0;
 const EXIT = 1;
 const HELLO = 2;
 const PING = 3;
+/** Core's largest frame (MAX_FRAME in core/src/runtime/terminal.rs). A longer one is a broken sandbox. */
+const MAX_FRAME = 1024 * 1024;
 const INPUT = 0;
 const RESIZE = 1;
 const PING_INTERVAL_MS = 25_000;
@@ -227,6 +229,12 @@ class Connection {
     this.buffer = Buffer.concat([this.buffer, chunk]);
     while (this.buffer.byteLength >= 5) {
       const length = this.buffer.readUInt32BE(1);
+      if (length > MAX_FRAME) {
+        // The close reconnects, as after any drop.
+        this.buffer = Buffer.alloc(0);
+        this.socket.destroy();
+        return;
+      }
       if (this.buffer.byteLength < 5 + length) return;
       const kind = this.buffer.readUInt8(0);
       const data = this.buffer.subarray(5, 5 + length);

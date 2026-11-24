@@ -1,3 +1,4 @@
+import { escapeHtmlText } from "@cloudroom/domain";
 import { highlight, type LanguageName } from "sugar-high";
 import { lang } from "sugar-high/lang";
 
@@ -9,6 +10,14 @@ const EXTRA_LANGUAGE_ALIASES: Record<string, LanguageName> = {
   hh: "cpp",
   hxx: "cpp",
   less: "css",
+  // No sugar-high lexer, but the JS one colors these reasonably.
+  mts: "typescript",
+  cts: "typescript",
+  ...Object.fromEntries(
+    "mjs cjs vue svelte astro json5 jsonl ndjson dart scala groovy gradle objc proto prisma solidity zig"
+      .split(" ")
+      .map((alias): [string, LanguageName] => [alias, "javascript"]),
+  ),
 };
 
 const HIGHLIGHT_CACHE_MAX_ENTRIES = 128;
@@ -30,7 +39,21 @@ function highlightUncached({
   const resolved =
     language === null
       ? undefined
-      : (lang(language) ?? EXTRA_LANGUAGE_ALIASES[language]);
+      : (lang(language) ??
+        (Object.hasOwn(EXTRA_LANGUAGE_ALIASES, language)
+          ? EXTRA_LANGUAGE_ALIASES[language]
+          : undefined));
+  if (resolved === undefined) {
+    // sugar-high would lex an unknown language as JavaScript; keep its line markup, uncolored.
+    return code === ""
+      ? ""
+      : code
+          .split("\n")
+          .map(
+            (line) => `<span class="sh__line">${escapeHtmlText(line)}</span>`,
+          )
+          .join("\n");
+  }
   return highlight(code, { lang: resolved });
 }
 

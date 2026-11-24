@@ -1,0 +1,894 @@
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { TimelineNonOperationSystemRow } from "@cloudroom/server-contract";
+import { Button } from "@cloudroom/shared-ui/button";
+import { Icon } from "@cloudroom/shared-ui/icon";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@cloudroom/shared-ui/dropdown-menu";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { formatUsageReset } from "@cloudroom/shared-ui/lib/usage-format";
+import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
+import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
+import { useThread } from "@/hooks/queries/thread-queries";
+import {
+  getProviderIconInfo,
+  getProviderIconTintStyle,
+} from "@/lib/provider-icon";
+import {
+  restartProviderModels,
+  useProviderCliFix,
+} from "@/components/pickers/ModelUnavailable";
+import {
+  CLOUDROOM_AGENT_ID,
+  usePlanLimitAgents,
+  type PlanLimitAgent,
+} from "./plan-limit-agents";
+import {
+  atLimit,
+  nextAccount,
+  reportLimitCardViewed,
+  switchAccount,
+  usePlanLimitAccounts,
+} from "./plan-limit-accounts";
+
+type Logo = {
+  icon: ComponentType<{ className?: string }>;
+  tint: CSSProperties | undefined;
+};
+type Agent = Logo & { name: string };
+type PlanLimitSwitch = NonNullable<
+  TimelineNonOperationSystemRow["planLimitSwitch"]
+>;
+type PlanLimitAccountSwitch = NonNullable<
+  TimelineNonOperationSystemRow["planLimitAccountSwitch"]
+>;
+
+/** Only a recent limit's card counts as seen: an old thread opened again after a restart would count it twice. */
+const CARD_VIEW_MS = 24 * 60 * 60_000;
+/** After Cloudroom Agent installs, its model should list within seconds. Past this, setup didn't work. */
+const SETUP_CHECK_MS = 30_000;
+/** A switch whose new agent never got going (say its message is still queued) stops showing as in progress. */
+const SWITCH_STALE_MS = 3 * 60_000;
+
+/** A plan limit stopped the last turn: switch to another account of the same agent, or continue on another agent (ADR 0211 switch, then resend).
+ *  A refusal (say OpenAI's cybersecurity filter) gets the same card without the account switch: every account has the
+ *  same filter (ADR 20261119-091500). */
+export function PlanLimitRow({
+  rowId,
+  rowAt,
+  threadId,
+  switched,
+  refusal = false,
+  detail = null,
+  className,
+}: {
+  /** The limit's timeline row: its card counts as viewed once per app run. */
+  rowId: string;
+  /** When the limit stopped the turn (ms). */
+  rowAt: number;
+  threadId: string;
+  /** The thread already moved to another agent with resend: the card shows it picking up. */
+  switched?: PlanLimitSwitch | undefined;
+  /** The provider refused the work instead of hitting a limit. */
+  refusal?: boolean | undefined;
+  /** The provider's own words, folded away on a refusal. */
+  detail?: string | null;
+  className?: string;
+}) {
+  const {
+    thread,
+    environmentId,
+    model,
+    self,
+    selfResetsAt,
+    selfLimit,
+    reasoningLevel,
+    permissionMode,
+    agents,
+    agentsLoaded,
+    primary,
+    cloudroomAgent,
+    cloudroomAgentMissing,
+  } = usePlanLimitAgents(threadId);
+  // Cloudroom Agent that isn't on this computer yet is installed by the same click, then takes over.
+  const agentInstall = useProviderCliFix(
+    CLOUDROOM_AGENT_ID,
+    environmentId ? { environmentId } : undefined,
+    cloudroomAgentMissing,
+  );
+  const [setup, setSetup] = useState<"running" | "failed" | null>(null);
+  const accounts = usePlanLimitAccounts(thread?.providerId ?? "");
+  const queryClient = useQueryClient();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
+  // Kept from the click: the thread moves to `to` midway, and `from` is the agent that hit the limit.
+  const [switching, setSwitching] = useState<{
+    from: Agent | null;
+    to: PlanLimitAgent;
+    startedAt: number;
+  } | null>(null);
+  const agentOf = useAgentOf();
+  const now = useNow(switching !== null || switched !== undefined);
+  const status = thread?.status;
+  const update = useUpdateThread({
+    threadId,
+    errorMessage: "Couldn't continue with the other agent.",
+  });
+  const accountSwitch = useMutation({
+    meta: { errorMessage: "Couldn't switch accounts." },
+    mutationFn: switchAccount,
+    onError: () => setBusy(null),
+  });
+  const retry = useMutation({
+    meta: { errorMessage: "Couldn't schedule the retry." },
+    mutationFn: scheduleRetry,
+  });
+  const pending = accountSwitch.isPending;
+  useEffect(() => {
+    if (busy === null || pending) return;
+    const timer = setTimeout(() => setBusy(null), 60_000);
+    return () => clearTimeout(timer);
+  }, [busy, pending]);
+  const stopped = status === "idle" || status === "error";
+  const switchTo = (agent: PlanLimitAgent) => {
+    setSwitching({ from: self, to: agent, startedAt: Date.now() });
+    update.mutate(
+      {
+        id: threadId,
+        providerId: agent.providerId,
+        model: agent.model,
+        reasoningLevel: agent.reasoningLevel,
+        resend: true,
+      },
+      {
+        onSuccess: () =>
+          void queryClient.invalidateQueries({
+            queryKey: ["cloudroom-thread", threadId],
+          }),
+        onError: () => setSwitching(null),
+      },
+    );
+  };
+  const installing = agentInstall?.installing ?? false;
+  const canInstall = agentInstall !== null;
+  const installRan = useRef(false);
+  // Setup is installing, then checking for its model, then the switch, or Retry. After a failure only a click switches.
+  useEffect(() => {
+    if (setup !== "running" || !stopped || switching) return;
+    if (cloudroomAgent) {
+      setSetup(null);
+      switchTo(cloudroomAgent);
+      return;
+    }
+    if (installing) {
+      installRan.current = true;
+      return;
+    }
+    if (installRan.current && canInstall) {
+      // The install ended and it still isn't installed: the install's own message says why.
+      setSetup("failed");
+      return;
+    }
+    const timer = setTimeout(() => setSetup("failed"), SETUP_CHECK_MS);
+    return () => clearTimeout(timer);
+    // oxlint-disable-next-line react/exhaustive-deps -- `switchTo` is this render's own, and runs once per click
+  }, [setup, stopped, switching, cloudroomAgent, installing, canInstall]);
+  const setUpAgent = () => {
+    installRan.current = false;
+    setSetup("running");
+    if (agentInstall) return agentInstall.install();
+    // Installed, but its model didn't list: look again.
+    void restartProviderModels(
+      queryClient,
+      CLOUDROOM_AGENT_ID,
+      environmentId ? { environmentId } : undefined,
+    ).catch(() => setSetup("failed"));
+  };
+  const shown =
+    !!thread && stopped && !switching && !switched;
+  const provider = thread?.providerId ?? "";
+  const execution =
+    thread?.executionTarget === "cloud" ? "cloud_sandbox" : "local";
+  useEffect(() => {
+    if (!shown || refusal || !accounts.loaded || !agentsLoaded) return;
+    if (Date.now() - rowAt > CARD_VIEW_MS) return;
+    reportLimitCardViewed({
+      key: rowId,
+      provider,
+      execution,
+      can_switch_account: accounts.others.length > 0,
+      other_agents: agents.length,
+    });
+  }, [shown, refusal, accounts.loaded, agentsLoaded, rowId, rowAt, provider, execution, accounts.others.length, agents.length]);
+  if (!thread) return null;
+  if (switching || switched) {
+    if (switched && stopped && now - switched.at > SWITCH_STALE_MS) {
+      return (
+        <PlanLimitSwitchedRow
+          switched={switched}
+          refusal={refusal}
+          detail={detail}
+          className={className}
+        />
+      );
+    }
+    const to = switching?.to ?? agentOf(switched!.to);
+    const landed =
+      switched !== undefined || thread.providerId === switching?.to.providerId;
+    return (
+      <SwitchChecklist
+        from={switching?.from ?? (switched ? agentOf(switched.from) : null)}
+        to={to}
+        refusal={refusal}
+        step={!landed ? 0 : status === "active" ? 2 : 1}
+        seconds={Math.max(
+          0,
+          Math.round((now - (switching?.startedAt ?? switched!.at)) / 1000),
+        )}
+        className={className}
+      />
+    );
+  }
+  if (!stopped) {
+    return (
+      <PlanLimitPastRow
+        threadId={threadId}
+        rowAt={rowAt}
+        refusal={refusal}
+        detail={detail}
+        className={className}
+      />
+    );
+  }
+  const isCloud = thread.executionTarget === "cloud";
+  const pickAccount = (accountId: string) => {
+    setBusy("Switching account");
+    accountSwitch.mutate({
+      providerId: thread.providerId,
+      accountId,
+      threadId,
+      isCloud,
+    });
+  };
+  const name = self?.name ?? thread.providerId;
+  const limit =
+    modelLimitName(detail) ??
+    (selfLimit !== "plan limit" ? selfLimit : limitName(detail));
+  const reset = formatUsageReset(selfResetsAt) ?? detailReset(detail, rowAt);
+  // Cloud keeps its own Antigravity login, so picking an account here can't move a Cloud Antigravity thread.
+  const canSwitch =
+    !refusal &&
+    accounts.others.length > 0 &&
+    !(isCloud && thread.providerId === "acp-antigravity");
+  const vendor = thread.providerId === "codex" ? "OpenAI" : name;
+  const SelfIcon = self?.icon;
+  const retryAt = refusal || !selfResetsAt ? null : Date.parse(selfResetsAt);
+  const settingUp = setup === "running" || installing;
+  const setupFailed = setup === "failed" && !installing && !cloudroomAgent;
+  // Setup keeps the button while the agent is neither missing nor listed yet.
+  const offersAgent = cloudroomAgent !== null || canInstall || setup !== null;
+
+  return (
+    <div className={cn("flex flex-col gap-3 py-1", className)}>
+      <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
+        {SelfIcon ? (
+          <SelfIcon className="size-[18px] shrink-0 text-muted-foreground" />
+        ) : (
+          <Icon
+            name="AlertCircle"
+            className="size-[18px] shrink-0 text-attention"
+            aria-hidden
+          />
+        )}
+        {refusal ? `${name} refused this task` : `${name} hit its ${limit}`}
+        {refusal || reset ? (
+          <span className="text-sm font-normal text-muted-foreground">
+            {refusal ? `${vendor}'s safety filter` : reset}
+          </span>
+        ) : null}
+      </p>
+      {busy ? (
+        <div className="pl-7">
+          <Button type="button" size="sm" variant="outline" disabled>
+            <Icon
+              name="Spinner"
+              className="size-3.5 animate-spin"
+              aria-hidden
+            />
+            {busy}
+          </Button>
+        </div>
+      ) : canSwitch || primary || retryAt || offersAgent ? (
+        <div className="flex flex-wrap items-center gap-2 pl-7">
+          {retryAt ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={retry.isPending || retry.isSuccess}
+              onClick={() =>
+                retry.mutate({
+                  projectId: thread.projectId,
+                  threadId,
+                  providerId: thread.providerId,
+                  model,
+                  reasoningLevel,
+                  permissionMode,
+                  runAt: retryAt,
+                })
+              }
+            >
+              <Icon
+                name={retry.isSuccess ? "Check" : "Clock"}
+                className="size-3.5"
+                aria-hidden
+              />
+              {retry.isSuccess ? "Retries" : "Retry"} at {clockTime(retryAt)}
+            </Button>
+          ) : null}
+          {canSwitch ? (
+            <SplitButton
+              logo={self}
+              label="Switch account"
+              onClick={() => {
+                const next = nextAccount(accounts.others, model);
+                if (next) pickAccount(next.id);
+              }}
+              menuLabel="Switch to"
+              moreLabel="Other accounts"
+            >
+              {accounts.others.map((account) => (
+                <MenuRow
+                  key={account.id}
+                  logo={self}
+                  label={account.label}
+                  detail={atLimit(account, model) ? "At limit" : null}
+                  onSelect={() => pickAccount(account.id)}
+                />
+              ))}
+              {accounts.inUse ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <MenuRow logo={self} label={accounts.inUse.label} checked />
+                </>
+              ) : null}
+            </SplitButton>
+          ) : null}
+          {primary ? (
+            <SplitButton
+              logo={primary}
+              label={`Continue with ${primary.name}`}
+              onClick={() => switchTo(primary)}
+              menuLabel="Continue with"
+              moreLabel="Other agents"
+            >
+              {agents.map((agent) => (
+                <MenuRow
+                  key={agent.providerId}
+                  logo={agent}
+                  label={agent.name}
+                  detail={
+                    agent.resetsAt === null
+                      ? agent.modelLabel
+                      : (formatUsageReset(agent.resetsAt) ?? "At its limit")
+                  }
+                  disabled={agent.resetsAt !== null}
+                  onSelect={() => switchTo(agent)}
+                />
+              ))}
+              {self ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <MenuRow
+                    logo={self}
+                    label={name}
+                    detail={refusal ? "Refused" : (reset ?? "At its limit")}
+                    disabled
+                  />
+                </>
+              ) : null}
+            </SplitButton>
+          ) : null}
+          {offersAgent ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={settingUp}
+              onClick={() =>
+                cloudroomAgent ? switchTo(cloudroomAgent) : setUpAgent()
+              }
+            >
+              {settingUp ? (
+                <Icon
+                  name="Spinner"
+                  className="size-3.5 animate-spin"
+                  aria-hidden
+                />
+              ) : (
+                <LogoIcon logo={agentOf(CLOUDROOM_AGENT_ID)} className="size-3.5" />
+              )}
+              {installing
+                ? "Installing Cloudroom Agent"
+                : settingUp
+                  ? "Checking Cloudroom Agent"
+                  : setupFailed
+                    ? "Retry Cloudroom Agent"
+                    : "Continue with Cloudroom Agent"}
+            </Button>
+          ) : null}
+          {setupFailed ? (
+            <span role="status" className="text-sm text-muted-foreground">
+              Cloudroom Agent didn't finish setting up.
+            </span>
+          ) : null}
+        </div>
+      ) : null}
+      {refusal && detail ? (
+        <div className="pl-7 text-sm text-muted-foreground">
+          <button
+            type="button"
+            className="flex items-center gap-1 hover:text-foreground"
+            onClick={() => setShowDetail(!showDetail)}
+          >
+            {vendor}'s message
+            <Icon
+              name={showDetail ? "ChevronDown" : "ChevronRight"}
+              className="size-3.5"
+              aria-hidden
+            />
+          </button>
+          {showDetail ? (
+            <p className="mt-2 max-w-[620px] whitespace-pre-wrap">{detail}</p>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** "Retry at 21:32": a one-time wake of this thread just after the reset, the same loop `room-cli wake` creates. */
+async function scheduleRetry(args: {
+  projectId: string;
+  threadId: string;
+  providerId: string;
+  model: string;
+  reasoningLevel: string | null;
+  permissionMode: string | null;
+  runAt: number;
+}): Promise<void> {
+  await callPluginRpc(fetch, "automations", "automations_create", {
+    projectId: args.projectId,
+    name: "Wake: retry after the plan limit",
+    trigger: { triggerType: "once", runAt: Math.max(args.runAt, Date.now()) + 60_000 },
+    execution: {
+      mode: "agent",
+      prompt: "The plan limit has reset. Continue where you left off.",
+      providerId: args.providerId,
+      model: args.model,
+      ...(args.reasoningLevel ? { reasoningLevel: args.reasoningLevel } : {}),
+      permissionMode: args.permissionMode ?? "full",
+      environment: { type: "project-default" },
+      targetThreadId: args.threadId,
+    },
+    origin: "app",
+    createdByThreadId: args.threadId,
+  });
+}
+
+function clockTime(at: number): string {
+  return new Date(at).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+/** Each step is a real signal: the switch request (new agent starting), the thread on the new agent (hidden "continue"
+ *  with the conversation on its way), then its turn running. The card goes once the new agent shows output. */
+function SwitchChecklist({
+  from,
+  to,
+  step,
+  seconds,
+  refusal,
+  className,
+}: {
+  refusal: boolean;
+  from: Agent | null;
+  to: Agent;
+  step: number;
+  seconds: number;
+  className?: string | undefined;
+}) {
+  const steps = [
+    `Starting ${to.name}`,
+    "Sharing the conversation",
+    `${to.name} picks up the task`,
+  ];
+  return (
+    <div className={cn("flex flex-col gap-2.5 py-1", className)}>
+      <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
+        <LogoIcon logo={to} className="size-[18px]" />
+        Switching to {to.name}
+        <span className="text-sm font-normal tabular-nums text-muted-foreground">
+          {seconds} s
+        </span>
+      </p>
+      <ul className="flex flex-col gap-2 pl-7 text-sm">
+        <SwitchStep state="done">
+          {from?.name ?? "The last agent"}{" "}
+          {refusal ? "refused the task" : "hit its plan limit"}
+        </SwitchStep>
+        {steps.map((label, index) => (
+          <SwitchStep
+            key={label}
+            state={index < step ? "done" : index === step ? "active" : "todo"}
+          >
+            {label}
+          </SwitchStep>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function SwitchStep({
+  state,
+  children,
+}: {
+  state: "done" | "active" | "todo";
+  children: ReactNode;
+}) {
+  return (
+    <li
+      className={cn(
+        "flex items-center gap-2.5",
+        state === "active" ? "text-foreground" : "text-muted-foreground",
+      )}
+    >
+      {state === "done" ? (
+        <Icon name="Check" className="size-3.5 text-success" aria-hidden />
+      ) : state === "active" ? (
+        <Icon name="Spinner" className="size-3.5 animate-spin" aria-hidden />
+      ) : (
+        <span className="mx-px size-3 rounded-full border border-muted-foreground/50" />
+      )}
+      {children}
+    </li>
+  );
+}
+
+/** After a switch, the plan-limit row is one line: who hit the limit and who took over. */
+export function PlanLimitSwitchedRow({
+  switched,
+  refusal = false,
+  detail = null,
+  className,
+}: {
+  switched: PlanLimitSwitch;
+  refusal?: boolean | undefined;
+  detail?: string | null;
+  className?: string;
+}) {
+  const agentOf = useAgentOf();
+  const from = agentOf(switched.from);
+  const to = agentOf(switched.to);
+  return (
+    <p
+      className={cn(
+        "flex flex-wrap items-center gap-2 py-1 text-sm text-muted-foreground",
+        className,
+      )}
+    >
+      <LogoIcon logo={from} className="size-3.5" />
+      {from.name} {refusal ? "refused the task" : `hit its ${limitName(detail)}`}
+      <Icon name="ArrowRight" className="size-3.5" aria-hidden />
+      <LogoIcon logo={to} className="size-3.5" />
+      {to.name} took over
+    </p>
+  );
+}
+
+/** An earlier or running plan-limit / refusal row without a switch: one quiet line, like AuthFailureRow. */
+export function PlanLimitPastRow({
+  threadId,
+  rowAt,
+  refusal = false,
+  detail = null,
+  className,
+}: {
+  threadId: string;
+  rowAt?: number | undefined;
+  refusal?: boolean | undefined;
+  detail?: string | null;
+  className?: string;
+}) {
+  const thread = useThread(threadId).data;
+  const agentOf = useAgentOf();
+  const [showDetail, setShowDetail] = useState(false);
+  const providerId = pastLimitProvider(detail, thread?.providerId);
+  const agent = providerId ? agentOf(providerId) : null;
+  const name = agent?.name ?? "Agent";
+  const reset = refusal ? null : detailReset(detail, rowAt);
+  const expandableRefusal = refusal && Boolean(detail);
+  const summary = (
+    <>
+      {agent ? (
+        <LogoIcon logo={agent} className="size-3.5" />
+      ) : (
+        <Icon name="AlertCircle" className="size-3.5 shrink-0" aria-hidden />
+      )}
+      <span>
+        {refusal
+          ? `${name} refused the task`
+          : `${name} hit its ${limitName(detail)}`}
+        {reset ? ` · ${reset}` : ""}
+      </span>
+    </>
+  );
+  if (!expandableRefusal) {
+    return (
+      <p
+        className={cn(
+          "flex flex-wrap items-center gap-2 py-1 text-sm text-muted-foreground",
+          className,
+        )}
+      >
+        {summary}
+      </p>
+    );
+  }
+  return (
+    <div className={cn("flex flex-col gap-1 py-1 text-sm text-muted-foreground", className)}>
+      <button
+        type="button"
+        className="flex flex-wrap items-center gap-2 text-left hover:text-foreground"
+        onClick={() => setShowDetail((open) => !open)}
+      >
+        {summary}
+        <Icon
+          name={showDetail ? "ChevronDown" : "ChevronRight"}
+          className="size-3.5"
+          aria-hidden
+        />
+      </button>
+      {showDetail ? (
+        <p className="max-w-[620px] whitespace-pre-wrap pl-5.5 text-xs leading-relaxed">
+          {detail}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** After an account switch, the plan-limit row is one quiet line (ADR 20261107-082837). */
+export function PlanLimitAccountSwitchedRow({
+  switched,
+  detail,
+  className,
+}: {
+  switched: PlanLimitAccountSwitch;
+  /** The limit error's text, which names the window Claude hit. */
+  detail: string | null;
+  className?: string;
+}) {
+  const agent = useAgentOf()(switched.provider);
+  return (
+    <p
+      className={cn(
+        "flex flex-wrap items-center gap-2 py-1 text-sm text-muted-foreground",
+        className,
+      )}
+    >
+      <LogoIcon logo={agent} className="size-3.5" />
+      {switched.from} hit its {limitName(detail)}
+      <Icon name="ArrowRight" className="size-3.5" aria-hidden />
+      <LogoIcon logo={agent} className="size-3.5" />
+      Continued on {switched.to}
+    </p>
+  );
+}
+
+/** Model-specific Claude limits ("You've hit your Fable limit") keep their capitalized model name. */
+function modelLimitName(detail: string | null): string | null {
+  const named = /\b(fable|opus|sonnet) limit\b/iu.exec(detail ?? "");
+  if (!named?.[1]) return null;
+  const model = named[1];
+  return `${model.charAt(0).toUpperCase()}${model.slice(1).toLowerCase()} limit`;
+}
+
+/** Claude names the window it hit ("You've hit your weekly limit"); otherwise it is the plan limit. */
+function limitName(detail: string | null): string {
+  const model = modelLimitName(detail);
+  if (model) return model;
+  const named =
+    /\b(weekly|session|daily|monthly|5-hour|five-hour) limit\b/iu.exec(
+      detail ?? "",
+    );
+  return named ? named[0].toLowerCase() : "plan limit";
+}
+
+const RELATIVE_RESET_FRESH_MS = 60_000;
+
+function detailReset(detail: string | null, rowAt?: number): string | null {
+  if (!detail) return null;
+  const resets = /\bresets\s+([^.\n]+)/iu.exec(detail);
+  const value = resets?.[1]?.trim().replace(/[,;:]$/, "");
+  if (value && value.length <= 40) {
+    if (
+      /^in\b/iu.test(value) &&
+      rowAt !== undefined &&
+      Date.now() - rowAt > RELATIVE_RESET_FRESH_MS
+    ) {
+      return null;
+    }
+    return `Resets ${value}`;
+  }
+  const resumes = /\bresumes at\s+([^,.\n]+)/iu.exec(detail);
+  const at = resumes?.[1]?.trim();
+  if (at && at.length <= 40) return `Resets ${at}`;
+  return null;
+}
+
+function pastLimitProvider(
+  detail: string | null,
+  fallback: string | undefined,
+): string | null {
+  const text = detail ?? "";
+  if (
+    /^Claude's plan limit\b/u.test(text) ||
+    modelLimitName(text) !== null ||
+    text.includes("claude.ai/settings/usage")
+  ) {
+    return "claude-code";
+  }
+  if (
+    /^Codex's plan limit\b/u.test(text) ||
+    text.includes("chatgpt.com/codex")
+  ) {
+    return "codex";
+  }
+  if (/^Cursor's plan limit\b/u.test(text)) return "acp-cursor";
+  if (/^Pi's plan limit\b/u.test(text)) return "pi";
+  if (/^Individual quota reached\b/iu.test(text)) return "acp-antigravity";
+  return fallback ?? null;
+}
+
+const FALLBACK_AGENT_NAMES: Record<string, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  "acp-cursor": "Cursor",
+  pi: "Pi",
+  "acp-antigravity": "Antigravity",
+};
+
+function useAgentOf(): (providerId: string) => Agent {
+  const providers = useSystemProviders().data;
+  return (providerId) => {
+    const provider = providers?.find((entry) => entry.id === providerId);
+    return {
+      name:
+        provider?.displayName ?? FALLBACK_AGENT_NAMES[providerId] ?? providerId,
+      icon: getProviderIconInfo("agent", providerId, provider ?? null).icon,
+      tint: provider ? getProviderIconTintStyle(provider) : undefined,
+    };
+  };
+}
+
+/** The clock, ticking each second only while a switch is in progress. */
+function useNow(ticking: boolean): number {
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (!ticking) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [ticking]);
+  return now;
+}
+
+function LogoIcon({ logo, className }: { logo: Logo; className: string }) {
+  const Glyph = logo.icon;
+  return (
+    <span className="inline-flex shrink-0" style={logo.tint}>
+      <Glyph className={className} />
+    </span>
+  );
+}
+
+function SplitButton({
+  logo,
+  label,
+  onClick,
+  menuLabel,
+  moreLabel,
+  children,
+}: {
+  logo: Logo | null;
+  label: string;
+  onClick: () => void;
+  menuLabel: string;
+  moreLabel: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex items-center">
+      <Button
+        type="button"
+        size="sm"
+        variant="outline"
+        className="rounded-r-none"
+        onClick={onClick}
+      >
+        {logo ? <LogoIcon logo={logo} className="size-3.5" /> : null}
+        {label}
+      </Button>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            aria-label={moreLabel}
+            className="rounded-l-none border-l-0 px-1.5"
+          >
+            <Icon name="ChevronDown" className="size-3.5" aria-hidden />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align="start"
+          mobileTitle={menuLabel}
+          className="w-64"
+        >
+          <DropdownMenuLabel className="font-normal text-subtle-foreground">
+            {menuLabel}
+          </DropdownMenuLabel>
+          {children}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
+function MenuRow({
+  logo,
+  label,
+  detail,
+  disabled,
+  checked,
+  onSelect,
+}: {
+  logo: Logo | null;
+  label: string;
+  detail?: string | null;
+  disabled?: boolean;
+  checked?: boolean;
+  onSelect?: () => void;
+}) {
+  return (
+    <DropdownMenuItem
+      disabled={disabled || checked}
+      className="gap-2"
+      onSelect={onSelect}
+    >
+      {logo ? <LogoIcon logo={logo} className="size-4" /> : null}
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {detail ? <span className="text-subtle-foreground">{detail}</span> : null}
+      {checked ? <Icon name="Check" className="size-4" aria-hidden /> : null}
+    </DropdownMenuItem>
+  );
+}

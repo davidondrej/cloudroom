@@ -76,7 +76,7 @@ const pluginBrandingSchema = z
     },
   );
 
-const pluginBbManifestSchema = z
+const pluginRoomManifestSchema = z
   .object({
     name: requiredManifestString,
     description: requiredManifestString,
@@ -114,7 +114,7 @@ export const pluginPackageJsonSchema = z
         bbPluginSdk: requiredManifestString.optional(),
       })
       .optional(),
-    bb: pluginBbManifestSchema,
+    bb: pluginRoomManifestSchema,
   })
   .passthrough();
 

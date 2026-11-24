@@ -24,8 +24,6 @@ const dependencyNames = [
   "@parcel/watcher",
   "fs-native-extensions",
   "node-pty",
-  "pino",
-  "pino-pretty",
   "pino-roll",
 ];
 const hostDaemonFiles = [
@@ -65,14 +63,6 @@ await buildNodeEsmEntry({
   packageRoot: hostPackageRoot,
   sourcemap: false,
 });
-await buildNodeEsmEntry({
-  cleanDist: false,
-  entryPoint: resolve(packageRoot, "src", "bin", "bb-host-daemon.ts"),
-  executable: true,
-  outfile: resolve(hostPackageRoot, "dist", "bb-host-daemon.js"),
-  packageRoot: hostPackageRoot,
-  sourcemap: false,
-});
 
 await mkdir(hostDaemonTarget, { recursive: true });
 await copyFile(
@@ -80,10 +70,12 @@ await copyFile(
   resolve(hostDaemonTarget, "room-cli"),
 );
 await chmod(resolve(hostDaemonTarget, "room-cli"), 0o755);
-await copyFile(
-  resolve(hostDaemonSource, "room-cli.cmd"),
-  resolve(hostDaemonTarget, "room-cli.cmd"),
-);
+for (const launcher of ["room-cli.cmd", "room-cli.ps1"]) {
+  await copyFile(
+    resolve(hostDaemonSource, launcher),
+    resolve(hostDaemonTarget, launcher),
+  );
+}
 await copyDirectory({
   from: resolve(hostDaemonSource, "room-cli-chunks"),
   to: resolve(hostDaemonTarget, "room-cli-chunks"),
@@ -115,7 +107,6 @@ await writeFile(
       bin: {
         "room-cli": "dist/room-cli.js",
         "bb-app": "dist/bb-app.js",
-        "bb-host-daemon": "dist/bb-host-daemon.js",
       },
       files: ["dist", "host-daemon", "README.md"],
       engines: sourcePackageJson.engines,

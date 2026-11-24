@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   SecondaryPanelTabStrip,
   SECONDARY_PANEL_TAB_STRIP_FADE_TONE,
-} from "./SecondaryPanelTabStrip";
+} from "@/components/right-panel/shell/tab-strip";
 
 afterEach(() => {
   cleanup();

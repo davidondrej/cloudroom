@@ -486,16 +486,24 @@ describe("room-cli thread action command output", () => {
     });
   });
 
-  it("room-cli thread compact calls the manual compaction endpoint", async () => {
+  it("room-cli thread compact sends a keep-going follow-up unless --no-then", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubServerApi({ "v1.threads.:id.compact.$post": post });
 
     await runCommand(["thread", "compact", "thread-compact"], register);
-
-    expect(post).toHaveBeenCalledWith({ param: { id: "thread-compact" } });
-    expect(collectLogLines(vi.mocked(console.log))).toContain(
-      "Thread thread-compact context compaction requested",
+    await runCommand(
+      ["thread", "compact", "thread-compact", "--no-then"],
+      register,
     );
+
+    expect(post).toHaveBeenNthCalledWith(1, {
+      param: { id: "thread-compact" },
+      json: { then: expect.stringContaining("Keep going") },
+    });
+    expect(post).toHaveBeenNthCalledWith(2, {
+      param: { id: "thread-compact" },
+      json: {},
+    });
   });
 
   it("room-cli thread clear invokes the context clear action", async () => {

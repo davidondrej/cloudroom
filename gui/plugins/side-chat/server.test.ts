@@ -94,6 +94,30 @@ describe("createSideChat rpc", () => {
       originPluginId: PLUGIN_ID,
     });
   });
+
+  it("forwards optional harness, model, and reasoning overrides", async () => {
+    const fork = vi.fn(async () => makeThreadResponse({ id: "thr_fork" }));
+    const { harness } = await loadPlugin({ fork });
+
+    await harness.callRpc("createSideChat", {
+      sourceThreadId: "thr_src",
+      anchorText: "",
+      providerId: "codex",
+      model: "gpt-5.4",
+      reasoningLevel: "high",
+    });
+
+    expect(fork).toHaveBeenCalledWith({
+      sourceThreadId: "thr_src",
+      fresh: true,
+      visibility: "hidden",
+      providerId: "codex",
+      model: "gpt-5.4",
+      reasoningLevel: "high",
+      origin: "plugin",
+      originPluginId: PLUGIN_ID,
+    });
+  });
 });
 
 describe("sendToMain rpc", () => {

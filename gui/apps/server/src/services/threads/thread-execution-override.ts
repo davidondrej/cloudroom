@@ -1,4 +1,5 @@
 import {
+  createEventId,
   getProjectExecutionDefaults,
   getThreadExecutionOverride,
   setThreadExecutionOverride,
@@ -6,16 +7,23 @@ import {
 } from "@cloudroom/db";
 import {
   reconcileReasoningLevel,
+  threadScope,
+  THREAD_MODEL_SELECTION_OPERATION,
   type AvailableModel,
   type CallerExecutionInputSource,
   type ReasoningLevel,
   type Thread,
 } from "@cloudroom/domain";
+import type { SystemExecutionOptionsModelLoadError } from "@cloudroom/server-contract";
 import { ApiError } from "../../errors.js";
 import type { LoggedWorkSessionDeps } from "../../types.js";
+import { isHostUnavailableApiError } from "../hosts/online-rpc.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
-import { resolveSystemExecutionOptionsForValidation } from "../system/execution-options.js";
-import { getLastExecutionOptions } from "./thread-events.js";
+import {
+  providerSetupError,
+  resolveSystemExecutionOptionsForValidation,
+} from "../system/execution-options.js";
+import { appendThreadEventInTransaction, getLastExecutionOptions } from "./thread-events.js";
 import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
 
 interface ThreadExecutionOverridePatch {
@@ -32,6 +40,8 @@ interface ResolveThreadExecutionOverrideUpdateArgs {
 }
 
 interface ApplyThreadExecutionOverrideArgs {
+  recordModelSelection?: boolean;
+  beforeSave?: (() => void) | undefined;
   thread: Thread;
   patch: ThreadExecutionOverridePatch;
 }
@@ -123,6 +133,7 @@ export async function applyThreadExecutionOverride(
     thread,
     typeof patch.model === "string" ? patch.model : null,
   );
+  args.beforeSave?.();
   const existing = getThreadExecutionOverride(deps.db, thread.id) ?? {
     modelOverride: null,
     reasoningLevelOverride: null,
@@ -136,11 +147,24 @@ export async function applyThreadExecutionOverride(
     fallbackModel: resolveFallbackModel(deps, thread),
   });
 
-  setThreadExecutionOverride(deps.db, {
-    threadId: thread.id,
-    modelOverride: next.modelOverride,
-    reasoningLevelOverride: next.reasoningLevelOverride,
+  deps.db.transaction((tx) => {
+    setThreadExecutionOverride(tx, { threadId: thread.id, ...next });
+    if (args.recordModelSelection && patch.model) {
+      appendThreadEventInTransaction(tx, {
+        threadId: thread.id,
+        environmentId: thread.environmentId,
+        type: "system/operation",
+        scope: threadScope(),
+        data: {
+          operation: THREAD_MODEL_SELECTION_OPERATION,
+          operationId: createEventId(),
+          status: "completed",
+          message: `Selected ${patch.model} for the next turn.`,
+        },
+      });
+    }
   });
+  if (args.recordModelSelection) deps.hub.notifyThread(thread.id, ["events-appended"], { projectId: thread.projectId });
 }
 
 /** A harness switch (ADR 0211) checks the model against the new harness's catalog and starts its overrides fresh. */
@@ -156,6 +180,7 @@ export async function resolveHarnessSwitchOverride(
       deps,
       { ...thread, providerId: target.providerId },
       target.model,
+      true,
     ),
     providerId: target.providerId,
     fallbackModel: null,
@@ -196,6 +221,7 @@ async function loadThreadProviderModels(
   deps: LoggedWorkSessionDeps,
   thread: Thread,
   requiredModel: string | null,
+  acceptFallback = false,
 ): Promise<readonly AvailableModel[]> {
   const result = await resolveSystemExecutionOptionsForValidation(
     deps,
@@ -206,15 +232,48 @@ async function loadThreadProviderModels(
         : {}),
     },
     requiredModel,
-  );
-  if (result.modelLoadError !== null) {
-    throw new ApiError(
-      503,
-      "model_catalog_unavailable",
-      `Unable to load ${thread.providerId} models to validate the change. Try again once the host is connected.`,
-    );
+  ).catch((error: unknown) => {
+    throw isHostUnavailableApiError(error)
+      ? modelCatalogUnavailable(deps, thread.providerId, null)
+      : error;
+  });
+  const models = [...result.models, ...result.selectedOnlyModels];
+  const error = result.modelLoadError;
+  // A switch accepts a built-in fallback model when listing fails or times out (Marko, 2026-11-10).
+  const fallback =
+    acceptFallback &&
+    (error?.code === "timeout" || error?.code === "failed") &&
+    models.some((model) => model.model === requiredModel);
+  if (error !== null && !fallback) {
+    throw modelCatalogUnavailable(deps, thread.providerId, error);
   }
-  return [...result.models, ...result.selectedOnlyModels];
+  return models;
+}
+
+/** Says why the model couldn't be checked; only an offline host (`null`) gets reconnect advice (#1291). */
+function modelCatalogUnavailable(
+  deps: LoggedWorkSessionDeps,
+  providerId: string,
+  error: SystemExecutionOptionsModelLoadError | null,
+): ApiError {
+  const setup = error === null ? null : providerSetupError(deps, error);
+  if (setup !== null) return setup;
+  const name =
+    deps.providerRegistry.get(providerId)?.info.displayName ?? providerId;
+  const reason =
+    error === null
+      ? "Try again once the host is connected."
+      : error.code === "provider_unavailable"
+        ? `${name}'s provider plugin failed to load. Reinstall or re-enable it, then try again.`
+        : error.code === "timeout"
+          ? `${name} took too long to list its models on this host. Try again.`
+          : `${name} failed to list its models on this host. Try again in a minute.`;
+  return new ApiError(
+    503,
+    "model_catalog_unavailable",
+    `Unable to load ${name} models to validate the change. ${reason}`,
+    error === null ? undefined : { details: error },
+  );
 }
 
 function resolveFallbackModel(

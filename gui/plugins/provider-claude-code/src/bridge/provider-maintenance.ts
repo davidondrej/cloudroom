@@ -1,4 +1,8 @@
-import { execFile } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,12 +21,15 @@ import {
   experimental_downloadedInstallerCommand as downloadedInstallerCommand,
   experimental_findCliExecutable as findCliExecutable,
   experimental_formatCommand as formatCommand,
+  experimental_installationRunUnavailable as installationRunUnavailable,
   experimental_installationVerification as installationVerification,
+  experimental_isClaudeNpmPlaceholder as isClaudeNpmPlaceholder,
   experimental_npmCommand as npmCommand,
   experimental_npmGlobalInstallSource as npmGlobalInstallSource,
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
   experimental_readCliVersion as readCliVersion,
   experimental_resolveExecutablePath as resolveExecutablePath,
+  experimental_spawnPortableProcess as spawnPortableProcess,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -35,12 +42,27 @@ const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
 const CLAUDE_NPM_PACKAGE = "@anthropic-ai/claude-code";
 const CLAUDE_INSTALL_SCRIPT_URL = "https://claude.ai/install.sh";
 const CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL = "https://claude.ai/install.ps1";
+const CLAUDE_NATIVE_RELEASES_URL =
+  "https://downloads.claude.ai/claude-code-releases";
 const CLAUDE_MINIMUM_SUPPORTED_VERSION = "2.1.280";
+const CLAUDE_RENEWS_MESSAGE =
+  "Claude renews its sign-in on its next reply. Usage shows after that.";
+// bin/claude.exe is Claude Code's own 500-byte placeholder until its
+// postinstall (install.cjs) puts the native binary there. npm 12 skips install
+// scripts it wasn't told to allow, so `npm install -g` can leave it (#1074).
+const CLAUDE_PLACEHOLDER = path.join(CLAUDE_NPM_PACKAGE, "bin", "claude.exe");
+const CLAUDE_PLACEHOLDER_MAX_BYTES = 4096;
+// The repair plus the probes after it (15 s) fit the bridge's 30 s request.
+const CLAUDE_REPAIR_TIMEOUT_MS = 10_000;
 
 const claudeCredentialsSchema = z.object({
   claudeAiOauth: z.object({
     accessToken: z.string().min(1),
+    /** When the short-lived access token ends, not the login. */
     expiresAt: z.number().nullish(),
+    // A malformed value must not hide a working login, so it reads as missing.
+    refreshToken: z.string().nullish().catch(null),
+    refreshTokenExpiresAt: z.number().nullish().catch(null),
     subscriptionType: z.string().nullish(),
     rateLimitTier: z.string().nullish(),
   }),
@@ -48,6 +70,9 @@ const claudeCredentialsSchema = z.object({
 type ClaudeCredentials = z.infer<
   typeof claudeCredentialsSchema
 >["claudeAiOauth"];
+const endedLoginSchema = z.object({
+  claudeAiOauth: z.object({ accessToken: z.literal("") }),
+});
 
 const claudeAccountSchema = z.object({
   oauthAccount: z
@@ -66,19 +91,58 @@ export function claudeExecutable(): string {
   );
 }
 
+/** Starts the Claude CLI. On Windows an npm install puts `claude.cmd` on PATH, which plain `spawn` can't start (EINVAL). */
+export function spawnClaude(
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+): ChildProcessWithoutNullStreams {
+  return process.platform === "win32"
+    ? (spawnPortableProcess({
+        command: claudeExecutable(),
+        args,
+        ...options,
+        stdio: "pipe",
+        windowsHide: true,
+      }) as ChildProcessWithoutNullStreams)
+    : spawn(claudeExecutable(), args, { ...options, stdio: "pipe" });
+}
+
+// npm's unfinished stub isn't Claude Code: report it missing, so the
+// installer offers a working copy (#1148).
+async function resolveClaudePath(command: string): Promise<string | null> {
+  const resolved = await resolveExecutablePath(command);
+  return resolved !== null && isClaudeNpmPlaceholder(resolved)
+    ? null
+    : resolved;
+}
+
 function claudeInstallerCommand(): ProviderInstallationCommand {
   return downloadedInstallerCommand(CLAUDE_INSTALL_SCRIPT_URL, {
     powershellUrl: CLAUDE_POWERSHELL_INSTALL_SCRIPT_URL,
   });
 }
 
-// Windows' native installer leaves claude.exe off PATH, so sign in with the
-// path we found. The sign-in terminal runs PowerShell: `&` runs a quoted path,
-// and a `'` inside single quotes is doubled (C:\Users\O'Brien).
-function claudeLoginCommand(command: string): string {
-  return process.platform === "win32" && path.win32.isAbsolute(command)
-    ? `& '${command.replaceAll("'", "''")}' /login`
-    : "claude /login";
+// `auth login` signs in without opening a session, so the home folder the
+// terminal starts in never shows Claude's folder-trust prompt (#2270). Older or
+// unknown versions may lack it and would read it as a prompt, so keep `/login`.
+// Sign in with the path we found: Windows' native installer leaves claude.exe
+// off PATH, and a Mac's PATH can put an older copy first. The Windows sign-in
+// terminal runs PowerShell: `&` runs a quoted path, and a `'` inside single
+// quotes is doubled (C:\Users\O'Brien).
+function claudeLoginCommand(command: string, version: string | null): string {
+  const login =
+    version !== null &&
+    compareVersions(version, CLAUDE_MINIMUM_SUPPORTED_VERSION) >= 0
+      ? "auth login"
+      : "/login";
+  if (process.platform === "win32") {
+    return path.win32.isAbsolute(command)
+      ? `& '${command.replaceAll("'", "''")}' ${login}`
+      : `claude ${login}`;
+  }
+  return formatCommand(path.isAbsolute(command) ? command : "claude", [
+    ...login.split(" "),
+  ]);
 }
 
 function claudeDistTags(value: string | null): {
@@ -108,25 +172,78 @@ function claudeDistTags(value: string | null): {
   }
 }
 
-function claudeDoctor(value: string | null): {
+async function nativeChannelVersion(channel: "latest" | "stable") {
+  try {
+    const response = await fetchWithProxyFallback((init) =>
+      fetch(`${CLAUDE_NATIVE_RELEASES_URL}/${channel}`, {
+        ...init,
+        signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
+      }),
+    );
+    return response.ok ? versionFrom(await response.text()) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function claudeNativeTags(): Promise<{
+  latest: string;
+  stable: string | null;
+} | null> {
+  const [latest, stable] = await Promise.all([
+    nativeChannelVersion("latest"),
+    nativeChannelVersion("stable"),
+  ]);
+  return latest === null ? null : { latest, stable };
+}
+
+// Package managers whose installs Cloudroom leaves to the user (#54).
+const CLAUDE_MANUAL_MANAGERS = ["homebrew", "winget", "apt", "dnf", "apk"];
+
+function claudeDoctor(
+  value: string | null,
+  executablePath: string | null,
+  platform: NodeJS.Platform = process.platform,
+): {
   installMethod: "native" | "npm-global" | "package-manager" | "unknown" | null;
+  running: string | null;
   updateChannel: "latest" | "stable" | null;
 } {
   const running =
     value === null ? null : /^Running:\s+([^\s(]+)/mu.exec(value)?.[1];
+  // Claude Code 2.1.329 prints `Running: package-manager` and names the
+  // manager on its own `Package manager: winget` line (#1898).
+  const manager =
+    running === "package-manager"
+      ? /^Package manager:\s+(\S+)/mu.exec(value ?? "")?.[1]
+      : running === "unknown"
+        ? undefined
+        : running;
   const channel =
     value === null
       ? null
       : /^Auto-update channel:\s+(latest|stable)\s*$/mu.exec(value)?.[1];
+  // Claude Code's own winget check, for when doctor names no manager.
+  const winget =
+    platform === "win32" &&
+    /[/\\]Microsoft[/\\]WinGet[/\\](?:Packages|Links)[/\\]/iu.test(
+      executablePath ?? "",
+    );
   return {
     installMethod:
       running === "native" || running === "npm-global"
         ? running
-        : running !== null && running !== undefined
-          ? ["homebrew", "winget", "apt", "dnf", "apk"].includes(running)
+        : manager !== null && manager !== undefined
+          ? // 2.1.329 names APT and DNF installs `deb` and `rpm`.
+            [...CLAUDE_MANUAL_MANAGERS, "deb", "rpm"].includes(manager)
             ? "package-manager"
             : "unknown"
-          : null,
+          : winget
+            ? "package-manager"
+            : running !== null && running !== undefined
+              ? "unknown"
+              : null,
+    running: running ?? null,
     updateChannel:
       channel === "latest" || channel === "stable" ? channel : null,
   };
@@ -135,8 +252,9 @@ function claudeDoctor(value: string | null): {
 // Homebrew installs can't run `claude update`, so upgrade the cask that owns the real file.
 async function homebrewUpgradeCommand(
   executablePath: string | null,
+  platform: NodeJS.Platform,
 ): Promise<ProviderInstallationCommand | null> {
-  if (executablePath === null || process.platform === "win32") return null;
+  if (executablePath === null || platform === "win32") return null;
   const realPath = await fs.realpath(executablePath).catch(() => null);
   const match =
     realPath === null
@@ -151,19 +269,72 @@ async function homebrewUpgradeCommand(
   return { command: brew, args, displayCommand: formatCommand("brew", args) };
 }
 
+/** The update Cloudroom can run; null when only the user's package manager can. */
+async function claudeUpdatePlan(
+  command: string,
+  doctorOutput: string | null,
+  executablePath: string | null,
+  platform: NodeJS.Platform = process.platform,
+) {
+  const doctor = claudeDoctor(doctorOutput, executablePath, platform);
+  const homebrew = await homebrewUpgradeCommand(executablePath, platform);
+  // Claude's own updater handles native, npm, and unknown installs. Other
+  // package managers (winget, apt, dnf, apk) need the user, often with sudo.
+  const update =
+    homebrew ??
+    (doctor.installMethod === "package-manager"
+      ? null
+      : {
+          command,
+          args: ["update"],
+          displayCommand: formatCommand(command, ["update"]),
+        });
+  // A too-old version blocks thread start exactly as before #1898: unless
+  // doctor's `Running:` line named one of these managers and brew wasn't found.
+  const blocksTooOld =
+    homebrew !== null || !CLAUDE_MANUAL_MANAGERS.includes(doctor.running ?? "");
+  return { doctor, homebrew, update, blocksTooOld };
+}
+
+/** The npm package folder while `command` is still the placeholder, else null. */
+async function claudePlaceholder(command: string): Promise<string | null> {
+  if (!path.isAbsolute(command)) return null;
+  const real = await fs.realpath(command).catch(() => null);
+  if (real === null || !real.endsWith(CLAUDE_PLACEHOLDER)) return null;
+  const size = (await fs.stat(real).catch(() => null))?.size ?? 0;
+  return size < CLAUDE_PLACEHOLDER_MAX_BYTES
+    ? path.dirname(path.dirname(real))
+    : null;
+}
+
+/** Runs the package's postinstall, as npm would have. True if still a placeholder. */
+async function repairClaudePlaceholder(command: string): Promise<boolean> {
+  const packageDir = await claudePlaceholder(command);
+  if (packageDir === null) return false;
+  // The bridge's own Node: Cloudroom's Electron when packaged.
+  await execFileAsync(process.execPath, ["install.cjs"], {
+    cwd: packageDir,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+    timeout: CLAUDE_REPAIR_TIMEOUT_MS,
+  }).catch(() => {});
+  return (await claudePlaceholder(command)) !== null;
+}
+
 async function claudeInstallation(): Promise<{
   status: ProviderInstallationStatus;
   update: ProviderInstallationCommand | null;
 }> {
   const command = claudeExecutable();
+  const placeholder = await repairClaudePlaceholder(command);
   const [
     resolvedExecutable,
     versionOutput,
     tagsOutput,
     npmGlobal,
     doctorOutput,
+    nativeTags,
   ] = await Promise.all([
-    resolveExecutablePath(command),
+    resolveClaudePath(command),
     commandOutput(command, ["--version"]),
     commandOutput(npmCommand(), [
       "view",
@@ -173,11 +344,16 @@ async function claudeInstallation(): Promise<{
     ]),
     probeNpmGlobalPackage(CLAUDE_NPM_PACKAGE),
     commandOutput(command, ["doctor"]),
+    claudeNativeTags(),
   ]);
-  const installed = resolvedExecutable !== null || versionOutput !== null;
+  const installed =
+    !placeholder && (resolvedExecutable !== null || versionOutput !== null);
   const currentVersion = versionFrom(versionOutput);
-  const doctor = claudeDoctor(doctorOutput);
-  const homebrew = await homebrewUpgradeCommand(resolvedExecutable);
+  const { doctor, homebrew, update, blocksTooOld } = await claudeUpdatePlan(
+    command,
+    doctorOutput,
+    resolvedExecutable,
+  );
   // A cask follows its own channel: claude-code is stable, claude-code@latest is latest.
   const updateChannel =
     homebrew === null
@@ -185,7 +361,10 @@ async function claudeInstallation(): Promise<{
       : homebrew.args.at(-1)?.endsWith("@latest")
         ? "latest"
         : "stable";
-  const tags = claudeDistTags(tagsOutput);
+  const tags =
+    homebrew === null && doctor.installMethod === "native"
+      ? nativeTags
+      : claudeDistTags(tagsOutput);
   const latestVersion =
     updateChannel === null || tags === null ? null : tags[updateChannel];
   const definitelyNeedsUnknownChannelUpdate =
@@ -199,19 +378,8 @@ async function claudeInstallation(): Promise<{
     installed && currentVersion !== null && latestVersion !== null
       ? compareVersions(latestVersion, currentVersion) > 0
       : definitelyNeedsUnknownChannelUpdate;
-  // Claude's own updater handles native, npm, and unknown installs. Other
-  // package managers (winget, apt, dnf, apk) need the user, often with sudo.
-  const update =
-    homebrew ??
-    (doctor.installMethod === "package-manager"
-      ? null
-      : {
-          command,
-          args: ["update"],
-          displayCommand: formatCommand(command, ["update"]),
-        });
   const versionUnsupported =
-    update !== null &&
+    blocksTooOld &&
     currentVersion !== null &&
     compareVersions(currentVersion, CLAUDE_MINIMUM_SUPPORTED_VERSION) < 0 &&
     (latestVersion === null
@@ -273,10 +441,7 @@ function buildClaudeProviderInstallationRun(
 ): ProviderInstallationRunResult {
   const command = action === "install" ? claudeInstallerCommand() : update;
   if (status.installAction?.kind !== action || command === null) {
-    return {
-      available: false,
-      message: `Claude Code ${action} is no longer available on this host.`,
-    };
+    return installationRunUnavailable("Claude Code", action, status);
   }
   return {
     available: true,
@@ -309,7 +474,8 @@ async function readKeychainCredentials(): Promise<string | null> {
   return null;
 }
 
-function parseCredentials(raw: string): ClaudeCredentials | null {
+/** The saved login, null when Claude Code ended it, or undefined when `raw` holds no Claude login. */
+function parseCredentials(raw: string): ClaudeCredentials | null | undefined {
   const trimmed = raw.trim();
   const candidates = [trimmed];
   if (/^(?:[0-9a-f]{2})+$/iu.test(trimmed)) {
@@ -317,25 +483,35 @@ function parseCredentials(raw: string): ClaudeCredentials | null {
   }
   for (const candidate of candidates) {
     try {
-      const parsed = claudeCredentialsSchema.safeParse(JSON.parse(candidate));
-      if (parsed.success) return parsed.data.claudeAiOauth;
+      const value: unknown = JSON.parse(candidate);
+      const parsed = claudeCredentialsSchema.safeParse(value);
+      // A login Claude Code can't renew keeps its tokens as "" (2.1.318).
+      if (parsed.success)
+        return parsed.data.claudeAiOauth.refreshToken === ""
+          ? null
+          : parsed.data.claudeAiOauth;
+      if (endedLoginSchema.safeParse(value).success) return null;
     } catch {}
   }
-  return null;
+  return undefined;
 }
 
 async function readCredentials(): Promise<ClaudeCredentials | null> {
   const keychainCredentials = await readKeychainCredentials();
-  if (keychainCredentials !== null) {
-    const parsed = parseCredentials(keychainCredentials);
-    if (parsed !== null) return parsed;
-  }
+  // Claude Code reads its Keychain item first, so a login it ended there must not come back from an old file.
+  const saved =
+    keychainCredentials === null
+      ? undefined
+      : parseCredentials(keychainCredentials);
+  if (saved !== undefined) return saved;
   try {
-    return parseCredentials(
-      await fs.readFile(
-        path.join(os.homedir(), ".claude", ".credentials.json"),
-        "utf8",
-      ),
+    return (
+      parseCredentials(
+        await fs.readFile(
+          path.join(os.homedir(), ".claude", ".credentials.json"),
+          "utf8",
+        ),
+      ) ?? null
     );
   } catch {
     return null;
@@ -359,13 +535,36 @@ async function readAccountEmail(): Promise<string | null> {
   return (await readAccount())?.emailAddress ?? null;
 }
 
+// Anthropic renamed Max 5x to Max and Max 20x to Ultra on 2026-10-30.
 function planLabel(credentials: ClaudeCredentials): string | null {
-  const maxMatch = (credentials.rateLimitTier ?? "").match(/max_(\d+)x/u);
-  if (maxMatch) return `Max (${maxMatch[1]}x)`;
+  if (credentials.rateLimitTier?.endsWith("max_20x")) return "Ultra";
+  if (credentials.rateLimitTier?.endsWith("max_5x")) return "Max";
   const subscription = credentials.subscriptionType;
   return subscription
     ? subscription.charAt(0).toUpperCase() + subscription.slice(1)
     : null;
+}
+
+/** Claude Code renews an expired access token itself while the refresh token lasts. Older versions store no end for it. */
+function canRenew(credentials: ClaudeCredentials, now = Date.now()): boolean {
+  return (
+    Boolean(credentials.refreshToken) &&
+    (credentials.refreshTokenExpiresAt == null ||
+      now < credentials.refreshTokenExpiresAt)
+  );
+}
+
+/**
+ * Claude Code's own sign-in check (2.1.318): a login is expired only when Claude Code can't renew it. Claude Code
+ * renews 5 minutes early, but the access token works until `expiresAt`. Cloudroom never renews or writes Claude's tokens.
+ */
+function loginState(
+  credentials: ClaudeCredentials,
+  now = Date.now(),
+): "valid" | "renewable" | "expired" {
+  if (credentials.expiresAt == null || now < credentials.expiresAt)
+    return "valid";
+  return canRenew(credentials, now) ? "renewable" : "expired";
 }
 
 function healthResult(
@@ -389,14 +588,14 @@ function healthResult(
       minimumSupportedVersion: null,
       canInstall: true,
       canUpdate: status !== "not_installed",
-      loginCommand: claudeLoginCommand(command),
+      loginCommand: claudeLoginCommand(command, args.installedVersion ?? null),
     },
   };
 }
 
 export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
   const command = claudeExecutable();
-  if ((await resolveExecutablePath(command)) === null) {
+  if ((await resolveClaudePath(command)) === null) {
     return healthResult(command, "not_installed");
   }
   const version = await readCliVersion(command);
@@ -415,7 +614,7 @@ export async function getClaudeProviderHealth(): Promise<ProviderHealthResult> {
       planLabel: planLabel(credentials),
       installedVersion: version,
     };
-    return credentials.expiresAt != null && Date.now() >= credentials.expiresAt
+    return loginState(credentials) === "expired"
       ? healthResult(command, "expired", known)
       : healthResult(command, "ready", known);
   } catch (error) {
@@ -582,7 +781,7 @@ function normalizeUsage(
 
 export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
   const command = claudeExecutable();
-  if ((await resolveExecutablePath(command)) === null) {
+  if ((await resolveClaudePath(command)) === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
   const [credentials, account] = await Promise.all([
@@ -593,10 +792,19 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
   if (!credentials) {
     return { supported: true, usage: { status: "unauthenticated" } };
   }
-  if (credentials.expiresAt != null && Date.now() >= credentials.expiresAt) {
-    return { supported: true, usage: { status: "expired" } };
-  }
+  const expired: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "expired" },
+  };
+  const login = loginState(credentials);
+  if (login === "expired") return expired;
   const known = { planLabel: planLabel(credentials), accountEmail: email };
+  // Until Claude Code renews it, the saved access token gets 401.
+  const renewing: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "error", message: CLAUDE_RENEWS_MESSAGE, ...known },
+  };
+  if (login === "renewable") return renewing;
   try {
     const response = await fetchWithProxyFallback((init) =>
       fetch(CLAUDE_USAGE_URL, {
@@ -611,9 +819,9 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
         signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
       }),
     );
-    if (response.status === 401) {
-      return { supported: true, usage: { status: "expired" } };
-    }
+    // Claude Code answers a 401 by renewing, so only a login it can't renew is expired.
+    if (response.status === 401)
+      return canRenew(credentials) ? renewing : expired;
     if (!response.ok) {
       return {
         supported: true,
@@ -650,5 +858,7 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
 
 export const __testing = {
   buildProviderInstallationRun: buildClaudeProviderInstallationRun,
+  claudeInstallation,
+  claudeUpdatePlan,
   normalizeUsage,
 };

@@ -14,7 +14,7 @@ import {
   getFixedPanelTabsStateStorageKey,
   pruneFixedPanelTabsStorage,
   serializeFixedPanelTabsState,
-} from "./fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   resetFixedPanelTabsStateForTest,
   resetFixedPanelTabsStorageMaintenanceForTest,
@@ -24,7 +24,7 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useRemoveFixedRightTerminalTab,
   useUpdateFixedPanelTabsState,
-} from "./fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import { BbHttpError } from "./sdk";
 import { setCachedThreadTabs } from "@/hooks/cache-owners/thread-tabs-cache-owner";
 import { scheduleThreadTabsPersistence } from "./thread-tabs-sync";

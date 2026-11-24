@@ -13,6 +13,7 @@ const hostCommandWakePolicy = {
   "thread.plan.cancel": "never",
   "thread.rename": "never",
   "thread.archive": "never",
+  "thread.processes.stop": "never",
   "thread.unarchive": "never",
   "interactive.resolve": "never",
   "environment.attach": "work",

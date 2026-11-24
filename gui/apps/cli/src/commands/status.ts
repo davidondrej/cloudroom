@@ -1,11 +1,12 @@
 import { Command } from "commander";
 import type { ThreadTimelinePendingTodos } from "@cloudroom/domain";
+import { BbRequestTimeoutError } from "@cloudroom/sdk";
 import { action } from "../action.js";
 import {
   resolveContextSnapshot,
   type ContextSnapshot,
 } from "../context-env.js";
-import { cliFetch, createCliBbSdk } from "../client.js";
+import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../client.js";
 import { outputJson } from "./helpers.js";
 import {
   type ThreadEnvironmentInfo,
@@ -13,6 +14,7 @@ import {
   printEnvironmentInfo,
 } from "./environment-helpers.js";
 import { printPendingTodos } from "./thread/pending-todos.js";
+import { cloudIssue, cloudIssueText, type CloudIssue } from "./thread/helpers.js";
 
 interface StatusPayload {
   serverUrl: string;
@@ -23,6 +25,7 @@ interface StatusPayload {
     status: string;
     title: string | null;
     pinnedAt: number | null;
+    archivedAt: number | null;
     parentThreadId: string | null;
     environment: ThreadEnvironmentInfo | null;
   } | null;
@@ -30,6 +33,9 @@ interface StatusPayload {
     id: string;
     status: string;
     title: string | null;
+    archivedAt: number | null;
+    /** Why a Cloud child that hasn't started yet is still waiting. */
+    cloud?: CloudIssue;
   }> | null;
   pendingTodos: ThreadTimelinePendingTodos | null;
   pluginsNeedingAttention: Array<{ id: string; status: string }>;
@@ -66,20 +72,17 @@ export function registerStatusCommand(
         };
 
         let serverAvailable = false;
+        const sdk = createCliRoomSdk(getUrl(), CLI_READ_TIMEOUT_MS);
 
         try {
-          const response = await cliFetch(`${getUrl()}/api/v1/system/config`);
-          if (response.ok) {
-            const config = (await response.json()) as { dataDir?: unknown };
-            if (typeof config.dataDir === "string") {
-              payload.dataDir = config.dataDir;
-              serverAvailable = true;
-            }
-          }
-        } catch {}
+          payload.dataDir = (await sdk.system.config()).dataDir;
+          serverAvailable = true;
+        } catch (error) {
+          if (error instanceof BbRequestTimeoutError) throw error;
+        }
 
         if (serverAvailable) {
-          const { plugins } = await createCliBbSdk(getUrl()).plugins.list();
+          const { plugins } = await sdk.plugins.list();
           payload.pluginsNeedingAttention = plugins
             .filter(
               (p) =>
@@ -91,7 +94,6 @@ export function registerStatusCommand(
         }
 
         if (context.projectId || context.threadId) {
-          const sdk = createCliBbSdk(getUrl());
           const status = await sdk.status.get({
             projectId: context.projectId,
             threadId: context.threadId,
@@ -120,16 +122,19 @@ export function registerStatusCommand(
               status: status.thread.status,
               title: status.thread.title ?? null,
               pinnedAt: status.thread.pinnedAt,
+              archivedAt: status.thread.archivedAt,
               parentThreadId: status.thread.parentThreadId ?? null,
               environment: environmentInfo,
             };
             serverAvailable = true;
 
             if (status.childThreads) {
-              payload.childThreads = status.childThreads.map((thread) => ({
-                id: thread.id,
-                status: thread.status,
-                title: thread.title ?? null,
+              // Only Cloud children not started yet are asked, briefly and best effort: the status above is already known.
+              payload.childThreads = await Promise.all(status.childThreads.map(async (thread) => {
+                const cloud = thread.executionTarget === "cloud" && ["pending", "starting"].includes(thread.status) && thread.archivedAt == null
+                  ? cloudIssue(await sdk.cloudroom.threadStatus(thread.id, AbortSignal.timeout(5_000)).catch(() => null))
+                  : null;
+                return { id: thread.id, status: thread.status, title: thread.title ?? null, archivedAt: thread.archivedAt ?? null, ...(cloud ? { cloud } : {}) };
               }));
             }
           }
@@ -154,7 +159,9 @@ export function registerStatusCommand(
 
         if (serverAvailable && payload.thread) {
           console.log(`Thread: ${payload.thread.id}`);
-          console.log(`  Status: ${payload.thread.status}`);
+          console.log(
+            `  Status: ${payload.thread.status}${payload.thread.archivedAt !== null ? " (archived)" : ""}`,
+          );
           if (payload.thread.title) {
             console.log(`  Title: ${payload.thread.title}`);
           }
@@ -175,7 +182,10 @@ export function registerStatusCommand(
             console.log(`Child threads: ${payload.childThreads.length}`);
             for (const mt of payload.childThreads) {
               const title = mt.title ? `"${mt.title}"` : "";
-              console.log(`  ${mt.id}  ${mt.status}  ${title}`);
+              const archived = mt.archivedAt !== null ? " (archived)" : "";
+              console.log(`  ${mt.id}  ${mt.status}${archived}  ${title}`);
+              const note = cloudIssueText(mt.cloud ?? null);
+              if (note) console.log(`    Cloud: ${note}`);
             }
           }
 

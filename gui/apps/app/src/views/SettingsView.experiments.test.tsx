@@ -14,6 +14,7 @@ function renderSection(
       disabled={false}
       experiments={{
         changelogPreview: false,
+        hideLaptopHints: false,
         mobileApp: false,
         multiMachinePicker: false,
         sidebarProgressiveDisclosure: false,

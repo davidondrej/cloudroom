@@ -22,6 +22,7 @@ import type {
   PluginEnvironmentProviderAvailability,
   PluginEnvironmentProviderAvailabilityContext,
 } from "@get-bb/plugin-sdk/environment-provider";
+import { resolveDefaultWorktreeBaseBranch } from "../projects/worktree-base-branch.js";
 import { decideWithinBox } from "../threads/dispatch-hooks.js";
 
 type GitCheckoutAvailability =
@@ -135,14 +136,17 @@ async function inspectGitCheckoutAvailability(
         remoteRefresh: "background",
       },
     });
+    const { checkout } = inspection;
     if (
-      inspection.checkout.kind === "unknown" ||
-      inspection.checkout.kind === "unborn" ||
-      inspection.checkout.headSha === null
+      (checkout.kind === "unknown" || checkout.kind === "unborn") &&
+      resolveDefaultWorktreeBaseBranch(inspection) === null
     ) {
       return {
         status: "unavailable",
-        message: "This project checkout has no usable git branch.",
+        message:
+          checkout.kind === "unborn"
+            ? `The project folder ${args.path} has no commits to branch from. Make a first commit, or run it as a Cloud thread.`
+            : `The project folder ${args.path} is missing or git can't read it (${checkout.reason}). Change the folder in project settings, or run it as a Cloud thread.`,
       };
     }
     return { status: "available" };

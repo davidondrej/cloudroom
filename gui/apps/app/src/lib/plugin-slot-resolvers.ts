@@ -272,10 +272,12 @@ export type FileOpenerPreferenceMap = Record<string, string>;
 
 export const BUILT_IN_FILE_OPENER_PREFERENCE = "__builtin__";
 
+// The built-in preview renders these; the bundled File Editor would show source.
 export const BUILT_IN_PREVIEW_EXTENSIONS: ReadonlySet<string> = new Set([
   "md",
   "markdown",
   "csv",
+  "html",
 ]);
 
 export function getFileExtension(path: string): string | null {
@@ -297,6 +299,8 @@ export function resolveFileOpenerReplacement(args: {
   preference?: FileOpenerPreferenceMap;
   path: string;
   override?: FileOpenerOverride;
+  /** False where the built-in preview has no HTML URL, so .html keeps its plugin opener. */
+  builtInRendersHtml?: boolean;
 }): ResolvedReplacement<PluginFileOpenerSlot> {
   const override = args.override;
   if (override === "builtin") return OWNER_REPLACEMENT;
@@ -314,7 +318,9 @@ export function resolveFileOpenerReplacement(args: {
   const preference = args.preference?.[extension];
   if (
     preference === BUILT_IN_FILE_OPENER_PREFERENCE ||
-    (preference === undefined && BUILT_IN_PREVIEW_EXTENSIONS.has(extension))
+    (preference === undefined &&
+      BUILT_IN_PREVIEW_EXTENSIONS.has(extension) &&
+      (extension !== "html" || args.builtInRendersHtml !== false))
   ) {
     return OWNER_REPLACEMENT;
   }
@@ -327,7 +333,8 @@ export function resolveFileOpenerReplacement(args: {
   );
 }
 
-/** Plugins whose requests open as a centered pop-up over a blurred app instead of a card in place of the composer:
- *  paid GPU sessions (docs/scopes/gpus.md). The chat box stays where it is. */
-const MODAL_PLUGINS = new Set(["gpu"]);
-export const isModalPluginInteraction = (pluginId: string | undefined) => pluginId !== undefined && MODAL_PLUGINS.has(pluginId);
+/** Plugins whose requests show as a card at the end of the chat instead of in place of the composer: paid GPU
+ *  sessions (docs/scopes/gpus.md). The chat box stays where it is. */
+const CHAT_CARD_PLUGINS = new Set(["gpu"]);
+export const isChatCardPluginInteraction = (pluginId: string | undefined) =>
+  pluginId !== undefined && CHAT_CARD_PLUGINS.has(pluginId);

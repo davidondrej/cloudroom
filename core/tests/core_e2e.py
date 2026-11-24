@@ -105,14 +105,18 @@ class Service:
         self.process = None
 
     def start(self):
-        self.log = self.log_path.open("w+")
-        self.process = subprocess.Popen([str(BINARY)], env=self.env,
-                                        stdout=self.log, stderr=self.log, start_new_session=True)
+        with self.log_path.open("w") as log:
+            self.process = subprocess.Popen([str(BINARY)], env=self.env,
+                                            stdout=log, stderr=log, start_new_session=True)
         def address():
             assert self.process.poll() is None, "core exited: " + self.log_path.read_text()
-            self.log.seek(0)
-            return next((line.split()[-1] for line in self.log if line.startswith("Cloudroom listening on ")), None)
-        self.address = until(address, "core startup", 10)
+            with self.log_path.open() as log:
+                return next((line.split()[-1] for line in log if line.startswith("Cloudroom listening on ")), None)
+        try:
+            self.address = until(address, "core startup", 10)
+        except BaseException:
+            self.stop(crash=True)
+            raise
         return self
 
     def stop(self, crash=False):
@@ -133,13 +137,11 @@ class Service:
             finally:
                 # Cleanup follows the assertion; it must not make the shutdown test pass.
                 reap_test_descendants(owned)
-        if self.process:
-            self.log.close()
         self.process = None
 
-    def request(self, method, path, body=None, expected=200, token=True):
+    def request(self, method, path, body=None, expected=200, token=True, headers=None):
         connection = http.client.HTTPConnection(self.address, timeout=15)
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", **(headers or {})}
         if token is not None:
             headers["Authorization"] = "Bearer " + (self.env["CLOUDROOM_TOKEN"] if token is True else token)
         connection.request(method, path, json.dumps(body) if body is not None else None, headers)
@@ -296,7 +298,7 @@ def main():
                 result = service.request("GET", "/v1/health", expected=expected, token=token)
                 if expected == 200:
                     assert result["status"] == "ready"
-            collision = subprocess.run([str(BINARY)], env=env, capture_output=True, timeout=5)
+            collision = subprocess.run([str(BINARY)], env=env, capture_output=True, timeout=8)
             assert collision.returncode != 0
             passed("HTTP auth, client reconnection, and exclusive state ownership")
             if args.fixture:

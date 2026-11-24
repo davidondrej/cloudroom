@@ -83,10 +83,10 @@
       "types": "./src/public-url.ts",
       "default": "./src/public-url.ts"
     },
-    "./bb-app-managed-config": {
-      "source": "./src/bb-app-managed-config.ts",
-      "types": "./src/bb-app-managed-config.ts",
-      "default": "./src/bb-app-managed-config.ts"
+    "./app-managed-config": {
+      "source": "./src/app-managed-config.ts",
+      "types": "./src/app-managed-config.ts",
+      "default": "./src/app-managed-config.ts"
     },
     "./managed-json-file": {
       "source": "./src/managed-json-file.ts",
@@ -132,22 +132,37 @@
       "source": "./src/child-process-exit.ts",
       "types": "./src/child-process-exit.ts",
       "default": "./src/child-process-exit.ts"
+    },
+    "./caller-proof": {
+      "source": "./src/caller-proof.ts",
+      "types": "./src/caller-proof.ts",
+      "default": "./src/caller-proof.ts"
+    },
+    "./human-click": {
+      "source": "./src/human-click.ts",
+      "types": "./src/human-click.ts",
+      "default": "./src/human-click.ts"
+    },
+    "./chat-file-copies": {
+      "source": "./src/chat-file-copies.ts",
+      "types": "./src/chat-file-copies.ts",
+      "default": "./src/chat-file-copies.ts"
     }
   },
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@cloudroom/domain": "workspace:*",
+    "@cloudroom/process-utils": "workspace:*",
     "fs-native-extensions": "1.5.0",
     "zod": "4.3.6"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

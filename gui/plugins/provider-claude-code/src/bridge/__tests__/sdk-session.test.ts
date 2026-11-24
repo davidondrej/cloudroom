@@ -9,16 +9,24 @@ const mockQueryInstance = {
   applyFlagSettings: vi.fn(),
   close: vi.fn(),
   interrupt: vi.fn(),
+  mcpServerStatus: vi.fn(),
+  reconnectMcpServer: vi.fn(),
   setModel: vi.fn(),
   setPermissionMode: vi.fn(),
   [Symbol.asyncIterator]: vi.fn(),
 };
-const { queryMock } = vi.hoisted(() => ({
+const { execFileMock, queryMock } = vi.hoisted(() => ({
+  execFileMock: vi.fn(),
   queryMock: vi.fn(),
 }));
 
 vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   query: queryMock,
+}));
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  execFile: execFileMock,
 }));
 
 import { SdkSession, type SdkSessionOptions } from "../sdk-session.js";
@@ -177,6 +185,59 @@ describe("SdkSession", () => {
     expect(mockQueryInstance.close).toHaveBeenCalled();
   });
 
+  it("keeps a Windows stop unconfirmed while a tool Claude started still runs", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    // "pid parentPid startedAt" rows: Claude (pid 100) has exited, its tool 200 hasn't.
+    let processes = "4 0 1000\r\n200 100 5000\r\n";
+    let onTaskkill = (): void => {};
+    execFileMock.mockImplementation((file, _args, _options, done) => {
+      const taskkill = String(file).endsWith("taskkill.exe");
+      if (taskkill) onTaskkill();
+      setImmediate(() =>
+        done(taskkill ? new Error("denied") : null, processes, ""),
+      );
+      return {};
+    });
+    const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+    const launcher = { pid: 100, exitCode: 0, signalCode: null };
+    Object.assign(session, { windowsChild: launcher, windowsSpawnedAt: 2000 });
+    try {
+      await expect(session.stop()).rejects.toThrow("could not confirm");
+      await expect(session.stop()).rejects.toThrow("could not confirm");
+      // A failed list (no rows) keeps tracking tool 200 for the next retry.
+      processes = "";
+      await expect(session.stop()).rejects.toThrow("could not confirm");
+      processes = "4 0 1000\r\n";
+      await expect(session.stop()).resolves.toBeUndefined();
+
+      // A running Claude starts tool 400 after the first list; taskkill fails.
+      const late = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+      const running = {
+        pid: 300,
+        exitCode: null as number | null,
+        signalCode: null,
+        kill: () => (running.exitCode = 0),
+      };
+      Object.assign(late, { windowsChild: running, windowsSpawnedAt: 2000 });
+      onTaskkill = () => (processes += "400 300 6000\r\n");
+      await expect(late.stop()).rejects.toThrow("could not confirm");
+
+      // Never listed while Claude ran: its tree is unknown, so it stays blocked.
+      const unlisted = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+      Object.assign(unlisted, {
+        windowsChild: running,
+        windowsSpawnedAt: 2000,
+      });
+      [running.exitCode, processes, onTaskkill] = [null, "", () => {}];
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
+      processes = "4 0 1000\r\n";
+      await expect(unlisted.stop()).rejects.toThrow("could not confirm");
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("waits for the SDK stream to finish during graceful close", async () => {
     let finishStream:
       | ((result: IteratorResult<SDKMessage>) => void)
@@ -205,6 +266,33 @@ describe("SdkSession", () => {
     await closePromise;
 
     expect(mockQueryInstance.close).not.toHaveBeenCalled();
+  });
+
+  it("reconnects failed and needs-auth MCP servers, backing off after a failed retry", async () => {
+    keepSdkStreamOpen();
+    mockQueryInstance.mcpServerStatus.mockResolvedValue([
+      { name: "linear", status: "needs-auth" },
+      { name: "figma", status: "failed" },
+      { name: "doop", status: "connected" },
+      { name: "slow", status: "pending" },
+    ]);
+    mockQueryInstance.reconnectMcpServer.mockRejectedValue(
+      new Error("Server status: needs-auth"),
+    );
+    const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+    session.start();
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer.mock.calls).toEqual([
+      ["linear"],
+      ["figma"],
+    ]);
+
+    await session.reconnectMcpServers();
+    await waitForAsyncWork();
+    expect(mockQueryInstance.reconnectMcpServer).toHaveBeenCalledTimes(2);
+    session.stop();
   });
 
   it("forwards local plugins to the SDK without a skills allowlist", () => {

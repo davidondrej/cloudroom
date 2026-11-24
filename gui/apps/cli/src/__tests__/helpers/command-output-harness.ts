@@ -12,9 +12,9 @@ const serverClientState = vi.hoisted(() => ({
 }));
 
 vi.mock("../../client.js", async () => {
-  const { cliFetch } =
+  const { CLI_READ_TIMEOUT_MS, cliFetch } =
     await vi.importActual<typeof import("../../client.js")>("../../client.js");
-  const { createBbSdk } =
+  const { createRoomSdk } =
     await vi.importActual<typeof import("@cloudroom/sdk/core")>("@cloudroom/sdk/core");
   const { createHttpTransport } =
     await vi.importActual<typeof import("@cloudroom/sdk/node")>("@cloudroom/sdk/node");
@@ -25,9 +25,9 @@ vi.mock("../../client.js", async () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
-  const createCliBbSdk = vi.fn((baseUrl: string) => {
+  const createCliRoomSdk = vi.fn((baseUrl: string) => {
     const realTransport = createHttpTransport({ baseUrl, runtime: "node" });
-    return createBbSdk({
+    return createRoomSdk({
       transport: {
         ...realTransport,
         api: serverClientState.createClient(baseUrl)?.api ?? {},
@@ -38,8 +38,16 @@ vi.mock("../../client.js", async () => {
       },
     });
   });
-  return { cliFetch, createCliBbSdk };
+  return { CLI_READ_TIMEOUT_MS, cliFetch, createCliRoomSdk };
 });
+
+// Keep the exit code observable as the mocked process.exit throw below.
+vi.mock("../../plugin-cli-proxy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugin-cli-proxy.js")>()),
+  exitWhenIdle: async (code: number) => {
+    process.exit(code);
+  },
+}));
 
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({

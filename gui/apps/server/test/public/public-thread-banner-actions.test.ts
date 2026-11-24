@@ -53,7 +53,7 @@ function clearCommandInput(): PromptInput[] {
 
 function seedBannerFixture(
   harness: TestAppHarness,
-  args: { status: "active" | "idle" },
+  args: { status: "active" | "idle"; providerId?: string },
 ): BannerFixture {
   const { host, session } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, {
@@ -66,7 +66,7 @@ function seedBannerFixture(
   const thread = seedThread(harness.deps, {
     environmentId: environment.id,
     projectId: project.id,
-    providerId: "codex",
+    providerId: args.providerId ?? "codex",
     status: args.status,
   });
   return {
@@ -523,6 +523,34 @@ describe("public thread banner actions", () => {
         code: "invalid_request",
         message: "No Goal to clear",
       });
+    });
+  });
+
+  it("refuses Goals on a provider without them before contacting the host", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedBannerFixture(harness, {
+        status: "idle",
+        providerId: "claude-code",
+      });
+      const responder = registerHostRpcResponder(harness, {
+        hostId: fixture.hostId,
+        sessionId: fixture.sessionId,
+        handle: () => ({ ok: true, result: {} }),
+      });
+      const response = await harness.app.request(
+        `/api/v1/threads/${fixture.threadId}/goal`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objective: "Ship it" }),
+        },
+      );
+      expect(response.status).toBe(409);
+      expect(await readJson(response)).toMatchObject({
+        message:
+          'Provider "claude-code" does not support Goals. Goals work on Codex threads.',
+      });
+      expect(responder.requests).toEqual([]);
     });
   });
 

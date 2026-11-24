@@ -1,7 +1,7 @@
 import type { ServerAccessStatus } from "@cloudroom/server-contract";
 import { isLocalOnlyUrl } from "@/lib/loopback-hostname";
 import { useEffect, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link } from "react-router";
 import { Button } from "@cloudroom/shared-ui/button";
 import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -297,12 +297,18 @@ function MachineAccessDetails({
         <SettingsWithControl
           label="Server address"
           description={
-            error === null ? (
-              "Use your own domain or an address on a shared network. Every machine you add must be able to reach this address; localhost won’t work."
-            ) : (
+            error !== null ? (
               <span role="alert" className="text-destructive-text">
                 {error}
               </span>
+            ) : parseUrl((draft ?? value).trim())?.protocol === "http:" ? (
+              <span className="text-warning-text">
+                Plain HTTP sends machine keys unencrypted, so adding machines
+                fails unless this server sets BB_ALLOW_INSECURE_SERVER_URL=1.
+                Use an https:// address.
+              </span>
+            ) : (
+              "Use your own domain or an address on a shared network. Every machine you add must be able to reach this address; localhost won’t work."
             )
           }
           controlPlacement="below"

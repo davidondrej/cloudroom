@@ -5,7 +5,7 @@ import {
   type Dispatch,
   type SetStateAction,
 } from "react";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
 import { Cancel01Icon, File01Icon } from "@hugeicons/core-free-icons";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { MAX_ATTACHMENT_SIZE_BYTES } from "../shared/attachments.js";

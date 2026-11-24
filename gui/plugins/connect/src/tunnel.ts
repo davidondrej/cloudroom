@@ -31,6 +31,7 @@ interface ConnectTunnelOptions {
   store: CredentialStore;
   shares: ShareRegistry;
   getLoopbackBaseUrl: () => string;
+  getLoopbackHeaders: () => Readonly<Record<string, string>>;
   log: PluginLogger;
   onStatusChange?: (status: TunnelStatus) => void;
   onCredentialRejected: () => void;
@@ -243,6 +244,7 @@ export class ConnectTunnel {
           publicOrigin: this.credential
             ? new URL(this.credential.serverUrl).origin
             : this.options.getLoopbackBaseUrl(),
+          headers: this.options.getLoopbackHeaders(),
         },
       };
     }

@@ -99,6 +99,10 @@ SDK `retryable` marker when available or conservative overload, rate-limit,
 provider 5xx, and network-error signatures. Authentication, configuration,
 schema, and other deterministic failures are not retried. Retry attempts are
 persisted on the call so a plugin restart cannot reset the retry budget.
+A failed or timed-out model listing is reread every 10 s. Each provider gets
+one 75 s window per run; its last reread can take one more listing (up to about
+30 s). Calls that fail after the window fail at once until a listing succeeds.
+Cancelling the run stops the wait.
 
 Worker output is either the final assistant text or an Ajv-validated value
 submitted through `bb_workflow_result`. Structured workers receive two
@@ -181,6 +185,11 @@ bb provider models <provider-id> --environment "$BB_ENVIRONMENT_ID" --json
 `status` is deliberately bounded: it returns run state, phase, call counts,
 notification state, and only a small final result. It omits source, arguments,
 and call history so polling cannot be truncated into invalid JSON.
+A queued run's `queue` says why it waits and how to unblock it:
+`dispatcher-stopped`, `dispatcher-busy` (a slow pass; wait),
+`dispatcher-stuck` (no progress for 15 minutes; restart Cloudroom),
+`waiting-for-active-runs` (slots are shared by all projects, so it counts runs
+that this project's `list` omits), or `starting`.
 `list` is likewise bounded and returns compact run summaries rather than source
 or result bodies. Untrusted names, phases, and errors are capped by UTF-8 bytes;
 the adjacent `*Truncated` fields report when a displayed value was shortened.
@@ -200,9 +209,12 @@ The final `page` record reports `hasMore` and `nextCursor`. Fetch the next page
 with that cursor and append it to the same file. A full `run` record appears on
 the first page, later pages include a small `run-reference`, and every call
 record includes requested options, resolved provider/model/reasoning/permission,
-cache/live state, child thread ID, repairs, result, and error. Pages are
-snapshots; while a run is active, rewrite the file from cursor `0` when a fresh
-detailed view is needed.
+cache/live state, child thread ID, repairs, result, and error. When a restart
+reruns a failed or cancelled call, that earlier attempt stays: a metadata-only
+record (status, error, times, child thread ID) with the same `callIndex` and
+`superseded: true` comes right before the call, and status counts include it.
+Pages are snapshots; while a run is active, rewrite the file from cursor `0`
+when a fresh detailed view is needed.
 
 This redirection intentionally happens in the invoking agent's shell. The
 canonical state remains in the plugin's server-side SQLite database, while the

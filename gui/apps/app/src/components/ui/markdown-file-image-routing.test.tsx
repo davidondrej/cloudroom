@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FilePreview } from "@/components/secondary-panel/FilePreview";
+import { FilePreview } from "@/components/right-panel/tabs/file-preview";
 import {
   buildMarkdownFileImageRouting,
   buildMarkdownLeaseImageRouting,

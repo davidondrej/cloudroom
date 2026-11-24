@@ -1,4 +1,4 @@
-import { z } from "zod/mini";
+import { z } from "zod";
 
 const nonemptyStringSchema = z.string().check(z.minLength(1));
 const costSchema = z.strictObject({
@@ -58,6 +58,8 @@ export const usageMachineSchema = z.strictObject({
   status: z.enum(["connected", "disconnected"]),
   providers: z.array(usageProviderSchema),
   error: z.nullable(nonemptyStringSchema),
+  /** The computer running Cloudroom, where its sign-in buttons act. */
+  primary: z.optional(z.literal(true)),
 });
 
 export const usageSnapshotSchema = z.strictObject({

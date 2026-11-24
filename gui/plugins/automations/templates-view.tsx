@@ -1,5 +1,5 @@
 import { COMPUTER } from "@cloudroom/domain/computer-name";
-import { useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useState, type ReactNode } from "react";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Checkbox } from "@cloudroom/shared-ui/checkbox";
@@ -14,8 +14,9 @@ import type {
   AutomationAgentSummary,
   AutomationsOverviewResponse,
 } from "./src/rpc-types.js";
+import type { TemplateUsage } from "./src/usage.js";
 import type { CloudAutomation } from "./cloud-view.js";
-import { formatAutomationTrigger } from "./lib/format-schedule.js";
+import { cronCadence } from "./lib/format-schedule.js";
 import {
   LOOP_TEMPLATES,
   TEMPLATE_CATEGORIES,
@@ -44,6 +45,14 @@ export interface LoopTemplatesState {
   /** True on the Free plan, null while the plan loads. */
   locked: boolean | null;
   onUpgrade: () => void;
+  /** Each template's rough share of the weekly Claude or Codex limit, by template ID. Templates it can't price are missing. */
+  usage?: TemplateUsage;
+}
+
+/** "~6%" or "<1%": a rough share of a weekly limit. */
+export function shareLabel(percent: number | undefined): string | null {
+  if (percent === undefined) return null;
+  return percent < 1 ? "<1%" : `~${Math.round(percent)}%`;
 }
 
 type OverviewEntry = AutomationsOverviewResponse["automations"][number];
@@ -81,28 +90,24 @@ export function LoopGroupDivider({
   );
 }
 
-// A small colored letter per repo, so many repos stay easy to tell apart.
-function RepoLetter({ name }: { name: string }) {
-  const hue =
-    ([...name].reduce((sum, c) => sum + c.charCodeAt(0), 0) * 47) % 360;
+// Where a repo lives: on GitHub, or only on this computer.
+function RepoIcon({ github }: { github: string | null }) {
   return (
-    <span
+    <Icon
+      name={github ? "GithubLogo" : "Laptop"}
+      className="size-3.5 shrink-0 text-subtle-foreground"
       aria-hidden
-      className="inline-grid size-[15px] shrink-0 place-items-center rounded-[4px] text-[9px] font-semibold"
-      style={{
-        backgroundColor: `oklch(42% 0.09 ${hue})`,
-        color: `oklch(92% 0.05 ${hue})`,
-      }}
-    >
-      {name.charAt(0).toUpperCase()}
-    </span>
+    />
   );
 }
 
-function parentFolder(path: string | null): string {
-  const short = path?.replace(/^\/(?:Users|home)\/[^/]+/u, "~") ?? "";
-  const cut = short.lastIndexOf("/");
-  return cut > 0 ? short.slice(0, cut) : short;
+// The GitHub owner, or the folder for a repo that's only on this computer.
+function repoHome(project: TemplateProject): string {
+  return (
+    project.github?.split("/")[0] ??
+    project.path?.replace(/^\/(?:Users|home)\/[^/]+/u, "~") ??
+    ""
+  );
 }
 
 function TemplateRepoPicker({
@@ -119,7 +124,9 @@ function TemplateRepoPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [target, setTarget] = useState<LoopTarget>("cloud");
+  const [target, setTarget] = useState<LoopTarget>(
+    template.localOnly ? "local" : "cloud",
+  );
   const [pending, setPending] = useState(false);
   const on = activeIds.size > 0;
   const choosable = (projects ?? []).filter((p) => !activeIds.has(p.id));
@@ -152,23 +159,23 @@ function TemplateRepoPicker({
       }}
     >
       <PopoverTrigger asChild>
-        <Button
+        <button
           type="button"
-          variant="outline"
-          size="sm"
           aria-label={`Add ${template.name} to repos`}
           className={cn(
-            "h-7 gap-1 px-2 text-xs",
-            on && "border-primary/40 text-primary hover:text-primary",
+            "flex h-9 min-w-21 cursor-pointer items-center justify-center gap-1.5 border-t border-l px-3 text-sm font-medium transition-colors",
+            on
+              ? "border-primary bg-primary font-semibold text-primary-foreground hover:bg-primary/90"
+              : "border-border bg-foreground/8 text-foreground hover:bg-foreground/14",
           )}
         >
           <Icon name={on ? "Check" : "Plus"} className="size-3.5" aria-hidden />
           {on ? "On" : "Add"}
-          <Icon name="ChevronDown" className="size-3" aria-hidden />
-        </Button>
+          <Icon name="ChevronDown" className="size-3 opacity-75" aria-hidden />
+        </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-88 p-1.5">
-        <div className="relative px-0.5">
+      <PopoverContent align="end" className="w-80 border-foreground/10 p-0">
+        <div className="relative border-b border-foreground/10">
           <Icon
             name="Search"
             className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground"
@@ -180,22 +187,22 @@ function TemplateRepoPicker({
             onChange={(event) => setQuery(event.target.value)}
             placeholder={`Search ${projects?.length ?? 0} repos`}
             aria-label="Search repos"
-            className="h-8 border-0 bg-muted/50 pl-8 text-sm"
+            className="h-9 rounded-none border-0 bg-transparent pl-8 text-sm focus-visible:ring-0"
           />
         </div>
-        <div className="flex items-center px-2 pb-1 pt-2 text-2xs font-medium text-subtle-foreground">
+        <div className="flex items-center px-2.5 pb-1 pt-2 text-2xs font-medium text-subtle-foreground">
           {projects === null ? "Loading repos…" : `${projects.length} repos`}
           {choosable.length > 0 ? (
             <button
               type="button"
-              className="ml-auto cursor-pointer text-primary hover:underline"
+              className="ml-auto cursor-pointer text-muted-foreground hover:text-foreground"
               onClick={() => setSelected(new Set(choosable.map((p) => p.id)))}
             >
               Select all
             </button>
           ) : null}
         </div>
-        <div className="max-h-80 overflow-y-auto">
+        <div className="max-h-[min(28rem,calc(var(--radix-popover-content-available-height)-6rem))] overflow-y-auto px-1 pb-1.5">
           {visible.map((project) => {
             const active = activeIds.has(project.id);
             const checked = active || selected.has(project.id);
@@ -203,32 +210,32 @@ function TemplateRepoPicker({
               <label
                 key={project.id}
                 className={cn(
-                  "flex h-11 cursor-pointer items-center gap-2.5 rounded-md px-2",
+                  "flex h-7 cursor-pointer items-center gap-2 rounded-md px-2",
                   active ? "cursor-default" : "hover:bg-state-hover",
-                  checked && !active && "bg-primary/7",
+                  checked && !active && "bg-foreground/6",
                 )}
               >
                 <Checkbox
+                  className="size-3.5 rounded-[4px] border-foreground/25 data-[state=checked]:border-foreground data-[state=checked]:bg-foreground data-[state=checked]:text-background [&_[data-icon-root]]:size-2.75"
                   checked={checked}
                   disabled={active || pending}
                   onCheckedChange={(value) =>
                     toggle(project.id, value === true)
                   }
                 />
-                <RepoLetter name={project.name} />
-                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <span className="truncate text-sm font-medium text-foreground">
-                    {project.name}
-                  </span>
-                  <span className="truncate text-left font-mono text-2xs text-subtle-foreground [direction:rtl]">
-                    <bdi>{parentFolder(project.path)}</bdi>
-                  </span>
+                <RepoIcon github={project.github} />
+                <span className="min-w-0 flex-1 truncate text-sm text-foreground">
+                  {project.name}
                 </span>
                 {active ? (
                   <span className="shrink-0 pl-2 text-2xs text-success">
                     running
                   </span>
-                ) : null}
+                ) : (
+                  <span className="max-w-[45%] shrink-0 truncate pl-2 text-left font-mono text-2xs text-subtle-foreground [direction:rtl]">
+                    <bdi>{repoHome(project)}</bdi>
+                  </span>
+                )}
               </label>
             );
           })}
@@ -238,35 +245,34 @@ function TemplateRepoPicker({
             </p>
           ) : null}
         </div>
-        <div className="mt-1 flex items-center gap-2 border-t border-foreground/10 px-1 pt-2">
+        <div className="flex items-center gap-2 border-t border-foreground/10 p-2">
           <div
             role="group"
             aria-label="Runs on"
-            className="flex rounded-md bg-muted/50 p-0.5"
+            className="flex rounded-md bg-foreground/5 p-0.5"
           >
             {(["cloud", "local"] as const).map((option) => (
               <button
                 key={option}
                 type="button"
                 aria-pressed={target === option}
-                disabled={pending}
+                disabled={pending || (option === "cloud" && template.localOnly)}
                 title={
                   option === "cloud"
-                    ? `Runs on Cloudroom's servers, even while this ${COMPUTER} is off`
+                    ? template.localOnly
+                      ? `Runs only on this ${COMPUTER}: Cloud threads can't see the project's threads`
+                      : `Runs on Cloudroom's servers, even while this ${COMPUTER} is off`
                     : `Runs on this ${COMPUTER}, only while it is awake`
                 }
                 onClick={() => setTarget(option)}
                 className={cn(
-                  "flex h-6 cursor-pointer items-center gap-1 rounded-[5px] px-2 text-xs text-muted-foreground transition-colors hover:text-foreground",
-                  target === option && "bg-state-hover text-foreground",
+                  "flex h-6 cursor-pointer items-center gap-1 rounded-[5px] px-2 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40",
+                  target === option && "bg-foreground/10 text-foreground",
                 )}
               >
                 <Icon
                   name={option === "cloud" ? "Cloud" : "Laptop"}
-                  className={cn(
-                    "size-3.5",
-                    target === option && option === "cloud" && "text-primary",
-                  )}
+                  className="size-3.5"
                   aria-hidden
                 />
                 {option === "cloud" ? "Cloud" : "Local"}
@@ -275,8 +281,9 @@ function TemplateRepoPicker({
           </div>
           <Button
             type="button"
+            variant="outline"
             size="sm"
-            className="ml-auto h-7 px-3 text-xs"
+            className="ml-auto h-7 border-foreground/15 px-3 text-xs"
             disabled={selected.size === 0 || pending}
             onClick={submit}
           >
@@ -292,79 +299,248 @@ function TemplateRepoPicker({
   );
 }
 
+// What a run does beyond reporting, read from the prompt so it can't drift from it.
+function templateAction(template: LoopTemplate): string | null {
+  if (template.prompt.includes("gh pr create")) return "Opens PR";
+  if (template.prompt.includes("gh pr review")) return "Reviews PRs";
+  return null;
+}
+
+// The infinity on every template card: two round loops joined by two straight strands that cross at (0, 0).
+const LOOP_MARK = (() => {
+  const radius = 27;
+  const reach = 39; // from the crossing to each loop's centre
+  const strand = Math.sqrt(reach ** 2 - radius ** 2);
+  const x = strand ** 2 / reach; // where a strand meets a loop
+  const y = (strand * radius) / reach;
+  const loop = `A${radius} ${radius} 0 1`;
+  return {
+    // Drawn a hair long, so no seam shows where it meets the other strand's loops.
+    under: `M${-x * 1.012} ${y * 1.012} L${x * 1.012} ${-y * 1.012}`,
+    over: `M${x} ${-y} ${loop} 1 ${x} ${y} L${-x} ${-y} ${loop} 0 ${-x} ${y}`,
+    crossing: `M${x * 0.72} ${y * 0.72} L${-x * 0.72} ${-y * 0.72}`,
+  };
+})();
+const mix = (percent: number, other: string) =>
+  `color-mix(in oklab, var(--primary) ${percent}%, ${other})`;
+// Reflections down the tube, top to bottom: black chrome, and the accent color for a template that is on.
+const CHROME = {
+  off: {
+    rim: "#8a8f96",
+    stops: [
+      [0, "#f4f6f8"],
+      [0.1, "#6c7178"],
+      [0.24, "#1a1b1e"],
+      [0.5, "#000"],
+      [0.56, "#3c4046"],
+      [0.74, "#0e0f11"],
+      [0.9, "#8d939a"],
+      [1, "#fff"],
+    ],
+  },
+  on: {
+    rim: mix(80, "white"),
+    stops: [
+      [0, mix(35, "white")],
+      [0.3, "var(--primary)"],
+      [0.5, mix(22, "black")],
+      [0.56, mix(72, "black")],
+      [0.8, mix(70, "white")],
+      [1, "#fff"],
+    ],
+  },
+} as const;
+
+/** A chrome infinity, tilted 30°, in the card's top right corner. Decoration: the card's text says the rest. */
+function LoopMark({ on }: { on: boolean }) {
+  const id = useId();
+  const { rim, stops } = on ? CHROME.on : CHROME.off;
+  // Two bands of the same reflections, the inner one flipped, read as a round tube.
+  const reflections = (key: string, from: number, to: number) => (
+    <linearGradient
+      id={`${id}${key}`}
+      gradientUnits="userSpaceOnUse"
+      gradientTransform="rotate(30)"
+      x1="0"
+      y1={from}
+      x2="0"
+      y2={to}
+      spreadMethod="reflect"
+    >
+      {stops.map(([offset, color]) => (
+        <stop key={offset} offset={offset} style={{ stopColor: color }} />
+      ))}
+    </linearGradient>
+  );
+  const tube = (d: string) => (
+    <>
+      <path d={d} style={{ stroke: rim }} strokeWidth="18.4" />
+      <path d={d} stroke={`url(#${id}a)`} strokeWidth="17" />
+      <path d={d} stroke={`url(#${id}b)`} strokeWidth="9.5" />
+    </>
+  );
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 150 122"
+      fill="none"
+      className="pointer-events-none absolute top-0 right-0 hidden h-[8.47rem] w-[10.42rem] overflow-visible @[19rem]:block"
+    >
+      <defs>
+        {reflections("a", -21.5, 26.8)}
+        {reflections("b", 26.8, -12.5)}
+        <filter id={`${id}s`} x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="2.9" />
+        </filter>
+        <filter id={`${id}d`} x="-50%" y="-50%" width="200%" height="200%">
+          <feGaussianBlur stdDeviation="4.5" />
+        </filter>
+      </defs>
+      <g transform="translate(71.2 64.7) rotate(-30)">
+        <path
+          d={`${LOOP_MARK.under} ${LOOP_MARK.over}`}
+          stroke="#000"
+          strokeWidth="17"
+          opacity="0.6"
+          filter={`url(#${id}d)`}
+          transform="rotate(30) translate(2.7 4.5) rotate(-30)"
+        />
+        {tube(LOOP_MARK.under)}
+        <path
+          d={LOOP_MARK.crossing}
+          stroke="#000"
+          strokeWidth="21"
+          opacity="0.75"
+          filter={`url(#${id}s)`}
+        />
+        {tube(LOOP_MARK.over)}
+      </g>
+    </svg>
+  );
+}
+
 function TemplateCard({
   template,
   repos,
   activeIds,
   projects,
+  usage,
   renderAgent,
   onAdd,
 }: {
   template: LoopTemplate;
-  repos: readonly string[];
+  repos: readonly { name: string; github: string | null }[];
   activeIds: ReadonlySet<string>;
   projects: readonly TemplateProject[] | null;
+  usage: TemplateUsage[string] | undefined;
   renderAgent: (agent: AutomationAgentSummary) => ReactNode;
   onAdd: LoopTemplatesState["onAdd"];
 }) {
   const on = repos.length > 0;
+  const action = templateAction(template);
+  const dot = (
+    <span aria-hidden className="text-muted-foreground/40">
+      ·
+    </span>
+  );
   return (
-    <div className="grid min-w-0 grid-cols-[1.25rem_minmax(0,1fr)_auto] content-start items-center gap-x-2.5 rounded-lg border border-border bg-surface-raised p-3.5">
-      <Icon
-        name={template.icon}
-        className={cn(
-          "size-4",
-          on ? "text-primary" : "text-muted-foreground/70",
-        )}
-        aria-hidden
-      />
-      <span className="truncate text-base font-semibold text-foreground">
-        {template.name}
-      </span>
-      <TemplateRepoPicker
-        template={template}
-        projects={projects}
-        activeIds={activeIds}
-        onAdd={onAdd}
-      />
-      <p className="col-span-2 col-start-2 mt-1 text-sm leading-snug text-muted-foreground">
+    // The text keeps clear of the infinity, so nothing ever covers it.
+    <div
+      className={cn(
+        "@container relative flex min-h-[10.3rem] min-w-0 flex-col overflow-hidden border bg-surface-raised",
+        on
+          ? "border-primary bg-linear-[105deg] from-transparent from-35% to-primary/25"
+          : "border-border",
+      )}
+    >
+      <LoopMark on={on} />
+      <div className="relative flex items-start gap-2 pt-3.5 pl-4.5 @[19rem]:pr-22">
+        <Icon
+          name={template.icon}
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            on ? "text-primary-text" : "text-muted-foreground",
+          )}
+          aria-hidden
+        />
+        <h3 className="text-lg leading-snug font-semibold text-foreground dark:text-white">
+          {template.name}
+        </h3>
+      </div>
+      <p className="relative mt-1 pr-4 pl-4.5 text-sm leading-snug text-muted-foreground @[19rem]:pr-[11rem]">
         {template.description}
       </p>
-      <span className="col-span-2 col-start-2 mt-3 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground/80">
-        {renderAgent({
-          providerId: template.providerId,
-          model: template.model,
-          reasoningLevel: template.reasoningLevel,
-        })}
-        <span aria-hidden className="text-muted-foreground/40">
-          ·
-        </span>
-        <span className="shrink-0">
-          {formatAutomationTrigger({
-            triggerType: "schedule",
-            cron: template.cron,
-            timezone: "UTC",
-          }).replace(/^On the hour, every/u, "Every")}
-        </span>
-      </span>
-      {on ? (
-        <span className="col-span-2 col-start-2 mt-2 flex flex-wrap gap-1">
-          {repos.slice(0, 3).map((name) => (
-            <span
-              key={name}
-              className="inline-flex h-5 items-center gap-1 rounded-[5px] bg-foreground/7 pl-0.5 pr-1.5 text-[11.5px] text-foreground"
-            >
-              <RepoLetter name={name} />
-              {name}
-            </span>
-          ))}
-          {repos.length > 3 ? (
-            <span className="inline-flex h-5 items-center rounded-[5px] bg-foreground/7 px-1.5 text-[11.5px] text-subtle-foreground">
-              +{repos.length - 3} more
-            </span>
+      <div className="relative mt-auto flex flex-col gap-1.5 pt-2.5 pr-24 pb-3.5 pl-4.5 text-sm text-muted-foreground @[19rem]:pr-[10.5rem]">
+        {/* The schedule and what it costs share a line: the schedule drives the usage. */}
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-1">
+          <Icon
+            name="Repeat"
+            className={cn("size-3.5 shrink-0", on && "text-primary-text")}
+            aria-hidden
+          />
+          <span
+            className={cn(
+              "font-medium",
+              on ? "text-primary-text" : "text-foreground dark:text-white",
+            )}
+          >
+            {cronCadence(template.cron)}
+          </span>
+          {usage ? (
+            <>
+              {dot}
+              <span
+                title={`A rough share of your weekly ${usage.limit} limit, from what this loop's runs usually use`}
+              >
+                {shareLabel(usage.percent)}/wk
+              </span>
+            </>
+          ) : null}
+          {action ? (
+            <>
+              {dot}
+              <span className="font-medium text-primary-text">{action}</span>
+            </>
           ) : null}
         </span>
-      ) : null}
+        <span className="flex min-w-0 items-center gap-1.5">
+          {renderAgent({
+            providerId: template.providerId,
+            model: template.model,
+            reasoningLevel: template.reasoningLevel,
+          })}
+        </span>
+        {on ? (
+          <span className="flex flex-wrap gap-1">
+            {repos.slice(0, 3).map((repo) => (
+              <span
+                key={repo.name}
+                className="inline-flex h-5 items-center gap-1 border border-primary/50 bg-primary/10 px-1.5 text-xs text-primary-text"
+              >
+                <Icon
+                  name={repo.github ? "GithubLogo" : "Laptop"}
+                  className="size-3 shrink-0"
+                  aria-hidden
+                />
+                {repo.name}
+              </span>
+            ))}
+            {repos.length > 3 ? (
+              <span className="inline-flex h-5 items-center bg-foreground/7 px-1.5 text-xs text-subtle-foreground">
+                +{repos.length - 3} more
+              </span>
+            ) : null}
+          </span>
+        ) : null}
+      </div>
+      <div className="absolute right-0 bottom-0">
+        <TemplateRepoPicker
+          template={template}
+          projects={projects}
+          activeIds={activeIds}
+          onAdd={onAdd}
+        />
+      </div>
     </div>
   );
 }
@@ -593,7 +769,7 @@ export function LoopTemplatesView({
           })),
         ]}
       />
-      <div className="-mt-6 min-w-0">
+      <div className="@container -mt-6 min-w-0">
         {TEMPLATE_PRIORITIES.map((priority) => {
           const group = shown.filter((t) => t.priority === priority.level);
           if (group.length === 0) return null;
@@ -606,7 +782,7 @@ export function LoopTemplatesView({
                 hint={priority.hint}
                 className={LOOP_PRIORITY_STYLE[priority.level].text}
               />
-              <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+              <div className="grid grid-cols-1 gap-4 @2xl:grid-cols-2">
                 {group.map((template) => {
                   const active =
                     running.get(template.name) ?? new Map<string, string>();
@@ -614,9 +790,15 @@ export function LoopTemplatesView({
                     <TemplateCard
                       key={template.id}
                       template={template}
-                      repos={[...active.values()]}
+                      repos={[...active].map(([id, name]) => ({
+                        name,
+                        github:
+                          templates.projects?.find((p) => p.id === id)
+                            ?.github ?? null,
+                      }))}
                       activeIds={new Set(active.keys())}
                       projects={templates.projects}
+                      usage={templates.usage?.[template.id]}
                       renderAgent={renderAgent}
                       onAdd={templates.onAdd}
                     />

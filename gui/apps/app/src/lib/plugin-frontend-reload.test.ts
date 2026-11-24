@@ -4,7 +4,7 @@ import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
 import { QueryClient } from "@tanstack/react-query";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { act } from "@testing-library/react";
 import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import {

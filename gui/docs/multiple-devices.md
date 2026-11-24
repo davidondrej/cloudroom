@@ -21,8 +21,10 @@ through Tailscale Serve:
 
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:38886
-npx bb-app config set BB_APP_URL https://<machine>.<tailnet>.ts.net
 ```
+
+Then set `BB_APP_URL` to `https://<machine>.<tailnet>.ts.net` in the data folder's
+`config.json` (`{"config": {"BB_APP_URL": "…"}}`) and restart the app.
 
 Start bb with `npx bb-app` and open the HTTPS URL. Tailscale ACLs are the access
 boundary for this route; do not expose the server through Funnel or the public
@@ -34,7 +36,11 @@ Existing remote host daemons that target a direct tailnet IP or
 upgraded server. Prefer signing in to Cloudroom and re-adding the machine from
 Settings → Machines so its installer records the cloudroom.run route. The
 private alternative is to open bb through the Tailscale Serve URL and re-run
-the Add machine installer from there.
+the Add machine installer from there. Machines refuse a non-loopback
+`http://` server URL. On a trusted network only, set
+`BB_ALLOW_INSECURE_SERVER_URL=1` in the server's `env.json`; new install
+commands pass it on, and an existing machine needs it in its own `env.json`
+(in `~/.bb-machines/<server-host>`).
 
 For compatibility only, `npx bb-app --server-bind-host 0.0.0.0` restores direct
 IPv4 network access. The public API is unauthenticated and permits command
@@ -57,12 +63,12 @@ If that browser should open work-host files in its local editor, first make
 sure bb is running on the browser device. Verify `ssh <work-host>` succeeds
 there, then map the server/work-host to that SSH target:
 
-```bash
-npx bb-app client ssh-target set <bb-server-origin> <ssh-target> --host-id <work-host-id>
+```json
+{ "servers": { "<bb-server-origin>": { "hosts": { "<work-host-id>": { "sshAuthority": "<ssh-target>" } } } } }
 ```
 
-Copy the work-host ID from `bb machine list`. `--host-id` may be omitted when
-the server has exactly one machine. A browser running on an enrolled execution
+Save that as `client.json` in the browser device's data folder. Copy the
+work-host ID from `room-cli machine list`. A browser running on an enrolled execution
 machine needs no SSH mapping for that same machine: connected daemons report
 their helper ports to the server, and the browser discovers the matching local
 helper after you enable integration.
@@ -78,8 +84,7 @@ If Settings reports that it cannot connect to the helper:
 2. Confirm the browser allows local network access for the bb page.
 3. A helper enrolled with this exact server trusts its origin automatically.
    For a separate local bb helper serving a custom HTTPS or Tailscale browser,
-   configure that exact origin with
-   `npx bb-app config set BB_APP_URL <origin>` and restart bb.
+   set that exact origin as `BB_APP_URL` in `config.json` and restart the app.
 4. Return to Settings → Files and choose **Retry**.
 
 Phones and tablets need no helper; editor-launch actions are simply unavailable.
@@ -91,38 +96,11 @@ cloudroom.dev/m, or scan the QR code in Settings → Cloudroom Connect, sign in,
 tap Open Cloudroom. Then use Add to Home Screen. Settings → Cloudroom Connect → Sign out all phones ends every
 phone session.
 
-### Push notifications on a self-hosted server
+### Notifications
 
-The built-in Push notifications plugin sends messages through Expo. A
-self-hosted server must reach `https://exp.host`. The server needs no Apple or
-Google key.
-
-An Expo push token lets its holder send a notification to one app installation.
-The token cannot read notifications. It cannot access the phone or authenticate
-to the bb server. Treat the token as private because a leak can cause unwanted
-notifications.
-
-The server sends a thread title and a short preview. Use these commands to
-manage device registrations and inspect the sender:
-
-```bash
-bb push-notifications list
-bb push-notifications add --token <expo-push-token> --platform ios --label <device-name>
-bb push-notifications remove <id>
-bb push-notifications status
-```
-
-Turn delivery off with `bb plugin disable push-notifications`. The plugin keeps
-registrations in its private storage. Enable the plugin to resume delivery.
-
-The `expoPushUrl` plugin setting changes the Expo endpoint. Use it only for a
-controlled test service or a compatible relay:
-
-```bash
-bb plugin config push-notifications set expoPushUrl <url>
-```
-
-The Expo request supports `HTTPS_PROXY` and `NO_PROXY`.
+There is no mobile push. The built-in Push notifications plugin shows system
+notifications only in open Cloudroom desktop windows and browser tabs. See
+[Configuration](configuration.md) for its switches.
 
 ## Open another of your Macs
 

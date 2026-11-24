@@ -4,10 +4,9 @@ import {
 } from "@/components/thread/pending-interactions/PendingInteractionShell";
 import { useCallback, useMemo, useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
-import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import type { JsonValue, PendingInteraction } from "@cloudroom/domain";
 import { PluginSlotMount } from "./PluginSlotMount";
-import { isModalPluginInteraction, resolvePendingInteraction } from "@/lib/plugin-slot-resolvers";
+import { isChatCardPluginInteraction, resolvePendingInteraction } from "@/lib/plugin-slot-resolvers";
 import { usePluginSlots } from "@/lib/plugin-slots";
 import { useStopThread } from "@/hooks/mutations/thread-runtime-mutations";
 import { sdk } from "@/lib/sdk";
@@ -143,22 +142,13 @@ export function PluginPendingInteractionComposer({
     )
   );
 
-  if (isModalPluginInteraction(request.pluginId)) {
+  // The plugin draws the whole card. It sits at the end of the chat (ThreadDetailView), so nothing grabs focus.
+  if (isChatCardPluginInteraction(request.pluginId)) {
     return (
-      <Dialog open>
-        <DialogContent
-          hideCloseButton
-          aria-describedby={undefined}
-          overlayClassName="bg-black/35 backdrop-blur-sm"
-          className="max-w-[520px] gap-0 rounded-[14px] border-white/15 p-7 sm:rounded-[14px]"
-          onEscapeKeyDown={(event) => event.preventDefault()}
-          onInteractOutside={(event) => event.preventDefault()}
-        >
-          <DialogTitle className="sr-only">{request.title}</DialogTitle>
-          {form}
-          {error ? <p className="mt-4 text-sm text-destructive">{error}</p> : null}
-        </DialogContent>
-      </Dialog>
+      <section aria-label={request.title}>
+        {form}
+        {error ? <p className="mt-2 text-sm text-destructive">{error}</p> : null}
+      </section>
     );
   }
 

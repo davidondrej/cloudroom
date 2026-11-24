@@ -86,6 +86,9 @@ describe("prepareThreadRewind", () => {
       expect(events).toEqual([]);
       expect(runtime.hasThread("thread-1:rewind:lease-1")).toBe(true);
       expect(runtime.hasThread("thread-1:rewind:lease-2")).toBe(true);
+      // Process cleanup leaves the thread's agent alone while an edit is staged (#607).
+      expect(runtime.hasThread("thread-1")).toBe(false);
+      expect(runtime.hasStagedRewind?.("thread-1")).toBe(true);
 
       await runtime.discardThreadRewind({ leaseId: "lease-1" });
       expect(
@@ -104,6 +107,7 @@ describe("prepareThreadRewind", () => {
 
       await runtime.discardThreadRewind({ leaseId: "lease-2" });
       expect(runtime.hasThread("thread-1:rewind:lease-2")).toBe(false);
+      expect(runtime.hasStagedRewind?.("thread-1")).toBe(false);
       expect(events).toEqual([]);
     } finally {
       await runtime.shutdown();

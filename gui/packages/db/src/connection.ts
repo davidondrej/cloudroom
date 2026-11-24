@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { chmodSync, closeSync, openSync, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { registerHostPathSqlFunctions } from "./data/host-path-sql.js";
@@ -153,10 +154,37 @@ function instrumentSqliteClient(
   });
 }
 
+// Every thread's history is in the database, so other accounts on this computer
+// must not read it (#2537). SQLite gives its -wal, -shm and -journal files the
+// database file's mode, so the file is made 0600 before SQLite opens it, and
+// existing files are fixed at every start. Windows has no mode bits.
+function makeDatabaseFilesOwnerOnly(path: string): void {
+  if (process.platform === "win32" || path === ":memory:" || path === "") {
+    return;
+  }
+  try {
+    closeSync(openSync(path, "wx", 0o600));
+  } catch (error) {
+    // A missing folder is left to SQLite, which reports it.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "EEXIST" && code !== "ENOENT") throw error;
+  }
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    const file = `${path}${suffix}`;
+    const info = statSync(file, { throwIfNoEntry: false });
+    if (info === undefined) continue;
+    if (info.uid !== process.getuid?.()) {
+      throw new Error(`${file} must be owned by this account`);
+    }
+    if ((info.mode & 0o077) !== 0) chmodSync(file, 0o600);
+  }
+}
+
 export function createConnection(
   source: string | Buffer = "bb.db",
   options: CreateConnectionOptions = {},
 ) {
+  if (typeof source === "string") makeDatabaseFilesOwnerOnly(source);
   const sqlite = new Database(source);
 
   sqlite.pragma("auto_vacuum = INCREMENTAL");

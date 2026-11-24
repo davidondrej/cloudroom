@@ -16,9 +16,16 @@ KEY = 'cursor-test-key-PRIVATE-CANARY'
 def cursor():
     home = Path(os.environ['HOME'])
     if '--list-models' in sys.argv:
-        good = os.environ.get('CURSOR_API_KEY') == KEY
-        print('default' if good else 'invalid key')
-        return 0 if good else 1
+        if 'CURSOR_API_KEY' in os.environ:
+            good = os.environ['CURSOR_API_KEY'] == KEY
+            print('default' if good else 'invalid key')
+            return 0 if good else 1
+        # A sign-in: Cursor refuses a token it no longer accepts (`stale`), while `status` still says yes.
+        if (home / 'connected').exists() and not (home / 'stale').exists():
+            print('default')
+            return 0
+        print('Authentication required', file=sys.stderr)
+        return 1
     if 'status' in sys.argv:
         print(json.dumps({'isAuthenticated': (home / 'connected').exists(), 'userInfo': {'email': 'fixture@example.invalid'}}))
         return 0
@@ -91,6 +98,15 @@ class CursorAccounts(unittest.TestCase):
         self.service.stop()
         self.service.start()
         self.assertEqual(self.account()['state'], 'connected')
+
+    def test_stale_sign_in_asks_to_connect_again(self):
+        (self.home / 'connected').touch()
+        self.assertEqual(self.account()['state'], 'connected')
+        # `status` still says yes; only listing models shows Cursor no longer accepts the saved token.
+        (self.home / 'stale').touch()
+        self.service.stop()
+        self.service.start()
+        self.assertEqual(self.account()['state'], 'missing')
 
     def test_key_is_private_verified_and_never_recorded(self):
         self.assertEqual(self.account('key', key='invalid')['state'], 'error')

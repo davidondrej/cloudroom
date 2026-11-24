@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildDevWebSocketUrl } from "./dev-websocket-url";
+import {
+  buildBrowserWebSocketUrl,
+  buildDevWebSocketUrl,
+} from "./dev-websocket-url";
 
 function installWindowLocation(url: string): void {
   const location = new URL(url);
@@ -25,6 +28,16 @@ describe("buildDevWebSocketUrl", () => {
 
     expect(buildDevWebSocketUrl({ path: "/ws" })).toBe(
       "ws://devbox.local:23802/ws",
+    );
+  });
+
+  it("uses 127.0.0.1 for a localhost page, the server origin the desktop trusts", () => {
+    vi.stubGlobal("__BB_DEV_WS_BROWSER_HOST_PORT__", 23_802);
+    vi.stubGlobal("__BB_DEV_APP_BROWSER_HOST_PORT__", 15_802);
+    installWindowLocation("http://localhost:15802/threads/thr_1");
+
+    expect(buildDevWebSocketUrl({ path: "/ws" })).toBe(
+      "ws://127.0.0.1:23802/ws",
     );
   });
 
@@ -64,5 +77,13 @@ describe("buildDevWebSocketUrl", () => {
     installWindowLocation("https://app.example.test/threads/thr_1");
 
     expect(buildDevWebSocketUrl({ path: "/ws" })).toBeUndefined();
+  });
+
+  it("keeps fallback URLs on the browser origin for URL-significant paths", () => {
+    installWindowLocation("http://dev.example.test:15802/threads/thr_1");
+
+    expect(buildBrowserWebSocketUrl("@a")).toBe(
+      "ws://dev.example.test:15802/@a",
+    );
   });
 });

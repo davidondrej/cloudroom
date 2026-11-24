@@ -3,7 +3,6 @@ import type {
   HostDaemonOnlineRpcRequestMessage,
   HostDaemonOnlineRpcResponseMessage,
 } from "@cloudroom/host-daemon-contract";
-import { WorkspaceError } from "@cloudroom/host-workspace";
 import {
   encodeClientTurnRequestIdNumber,
   type ClientTurnRequestId,
@@ -210,34 +209,35 @@ async function runRouterCommand({
 }
 
 describe("CommandRouter", () => {
-  it("does not warn for expected provision cancellation RPC failures", async () => {
+  // A server releasing a held attach and its cancel together delivers them
+  // back to back, before the attach registers its provision (#2171).
+  it("never provisions an attach cancelled right behind it, and does not warn", async () => {
     const harness = createHarness({ workspacePath: "/tmp/env-router" });
     const logger = {
       debug: vi.fn(),
       warn: vi.fn(),
     };
-    const runtimeManager = new RuntimeManager({
-      createRuntime: () => harness.runtime,
-      provisionWorkspace: async () => {
-        throw new WorkspaceError(
-          "provision_cancelled",
-          "Workspace provisioning was cancelled",
-        );
-      },
-    });
-    const router = createRouter(harness, { logger, runtimeManager });
+    const router = createRouter(harness, { logger });
 
-    const response = await runRouterCommand({
+    const response = runRouterCommand({
       command: createEnvironmentProvisionCommand(),
       requestId: "provision-cancelled-env-router",
       router,
     });
+    await runRouterCommand({
+      command: {
+        type: "environment.attach.cancel",
+        environmentId: "env-router",
+      },
+      requestId: "provision-cancel-env-router",
+      router,
+    });
 
-    expect(response).toMatchObject({
+    await expect(response).resolves.toMatchObject({
       ok: false,
       errorCode: "provision_cancelled",
-      errorMessage: "Workspace provisioning was cancelled",
     });
+    expect(harness.provisions).toEqual([]);
     expect(logger.warn).not.toHaveBeenCalled();
   });
 
@@ -376,6 +376,61 @@ describe("CommandRouter", () => {
         threadId: "thread-router",
       }),
     );
+  });
+
+  it("orders turn.submit and goal commands after the thread's process cleanup in another environment", async () => {
+    const harness = createHarness({ workspacePath: "/tmp/env-router" });
+    const cleanupEntered = createDeferredPromise<void>();
+    const releaseCleanup = createDeferredPromise<void>();
+    vi.spyOn(harness.manager, "reapIdleProviderSessions").mockImplementation(
+      async () => {
+        cleanupEntered.resolve();
+        await releaseCleanup.promise;
+        return { reapedSessions: [] };
+      },
+    );
+    const resume = vi.spyOn(
+      harness.manager,
+      "releaseThreadFromOtherEnvironments",
+    );
+    const router = createRouter(harness);
+    const cleanupTask = runRouterCommand({
+      command: {
+        type: "thread.processes.stop",
+        environmentId: "env-router-old",
+        threadId: "thread-router",
+      },
+      requestId: "cleanup-before-turn",
+      router,
+    });
+    await cleanupEntered.promise;
+    const submit = createTurnSubmitCommand();
+    const turnTask = runRouterCommand({
+      command: submit,
+      requestId: "turn-behind-cleanup",
+      router,
+    });
+    const goalTask = runRouterCommand({
+      command: {
+        type: "thread.goal.set",
+        environmentId: submit.environmentId,
+        threadId: submit.threadId,
+        objective: "ship it",
+        options: submit.options,
+        bridgeLaunch: submit.bridgeLaunch,
+        resumeContext: submit.resumeContext,
+      },
+      requestId: "goal-behind-cleanup",
+      router,
+    });
+    await flushAsyncWork();
+
+    expect(resume).not.toHaveBeenCalled();
+    releaseCleanup.resolve();
+    expect((await cleanupTask).ok).toBe(true);
+    expect((await turnTask).ok).toBe(true);
+    await goalTask;
+    expect(resume).toHaveBeenCalledTimes(2);
   });
 
   it("waits for an old-environment turn before resuming the moved thread", async () => {

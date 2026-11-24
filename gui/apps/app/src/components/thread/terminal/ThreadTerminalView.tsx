@@ -472,6 +472,7 @@ function buildTerminalSelection({
 
   const selection: MessageProseSelection = {
     text: trimmedText,
+    copyText: text,
     rect:
       anchor === null
         ? containerElement.getBoundingClientRect()
@@ -1165,9 +1166,10 @@ export function ThreadTerminalView({
           onTouchEnd={handleTerminalTouchEnd}
           onTouchCancel={handleTerminalTouchCancel}
         >
+          {/* ghostty-web makes this host contenteditable; hide the browser caret it draws. */}
           <div
             ref={containerRef}
-            className="h-full min-h-0 w-full overflow-hidden"
+            className="h-full min-h-0 w-full overflow-hidden caret-transparent"
           />
         </div>
       </ContextMenuTrigger>

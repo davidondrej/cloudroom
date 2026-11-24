@@ -9,7 +9,7 @@ const { preloadThreadSecondaryPanel } = vi.hoisted(() => ({
 }));
 
 vi.mock(
-  "@/components/secondary-panel/lazySecondaryPanelComponents",
+  "@/components/right-panel/shell/lazy-chunks",
   async (importOriginal) => ({
     ...(await importOriginal()),
     preloadThreadSecondaryPanel,

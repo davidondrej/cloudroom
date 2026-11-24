@@ -49,7 +49,7 @@ function PermissionRows({
             <span className="text-xs text-muted-foreground">{row.granted ? "Granted" : row.need}</span>
           </span>
           {row.granted === false ? (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => void grant(row.kind)}>
+            <Button type="button" size="sm" variant="outline" disabled={busy} onClick={() => void grant(row.kind)}>
               Grant
             </Button>
           ) : null}
@@ -71,6 +71,7 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
       </Button>
     );
   const payload = parsed.data;
+  const isForeground = payload.foreground === true;
   const current = permissions ?? payload.permissions;
   const decide = async (decision: "thread" | "always" | "deny") => {
     setBusy(true);
@@ -82,23 +83,29 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
     }
   };
   return (
-    <form
+    <div
       className="space-y-4"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void decide("always");
-      }}
       onKeyDown={(event) => {
         if (event.key === "Escape") void decide("deny");
       }}
     >
       <div className="space-y-1">
         <p className="text-sm text-foreground">
-          The agent wants to see and control <span className="font-semibold">{payload.app.name}</span>.
+          {isForeground ? (
+            <>
+              The agent wants to bring <span className="font-semibold">{payload.app.name}</span> to the front.
+            </>
+          ) : (
+            <>
+              The agent wants to see and control <span className="font-semibold">{payload.app.name}</span>.
+            </>
+          )}
         </p>
         {payload.purpose ? <p className="text-xs text-muted-foreground">{payload.purpose}</p> : null}
         <p className="text-xs text-muted-foreground">
-          It works in the background with its own cursor. Screen content may be sent to the model.
+          {isForeground
+            ? "This will temporarily take focus from what you are typing."
+            : "It works in the background with its own cursor. Screen content may be sent to the model."}
         </p>
       </div>
       {payload.platform === "darwin" && current.accessibility === false ? (
@@ -111,14 +118,22 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
         <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void decide("deny")}>
           Deny
         </Button>
-        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void decide("thread")}>
-          Only this thread
-        </Button>
-        <Button type="submit" size="sm" disabled={busy} autoFocus>
-          Always allow
-        </Button>
+        {isForeground ? (
+          <Button type="button" size="sm" disabled={busy} onClick={() => void decide("thread")}>
+            Allow once
+          </Button>
+        ) : (
+          <>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void decide("thread")}>
+              Only this thread
+            </Button>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void decide("always")}>
+              Always allow
+            </Button>
+          </>
+        )}
       </div>
-    </form>
+    </div>
   );
 }
 

@@ -19,13 +19,35 @@ const scanSchema = z.object({
   readers: z.number().catch(0),
   readersDone: z.number().catch(0),
   secrets: z.number().catch(0),
+  // The Cyber scan shares this card: repos instead of chats (docs/scopes/cyber-scan.md).
+  kind: z.enum(["workflow", "cyber"]).catch("workflow"),
+  critical: z.number().catch(0),
 });
 type Scan = z.output<typeof scanSchema>;
 
-const STAGE_LABEL: Record<Scan["stage"], string> = {
-  finding: "finding your chats",
-  reading: "reading your chats",
-  patterns: "finding patterns",
+const STAGE_LABEL: Record<Scan["kind"], Record<Scan["stage"], string>> = {
+  workflow: {
+    finding: "finding your chats",
+    reading: "reading your chats",
+    patterns: "finding patterns",
+  },
+  cyber: {
+    finding: "checking your computer and repos",
+    reading: "reviewing your repos",
+    patterns: "writing your report",
+  },
+};
+const WAITING_TEXT: Record<Scan["kind"], [string, string, string]> = {
+  workflow: [
+    "Finding your chats",
+    "Looking through 13 weeks on this computer",
+    "Secrets are masked before anything leaves it",
+  ],
+  cyber: [
+    "Checking your computer",
+    "And every repo active in the last 30 days",
+    "Read-only checks. Secrets never leave it",
+  ],
 };
 
 const fmt = (n: number) => n.toLocaleString("en-US");
@@ -91,7 +113,8 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
   const { ref, collapse } = useScrollCollapse();
   const read = scan.read.reduce((sum, n) => sum + n, 0);
   const finished = scan.stage === "patterns";
-  const waiting = busy && scan.chats === 0;
+  const cyber = scan.kind === "cyber";
+  const waiting = busy && scan.chats === 0 && scan.stage === "finding";
   const status = waiting
     ? ""
     : busy
@@ -120,9 +143,16 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
               busy && "animate-pulse",
             )}
           />
-          <span className="font-semibold text-foreground">Workflow scan</span>
+          <span className="font-semibold text-foreground">
+            {cyber ? "Cyber scan" : "Workflow scan"}
+          </span>
           <span className="truncate text-muted-foreground">
-            · {busy ? STAGE_LABEL[scan.stage] : finished ? "done" : "stopped"}
+            ·{" "}
+            {busy
+              ? STAGE_LABEL[scan.kind][scan.stage]
+              : finished
+                ? "done"
+                : "stopped"}
           </span>
           <span className="ml-auto flex items-center gap-3">
             <span
@@ -135,7 +165,7 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
               <Heatmap scan={scan} cell={4} gap={1} waiting={waiting} />
               {waiting ? null : (
                 <span className="text-[12px] font-semibold text-foreground tabular-nums">
-                  {fmt(read)}
+                  {cyber ? `${scan.readersDone}/${scan.readers}` : fmt(read)}
                 </span>
               )}
             </span>
@@ -160,13 +190,37 @@ function ScanProgressCard({ scan, busy }: { scan: Scan; busy: boolean }) {
             {waiting ? (
               <div className="min-w-0 pb-1">
                 <div className="text-[17px] leading-none font-semibold text-foreground">
-                  Finding your chats
+                  {WAITING_TEXT[scan.kind][0]}
                 </div>
                 <div className="mt-2 text-[11px] text-muted-foreground">
-                  Looking through 13 weeks on this computer
+                  {WAITING_TEXT[scan.kind][1]}
                 </div>
                 <div className="mt-1 text-[11px] text-muted-foreground">
-                  Secrets are masked before anything leaves it
+                  {WAITING_TEXT[scan.kind][2]}
+                </div>
+              </div>
+            ) : cyber ? (
+              <div className="min-w-0 pb-0.5">
+                <div className="text-[26px] leading-none font-semibold text-foreground tabular-nums">
+                  {fmt(scan.chats)}
+                  <span className="text-[15px] text-muted-foreground">
+                    {" "}
+                    repos
+                  </span>
+                </div>
+                <div className="mt-1 text-[11px] text-muted-foreground">
+                  checked, plus this computer
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground tabular-nums">
+                  <span className="text-primary">{scan.readersDone}</span>/
+                  {scan.readers} cloud reviews ·{" "}
+                  <span
+                    className={
+                      scan.critical ? "text-destructive-text" : undefined
+                    }
+                  >
+                    {fmt(scan.critical)} critical
+                  </span>
                 </div>
               </div>
             ) : (

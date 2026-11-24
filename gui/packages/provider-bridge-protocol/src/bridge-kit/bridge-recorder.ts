@@ -1,4 +1,11 @@
-import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { Readable, Writable } from "node:stream";
@@ -140,6 +147,60 @@ function parseRuntimeLine(line: string): ParsedRuntimeLine | null {
   return { id, method, threadId };
 }
 
+// Credentials must never reach a recording file. Keys ending in a credential
+// word are masked anywhere; `env`/`envVars`/`environment` maps use the broader
+// rule from scripts/provider-recordings/redact.mjs. Lines with nothing to mask
+// are written byte-for-byte so replay stays exact.
+const CREDENTIAL_KEY =
+  /(token|secret|password|passwd|apikey|cookie|authorization|credentials?)$/;
+const SECRET_ENV_KEY =
+  /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|AUTH)/i;
+const ENV_MAP_KEYS = new Set(["env", "envVars", "environment"]);
+// Forward match (no lookbehind) keeps this linear on long whitespace runs.
+const BEARER_VALUE = /(bearer\s+)[A-Za-z0-9._~+/-]{20,}=*/gi;
+const REDACTED = "REDACTED";
+const UNREDACTABLE_LINE = '{"redacted":"unparseable"}';
+
+function redactCredentials(value: unknown, inEnvMap: boolean): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactCredentials(entry, false));
+  }
+  if (typeof value !== "object" || value === null) {
+    return value;
+  }
+  const out: Record<string, unknown> = Object.create(null);
+  for (const [key, child] of Object.entries(value)) {
+    const secret = inEnvMap
+      ? SECRET_ENV_KEY.test(key)
+      : CREDENTIAL_KEY.test(key.toLowerCase().replace(/[-_]/g, ""));
+    out[key] =
+      secret && typeof child === "string" && child !== ""
+        ? REDACTED
+        : redactCredentials(child, ENV_MAP_KEYS.has(key));
+  }
+  return out;
+}
+
+function redactRecordingLine(line: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return line.replace(BEARER_VALUE, `$1${REDACTED}`);
+  }
+  let out = line;
+  try {
+    const redacted = JSON.stringify(redactCredentials(parsed, false));
+    if (redacted !== JSON.stringify(parsed)) {
+      out = redacted;
+    }
+  } catch {
+    // Never fall back to the raw line: it may hold the credential.
+    return UNREDACTABLE_LINE;
+  }
+  return out.replace(BEARER_VALUE, `$1${REDACTED}`);
+}
+
 function pendingKey(id: string | number): string {
   return `${typeof id}:${String(id)}`;
 }
@@ -160,12 +221,24 @@ export function createBridgeRecorder(args: { dir: string }): BridgeRecorder {
       return existing;
     }
     const scopeDir = join(dir, scope);
-    mkdirSync(scopeDir, { recursive: true });
+    // Owner-only: recordings hold full provider traffic. Existing scope
+    // folders and files from older runs are tightened too. Windows ignores
+    // POSIX modes, so skip the chmods there; a failed chmod keeps recording.
+    mkdirSync(scopeDir, { recursive: true, mode: 0o700 });
     const fd = openSync(
       join(scopeDir, bridgeRecordingFileName(direction)),
       "a",
+      0o600,
     );
     fds.set(key, fd);
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(scopeDir, 0o700);
+      } catch {}
+      try {
+        fchmodSync(fd, 0o600);
+      } catch {}
+    }
     return fd;
   }
 
@@ -179,7 +252,7 @@ export function createBridgeRecorder(args: { dir: string }): BridgeRecorder {
       run,
       seq,
       dir: recordArgs.direction,
-      line: recordArgs.line,
+      line: redactRecordingLine(recordArgs.line),
     };
     try {
       writeSync(

@@ -123,6 +123,44 @@ describe("file-preview", () => {
     });
   });
 
+  it("routes office files, archives, and audio to their own preview kinds", () => {
+    const bytes = Uint8Array.from([80, 75, 3, 4]);
+    const preview = (path: string, mimeType = "application/octet-stream") =>
+      buildFilePreview({
+        contentBytes: bytes,
+        mimeType,
+        path,
+        url: `/files/${path}`,
+      });
+
+    expect(preview("reports/Q3.XLSX")).toMatchObject({
+      kind: "document",
+      format: "xlsx",
+      contentBytes: bytes,
+    });
+    expect(preview("memo.docx")).toMatchObject({
+      kind: "document",
+      format: "docx",
+    });
+    expect(preview("deck.pptx")).toMatchObject({
+      kind: "document",
+      format: "pptx",
+    });
+    expect(preview("dist/assets.zip", "application/zip")).toMatchObject({
+      kind: "document",
+      format: "zip",
+    });
+    expect(preview("backup.tar.gz")).toMatchObject({
+      kind: "document",
+      format: "tgz",
+    });
+    expect(preview("recap.mp3", "audio/mpeg")).toMatchObject({
+      kind: "audio",
+      sizeBytes: 4,
+    });
+    expect(preview("playlist.m3u", "audio/x-mpegurl").kind).toBe("text");
+  });
+
   it("normalizes file preview mime types", () => {
     expect(normalizeFilePreviewMimeType("text/plain; charset=utf-8")).toBe(
       "text/plain",

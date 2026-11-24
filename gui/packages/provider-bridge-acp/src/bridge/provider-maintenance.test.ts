@@ -1,5 +1,16 @@
+import { existsSync } from "node:fs";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { CURSOR_ACP_MAINTENANCE, __testing } from "./provider-maintenance.js";
+import {
+  CURSOR_ACP_MAINTENANCE,
+  __testing,
+  acpInstallerCommand,
+  acpInstallerSchema,
+  getAcpProviderHealth,
+  getAcpProviderInstallationStatus,
+} from "./provider-maintenance.js";
 
 function cursorMissingInstallationStatus() {
   return {
@@ -79,7 +90,8 @@ describe("ACP provider maintenance", () => {
       ),
     ).toEqual({
       available: false,
-      message: "opencode install is not available on this host.",
+      message:
+        "opencode install is not available on this host: opencode is not installed. Cloudroom has no install or update to run.",
     });
     expect(
       __testing.buildProviderInstallationRun(
@@ -92,7 +104,153 @@ describe("ACP provider maintenance", () => {
       ),
     ).toEqual({
       available: false,
-      message: "opencode install is not available on this host.",
+      message:
+        "opencode install is not available on this host: opencode is not installed. Cloudroom has no install or update to run.",
     });
+  });
+
+  // #1156: legacy Kilo 0.x has no `kilo acp` and exits with a piped-input error.
+  it.skipIf(process.platform === "win32").each([
+    { version: "0.26.1", unsupported: true, health: "unsupported_version" },
+    { version: "7.8.27", unsupported: false, health: "ready" },
+    { version: "unparseable", unsupported: false, health: "ready" },
+  ])(
+    "gates a CLI below its minimum version ($version)",
+    async ({ version, unsupported, health }) => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-kilo-"));
+      try {
+        const command = path.join(dir, "kilo");
+        await writeFile(command, `#!/bin/sh\necho "${version}"\n`);
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: () => ({
+            command: "sh",
+            args: [],
+            displayCommand: "install kilo",
+          }),
+          command,
+          minimumVersion: "1.0.0",
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: health, minimumSupportedVersion: "1.0.0" },
+        });
+        const status = await getAcpProviderInstallationStatus(target);
+        expect(status).toMatchObject({
+          versionUnsupported: unsupported,
+          installAction: unsupported ? { kind: "update" } : null,
+        });
+        expect(
+          __testing.buildProviderInstallationRun(status, {
+            ...target,
+            action: "update",
+          }),
+        ).toMatchObject(
+          unsupported
+            ? {
+                available: true,
+                verification: { kind: "version_at_least", version: "1.0.0" },
+              }
+            : { available: false },
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // #1823: cmux ships a `grok` wrapper that only forwards to the real CLI.
+  it.skipIf(process.platform === "win32")(
+    "treats a wrapper whose CLI is missing as not installed",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-grok-"));
+      try {
+        const command = path.join(dir, "grok");
+        await writeFile(
+          command,
+          `#!/bin/sh\necho "Error: grok not found in PATH" >&2\nexit 127\n`,
+        );
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: () => ({ command: "sh", args: [], displayCommand: "" }),
+          command,
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: "not_installed" },
+        });
+        expect(await getAcpProviderInstallationStatus(target)).toMatchObject({
+          installed: false,
+          installAction: { kind: "install" },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "checks Hermes without running its update-checking --version",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "bb-acp-hermes-"));
+      try {
+        const command = path.join(dir, "hermes");
+        await writeFile(
+          command,
+          `#!/bin/sh\ntouch "${dir}/ran"\necho "Hermes Agent v1.0.0"\n`,
+        );
+        await chmod(command, 0o755);
+        const target = {
+          maintenance: undefined,
+          installer: undefined,
+          command,
+        };
+        expect(await getAcpProviderHealth(target)).toMatchObject({
+          health: { status: "ready", installedVersion: null },
+        });
+        expect(await getAcpProviderInstallationStatus(target)).toMatchObject({
+          installed: true,
+          currentVersion: null,
+        });
+        expect(existsSync(path.join(dir, "ran"))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("runs Kimi's PowerShell installer on Windows, not the Unix script (#1696)", () => {
+    const installer = acpInstallerSchema.parse({
+      scriptUrl: "https://code.kimi.com/kimi-code/install.sh",
+      powershellUrl: "https://code.kimi.com/kimi-code/install.ps1",
+    });
+    const windows = acpInstallerCommand(installer, "win32");
+    expect(windows).toMatchObject({
+      command: "powershell.exe",
+      displayCommand: "irm https://code.kimi.com/kimi-code/install.ps1 | iex",
+    });
+    // Its failure path asks "Press Enter to exit"; nobody answers.
+    expect(windows.args).toContain("-NonInteractive");
+    expect(acpInstallerCommand(installer, "linux").command).toBe("sh");
+  });
+
+  it("runs Cursor's PowerShell installer on Windows, not the Unix script (#1897)", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      expect(CURSOR_ACP_MAINTENANCE.installer(null)).toMatchObject({
+        command: "powershell.exe",
+        displayCommand: "irm https://cursor.com/install?win32=true | iex",
+      });
+      // The script deletes the install, running versions included: update in
+      // place, with CI set so `update` can't switch cursor-agent to Grok.
+      expect(
+        CURSOR_ACP_MAINTENANCE.installer("C:\\O'N\\ca.cmd").args,
+      ).toContain(
+        "$env:CI = '1'; & 'C:\\O''N\\ca.cmd' update; exit $LASTEXITCODE",
+      );
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 });

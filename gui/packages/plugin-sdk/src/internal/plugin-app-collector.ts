@@ -31,6 +31,7 @@ import type {
   PluginSourceCodeRendererRegistration,
   PluginThreadHeaderActionRegistration,
   PluginThreadActionRegistration,
+  ExperimentalProjectActionRegistration,
   ExperimentalPluginBrowserToolbarActionRegistration,
   PluginThreadListRegistration,
   PluginThreadPanelActionRegistration,
@@ -267,6 +268,7 @@ const NAV_PANEL_REGISTRATION_KEYS: ReadonlySet<string> = new Set(
     component: true,
     fixedTabs: true,
     experimental_sidebarAccessory: true,
+    experimental_sidebarLabel: true,
     headerContent: true,
   } satisfies Record<keyof PluginNavPanelRegistration, true>),
 );
@@ -368,6 +370,7 @@ export interface CollectedPluginAppRegistrations {
   threadLists: PluginThreadListRegistration[];
   threadHeaderActions: PluginThreadHeaderActionRegistration[];
   threadActions: PluginThreadActionRegistration<unknown>[];
+  projectActions: ExperimentalProjectActionRegistration[];
   browserToolbarActions: ExperimentalPluginBrowserToolbarActionRegistration[];
   fileOpeners: PluginFileOpenerRegistration[];
   sourceCodeRenderers: PluginSourceCodeRendererRegistration[];
@@ -495,6 +498,7 @@ export function collectPluginAppRegistrations(
     threadLists: [],
     threadHeaderActions: [],
     threadActions: [],
+    projectActions: [],
     browserToolbarActions: [],
     fileOpeners: [],
     sourceCodeRenderers: [],
@@ -526,6 +530,7 @@ export function collectPluginAppRegistrations(
     threadList: new Set<string>(),
     threadHeaderAction: new Set<string>(),
     threadAction: new Set<string>(),
+    projectAction: new Set<string>(),
     browserToolbarAction: new Set<string>(),
     fileOpener: new Set<string>(),
     sourceCodeRenderer: new Set<string>(),
@@ -656,13 +661,18 @@ export function collectPluginAppRegistrations(
             `${kind}: "headerContent" must be a React component function when set`,
           );
         }
-        if (
-          registration.experimental_sidebarAccessory !== undefined &&
-          typeof registration.experimental_sidebarAccessory !== "function"
-        ) {
-          throw new Error(
-            `${kind}: "experimental_sidebarAccessory" must be a React component function when set`,
-          );
+        for (const key of [
+          "experimental_sidebarAccessory",
+          "experimental_sidebarLabel",
+        ] as const) {
+          if (
+            registration[key] !== undefined &&
+            typeof registration[key] !== "function"
+          ) {
+            throw new Error(
+              `${kind}: "${key}" must be a React component function when set`,
+            );
+          }
         }
         const fixedTabs: PluginNavPanelFixedTabRegistration[] = (() => {
           if (registration.fixedTabs === undefined) return [];
@@ -742,6 +752,9 @@ export function collectPluginAppRegistrations(
                   registration.experimental_sidebarAccessory,
               }
             : {}),
+          ...(registration.experimental_sidebarLabel !== undefined
+            ? { experimental_sidebarLabel: registration.experimental_sidebarLabel }
+            : {}),
           ...(registration.headerContent !== undefined
             ? { headerContent: registration.headerContent }
             : {}),
@@ -815,6 +828,19 @@ export function collectPluginAppRegistrations(
         collected.threadHeaderActions.push({
           id,
           title: requireNonEmptyString(kind, "title", registration.title),
+          component: requireComponent(kind, registration.component),
+        });
+      },
+      experimental_projectAction(registration) {
+        const kind = "slots.experimental_projectAction";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.projectAction, id);
+        const badge = requireOptionalString(kind, "badge", registration.badge);
+        collected.projectActions.push({
+          id,
+          title: requireNonEmptyString(kind, "title", registration.title),
+          icon: requireNonEmptyString(kind, "icon", registration.icon),
+          ...(badge !== undefined ? { badge } : {}),
           component: requireComponent(kind, registration.component),
         });
       },

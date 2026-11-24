@@ -1,4 +1,5 @@
 // Your Macs on cloudroom.run: list them and open one in this window (ADR 0184 relay).
+import { localServerFetch } from "./local-caller-auth.js";
 import { execFile } from "node:child_process";
 import { hostname } from "node:os";
 import { promisify } from "node:util";
@@ -17,7 +18,7 @@ const RELAY_HOST = new URL(
 const OPEN_TIMEOUT_MS = 5_000;
 // A Mac that blinks offline (a relay hiccup, a reconnect) is still the one you picked, so keep trying this long before
 // opening this Mac instead.
-export const OPEN_RETRY_MS = 30_000;
+const OPEN_RETRY_MS = 10_000;
 const LIST_TIMEOUT_MS = 10_000;
 
 const computerSchema = z.object({
@@ -91,7 +92,7 @@ export async function computerName(): Promise<string> {
 export async function fetchRelayCredential(
   localServerUrl: string,
 ): Promise<ConnectCredential | null | undefined> {
-  const response = await fetch(
+  const response = await localServerFetch(
     new URL("/api/v1/plugins/connect/rpc/relayCredential", localServerUrl),
     {
       method: "POST",
@@ -206,9 +207,6 @@ export async function openComputer(
   return { ok: true, value: { url, expiresAt: cookie.expiresAt } };
 }
 
-/** Every request to a Mac on the relay, for watching its answers. */
-export const RELAY_URL_PATTERN = `*://*.${RELAY_HOST}/*`;
-
 const RENEW_CHECK_MS = 60 * 60_000;
 // The relay's sign-in lasts 30 days. Renew with a week to spare, so a sleeping Mac never wakes up signed out.
 const RENEW_BEFORE_MS = 7 * 24 * 60 * 60_000;
@@ -307,6 +305,8 @@ const SYNC_INTERVAL_MS = 10 * 60_000;
 // While this Mac stands in for an offline one, check every minute so "Switch back" shows up soon.
 const FALLBACK_SYNC_INTERVAL_MS = 60_000;
 const MIN_LIST_INTERVAL_MS = 60_000;
+// While standing in, a refresh the page asks for (Settings, the chip, a finished sign-in) may run this often.
+const FALLBACK_MIN_LIST_INTERVAL_MS = 10_000;
 // The Connect plugin registers this Mac a few seconds after the server starts.
 const STARTUP_RETRY_MS = 5_000;
 const STARTUP_RETRIES = 6;
@@ -325,6 +325,7 @@ export function createComputersSync(args: {
   let inFlight: Promise<void> | null = null;
   let lastAttemptAt = 0;
   let retries = 0;
+  let fallback = false;
   let timer: ReturnType<typeof setInterval> | undefined;
 
   const schedule = (ms: number) => {
@@ -356,14 +357,65 @@ export function createComputersSync(args: {
   return {
     syncNow,
     onListRequested() {
-      if (Date.now() - lastAttemptAt >= MIN_LIST_INTERVAL_MS) void syncNow();
+      if (Date.now() - lastAttemptAt < (fallback ? FALLBACK_MIN_LIST_INTERVAL_MS : MIN_LIST_INTERVAL_MS)) return;
+      // Right after a sign-in the Connect plugin needs a few seconds for its key, so keep trying for a bit.
+      if (fallback) retries = 0;
+      void syncNow();
     },
     onRuntimeReady() {
       retries = 0;
       void syncNow();
     },
     setFallback(on) {
+      fallback = on;
       schedule(on ? FALLBACK_SYNC_INTERVAL_MS : SYNC_INTERVAL_MS);
     },
   };
+}
+
+// A closed-lid Mac wakes for a few seconds every few minutes. Only a Mac still online this long after the first list
+// that showed it counts as back, so a brief wake never pulls this Mac's window over (ADR 20261113-210101).
+export const BACK_CHECK_MS = 30_000;
+
+/** Reads each Mac list while this Mac stands in, and says when the picked Mac is back for real. */
+export function createReturnWatch(now: () => number = Date.now) {
+  let seenAt: number | null = null;
+  return {
+    /** "check-again": first seen online, look again in BACK_CHECK_MS. "return": still online since then. */
+    next(live: boolean): "wait" | "check-again" | "return" {
+      if (!live) {
+        seenAt = null;
+        return "wait";
+      }
+      if (seenAt === null) {
+        seenAt = now();
+        return "check-again";
+      }
+      return now() - seenAt >= BACK_CHECK_MS ? "return" : "wait";
+    },
+    reset() {
+      seenAt = null;
+    },
+  };
+}
+
+/**
+ * Opens another Mac when the app starts or the user picks it. While the relay says it's offline, tries again for
+ * 10 seconds. After that the window never leaves that Mac by itself: its page shows "Reconnecting…" and recovers.
+ */
+export async function openWithRetries<Opened>(args: {
+  current: () => boolean;
+  /** One try to open the Mac on the relay. */
+  open: () => Promise<ComputersResult<Opened>>;
+  sleep?: (ms: number) => Promise<void>;
+}): Promise<Opened | null> {
+  const sleep = args.sleep ?? ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = Date.now() + OPEN_RETRY_MS;
+  for (let retryDelayMs = 1_000; ; retryDelayMs *= 2) {
+    const opened = await args.open();
+    if (!args.current()) return null;
+    if (opened.ok) return opened.value;
+    if (opened.reason !== "offline" || Date.now() + retryDelayMs > deadline) return null;
+    await sleep(retryDelayMs);
+  }
 }

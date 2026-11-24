@@ -53,8 +53,9 @@ export function needsMcpSignIn(server: RemoteMcpServer): Promise<boolean> {
 }
 
 async function getJson(url: string, init: RequestInit = {}): Promise<Json | null> {
-  const response = await fetch(url, { ...init, redirect: "follow", signal: AbortSignal.timeout(TIMEOUT_MS), headers: { accept: "application/json", ...init.headers } }).catch(() => null);
-  if (!response?.ok) { void response?.body?.cancel().catch(() => {}); return null; }
+  const response = await fetch(url, { redirect: "follow", ...init, signal: AbortSignal.timeout(TIMEOUT_MS), headers: { accept: "application/json", ...init.headers } }).catch(() => null);
+  // An answer from another site could name its own token endpoint and get the sign-in code (#1941).
+  if (!response?.ok || new URL(response.url).origin !== new URL(url).origin) { void response?.body?.cancel().catch(() => {}); return null; }
   const value: unknown = await response.json().catch(() => null);
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : null;
 }
@@ -118,7 +119,8 @@ export async function finishMcpSignIn(query: URLSearchParams, account: SandboxAc
   const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
   if (login.clientSecret && login.secretInBody) body.set("client_secret", login.clientSecret);
   else if (login.clientSecret) headers.authorization = `Basic ${Buffer.from(`${encodeURIComponent(login.clientId)}:${encodeURIComponent(login.clientSecret)}`).toString("base64")}`;
-  const tokens = await getJson(login.tokenUrl, { method: "POST", headers, body });
+  // Never follow a redirect with the code, verifier and secret: it could hand them to another site (#1941).
+  const tokens = await getJson(login.tokenUrl, { method: "POST", headers, body, redirect: "error" });
   const accessToken = text(tokens?.access_token);
   if (!accessToken) throw new CloudroomError(`${login.name} didn't finish the sign-in. Try again.`, 502);
   const expiresIn = Number(tokens?.expires_in);

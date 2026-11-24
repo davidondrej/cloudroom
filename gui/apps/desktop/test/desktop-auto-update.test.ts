@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
-import type {
-  UpdateCheckResult,
-  UpdateDownloadedEvent,
-  UpdateInfo,
+import {
+  AppImageUpdater,
+  type UpdateCheckResult,
+  type UpdateDownloadedEvent,
+  type UpdateInfo,
 } from "electron-updater";
 import {
   createDesktopAutoUpdateService,
+  createElectronAutoUpdaterAdapter,
   shouldEnableDesktopAutoUpdate,
   type DesktopAutoUpdateAvailableHandler,
   type DesktopAutoUpdateDownloadedHandler,
@@ -531,6 +533,7 @@ describe("desktop auto-update service", () => {
   });
 
   it("offers the download again after a Restart to update that didn't install", () => {
+    const updater = new DesktopAutoUpdaterAdapterStub();
     const service = createDesktopAutoUpdateService({
       currentVersion: "0.0.1",
       enabled: true,
@@ -538,10 +541,22 @@ describe("desktop auto-update service", () => {
       logger: createLogger(createLoggerMessages()),
       now: () => Date.parse(checkedAt),
       platform: "windows",
-      updater: new DesktopAutoUpdaterAdapterStub(),
+      updater,
     });
     service.markInstallFailed("0.0.2");
-    expect(service.getInfo()).toMatchObject({ downloadState: "failed", latestVersion: "0.0.2", updateAvailable: true, updateDownloaded: false });
+    expect(service.getInfo()).toMatchObject({
+      downloadState: "failed",
+      installFailed: true,
+      latestVersion: "0.0.2",
+      updateAvailable: true,
+      updateDownloaded: false,
+    });
+    // Ready again, it still says the last restart didn't install.
+    updater.emitUpdateDownloaded(createDownloadedEvent("0.0.2"));
+    expect(service.getInfo()).toMatchObject({
+      installFailed: true,
+      updateDownloaded: true,
+    });
   });
 
   it("does not initialize electron-updater in dev mode without the override", async () => {
@@ -568,6 +583,27 @@ describe("desktop auto-update service", () => {
     expect(updater.checkForUpdatesCalls).toBe(0);
     expect(updater.autoDownload).toBeNull();
   });
+
+  // Also breaks if an electron-updater upgrade renames spawnLog, which starts the new AppImage.
+  it.runIf(process.platform === "linux")(
+    "starts the new AppImage through the fd cleanup, so old mounts unmount (#2155)",
+    async () => {
+      const updater = Object.create(
+        AppImageUpdater.prototype,
+      ) as AppImageUpdater;
+      const spawned: unknown[][] = [];
+      expect(typeof Reflect.get(updater, "spawnLog")).toBe("function");
+      Reflect.set(updater, "spawnLog", async (...args: unknown[]) =>
+        spawned.push(args),
+      );
+      createElectronAutoUpdaterAdapter(updater, { on: () => undefined });
+      await Reflect.get(updater, "spawnLog")("/apps/Cloudroom.AppImage", [], {
+        PATH: "/usr/bin",
+      });
+      expect(spawned[0]?.[0]).toBe("/bin/bash");
+      expect(spawned[0]?.[1]).toContain("/apps/Cloudroom.AppImage");
+    },
+  );
 
   it("allows the dev-mode auto-update override", () => {
     expect(

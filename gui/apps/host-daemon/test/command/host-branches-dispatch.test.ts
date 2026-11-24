@@ -349,19 +349,23 @@ describe("host.inspect_git_source dispatch", () => {
     expect(result.checkout.kind).toBe("detached");
   });
 
-  it("reports dirty primary checkouts", async () => {
+  it("reports dirty primary checkouts but not untracked-only ones", async () => {
     const repoPath = await initBranchRepo();
-    await fs.writeFile(path.join(repoPath, "draft.txt"), "dirty\n", "utf8");
+    await fs.writeFile(path.join(repoPath, "draft.txt"), "untracked\n", "utf8");
     const harness = createHarness();
+    const inspect = () =>
+      dispatchOnlineRpcCommand(
+        {
+          type: "host.inspect_git_source",
+          path: repoPath,
+          remoteRefresh: "blocking",
+        },
+        harness.dispatchOptions(),
+      );
 
-    const result = await dispatchOnlineRpcCommand(
-      {
-        type: "host.inspect_git_source",
-        path: repoPath,
-        remoteRefresh: "blocking",
-      },
-      harness.dispatchOptions(),
-    );
+    expect((await inspect()).hasUncommittedChanges).toBe(false);
+    await fs.writeFile(path.join(repoPath, "README.md"), "dirty\n", "utf8");
+    const result = await inspect();
 
     expect(result.hasUncommittedChanges).toBe(true);
     expect(result.operation).toEqual({ kind: "none" });

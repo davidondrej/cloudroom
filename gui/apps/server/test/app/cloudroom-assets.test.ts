@@ -14,26 +14,25 @@ import { pathToFileURL } from "node:url";
 import { expect, it, onTestFinished } from "vitest";
 
 it.each([false, true])(
-  "runs the bundled sync helper with sibling core present: %s",
-  (withCore) => {
+  "runs Core's sync helper, from the build when it has one: %s",
+  (built) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), "cloudroom-assets-")));
     onTestFinished(() => rmSync(root, { recursive: true, force: true }));
     const source = join(root, "gui/apps/server/src");
+    const core = join(root, "core/src/sync");
     mkdirSync(source, { recursive: true });
     copyFileSync(
       new URL("../../src/cloudroom-workspace-asset.ts", import.meta.url),
-      join(source, "paths.mjs"),
+      join(source, "paths.ts"),
     );
-    cpSync(
-      new URL("../../src/assets/cloudroom-sync", import.meta.url),
-      join(source, "assets/cloudroom-sync"),
-      { recursive: true },
-    );
-    if (withCore) {
-      mkdirSync(join(root, "core/src/sync"), { recursive: true });
+    cpSync(new URL("../../../../../core/src/sync", import.meta.url), core, {
+      recursive: true,
+    });
+    if (built) {
+      cpSync(core, join(source, "assets/cloudroom-sync"), { recursive: true });
       writeFileSync(
-        join(root, "core/src/sync/client.py"),
-        "raise RuntimeError('must use bundled helper')\n",
+        join(core, "client.py"),
+        "raise RuntimeError('must use the built helper')\n",
       );
     }
 
@@ -43,13 +42,13 @@ it.each([false, true])(
         "--input-type=module",
         "-e",
         "const m = await import(process.argv[1]); console.log(m.CLOUDROOM_SYNC_SCRIPT_PATH)",
-        pathToFileURL(join(source, "paths.mjs")).href,
+        pathToFileURL(join(source, "paths.ts")).href,
       ],
       { encoding: "utf8", cwd: root, timeout: 10_000 },
     );
     expect(resolved.status, resolved.stderr).toBe(0);
     expect(resolved.stdout.trim()).toBe(
-      join(source, "assets/cloudroom-sync/client.py"),
+      built ? join(source, "assets/cloudroom-sync/client.py") : join(core, "client.py"),
     );
     const help = spawnSync(
       "python3",

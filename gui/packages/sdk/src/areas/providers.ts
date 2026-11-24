@@ -16,6 +16,8 @@ export type ProviderHostRoutingArgs =
 
 export type ProviderListArgs = ProviderHostRoutingArgs & {
   capability?: SystemProvidersQuery["capability"];
+  /** Just this registered provider, without checking any host. */
+  providerId?: string;
   signal?: AbortSignal;
 };
 export type ProviderInstallableArgs = ProviderHostRoutingArgs & {
@@ -23,11 +25,15 @@ export type ProviderInstallableArgs = ProviderHostRoutingArgs & {
 };
 export type ProviderModelsArgs = ProviderHostRoutingArgs & {
   providerId?: string;
+  /** Lists the models a new thread in this project gets (#1236). */
+  projectId?: string;
   signal?: AbortSignal;
 };
 
 export type ProviderRestartModelDiscoveryArgs = ProviderHostRoutingArgs & {
   providerId: string;
+  /** Restarts the list a new thread in this project gets (#1236). */
+  projectId?: string;
   signal?: AbortSignal;
 };
 
@@ -54,6 +60,7 @@ export function createProvidersArea(args: CreateSdkAreaArgs): ProvidersArea {
               capability: input.capability,
               environmentId: input.environmentId,
               hostId: input.hostId,
+              providerId: input.providerId,
             },
           },
           ...signalRequestArgs(input.signal),
@@ -84,6 +91,7 @@ export function createProvidersArea(args: CreateSdkAreaArgs): ProvidersArea {
               providerId: input.providerId,
               hostId: input.hostId,
               environmentId: input.environmentId,
+              projectId: input.projectId,
             },
           },
           ...signalRequestArgs(input.signal),

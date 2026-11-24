@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { createAutomationId, createAutomationRunId } from "./ids.js";
+import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
   automationExecutionSchema,
   automationResponseSchema,
@@ -39,7 +40,16 @@ const AUTOMATION_RUN_COLUMNS = `id, automation_id AS automationId, run_mode AS r
 export type Db = Database.Database;
 
 const AUTOMATION_MAX_CONSECUTIVE_FAILURES = 3;
-export const AUTOMATION_RETRY_BASE_MS = 30_000;
+/** Before a pause, a scheduled loop tries again 1 minute, then 15 minutes, after a failure. */
+export const AUTOMATION_RETRY_DELAYS_MS = [60_000, 15 * 60_000] as const;
+/** A run's error starts with this when its provider refused the work, say OpenAI's cybersecurity filter (run.ts). It
+ *  fails the run, but never counts toward a pause: its retry runs on the other provider (ADR 20261119-091500). */
+export const REFUSED = "Refused: ";
+// A paused loop tries again on its own (ADR 20261103-235500), like Cloud loops: 1 hour, 6 hours, then daily, until 10
+// failures in a row. Each try that fails adds one, so the count says how far along it is.
+const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
+const STOP_RETRYING = 10;
+const PAUSE_MARK = "%(loop paused after % consecutive failures)";
 
 export interface AutomationRow {
   id: string;
@@ -236,13 +246,40 @@ export const migrations = [
      ON automation_runs(started_at);`,
   `ALTER TABLE automations
      ADD COLUMN priority INTEGER NOT NULL DEFAULT 3;`,
+  // Core's ID for a same-thread run's message: its turn request, or queued row and content (#1100). Null keeps today's reports.
+  `ALTER TABLE automation_runs ADD COLUMN sent_id TEXT;`,
 ];
 
 export const REVIEW_RETENTION_MS = 30 * 24 * 60 * 60_000;
 
 function automationRetryDelayMs(consecutiveFailures: number): number {
-  const exponent = Math.max(0, consecutiveFailures - 1);
-  return AUTOMATION_RETRY_BASE_MS * 2 ** exponent;
+  const delays = AUTOMATION_RETRY_DELAYS_MS;
+  return delays[Math.min(Math.max(consecutiveFailures, 1), delays.length) - 1]!;
+}
+
+function pausedRetryAt(consecutiveFailures: number, now: number): number | null {
+  if (consecutiveFailures >= STOP_RETRYING) return null;
+  const step = consecutiveFailures - AUTOMATION_MAX_CONSECUTIVE_FAILURES;
+  return now + PAUSE_RETRY_MS[Math.min(Math.max(step, 0), PAUSE_RETRY_MS.length - 1)]!;
+}
+
+/** Paused loops whose time to try again came run again, keeping their failure count, so one more failure pauses them
+ *  again and one success clears it. Pauses from before retries (no time saved) from the last 30 days try once too.
+ *  Returns the projects whose loops changed. */
+export function retryPausedAutomations(db: Db, now: number): string[] {
+  const rows = db
+    .prepare(
+      `UPDATE automations SET
+         enabled = 1,
+         next_run_at = CASE WHEN trigger_type = 'webhook' THEN NULL ELSE @now END,
+         last_error = NULL,
+         updated_at = @now
+       WHERE enabled = 0 AND last_error LIKE @mark AND consecutive_failures < @stop
+         AND (next_run_at <= @now OR (next_run_at IS NULL AND updated_at >= @since))
+       RETURNING project_id AS projectId`,
+    )
+    .all({ now, mark: PAUSE_MARK, stop: STOP_RETRYING, since: now - 30 * 86_400_000 }) as { projectId: string }[];
+  return [...new Set(rows.map((row) => row.projectId))];
 }
 
 export interface CreateAutomationInput {
@@ -650,9 +687,10 @@ export function deleteAutomation(
 
 export function listDueAutomations(
   db: Db,
-  args: { now: number; limit: number },
+  args: { now: number; limit: number; overdueBefore?: number },
 ): AutomationRow[] {
   if (args.limit <= 0) return [];
+  const overdueBefore = args.overdueBefore ?? Number.MIN_SAFE_INTEGER;
   const pageSize = Math.max(args.limit, 100);
   const query = db.prepare(
     `SELECT
@@ -662,14 +700,21 @@ export function listDueAutomations(
        AND trigger_type IN ('schedule', 'once')
        AND next_run_at IS NOT NULL
        AND next_run_at <= ?
-     ORDER BY next_run_at ASC, created_at ASC, id ASC
+       AND NOT EXISTS (
+         SELECT 1 FROM automation_runs r
+         WHERE r.automation_id = automations.id AND r.status = 'running'
+       )
+     ORDER BY MAX(next_run_at, COALESCE((
+         SELECT MAX(r.finished_at) FROM automation_runs r
+         WHERE r.automation_id = automations.id
+       ), 0)) < ? ASC, priority ASC, next_run_at ASC, created_at ASC, id ASC
      LIMIT ? OFFSET ?`,
   );
   const due: AutomationRow[] = [];
   let offset = 0;
   while (due.length < args.limit) {
     const page = query
-      .all(args.now, pageSize, offset)
+      .all(args.now, overdueBefore, pageSize, offset)
       .map(requiredAutomationRow);
     if (page.length === 0) break;
     offset += page.length;
@@ -795,8 +840,12 @@ function recordAutomationFailure(
   if (!automation) {
     return { consecutiveFailures: 0, paused: false, retryAt: null };
   }
-  const consecutiveFailures = automation.consecutiveFailures + 1;
-  const paused = consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES;
+  const consecutiveFailures =
+    automation.consecutiveFailures + (args.error.startsWith(REFUSED) ? 0 : 1);
+  // Turned off by hand while this run went on, it stays off: no pause mark, so it never tries again on its own.
+  const paused =
+    automation.enabled &&
+    consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES;
   const retryAt =
     args.retrySchedule && automation.enabled && !paused
       ? args.now + automationRetryDelayMs(consecutiveFailures)
@@ -808,18 +857,20 @@ function recordAutomationFailure(
     `UPDATE automations SET
        enabled = CASE WHEN @paused = 1 THEN 0 ELSE enabled END,
        next_run_at = CASE
-         WHEN @paused = 1 THEN NULL
+         WHEN @paused = 1 THEN @pausedRetryAt
          WHEN @retryAt IS NOT NULL THEN @retryAt
          ELSE next_run_at
        END,
        consecutive_failures = @consecutiveFailures,
        last_run_status = 'failed',
-       last_error = @lastError,
+       last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE @lastError END,
        updated_at = @now
      WHERE id = @automationId`,
   ).run({
     automationId: args.automationId,
+    archivedError: THREAD_ARCHIVED_ERROR,
     paused: boolToInt(paused),
+    pausedRetryAt: paused ? pausedRetryAt(consecutiveFailures, args.now) : null,
     retryAt,
     consecutiveFailures,
     lastError,
@@ -838,6 +889,8 @@ export function closeAutomationRun(
     output?: string | null;
     exitCode?: number | null;
     threadId?: string | null;
+    /** A stopped or unreadable run says nothing about the loop's health. */
+    keepFailureStreak?: boolean;
     now: number;
   },
 ): { run: AutomationRunRow; automationId: string } | null {
@@ -889,25 +942,76 @@ export function closeAutomationRun(
     } else {
       db.prepare(
         `UPDATE automations SET
-           consecutive_failures = 0,
+           consecutive_failures = CASE WHEN @keep THEN consecutive_failures ELSE 0 END,
            last_run_status = @status,
            last_run_thread_id = CASE
              WHEN @threadId IS NOT NULL THEN @threadId
              ELSE last_run_thread_id
            END,
-           last_error = NULL,
+           last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE NULL END,
            updated_at = @now
          WHERE id = @automationId`,
       ).run({
         automationId: existing.automationId,
+        archivedError: THREAD_ARCHIVED_ERROR,
         status: args.status,
         threadId: args.threadId ?? null,
+        keep: args.keepFailureStreak ? 1 : 0,
         now: args.now,
       });
     }
     const run = getAutomationRun(db, args.runId);
     if (!run) return null;
     return { run, automationId: run.automationId };
+  })();
+}
+
+/** A failed scheduled run whose thread came back and did its work (#1443) counts as succeeded, and its waiting retry
+ *  moves to the loop's next slot, so the slot never runs twice. A retry at or after that slot is that slot's own run,
+ *  so it stays. The loop and that slot when the run can be recovered, from local checks alone. */
+export function recoverableRun(
+  db: Db,
+  runId: string,
+): { automationId: string; slot: number } | null {
+  const run = getAutomationRun(db, runId);
+  const automation = run && getAutomation(db, run.automationId);
+  if (
+    !run ||
+    !automation?.enabled ||
+    automation.nextRunAt === null ||
+    run.status !== "failed" ||
+    run.runMode !== "agent" ||
+    run.trigger !== "schedule" ||
+    listAutomationRuns(db, { automationId: run.automationId, limit: 1 })[0]
+      ?.id !== run.id
+  )
+    return null;
+  const trigger = parseAutomationTrigger(automation.triggerConfig);
+  if (trigger.triggerType !== "schedule") return null;
+  const slot = computeNextScheduledTime({
+    cron: trigger.cron,
+    timezone: trigger.timezone,
+    now: run.startedAt,
+  });
+  return automation.nextRunAt < slot
+    ? { automationId: automation.id, slot }
+    : null;
+}
+
+/** Recovers a failed run (see recoverableRun). True when the run was recovered. */
+export function recoverFailedRun(db: Db, runId: string, now: number): boolean {
+  return db.transaction(() => {
+    const recoverable = recoverableRun(db, runId);
+    if (!recoverable) return false;
+    db.prepare(
+      `UPDATE automation_runs SET status = 'succeeded', error = NULL WHERE id = ?`,
+    ).run(runId);
+    db.prepare(
+      `UPDATE automations SET next_run_at = @slot, consecutive_failures = 0, last_run_status = 'succeeded',
+         last_error = NULL, updated_at = @now
+       WHERE id = @id`,
+    ).run({ id: recoverable.automationId, slot: recoverable.slot, now });
+    return true;
   })();
 }
 
@@ -1009,6 +1113,21 @@ export function setAutomationRunThread(
   return getAutomationRun(db, args.runId);
 }
 
+export function setAutomationRunSentId(db: Db, runId: string, sentId: string): void {
+  db.prepare(`UPDATE automation_runs SET sent_id = ? WHERE id = ?`).run(sentId, runId);
+}
+
+/** The thread's one run whose message Core took under one of these IDs; none or several stay unreported (#1100). */
+export function getSentRun(db: Db, threadId: string, ids: string[]): AutomationRunRow | null {
+  const rows = db
+    .prepare(
+      `SELECT ${AUTOMATION_RUN_COLUMNS} FROM automation_runs
+       WHERE thread_id = ? AND sent_id IN (SELECT value FROM json_each(?))`,
+    )
+    .all(threadId, JSON.stringify(ids));
+  return rows.length === 1 ? requiredRunRow(rows[0]) : null;
+}
+
 export function markAutomationThread(
   db: Db,
   args: { threadId: string; automationId: string; runId: string; now: number },
@@ -1032,6 +1151,33 @@ export function isAutomationSpawnedThread(db: Db, threadId: string): boolean {
       )
       .get(threadId) !== undefined
   );
+}
+
+/** A thread's wakes that have not fired yet: one-time loops it made to re-prompt itself. */
+export function countWaitingWakes(db: Db, threadId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS waiting FROM automations
+       WHERE enabled = 1 AND trigger_type = 'once'
+         AND target_thread_id = ? AND created_by_thread_id = ?`,
+    )
+    .get(threadId, threadId) as { waiting: number };
+  return row.waiting;
+}
+
+/** One-time loops whose run succeeded before `before`: timers and reminders that did their job. A failed or
+ *  paused one stays, so its reason stays readable. */
+export function listFinishedOnceAutomations(
+  db: Db,
+  before: number,
+): { projectId: string; automationId: string }[] {
+  return db
+    .prepare(
+      `SELECT project_id AS projectId, id AS automationId FROM automations
+       WHERE trigger_type = 'once' AND enabled = 0
+         AND last_run_status = 'succeeded' AND last_run_at < ?`,
+    )
+    .all(before) as { projectId: string; automationId: string }[];
 }
 
 export function listRunningAutomationRuns(db: Db): AutomationRunRow[] {
@@ -1059,6 +1205,35 @@ export function listRunningAutomationRunsByThread(
          ORDER BY started_at DESC, id DESC`,
     )
     .all(threadId) as AutomationRunRow[];
+}
+
+/** The run a thread's `loop report` is for (ADR 0298): its running run, else the run that started the thread (its
+ *  spawn or its check script), even settled, while no other run was sent to it: a retried, recovered or continued
+ *  turn there is still that run's work (#1293). A loop's own target thread, or one several runs share, can't tell
+ *  them apart once they end, so it reports only while a run is running there. */
+export function getThreadReportRun(
+  db: Db,
+  threadId: string,
+): AutomationRunRow | null {
+  return optionalRunRow(
+    db
+      .prepare(
+        `SELECT
+           ${AUTOMATION_RUN_COLUMNS}
+         FROM automation_runs r
+         WHERE (r.thread_id = @threadId AND r.status = 'running')
+            OR (r.id IN (
+                  SELECT run_id FROM automation_thread_marks WHERE thread_id = @threadId
+                  UNION ALL
+                  SELECT run_id FROM automation_review_threads WHERE thread_id = @threadId)
+                AND NOT EXISTS (
+                  SELECT 1 FROM automation_runs o WHERE o.thread_id = @threadId AND o.id <> r.id)
+                AND NOT EXISTS (SELECT 1 FROM automations a WHERE a.target_thread_id = @threadId))
+         ORDER BY r.status = 'running' DESC, r.started_at DESC, r.id DESC
+         LIMIT 1`,
+      )
+      .get({ threadId }),
+  );
 }
 
 export function listAutomationRuns(
@@ -1100,28 +1275,70 @@ export function listAutomationRuns(
   return rows.map(requiredRunRow);
 }
 
+export const THREAD_ARCHIVED_ERROR =
+  "Paused because its thread is archived. Unarchive the thread to resume this loop.";
+
 export function disableAutomationsForDeletedThread(
   db: Db,
-  args: { threadId: string; now: number },
+  args: { threadId: string; now: number; lastError?: string; alsoId?: string },
 ): AutomationRow[] {
+  const params = {
+    threadId: args.threadId,
+    now: args.now,
+    lastError: args.lastError ?? "target thread deleted",
+    alsoId: args.alsoId ?? null,
+    archivedError: THREAD_ARCHIVED_ERROR,
+  };
   db.prepare(
     `UPDATE automations SET
        enabled = 0,
        next_run_at = NULL,
-       last_error = 'target thread deleted',
+       last_error = @lastError,
        updated_at = @now
-     WHERE target_thread_id = @threadId AND enabled = 1`,
-  ).run(args);
+     WHERE target_thread_id = @threadId
+       AND (enabled = 1 OR id = @alsoId OR last_error = @archivedError)
+       AND (@lastError != @archivedError OR id = @alsoId OR NOT EXISTS (
+         SELECT 1 FROM automation_runs r
+         WHERE r.automation_id = automations.id AND r.status = 'running'
+       ))`,
+  ).run(params);
+  return listThreadAutomationsPausedFor(db, params);
+}
+
+export function listThreadAutomationsPausedFor(
+  db: Db,
+  args: { threadId: string; lastError: string },
+): AutomationRow[] {
   return db
     .prepare(
       `SELECT
          ${AUTOMATION_COLUMNS}
        FROM automations
-       WHERE target_thread_id = @threadId AND last_error = 'target thread deleted'
+       WHERE target_thread_id = @threadId AND enabled = 0 AND last_error = @lastError
        ORDER BY updated_at DESC`,
     )
-    .all(args)
+    .all({ threadId: args.threadId, lastError: args.lastError })
     .map(requiredAutomationRow);
+}
+
+export function listArchivePausedThreadIds(db: Db): string[] {
+  return (
+    db
+      .prepare(
+        `SELECT DISTINCT target_thread_id AS threadId FROM automations
+         WHERE enabled = 0 AND last_error = ? AND target_thread_id IS NOT NULL`,
+      )
+      .all(THREAD_ARCHIVED_ERROR) as { threadId: string }[]
+  ).map((row) => row.threadId);
+}
+
+export function lastRunFinishedAt(db: Db, automationId: string): number {
+  const row = db
+    .prepare(
+      `SELECT MAX(finished_at) AS at FROM automation_runs WHERE automation_id = ?`,
+    )
+    .get(automationId) as { at: number | null } | undefined;
+  return row?.at ?? 0;
 }
 
 export interface ReviewRunRow extends AutomationRunRow {

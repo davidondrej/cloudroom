@@ -139,6 +139,22 @@ const descriptionCases: DescriptionCase[] = [
     },
   },
   {
+    name: "thread_environment_unavailable deleted workspace",
+    body: {
+      code: "thread_environment_unavailable",
+      message: "This thread's workspace was deleted. Start a new thread to continue.",
+      details: {
+        environmentStatus: null,
+        reason: "destroyed",
+      },
+    },
+    expected: {
+      title: "Workspace deleted",
+      body: "This thread's workspace was deleted. Start a new thread to continue.",
+      severity: "warning",
+    },
+  },
+  {
     name: "thread_environment_unavailable provisioning",
     body: {
       code: "thread_environment_unavailable",

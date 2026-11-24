@@ -4,8 +4,12 @@ interface NodeWebSocketConstructor {
   new (address: string | URL, protocols?: string | string[]): object;
 }
 
+export type NodeWebSocketHeaders =
+  | Record<string, string>
+  | (() => Record<string, string>);
+
 export function createNodeWebSocketConstructor(
-  headers: Record<string, string> | undefined,
+  headers: NodeWebSocketHeaders | undefined,
 ): NodeWebSocketConstructor {
   if (!headers) {
     return NodeWebSocket;
@@ -13,7 +17,9 @@ export function createNodeWebSocketConstructor(
 
   return class HeaderAwareWebSocket extends NodeWebSocket {
     constructor(address: string | URL, protocols?: string | string[]) {
-      super(address, protocols, { headers });
+      super(address, protocols, {
+        headers: typeof headers === "function" ? headers() : headers,
+      });
     }
   };
 }

@@ -43,6 +43,7 @@ import {
 import { startTestServer, withTestHarness } from "../helpers/test-app.js";
 import type { TestAppHarness } from "../helpers/test-app.js";
 import { setPluginAgentContributions } from "../../src/services/plugins/plugin-agent-contributions.js";
+import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import type { PluginAgentToolRecord } from "../../src/services/plugins/plugin-api.js";
 
 async function postEventBatch(args: {
@@ -1330,6 +1331,8 @@ describe("internal event and tool-call routes", () => {
         throw new Error("Expected environment.attach command");
       }
       expect(provisionCommand.command.initiator).toBeNull();
+      // The cleanup sweep must not take the tool's own setup for abandoned (#1306).
+      await runEnvironmentProvisioningSweep(harness.deps);
 
       await reportQueuedCommandSuccess(harness, provisionCommand, {
         path: "/tmp/new-unmanaged-worktree",
@@ -1387,6 +1390,75 @@ describe("internal event and tool-call routes", () => {
         scopeKind: "turn",
         turnId: "turn-new-environment",
       });
+    });
+  });
+
+  it("rechecks a failed unmanaged environment under a fresh row that replaces it (#1306)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const current = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/current-environment",
+      });
+      const failed = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/fixed-checkout",
+        status: "error",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: current.id,
+      });
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: current.id,
+        providerThreadId: "provider-tool-call",
+        sequence: 1,
+        type: "turn/started",
+        scope: turnScope("turn-tool-call"),
+        data: { providerThreadId: "provider-tool-call" },
+      });
+
+      const responsePromise = postToolCall({
+        harness,
+        sessionId: session.id,
+        threadId: thread.id,
+        tool: "update_environment_directory",
+        arguments: { path: "/tmp/fixed-checkout" },
+      });
+      const recheck = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "environment.attach" &&
+          command.path === "/tmp/fixed-checkout",
+      );
+      // The host keeps its first answer per ID, so a real recheck needs a new one.
+      expect(recheck.command).not.toMatchObject({ environmentId: failed.id });
+      await runEnvironmentProvisioningSweep(harness.deps);
+      await reportQueuedCommandSuccess(harness, recheck, {
+        path: "/tmp/fixed-checkout",
+        isGitRepo: true,
+        isWorktree: true,
+        branchName: "feature/fixed",
+        defaultBranch: "main",
+        transcript: [],
+      });
+
+      await expect(readJson(await responsePromise)).resolves.toMatchObject({
+        success: true,
+      });
+      expect(
+        listEnvironments(harness.db, { path: "/tmp/fixed-checkout" }),
+      ).toMatchObject([{ status: "ready" }]);
+      expect(getEnvironment(harness.db, failed.id)?.status).toBe("destroyed");
+      expect(getThread(harness.db, thread.id)?.environmentId).toBe(
+        listEnvironments(harness.db, { path: "/tmp/fixed-checkout" })[0]?.id,
+      );
     });
   });
 

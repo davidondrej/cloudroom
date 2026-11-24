@@ -1,14 +1,22 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { expect, it } from "vitest";
-import { tarCommand } from "@cloudroom/process-utils";
+import { DatabaseSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
+import { dirname, join, sep } from "node:path";
+import { expect, it, vi } from "vitest";
+import { chatFileCopyPath } from "@cloudroom/config/chat-file-copies";
+import { openSession } from "@cloudroom/db";
+import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
+import { CHAT_FILE_COPIES_DIR_NAME, ensureDataPrivateDir, tarCommand } from "@cloudroom/process-utils";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
+import { cloudroom } from "../../src/services/cloudroom/commands.js";
+import { seedHost, seedPrimaryHost } from "../helpers/seed.js";
+import { withTestHarness } from "../helpers/test-app.js";
 import { checksOutCrlf } from "../../src/services/cloudroom/project-copy.js";
 import { landForkCode, sourceCode } from "../../src/services/cloudroom/fork.js";
-import { applyChanges, cloudChanges, packChangesCommand } from "../../src/services/cloudroom/teleport-local.js";
+import { allowance, applyChanges, cloudChanges, cloudFile, codexLineage, conversationParser, download, moveAntigravityConversation, moveAntigravityWorkspace, packChangesCommand, saveCloudImages } from "../../src/services/cloudroom/teleport-local.js";
 
 it("Teleport to Local never overwrites Mac work and never writes into .git", async () => {
   const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-local-"));
@@ -37,7 +45,7 @@ it("Teleport to Local never overwrites Mac work and never writes into .git", asy
     const archive = join(temp, "changes.tgz");
     execFileSync("tar", ["-czf", archive, "-C", cloud, ...files]);
 
-    expect(await applyChanges(root, readFileSync(archive), "run", base)).toBe(2);
+    expect(await applyChanges(root, readFileSync(archive), "run", base)).toEqual(["main.txt", "wip.txt"]);
     expect([read("main.txt"), read("wip.txt"), read("clean.txt"), read("new.txt")]).toEqual(["mac", "mac", "cloud", "cloud"]);
     expect([read(".cloudroom/teleport/run/main.txt"), read(".cloudroom/teleport/run/wip.txt")]).toEqual(["cloud", "cloud"]);
     expect(existsSync(join(root, ".git/hooks/pre-commit"))).toBe(false);
@@ -56,6 +64,31 @@ function localCloud(home: string, workspace = home) {
     sessionWorkspace: async () => ({ path: workspace, branch: null, head: null }),
   } as unknown as CloudroomClient;
 }
+
+it.skipIf(process.platform !== "linux")("Teleport removes its archive when the pack response is lost", async () => {
+  const home = await mkdtemp(join(tmpdir(), "teleport-lost-response-"));
+  try {
+    const workspace = join(home, "project");
+    await mkdir(workspace);
+    await writeFile(join(workspace, "changed.txt"), "cloud work\n");
+    const client = localCloud(home);
+    const run = client.runOnVm.bind(client);
+    let calls = 0;
+    client.runOnVm = async (...args) => {
+      const result = await run(...args);
+      if (calls++ === 0) {
+        expect(result.code).toBe(0);
+        expect(readdirSync(join(home, ".cache/cloudroom"))).toHaveLength(1);
+        throw new Error("Pack response lost");
+      }
+      return result;
+    };
+    await expect(cloudChanges(client, workspace, null, Date.now())).rejects.toThrow("Pack response lost");
+    expect(readdirSync(join(home, ".cache/cloudroom"))).toEqual([]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
 
 it.skipIf(process.platform === "win32")("A child's blobless clone lands its parent's code and uncommitted changes", async () => {
   const home = await mkdtemp(join(tmpdir(), "fork-code-"));
@@ -93,7 +126,22 @@ it.skipIf(process.platform === "win32")("A child's blobless clone lands its pare
   }
 });
 
-it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable file and skip only dangling links on Windows", async () => {
+it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));
+  try {
+    await writeFile(join(root, "a.md"), "agents\n");
+    await writeFile(join(root, "secret.txt"), "x");
+    await chmod(join(root, "secret.txt"), 0o000);
+    const pack = (names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), false)}`], { cwd: root, encoding: "utf8" });
+    expect(packChangesCommand("~/x.tgz", false)).toBe("tar -czf ~/x.tgz --null -T -");
+    expect(pack(["a.md", "secret.txt"]).status).not.toBe(0);
+  } finally {
+    await chmod(join(root, "secret.txt"), 0o600).catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it.skipIf(process.platform !== "linux")("Windows Teleport packs dereference links, skip dangling links, and fail on unreadable files", async () => {
   const root = await mkdtemp(join(tmpdir(), "teleport-pack-"));
   try {
     await writeFile(join(root, "a.md"), "agents\n");
@@ -101,21 +149,19 @@ it.skipIf(process.platform === "win32")("Teleport packs fail on an unreadable fi
     await symlink("missing.md", join(root, "dangling.md"));
     await writeFile(join(root, "secret.txt"), "x");
     await chmod(join(root, "secret.txt"), 0o000);
-    const pack = (windows: boolean, names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), windows)}`], { cwd: root, encoding: "utf8" });
-    expect(packChangesCommand("~/x.tgz", false)).toBe("tar -czf ~/x.tgz --null -T -");
-    expect(pack(true, ["a.md", "link.md", "dangling.md"]).status).toBe(0);
+    const pack = (names: string[]) => spawnSync("bash", ["-c", `printf '%s\\0' ${names.join(" ")} | ${packChangesCommand(join(root, "out.tgz"), true)}`], { cwd: root, encoding: "utf8" });
+    expect(pack(["a.md", "link.md", "dangling.md"]).status).toBe(0);
     const listed = spawnSync("tar", ["-tvzf", join(root, "out.tgz")], { encoding: "utf8" }).stdout;
     expect(listed).toMatch(/^-.* link\.md$/m);
     expect(listed).not.toContain("dangling.md");
-    expect(pack(true, ["a.md", "secret.txt"]).status).not.toBe(0);
-    expect(pack(false, ["a.md", "secret.txt"]).status).not.toBe(0);
+    expect(pack(["a.md", "secret.txt"]).status).not.toBe(0);
   } finally {
     await chmod(join(root, "secret.txt"), 0o600).catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });
 
-it.skipIf(process.platform === "win32")("Teleport to Local stops before switching when a changed cloud file can't be read", async () => {
+it.skipIf(process.platform !== "linux")("Teleport to Local stops before switching when a changed cloud file can't be read", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-cloud-"));
   try {
     const workspace = join(home, "project");
@@ -126,6 +172,7 @@ it.skipIf(process.platform === "win32")("Teleport to Local stops before switchin
     await writeFile(join(workspace, "secret.txt"), "x");
     await chmod(join(workspace, "secret.txt"), 0o000);
     await expect(cloudChanges(localCloud(home), workspace, null, Date.now())).rejects.toThrow(/secret\.txt/);
+    expect(readdirSync(join(home, ".cache/cloudroom"))).toEqual([]);
     await chmod(join(workspace, "secret.txt"), 0o600);
     const changes = await cloudChanges(localCloud(home), workspace, null, Date.now());
     expect(changes.archive.length).toBeGreaterThan(0);
@@ -133,6 +180,27 @@ it.skipIf(process.platform === "win32")("Teleport to Local stops before switchin
     await chmod(join(home, "project", "secret.txt"), 0o600).catch(() => {});
     await rm(home, { recursive: true, force: true });
   }
+});
+
+it("a replaced Core can't make downloads hold more than their sizes, shared allowance, and JSON values", async () => {
+  // `wc -c` reports `size`, and each piece holds `piece` bytes.
+  const cloud = (size: string, piece: number) => async (command: string) => command.startsWith("[ -f") ? Buffer.from(`${size}\n`) : Buffer.alloc(piece);
+  const client = {} as CloudroomClient;
+  await expect(download(client, "a", undefined, cloud("Infinity", 0))).rejects.toThrow("no valid size");
+  await expect(download(client, "a", undefined, cloud(String(2 ** 40), 0))).rejects.toThrow("a is over the 1024 MB limit.");
+  await expect(download(client, "a", undefined, cloud("10", 11))).rejects.toThrow("more of a than was asked for");
+  const allowed = allowance(1);
+  expect((await download(client, "a", allowed, cloud("700000", 700_000))).length).toBe(700_000);
+  await expect(download(client, "b", allowed, cloud("700000", 700_000))).rejects.toThrow("b is over the 1 MB limit.");
+  const parents = Buffer.from(Array.from({ length: 65 }, (_, i) => `/parent-${i}.jsonl`).join("\n")).toString("hex");
+  const lineage = { runOnVm: async () => ({ code: 0, stdout: parents, stderr: "", truncated: false }) } as unknown as CloudroomClient;
+  await expect(codexLineage(lineage, "/fork.jsonl")).rejects.toThrow("too many parents");
+  // Tiny JSON values far inside the byte limit, in one line or spread over a file's lines.
+  const tiny = `[${"{},".repeat(3_000_000)}{}]`, parse = conversationParser();
+  parse(tiny);
+  parse(tiny);
+  expect(() => parse(tiny)).toThrow("too complex");
+  expect(() => conversationParser()(`[${tiny},${tiny},${tiny}]`)).toThrow("too complex");
 });
 
 it("CRLF checkouts are found in every spelling Git accepts", async () => {
@@ -148,7 +216,7 @@ it("CRLF checkouts are found in every spelling Git accepts", async () => {
   }
 });
 
-it.skipIf(process.platform === "win32")("A folder link round-trips to Mac and Linux, and stops a Windows Teleport with its path", async () => {
+it.skipIf(process.platform !== "linux")("A folder link round-trips to Mac and Linux, and stops a Windows Teleport with its path", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-folder-link-"));
   try {
     const workspace = join(home, "project");
@@ -163,7 +231,7 @@ it.skipIf(process.platform === "win32")("A folder link round-trips to Mac and Li
     await symlink("docs", join(workspace, "docs-link"));
 
     const changes = await cloudChanges(localCloud(home), workspace, null, Date.now());
-    expect(await applyChanges(mac, changes.archive, "run", null)).toBe(0);
+    expect(await applyChanges(mac, changes.archive, "run", null)).toEqual([]);
     expect(readlinkSync(join(mac, "docs-link"))).toBe("docs");
     expect(readFileSync(join(mac, "docs-link", "a.md"), "utf8")).toBe("a\n");
 
@@ -175,7 +243,7 @@ it.skipIf(process.platform === "win32")("A folder link round-trips to Mac and Li
   }
 });
 
-it.skipIf(process.platform === "win32")("A Windows Teleport refuses a link out of the project before switching", async () => {
+it.skipIf(process.platform !== "linux")("A Windows Teleport refuses a link out of the project before switching", async () => {
   const home = await mkdtemp(join(tmpdir(), "teleport-outside-link-"));
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
   try {
@@ -197,7 +265,7 @@ it.skipIf(process.platform === "win32")("A Windows Teleport refuses a link out o
     Object.defineProperty(process, "platform", platform);
     const mac = join(home, "mac");
     await mkdir(mac);
-    expect(await applyChanges(mac, changes.archive, "run", null)).toBe(0);
+    expect(await applyChanges(mac, changes.archive, "run", null)).toEqual([]);
     expect(readFileSync(join(mac, "inside.md"), "utf8")).toBe("a\n");
   } finally {
     Object.defineProperty(process, "platform", platform);
@@ -232,7 +300,7 @@ it("Teleport to Local never overwrites a dirty file it reaches by another spelli
     writeFileSync(join(root, "src", "Foo.ts"), "mac");
 
     const incoming = windows ? "src/foo.ts" : "alias/Foo.ts";
-    expect(await applyChanges(root, pack(join(temp, "one.tgz"), { [incoming]: "cloud" }), "run", base)).toBe(1);
+    expect(await applyChanges(root, pack(join(temp, "one.tgz"), { [incoming]: "cloud" }), "run", base)).toHaveLength(1);
     expect(readFileSync(join(root, "src", "Foo.ts"), "utf8")).toBe("mac");
     expect(readFileSync(join(root, ".cloudroom", "teleport", "run", incoming), "utf8")).toBe("cloud");
 
@@ -242,4 +310,120 @@ it("Teleport to Local never overwrites a dirty file it reaches by another spelli
   } finally {
     rmSync(temp, { recursive: true, force: true });
   }
+});
+
+it.skipIf(process.platform === "win32")("Teleport to Local ignores a cloud .cloudroom link and never writes outside the project", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "cloudroom-teleport-link-"));
+  const [root, cloud, outside] = ["mac", "cloud", "outside"].map((name) => join(temp, name));
+  try {
+    [root, cloud, outside].forEach((folder) => mkdirSync(folder));
+    writeFileSync(join(root, "a.txt"), "mac");
+    writeFileSync(join(cloud, "a.txt"), "cloud");
+    symlinkSync(outside, join(cloud, ".cloudroom"));
+    // An extra "./" must not hide the link.
+    const archive = join(temp, "changes.tgz");
+    execFileSync(tarCommand(), ["-czf", archive, "-C", cloud, "././.cloudroom", "a.txt"]);
+
+    expect(await applyChanges(root, readFileSync(archive), "run", null)).toHaveLength(1);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readFileSync(join(root, "a.txt"), "utf8")).toBe("mac");
+    expect(readFileSync(join(root, ".cloudroom", "teleport", "run", "a.txt"), "utf8")).toBe("cloud");
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("Antigravity's saved workspace moves to the Local folder, so its commands run there (#2453)", () => {
+  // trajectory_metadata_blob of a conversation agy 1.5.12 started in /tmp/agyrepro/code.
+  const cloud = Buffer.from("0a1d0a1966696c653a2f2f2f746d702f616779726570726f2f636f64651a00120c08f1f68cd8061089aebd87021a2437343332333835392d343136312d346462642d626235332d313836393735363933656530322436633133633163352d313363642d343635662d386165362d3662626162623166616163363a1966696c653a2f2f2f746d702f616779726570726f2f636f646592011364656661756c742d636c692d70726f6a656374", "hex");
+  const id = "6c13c1c5-13cd-465f-8ae6-6bbabb1faac6";
+  const to = process.platform === "win32" ? "C:\\Users\\me\\my project" : "/Users/me/my project";
+  const local = moveAntigravityWorkspace(cloud, "/tmp/agyrepro/code", to);
+  expect(local.toString("latin1").split(pathToFileURL(to).href).length).toBe(3);
+  expect(local.toString("latin1")).not.toContain("agyrepro");
+  expect(local.toString("latin1")).toContain("$" + id + ":"); // the rest is untouched
+  expect(local.toString("latin1").endsWith("\x92\x01\x13default-cli-project")).toBe(true);
+  expect(moveAntigravityWorkspace(cloud, "/tmp/agyrepro/co", "/elsewhere")).toEqual(cloud);
+  // A 10-byte varint (a negative int64) is valid protobuf and is kept as it came.
+  const negative = Buffer.from([0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]);
+  expect(moveAntigravityWorkspace(Buffer.concat([negative, cloud]), "/tmp/agyrepro/code", to)).toEqual(Buffer.concat([negative, local]));
+
+  // Only the exact agy table without triggers or foreign keys, holding a blob up to 1 MiB, is written. Else it stays as it came.
+  const temp = mkdtempSync(join(tmpdir(), "cloudroom-agy-"));
+  try {
+    const install = (name: string, steps: string, data: Buffer | string = cloud, trigger = "") => {
+      const file = join(temp, `${name}.db`), db = new DatabaseSync(file);
+      db.exec('CREATE TABLE `trajectory_metadata_blob` (`id` text DEFAULT "main",`data` blob,PRIMARY KEY (`id`))');
+      db.exec(`CREATE TABLE \`trajectory_meta\` (\`trajectory_id\` text,\`cascade_id\` text,PRIMARY KEY (\`trajectory_id\`)); CREATE TABLE steps (${steps}); ${trigger}`);
+      db.prepare("INSERT INTO trajectory_meta VALUES ('t', ?)").run(id);
+      db.prepare("INSERT INTO trajectory_metadata_blob VALUES ('main', ?)").run(data);
+      db.prepare("INSERT INTO steps (idx) VALUES (0)").run();
+      const read = () => db.prepare("SELECT hex(data) data, (SELECT count(*) FROM steps) steps FROM trajectory_metadata_blob").get();
+      const before = read();
+      db.close();
+      moveAntigravityConversation(file, id, "/tmp/agyrepro/code", to);
+      const check = new DatabaseSync(file);
+      try { return { before, after: check.prepare("SELECT hex(data) data, (SELECT count(*) FROM steps) steps FROM trajectory_metadata_blob").get() }; }
+      finally { check.close(); }
+    };
+    expect(install("agy", "idx integer").after).toEqual({ data: local.toString("hex").toUpperCase(), steps: 1 });
+    const kept = [
+      install("trigger", "idx integer", cloud, "CREATE TRIGGER t AFTER UPDATE ON trajectory_metadata_blob BEGIN INSERT INTO steps VALUES (1); END;"),
+      install("index", "idx integer", cloud, "CREATE INDEX big ON trajectory_metadata_blob(zeroblob(1000)) WHERE data != x'00';"),
+      install("foreign-key", "idx integer, main text REFERENCES trajectory_metadata_blob(id) ON UPDATE CASCADE"),
+      install("big-blob", "idx integer", Buffer.concat([cloud, Buffer.from([0x9a, 0x06, 0x80, 0x80, 0x40]), Buffer.alloc(1 << 20)])),
+      install("text", "idx integer", "file:///tmp/agyrepro/code\0" + "x".repeat(2 << 20)),
+    ];
+    for (const { before, after } of kept) expect(after).toEqual(before);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+it("Cloud chat file copies go only where no sandbox can write, never through a link planted where they used to go", async () => {
+  await withTestHarness(async (harness) => {
+    const temp = mkdtempSync(join(tmpdir(), "cloudroom-chat-copies-"));
+    try {
+      const dataDir = join(temp, "data");
+      const host = seedHost(harness.deps);
+      openSession(harness.deps.db, { hostId: host.id, instanceId: "instance-1", hostName: "Test Host", dataDir, protocolVersion: HOST_DAEMON_PROTOCOL_VERSION, heartbeatIntervalMs: 5_000, leaseTimeoutMs: 30_000 });
+      seedPrimaryHost(harness.deps, host.id);
+      // The host daemon makes it at startup.
+      ensureDataPrivateDir(dataDir, CHAT_FILE_COPIES_DIR_NAME);
+      const threadId = "thr_cloudcopies";
+      // The sandbox (a local folder here) shows an image.
+      const image = join(temp, "sandbox", "shot.png");
+      mkdirSync(dirname(image), { recursive: true });
+      writeFileSync(image, "image");
+      const sandbox = {
+        runOnVm: async (input: { command: string }) => {
+          const result = spawnSync("bash", ["-c", input.command]);
+          return { code: result.status ?? 1, stdout: result.stdout.toString("hex"), stderr: result.stderr.toString("hex"), truncated: false };
+        },
+      } as unknown as CloudroomClient;
+      const threadClient = vi.spyOn(cloudroom(harness.deps), "threadClient").mockResolvedValue(sandbox);
+      // A sandboxed Local agent can write thread storage: it links a folder on the way to where this copy used to go.
+      const outside = join(temp, "outside");
+      mkdirSync(outside);
+      const old = join(dataDir, "thread-storage", threadId, "Cloud files");
+      mkdirSync(old, { recursive: true });
+      symlinkSync(outside, join(old, image.split(sep)[1]!));
+
+      await saveCloudImages(harness.deps, threadId, `![Shot](${image})`);
+      expect(readdirSync(outside)).toEqual([]);
+      expect(readFileSync(chatFileCopyPath(dataDir, threadId, image)!, "utf8")).toBe("image");
+      // A copy that can be shown spares the sandbox a wake.
+      await expect(cloudFile(harness.deps, threadId, image)).resolves.toEqual(Buffer.from("image"));
+      expect(threadClient).toHaveBeenLastCalledWith(threadId, false);
+
+      // A copy that can't be read or saved: the sandbox wakes, and the downloaded file still shows.
+      rmSync(join(dataDir, CHAT_FILE_COPIES_DIR_NAME), { recursive: true });
+      writeFileSync(join(dataDir, CHAT_FILE_COPIES_DIR_NAME), "not a folder");
+      await expect(cloudFile(harness.deps, threadId, image)).resolves.toEqual(Buffer.from("image"));
+      expect(threadClient).toHaveBeenLastCalledWith(threadId, true);
+      expect(readdirSync(outside)).toEqual([]);
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
+  });
 });

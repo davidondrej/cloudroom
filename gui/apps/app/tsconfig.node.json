@@ -14,6 +14,7 @@
     "vite-bundle-stats.ts",
     "vite-font-preload.ts",
     "vite-shared-ui-seam.ts",
-    "vite-react-compiler.ts"
+    "vite-react-compiler.ts",
+    "vite-tailwind.ts"
   ]
 }

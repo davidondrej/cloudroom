@@ -250,9 +250,13 @@ function preserveOpenPluginOrder(
 export function PluginComposerPlusMenuEntry({
   contribution,
   onSelected,
+  className,
+  iconClassName,
 }: {
   contribution: PluginComposerPlusMenuContribution;
   onSelected(selection: PluginComposerPlusMenuSelection): void;
+  className?: string;
+  iconClassName?: string;
 }) {
   const { key, pluginId, customizationId, item } = contribution;
   return (
@@ -267,6 +271,8 @@ export function PluginComposerPlusMenuEntry({
         pluginId={pluginId}
         item={item}
         onSelected={onSelected}
+        className={className}
+        iconClassName={iconClassName}
       />
     </PluginSlotMount>
   );
@@ -276,10 +282,14 @@ function PluginComposerPlusMenuEntryContent({
   pluginId,
   item,
   onSelected,
+  className,
+  iconClassName,
 }: {
   pluginId: string;
   item: ComposerPlusMenuItem;
   onSelected(selection: PluginComposerPlusMenuSelection): void;
+  className?: string;
+  iconClassName?: string;
 }) {
   const composer = useComposer();
   const view = useComposerView();
@@ -306,6 +316,7 @@ function PluginComposerPlusMenuEntryContent({
     <DropdownMenuItem
       disabled={disabled}
       aria-description={item.description}
+      className={className}
       onSelect={() => {
         onSelected({
           restoreComposerFocus: () => composer.focus(),
@@ -314,7 +325,11 @@ function PluginComposerPlusMenuEntryContent({
         void run();
       }}
     >
-      <PluginIcon pluginId={pluginId} icon={item.icon ?? null} />
+      <PluginIcon
+        pluginId={pluginId}
+        icon={item.icon ?? null}
+        className={iconClassName}
+      />
       {item.label}
     </DropdownMenuItem>
   );
