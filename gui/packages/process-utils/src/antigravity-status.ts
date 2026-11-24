@@ -36,7 +36,8 @@ try:
                         break
                     if email_seen_at is None:
                         email_seen_at = time.time()
-                    elif time.time() - email_seen_at >= 2.0:
+                    # Quota refreshes after model discovery and can trail email by >2s.
+                    elif time.time() - email_seen_at >= 6.0:
                         break
             except Exception:
                 pass
