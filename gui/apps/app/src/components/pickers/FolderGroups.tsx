@@ -24,15 +24,15 @@ type FolderPicker = ReturnType<typeof useFolderPicker>;
 
 export const baseName = (path: string) => getHostPathBasename(path) ?? path;
 
-/** What Enter does. It shows only on the highlighted row, so the list stays quiet. */
-export function RowAction({ label, busy = false }: { label: string; busy?: boolean }) {
+/** What Enter does. Pasted URLs show their access action as soon as it is known. */
+export function RowAction({ label, busy = false, visible = false }: { label: string; busy?: boolean; visible?: boolean }) {
   return busy ? (
     <span className="flex shrink-0 items-center gap-1 text-[0.6875rem] text-muted-foreground">
       <Icon name="Loading" className="size-3! animate-spin" aria-hidden />
       Adding
     </span>
   ) : (
-    <span className="hidden shrink-0 items-center gap-1 rounded-sm bg-primary px-[0.4375rem] text-[0.6875rem] font-semibold leading-[1.125rem] text-primary-foreground group-data-[selected=true]:flex">
+    <span className={(visible ? "flex" : "hidden group-data-[selected=true]:flex") + " shrink-0 items-center gap-1 rounded-sm bg-primary px-[0.4375rem] text-[0.6875rem] font-semibold leading-[1.125rem] text-primary-foreground"}>
       {label}
       <Icon name="CornerDownLeft" className="size-2.5!" aria-hidden />
     </span>

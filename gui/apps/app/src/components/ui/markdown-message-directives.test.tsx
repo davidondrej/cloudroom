@@ -25,7 +25,7 @@ import {
 } from "@/components/plugin/PluginSlotMount";
 import type { PluginMessageDirectiveSlot } from "@/lib/plugin-slots";
 import { ConversationMessageContent } from "@/components/thread/timeline/ConversationMessageContent";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { ThreadTimelineRows } from "@/components/thread/timeline/ThreadTimelineRows";

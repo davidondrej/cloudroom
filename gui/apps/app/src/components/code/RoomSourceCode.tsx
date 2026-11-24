@@ -18,8 +18,8 @@ import {
   type VirtualFileMetrics,
 } from "@pierre/diffs";
 import { Button } from "@cloudroom/shared-ui/button";
-import { getDiffShadowRoots } from "@/components/git-diff/git-diff-patch-text";
-import { usePierreLineSelectionActions } from "@/components/git-diff/PierreLineSelectionActions.js";
+import { getDiffShadowRoots } from "@/components/diff/patch-utils";
+import { usePierreLineSelectionActions } from "@/components/diff/line-selection";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import { useResolvedCodeThemePair } from "@/lib/code-theme";
 import { PierreWorkerPoolBoundary } from "@/lib/pierre-worker-pool-boundary";
@@ -199,6 +199,18 @@ function formatLineRange(startLineNumber: number, endLineNumber: number) {
     : `${startLineNumber}-${endLineNumber}`;
 }
 
+function getSelectedSourceLines(contents: string, range: SelectedLineRange) {
+  const startLineNumber = Math.max(1, Math.min(range.start, range.end));
+  const endLineNumber = Math.max(
+    startLineNumber,
+    Math.max(range.start, range.end),
+  );
+  const lines = contents
+    .split(/\r\n|\n|\r/)
+    .slice(startLineNumber - 1, endLineNumber);
+  return { endLineNumber, lines, startLineNumber };
+}
+
 function buildLineSelectionText({
   contents,
   path,
@@ -208,21 +220,26 @@ function buildLineSelectionText({
   path: string;
   range: SelectedLineRange;
 }): string | null {
-  const startLineNumber = Math.max(1, Math.min(range.start, range.end));
-  const endLineNumber = Math.max(
-    startLineNumber,
-    Math.max(range.start, range.end),
+  const { endLineNumber, lines, startLineNumber } = getSelectedSourceLines(
+    contents,
+    range,
   );
-  const lines = contents.split(/\r\n|\n|\r/);
-  const selectedLines = lines.slice(startLineNumber - 1, endLineNumber);
-  if (selectedLines.length === 0) {
+  if (lines.length === 0) {
     return null;
   }
-  const selectedText = selectedLines.join("\n").trimEnd();
+  const selectedText = lines.join("\n").trimEnd();
   if (selectedText.trim().length === 0) {
     return null;
   }
   return `${path}:${formatLineRange(startLineNumber, endLineNumber)}\n${selectedText}`;
+}
+
+function buildLineCopyText(
+  contents: string,
+  range: SelectedLineRange,
+): string | null {
+  const { lines } = getSelectedSourceLines(contents, range);
+  return lines.length === 0 ? null : lines.join("\n");
 }
 
 function RoomSourceCode({
@@ -259,7 +276,12 @@ function RoomSourceCode({
       buildLineSelectionText({ contents: content, path, range }),
     [content, path],
   );
+  const buildCopyText = useCallback(
+    (range: SelectedLineRange) => buildLineCopyText(content, range),
+    [content],
+  );
   const lineSelectionActions = usePierreLineSelectionActions({
+    buildCopyText,
     buildSelectionText,
     containerRef,
     enabled: onSelectionAddToChat !== undefined,

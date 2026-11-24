@@ -202,6 +202,7 @@ export function spawnPortablePipedProcess(
   const child = spawnPortableProcess({
     ...request,
     stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
   });
   assertPortablePipedProcess(child);
   return child;

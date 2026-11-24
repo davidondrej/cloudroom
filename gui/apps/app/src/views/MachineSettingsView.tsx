@@ -1,6 +1,6 @@
 import { MachineLifecycleNoticeContent } from "@/components/machines/MachineLifecycleNotice";
 import { useMemo, useState, type ComponentProps } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router";
 import type { Host, PermissionMode } from "@cloudroom/domain";
 import type { SystemMachineProvider } from "@cloudroom/server-contract";
 import type { HostPlatform } from "@cloudroom/host-daemon-contract";

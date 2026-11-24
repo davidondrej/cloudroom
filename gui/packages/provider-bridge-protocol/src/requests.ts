@@ -46,6 +46,8 @@ export const threadStartParamsSchema = z
   .object({
     ...sessionConstructionFields,
     input: z.array(promptInputSchema).optional(),
+    /** A message edit's start replaces this native session of the same thread. */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .passthrough();
 
@@ -61,6 +63,8 @@ export const threadForkParamsSchema = z
     ...sessionConstructionFields,
     sourceProviderThreadId: z.string().min(1),
     sourceProviderCheckpointId: z.string().min(1).optional(),
+    /** A message edit's fork replaces this native session of the same thread. */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .passthrough();
 

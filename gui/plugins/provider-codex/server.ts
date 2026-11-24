@@ -49,6 +49,7 @@ export default function plugin(room: BbPluginApi) {
       supportsNativeUserQuestion: false,
       fork: "checkpoint",
       supportsManualCompaction: true,
+      resumesInNewFolder: true,
       supportsThreadArchive: true,
       supportsThreadRename: true,
       permissionModes: ["accept-edits", "auto", "full"],
@@ -69,6 +70,7 @@ export default function plugin(room: BbPluginApi) {
     serviceTiers: [
       { id: "default", label: "Default" },
       { id: "fast", label: "Fast" },
+      { id: "ultrafast", label: "Ultra Fast" },
     ],
     composerActions: ["plan", "goal"],
     deriveProviderOptions(context) {

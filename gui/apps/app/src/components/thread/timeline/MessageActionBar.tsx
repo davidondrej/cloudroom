@@ -31,28 +31,8 @@ import {
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import type { PromptDraftAttachment } from "@cloudroom/client-core";
 import { usePortalScopeProps } from "@/lib/portal-scope";
-import { PluginIcon, pluginIconName } from "@/components/plugin/PluginIcon";
+import { PluginActionIcon } from "@/components/plugin/PluginIcon";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
-
-function PluginActionIcon({
-  pluginId,
-  icon,
-  className,
-}: {
-  pluginId: string | null;
-  icon: string | null;
-  className?: string;
-}) {
-  return pluginId === null ? (
-    <Icon
-      name={pluginIconName(icon)}
-      className={cn("size-4 shrink-0", className)}
-      aria-hidden="true"
-    />
-  ) : (
-    <PluginIcon pluginId={pluginId} icon={icon} className={className} />
-  );
-}
 
 interface MessageActionBarProps {
   messageText: string;
@@ -271,6 +251,7 @@ function MobileMessageOverflowPopover({
               onClick={() => {
                 if (action.kind === "copy") {
                   void copyToClipboardWithToast(action.copyText ?? "", {
+                    chatMessage: true,
                     successMessage: null,
                     errorMessage: "Failed to copy",
                   }).then((didCopy) => {
@@ -531,6 +512,7 @@ export function MessageActionBar({
             label: "Copy message",
             onSelect: () => {
               void copyToClipboardWithToast(messageText, {
+                chatMessage: true,
                 errorMessage: "Failed to copy",
                 imageUrl: copyImageUrl,
               });
@@ -799,6 +781,7 @@ function MobileInlineActions({
           )}
           onClick={() => {
             void copyToClipboardWithToast(action.copyText ?? "", {
+              chatMessage: true,
               successMessage: null,
               errorMessage: "Failed to copy",
               imageUrl: action.copyImageUrl,

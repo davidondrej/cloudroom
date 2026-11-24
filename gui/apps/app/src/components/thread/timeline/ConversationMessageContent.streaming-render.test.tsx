@@ -10,7 +10,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginMessageDirectiveProps } from "@get-bb/plugin-sdk";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import {
   buildMessageDirectiveRegistry,

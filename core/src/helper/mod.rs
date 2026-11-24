@@ -2,7 +2,7 @@
 //! (ADR 0113, 0186). A Rust port of `src/preview/client.py` for macOS. While both ship, they read and write the
 //! same files under the same LaunchAgent label, so the app can switch between them, and they must behave the same.
 
-mod jobs;
+pub(crate) mod jobs;
 mod net;
 #[cfg(test)]
 mod tests;
@@ -579,14 +579,24 @@ async fn stop(folder: &Path, pause: bool) -> Result<()> {
     }
     let mut config = private_json(&folder.join("config.json"))?;
     if !config["revoked"].as_bool().unwrap_or(false) {
-        // Best effort: a sleeping sandbox or an archived VM must never block sign-out.
-        let shared = Shared::new(folder.to_owned());
-        let device = text(&config, "device").unwrap_or_default().to_owned();
-        for core in net::cores(&shared, &config).await.unwrap_or_default() {
-            let _ = core
-                .request(&shared, &format!("/device/{device}"), None, Some("DELETE"))
-                .await;
-        }
+        // Best effort: a sleeping sandbox or an archived VM must never block sign-out. Ask 32 cores at a time, so
+        // open files stay far below macOS's 256, and stop waiting after 12 s, inside the app's 20 s (#1691).
+        let shared = Arc::new(Shared::new(folder.to_owned()));
+        let path = format!("/device/{}", text(&config, "device").unwrap_or_default());
+        let revoke = async {
+            let mut asks = tokio::task::JoinSet::new();
+            for mut core in net::cores(&shared, &config).await.unwrap_or_default() {
+                if asks.len() >= 32 {
+                    asks.join_next().await;
+                }
+                // Closed after its answer, as client.py's are: reqwest would keep one open file per core.
+                core.headers.push(("Connection".into(), "close".into()));
+                let (shared, path) = (shared.clone(), path.clone());
+                asks.spawn(async move { core.request(&shared, &path, None, Some("DELETE")).await });
+            }
+            asks.join_all().await
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(12), revoke).await;
         config["revoked"] = json!(true);
         save(&folder.join("config.json"), &config)?;
     }
@@ -904,6 +914,8 @@ impl Previews {
                 let error = match () {
                     _ if ready => None,
                     _ if !alive => Some(if info.relay { "Tunnel unavailable" } else { "SSH connection unavailable" }),
+                    // Nothing came back through the tunnel, so this says nothing about the app (#1798, #2016).
+                    _ if info.refused() => Some("Tunnel unavailable"),
                     _ if info.reachable() => Some("Cloud HTTP server unavailable"),
                     _ => None,
                 };

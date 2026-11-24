@@ -7,6 +7,10 @@ import { ApiError } from "../../errors.js";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import type { LoggedWorkSessionDeps } from "../../types.js";
 import { callHostRetryableOnlineRpc } from "./online-rpc.js";
+import {
+  tryServeColocatedLocalFile,
+  type LocalFileStreamOptions,
+} from "./local-file-stream.js";
 
 const OCTET_STREAM_MIME_TYPE = "application/octet-stream";
 const REVALIDATE_CACHE_CONTROL = "private, no-cache";
@@ -31,7 +35,21 @@ export async function serveDaemonFileContent(
     rootPath?: string;
   },
   createResponse: (result: DaemonFileReadResult) => Response,
+  options?: {
+    directLocal?: LocalFileStreamOptions;
+  },
 ): Promise<Response> {
+  if (options?.directLocal !== undefined) {
+    const localResponse = await tryServeColocatedLocalFile(
+      deps,
+      target,
+      options.directLocal,
+      { requestMatchesEntityTag, setUntrustedFileHeaders },
+    );
+    if (localResponse !== null) {
+      return localResponse;
+    }
+  }
   const { hostId, ifNoneMatch, ...file } = target;
   const daemonIfNoneMatch = parseDaemonIfNoneMatch(ifNoneMatch);
   try {
@@ -180,6 +198,14 @@ export function remapDaemonFileRouteError(error: unknown): never {
   if (error.body.code === "invalid_path") {
     throw new ApiError(
       400,
+      error.body.code,
+      error.body.message,
+      error.body.retryable,
+    );
+  }
+  if (error.body.code === "permission_denied") {
+    throw new ApiError(
+      403,
       error.body.code,
       error.body.message,
       error.body.retryable,

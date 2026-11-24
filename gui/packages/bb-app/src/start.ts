@@ -42,6 +42,7 @@ import {
 } from "./processes.js";
 
 const RESTART_DELAY_MS = 1_000;
+const BLOCKED_SPAWN_LIMIT = 5;
 
 export interface RunAppOptions {
   dryRun?: boolean;
@@ -125,15 +126,29 @@ async function restart(args: {
   isShuttingDown: () => boolean;
   wait: (ms: number) => Promise<void>;
 }): Promise<boolean> {
+  let blockedSpawns = 0;
   while (!args.isShuttingDown()) {
     beginStep(`Restarting ${processLabel(args.name)}`);
     try {
       await args.start();
       endStep(green("✓"), `${args.name === "server" ? "Server" : "Host daemon"} restarted`);
       return true;
-    } catch {
+    } catch (error) {
       if (args.isShuttingDown()) return false;
       endStep(red("✗"), `${args.name === "server" ? "Server" : "Host daemon"} failed to restart`);
+      // Windows refused to start Cloudroom.exe (spawn UNKNOWN or EPERM). A virus scan or an update
+      // can do that once, so stop only after 5 in a row: then it's a policy block (#1583).
+      const { code, syscall } = error as NodeJS.ErrnoException;
+      const blocked =
+        process.platform === "win32" &&
+        syscall?.startsWith("spawn") === true &&
+        (code === "UNKNOWN" || code === "EPERM");
+      blockedSpawns = blocked ? blockedSpawns + 1 : 0;
+      if (blockedSpawns >= BLOCKED_SPAWN_LIMIT) {
+        throw new Error(
+          `Windows blocked Cloudroom from restarting the ${processLabel(args.name)} (spawn ${code}). Smart App Control or an IT policy can block Cloudroom.exe. Reopen Cloudroom once Windows allows it.`,
+        );
+      }
       logStartupFailure(args.context, args.name);
       await args.wait(RESTART_DELAY_MS);
     }

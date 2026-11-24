@@ -43,7 +43,7 @@ export function DefaultsSettingsSection() {
     <SettingsSection title="Defaults" bodyClassName="space-y-5">
       <SettingsWithControl
         label="Starting machine"
-        description="Where new threads run when you open the composer."
+        description="Where new threads start. With Last used, a Local pick sticks to its project for 24 hours, then it's Cloud again."
       >
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -85,7 +85,7 @@ export function DefaultsSettingsSection() {
       </SettingsWithControl>
       <SettingsWithControl
         label="Remove AI co-authors"
-        description="Strip agent Co-authored-by lines from commits. Applies to new sessions."
+        description='Strip agent Co-authored-by lines from commits. Claude Code pull requests end with "Built with Cloudroom". Applies to new sessions.'
       >
         <Switch
           checked={settings?.stripAiCoAuthorsEnabled ?? true}

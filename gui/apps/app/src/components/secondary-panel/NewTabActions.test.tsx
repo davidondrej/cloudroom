@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { COMPACT_VIEWPORT_QUERY } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import type { PluginPanelActionEntry } from "@/components/plugin/PluginPanelActions";
 import { setCompactSidebarDrawerShowing } from "@/components/ui/sidebar-mobile-drawer-visibility";
-import { NewTabActions } from "./NewTabActions";
-import { newTabActionOrderAtom } from "./newTabActionsAtoms";
+import { NewTabActions } from "@/components/right-panel/tabs/new-tab";
+import { newTabActionOrderAtom } from "@/components/right-panel/store/panel-prefs";
 
 vi.mock("@/components/commands/AppCommandProvider", () => ({
   useAppCommandShortcut: () => null,

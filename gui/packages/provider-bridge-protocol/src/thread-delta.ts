@@ -288,6 +288,7 @@ export const threadDeltaSchema = z.discriminatedUnion("kind", [
 
   z.object({
     kind: z.literal("item.textClose"),
+    providerCheckpointId: z.string().min(1).optional(),
     key: deltaItemKeySchema,
     channel: deltaTextChannelSchema,
     text: z.string().optional(),

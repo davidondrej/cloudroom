@@ -99,6 +99,7 @@ function registerRemoteRuntimeFileResponder(
     hostId: string;
     sessionId: string;
     sharedSkills?: DiscoveredSkill[];
+    readErrorCode?: string;
   },
 ): HostRpcResponder {
   return registerHostRpcResponder(harness, {
@@ -127,7 +128,7 @@ function registerRemoteRuntimeFileResponder(
         if (content === undefined) {
           return {
             ok: false,
-            errorCode: "ENOENT",
+            errorCode: args.readErrorCode ?? "ENOENT",
             errorMessage: `Path does not exist: ${command.path}`,
           };
         }
@@ -264,6 +265,62 @@ describe("thread runtime config", () => {
         ]);
         expect(submitCommand.resumeContext.instructions).toContain(
           "update_environment_directory",
+        );
+      },
+    );
+  });
+
+  it("starts an agent run with this computer's own binary only on this computer (#1884)", async () => {
+    await withTestHarness(
+      {
+        extraProviders: [
+          await configuredAcpProvider({
+            id: "shim",
+            displayName: "Devin",
+            command: process.execPath,
+            args: ["/Users/me/shim.mjs"],
+          }),
+        ],
+      },
+      async (harness) => {
+        const start = (hostId: string) => {
+          const { project } = seedProjectWithSource(harness.deps, { hostId });
+          const environment = seedEnvironment(harness.deps, {
+            hostId,
+            projectId: project.id,
+          });
+          return buildThreadStartCommand(harness.deps, {
+            environment,
+            execution: {
+              model: "acp-default",
+              permissionMode: "full",
+              reasoningLevel: "medium",
+              serviceTier: "default",
+              source: "client/turn/requested",
+            },
+            fork: null,
+            permissionEscalation: "ask",
+            input: textInput("hello"),
+            projectId: project.id,
+            providerId: "acp-shim",
+            requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
+            syncGeneratedTitle: false,
+            thread: seedThread(harness.deps, {
+              projectId: project.id,
+              environmentId: environment.id,
+              providerId: "acp-shim",
+            }),
+          });
+        };
+        const { host } = seedHostSession(harness.deps, { id: "host-mac" });
+        seedPrimaryHost(harness.deps, host.id);
+        seedHostSession(harness.deps, { id: "host-linux", name: "linux-box" });
+
+        expect(
+          (await start("host-mac")).bridgeLaunch.providerOptions,
+        ).toMatchObject({ acpLaunchSpec: { command: process.execPath } });
+        await expect(start("host-linux")).rejects.toThrow(
+          `can't start on linux-box: its plugin (provider-acp) runs the agent with this computer's Cloudroom app (${process.execPath}), which only exists here. Use provider "acp-devin" there instead.`,
         );
       },
     );
@@ -797,7 +854,7 @@ describe("thread runtime config", () => {
         entryPath: "SKILL.md",
       });
       expect(command.injectedSkillSources).toEqual([
-        ...["adr-verbatim", "browser-harness", "decisions", "file-tree"].map(
+        ...["adr-verbatim", "browser-harness", "create-loop", "decisions", "deepapi", "file-tree"].map(
           sharedSkill,
         ),
         {
@@ -1323,7 +1380,7 @@ describe("thread runtime config", () => {
     });
   });
 
-  it("treats a missing remote workspace .bb/AGENTS.md as null", async () => {
+  it("treats a missing or refused remote workspace .bb/AGENTS.md as null", async () => {
     await withTestHarness(async (harness) => {
       const { host: primary } = seedHostSession(harness.deps, {
         id: "host-runtime-missing-agents-primary",
@@ -1363,6 +1420,28 @@ describe("thread runtime config", () => {
       expect(runtimeConfig.instructions).not.toContain(
         "The following workspace instructions come from .bb/AGENTS.md:",
       );
+
+      const failReadsWith = (readErrorCode: string) =>
+        registerRemoteRuntimeFileResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          files: new Map(),
+          readErrorCode,
+        });
+      const resolve = () =>
+        resolveThreadRuntimeCommandConfig(harness.deps, {
+          thread,
+          environment,
+          model: "test-model",
+        });
+      // The host refuses a symlinked workspace root; the message must still go out (#1764).
+      failReadsWith("invalid_path");
+      expect((await resolve()).instructions).toBe(runtimeConfig.instructions);
+      // A transport-style failure still throws, so dispatch can retry it.
+      failReadsWith("host_unavailable");
+      await expect(resolve()).rejects.toMatchObject({
+        body: { code: "host_unavailable" },
+      });
     });
   });
 

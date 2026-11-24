@@ -61,6 +61,7 @@ export async function resolveExecutablePath(
     const lookup = process.platform === "win32" ? "where" : "which";
     const { stdout } = await execFileAsync(lookup, [command], {
       timeout: CLI_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     return selectResolvedExecutable({
       candidates: stdout.split(/\r?\n/u),
@@ -128,6 +129,7 @@ function runCliProbe(
     const child = spawn(command, [...args], {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
     liveProbes.add(child);
     const output = { stdout: "", stderr: "" };

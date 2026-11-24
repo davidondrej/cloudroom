@@ -61,7 +61,9 @@ const SECRET_PATTERNS = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /\b(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/g,
   /\bsk-[A-Za-z0-9_-]{20,}/g,
-  /\b(?:gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})/g,
+  // Whole, with dots and dashes: GitHub App installation tokens are `ghs_<app id>_<JWT>` (#1847).
+  /\b(?:glpat|gloas)-[\w.-]{12,}/g,
+  /\b(?:gh[pousr]|github_pat)_[\w.-]{29,}\w/g,
   /\bglpat-[A-Za-z0-9_-]{20,}/g,
   /\bxox[abeprs]-[A-Za-z0-9-]{10,}/g,
   /\bAKIA[0-9A-Z]{16}\b/g,
@@ -71,14 +73,18 @@ const SECRET_PATTERNS = [
   /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{20,}/g,
 ];
 const ASSIGNMENT = /\b([A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Za-z0-9_]*["']?\s*[:=]\s*["']?)([^\s"'`,;]{12,})/gi;
-const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@/]+@/gi;
+/** A URL's whole login, since Git prints token-only ones too: `https://<token>@github.com` (#1847). */
+const URL_LOGIN = /(\b[a-z][a-z0-9+.-]*:\/\/)[^/?#@\s]+@/gi;
+/** Git echoes a credential helper's malformed output line verbatim, often a bare token (#1847). */
+const CREDENTIAL_LINE = /(invalid credential line: ).+/g;
 
 export function redactSecrets(text: string, known: readonly string[]): string {
-  let result = known.reduce((current, value) => current.split(value).join(REMOVED), text);
+  let result = known.reduce((current, value) => value ? current.split(value).join(REMOVED) : current, text);
   for (const pattern of SECRET_PATTERNS) result = result.replace(pattern, REMOVED);
   return result
     .replace(ASSIGNMENT, (match, name: string, value: string) => /[A-Za-z]/.test(value) && /\d/.test(value) ? `${name}${REMOVED}` : match)
-    .replace(URL_PASSWORD, `$1${REMOVED}@`);
+    .replace(URL_LOGIN, `$1${REMOVED}@`)
+    .replace(CREDENTIAL_LINE, `$1${REMOVED}`);
 }
 
 const TOKEN = /(?:^|\/)([A-Za-z0-9_-]{22})\/?$/;

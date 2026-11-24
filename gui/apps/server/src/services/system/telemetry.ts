@@ -15,10 +15,10 @@ const telemetryAppSurfaceStorage = new AsyncLocalStorage<RequestAppSurface>();
 export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 
 /** The desktop app's first-run setup funnel: which step people see, act on, finish, skip, or leave. */
-export const SETUP_STEPS = ["account", "agent", "github", "project", "first_agent"] as const;
+export const SETUP_STEPS = ["account", "agent", "github", "project"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
-export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "fx", "openclaw"] as const;
-export const SETUP_DETAILS = ["github", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "cloud", "local", "blocked", "failed", ...SETUP_AGENTS] as const;
+export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "antigravity", "fx", "openclaw", "agent-zero"] as const;
+export const SETUP_DETAILS = ["github", "gitlab", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "repos", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
 
@@ -124,21 +124,50 @@ export type TelemetryEvent =
       name: "token_usage";
       properties: { day: string; provider: string; model: string; is_child_thread: boolean; input: number; cached: number; cache_write: number; output: number; turns: number };
     }
+  /** Skills run and agents started on this computer per finished UTC `day`; built in skill-telemetry.ts. */
+  | { name: "skill_usage"; properties: { day: string; skill_runs: number; threads: number } }
+  | {
+      /** A sent message that got no reply and no error (first-response-telemetry.ts). */
+      name: "turn_silent";
+      properties: {
+        /** `no_reply`: no output 10 minutes after the send. `empty`: the turn ended as completed with no output. */
+        reason: "no_reply" | "empty"; ms: number; execution: TelemetryExecution; is_child_thread: boolean;
+        message_source: "queued_message" | "thread_create" | "thread_send"; provider: string; model: string | null;
+        /** The thread's status at that moment, and whether the agent started a turn for the message. */
+        thread_status: string; turn_started: boolean;
+        started_by?: string; first_agent?: true;
+      };
+    }
   | {
       name: "turn_failed";
       properties: {
-        execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message?: string | null; first_agent?: true;
+        /** The provider's category, else Cloud's, else our own code (`host-disconnected`, `rpc-timeout`), else `unknown`. */
+        execution: TelemetryExecution; is_child_thread: boolean; provider: string; error_category: string; error_message: string | null; first_agent?: true;
+        /** The provider's HTTP status and code, when it gave them. */
+        http_status?: number; provider_code?: string;
+        /** `person` (typed in the app), `script` (API or CLI), `agent`, or `system`; absent when the request didn't record it. */
+        started_by?: string;
         /** A Cloud prompt Cloud refused (auth-failure-telemetry.ts): Core's code, this computer's logins, and the default agent. */
         cloud_code?: string | null; local_logins?: string; default_agent?: string;
       };
     }
+  /** A thread a plan limit stopped runs again (plan-limit-telemetry.ts): how long it waited, and what got it going. */
+  | {
+      name: "plan_limit_resolved";
+      properties: { provider: string; execution: TelemetryExecution; is_child_thread: boolean; how: "account_switch" | "agent_switch" | "retry" | "user"; blocked_ms: number };
+    }
+  /** The plan-limit card showed, once per limit per app run. Its clicks are `account_switch` (`where: limit_card`) and `harness_switched` (`resend`). */
+  | { name: "limit_card"; properties: { provider: string; execution: TelemetryExecution; can_switch_account: boolean; other_agents: number } }
   | { name: "upgrade_prompt"; properties: { where: (typeof UPGRADE_PROMPTS)[number]; action: "viewed" | "clicked" } }
   | { name: "activation_step"; properties: { step: ActivationStep; action: "clicked" | "done" | "hidden" } }
-  | { name: "starter_prompt"; properties: { starter: StarterPrompt } }
   | { name: "popup"; properties: { popup: Popup; action: "viewed" | "closed" | PopupDetail } }
+  /** A card at the top right (docs/scopes/corner-cards.md). `viewed`: a new showing started. `key` names the showing; `variant` is its design. */
+  | { name: "corner"; properties: { card: CornerCard; key: string; action: "viewed" | CornerAnswer; variant?: string } }
   /** Monthly Wrapped (docs/scopes/wrapped.md): the top-right card and the Story it opens. `month` is `2026-10`. */
   | { name: "wrapped"; properties: { month: string; action: (typeof WRAPPED_ACTIONS)[number] } }
   | { name: "prompt_suggestion"; properties: { action: "shown" | "accepted"; provider: string } }
+  /** The "save as skill" card on a thread that repeats a job (docs/scopes/skill-suggestions.md). */
+  | { name: "skill_suggestion"; properties: { action: "shown" | "accepted" | "dismissed" } }
   | { name: "cloud_choice"; properties: { action: (typeof CLOUD_CHOICE_ACTIONS)[number]; reason: (typeof CLOUD_CHOICE_REASONS)[number] | null } }
   /** A Local message the queue failed or dropped (services/threads/queue-drain-failure.ts). */
   | { name: "queue_delivery"; properties: { outcome: "failed" | "dropped"; message: string; waiting_on: string | null; thread_status: string | null; error: string | null; detail: string | null } };
@@ -148,17 +177,22 @@ export const SHARE_CLICKS = ["opened", "copied"] as const;
 export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" | "stopped" | "continued";
 /** `viewed`: the card showed. `opened`: the Story opened. `closed`: the card's X. Then the Story's three buttons. */
 export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
-export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local"] as const;
-export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded"] as const;
+export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local", "switched_agent"] as const;
+export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "claude_not_connected", "queue", "region"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded", "one_click_scan"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
-export const STARTER_PROMPTS = ["security", "keys", "packages", "mac"] as const;
-export type StarterPrompt = (typeof STARTER_PROMPTS)[number];
 export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;
 export type Popup = (typeof POPUPS)[number];
 export const POPUP_DETAILS = ["starred", "opened", "already", "migrated"] as const;
 export type PopupDetail = (typeof POPUP_DETAILS)[number];
+/** The cards at the top right, as the app's corner module lists them (packages/shared-ui/src/lib/corner.ts).
+ *  `build` is the "build next" note on the chat input (docs/scopes/build-next.md): it never shows at the top right,
+ *  and only keeps its showings and answers in the same record. Its `variant` is the bet the user ticked. */
+export const CORNER_CARDS = ["invite", "call", "checklist", "wrapped", "scan", "partner", "build"] as const;
+export type CornerCard = (typeof CORNER_CARDS)[number];
+export const CORNER_ANSWERS = ["opened", "closed"] as const;
+export type CornerAnswer = (typeof CORNER_ANSWERS)[number];
 const PLANS = ["free", "pro", "super", "ultra"];
 
 export type PluginTelemetryProperties = Record<string, TelemetryValue>;
@@ -197,6 +231,11 @@ const noopTelemetryService: TelemetryService = {
 
 export function createNoopTelemetryService(): TelemetryService {
   return noopTelemetryService;
+}
+
+/** The surface of the request being handled (`desktop`, `web`, `mobile`, `api`); undefined outside a request. */
+export function currentAppSurface(): RequestAppSurface | undefined {
+  return telemetryAppSurfaceStorage.getStore();
 }
 
 export function runWithTelemetryAppSurface<T>(

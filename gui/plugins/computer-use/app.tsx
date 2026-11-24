@@ -71,6 +71,7 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
       </Button>
     );
   const payload = parsed.data;
+  const isForeground = payload.foreground === true;
   const current = permissions ?? payload.permissions;
   const decide = async (decision: "thread" | "always" | "deny") => {
     setBusy(true);
@@ -90,11 +91,21 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
     >
       <div className="space-y-1">
         <p className="text-sm text-foreground">
-          The agent wants to see and control <span className="font-semibold">{payload.app.name}</span>.
+          {isForeground ? (
+            <>
+              The agent wants to bring <span className="font-semibold">{payload.app.name}</span> to the front.
+            </>
+          ) : (
+            <>
+              The agent wants to see and control <span className="font-semibold">{payload.app.name}</span>.
+            </>
+          )}
         </p>
         {payload.purpose ? <p className="text-xs text-muted-foreground">{payload.purpose}</p> : null}
         <p className="text-xs text-muted-foreground">
-          It works in the background with its own cursor. Screen content may be sent to the model.
+          {isForeground
+            ? "This will temporarily take focus from what you are typing."
+            : "It works in the background with its own cursor. Screen content may be sent to the model."}
         </p>
       </div>
       {payload.platform === "darwin" && current.accessibility === false ? (
@@ -107,12 +118,20 @@ function ApprovalCard({ interaction, submit, cancel }: PluginPendingInteractionP
         <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void decide("deny")}>
           Deny
         </Button>
-        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void decide("thread")}>
-          Only this thread
-        </Button>
-        <Button type="button" size="sm" disabled={busy} onClick={() => void decide("always")}>
-          Always allow
-        </Button>
+        {isForeground ? (
+          <Button type="button" size="sm" disabled={busy} onClick={() => void decide("thread")}>
+            Allow once
+          </Button>
+        ) : (
+          <>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void decide("thread")}>
+              Only this thread
+            </Button>
+            <Button type="button" size="sm" disabled={busy} onClick={() => void decide("always")}>
+              Always allow
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

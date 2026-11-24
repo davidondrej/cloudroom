@@ -72,6 +72,11 @@ export interface ProviderModelCatalogStore {
     deps: WorkSessionDeps,
     args: { hostId: string; provider: ProviderInfo },
   ): Promise<void>;
+  /** Lists the host's models again after the account refused `model` (#2009), unless they no longer offer it. */
+  refreshRefusedModel(
+    deps: WorkSessionDeps,
+    args: { hostId: string; provider: ProviderInfo; model: string | null },
+  ): Promise<void>;
   /** Models this host last listed, even under an older fingerprint (#1399). */
   lastListedModels(
     deps: WorkSessionDeps,
@@ -288,6 +293,8 @@ export function createProviderModelCatalogStore(options: {
   const entries = new Map<string, CatalogEntry>();
   const pendingPushByHost = new Map<string, ReturnType<typeof setTimeout>>();
   const startedAt = options.now();
+  // Refused models a listing still offered, as when the thread's account isn't the login Codex lists with (#2009).
+  const offeredRefusedModels = new WeakMap<CatalogGood, Set<string>>();
 
   function loadStoredGood(
     deps: WorkSessionDeps,
@@ -626,6 +633,55 @@ export function createProviderModelCatalogStore(options: {
         return;
       }
       await startRefresh(deps, entry, fingerprint, bridgeLaunch);
+    },
+
+    async refreshRefusedModel(deps, args) {
+      const bridgeLaunch = resolveBridgeLaunchForProviderId(
+        deps,
+        args.provider.id,
+      );
+      if (bridgeLaunch === null) {
+        return;
+      }
+      const fingerprint = catalogFingerprint(args.provider.id, bridgeLaunch);
+      const entry = loadEntry(deps, catalogKey({ ...args, cwd: null }));
+      const { model } = args;
+      // One listing at a time; its result stays fresh.
+      const running =
+        entry.refresh?.fingerprint === fingerprint
+          ? entry.refresh.promise
+          : null;
+      if (running === null) {
+        const { good, failure } = currentState(entry, fingerprint);
+        const now = options.now();
+        // A failed listing keeps its backoff. A fresh listing, one that dropped the model, or one that still offered
+        // it after a refusal answers until it's replaced or older than FRESH_MS.
+        if (
+          (failure !== null && now - failure.failedAt < FAILURE_TTL_MS) ||
+          (good !== null &&
+            (now - good.fetchedAt < VALIDATION_MIN_AGE_MS ||
+              (model !== null &&
+                (lacksRequiredModel(good, model) ||
+                  (now - good.fetchedAt < FRESH_MS &&
+                    offeredRefusedModels.get(good)?.has(model) === true)))))
+        ) {
+          return;
+        }
+      }
+      const before = entry.good;
+      await (running ?? startRefresh(deps, entry, fingerprint, bridgeLaunch));
+      const listed = currentState(entry, fingerprint).good;
+      if (
+        model !== null &&
+        listed !== null &&
+        listed !== before &&
+        !lacksRequiredModel(listed, model)
+      ) {
+        offeredRefusedModels.set(
+          listed,
+          (offeredRefusedModels.get(listed) ?? new Set()).add(model),
+        );
+      }
     },
 
     lastListedModels(deps, args) {

@@ -1,7 +1,21 @@
 // @vitest-environment jsdom
 
+import { createDeferredPromise } from "@cloudroom/test-helpers";
+import { MemoryRouter } from "react-router";
+import {
+  useChildThreads,
+  useThreadMentionCandidates,
+} from "@/hooks/queries/thread-queries";
+import { sidebarNavigationQueryKey } from "@/hooks/queries/query-keys";
 import type { ReactNode } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Thread } from "@cloudroom/domain";
 import { makeThread as makeThreadFixture } from "@cloudroom/test-helpers/domain-fixtures";
@@ -28,8 +42,8 @@ vi.mock("@/components/ui/app-route-anchor", () => ({
   useRouteNavigate: () => mocks.navigate,
 }));
 
-vi.mock("react-router-dom", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("react-router-dom")>();
+vi.mock("react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router")>();
   return { ...actual, useNavigate: () => mocks.navigate };
 });
 
@@ -76,6 +90,18 @@ vi.mock("@/hooks/mutations/thread-state-mutations", async (importOriginal) => {
   };
 });
 
+const appCommandHandlers = vi.hoisted(
+  () => new Map<string, { handler: () => boolean; enabled: boolean }>(),
+);
+vi.mock("@/components/commands/AppCommandProvider", () => ({
+  useAppCommandHandler: (
+    command: string,
+    handler: () => boolean,
+    _priority: number,
+    enabled = true,
+  ) => appCommandHandlers.set(command, { handler, enabled }),
+  useAppCommandShortcut: () => null,
+}));
 vi.mock("@/lib/sdk", () => ({
   sdk: {
     threads: {
@@ -124,7 +150,9 @@ function ArchiveButton({ thread }: { thread: Thread }) {
 function renderProvider(children: ReactNode) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <ThreadActionsProvider>{children}</ThreadActionsProvider>
+      <MemoryRouter>
+        <ThreadActionsProvider>{children}</ThreadActionsProvider>
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -142,7 +170,10 @@ beforeEach(() => {
     archivedThreadIds: ["thr_parent", "thr_child"],
     ok: true,
   });
-  vi.mocked(sdk.threads.unarchive).mockResolvedValue({ ok: true });
+  vi.mocked(sdk.threads.unarchive).mockResolvedValue({
+    ok: true,
+    unarchivedThreadIds: [],
+  });
   vi.mocked(sdk.threads.childSummary).mockResolvedValue({
     nonDeletedChildCount: 1,
     runningThreadCount: 0,
@@ -155,6 +186,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
   mocks.viewedThreadId = null;
 });
@@ -228,6 +260,7 @@ describe("ThreadActionsProvider archive feedback", () => {
       expect(appToast.success).toHaveBeenCalledTimes(1);
     });
     expect(appToast.message).not.toHaveBeenCalled();
+    expect(appToast.loading).not.toHaveBeenCalled();
     expect(vi.mocked(appToast.success).mock.calls[0]?.[0]).toBe("Archived");
     const toastOptions = vi.mocked(appToast.success).mock.calls[0]?.[1];
     expect(toastOptions).toMatchObject({
@@ -257,4 +290,189 @@ describe("ThreadActionsProvider archive feedback", () => {
       threadId: "thr_child",
     });
   });
+});
+
+describe("Cloud archive", () => {
+  const cloud = makeThread({ executionTarget: "cloud" });
+  function clickArchive() {
+    fireEvent.click(screen.getByRole("button", { name: "Archive" }));
+  }
+  function undo() {
+    const action = vi.mocked(appToast.loading).mock.calls.at(-1)?.[1]?.cancel;
+    if (!action) throw new Error("Missing pending Undo");
+    render(<button onClick={action.onClick}>Undo archive</button>);
+    fireEvent.click(screen.getByRole("button", { name: "Undo archive" }));
+  }
+
+  it("aborts a pending check and ignores its late answer", async () => {
+    const check = createDeferredPromise<Response>();
+    const fetch = vi.fn(
+      (_input: RequestInfo | URL, _init?: RequestInit) => check.promise,
+    );
+    vi.stubGlobal("fetch", fetch);
+    renderProvider(<ArchiveButton thread={cloud} />);
+    clickArchive();
+    undo();
+    expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    await act(async () => check.resolve(Response.json({ running: [] })));
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+    expect(appToast.error).not.toHaveBeenCalled();
+  });
+
+  it("offers Retry, Cancel and explicit archive when Cloud cannot answer", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ running: null }))
+      .mockResolvedValueOnce(Response.json({ running: ["child"] }))
+      .mockResolvedValueOnce(Response.json({ running: null }));
+    vi.stubGlobal("fetch", fetch);
+    renderProvider(<ArchiveButton thread={cloud} />);
+    clickArchive();
+    fireEvent.click(await screen.findByRole("button", { name: "Retry" }));
+    await screen.findByText("Archive running thread?");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+    clickArchive();
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Archive",
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(sdk.threads.archiveAll).toHaveBeenCalledTimes(1),
+    );
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("confirms on a second archive shortcut, but not in the first 400ms", async () => {
+    vi.stubGlobal("fetch", () =>
+      Promise.resolve(Response.json({ running: ["child"] })),
+    );
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000);
+    renderProvider(<ArchiveButton thread={cloud} />);
+    clickArchive();
+    await screen.findByRole("dialog");
+    const shortcut = appCommandHandlers.get("thread.archive")!;
+    expect(shortcut.enabled).toBe(true);
+    await act(async () => void expect(shortcut.handler()).toBe(true));
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+    now.mockReturnValue(1_400);
+    act(() => void shortcut.handler());
+    await vi.waitFor(() =>
+      expect(sdk.threads.archiveAll).toHaveBeenCalledTimes(1),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    now.mockRestore();
+  });
+
+  it("checks the latest sidebar status of an unopened Local parent with a Cloud child", async () => {
+    const parent = makeThread();
+    const child = makeThread({
+      id: "child",
+      parentThreadId: parent.id,
+      executionTarget: "cloud",
+    });
+    const sidebar = (root: Thread) => ({
+      projects: [{ threads: [root, child] }],
+      personalProject: { threads: [] },
+      sections: [],
+    });
+    queryClient.setQueryData(sidebarNavigationQueryKey(), sidebar(parent));
+    const check = createDeferredPromise<Response>();
+    vi.stubGlobal("fetch", () => check.promise);
+    renderProvider(<ArchiveButton thread={parent} />);
+    clickArchive();
+    queryClient.setQueryData(
+      sidebarNavigationQueryKey(),
+      sidebar({ ...parent, status: "active", updatedAt: 2 }),
+    );
+    await act(async () => check.resolve(Response.json({ running: [] })));
+    within(await screen.findByRole("dialog")).getByRole("button", {
+      name: "Archive",
+    });
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+  });
+
+  it("keeps a child hidden in visible lists when its parent's overlapping archive is undone", async () => {
+    const check = createDeferredPromise<Response>();
+    vi.stubGlobal("fetch", () => check.promise);
+    const child = makeThread({
+      id: "child",
+      parentThreadId: cloud.id,
+      executionTarget: "cloud",
+    });
+    queryClient.setQueryData(sidebarNavigationQueryKey(), {
+      projects: [{ threads: [cloud, child] }],
+      personalProject: { threads: [] },
+      sections: [],
+    });
+    function Lists() {
+      const children =
+        useChildThreads({ parentThreadId: cloud.id, enabled: true }).data ?? [];
+      const mentions = useThreadMentionCandidates({ enabled: true }).data ?? [];
+      return (
+        <output>
+          {children.length} children, {mentions.length} mentions
+        </output>
+      );
+    }
+    renderProvider(
+      <>
+        <ArchiveButton thread={child} />
+        <ArchiveButton thread={cloud} />
+        <Lists />
+      </>,
+    );
+    const buttons = screen.getAllByRole("button", { name: "Archive" });
+    fireEvent.click(buttons[0]!);
+    fireEvent.click(buttons[1]!);
+    expect(screen.getByText("0 children, 0 mentions")).toBeTruthy();
+    const pending = vi
+      .mocked(appToast.loading)
+      .mock.calls.map(([, options]) => options?.cancel?.onClick);
+    render(
+      <>
+        <button onClick={pending[1]}>Undo parent</button>
+        <button onClick={pending[0]}>Undo child</button>
+      </>,
+    );
+    fireEvent.click(screen.getByText("Undo parent"));
+    expect(screen.getByText("0 children, 1 mentions")).toBeTruthy();
+    fireEvent.click(screen.getByText("Undo child"));
+    expect(screen.getByText("1 children, 2 mentions")).toBeTruthy();
+    await act(async () => check.resolve(Response.json({ running: [] })));
+    expect(sdk.threads.archiveAll).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])(
+    "honors Undo during submission, including a rejected archive (success=%s)",
+    async (succeeds) => {
+      vi.stubGlobal("fetch", () =>
+        Promise.resolve(Response.json({ running: [] })),
+      );
+      const commit =
+        createDeferredPromise<
+          Awaited<ReturnType<typeof sdk.threads.archiveAll>>
+        >();
+      vi.mocked(sdk.threads.archiveAll).mockReturnValueOnce(commit.promise);
+      renderProvider(<ArchiveButton thread={cloud} />);
+      clickArchive();
+      await vi.waitFor(() => expect(sdk.threads.archiveAll).toHaveBeenCalled());
+      undo();
+      await act(async () =>
+        succeeds
+          ? commit.resolve({ ok: true, archivedThreadIds: ["actual-child"] })
+          : commit.reject(new Error("failed")),
+      );
+      expect(sdk.threads.unarchive).toHaveBeenCalledTimes(succeeds ? 1 : 0);
+      if (succeeds)
+        expect(sdk.threads.unarchive).toHaveBeenCalledWith({
+          threadId: "actual-child",
+          keepParent: true,
+        });
+      expect(appToast.success).not.toHaveBeenCalled();
+      expect(appToast.error).not.toHaveBeenCalled();
+    },
+  );
 });

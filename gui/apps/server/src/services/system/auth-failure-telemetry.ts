@@ -2,7 +2,8 @@ import { firstAgentTag } from "./first-agent.js";
 import { countThreads, getAppSettings, getLatestStoredThreadEventOfTypes, getThread, type DbConnection } from "@cloudroom/db";
 import type { ServerLogger } from "../../types.js";
 import { localLogins, reportCloudFailure, scrub } from "../cloudroom/setup-telemetry.js";
-import { buildTurnFailedEvent, loadFailedTurn } from "../threads/turn-failed.js";
+import { buildTurnFailedEvent, loadFailedTurn, turnFailureFacts } from "../threads/turn-failed.js";
+import { CORE_PLAN_LIMIT, notePlanLimit, notePlanLimitEnded } from "./plan-limit-telemetry.js";
 import type { TelemetryService } from "./telemetry.js";
 
 interface Deps {
@@ -19,6 +20,8 @@ export interface CloudFailure {
   category: string;
   code?: string | null;
   message?: string | null;
+  /** The step a never-started prompt failed at (#1398). */
+  step?: string;
 }
 
 export function installAuthFailureTelemetry(next: Deps): () => void {
@@ -40,15 +43,30 @@ export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
     // first one each app run also sends a snapshot with a network check.
     const refused = execution === "cloud_sandbox" && !failed?.errorInfo && cloud?.category.startsWith("prompt-") === true;
     if (refused) reportCloudFailure();
-    const refusal = refused ? { cloud_code: cloud?.code ?? null, local_logins: await localLogins(), default_agent: getAppSettings(current.db).defaultProviderId ?? "none" } : {};
+    const refusal = refused ? { cloud_code: cloud?.code ?? null, cloud_step: cloud?.step ?? null, local_logins: await localLogins(), default_agent: getAppSettings(current.db).defaultProviderId ?? "none" } : {};
+    // Core reports a Cloud plan limit only in its failure reason, so it counts as one with Local's category.
+    const cloudCategory = cloud?.message?.includes(CORE_PLAN_LIMIT) ? "rate-limit" : cloud?.category;
+    const category = failed?.errorInfo?.category ?? cloudCategory ?? "unknown";
+    // Local waits; Cloud notes its own in saveStatus. A thread already running again (a queued message) never waited.
+    if (execution === "local") {
+      if (category !== "rate-limit") notePlanLimitEnded(threadId);
+      else if (thread.status === "error") notePlanLimit(threadId, { provider: thread.providerId, execution, child: thread.parentThreadId !== null });
+    }
+    // A provider's "unknown" says less than Cloud's reason or our own code for where it failed (docs/scopes/analytics.md#failed-turns).
+    const info = failed?.errorInfo;
+    const providerCode = known(info?.providerCode);
+    const facts = turnFailureFacts(current.db, threadId);
     current.telemetry.capture({
       name: "turn_failed",
       properties: {
         execution,
         is_child_thread: thread.parentThreadId !== null,
         provider: thread.providerId,
-        error_category: failed?.errorInfo?.category ?? cloud?.category ?? "unknown",
-        ...(process.platform === "win32" ? { error_message: failureText(current.db, threadId, failed?.interruptionReason, cloud?.message) } : {}),
+        error_category: known(category) ?? known(cloudCategory) ?? facts.code ?? "unknown",
+        error_message: failureText(current.db, threadId, failed?.interruptionReason, cloud?.message),
+        ...(info?.httpStatusCode ? { http_status: info.httpStatusCode } : {}),
+        ...(providerCode ? { provider_code: providerCode } : {}),
+        ...(facts.startedBy ? { started_by: facts.startedBy } : {}),
         ...refusal,
         ...firstAgentTag(current.db, threadId),
       },
@@ -79,6 +97,10 @@ export function noteTurnFailed(threadId: string, cloud?: CloudFailure): void {
       },
     });
   });
+}
+
+function known(value: string | null | undefined): string | null {
+  return value && value !== "unknown" ? value : null;
 }
 
 function failureText(db: DbConnection, threadId: string, interruption: string | null | undefined, cloud: string | null | undefined): string | null {

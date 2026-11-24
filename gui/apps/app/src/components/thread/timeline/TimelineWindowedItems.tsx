@@ -6,7 +6,7 @@ import {
   useState,
   type SyntheticEvent,
 } from "react";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import {
   defaultRangeExtractor,
   useVirtualizer,

@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     os::unix::process::{CommandExt, ExitStatusExt},
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -15,7 +15,7 @@ use std::{
         mpsc::{self, Receiver, RecvTimeoutError},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 const SIGKILL: i32 = 9;
@@ -263,6 +263,7 @@ fn reap(keep: i32) {
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
     fn setsid() -> i32;
+    fn getuid() -> u32;
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
 }
 const WNOHANG: i32 = 1;
@@ -346,12 +347,78 @@ fn lines(mut reader: impl BufRead, mut each: impl FnMut(&[u8]) -> bool) {
     }
 }
 
-/// The first 64 KB of what Cursor writes to stderr, where its error is. The rest is read and dropped.
-fn head_of(mut reader: impl Read) -> String {
-    let mut kept = Vec::new();
-    let _ = reader.by_ref().take(64 << 10).read_to_end(&mut kept);
-    let _ = io::copy(&mut reader, &mut io::sink());
-    String::from_utf8_lossy(&kept).into_owned()
+/// Keeps the first 64 KB of what Cursor writes to stderr, where its error is, as it arrives: a tool left
+/// running can hold stderr open after Cursor exits. The rest is read and dropped.
+fn head_of(mut reader: impl Read, kept: &Mutex<Vec<u8>>) {
+    let mut buffer = [0; 8192];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return,
+            Ok(read) => {
+                let mut kept = kept.lock().unwrap();
+                let room = (64 << 10) - kept.len();
+                kept.extend_from_slice(&buffer[..read.min(room)]);
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// The last error Cursor caught globally this turn, from its own debug log. Cursor only logs those, then
+/// exits 0 once nothing runs: no final result and nothing on stderr (#1961).
+fn logged_error(pid: u32, started: SystemTime) -> Option<String> {
+    let folder = std::env::temp_dir().join(format!("cursor-agent-logs-{}", unsafe { getuid() }));
+    // session-<time>-<pid>-<count>.log, a regular file this turn's Cursor wrote; each process has its own.
+    let (_, log) = (std::fs::read_dir(folder).ok()?.flatten())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let mut fields = name.trim_end_matches(".log").rsplit('-');
+            let modified = (entry.metadata().ok())
+                .filter(|m| m.is_file())?
+                .modified()
+                .ok()?;
+            (name.starts_with("session-")
+                && fields.nth(1) == Some(pid.to_string().as_str())
+                && modified >= started)
+                .then(|| (modified, entry.path()))
+        })
+        .max()?;
+    let mut file = std::fs::File::open(log).ok()?;
+    let size = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(64 << 10)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    String::from_utf8_lossy(&tail)
+        .lines()
+        .rev()
+        .find_map(logged_record)
+}
+
+/// The message of one of Cursor's global error records, `[<ISO time>] uncaughtException: <message> <JSON>`,
+/// without its JSON details. Text that merely quotes the marker is not a record.
+fn logged_record(line: &str) -> Option<String> {
+    let (stamp, rest) = line.strip_prefix('[')?.split_once("] ")?;
+    if stamp.len() != 24 || !(stamp.bytes()).all(|b| b.is_ascii_digit() || b"-:.TZ".contains(&b)) {
+        return None;
+    }
+    let rest = (rest.strip_prefix("uncaughtException: "))
+        .or_else(|| rest.strip_prefix("unhandledRejection: "))?;
+    let end = (rest.match_indices(" {").map(|(at, _)| at))
+        .find(|&at| serde_json::from_str::<Value>(&rest[at..]).is_ok_and(|v| v.is_object()))?;
+    let message = rest[..end].trim();
+    (!message.is_empty()).then(|| capped(message))
+}
+
+/// At most 300 characters, marked when cut.
+fn capped(text: &str) -> String {
+    let short: String = text.chars().take(300).collect();
+    if short.len() < text.len() {
+        short + "…"
+    } else {
+        short
+    }
 }
 
 /// How long Cursor gets to exit after its final result, or after it closes its output.
@@ -368,6 +435,8 @@ struct Turn {
     supervisor: Mutex<Option<thread::JoinHandle<()>>>,
     /// Processes that ran before this turn, such as a server an earlier turn left running.
     baseline: Vec<i32>,
+    /// When the turn began, so only its own Cursor log explains a failure.
+    started: SystemTime,
 }
 
 impl Turn {
@@ -379,6 +448,7 @@ impl Turn {
         let (Some(session), Some(cwd)) = (session, cwd) else {
             return Err(io::Error::other("Cursor turn has no session"));
         };
+        let started = SystemTime::now();
         reap(0);
         let baseline = descendants(std::process::id() as i32);
         let mut command = cursor(&cwd);
@@ -401,13 +471,19 @@ impl Turn {
             cancelled: AtomicBool::new(false),
             supervisor: Mutex::new(None),
             baseline,
+            started,
         });
         STATE.lock().unwrap().turn = Some(turn.clone());
         let mut stdin = child.stdin.take().unwrap();
         thread::spawn(move || stdin.write_all(text.as_bytes()));
         let stderr = child.stderr.take().unwrap();
-        let (stderr_tx, stderr_rx) = mpsc::channel();
-        thread::spawn(move || stderr_tx.send(head_of(stderr)));
+        let (stderr_closed, stderr_rx) = mpsc::channel::<()>();
+        let stderr_text = Arc::new(Mutex::new(Vec::new()));
+        let kept = stderr_text.clone();
+        thread::spawn(move || {
+            head_of(stderr, &kept);
+            drop(stderr_closed);
+        });
         let stdout = child.stdout.take().unwrap();
         let (output_tx, output_rx) = mpsc::channel();
         // Only the supervisor forwards events; once the turn ends, sends fail and reading stops.
@@ -421,7 +497,8 @@ impl Turn {
             })
         });
         let supervisor = turn.clone();
-        let handle = thread::spawn(move || supervisor.supervise(child, output_rx, stderr_rx));
+        let handle =
+            thread::spawn(move || supervisor.supervise(child, output_rx, (stderr_rx, stderr_text)));
         *turn.supervisor.lock().unwrap() = Some(handle);
         Ok(())
     }
@@ -432,7 +509,12 @@ impl Turn {
 
     /// Owns Cursor's process: ends the turn when Cursor exits, when it hangs after its result or
     /// goes silent, or when the user stops it. Only then does the next turn start.
-    fn supervise(&self, mut child: Child, output: Receiver<Value>, stderr: Receiver<String>) {
+    fn supervise(
+        &self,
+        mut child: Child,
+        output: Receiver<Value>,
+        (stderr_closed, stderr): (Receiver<()>, Arc<Mutex<Vec<u8>>>),
+    ) {
         let mut outcome = None;
         let mut events = Events::default();
         let (mut ended, mut heard, mut silent) = (false, Instant::now(), false);
@@ -495,13 +577,15 @@ impl Turn {
             }
         }
         drop(output);
-        let mut stderr_text = String::new();
         while Instant::now() < deadline && (stopped || !self.cancelled()) {
-            if let Ok(text) = stderr.recv_timeout(left()) {
-                stderr_text = text;
+            if !matches!(
+                stderr_closed.recv_timeout(left()),
+                Err(RecvTimeoutError::Timeout)
+            ) {
                 break;
             }
         }
+        let stderr_text = String::from_utf8_lossy(&stderr.lock().unwrap()).into_owned();
         // A stop that arrived while the turn was finishing still ends every tool before the reply.
         if self.cancelled() && !stopped {
             stop(&mut child, &self.baseline, true, &|| false);
@@ -512,7 +596,10 @@ impl Turn {
         let verdict = if stopped {
             Ok(json!({"stopReason":"cancelled"}))
         } else {
-            verdict(outcome, status, &stderr_text, silent)
+            let pid = child.id();
+            verdict(outcome, status, &stderr_text, silent, || {
+                logged_error(pid, self.started)
+            })
         };
         reply(&self.request, verdict);
     }
@@ -569,6 +656,7 @@ fn verdict(
     status: Option<std::process::ExitStatus>,
     stderr: &str,
     silent: bool,
+    logged: impl FnOnce() -> Option<String>,
 ) -> Result<Value, Value> {
     let outcome = outcome.unwrap_or_default();
     // A finished turn ends with a successful result; the work is done even if Cursor then exits badly.
@@ -579,20 +667,17 @@ fn verdict(
         result if truthy(result) => text(result),
         _ if silent => format!("no output for {} minutes", SILENCE.as_secs() / 60),
         // Cursor's error leads stderr; long ones list every model after it.
-        _ if !stderr.trim().is_empty() => {
-            let plain = without_colors(stderr);
-            let stderr = plain.trim();
-            let short: String = stderr.chars().take(300).collect();
-            if short.len() < stderr.len() {
-                short + "…"
-            } else {
-                short
+        _ if !stderr.trim().is_empty() => capped(without_colors(stderr).trim()),
+        _ => {
+            let ended = match status.map(|s| s.code().unwrap_or_else(|| -s.signal().unwrap_or(0))) {
+                Some(code) if code != 0 => format!("exit code {code}"),
+                _ => "no final result".to_owned(),
+            };
+            match logged() {
+                Some(error) => format!("{ended} ({error})"),
+                None => ended,
             }
         }
-        _ => match status.map(|s| s.code().unwrap_or_else(|| -s.signal().unwrap_or(0))) {
-            Some(code) if code != 0 => format!("exit code {code}"),
-            _ => "no final result".to_owned(),
-        },
     };
     Err(json!({"code":-32603,"message":detail}))
 }

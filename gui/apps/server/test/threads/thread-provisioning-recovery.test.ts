@@ -63,7 +63,7 @@ import {
 import { installFakeEnvironmentProvider } from "../helpers/environment-provider.js";
 import { withTestHarness } from "../helpers/test-app.js";
 import { handleDaemonSocketClosed } from "../../src/internal/session-owner-side-effects.js";
-import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../src/constants.js";
+import { DAEMON_SETUP_DISCONNECT_GRACE_MS } from "../../src/constants.js";
 import { onDaemonSocketOpen } from "../../src/ws/daemon-protocol.js";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
 
@@ -1015,7 +1015,7 @@ it("keeps a thread start that was in flight when the same daemon reconnects runn
   });
 });
 
-it("fails workspace setup only after the active-work disconnect grace", async () => {
+it("fails workspace setup only after the setup disconnect grace", async () => {
   await withTestHarness(async (harness) => {
     const { host, session } = seedHostSession(harness.deps, {
       id: "host-provision-disconnect-grace",
@@ -1048,9 +1048,7 @@ it("fails workspace setup only after the active-work disconnect grace", async ()
     vi.useFakeTimers();
     try {
       handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
-      await vi.advanceTimersByTimeAsync(
-        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 1,
-      );
+      await vi.advanceTimersByTimeAsync(DAEMON_SETUP_DISCONNECT_GRACE_MS - 1);
       expect(getEnvironment(harness.db, environment.id)?.status).toBe(
         "provisioning",
       );

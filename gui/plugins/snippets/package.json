@@ -1,0 +1,40 @@
+{
+  "name": "bb-plugin-snippets",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Save, expand, and share text snippets in Cloudroom chats.",
+  "engines": {
+    "bb": ">=0.0"
+  },
+  "bb": {
+    "name": "Snippets",
+    "description": "Save, expand, and share text snippets in Cloudroom chats.",
+    "branding": {
+      "icon": "FileText"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "typecheck": "bun check",
+    "prepare:bundled": "bb-plugin-build prepare-bundled"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudroom/plugin-build": "workspace:*",
+    "@get-bb/plugin-sdk": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2"
+  }
+}

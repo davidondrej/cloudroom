@@ -4,7 +4,7 @@ import {
   experimental_defineHostEntry,
   type ExperimentalHostWorkerLease,
 } from "@get-bb/plugin-sdk/host";
-import { keepAwakeHostContract } from "./contract.js";
+import { keepAwakeHostContract, type HostState } from "./contract.js";
 
 const REASON = "Keep Awake is on in Cloudroom";
 const GNOME_INHIBIT = "/usr/bin/gnome-session-inhibit";
@@ -16,22 +16,26 @@ const HEALTHY_MS = 10_000;
 
 /**
  * The helper that keeps this OS awake. Every helper watches process `pid` and
- * exits with it, so sleep prevention can never outlive Cloudroom. `null` means
- * this OS is not supported.
+ * exits with it, so sleep prevention can never outlive Cloudroom. `display`
+ * also keeps the screen on (macOS and Windows; Linux helpers always do).
+ * `null` means this OS is not supported.
  */
 export function keepAwakeCommand(
   platform: NodeJS.Platform,
   pid: number,
+  display: boolean,
   env: NodeJS.ProcessEnv = process.env,
   exists: (path: string) => boolean = existsSync,
 ): [command: string, args: string[]] | null {
-  if (platform === "darwin") return ["/usr/bin/caffeinate", ["-d", "-i", "-s", "-w", String(pid)]];
+  if (platform === "darwin") {
+    return ["/usr/bin/caffeinate", [...(display ? ["-d"] : []), "-i", "-s", "-w", String(pid)]];
+  }
   if (platform === "win32") {
     const script = [
       "$ErrorActionPreference = 'Stop'",
       "$power = Add-Type -Name KeepAwake -Namespace Cloudroom -PassThru -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern uint SetThreadExecutionState(uint flags);'",
-      // ES_CONTINUOUS | ES_SYSTEM_REQUIRED, as a decimal: PowerShell reads the hex as negative.
-      `if ($power::SetThreadExecutionState(${0x80000001}) -eq 0) { exit 1 }`,
+      // ES_CONTINUOUS | ES_SYSTEM_REQUIRED (| ES_DISPLAY_REQUIRED), as a decimal: PowerShell reads the hex as negative.
+      `if ($power::SetThreadExecutionState(${display ? 0x80000003 : 0x80000001}) -eq 0) { exit 1 }`,
       `Wait-Process -Id ${pid}`,
     ].join("; ");
     return [
@@ -52,8 +56,8 @@ export function keepAwakeCommand(
   return [SYSTEMD_INHIBIT, [...args, ...untilPidExits]];
 }
 
-const command = keepAwakeCommand(process.platform, process.pid);
-let wanted = false;
+const supported = keepAwakeCommand(process.platform, process.pid, false) !== null;
+let state: HostState = "off";
 let helper: ChildProcess | null = null;
 let restart: ReturnType<typeof setTimeout> | null = null;
 let restartMs = RESTART_MIN_MS;
@@ -69,7 +73,8 @@ function restartLater(): void {
 }
 
 function start(): void {
-  if (!wanted || command === null || helper !== null || restart !== null) return;
+  const command = state === "off" ? null : keepAwakeCommand(process.platform, process.pid, state === "display");
+  if (command === null || helper !== null || restart !== null) return;
   const startedAt = Date.now();
   let next: ChildProcess;
   try {
@@ -88,14 +93,18 @@ function start(): void {
   next.once("error", ended).once("exit", ended);
 }
 
-function stop(): void {
-  wanted = false;
+function stopHelper(): void {
   if (restart !== null) clearTimeout(restart);
   restart = null;
   restartMs = RESTART_MIN_MS;
   const running = helper;
   helper = null;
   running?.kill("SIGTERM");
+}
+
+function stop(): void {
+  state = "off";
+  stopHelper();
   void lease?.dispose();
   lease = null;
 }
@@ -103,15 +112,16 @@ function stop(): void {
 export default experimental_defineHostEntry({
   contract: keepAwakeHostContract,
   handlers: {
-    setEnabled({ enabled }, context) {
-      if (enabled && command !== null) {
-        wanted = true;
+    setState({ state: next }, context) {
+      if (next === "off" || !supported) {
+        stop();
+      } else {
+        if (next !== state) stopHelper(); // a new state needs a helper with other flags
+        state = next;
         lease ??= context.experimental_retainWorker();
         start();
-      } else {
-        stop();
       }
-      return { enabled: helper !== null, supported: command !== null };
+      return { state: helper === null ? "off" : state, supported };
     },
   },
   dispose: stop,

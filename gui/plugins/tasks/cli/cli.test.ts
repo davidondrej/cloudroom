@@ -1618,6 +1618,72 @@ describe("room-cli tasks CLI", () => {
     await harness.dispose();
   });
 
+  it("keeps a Manual thread's attachment files in its own folder (#2094)", async () => {
+    const calls: unknown[] = [];
+    const record = (input: object) => {
+      calls.push(input);
+      return { path: "", content: "x", contentEncoding: "utf8", sizeBytes: 1 };
+    };
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "tasks",
+      sdk: {
+        threads: {
+          get: async ({ threadId }) =>
+            ({ id: threadId, environmentId: "env_ws" }) as never,
+          defaultExecutionOptions: async ({ threadId }) =>
+            ({
+              permissionMode: threadId === "thr_full" ? "full" : "accept-edits",
+            }) as never,
+        },
+        environments: {
+          get: async () =>
+            ({ id: "env_ws", hostId: "host_ws", path: "C:\\work\\repo" }) as never,
+        },
+        // The workspace is on another machine, so its path is sent as stored.
+        system: { config: async () => ({ primaryHostId: "host_here" }) as never },
+        hosts: {
+          list: async () => [
+            { id: "host_ws", name: "Laptop" },
+            { id: "host_other", name: "Other" },
+          ],
+        },
+        files: {
+          read: async (input) => record(input) as never,
+          write: async (input) => record(input) as never,
+        },
+      },
+    });
+    await plugin(bb);
+    stdout(await harness.runCli(["project", "create", "--name", "Ws", "--prefix", "WS"]));
+    stdout(await harness.runCli(["create", "--project", "WS", "--title", "t"]));
+    const add = ["attachment", "add", "WS-1", "--file", "/abs/notes.txt"];
+    const id = JSON.parse(
+      stdout(await harness.runCli([...add, "--json"], { threadId: "thr_m" })),
+    ).attachment.id;
+    stdout(
+      await harness.runCli(["attachment", "get", id, "--out", "/abs/out.txt"], {
+        threadId: "thr_m",
+      }),
+    );
+    // The daemon refuses paths outside rootPath, after resolving symlinks.
+    expect(calls).toMatchObject([
+      { hostId: "host_ws", rootPath: "C:\\work\\repo", path: "/abs/notes.txt" },
+      { hostId: "host_ws", rootPath: "C:\\work\\repo", path: "/abs/out.txt" },
+    ]);
+    const other = await harness.runCli([...add, "--machine", "Other"], {
+      threadId: "thr_m",
+    });
+    expect(other.stderr).toContain("only read and write files in its own folder");
+    // The user and Full Access threads are unchanged.
+    stdout(await harness.runCli(add, { threadId: "thr_full" }));
+    stdout(await harness.runCli([...add, "--machine", "Other"]));
+    expect(calls.slice(2)).toEqual([
+      { hostId: "host_ws", path: "/abs/notes.txt" },
+      { hostId: "host_other", path: "/abs/notes.txt" },
+    ]);
+    await harness.dispose();
+  });
+
   it("adds and downloads an attachment with an exact file round-trip", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-tasks-cli-"));
     const inputPath = join(directory, "input.txt");
@@ -1863,6 +1929,8 @@ describe("room-cli tasks CLI", () => {
         threads: {
           get: async ({ threadId }: { threadId: string }) =>
             makeThreadResponse({ id: threadId, environmentId: "env-remote" }),
+          defaultExecutionOptions: async () =>
+            ({ permissionMode: "full" }) as never,
         },
         environments: {
           get: async () => ({ hostId: "machine-remote" }),
@@ -1987,7 +2055,20 @@ describe("room-cli tasks CLI", () => {
   });
 
   it("returns a friendly dispatch error when the task project is not linked", async () => {
-    const { bb, harness } = createFakePluginHost({ pluginId: "tasks" });
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "tasks",
+      sdk: {
+        threads: {
+          defaultExecutionOptions: async () => ({
+            model: "gpt-5.6-sol",
+            serviceTier: "default",
+            reasoningLevel: "high",
+            permissionMode: "auto",
+            source: "client/turn/requested",
+          }),
+        },
+      },
+    });
     await plugin(bb);
     stdout(
       await harness.runCli([
@@ -2044,6 +2125,14 @@ describe("room-cli tasks CLI", () => {
     ]);
     expect(aliased.stderr).toBe(
       'Task project "Unlinked CLI" is not linked to a Cloudroom project',
+    );
+    // An Auto thread can't dispatch a Full preset (#2095).
+    const capped = await harness.runCli(
+      ["dispatch", "UNL-1", "--preset", "CLI worker"],
+      { threadId: "thr_auto" },
+    );
+    expect(capped.stderr).toContain(
+      "runs in auto mode, so it can't use a preset in full mode",
     );
     expect(harness.sdk.callsTo("threads.spawn")).toEqual([]);
 

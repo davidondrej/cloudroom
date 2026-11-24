@@ -1720,6 +1720,9 @@ export function createDeltaAssembler(
             parentToolCallId ?? open?.item.parentToolCallId,
           );
         }
+        if (item.type === "agentMessage" && delta.providerCheckpointId && !parentToolCallId) {
+          item = { ...item, providerCheckpointId: delta.providerCheckpointId };
+        }
         if (delta.key.providerItemId !== undefined && roomItemId !== undefined) {
           registerItemId(state, delta.key.providerItemId, roomItemId);
           rememberSettledKey(state, keyStr);

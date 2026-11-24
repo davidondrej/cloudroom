@@ -439,9 +439,7 @@ export function EnvironmentPickerUI({
                 className={cn(
                   COARSE_POINTER_COMPACT_ICON_SIZE_SHRINK_CLASS,
                   isLoading && "animate-spin",
-                  !isLoading &&
-                    selected.icon === "Cloud" &&
-                    "text-primary [&_path]:stroke-[1.9]",
+                  !isLoading && selected.icon === "Cloud" && "cloud-icon",
                 )}
               />
             ) : (
@@ -1285,10 +1283,11 @@ function EnvironmentMenuItem({
       <Icon
         name={icon}
         className={cn(
-          !alignIconWithMachine &&
-            "mt-px text-muted-foreground max-md:pointer-coarse:mt-0",
+          !alignIconWithMachine && "mt-px max-md:pointer-coarse:mt-0",
           alignIconWithMachine ? "!size-full" : iconSizeClassName,
-          icon === "Cloud" && "text-primary [&_path]:stroke-[1.9]",
+          icon === "Cloud"
+            ? "cloud-icon"
+            : !alignIconWithMachine && "text-muted-foreground",
         )}
       />
     ) : (

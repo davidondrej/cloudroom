@@ -16,7 +16,7 @@ import { SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { SidebarMenu, SidebarMenuItem } from "@/components/ui/sidebar";
 import { appToast } from "@/components/ui/app-toast";
 import { DESKTOP_DOWNLOAD_URL, useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
-import { OsTile } from "@/components/machines/OsTile";
+import { OsTile, type OsKind } from "@/components/machines/OsTile";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
@@ -177,7 +177,6 @@ export function YourMacRow({ mac }: { mac: YourMac }) {
   );
 }
 
-const MAC_OS = COMPUTER === "Mac" ? "macos" : "linux";
 const BIG_TILE = "size-14 rounded-2xl [&_svg]:size-6";
 const CARD_BUTTON = "h-9 px-3.5 text-[13px]";
 
@@ -190,7 +189,7 @@ export function ViewingMacCard() {
   const refreshComputers = desktopApi?.refreshComputers;
   // The desktop app's list of Macs can be minutes old: ask for a fresh one when this card opens.
   useEffect(() => refreshComputers?.(), [refreshComputers]);
-  if (isPhoneApp() || !computers || !openComputer) return null;
+  if (isPhoneApp() || !desktopInfo || !computers || !openComputer) return null;
 
   const macs = withoutOldCopies(computers.list);
   const self = computers.list.find((mac) => mac.self);
@@ -216,7 +215,7 @@ export function ViewingMacCard() {
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80 p-1.5">
-        <MacSwitchItems computers={computers} open={open} />
+        <MacSwitchItems computers={computers} os={desktopInfo.platform} open={open} />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -304,7 +303,7 @@ export function ViewingMacCard() {
 
   return (
     <div className={cn("flex items-center gap-4 rounded-xl bg-surface-recessed p-5 ring-1 ring-inset", tone)}>
-      <OsTile os={MAC_OS} className={BIG_TILE} />
+      <OsTile os={desktopInfo.platform} className={BIG_TILE} />
       <div className="min-w-0 flex-1">
         <div className="text-xs text-subtle-foreground/75">{label}</div>
         <div className="truncate text-base font-semibold text-foreground">{name}</div>
@@ -322,10 +321,13 @@ type DesktopComputers = NonNullable<RoomDesktopInfo["computers"]>;
 /** Your Macs, with Open on the ones this window can switch to. Settings → Machines and the sidebar chip share it. */
 function MacSwitchItems({
   computers,
+  os,
   open,
   hideSelf = false,
 }: {
   computers: DesktopComputers;
+  /** This desktop app's OS. The list doesn't say what OS other computers run, so they share it. */
+  os: OsKind;
   open: (handle: string | null, name: string) => void;
   /** The chip shows "Stay on this Mac" instead of this Mac's own row while it stands in. */
   hideSelf?: boolean;
@@ -344,7 +346,7 @@ function MacSwitchItems({
           if (canOpen) open(mac.self ? null : mac.handle, mac.name);
         }}
       >
-        <OsTile os={MAC_OS} className={cn(!here && !canOpen && "opacity-55")} />
+        <OsTile os={os} className={cn(!here && !canOpen && "opacity-55")} />
         <span className={cn("min-w-0 flex-1", !here && !canOpen && "opacity-55")}>
           <span className="block truncate text-sm text-foreground">{mac.name}</span>
           <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -375,7 +377,7 @@ export function ViewingMacBar() {
   const computers = desktopInfo?.computers;
   const openComputer = desktopApi?.openComputer;
   const refreshComputers = desktopApi?.refreshComputers;
-  if (isPhoneApp() || !computers || !openComputer) return null;
+  if (isPhoneApp() || !desktopInfo || !computers || !openComputer) return null;
   const viewed = computers.list.find((mac) => !mac.self && mac.handle === computers.viewing);
   const fallback = computers.fallback;
   if (!viewed && !fallback) return null;
@@ -424,7 +426,7 @@ export function ViewingMacBar() {
                 <span className="min-w-0 flex-1 text-sm text-foreground">Stay on this {COMPUTER}</span>
               </DropdownMenuItem>
             ) : null}
-            <MacSwitchItems computers={computers} open={open} hideSelf={fallback !== null} />
+            <MacSwitchItems computers={computers} os={desktopInfo.platform} open={open} hideSelf={fallback !== null} />
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>

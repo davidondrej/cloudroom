@@ -339,6 +339,7 @@ vi.mock("@/hooks/mutations/thread-runtime-mutations", () => ({
 }));
 
 vi.mock("@/hooks/mutations/thread-state-mutations", () => ({
+  useSaveThreadModel: () => ({ save: vi.fn().mockResolvedValue(undefined), pendingModel: null }),
   useMarkThreadRead: () => ({ mutate: mocks.markThreadReadMutate }),
 }));
 

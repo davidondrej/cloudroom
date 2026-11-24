@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThreadEvent } from "@cloudroom/domain";
-import { createAgentRuntime } from "./runtime.js";
+import { AgentRuntimeTurnBusyError, createAgentRuntime } from "./runtime.js";
 import {
   createScriptedEchoLaunch,
   createScriptedEchoRequestRecord,
@@ -301,6 +301,19 @@ describe("codex process topology", () => {
       timeoutMs: 5_000,
     });
     expect(topology.spawned()).toBe(1);
+    // A competing start is refused before it ends the held turn's app-server.
+    await expect(
+      runtime.startThread({
+        clientRequestId: "creq_cdxtpgy584",
+        environmentId: "env-1",
+        input: [promptTextInput({ text: "second notice" })],
+        options: fullRuntimeOptions,
+        projectId: "p1",
+        providerId: "codex",
+        threadId: "t1",
+      }),
+    ).rejects.toBeInstanceOf(AgentRuntimeTurnBusyError);
+    expect(topology.spawned()).toBe(1);
 
     await runtime.stopThread({ threadId: "t1" });
 
@@ -376,6 +389,26 @@ describe("codex process topology", () => {
     expect(topology.exited()).toBe(1);
     expect(runtime.listRunningProviders()).toEqual([]);
     expect(topology.bridgeExits).toEqual([{ expected: true }]);
+  }, 30_000);
+
+  it("ends the old bridge's app-server when a thread starts again on a new bridge (#1717)", async () => {
+    const topology = createCodexTopologyRuntime();
+    const { runtime } = topology;
+    await startCodexThread(runtime, "t1");
+    await expect(
+      runtime.startThread({
+        bridgeLaunch: topology.launch("codex-v2"),
+        environmentId: "env-1",
+        projectId: "p1",
+        providerId: "codex",
+        threadId: "t1",
+        options: fullRuntimeOptions,
+        fork: { sourceProviderThreadId: "archived-staged-edit" },
+      }),
+    ).rejects.toThrow(/archived/);
+    // The old app-server would keep Codex's writer lock where Stop can't reach.
+    expect(topology.exited()).toBe(topology.spawned());
+    expect(runtime.listRunningProviders()).toEqual([]);
   }, 30_000);
 
   it("sweeps every app-server child when the bridge dies unexpectedly", async () => {

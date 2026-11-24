@@ -25,9 +25,13 @@ vi.mock(import("@/lib/system-config-atoms"), async (original) => ({
 }));
 vi.mock("@/hooks/queries/cloudroom-queries", () => ({ useCloudroomAccount: () => ({ data: { ready: true, account: { id: "m" } } }), cloudCanRunHarness: () => true }));
 vi.mock("@/hooks/queries/environment-queries", () => ({ useEnvironment: (id: string | null) => ({ data: id ? { hostId: "host_env" } : undefined }) }));
-vi.mock("@/hooks/queries/system-queries", () => ({
-  useSystemProviders: () => ({ data: [] }),
-  useSystemProviderStates: (options: { enabled: boolean }) => ({ data: options.enabled ? { providers: localStates } : undefined, refetch: vi.fn() }),
+vi.mock(import("@/hooks/queries/system-queries"), async (original) => ({
+  ...(await original()),
+  useSystemProviders: (() => ({ data: [] })) as never,
+  useSystemProviderStates: ((options: { enabled: boolean }) => ({
+    data: options.enabled ? { providers: localStates } : undefined,
+    refetch: vi.fn(),
+  })) as never,
 }));
 vi.mock("@/lib/provider-icon", () => ({ getProviderIconInfo: (_: string, id: string) => ({ icon: () => <i data-logo={id} /> }), getProviderIconTintStyle: () => undefined }));
 vi.mock("@/components/thread/terminal/ThreadTerminalView", () => ({ ThreadTerminalView: () => null }));

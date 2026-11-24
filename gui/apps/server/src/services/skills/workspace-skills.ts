@@ -53,7 +53,20 @@ async function readProjectSkill(
     if (error instanceof ApiError && error.body.code === "ENOENT") {
       return null;
     }
-    throw error;
+    // The host refuses a symlinked workspace root: skip the file, not the message (#1764).
+    // Anything else, like a dropped host, still fails so dispatch can retry.
+    if (!(error instanceof ApiError && error.body.code === "invalid_path")) {
+      throw error;
+    }
+    deps.logger.warn(
+      {
+        candidatePath,
+        reason: error instanceof Error ? error.message : String(error),
+        sourceType: "project",
+      },
+      "Skipping invalid injected skill",
+    );
+    return null;
   }
 
   const contentResult = requireDaemonFileContentResult(result);

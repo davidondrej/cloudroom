@@ -163,6 +163,18 @@ describe("machine enroll", () => {
     expect(String(error)).toBe(`Error: Could not exchange machine enrollment credential: ${reason}`);
   });
 
+  it("refuses a remote http:// server unless opted in, then keeps the opt-in for the service", async () => {
+    const h = await harness();
+    h.bundle = JSON.stringify({ ...bundle(), serverUrl: "http://192.0.2.10:38886" });
+    await expect(h.run()).rejects.toThrow("over plain HTTP");
+    expect(h.fetchFn).not.toHaveBeenCalled();
+    h.env.BB_ALLOW_INSECURE_SERVER_URL = "1";
+    await expect(h.run()).resolves.toEqual({ hostId: "host_test" });
+    expect(JSON.parse(await readFile(join(h.dir, "env.json"), "utf8"))).toEqual({
+      env: { BB_ALLOW_INSECURE_SERVER_URL: "1" },
+    });
+  });
+
   it("persists provider headers and sends them directly on enrollment without redemption", async () => {
     const h = await harness();
     const headers = { "x-access-token": "private-provider-header" };

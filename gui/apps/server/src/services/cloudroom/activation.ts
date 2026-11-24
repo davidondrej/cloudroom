@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { and, eq, isNotNull, isNull, ne, notInArray, sql } from "drizzle-orm";
-import { threads } from "@cloudroom/db";
+import { and, eq, isNotNull, isNull, ne, notExists, notInArray, sql } from "drizzle-orm";
+import { threadPluginMetadata, threads } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import type { PluginService } from "../plugins/plugin-service.js";
 import { firstAgentThreadId } from "../system/first-agent.js";
@@ -74,7 +74,10 @@ export async function activation(deps: AppDeps, plugins: PluginService): Promise
     if (child || (count?.n ?? 0) >= 3) found.push("subagents");
   }
   if (!state.done.has("loop")) {
-    const run = deps.db.select({ id: threads.id }).from(threads).where(eq(threads.originPluginId, "automations")).limit(1).get();
+    // Scans start from the Loops plugin too, but a scan is not a loop.
+    const scan = deps.db.select({ id: threadPluginMetadata.threadId }).from(threadPluginMetadata)
+      .where(and(eq(threadPluginMetadata.threadId, threads.id), sql`json_extract(${threadPluginMetadata.metadataJson}, '$.workflowScan') is not null`));
+    const run = deps.db.select({ id: threads.id }).from(threads).where(and(eq(threads.originPluginId, "automations"), notExists(scan))).limit(1).get();
     if (run) found.push("loop");
     else if (Date.now() - state.loopCheckedAt >= CHECK_MS) {
       state.loopCheckedAt = Date.now();

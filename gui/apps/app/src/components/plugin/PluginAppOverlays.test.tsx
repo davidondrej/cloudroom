@@ -9,7 +9,7 @@ import {
   screen,
 } from "@testing-library/react";
 import { createPortal } from "react-dom";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThreadActionsProvider } from "@/components/thread/ThreadActionsProvider";

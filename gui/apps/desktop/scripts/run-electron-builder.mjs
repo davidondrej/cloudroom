@@ -13,7 +13,7 @@ import {
   stampRequested,
 } from "./cloudroom-version.mjs";
 
-import { prepareRuntimes } from "./prepare-runtimes.mjs";
+import { prepareCore, prepareRuntimes } from "./prepare-runtimes.mjs";
 import { unregisterBundle } from "./macos-bundle.mjs";
 import notarizeHook from "./notarize.cjs";
 
@@ -375,8 +375,9 @@ async function main() {
   } else {
     logSigningPlan(signingPlan);
   }
-  if (!electronBuilderArgs.includes("--linux") && !prepackaged) {
-    await prepareRuntimes();
+  if (!prepackaged) {
+    // Linux bundles only Core; macOS and Windows also bundle Python (and macOS Git).
+    await (electronBuilderArgs.includes("--linux") ? prepareCore() : prepareRuntimes());
   }
   await mkdir(dirname(generatedConfigPath), { recursive: true });
   await writeGeneratedConfig(config);

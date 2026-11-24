@@ -84,7 +84,9 @@ vi.mock("@/components/promptbox/PromptBoxInternal", async () => {
   return {
   DEFAULT_COMPOSER_SCOPE: { kind: "new-thread", projectId: null },
   promptFastModeCommand: actual.promptFastModeCommand,
+  promptModelShortcuts: actual.promptModelShortcuts,
   PromptBoxInternal: ({
+    modelShortcuts,
     footerStart,
     modeHeader,
     compact,
@@ -99,6 +101,7 @@ vi.mock("@/components/promptbox/PromptBoxInternal", async () => {
     minHeight,
     voice,
   }: {
+    modelShortcuts?: readonly { name: string }[];
     footerStart?: ReactNode;
     modeHeader?: ReactNode;
     compact?: {
@@ -123,6 +126,7 @@ vi.mock("@/components/promptbox/PromptBoxInternal", async () => {
   }) => (
     <div
       data-testid="prompt-box"
+      data-model-shortcuts={modelShortcuts?.map(({ name }) => name).join(",")}
       data-compact={compact?.isCompact}
       data-height-animation-key={heightAnimationKey}
       data-min-height={minHeight}
@@ -728,8 +732,14 @@ describe("FollowUpPromptBox", () => {
 
   it("can lock permission without disabling execution controls", () => {
     const props = createFollowUpPromptBoxProps({ kind: "ready" });
+    props.threadProviderId = "codex";
+    props.execution.model.moreOptions = [{ value: "gpt-6-astra", label: "Astra" }];
+    props.execution.provider.options = [{ value: "codex", label: "Codex" }];
+    props.execution.selectModel = vi.fn();
 
-    render(<FollowUpPromptBox {...props} permissionReadOnly />);
+    const { rerender } = render(
+      <FollowUpPromptBox {...props} permissionReadOnly />,
+    );
 
     expect(mocks.executionControls).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -741,6 +751,33 @@ describe("FollowUpPromptBox", () => {
         disabled: true,
       }),
     );
+    const prompt = screen.getByTestId("prompt-box");
+    expect(prompt.dataset.modelShortcuts).toBe("astra");
+    for (const blocked of [
+      { executionReadOnly: true },
+      { pendingInteraction: <div>Waiting for input</div> },
+      { execution: { ...props.execution, disabled: true } },
+      { execution: { ...props.execution, lockModelSelection: true } },
+      { composer: { ...props.composer!, isFollowUpSubmitting: true } },
+      { composer: { ...props.composer!, threadRuntimeDisplayStatus: "stopping" as const } },
+    ]) {
+      rerender(<FollowUpPromptBox {...props} {...blocked} />);
+      expect(screen.queryByTestId("prompt-box")?.dataset.modelShortcuts).toBeUndefined();
+    }
+    rerender(<FollowUpPromptBox {...props} composer={{ ...props.composer!, threadRuntimeDisplayStatus: "error" }} />);
+    expect(prompt.dataset.modelShortcuts).toBe("astra");
+    rerender(
+      <FollowUpPromptBox
+        {...props}
+        permissionReadOnly
+        composer={{
+          ...props.composer!,
+          threadRuntimeDisplayStatus: "active",
+          submitMode: { kind: "queue", onStop: vi.fn() },
+        }}
+      />,
+    );
+    expect(prompt.dataset.modelShortcuts).toBeUndefined();
   });
 
   it("starts as a single compact row on mobile without size controls", () => {

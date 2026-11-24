@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { findCliExecutable } from "@cloudroom/process-utils";
-import { macCursorLogin, macKimiLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
+import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
+import { macAgentZeroLogin, macCursorLogin, macKimiLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
 
 const read = (path: string) => readFile(path, "utf8").catch(() => "");
 const parse = (text: string | null): unknown => { try { return text ? JSON.parse(text) : null; } catch { return null; } };
@@ -22,6 +22,12 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
   ["acp-grok", "grok", async () => Boolean(process.env.XAI_API_KEY) || hasSecret(parse(await read(join(dir("GROK_HOME", ".grok"), "auth.json"))))],
   ["acp-devin", "devin", async () => setsSecret(await read(join(dir("XDG_DATA_HOME", ".local/share"), "devin", "credentials.toml")))],
   ["acp-kimi", "kimi", async () => (await macKimiLogin()) !== null],
+  // agy keeps its sign-in in the Keychain, so ask agy: signed out, `agy models` fails with "Please sign in".
+  ["acp-antigravity", "agy", async () => {
+    const agy = findCliExecutable("agy");
+    return agy !== null && await execPortableFile(agy, ["models"], { timeoutMs: 15_000, env: { ...process.env, AGY_CLI_DISABLE_AUTO_UPDATE: "1" } }).then(() => true, () => false);
+  }],
+  ["acp-agent-zero", "a0", async () => (await macAgentZeroLogin()) !== null],
   // Droid keeps its sign-in encrypted in ~/.factory (unlocked through the Keychain on macOS); an API key may live only in the login shell.
   ["acp-droid", "droid", async () => Boolean(process.env.FACTORY_API_KEY || (await macVariables()).FACTORY_API_KEY)
     || (await Promise.all(["auth.v2.loginkeychain", "auth.v2.file"].map((file) => read(join(homedir(), ".factory", file))))).some((text) => text.trim() !== "")],

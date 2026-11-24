@@ -7,8 +7,8 @@ import { TopRowBrandMark } from "@/components/layout/BrandMark";
 import { CompactHeaderVersionMark } from "@/components/layout/CloudroomVersionMark";
 import { PluginHomepageSections } from "@/components/plugin/PluginHomepageSections";
 import { usePluginComposerHost } from "@/components/plugin/plugin-composer-host";
-import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPanelLayout";
-import { LazyThreadSecondaryPanel } from "@/components/secondary-panel/lazySecondaryPanelComponents";
+import { SecondaryPanelLayout } from "@/components/right-panel/shell/responsive-panel-host";
+import { LazyThreadSecondaryPanel } from "@/components/right-panel/shell/lazy-chunks";
 import {
   CHROME_ROW_HEIGHT_CLASS,
   getRoomDesktopInfo,
@@ -18,7 +18,7 @@ import {
 } from "@/lib/room-desktop";
 import { RootComposeCompactHome } from "./RootComposeCompactHome";
 import { useOptionalPaneContext } from "./thread-detail/PaneContext";
-import { getCompactPanelPresentation } from "@/components/secondary-panel/panelToggleControlState";
+import { getCompactPanelPresentation } from "@/components/right-panel/shell/panel-tokens";
 
 const ROOT_COMPOSE_MAX_WIDTH_CLASS = "max-w-[760px]";
 
@@ -115,9 +115,7 @@ export function RootComposeSecondaryContent({
         </div>
       ) : null}
       {usesCompactHomeLayout ? (
-        <div
-          className="@container/page flex min-h-0 flex-1 flex-col"
-        >
+        <div className="@container/page flex min-h-0 flex-1 flex-col">
           <CompactHeaderVersionMark />
           <RootComposeCompactHome composer={children}>
             {compactScrollContent}
@@ -170,9 +168,8 @@ export function RootComposeSecondaryContent({
         compactPresentation={getCompactPanelPresentation(
           threadSecondaryPanelProps.activeTab?.kind,
           threadSecondaryPanelProps.fixedTabs[0]?.tab.kind ??
-            threadSecondaryPanelProps.tabs.find(
-              (tab) => tab.isHidden !== true,
-            )?.tab.kind,
+            threadSecondaryPanelProps.tabs.find((tab) => tab.isHidden !== true)
+              ?.tab.kind,
         )}
         renderPanel={({
           presentation,

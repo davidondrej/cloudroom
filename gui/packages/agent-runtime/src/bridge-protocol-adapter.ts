@@ -270,6 +270,9 @@ export function createBridgeProtocolAdapter(
             params: {
               threadId: command.threadId,
               cwd: command.cwd,
+              ...(command.replacesProviderThreadId !== undefined
+                ? { replacesProviderThreadId: command.replacesProviderThreadId }
+                : {}),
               ...sessionConstructionParams(command),
             },
           };
@@ -311,6 +314,9 @@ export function createBridgeProtocolAdapter(
                     sourceProviderCheckpointId:
                       command.sourceProviderCheckpointId,
                   }
+                : {}),
+              ...(command.replacesProviderThreadId !== undefined
+                ? { replacesProviderThreadId: command.replacesProviderThreadId }
                 : {}),
               ...sessionConstructionParams(command),
             },

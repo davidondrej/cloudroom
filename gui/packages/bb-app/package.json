@@ -34,23 +34,20 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:host": "node scripts/build-host.mjs",
-    "clean": "rimraf dist app host-daemon server tsconfig.tsbuildinfo",
+    "clean": "node ../../scripts/rm.mjs dist app host-daemon server tsconfig.tsbuildinfo",
     "prepack": "node dist/prune-cli-chunks.mjs",
     "smoke:boot": "node scripts/smoke-boot.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@parcel/watcher": "2.5.6",
     "better-sqlite3": "13.0.3",
     "fs-native-extensions": "1.5.0",
-    "hono": "^4.7.0",
+    "hono": "^4.13.16",
     "jiti": "^2.6.1",
     "node-pty": "1.2.0-beta.15",
-    "npm": "11.16.0",
-    "picocolors": "^1.1.1",
-    "pino": "^9.6.0",
-    "pino-pretty": "^13.0.0",
+    "npm": "11.21.2",
     "pino-roll": "^4.0.0",
     "zod": "4.3.6"
   },
@@ -58,9 +55,7 @@
     "@cloudroom/config": "workspace:*",
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "rimraf": "^6.1.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   },
   "engines": {

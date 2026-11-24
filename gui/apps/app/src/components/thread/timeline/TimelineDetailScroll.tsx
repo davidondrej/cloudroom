@@ -1,5 +1,5 @@
 import { useMemo, type ReactNode } from "react";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   getDetailScrollMaxHeightClass,

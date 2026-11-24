@@ -114,7 +114,7 @@ vi.mock("@cloudroom/shared-ui/responsive-overlay", async (importOriginal) => {
   return { ...actual, PersistentResponsiveDrawerShell };
 });
 
-vi.mock("@/components/secondary-panel/ThreadSecondaryPanel", async () => {
+vi.mock("@/components/right-panel/shell/panel-shell", async () => {
   const React = await import("react");
 
   const ThreadSecondaryPanel = ({

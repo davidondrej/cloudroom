@@ -6,6 +6,7 @@ import type {
 } from "electron-updater";
 import { existsSync } from "node:fs";
 import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
+import { closeInheritedFdsOnLinux } from "./app-process.js";
 import {
   DESKTOP_AUTO_UPDATE_FEED_CONFIG,
   type DesktopAutoUpdateFeedConfig,
@@ -144,10 +145,31 @@ interface SquirrelUpdater {
   on(event: "update-downloaded", listener: () => void): unknown;
 }
 
+type SpawnLog = (
+  cmd: string,
+  args?: string[],
+  env?: NodeJS.ProcessEnv,
+  stdio?: unknown,
+) => Promise<boolean>;
+
 export function createElectronAutoUpdaterAdapter(
   updater: AppUpdater,
   squirrel: SquirrelUpdater,
 ): DesktopAutoUpdaterAdapter {
+  // Linux: electron-updater starts the new AppImage with Node's spawn, which hands it every fd
+  // Electron left open, the old AppImage's keepalive pipe included, so each update left the
+  // old mount behind (#2155). Start it through the same fd cleanup as bb-app (#1089).
+  const spawner = updater as unknown as { spawnLog?: SpawnLog };
+  const spawnLog = spawner.spawnLog?.bind(updater);
+  if (process.platform === "linux" && spawnLog) {
+    spawner.spawnLog = (cmd, args = [], env = process.env, stdio) => {
+      const launch = closeInheritedFdsOnLinux({
+        launch: { args, env, executablePath: cmd },
+        platform: "linux",
+      });
+      return spawnLog(launch.executablePath, launch.args, launch.env, stdio);
+    };
+  }
   return {
     checkForUpdates() {
       return updater.checkForUpdates();

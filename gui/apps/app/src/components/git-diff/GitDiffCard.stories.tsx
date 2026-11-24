@@ -7,9 +7,9 @@ import {
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { Button } from "@cloudroom/shared-ui/button";
 import { resolveAppThemeCss } from "@/lib/themes";
-import { GitDiffCard } from "@/components/git-diff/GitDiffCard";
+import { GitDiffCard } from "@/components/diff/diff-card";
 import type { DiffPresentation } from "@/components/code/code-rendering";
-import { parseGitDiffFiles } from "@/components/git-diff/git-diff-parsing";
+import { parseGitDiffFiles } from "@/components/diff/patch-utils";
 
 export default {
   title: "Git Diff / Themed Panel",

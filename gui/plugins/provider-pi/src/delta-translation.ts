@@ -117,6 +117,8 @@ const piAgentEndEventSchema = z
     type: z.literal("agent_end"),
     messages: z.array(piConversationMessageSchema),
     providerCheckpointId: z.string().min(1).optional(),
+    /** The bridge's: Pi's overflow compaction failed after this run. */
+    recoveryError: z.string().optional(),
     willRetry: z.boolean().default(false),
   })
   .passthrough();
@@ -184,7 +186,7 @@ const piToolExecutionUpdateEventSchema = z
     type: z.literal("tool_execution_update"),
     toolCallId: z.string(),
     toolName: z.string(),
-    partialResult: z.unknown(),
+    partialResult: z.unknown().optional(),
   })
   .passthrough();
 
@@ -352,9 +354,12 @@ export function createPiDeltaTranslator(
     string,
     ThreadEventTokenUsageBreakdown
   >();
+  /** Threads whose run Pi is compacting for a context overflow (#1900). */
+  const overflowCompactionThreadIds = new Set<string>();
 
   function resetThread(threadId: string): void {
     cumulativeTokensByThreadId.delete(threadId);
+    overflowCompactionThreadIds.delete(threadId);
     clearThreadToolShapes({ threadId });
   }
 
@@ -462,31 +467,56 @@ export function createPiDeltaTranslator(
     event: unknown,
     context?: PiDeltaTranslationContext,
   ): ThreadDelta[] {
-    const sdkEnvelope = sdkMessageEnvelopeSchema.safeParse(event);
-    if (sdkEnvelope.success) {
+    const sdkEnvelopes: Array<{
+      envelope: z.infer<typeof sdkMessageEnvelopeSchema>;
+      parentToolCallId: string | undefined;
+    }> = [];
+    let ignored = false;
+    for (;;) {
+      const parsedSdkEnvelope = sdkMessageEnvelopeSchema.safeParse(event);
+      if (!parsedSdkEnvelope.success) break;
       if (
-        piIgnoredEventSchema.safeParse(sdkEnvelope.data.params.message).success
+        piIgnoredEventSchema.safeParse(parsedSdkEnvelope.data.params.message)
+          .success
       ) {
-        return [];
+        ignored = true;
+        break;
       }
       const parentToolCallId =
-        sdkEnvelope.data.params.parent_tool_use_id ?? context?.parentToolCallId;
-      const translated = translate(sdkEnvelope.data.params.message, {
+        parsedSdkEnvelope.data.params.parent_tool_use_id ??
+        context?.parentToolCallId;
+      sdkEnvelopes.push({
+        envelope: parsedSdkEnvelope.data,
+        parentToolCallId,
+      });
+      context = {
         ...context,
         ...(parentToolCallId ? { parentToolCallId } : {}),
-      });
-      return translated.length > 0
-        ? translated
-        : unhandledDeltas(
-            {
-              jsonrpc: "2.0",
-              method: sdkEnvelope.data.method,
-              params: sdkEnvelope.data.params,
-            },
-            parentToolCallId,
-          );
+      };
+      event = parsedSdkEnvelope.data.params.message;
     }
 
+    const translated = ignored ? [] : translateUnwrapped(event, context);
+    if (translated.length > 0) return translated;
+    for (let index = sdkEnvelopes.length - 1; index >= 0; index -= 1) {
+      const { envelope, parentToolCallId } = sdkEnvelopes[index]!;
+      const fallback = unhandledDeltas(
+        {
+          jsonrpc: "2.0",
+          method: envelope.method,
+          params: envelope.params,
+        },
+        parentToolCallId,
+      );
+      if (fallback.length > 0) return fallback;
+    }
+    return [];
+  }
+
+  function translateUnwrapped(
+    event: unknown,
+    context?: PiDeltaTranslationContext,
+  ): ThreadDelta[] {
     const promptSettledEnvelope =
       piPromptSettledEnvelopeSchema.safeParse(event);
     if (promptSettledEnvelope.success) {
@@ -585,6 +615,9 @@ export function createPiDeltaTranslator(
         if (!parsed.success) {
           return unexpectedSdkEventDeltas(event, context);
         }
+        if (parsed.data.reason === "overflow") {
+          overflowCompactionThreadIds.add(context?.threadId ?? "");
+        }
         const open: ThreadDelta = {
           kind: "item.open",
           key: { channel: "compaction" },
@@ -666,6 +699,19 @@ export function createPiDeltaTranslator(
           return unexpectedSdkEventDeltas(event, context);
         }
         const lastAssistant = findLastAssistantMessage(piEvent.data.messages);
+        if (piEvent.data.recoveryError !== undefined) {
+          // Pi gave up on the run: its overflow compaction failed (#1876).
+          overflowCompactionThreadIds.delete(context?.threadId ?? "");
+          clearThreadToolShapes(context);
+          return [
+            {
+              kind: "provider.error",
+              message: "Context compaction failed",
+              detail: piEvent.data.recoveryError,
+              settlesTurn: true,
+            },
+          ];
+        }
         if (piEvent.data.willRetry) {
           if (lastAssistant && isPiAssistantError(lastAssistant)) {
             return [
@@ -679,6 +725,10 @@ export function createPiDeltaTranslator(
           }
           return [];
         }
+        // Pi cut this run short for its context overflow, not an output limit.
+        const overflowCompacted = overflowCompactionThreadIds.delete(
+          context?.threadId ?? "",
+        );
         if (lastAssistant && isPiAssistantError(lastAssistant)) {
           clearThreadToolShapes(context);
           return [
@@ -691,6 +741,14 @@ export function createPiDeltaTranslator(
             },
           ];
         }
+        // Pi ends a reply cut off by the output limit with stopReason "length"
+        // and no error, so it looked like an empty success (#1900). Pi also
+        // ends a context overflow with "length": then it compacts first, or
+        // nothing came out (Pi's isContextOverflow), and Pi handles it.
+        const hitOutputLimit =
+          lastAssistant?.stopReason === "length" &&
+          !overflowCompacted &&
+          (lastAssistant.usage?.output ?? 0) > 0;
         clearThreadToolShapes(context);
         const deltas: ThreadDelta[] = [];
         if (lastAssistant) {
@@ -719,9 +777,18 @@ export function createPiDeltaTranslator(
             modelContextWindow: resolveModelContextWindow(lastAssistant),
           });
         }
+        if (hitOutputLimit) {
+          deltas.push({
+            kind: "provider.error",
+            message: "Output limit reached",
+            detail:
+              'The model hit its output token limit before it finished. Send "continue" to resume.',
+          });
+        }
+        // A capped turn keeps its checkpoint, so its partial reply can be forked.
         deltas.push({
           kind: "turn.boundary",
-          status: "completed",
+          status: hitOutputLimit ? "failed" : "completed",
           ...(piEvent.data.providerCheckpointId !== undefined
             ? { providerCheckpointId: piEvent.data.providerCheckpointId }
             : {}),

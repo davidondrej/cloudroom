@@ -78,7 +78,27 @@ function model(
   };
 }
 
+// Its plugin is off by default (docs/scopes/cloudroom-agent.md): only the rows that turn it on list it.
+const cloudroomAgent = makeProviderInfo({
+  id: "cloudroom-agent",
+  displayName: "Cloudroom Agent",
+  icon: { glyph: "Cloud" },
+  strings: {
+    signInHint: "",
+    expiredHint: "",
+    installUrl: "https://cloudroom.dev",
+    iconTint: { light: "#5C7A00", dark: "#BFFF00" },
+  },
+});
+
 const catalogs: Record<string, AvailableModel[]> = {
+  "cloudroom-agent": [
+    model("cloudroom/cloudroom-agent", "Cloudroom Agent", [
+      "low",
+      "medium",
+      "high",
+    ]),
+  ],
   "claude-code": [
     model("claude-opus-5-5[1m]", "Claude Opus 5.5 (1M)", ALL_EFFORTS),
   ],
@@ -117,6 +137,28 @@ const rows: TimelineRow[] = [
   },
 ];
 
+// A Cloud Codex refusal (OpenAI's cybersecurity filter), as a loop run hit it on 2026-11-19.
+const refusalRows: TimelineRow[] = [
+  rows[0]!,
+  {
+    ...systemRow({
+      id: "refusal_error",
+      threadId: THREAD_ID,
+      turnId: null,
+      sourceSeqStart: 2,
+      sourceSeqEnd: 2,
+      startedAt: 2,
+      createdAt: 2,
+      systemKind: "error",
+      title: "Codex error (cyberPolicy)",
+      detail:
+        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request.",
+      status: "error",
+    }),
+    refusal: true,
+  },
+];
+
 function usage(usedPercent: number, resetInMinutes: number) {
   return {
     status: "ok" as const,
@@ -147,7 +189,10 @@ const accounts = [
 function seededClient(
   othersUsedPercent: number,
   withAccounts: boolean,
+  refusal = false,
+  withCloudroomAgent = false,
 ): QueryClient {
+  const listed = withCloudroomAgent ? [...providers, cloudroomAgent] : providers;
   const client = new QueryClient({
     defaultOptions: {
       queries: { gcTime: Infinity, retry: false, staleTime: Infinity },
@@ -155,7 +200,7 @@ function seededClient(
   });
   client.setQueryData(hostsQueryKey(), []);
   client.setQueryData(
-    ["plan-limit-accounts", "claude-code"],
+    ["plan-limit-accounts", refusal ? "codex" : "claude-code"],
     withAccounts ? accounts : [],
   );
   client.setQueryData(systemConfigQueryKey(), makeSystemConfig());
@@ -164,26 +209,26 @@ function seededClient(
     makeThreadResponse({
       id: THREAD_ID,
       status: "error",
-      providerId: "claude-code",
+      providerId: refusal ? "codex" : "claude-code",
       environmentId: null,
     }),
   );
   client.setQueryData<ResolvedThreadExecutionOptions>(
     threadDefaultExecutionOptionsQueryKey(THREAD_ID),
     {
-      model: "claude-opus-5-5[1m]",
-      reasoningLevel: "max",
+      model: refusal ? "gpt-6.1-sol" : "claude-opus-5-5[1m]",
+      reasoningLevel: refusal ? "xhigh" : "max",
       serviceTier: "default",
       permissionMode: "full",
       source: "client/turn/requested",
     },
   );
   const used: Record<string, number> = {
-    "claude-code": 100,
-    codex: othersUsedPercent,
+    "claude-code": refusal ? othersUsedPercent : 100,
+    codex: refusal ? 20 : othersUsedPercent,
     "acp-cursor": othersUsedPercent,
   };
-  for (const provider of providers) {
+  for (const provider of listed) {
     client.setQueryData<SystemExecutionOptionsResponse>(
       systemExecutionOptionsQueryKey({
         environmentId: null,
@@ -191,7 +236,7 @@ function seededClient(
         providerId: provider.id,
       }),
       {
-        providers,
+        providers: listed,
         models: catalogs[provider.id] ?? [],
         selectedOnlyModels: [],
         permissionCeiling: "full",
@@ -211,12 +256,16 @@ function seededClient(
 function Preview({
   othersUsedPercent,
   withAccounts = false,
+  refusal = false,
+  withCloudroomAgent = false,
 }: {
   othersUsedPercent: number;
   withAccounts?: boolean;
+  refusal?: boolean;
+  withCloudroomAgent?: boolean;
 }) {
   const [client] = useState(() =>
-    seededClient(othersUsedPercent, withAccounts),
+    seededClient(othersUsedPercent, withAccounts, refusal, withCloudroomAgent),
   );
   return (
     <QueryClientProvider client={client}>
@@ -224,7 +273,7 @@ function Preview({
         <ThreadTimelineRows
           threadRuntimeDisplayStatus="idle"
           workspaceRootPath={undefined}
-          timelineRows={rows}
+          timelineRows={refusal ? refusalRows : rows}
         />
       </div>
     </QueryClientProvider>
@@ -257,6 +306,24 @@ export function States() {
         hint="no button; the row only says when the limit resets"
       >
         <Preview othersUsedPercent={100} />
+      </StoryRow>
+      <StoryRow
+        label="refusal"
+        hint="Codex refused (OpenAI's filter): continue on another agent; no account switch, every account has the filter"
+      >
+        <Preview othersUsedPercent={36} refusal withAccounts />
+      </StoryRow>
+      <StoryRow
+        label="Cloudroom Agent on"
+        hint="its own button, after the account and agent buttons"
+      >
+        <Preview othersUsedPercent={36} withAccounts withCloudroomAgent />
+      </StoryRow>
+      <StoryRow
+        label="Cloudroom Agent is the only way on"
+        hint="its button, after the retry at the reset"
+      >
+        <Preview othersUsedPercent={100} withCloudroomAgent />
       </StoryRow>
     </StoryCard>
   );

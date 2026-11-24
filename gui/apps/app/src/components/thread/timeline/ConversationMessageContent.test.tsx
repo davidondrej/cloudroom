@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { ThreadListEntry } from "@cloudroom/domain";
 import { afterEach, describe, expect, it } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import {
@@ -483,5 +483,146 @@ describe("ConversationMessageContent user thread mentions", () => {
         .getByRole("link", { name: "Cross-project mention" })
         .getAttribute("href"),
     ).toBe("/projects/proj_target/threads/thr_cross_project");
+  });
+});
+
+describe("ConversationMessageContent collapsible context chips", () => {
+  it("starts collapsed and expands the full context card on click", () => {
+    const quoted = [
+      "Hey Danny — thanks for reaching out.",
+      "",
+      "Could you share your monthly reach and main channels?",
+    ].join("\n");
+    const text = `<context message="#465">\n${quoted}\n</context>\nTighten this to two sentences.`;
+
+    render(
+      <MemoryRouter>
+        <RouteNavigationProvider>
+          <ConversationMessageContent
+            role="user"
+            attachments={null}
+            originKind={null}
+            initiator="user"
+            mentions={[]}
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text={text}
+            turnRequest={{
+              isGrouped: false,
+              kind: "message",
+              status: "accepted",
+            }}
+          />
+        </RouteNavigationProvider>
+      </MemoryRouter>,
+    );
+
+    const expandButton = screen.getByRole("button", {
+      name: "Expand message #465",
+    });
+    expandButton.focus();
+    expect(document.activeElement).toBe(expandButton);
+    expect(expandButton.getAttribute("aria-expanded")).toBe("false");
+    expect(expandButton.getAttribute("aria-controls")).toBeNull();
+    expect(expandButton.textContent).toContain("#465");
+    expect(screen.getByText("Tighten this to two sentences.")).toBeTruthy();
+    expect(screen.queryByText(/Message #465/u)).toBeNull();
+
+    fireEvent.click(expandButton);
+
+    const collapseButton = screen.getByRole("button", {
+      name: "Collapse message #465",
+    });
+    expect(collapseButton).toBe(expandButton);
+    expect(document.activeElement).toBe(collapseButton);
+    expect(collapseButton.getAttribute("aria-expanded")).toBe("true");
+    const controlledId = collapseButton.getAttribute("aria-controls");
+    expect(controlledId).toBeTruthy();
+    expect(document.getElementById(controlledId!)?.textContent).toContain(
+      "Could you share your monthly reach and main channels",
+    );
+    expect(collapseButton.textContent).toContain("Message #465");
+    expect(collapseButton.textContent).toContain("16 words");
+
+    fireEvent.click(collapseButton);
+    const recollapsedButton = screen.getByRole("button", {
+      name: "Expand message #465",
+    });
+    expect(recollapsedButton).toBe(expandButton);
+    expect(document.activeElement).toBe(recollapsedButton);
+    expect(recollapsedButton.getAttribute("aria-expanded")).toBe("false");
+    expect(recollapsedButton.getAttribute("aria-controls")).toBeNull();
+  });
+
+  it("renders legacy unnumbered context tags and preserves mentions after them", () => {
+    const mentionedThread = threadListEntry({
+      id: "thr_ctx_mention",
+      projectId: "proj_demo",
+      title: "Partner terms",
+    });
+    const text =
+      "<context>\nDanny Li (Morse): affiliate offer.\n</context>\nSee @partner for terms.";
+    const mentionStart = text.indexOf("@partner");
+
+    render(
+      <MemoryRouter>
+        <RouteNavigationProvider>
+          <ThreadTitleMentionResourcesProvider
+            sectionNamesById={new Map()}
+            projectNamesById={new Map()}
+            threadById={new Map([[mentionedThread.id, mentionedThread]])}
+          >
+            <ConversationMessageContent
+              role="user"
+              attachments={null}
+              originKind={null}
+              initiator="user"
+              mentions={[
+                {
+                  start: mentionStart,
+                  end: mentionStart + "@partner".length,
+                  resource: {
+                    kind: "thread",
+                    threadId: mentionedThread.id,
+                    projectId: mentionedThread.projectId,
+                    label: mentionedThread.title!,
+                  },
+                },
+              ]}
+              senderThreadId={null}
+              senderThreadTitle={null}
+              senderIsPluginSideChat={false}
+              systemMessageKind="unlabeled"
+              systemMessageSubject={null}
+              text={text}
+              turnRequest={{
+                isGrouped: false,
+                kind: "message",
+                status: "accepted",
+              }}
+            />
+          </ThreadTitleMentionResourcesProvider>
+        </RouteNavigationProvider>
+      </MemoryRouter>,
+    );
+
+    const expandButton = screen.getByRole("button", {
+      name: "Expand quoted context",
+    });
+    expect(expandButton.textContent).toContain("Danny Li (Morse): affiliate offer.");
+    expect(
+      screen
+        .getByRole("link", { name: "Partner terms" })
+        .getAttribute("href"),
+    ).toBe("/projects/proj_demo/threads/thr_ctx_mention");
+
+    fireEvent.click(expandButton);
+    expect(
+      screen.getByRole("button", { name: "Collapse quoted context" })
+        .textContent,
+    ).toContain("Quoted context");
   });
 });

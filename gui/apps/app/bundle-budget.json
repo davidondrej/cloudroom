@@ -31,7 +31,7 @@
     "package may appear only in the static import closure of that gate's chunk.",
     "Any other chunk whose static closure reaches the package fails the check.",
     "KaTeX is the example: markdown-preview is a static import of the thread",
-    "route, so a static rehype-katex import would put ~64 KB brotli of math",
+    "route, so a static KaTeX import would put ~64 KB brotli of math",
     "renderer in front of every thread's first paint even though almost no",
     "message contains $$ math.",
     "",
@@ -40,7 +40,7 @@
     "painted' and 'route content painted'. SplitWorkspaceRoute is every thread,",
     "compose and plugin-panel page, so its closure is the second number that",
     "decides how slow bb feels on a phone. Same 10% ratchet; its forbiddenPackages",
-    "are the diff engine, math, file tree and terminal code that only a user",
+    "are the diff engine, math and terminal code that only a user",
     "action needs.",
     "The composer (tiptap/prosemirror) is visible on every thread page and is",
     "allowed until it moves behind a first-focus handoff. Run",
@@ -52,7 +52,6 @@
   "forbiddenBootPackages": [
     "@pierre/diffs",
     "@pierre/theming",
-    "@pierre/trees",
     "@shikijs/core",
     "@shikijs/engine-javascript",
     "@shikijs/engine-oniguruma",
@@ -69,13 +68,10 @@
     "prosemirror-state",
     "prosemirror-view",
     "react-resizable-panels",
-    "rehype-katex",
     "shiki"
   ],
   "onDemandPackages": {
-    "@pierre/trees": "src/components/secondary-panel/ThreadStorageFileTree.tsx",
-    "katex": "src/components/ui/markdown-katex.ts",
-    "rehype-katex": "src/components/ui/markdown-katex.ts"
+    "katex": "src/components/ui/markdown-katex.ts"
   },
   "routeClosures": {
     "SplitWorkspaceRoute": {
@@ -84,7 +80,6 @@
       "forbiddenPackages": [
         "@pierre/diffs",
         "@pierre/theming",
-        "@pierre/trees",
         "@shikijs/core",
         "@shikijs/engine-javascript",
         "@shikijs/engine-oniguruma",
@@ -94,7 +89,6 @@
         "katex",
         "mermaid",
         "oniguruma-to-es",
-        "rehype-katex",
         "shiki"
       ]
     }

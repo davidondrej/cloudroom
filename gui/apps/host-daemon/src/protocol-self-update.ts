@@ -147,7 +147,7 @@ const defaultRunProcess: SelfUpdateProcessRunner = async (
   args,
   options,
 ) => {
-  await execFileAsync(command, args, options);
+  await execFileAsync(command, args, { ...options, windowsHide: true });
 };
 
 const ROOM_APP_ALLOW_SCRIPTS_ARG =

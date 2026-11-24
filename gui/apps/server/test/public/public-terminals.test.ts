@@ -3,6 +3,7 @@ import * as gitCredentials from "../../src/services/machines/git-credentials.js"
 import {
   createThread,
   getAppSettings,
+  heartbeatSession,
   setAppSettings,
   updateHost,
 } from "@cloudroom/db";
@@ -1431,6 +1432,66 @@ describe("public terminal routes", () => {
       reason: "daemon-disconnect",
     });
   });
+
+  it.each([
+    { during: "silence", status: 502, code: "host_disconnected" },
+    { during: "heartbeat", status: 201, code: null },
+    { during: "archive", status: 409, code: "terminal_open_cancelled" },
+  ])(
+    "sends no open to a daemon silent past its lease ($during)",
+    async ({ during, status, code }) => {
+      const fixture = await createTerminalRouteFixture();
+      harnesses.push(fixture.harness);
+      heartbeatSession(fixture.harness.db, fixture.session.id, Date.now() - 1);
+
+      const responsePromise = Promise.resolve(
+        fixture.harness.app.request("/api/v1/terminals", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            cols: 80,
+            rows: 24,
+            target: { kind: "thread", threadId: fixture.thread.id },
+          }),
+        }),
+      );
+      if (during !== "silence") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        if (during === "archive") {
+          fixture.harness.deps.terminalSessions.closeArchivedThreadTerminals({
+            threadId: fixture.thread.id,
+          });
+        }
+        heartbeatSession(
+          fixture.harness.db,
+          fixture.session.id,
+          Date.now() + 30_000,
+        );
+      }
+      if (during === "heartbeat") {
+        const [openMessage] = await vi.waitFor(() => {
+          const messages = readDaemonOperationMessages(fixture.socket);
+          expect(messages).toHaveLength(1);
+          return messages;
+        });
+        if (openMessage?.type !== "terminal.open") {
+          throw new Error("Expected terminal.open");
+        }
+        acknowledgeTerminalOpen(fixture, openMessage);
+      }
+      const response = await responsePromise;
+
+      expect(response.status).toBe(status);
+      if (code !== null) {
+        expect(apiErrorSchema.parse(await readJson(response))).toMatchObject({
+          code,
+        });
+        expect(
+          readDaemonOperationMessages(fixture.socket).map((m) => m.type),
+        ).not.toContain("terminal.open");
+      }
+    },
+  );
 
   it("marks timed-out terminal opens exited", async () => {
     const fixture = await createTerminalRouteFixture();

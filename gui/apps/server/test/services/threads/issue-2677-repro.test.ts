@@ -199,8 +199,25 @@ describe("child outcome reconciliation", () => {
       expect(parentSystemMessageKinds(harness, fixture.parent.id)).toEqual([
         "child-failed",
       ]);
+
+      // A daemon that lost its post's reply sends a turn's end again (#1671).
+      for (let index = 0; index < 2; index += 1) {
+        await queueChildThreadTurnNotificationBestEffort(harness.deps, {
+          childThread: fixture.child,
+          parentThreadId: fixture.parent.id,
+          turnId: "turn-replayed",
+          turnStatus: "completed",
+        });
+        await new Promise((resolve) => setTimeout(resolve, 2_100));
+      }
+      expect([
+        ...parentSystemMessageKinds(harness, fixture.parent.id),
+        ...listQueuedThreadMessages(harness.db, fixture.parent.id).map(
+          (row) => JSON.parse(row.systemNotice ?? "{}").kind,
+        ),
+      ]).toEqual(["child-failed", "child-completed"]);
     });
-  });
+  }, 10_000);
 
   // full/free: writes fail with SQLITE_FULL or work; stall/pass: deliveries
   // stall on a gate or run; open: reopens gates oldest first; held: notices

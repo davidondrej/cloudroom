@@ -32,7 +32,6 @@ const dependencyRequire = createRequire(join(pluginSdkRoot, "package.json"));
 
 const EXTERNAL_DEPENDENCIES = [
   "@hugeicons/core-free-icons",
-  "@hugeicons/react",
   "@radix-ui/react-dialog",
   "@radix-ui/react-slot",
   "@testing-library/react",

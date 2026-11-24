@@ -81,10 +81,12 @@ const systemProviderHostQueryFields = {
   environmentId: z.string().min(1),
 } as const;
 
+// `providerId` returns just that registered provider, without checking any host.
 export const systemProvidersQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     capability: z.enum(["usage"]),
+    providerId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -110,10 +112,12 @@ export type SystemInstallableProvidersQuery = z.infer<
   typeof systemInstallableProvidersQuerySchema
 >;
 
+// `projectId` lists in that project's checkout on the host, where a new thread there starts (#1236).
 export const systemExecutionOptionsQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     providerId: z.string().min(1),
+    projectId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -126,6 +130,7 @@ export const systemRestartModelDiscoveryRequestSchema = z
     hostId: z.string().min(1).optional(),
     environmentId: z.string().min(1).optional(),
     providerId: z.string().min(1),
+    projectId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -153,6 +158,42 @@ export const systemVoiceTranscriptionResponseSchema = z.object({
 });
 export type SystemVoiceTranscriptionResponse = z.infer<
   typeof systemVoiceTranscriptionResponseSchema
+>;
+
+export const systemVoiceTranscriptionJobStartResponseSchema = z.object({
+  id: z.string().min(1),
+});
+export type SystemVoiceTranscriptionJobStartResponse = z.infer<
+  typeof systemVoiceTranscriptionJobStartResponseSchema
+>;
+
+export const systemVoiceTranscriptionJobErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean().optional(),
+});
+export type SystemVoiceTranscriptionJobError = z.infer<
+  typeof systemVoiceTranscriptionJobErrorSchema
+>;
+
+export const systemVoiceTranscriptionJobResponseSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({ id: z.string().min(1), status: z.literal("pending") }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("completed"),
+      text: z.string(),
+    }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("failed"),
+      error: systemVoiceTranscriptionJobErrorSchema,
+    }),
+  ],
+);
+export type SystemVoiceTranscriptionJobResponse = z.infer<
+  typeof systemVoiceTranscriptionJobResponseSchema
 >;
 
 export const systemProviderStateSchema = providerHealthSchema.extend({
@@ -214,6 +255,7 @@ export const systemConfigResponseSchema = z.object({
   serverAccess: serverAccessStatusSchema,
   generalSettings: appSettingsSchema.extend({
     showUnhandledProviderEvents: z.boolean().optional(),
+    providerOrder: z.array(z.string()).optional(),
   }),
   keybindings: appKeybindingsSchema,
   defaultKeybindings: appDefaultKeybindingsSchema,

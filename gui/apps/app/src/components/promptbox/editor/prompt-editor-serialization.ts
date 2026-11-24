@@ -7,9 +7,11 @@ import {
 } from "@cloudroom/domain";
 import type { JSONContent } from "@tiptap/react";
 import type { Node as ProseMirrorNode, Schema, Slice } from "@tiptap/pm/model";
-import type {
-  PromptMentionSuggestion,
-  ProviderCommandSuggestion,
+import {
+  findMessageContextLines,
+  messageContextLine,
+  type PromptMentionSuggestion,
+  type ProviderCommandSuggestion,
 } from "@cloudroom/client-core";
 
 export interface PromptEditorValue {
@@ -84,6 +86,51 @@ function normalizeMentions(
         mention.end <= value.text.length,
     )
     .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+/** A mention pill or a reply chip: one inline node in the editor. */
+type PromptEditorInlineAtom =
+  | { start: number; end: number; mention: PromptTextMention }
+  | { start: number; end: number; contextLabel: string };
+
+function inlineAtoms(
+  value: PromptEditorContentValue,
+): PromptEditorInlineAtom[] {
+  const mentions = normalizeMentions(value);
+  const contexts = findMessageContextLines(value.text).filter(
+    (context) =>
+      !mentions.some(
+        (mention) => mention.start < context.end && mention.end > context.start,
+      ),
+  );
+  return [
+    ...mentions.map((mention) => ({
+      start: mention.start,
+      end: mention.end,
+      mention,
+    })),
+    ...contexts.map((context) => ({
+      start: context.start,
+      end: context.end,
+      contextLabel: context.label,
+    })),
+  ].sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function inlineAtomContent(
+  atom: PromptEditorInlineAtom,
+  text: string,
+): JSONContent {
+  if ("contextLabel" in atom) {
+    return { type: "promptContext", attrs: { label: atom.contextLabel } };
+  }
+  return {
+    type: "mention",
+    attrs: {
+      resource: atom.mention.resource,
+      serializedText: text.slice(atom.start, atom.end),
+    } satisfies PromptEditorMentionAttrs,
+  };
 }
 
 function isQuoteLine(line: string): boolean {
@@ -298,7 +345,7 @@ function createMarkdownBoundarySweep({
   markers,
   text,
 }: {
-  mentions: readonly PromptTextMention[];
+  mentions: readonly { start: number }[];
   markers: readonly MarkdownMarkerRange[];
   text: string;
 }): (position: number) => number {
@@ -360,7 +407,7 @@ function appendMarkedTextContent({
 function promptEditorInlineMarkdownContentFromValue(
   value: PromptEditorContentValue,
 ): JSONContent[] {
-  const mentions = normalizeMentions(value);
+  const mentions = inlineAtoms(value);
   const ranges = collectMarkdownMarkRanges(value.text);
   const content: JSONContent[] = [];
   let cursor = 0;
@@ -397,11 +444,7 @@ function promptEditorInlineMarkdownContentFromValue(
     const marks = marksAt(cursor);
     if (mention) {
       content.push({
-        type: "mention",
-        attrs: {
-          resource: mention.resource,
-          serializedText: value.text.slice(mention.start, mention.end),
-        } satisfies PromptEditorMentionAttrs,
+        ...inlineAtomContent(mention, value.text),
         ...(marks ? { marks } : {}),
       });
       cursor = mention.end;
@@ -803,19 +846,13 @@ export function promptEditorInlineContentFromValue(
   const content: JSONContent[] = [];
   let cursor = 0;
 
-  for (const mention of normalizeMentions(value)) {
-    if (mention.start < cursor) {
+  for (const atom of inlineAtoms(value)) {
+    if (atom.start < cursor) {
       continue;
     }
-    content.push(...splitTextContent(value.text.slice(cursor, mention.start)));
-    content.push({
-      type: "mention",
-      attrs: {
-        resource: mention.resource,
-        serializedText: value.text.slice(mention.start, mention.end),
-      } satisfies PromptEditorMentionAttrs,
-    });
-    cursor = mention.end;
+    content.push(...splitTextContent(value.text.slice(cursor, atom.start)));
+    content.push(inlineAtomContent(atom, value.text));
+    cursor = atom.end;
   }
 
   content.push(...splitTextContent(value.text.slice(cursor)));
@@ -938,6 +975,19 @@ function serializePromptEditorNode(
       }
       return;
     }
+    if (node.type.name === "promptContext") {
+      const label: unknown = node.attrs.label;
+      if (typeof label === "string") {
+        appendMarkedInlineText(
+          messageContextLine(label),
+          node.marks,
+          nodePosition,
+          nodePosition + node.nodeSize,
+          "mention",
+        );
+      }
+      return;
+    }
     appendChildren(node, nodePosition);
   };
 
@@ -1041,7 +1091,8 @@ function serializePromptEditorNode(
     if (
       node.type.name === "text" ||
       node.type.name === "hardBreak" ||
-      node.type.name === "mention"
+      node.type.name === "mention" ||
+      node.type.name === "promptContext"
     ) {
       appendInline(node, nodePosition);
       return;

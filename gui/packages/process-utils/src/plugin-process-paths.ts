@@ -1,5 +1,11 @@
 import { execFile } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, realpathSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+} from "node:fs";
 import { mkdir, mkdtemp, realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
@@ -67,22 +73,23 @@ async function othersCanChange(path: string): Promise<boolean> {
   }
 }
 
-// `.cloudroom-tmp` in a data folder, given at its real path. Synchronous, so
-// ensureDataTempDir's callers can make their folder and start in one step.
-function ownTempDir(realDataDir: string): string {
-  const base = join(realDataDir, ".cloudroom-tmp");
+// `name` (`.cloudroom-tmp`, `environment-hooks`) in a data folder, given at its
+// real path, made unless `create` is false. Synchronous, so ensureDataTempDir's
+// callers can make their folder and start in one step.
+function ownPrivateDir(realDataDir: string, name: string, create = true): string {
+  const base = join(realDataDir, name);
   if (process.platform === "win32") {
     // Windows has no owner or mode bits to check. The data folder is in the
     // user's profile, which only this account and administrators can write.
-    mkdirSync(base, { recursive: true });
+    if (create) mkdirSync(base, { recursive: true });
     if (!lstatSync(base).isDirectory()) {
       throw new Error(`${base} must be a folder`);
     }
     return base;
   }
-  // `.cloudroom-tmp` must be a real, owner-only folder this account owns.
+  // It must be a real, owner-only folder this account owns.
   try {
-    mkdirSync(base, { mode: 0o700 });
+    if (create) mkdirSync(base, { mode: 0o700 });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
@@ -113,7 +120,7 @@ async function privateDataTempDir(dataDir: string): Promise<string> {
       `Another account can change ${realDataDir} or a folder above it. Make these folders writable only by you.`,
     );
   }
-  return ownTempDir(realDataDir);
+  return ownPrivateDir(realDataDir, ".cloudroom-tmp");
 }
 
 /** Makes a plugin process's temp folder in its data folder, never in the OS temp folder. */
@@ -140,7 +147,90 @@ export async function createPluginProcessTempDir(args: {
  * folder above it.
  */
 export function ensureDataTempDir(dataDir: string): string {
+  return ensureDataPrivateDir(dataDir, ".cloudroom-tmp");
+}
+
+/**
+ * `<dataDir>/<name>`: an owner-only folder for files Cloudroom keeps and later
+ * runs outside any sandbox, such as an environment's saved lifecycle hooks.
+ * The same rules as `.cloudroom-tmp` above apply.
+ */
+export function ensureDataPrivateDir(dataDir: string, name: string): string {
   mkdirSync(dataDir, { recursive: true });
   // The native call, like fs/promises realpath above: the same path everywhere.
-  return ownTempDir(realpathSync.native(dataDir));
+  return ownPrivateDir(realpathSync.native(dataDir), name);
+}
+
+/**
+ * `<dataDir>/<name>` as ensureDataPrivateDir made it before, with the same
+ * checks, but never made here. For a folder no sandbox may read: on Linux,
+ * Claude's sandbox hides only paths that exist when it starts, so the folder
+ * must not appear while one runs.
+ */
+export function existingDataPrivateDir(dataDir: string, name: string): string {
+  return ownPrivateDir(realpathSync.native(dataDir), name, false);
+}
+
+/**
+ * `<dataDir>/chat-file-copies`: Cloudroom's copies of the images chats showed,
+ * one folder per thread. Owner-only, and on the list below, because a copy is
+ * written outside every sandbox and may hold any file an agent named.
+ */
+export const CHAT_FILE_COPIES_DIR_NAME = "chat-file-copies";
+
+// Files in the data folder that hold credentials or every thread's data: the
+// host key, the cloud account token, the auth secret, the browser broker token,
+// Codex account tokens, share tokens, plugin state backups, the app database,
+// and chat image copies. Not the whole folder: managed worktrees, attachments,
+// and thread storage live there too, and agents need them.
+const PRIVATE_DATA_FILES = [
+  "auth.json",
+  "auth-secret",
+  "machine-environment-key",
+  "cloudroom.json",
+  "desktop-browser-broker.json",
+  "cloudroom-codex-accounts.json",
+  "thread-shares.json",
+  "bb.db",
+  "bb.db-wal",
+  "bb.db-shm",
+  "bb.db-journal",
+  join("plugins", "accounts", "secrets"),
+  join("plugins", "snapshots"),
+  CHAT_FILE_COPIES_DIR_NAME,
+];
+
+// Real paths, not wildcards: Claude's sandbox matches wildcards differently on
+// Linux. A secret created later is covered from the next session.
+function childPaths(dir: string, pick: (name: string) => string | null): string[] {
+  try {
+    return readdirSync(dir).flatMap((name) => {
+      const child = pick(name);
+      return child === null ? [] : [join(dir, child)];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Paths a sandboxed agent must never read (#2191); empty without a data folder. */
+export function privateDataPaths(dataDir: string | undefined): string[] {
+  const root = dataDir?.trim();
+  if (!root) return [];
+  const plugins = join(root, "plugins");
+  return [
+    ...new Set([
+      ...PRIVATE_DATA_FILES.map((name) => join(root, name)),
+      // Every plugin's secret settings and HTTP token.
+      ...childPaths(plugins, (name) => join(name, "secrets")),
+      // Claude logins of added accounts (Linux and Windows keep them in a file).
+      ...childPaths(join(plugins, "accounts", "profiles"), (name) =>
+        join(name, ".credentials.json"),
+      ),
+      // The preview helper's SSH key, including parked account folders.
+      ...childPaths(root, (name) =>
+        name.startsWith("cloudroom-preview") ? join(name, "id_ed25519") : null,
+      ),
+    ]),
+  ];
 }

@@ -7,7 +7,7 @@ import {
   buildTimelineRowTitle,
   buildTimelineViewRows,
 } from "../src/index.js";
-import { timelineRowActivityIntents } from "../src/timeline-activity-intents.js";
+import { timelineRowActivityIntents } from "../src/intents.js";
 import {
   createTimelineEventFactory,
   renderTimelineFixture,

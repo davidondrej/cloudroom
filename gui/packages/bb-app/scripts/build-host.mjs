@@ -24,8 +24,6 @@ const dependencyNames = [
   "@parcel/watcher",
   "fs-native-extensions",
   "node-pty",
-  "pino",
-  "pino-pretty",
   "pino-roll",
 ];
 const hostDaemonFiles = [

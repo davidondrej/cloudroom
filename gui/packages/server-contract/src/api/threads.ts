@@ -267,6 +267,8 @@ const sendMessageRequestFieldsSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   mode: sendMessageModeSchema,
   senderThreadId: z.string().min(1).optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
   pluginSubmission: z
     .object({ pluginId: pluginIdSchema, data: jsonValueSchema })
     .optional(),
@@ -319,7 +321,7 @@ export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
 // `sendAt` is deliberately dropped: an edit rewrites a message that has
 // already been dispatched, so there is nothing left to schedule.
 export const editMessageRequestSchema = sendMessageRequestFieldsSchema
-  .omit({ mode: true, sendAt: true, pluginSubmission: true })
+  .omit({ mode: true, sendAt: true, pluginSubmission: true, fromComposer: true })
   .extend({
     operationId: z.string().min(1),
     expectedRequestSequence: z.number().int().nonnegative().optional(),
@@ -414,6 +416,8 @@ export const createQueuedMessageRequestSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   senderThreadId: z.string().min(1).optional(),
   hardQueue: z.boolean().optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
 });
 export type CreateQueuedMessageRequest = z.infer<
   typeof createQueuedMessageRequestSchema
@@ -657,8 +661,19 @@ export type ThreadChildSummaryResponse = z.infer<
 
 export const threadUnarchiveQuerySchema = z.object({
   keepParent: z.enum(["true", "false"]).optional(),
+  /** Also restore the threads under it that were archived with it, still under it. */
+  withChildren: z.enum(["true", "false"]).optional(),
 });
 export type ThreadUnarchiveQuery = z.infer<typeof threadUnarchiveQuerySchema>;
+
+export const threadUnarchiveResponseSchema = z.object({
+  ok: z.literal(true),
+  /** The thread itself first, then any threads restored with it. */
+  unarchivedThreadIds: z.array(z.string()),
+});
+export type ThreadUnarchiveResponse = z.infer<
+  typeof threadUnarchiveResponseSchema
+>;
 
 export const deleteThreadRequestSchema = z.object({
   childThreadsConfirmed: z.boolean(),
@@ -673,12 +688,18 @@ export const updateThreadRequestSchema = z
     /** Another harness for this thread (ADR 0211); needs `model`. */
     providerId: z.string().min(1),
     model: z.string().min(1).nullable(),
+    /** Model shortcut: the named harness must still own this stopped session. */
+    idleSessionOnly: z.literal(true),
     reasoningLevel: reasoningLevelSchema.nullable(),
     visibility: threadVisibilitySchema,
     /** After a harness switch, the new agent continues the conversation right away. */
     resend: z.boolean(),
   })
   .partial()
+  .refine(
+    (value) => !value.idleSessionOnly || (value.providerId && typeof value.model === "string" && !value.resend),
+    "An idle-session model pick needs a harness and model and cannot resend.",
+  )
   .refine(
     (value) => value.providerId === undefined || typeof value.model === "string",
     "providerId needs a model",
@@ -726,6 +747,7 @@ export interface MoveThreadResponse {
 /** `room-cli thread worktree`: the uncommitted files to bring along, relative to the thread's folder. */
 export const moveThreadToWorktreeRequestSchema = z.object({
   carry: z.array(z.string().min(1)).max(10_000).optional(),
+  self: z.boolean().optional(),
 });
 export type MoveThreadToWorktreeRequest = z.infer<
   typeof moveThreadToWorktreeRequestSchema
@@ -733,6 +755,7 @@ export type MoveThreadToWorktreeRequest = z.infer<
 
 export interface MoveThreadToWorktreeResponse {
   previousPath: string;
+  deferred: boolean;
 }
 
 export const panelFileSourceSchema = z.enum(["workspace", "thread-storage"]);
@@ -848,6 +871,12 @@ export type ThreadPaneActionResponse = z.infer<
   typeof threadPaneActionResponseSchema
 >;
 
+/** `room-cli thread compact`: a busy thread compacts once its turn ends; `then` is sent next, so the agent keeps going. */
+export const threadCompactRequestSchema = z
+  .object({ then: z.string().trim().min(1).max(262_144).optional() })
+  .default({});
+export type ThreadCompactRequest = z.infer<typeof threadCompactRequestSchema>;
+
 /** `room-cli thread stop`: an idle thread's agent also ends what it left running (#607). */
 export const threadStopQuerySchema = z.object({
   endProcesses: z.enum(["true", "false"]).optional(),
@@ -906,13 +935,15 @@ export type ThreadCountGroupBy = z.infer<typeof threadCountGroupBySchema>;
  * Filters for `GET /threads/count`. Every value is a string because this is a
  * query string; the route parses them once at the boundary.
  *
- * `parentThreadId` is deliberately three-valued and unambiguous: omitted means
- * "do not filter on parentage", the literal `"none"` means root threads only
- * (`parent_thread_id IS NULL`), and any other value is that parent's id. An
- * empty string would have been ambiguous with an omitted parameter, and a
- * thread id can never be `"none"` (ids are prefixed `thr_`).
+ * `parentThreadId` is deliberately unambiguous: omitted means "do not filter on
+ * parentage", the literal `"none"` means root threads only
+ * (`parent_thread_id IS NULL`), the literal `"any"` means child threads only,
+ * and any other value is that parent's id. An empty string would have been
+ * ambiguous with an omitted parameter, and a thread id can never be `"none"`
+ * or `"any"` (ids are prefixed `thr_`).
  */
 export const THREAD_COUNT_ROOT_PARENT = "none";
+export const THREAD_COUNT_ANY_PARENT = "any";
 
 export const threadCountQuerySchema = z.object({
   status: threadStatusSchema.optional(),
@@ -923,6 +954,8 @@ export const threadCountQuerySchema = z.object({
   groupBy: threadCountGroupBySchema.optional(),
   /** Count archived threads too; omitted/false excludes them (deleted always are). */
   includeArchived: z.enum(["true", "false"]).optional(),
+  /** Count archived threads only; wins over `includeArchived`. */
+  archivedOnly: z.enum(["true", "false"]).optional(),
   /** Count hidden threads too; omitted/false counts visible threads only. */
   includeHidden: z.enum(["true", "false"]).optional(),
 });
@@ -981,6 +1014,10 @@ export type ThreadRunningResponse = z.infer<typeof threadRunningResponseSchema>;
 export const threadSearchQuerySchema = z.object({
   query: z.string().trim().min(2),
   limitPerGroup: z.string().regex(/^\d+$/).optional(),
+  /** Search one project only. Applied before `limitPerGroup`, like `hasParent`. */
+  projectId: z.string().min(1).optional(),
+  /** "true" for child threads only, "false" for root threads only. */
+  hasParent: z.enum(["true", "false"]).optional(),
 });
 export type ThreadSearchQuery = z.infer<typeof threadSearchQuerySchema>;
 

@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router";
 import "@cloudroom/shared-ui/icon-extended";
 import {
   findLocalPathProjectSourceForHost,

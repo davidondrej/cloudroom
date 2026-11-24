@@ -12,6 +12,13 @@ import {
   isAutomationPromptCommandResource,
   SUBMITTED_AUTOMATION_PROMPT_PREFIX,
 } from "./automation-prompt.js";
+import {
+  formatSubmittedMessageContextParts,
+  parseMessageContextNumber,
+  splitMessageContextSegments,
+  updateCodeFenceState,
+  type CodeFenceState,
+} from "./message-context.js";
 
 export type PromptDraftAttachment = UploadedPromptAttachment;
 
@@ -19,6 +26,7 @@ export type PromptDraftAttachment = UploadedPromptAttachment;
 export interface PromptDraftContext {
   label: string;
   text: string;
+  mentions?: PromptTextMention[];
 }
 
 export interface PromptDraftState {
@@ -28,10 +36,21 @@ export interface PromptDraftState {
   contexts?: PromptDraftContext[];
 }
 
-const promptDraftContextSchema = z.object({
-  label: z.string(),
-  text: z.string(),
-});
+const promptDraftContextSchema = z
+  .object({
+    label: z.string(),
+    text: z.string(),
+    mentions: z.array(z.unknown()).optional(),
+  })
+  .transform(({ label, text, mentions }): PromptDraftContext => {
+    const parsedMentions = (mentions ?? []).flatMap((item) => {
+      const result = promptTextMentionSchema.safeParse(item);
+      return result.success ? [result.data] : [];
+    });
+    return parsedMentions.length > 0
+      ? { label, text, mentions: parsedMentions }
+      : { label, text };
+  });
 
 const promptDraftStorageSchema = z.object({
   text: z.string().default(""),
@@ -152,8 +171,59 @@ function countWords(text: string): number {
   return text.split(/\s+/u).filter((word) => word.length > 0).length;
 }
 
-function messageContextLine(label: string): string {
+export function messageContextLine(label: string): string {
   return `<context> ${label} </context>`;
+}
+
+export interface MessageContextLineRange {
+  start: number;
+  end: number;
+  label: string;
+}
+
+const CONTEXT_LINE_PATTERN = /<context> (\[[^\]\n]+\]) <\/context>/gu;
+
+/** Finds every `<context> [label] </context>` line outside fenced code blocks. */
+export function findMessageContextLines(
+  text: string,
+): MessageContextLineRange[] {
+  if (!text.includes("<context> [")) return [];
+
+  const ranges: MessageContextLineRange[] = [];
+  let fence: CodeFenceState | null = null;
+  let lineStart = 0;
+
+  while (lineStart < text.length) {
+    const lineEnd = text.indexOf("\n", lineStart);
+    const rawEnd = lineEnd === -1 ? text.length : lineEnd;
+    const lineContentEnd =
+      rawEnd > lineStart && text[rawEnd - 1] === "\r" ? rawEnd - 1 : rawEnd;
+    const nextFence = updateCodeFenceState(
+      fence,
+      text,
+      lineStart,
+      lineContentEnd,
+    );
+    if (nextFence !== fence || fence !== null) {
+      fence = nextFence;
+      lineStart = lineEnd === -1 ? text.length : lineEnd + 1;
+      continue;
+    }
+
+    const line = text.slice(lineStart, lineContentEnd);
+    if (line.includes("<context> [")) {
+      for (const match of line.matchAll(CONTEXT_LINE_PATTERN)) {
+        ranges.push({
+          start: lineStart + match.index,
+          end: lineStart + match.index + match[0].length,
+          label: match[1]!,
+        });
+      }
+    }
+    lineStart = lineEnd === -1 ? text.length : lineEnd + 1;
+  }
+
+  return ranges;
 }
 
 function messageContextLabel(
@@ -164,9 +234,51 @@ function messageContextLabel(
   return `[message${messageNumber === null ? "" : ` #${messageNumber}`} - ${words} ${words === 1 ? "word" : "words"}]`;
 }
 
+function arePromptTextMentionsEqual(
+  left: readonly PromptTextMention[] | undefined,
+  right: readonly PromptTextMention[] | undefined,
+): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  if (a.length !== b.length) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** Picks a unique draft context label when two distinct quotes share a base label. */
+function uniqueMessageContextLabel(
+  baseLabel: string,
+  text: string,
+  mentions: readonly PromptTextMention[] | undefined,
+  existingByLabel: ReadonlyMap<string, PromptDraftContext>,
+  reservedLabels?: ReadonlySet<string>,
+): string {
+  const matchesExisting = (existing: PromptDraftContext) =>
+    existing.text === text &&
+    arePromptTextMentionsEqual(existing.mentions, mentions);
+
+  if (!reservedLabels?.has(baseLabel)) {
+    const direct = existingByLabel.get(baseLabel);
+    if (!direct || matchesExisting(direct)) {
+      return baseLabel;
+    }
+  }
+
+  const prefix = baseLabel.endsWith("]") ? baseLabel.slice(0, -1) : baseLabel;
+  const suffix = baseLabel.endsWith("]") ? "]" : "";
+  for (let occurrence = 2; ; occurrence += 1) {
+    const candidate = `${prefix} (${occurrence})${suffix}`;
+    if (reservedLabels?.has(candidate)) continue;
+    const existing = existingByLabel.get(candidate);
+    if (!existing || matchesExisting(existing)) {
+      return candidate;
+    }
+  }
+}
+
 /**
  * Adds a chat message as a short `<context> [message #7 - 494 words] </context>`
- * line. The full text is kept in `contexts` and swapped in on send.
+ * reply chip, followed by a newline so the user types on the next line. The full
+ * text is kept in `contexts` and swapped in on send.
  */
 export function appendMessageContextToDraft(
   state: PromptDraftState,
@@ -177,16 +289,24 @@ export function appendMessageContextToDraft(
   const text = messageText.trim();
   if (text === "") return appendAttachmentsToDraft(state, attachments);
 
-  const label = messageContextLabel(text, messageNumber);
-  const separator =
-    state.text === "" || state.text.endsWith("\n") ? "" : "\n\n";
-  const contexts = (state.contexts ?? []).filter(
+  const existingContexts = state.contexts ?? [];
+  const existingByLabel = new Map(
+    existingContexts.map((context) => [context.label, context]),
+  );
+  const label = uniqueMessageContextLabel(
+    messageContextLabel(text, messageNumber),
+    text,
+    undefined,
+    existingByLabel,
+  );
+  const separator = state.text === "" || state.text.endsWith("\n") ? "" : "\n";
+  const contexts = existingContexts.filter(
     (context) => context.label !== label,
   );
   return appendAttachmentsToDraft(
     {
       ...state,
-      text: `${state.text}${separator}${messageContextLine(label)}\n\n`,
+      text: `${state.text}${separator}${messageContextLine(label)}\n`,
       contexts: [...contexts, { label, text }],
     },
     attachments,
@@ -200,10 +320,26 @@ export function numberMessageContextInDraft(
   messageNumber: number,
 ): PromptDraftState {
   const text = messageText.trim();
-  const oldLabel = messageContextLabel(text, null);
-  const label = messageContextLabel(text, messageNumber);
   const contexts = state.contexts ?? [];
-  if (!contexts.some((context) => context.label === oldLabel)) return state;
+  const matching = contexts.find(
+    (context) =>
+      context.text === text &&
+      parseMessageContextNumber(context.label) === null,
+  );
+  if (!matching) return state;
+
+  const oldLabel = matching.label;
+  const otherByLabel = new Map(
+    contexts
+      .filter((context) => context.label !== oldLabel)
+      .map((context) => [context.label, context]),
+  );
+  const label = uniqueMessageContextLabel(
+    messageContextLabel(text, messageNumber),
+    matching.text,
+    matching.mentions,
+    otherByLabel,
+  );
   return {
     ...state,
     text: state.text.replaceAll(
@@ -214,7 +350,7 @@ export function numberMessageContextInDraft(
       context.label === label
         ? []
         : context.label === oldLabel
-          ? [{ label, text: context.text }]
+          ? [{ ...context, label }]
           : [context],
     ),
   };
@@ -305,6 +441,7 @@ interface PromptTextReplacement {
   start: number;
   end: number;
   text: string;
+  mentions?: readonly PromptTextMention[];
 }
 
 function automationPromptCommandReplacements(
@@ -323,25 +460,34 @@ function messageContextReplacements(
   text: string,
   contexts: readonly PromptDraftContext[],
 ): PromptTextReplacement[] {
-  return contexts.flatMap((context) => {
-    const line = messageContextLine(context.label);
-    const replacements: PromptTextReplacement[] = [];
-    for (
-      let start = text.indexOf(line);
-      start !== -1;
-      start = text.indexOf(line, start + line.length)
-    ) {
-      replacements.push({
-        start,
-        end: start + line.length,
-        text: `<context>\n${context.text}\n</context>`,
-      });
-    }
-    return replacements;
-  });
+  if (contexts.length === 0) return [];
+  const contextsByLabel = new Map(
+    contexts.map((context) => [context.label, context]),
+  );
+  const replacements: PromptTextReplacement[] = [];
+  for (const line of findMessageContextLines(text)) {
+    const context = contextsByLabel.get(line.label);
+    if (!context) continue;
+    const formatted = formatSubmittedMessageContextParts(
+      context.text,
+      context.label,
+    );
+    const mentions = context.mentions?.map((mention) => ({
+      ...mention,
+      start: formatted.bodyOffset + mention.start,
+      end: formatted.bodyOffset + mention.end,
+    }));
+    replacements.push({
+      start: line.start,
+      end: line.end,
+      text: formatted.text,
+      ...(mentions && mentions.length > 0 ? { mentions } : {}),
+    });
+  }
+  return replacements;
 }
 
-/** Applies non-overlapping replacements, dropping mentions inside them and shifting the rest. */
+/** Applies non-overlapping replacements, dropping mentions inside them, restoring replacement mentions, and shifting the rest. */
 function applyPromptTextReplacements(
   text: string,
   mentions: readonly PromptTextMention[],
@@ -352,6 +498,7 @@ function applyPromptTextReplacements(
   }
 
   const applied: PromptTextReplacement[] = [];
+  const insertedMentions: PromptTextMention[] = [];
   let cursor = 0;
   let nextText = "";
   for (const replacement of [...replacements].sort(
@@ -362,7 +509,17 @@ function applyPromptTextReplacements(
     }
     applied.push(replacement);
     nextText += text.slice(cursor, replacement.start);
+    const insertedStart = nextText.length;
     nextText += replacement.text;
+    if (replacement.mentions) {
+      for (const mention of replacement.mentions) {
+        insertedMentions.push({
+          ...mention,
+          start: insertedStart + mention.start,
+          end: insertedStart + mention.end,
+        });
+      }
+    }
     cursor = replacement.end;
   }
   nextText += text.slice(cursor);
@@ -390,7 +547,10 @@ function applyPromptTextReplacements(
 
   return {
     text: nextText,
-    mentions: normalizePromptTextMentions(nextMentions, nextText.length),
+    mentions: normalizePromptTextMentions(
+      [...nextMentions, ...insertedMentions],
+      nextText.length,
+    ),
   };
 }
 
@@ -455,19 +615,81 @@ export function promptInputToDraft(
   const textSegments: string[] = [];
   const mentions: PromptTextMention[] = [];
   const attachments: PromptDraftState["attachments"] = [];
+  const contextsByLabel = new Map<string, PromptDraftContext>();
+  const reservedLabels = new Set<string>();
+  const chunkSegments = input.map((chunk) =>
+    chunk.type === "text" && chunk.text.trim().length > 0
+      ? splitMessageContextSegments(chunk.text)
+      : null,
+  );
+  for (const segments of chunkSegments) {
+    if (!segments) continue;
+    for (const segment of segments) {
+      if (segment.kind !== "text") continue;
+      for (const line of findMessageContextLines(segment.text)) {
+        reservedLabels.add(line.label);
+      }
+    }
+  }
   let textOffset = 0;
 
-  for (const chunk of input) {
+  for (const [chunkIndex, chunk] of input.entries()) {
     if (chunk.type === "text") {
-      if (chunk.text.trim().length > 0) {
+      const segments = chunkSegments[chunkIndex];
+      if (segments) {
         if (textSegments.length > 0) {
           textOffset += 2;
         }
-        for (const mention of chunk.mentions) {
+        const replacements: PromptTextReplacement[] = [];
+        for (const segment of segments) {
+          if (segment.kind !== "context") continue;
+          const contextMentions = normalizePromptTextMentions(
+            chunk.mentions.flatMap((mention) =>
+              mention.start >= segment.bodyStart &&
+              mention.end <= segment.bodyEnd
+                ? [
+                    {
+                      ...mention,
+                      start: mention.start - segment.bodyStart,
+                      end: mention.end - segment.bodyStart,
+                    },
+                  ]
+                : [],
+            ),
+            segment.text.length,
+          );
+          const label = uniqueMessageContextLabel(
+            messageContextLabel(segment.text, segment.messageNumber),
+            segment.text,
+            contextMentions,
+            contextsByLabel,
+            reservedLabels,
+          );
+          if (!contextsByLabel.has(label)) {
+            contextsByLabel.set(label, {
+              label,
+              text: segment.text,
+              ...(contextMentions.length > 0
+                ? { mentions: contextMentions }
+                : {}),
+            });
+          }
+          replacements.push({
+            start: segment.start,
+            end: segment.end,
+            text: messageContextLine(label),
+          });
+        }
+        const collapsed = applyPromptTextReplacements(
+          chunk.text,
+          chunk.mentions,
+          replacements,
+        );
+        for (const mention of collapsed.mentions) {
           if (
             mention.start >= 0 &&
             mention.end > mention.start &&
-            mention.end <= chunk.text.length
+            mention.end <= collapsed.text.length
           ) {
             mentions.push({
               ...mention,
@@ -476,8 +698,8 @@ export function promptInputToDraft(
             });
           }
         }
-        textSegments.push(chunk.text);
-        textOffset += chunk.text.length;
+        textSegments.push(collapsed.text);
+        textOffset += collapsed.text.length;
       }
       continue;
     }
@@ -503,10 +725,12 @@ export function promptInputToDraft(
     }
   }
 
+  const contexts: PromptDraftContext[] = [...contextsByLabel.values()];
   return {
     text: textSegments.join("\n\n"),
     mentions,
     attachments,
+    ...(contexts.length > 0 ? { contexts } : {}),
   };
 }
 

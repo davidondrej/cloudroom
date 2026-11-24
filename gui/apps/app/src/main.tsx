@@ -2,7 +2,7 @@ import { StrictMode, useEffect } from "react";
 import { COMPUTER } from "@cloudroom/domain";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter } from "react-router-dom";
+import { BrowserRouter } from "react-router";
 import { App } from "./App";
 import {
   isPhoneRelay,
@@ -12,12 +12,15 @@ import {
   reloadWhenMacGoesOffline,
 } from "./cloud/cloud-mode";
 import { installCloudServer } from "./cloud/cloud-server";
-import { keepOtherMacOnScreen, viewingOtherMac } from "./cloud/other-mac";
+import { viewingOtherMac } from "./cloud/mac-connection";
+import { keepOtherMacOnScreen } from "./cloud/other-mac";
 import { AppErrorBoundary } from "./components/AppErrorBoundary";
 import { AppToaster } from "./components/AppToaster";
+import { HumanClickRequests } from "./components/plugin/HumanClickRequests";
 import { isFirefoxAndroid } from "./components/layout/useMobileVisualViewportHeight";
 import { appToast } from "./components/ui/app-toast";
 import { registerProviderCliInstallQueryClient } from "./components/provider-cli/provider-cli-install-store";
+import { initializeCloudIconStyle } from "./hooks/useCloudIconStyle";
 import { initializeCorners } from "./hooks/useCorners";
 import { initializePreferredTheme } from "./hooks/useTheme";
 import { initializeFavicon } from "./lib/favicon-color-preference";
@@ -81,6 +84,7 @@ registerProviderCliInstallQueryClient(appQueryClient);
 
 initializePreferredTheme();
 initializeCorners();
+initializeCloudIconStyle();
 applyCachedAppThemeCss();
 initializeFavicon();
 
@@ -115,7 +119,12 @@ function render() {
           <BrowserRouter>
             <App />
             <AppToaster />
-            {macIsOff() && <CloudModeNotice />}
+            {macIsOff() ? (
+              <CloudModeNotice />
+            ) : (
+              // Only the desktop app on this computer can answer, so a phone or another Mac never asks.
+              !isPhoneRelay() && !viewingOtherMac() && <HumanClickRequests />
+            )}
           </BrowserRouter>
         </QueryClientProvider>
       </AppErrorBoundary>
@@ -129,6 +138,7 @@ if (viewingOtherMac()) {
   keepOtherMacOnScreen();
   render();
 } else if (isPhoneRelay()) {
+  document.documentElement.dataset.cloudroomPhone = "true";
   keepOfflineCopy();
   void macOffline().then((offline) => {
     if (offline) installCloudServer();

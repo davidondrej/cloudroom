@@ -1,7 +1,7 @@
 /** Agents whose Cloud login can be refused ("disconnected in Cloud"). Shared by the banner, threads, and paused loops. */
-export type CloudLoginProvider = "codex" | "claude-code" | "acp-cursor";
+export type CloudLoginProvider = "codex" | "claude-code" | "acp-cursor" | "acp-antigravity";
 
-const NAMES: Record<CloudLoginProvider, string> = { codex: "Codex", "claude-code": "Claude Code", "acp-cursor": "Cursor" };
+const NAMES: Record<CloudLoginProvider, string> = { codex: "Codex", "claude-code": "Claude Code", "acp-cursor": "Cursor", "acp-antigravity": "Antigravity" };
 const BY_NAME = new Map(Object.entries(NAMES).map(([id, name]) => [name, id as CloudLoginProvider]));
 
 export const cloudLoginName = (provider: CloudLoginProvider): string => NAMES[provider];
@@ -11,7 +11,7 @@ export const cloudLoginTitle = (provider: CloudLoginProvider): string => `${NAME
 
 // Core's refusal ("Connect your ChatGPT subscription to use Codex in Cloud."), the website's loop reason, old and new
 // ("Connect Codex first.", "Codex disconnected in Cloud.").
-const REFUSAL = /to use (Codex|Claude Code|Cursor) in Cloud\b|^Connect (Codex|Claude Code|Cursor) first\b|^(Codex|Claude Code|Cursor) disconnected in Cloud\b/u;
+const REFUSAL = /to use (Codex|Claude Code|Cursor|Antigravity) in Cloud\b|^Connect (Codex|Claude Code|Cursor|Antigravity) first\b|^(Codex|Claude Code|Cursor|Antigravity) disconnected in Cloud\b/u;
 
 /** Which agent's Cloud login a refusal or paused loop's reason names, or null for any other error. */
 export function cloudLoginProvider(text: string | null | undefined): CloudLoginProvider | null {

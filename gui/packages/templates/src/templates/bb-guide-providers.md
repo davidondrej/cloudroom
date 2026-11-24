@@ -11,7 +11,7 @@ Providers are agent backends (e.g., codex, claude-code). Each supports different
 
   room-cli provider list [--machine <id-or-name> | --environment <id>]
                                           List available providers
-  room-cli provider models [providerId] [--machine <id-or-name> | --environment <id>] [--restart]
+  room-cli provider models [providerId] [--machine <id-or-name> | --environment <id>] [--project <id>] [--restart]
                                           List models for a provider
   room-cli provider disconnect <claude-code|codex>
                                           Sign it out on this computer and in Cloud, and remove added accounts
@@ -32,13 +32,15 @@ the explicitly requested provider or Codex, then resolves the model marked
 default by that provider on the target machine (falling back to the first
 catalog model when none is marked).
 
-`room-cli provider models acp-cursor --restart` (or `codex`/`pi --restart`) restarts
-that provider's model-discovery process and reloads its models. It preserves
-conversation threads, credentials, and project files. Use it when model loading
-fails, or when the model list looks stale after a CLI upgrade or a Pi
-`models.json` edit; it does not
+`room-cli provider models acp-cursor --restart` (or any `acp-*` provider, `codex`,
+`pi`) restarts that provider's model-discovery process and reloads its models. It
+preserves conversation threads, credentials, and project files. Use it when model
+loading fails, or when the model list looks stale after a CLI upgrade, a Pi
+`models.json` edit, or an `opencode.json` provider change; it does not
 repair login or installation problems. Other providers must explicitly support
-this action.
+this action. OpenCode and Kilo Code list models per project, since a project's
+`opencode.json` can hide providers. `provider models` lists the calling thread's
+project; pass `--project <id>` for another project, or `--environment <id>`.
 
 Model lists answer from the machine's last stored list while a background
 refresh runs, so a list can be hours old. A provider whose refresh keeps

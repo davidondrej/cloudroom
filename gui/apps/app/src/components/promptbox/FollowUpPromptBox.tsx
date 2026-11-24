@@ -37,6 +37,7 @@ import {
   DEFAULT_COMPOSER_SCOPE,
   PromptBoxInternal,
   promptFastModeCommand,
+  promptModelShortcuts,
   type AttachmentsConfig,
   type HistoryConfig,
   type PromptBoxAction,
@@ -56,7 +57,10 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { ThreadTimelineScrollToBottomButton } from "@/views/thread-detail/ThreadTimelineScrollToBottomButton";
 import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
-import { ThreadContextWindowIndicator } from "@/components/thread/timeline";
+import {
+  ThreadContextWindowIndicator,
+  type ThreadContextWindowActions,
+} from "@/components/thread/timeline";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
 
 type PromptBoxWithScrollAnchorProps = ComponentProps<
@@ -155,7 +159,10 @@ export interface FollowUpPromptBoxProps {
   environmentSummary: ReactNode | null;
   contextWindowUsage: ContextWindowUsage | null;
   contextWindowNote?: string | undefined;
+  contextWindowActions?: ThreadContextWindowActions | undefined;
   execution: ExecutionControlsProps;
+  threadProviderId?: string | undefined;
+  cloudShortcutModels?: readonly string[] | undefined;
   permission: ExecutionPermissionConfig;
   executionReadOnly?: boolean;
   permissionReadOnly?: boolean;
@@ -228,7 +235,10 @@ function FollowUpPromptBoxWithComposer({
   environmentSummary,
   contextWindowUsage,
   contextWindowNote,
+  contextWindowActions,
   execution,
+  threadProviderId,
+  cloudShortcutModels,
   permission,
   executionReadOnly,
   permissionReadOnly,
@@ -613,6 +623,18 @@ function FollowUpPromptBoxWithComposer({
     onModifierSubmit ? `, ${modifierSubmitShortcutLabel()} to ${action}` : "";
   const executionControlsDisabled =
     (executionReadOnly ?? false) || hasPendingInteraction;
+  const executionCommandsEnabled =
+    !execution.disabled &&
+    !executionControlsDisabled &&
+    !isLoadingExecutionOptions &&
+    !execution.model.isLoading &&
+    !execution.model.loadFailed;
+  const canSwitchModel =
+    executionCommandsEnabled &&
+    !execution.lockModelSelection &&
+    (composer.threadRuntimeDisplayStatus === "idle" || composer.threadRuntimeDisplayStatus === "error") &&
+    submitMode.kind === "ready" &&
+    !composer.isFollowUpSubmitting;
   const { permissionDisplayOverride, permissionPickerDisabledByPlanMode } =
     usePromptModePermissionDisplay({
       execution,
@@ -740,23 +762,17 @@ function FollowUpPromptBoxWithComposer({
           isRunning: canStopRuntime,
         }}
         typeahead={typeahead}
-        reasoning={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : execution.reasoning
-        }
+        reasoning={executionCommandsEnabled ? execution.reasoning : undefined}
         fastMode={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : promptFastModeCommand(execution.serviceTier)
+          executionCommandsEnabled ? promptFastModeCommand(execution.serviceTier) : undefined
+        }
+        modelShortcuts={
+          canSwitchModel && threadProviderId
+            ? promptModelShortcuts(execution, {
+                providerId: threadProviderId,
+                models: cloudShortcutModels ?? [...execution.model.options, ...execution.model.moreOptions].map(({ value }) => value),
+              })
+            : undefined
         }
         attachments={attachments}
         promptActions={promptActions}
@@ -782,6 +798,7 @@ function FollowUpPromptBoxWithComposer({
               <ThreadContextWindowIndicator
                 usage={contextWindowUsage}
                 note={contextWindowNote}
+                actions={contextWindowActions}
               />
             ) : null}
           </div>

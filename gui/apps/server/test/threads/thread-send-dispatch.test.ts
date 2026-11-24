@@ -1,3 +1,4 @@
+import { AgentRuntimeTurnBusyError } from "@cloudroom/agent-runtime";
 import {
   archiveThread,
   createPendingInteraction,
@@ -532,7 +533,7 @@ describe("startup queue waits", () => {
         ).rejects.toMatchObject({
           body: {
             code: "thread_not_writable",
-            details: { reason },
+            details: { reason, threadId: thread.id },
           },
           status: 409,
         });
@@ -865,6 +866,39 @@ describe("startup queue waits", () => {
     });
   });
 
+  it("keeps an explicitly sent needs-attention notice out of the stale drop (#2452)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedProviderThreadFixture({
+        harness,
+        status: "active",
+        value: 2452,
+      });
+      const notice = {
+        input: textInput("child needs help"),
+        parentThreadId: thread.id,
+        systemMessageKind: "child-needs-attention" as const,
+        systemMessageSubject: null,
+      };
+      await queueParentSystemMessage(harness.deps, {
+        ...notice,
+        interactionId: "pint_2452",
+      });
+      const parked = listQueuedThreadMessages(harness.db, thread.id)[0]!;
+      expect(JSON.parse(parked.systemNotice!).interactionId).toBe("pint_2452");
+
+      await sendQueuedMessageNow(harness.deps, {
+        mode: "auto",
+        queuedMessageId: parked.id,
+        threadId: thread.id,
+      });
+      const requeued = listQueuedThreadMessages(harness.db, thread.id);
+      expect(requeued).toHaveLength(1);
+      expect(JSON.parse(requeued[0]!.systemNotice!)).not.toHaveProperty(
+        "interactionId",
+      );
+    });
+  });
+
   it("parks a second notice while the first starts a fresh session (#1584)", async () => {
     await withTestHarness(async (harness) => {
       const { thread } = seedProviderThreadFixture({ harness, value: 1584 });
@@ -889,6 +923,32 @@ describe("startup queue waits", () => {
           JSON.parse(row.waitingOn!),
         ),
       ).toEqual([{ kind: "turn-starting" }]);
+
+      // A start the host refused as competing, before touching the live
+      // turn, leaves that turn running, not the thread failed.
+      const start = await waitForQueuedCommand(
+        harness,
+        (queued) => queued.command.type === "thread.start",
+      );
+      const busy = new AgentRuntimeTurnBusyError(thread.id);
+      await reportQueuedCommandError(harness, start, {
+        errorCode: busy.code,
+        errorMessage: busy.message,
+      });
+      expect(getThread(harness.db, thread.id)?.status).toBe("active");
+      expect(
+        listEvents(harness.db, { threadId: thread.id }).map((e) => e.type),
+      ).not.toContain("system/error");
+      // Its notice waits for that turn too, in its place, instead of being lost.
+      expect(
+        listQueuedThreadMessages(harness.db, thread.id).map((row) => [
+          row.payloadKind,
+          JSON.parse(row.content)[0].text,
+        ]),
+      ).toEqual([
+        ["retry", "child A assigned"],
+        ["inline", "child B assigned"],
+      ]);
     });
   });
 

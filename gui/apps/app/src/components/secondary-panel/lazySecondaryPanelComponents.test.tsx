@@ -3,9 +3,9 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PanelGroup } from "react-resizable-panels";
-import { LazyThreadSecondaryPanel } from "./lazySecondaryPanelComponents";
+import { LazyThreadSecondaryPanel } from "@/components/right-panel/shell/lazy-chunks";
 
-vi.mock("./ThreadSecondaryPanel", () => new Promise(() => {}));
+vi.mock("@/components/right-panel/shell/panel-shell", () => new Promise(() => {}));
 
 afterEach(cleanup);
 

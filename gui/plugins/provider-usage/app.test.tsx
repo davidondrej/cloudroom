@@ -226,6 +226,7 @@ describe("provider usage footer disclosure", () => {
     const mounted = await mountPluginContentScripts(app, {
       pluginId: "provider-usage",
     });
+    expect(app.settingsSections).toHaveLength(0);
     const item = app.experimentalSidebarFooterItems[0];
     expect(item).toMatchObject({
       kind: "disclosure",
@@ -409,7 +410,7 @@ describe("provider usage footer disclosure", () => {
       await waitFor(() =>
         expect(
           slot.getByText(
-            "Couldn’t refresh usage. Showing the last available update.",
+            "Refresh failed · Showing saved usage",
           ),
         ).toBeTruthy(),
       );
@@ -425,7 +426,7 @@ describe("provider usage footer disclosure", () => {
       await waitFor(() =>
         expect(
           slot.queryByText(
-            "Couldn’t refresh usage. Showing the last available update.",
+            "Refresh failed · Showing saved usage",
           ),
         ).toBeNull(),
       );
@@ -445,7 +446,7 @@ it.each([
   ["no-limits", "No usage limits reported for this plan."],
   [
     "source-error",
-    "Couldn’t refresh usage. Showing the last available update.",
+    "Refresh failed · Showing saved usage",
   ],
 ] as const)("renders the %s shared-source state", async (state, expected) => {
   const usage: UsageProvider["usage"] =

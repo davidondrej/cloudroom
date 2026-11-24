@@ -107,6 +107,7 @@ pub(crate) fn models<'a>(ids: impl IntoIterator<Item = &'a str>) -> Vec<Model> {
                 .keys()
                 .map(|index| LEVELS[*index].to_owned())
                 .collect(),
+            service_tiers: Vec::new(),
         })
         .collect()
 }

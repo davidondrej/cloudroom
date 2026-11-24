@@ -115,60 +115,94 @@ describe("host online RPC retry semantics", () => {
     });
   });
 
-  it("runs a retryable RPC when the daemon websocket is still registered with a stale lease", async () => {
-    await withTestHarness(async (harness) => {
-      const { host, session } = seedHostSession(harness.deps, {
-        id: "host-online-rpc-stale-lease-live-socket",
-      });
-      const requests: HostDaemonOnlineRpcRequestMessage[] = [];
-      harness.hub.unregisterDaemon(session.id);
-      const socket: TestHostRpcSocket = {
-        close() {},
-        send(data) {
-          const request = parseHostRpcRequest(data);
-          requests.push(request);
-          harness.hub.recordHostOnlineRpcResponse({
-            sessionId: session.id,
-            message: hostDaemonOnlineRpcResponseMessageSchema.parse({
-              type: "host-rpc.response",
-              requestId: request.requestId,
-              commandType: request.command.type,
-              ok: true,
-              result: { models: [], selectedOnlyModels: [] },
-            }),
-          });
-        },
-      };
-      harness.hub.registerDaemon(session.id, host.id, socket);
-      harness.db
-        .update(hostDaemonSessions)
-        .set({ leaseExpiresAt: Date.now() - 1000 })
-        .where(eq(hostDaemonSessions.id, session.id))
-        .run();
-
-      await expect(
-        callHostRetryableOnlineRpc(harness.deps, {
-          hostId: host.id,
-          timeoutMs: 1_000,
-          command: {
-            type: "provider.list_models",
-            providerId: "codex",
-            bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
+  // A daemon silent past its lease has dropped the socket the server still holds.
+  // Waiting commands leave in order, so a cancel never overtakes its command (#2171).
+  it.each([{ speaks: true }, { speaks: false }])(
+    "sends retryable RPCs to a socket with a stale lease in order, once the daemon speaks (speaks: $speaks)",
+    async ({ speaks }) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-online-rpc-stale-lease-live-socket",
+        });
+        const requests: HostDaemonOnlineRpcRequestMessage[] = [];
+        harness.hub.unregisterDaemon(session.id);
+        const socket: TestHostRpcSocket = {
+          close() {},
+          send(data) {
+            const request = parseHostRpcRequest(data);
+            requests.push(request);
+            harness.hub.recordHostOnlineRpcResponse({
+              sessionId: session.id,
+              message: hostDaemonOnlineRpcResponseMessageSchema.parse({
+                type: "host-rpc.response",
+                requestId: request.requestId,
+                commandType: request.command.type,
+                ok: true,
+                result: { models: [], selectedOnlyModels: [] },
+              }),
+            });
           },
-        }),
-      ).resolves.toEqual({ models: [], selectedOnlyModels: [] });
+        };
+        harness.hub.registerDaemon(session.id, host.id, socket);
+        harness.db
+          .update(hostDaemonSessions)
+          .set({ leaseExpiresAt: Date.now() - 1000 })
+          .where(eq(hostDaemonSessions.id, session.id))
+          .run();
+        if (speaks) {
+          setTimeout(() => {
+            harness.db
+              .update(hostDaemonSessions)
+              .set({ leaseExpiresAt: Date.now() + 30_000 })
+              .where(eq(hostDaemonSessions.id, session.id))
+              .run();
+          }, 600);
+        }
 
-      const updatedSession = harness.db
-        .select()
-        .from(hostDaemonSessions)
-        .where(eq(hostDaemonSessions.id, session.id))
-        .get();
-      expect(updatedSession?.status).toBe("active");
-      expect(requests.map((request) => request.command.type)).toEqual([
-        "provider.list_models",
-      ]);
-    });
-  });
+        const listModels = (providerId: string) =>
+          callHostRetryableOnlineRpc(harness.deps, {
+            hostId: host.id,
+            timeoutMs: speaks ? 4_000 : 1_000,
+            command: {
+              type: "provider.list_models",
+              providerId,
+              bridgeLaunch: TRANSPORT_TEST_BRIDGE_LAUNCH,
+            },
+          });
+        const result = listModels("codex");
+        if (speaks) {
+          // Polls out of phase with the first, so it sees the lease first.
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const empty = { models: [], selectedOnlyModels: [] };
+          await expect(
+            Promise.all([result, listModels("claude-code")]),
+          ).resolves.toEqual([empty, empty]);
+        } else {
+          await expect(result).rejects.toMatchObject({
+            status: 502,
+            body: {
+              code: "host_unavailable",
+              message: expect.stringContaining("Nothing was sent to it"),
+            },
+          });
+        }
+
+        const updatedSession = harness.db
+          .select()
+          .from(hostDaemonSessions)
+          .where(eq(hostDaemonSessions.id, session.id))
+          .get();
+        expect(updatedSession?.status).toBe("active");
+        expect(
+          requests.map((request) =>
+            request.command.type === "provider.list_models"
+              ? request.command.providerId
+              : request.command.type,
+          ),
+        ).toEqual(speaks ? ["codex", "claude-code"] : []);
+      });
+    },
+  );
 
   it("waits briefly for retryable work when the session is active before the daemon websocket registers", async () => {
     await withTestHarness(async (harness) => {

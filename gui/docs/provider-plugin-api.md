@@ -63,6 +63,7 @@ bb.providers.register({
     fork: "checkpoint",          // "none" | "tip" | "checkpoint"
     supportsNativeUserQuestion: true,
     supportsManualCompaction: true,
+    resumesInNewFolder: true,    // optional; a moved thread keeps its session (default: fresh session + chat history)
     supportsThreadArchive: true,
     supportsThreadRename: true,
     supportsServiceTier: false,

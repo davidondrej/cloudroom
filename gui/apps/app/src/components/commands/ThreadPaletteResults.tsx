@@ -623,7 +623,7 @@ function LocationIcon({ thread }: { thread: ThreadListEntry }) {
     <Icon
       name={cloud ? "Cloud" : "Laptop"}
       aria-label={cloud ? "Cloud thread" : "Local thread"}
-      className={cn("size-4 shrink-0", cloud ? "text-primary [&_path]:stroke-[1.9]" : "text-muted-foreground opacity-50")}
+      className={cn("size-4 shrink-0", cloud ? "cloud-icon-sidebar" : "text-muted-foreground opacity-50")}
     />
   );
 }

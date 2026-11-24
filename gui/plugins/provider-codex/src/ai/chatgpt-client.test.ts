@@ -756,6 +756,57 @@ describe("Codex ChatGPT client", () => {
     expect(retryHeaders.get("authorization")).toBe(`Bearer ${accessToken}`);
   });
 
+  it("pulls audio bytes from audioUrl resolved against ROOM_SERVER_URL", async () => {
+    const homeDir = await makeTempHome();
+    vi.stubEnv("ROOM_SERVER_URL", "http://127.0.0.1:4321");
+    const accessToken = createAccessToken({
+      accountId: "account-123",
+      expSeconds: Math.floor(Date.now() / 1000) + 3600,
+    });
+    await writeCodexAuth({
+      homeDir,
+      accessToken,
+      refreshToken: "refresh-token",
+    });
+    const fetchMock = setupFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(Buffer.from("pulled-audio-bytes"), {
+          status: 200,
+          headers: { "content-type": "audio/webm" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: "from pull url" }), {
+          status: 200,
+        }),
+      );
+
+    const result = await transcribeCodexVoice({
+      serviceId: "codex",
+      model: "gpt-4o-mini-transcribe",
+      audioUrl: "/internal/voice-audio/abc",
+      mimeType: "audio/webm",
+      filename: "long.webm",
+      prompt: null,
+      timeoutMs: 30000,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      model: "gpt-4o-mini-transcribe",
+      text: "from pull url",
+    });
+    const [pullUrl] = requiredFetchCall(fetchMock, 0);
+    expect(String(pullUrl)).toBe(
+      "http://127.0.0.1:4321/internal/voice-audio/abc",
+    );
+    const [, transcribeInit] = requiredFetchCall(fetchMock, 1);
+    const body = transcribeInit?.body as FormData;
+    const uploaded = body.get("file") as File;
+    expect(await uploaded.text()).toBe("pulled-audio-bytes");
+  });
+
   it("classifies a persistent Cloudflare challenge as transient without leaking the challenge page", async () => {
     const homeDir = await makeTempHome();
     const accessToken = createAccessToken({

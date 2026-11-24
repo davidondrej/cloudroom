@@ -9,6 +9,10 @@
   file at the repo root to list untracked files, such as `.env`, that cloudroom must
   copy from the source checkout. It uses gitignore pattern syntax. cloudroom copies
   the matches before it runs `.bb-env-setup.sh`.
+- Hooks run as committed on the environment's base branch, read from Git at its
+  first setup. cloudroom never runs the copy in the folder, so editing or
+  adding a hook in a worktree changes nothing until it is committed to the base
+  branch, and then only for new environments.
 
 - Hooks require ownership confirmed by successful provider creation. Attached
   checkout and personal-workspace paths skip both hooks. Server restart resumes
@@ -162,5 +166,7 @@ bindings in the same update; plugin defaults yield to explicit bindings.
 ## Shell and environment variables
 
 Cloudroom supplies `ROOM_SERVER_URL`, `ROOM_HOST_DAEMON_PORT`, `ROOM_CLI`, `ROOM_DATA_DIR`, and thread context to Local agents and thread-scoped terminals automatically. Machine-only and environment-only terminals have no current thread. `room-cli` ignores the corresponding `BB_*` settings. Use `ROOM_*` overrides only for an intentional target change; never reuse thread IDs from another instance. `"$ROOM_CLI"` selects the current runtime's executable directly in a POSIX shell.
+
+On Windows, `ROOM_CLI_CMD` names the `.cmd` fallback when it is bundled. If PowerShell cannot run the `.ps1` launcher, invoke `& $env:ROOM_CLI_CMD`.
 
 Examples here use POSIX shell syntax. On Windows the agent shell is usually PowerShell: run bare `room-cli`, read an environment variable as `$env:NAME` (`"$env:ROOM_THREAD_ID"`), separate commands with `;` instead of `&&`, and continue a line with a backtick instead of a backslash. The Windows `room-cli.cmd` launcher keeps only the first line of a `--prompt` argument. For a multiline prompt to `thread spawn`, `thread fork`, or `loop create|update`, save it as a UTF-8 file and pass `--prompt-file PATH`. Long arguments fail (around 8 KB in PowerShell), so send a long `thread tell` message with `--message-file PATH`. On Windows, save the message as a UTF-8 file first: PowerShell 5.1 pipes turn non-ASCII text into `?`. In POSIX shells and Git Bash, `--message-file -` reads stdin.

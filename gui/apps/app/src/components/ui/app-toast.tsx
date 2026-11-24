@@ -41,6 +41,8 @@ export interface AppToastOptions extends Pick<
 > {
   action?: Action;
   cancel?: Action;
+  /** Additional buttons shown alongside `action` and `cancel` on a wrapped row below the description. */
+  extraActions?: readonly Action[];
   /** One row: dot, title, muted description, actions. No close button. */
   compact?: boolean;
   description?: ReactNode;
@@ -51,6 +53,7 @@ export interface AppToastOptions extends Pick<
 interface AppToastContentProps {
   action?: Action;
   cancel?: Action;
+  extraActions?: readonly Action[];
   compact?: boolean;
   description?: ReactNode;
   dismissible?: boolean;
@@ -116,11 +119,10 @@ function AppToastActionButton({
   action,
   className,
   id,
-  priority,
 }: AppToastActionButtonProps) {
   const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
     action.onClick(event);
-    if (priority === "primary" && event.defaultPrevented) {
+    if (event.defaultPrevented) {
       return;
     }
     dismissToast(id);
@@ -196,6 +198,7 @@ function AppToastOverflowText({
 export function AppToastContent({
   action,
   cancel,
+  extraActions,
   compact = false,
   description,
   dismissible = true,
@@ -205,7 +208,9 @@ export function AppToastContent({
   title,
   tone,
 }: AppToastContentProps) {
-  const hasActions = action !== undefined || cancel !== undefined;
+  const hasExtraActions = (extraActions?.length ?? 0) > 0;
+  const hasActions =
+    action !== undefined || cancel !== undefined || hasExtraActions;
   const showNotification = () => {
     dismissToast(id);
     openNotificationCenter(notificationId);
@@ -223,6 +228,15 @@ export function AppToastContent({
           priority="primary"
         />
       ) : null}
+      {extraActions?.map((extraAction, index) => (
+        <AppToastActionButton
+          key={index}
+          action={extraAction}
+          className={actionClassName}
+          id={id}
+          priority="secondary"
+        />
+      ))}
       {cancel ? (
         <AppToastActionButton
           action={cancel}
@@ -289,8 +303,13 @@ export function AppToastContent({
               />
             </div>
           ) : null}
+          {hasActions && hasExtraActions ? (
+            <div className="mt-1.5 -ml-2 flex flex-wrap items-center gap-0.5">
+              {actions}
+            </div>
+          ) : null}
         </div>
-        {hasActions ? (
+        {hasActions && !hasExtraActions ? (
           <div className="flex shrink-0 items-center">{actions}</div>
         ) : null}
         {dismissible ? (
@@ -323,6 +342,7 @@ function showAppToast({
   const {
     action,
     cancel,
+    extraActions,
     className,
     compact,
     description,
@@ -354,6 +374,7 @@ function showAppToast({
       <AppToastContent
         action={action}
         cancel={cancel}
+        extraActions={extraActions}
         compact={compact}
         description={description}
         dismissible={dismissible}

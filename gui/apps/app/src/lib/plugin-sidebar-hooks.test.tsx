@@ -17,7 +17,12 @@ const actions = vi.hoisted(() => ({
 const state = vi.hoisted(() => ({
   data: undefined as
     | {
-        sections: never[];
+        sections: {
+          id: string;
+          name: string;
+          createdAt: number;
+          updatedAt: number;
+        }[];
         projects: { id: string; name: string; threads: ThreadListEntry[] }[];
         personalProject: {
           id: string;
@@ -114,6 +119,16 @@ describe("useSidebarThreads", () => {
     second.rerender();
     expect(first.result.current.threads[0]).toBe(before);
     expect(second.result.current.threads[0]).toBe(before);
+  });
+
+  it("returns the server's sections in order (#2252)", () => {
+    const sections = [
+      { id: "sec_b", name: "Later", createdAt: 2, updatedAt: 2 },
+      { id: "sec_a", name: "Slop Cop", createdAt: 1, updatedAt: 1 },
+    ];
+    state.data = { ...payload([]), sections };
+    const { result } = renderHook(() => useSidebarThreads());
+    expect(result.current.sections).toEqual(sections);
   });
 });
 

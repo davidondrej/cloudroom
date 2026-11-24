@@ -1,7 +1,7 @@
 import { useId, useState, type CSSProperties } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 
-// The wave chart on Settings → Analytics: Cloud Credits and Tokens share it.
+// The wave chart on Settings → Analytics → Cloud Credits.
 
 export function smooth(values: number[], sigma: number) {
   const reach = Math.ceil(sigma * 3);
@@ -32,7 +32,7 @@ export function curve(points: [number, number][]) {
 
 const Dot = ({ style }: { style?: CSSProperties }) => <span className="pointer-events-none absolute -mt-[5px] -ml-[5px] size-2.5 rounded-full border-2 border-background bg-primary" style={style} />;
 
-export interface WavePoint { value: number; top: { name: string; value: number }[] }
+export interface WavePoint { value: number; top: { name: string; value: number; color?: string }[] }
 interface WavePlotProps {
   /** Two points or more. */
   points: WavePoint[];
@@ -46,14 +46,18 @@ interface WavePlotProps {
   /** Vertical guide lines. */
   marks?: number[];
   standouts: { at: number; name: string; detail: string }[];
+  /** Colored layers, bottom first, that add up to the points (design E). Without them, one lime wave. */
+  layers?: { color: string; values: number[] }[];
 }
 
 /** The wave: the biggest bursts named, and hover shows a point's number and its top threads. */
-export function WavePlot({ points, sigma, format, unit, when, labels, marks = [], standouts }: WavePlotProps) {
+export function WavePlot({ points, sigma, format, unit, when, labels, marks = [], standouts, layers }: WavePlotProps) {
   const [hover, setHover] = useState<number | null>(null), gradient = useId(), last = points.length - 1;
-  const values = smooth(points.map((point) => point.value), sigma), peak = Math.max(...values) * 1.3;
+  // Each layer is smoothed, then stacked. Smoothing adds up, so the top edge is the same wave as without layers.
+  const bands = (layers ?? [{ color: "var(--primary)", values: points.map((point) => point.value) }]).map((band) => ({ color: band.color, values: smooth(band.values, sigma) }));
+  const stacks = bands.reduce<number[][]>((tops, band) => [...tops, band.values.map((v, i) => v + (tops.at(-1)?.[i] ?? 0))], []);
+  const values = stacks.at(-1)!, peak = Math.max(...values) * 1.3;
   const x = (i: number) => (i / last) * 100, y = (v: number) => 100 - (v / peak) * 100;
-  const line = curve(values.map((v, i) => [x(i) * 10, y(v)]));
   const focus = hover === null ? null : points[hover]!;
   return (
     <div>
@@ -73,10 +77,18 @@ export function WavePlot({ points, sigma, format, unit, when, labels, marks = []
               <stop offset="1" stopColor="var(--primary)" stopOpacity="0.05" />
             </linearGradient>
           </defs>
-          <path d={`${line} L1000,100 L0,100 Z`} fill={`url(#${gradient})`} />
-          <path d={line} fill="none" stroke="var(--primary)" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+          {/* Top layer first, so each lower one covers its part. One layer keeps the lime gradient. */}
+          {stacks.map((_, k) => stacks.length - 1 - k).map((k) => {
+            const line = curve(stacks[k]!.map((v, i) => [x(i) * 10, y(v)]));
+            return (
+              <g key={k}>
+                <path d={`${line} L1000,100 L0,100 Z`} fill={layers ? `color-mix(in oklab, ${bands[k]!.color} 46%, var(--background))` : `url(#${gradient})`} />
+                <path d={line} fill="none" stroke={bands[k]!.color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+              </g>
+            );
+          })}
         </svg>
-        {hover === null
+        {hover === null && !layers
           ? standouts.map((note) => (
               <div key={note.at} className="pointer-events-none absolute" style={{ left: `${x(note.at)}%`, top: `${y(values[note.at]!)}%` }}>
                 <Dot />
@@ -101,7 +113,10 @@ export function WavePlot({ points, sigma, format, unit, when, labels, marks = []
               <div className="mt-0.5 mb-1.5 font-mono text-base text-foreground tabular-nums">{format(focus.value)} {unit}</div>
               {focus.top.map((thread, i) => (
                 <div key={i} className="flex justify-between gap-4 leading-6">
-                  <span className="max-w-64 truncate">{thread.name}</span>
+                  <span className="flex min-w-0 items-center gap-2">
+                    {thread.color ? <span className="size-2 shrink-0 rounded-full" style={{ background: thread.color }} /> : null}
+                    <span className="max-w-64 truncate">{thread.name}</span>
+                  </span>
                   <span className="font-mono tabular-nums">{format(thread.value)}</span>
                 </div>
               ))}

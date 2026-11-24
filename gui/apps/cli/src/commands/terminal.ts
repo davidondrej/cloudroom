@@ -612,6 +612,7 @@ async function attachTerminal(args: {
     process.stdout.off("resize", onResize);
     process.stdin.setRawMode(previousRawMode);
     process.stdin.pause();
+    socket.close(); // An open socket would keep a failed attach alive (#1815).
   });
 }
 

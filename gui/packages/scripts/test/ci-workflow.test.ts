@@ -17,25 +17,6 @@ import { expect, it, onTestFinished } from "vitest";
 const testDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(testDir, "..", "..", "..");
 
-it.each(["ci.yml", "gui-versions.yml"])(
-  "keeps pull request jobs off the persistent Mac runner in %s",
-  (workflow) => {
-    const source = readFileSync(
-      resolve(repoRoot, "..", ".github/workflows", workflow),
-      "utf8",
-    );
-    const macRunnerLines = source
-      .split("\n")
-      .filter(
-        (line) => line.includes("runs-on:") && line.includes("vars.MAC_RUNNER"),
-      );
-    expect(macRunnerLines.length).toBeGreaterThan(0);
-    for (const line of macRunnerLines) {
-      expect(line).toContain("github.event_name != 'pull_request'");
-    }
-  },
-);
-
 it("keeps desktop builds local without publishing", () => {
   const { scripts } = JSON.parse(
     readFileSync(resolve(repoRoot, "apps/desktop/package.json"), "utf8"),

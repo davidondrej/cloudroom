@@ -866,6 +866,7 @@ export function createClaudeDeltaTranslator(
       });
     }
 
+    const tools = extractToolUses(message);
     const text = extractAssistantText(message);
     if (text) {
       if (parentToolCallId === undefined && text.trim() !== "") {
@@ -876,10 +877,13 @@ export function createClaudeDeltaTranslator(
         key: { channel: ASSISTANT_STREAM_KEY, ...parentRefField },
         channel: "agentMessage",
         text,
+        ...(providerCheckpointId && tools.length === 0 && !message.error && message.isReplay !== true
+          ? { providerCheckpointId }
+          : {}),
       });
     }
 
-    for (const toolUse of extractToolUses(message)) {
+    for (const toolUse of tools) {
       const classified = classifyClaudeToolUse({
         toolName: toolUse.name,
         toolUseId: toolUse.id,
@@ -1343,10 +1347,15 @@ export function createClaudeDeltaTranslator(
     // A Stop: what a sub-agent still streams must not open a turn of its own.
     // The next input lifts this.
     if (includeUnopenedTurn) state.suppressUnacceptedTurnStart = true;
-    deltas.push(
-      ...buildInterruptedClaudeTaskDeltas({ tasks: state.tasksById }),
-    );
+    deltas.push(...buildEndedTaskDeltas(threadId));
     return deltas;
+  }
+
+  /** Claude ended: its commands, agents, and workflows ended with it (#2228). */
+  function buildEndedTaskDeltas(threadId: string): ThreadDelta[] {
+    return buildInterruptedClaudeTaskDeltas({
+      tasks: stateFor({ threadId }).tasksById,
+    });
   }
 
   function hasOpenTurn(threadId: string): boolean {
@@ -1363,6 +1372,7 @@ export function createClaudeDeltaTranslator(
 
   return {
     acceptInput,
+    buildEndedTaskDeltas,
     buildSessionSettlementDeltas,
     cancelInput,
     configureInjectedTools,

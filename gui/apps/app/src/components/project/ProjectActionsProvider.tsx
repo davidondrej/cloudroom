@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 import { useSetAtom } from "jotai";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import type { ProjectResponse } from "@cloudroom/server-contract";
 import { useRouteState } from "@/hooks/useRouteState";
 import {

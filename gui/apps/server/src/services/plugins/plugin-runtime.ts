@@ -101,7 +101,10 @@ import type {
   PluginWireLookup,
   ServiceRuntime,
 } from "./plugin-service-internal.js";
-import { createPluginRpcCallerRegistry } from "./plugin-rpc-caller.js";
+import {
+  createPluginRpcCallerRegistry,
+  pluginSdkFetch,
+} from "./plugin-rpc-caller.js";
 import { createKeyedLock } from "../lib/async-deduper.js";
 import { runEventLoopWork } from "../system/event-loop-work.js";
 
@@ -1948,6 +1951,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     boundSdk = createNodeRoomSdk({
       baseUrl: args.baseUrl,
       callerToken: args.callerToken,
+      fetch: pluginSdkFetch,
     });
     boundLoopbackBaseUrl = args.baseUrl;
     boundCallerToken = args.callerToken;

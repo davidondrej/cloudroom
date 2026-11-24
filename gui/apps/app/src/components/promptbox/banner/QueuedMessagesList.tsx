@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -42,11 +43,10 @@ import {
   SortableContext,
   arrayMove,
   sortableKeyboardCoordinates,
+  sortableTranslate,
   useSortable,
   verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
-import type { Transform } from "@dnd-kit/utilities";
+} from "@/lib/sortable";
 import type {
   PromptInput,
   PromptTextMention,
@@ -62,8 +62,16 @@ import { PROMPT_STACK_ROW_ACTION_TAKEOVER_CLASS } from "@/components/promptbox/b
 import { useScrollOverflowState } from "@/components/thread/timeline/useScrollOverflowState";
 import { OverflowFade } from "@/components/ui/overflow-fade";
 import { InlineMessageEditorFrame } from "@/components/promptbox/InlineMessageEditorFrame";
-import { resolveAttachmentPreviewSrc } from "@/components/promptbox/AttachmentPreview";
+import {
+  resolveAttachmentPreviewSrc,
+  useAttachmentThumbnail,
+} from "@/components/promptbox/AttachmentPreview";
 import { useBottomAnchoredScroll } from "@/components/ui/bottom-anchored-scroll-body";
+import {
+  HoverCard,
+  HoverCardContent,
+  HoverCardTrigger,
+} from "@cloudroom/shared-ui/hover-card";
 import {
   Tooltip,
   TooltipContent,
@@ -75,9 +83,13 @@ import {
   computeMutedPrefixLength,
   countQueuedMessageAttachments,
   formatQueuedMessagePreview,
+  splitMessageContextSegments,
+  type MessageContextBlockSegment,
 } from "@cloudroom/client-core";
 import type { QueuedMessageReorderRequest } from "@/lib/queued-message-reorder";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
+import { PROMPT_MENTION_PILL_CLASS } from "@/components/promptbox/mentions/prompt-mention-display";
+import { MessageContextQuoteGlyph } from "@/components/thread/timeline/MessageContextChip";
 import {
   PromptMentionPill,
   shiftMentionsToTextRange,
@@ -93,7 +105,9 @@ import {
   type QueuedEditorTypeaheadLayout,
 } from "@/components/promptbox/queued-editor-typeahead-layout";
 
-export type QueuedMessageProcessingAction = "send" | "edit" | "delete";
+type Transform = Parameters<Modifier>[0]["transform"];
+
+export type QueuedMessageProcessingAction = "send" | "edit";
 export type QueuedMessageSendAction = "send-now" | "steer-when-ready";
 
 export interface QueuedMessageEditRequest {
@@ -171,6 +185,7 @@ const WORKSPACE_CHROME_HEIGHT = 29;
 const WORKSPACE_ROW_HEIGHT = 40;
 const TYPEAHEAD_MENU_GAP = 8;
 const SURFACE_DRAG_THRESHOLD = 72;
+const FOLLOW_NEWEST_SCROLL_MS = 520;
 type QueueSurfaceMode = "collapsed" | "drawer" | "workspace";
 
 function getDrawerHeight({
@@ -476,33 +491,193 @@ function trimQueuedMessagePreviewTextRange({
   };
 }
 
-function buildQueuedMessagePreviewText(
+type QueuedContextItem = Pick<
+  MessageContextBlockSegment,
+  "messageNumber" | "text"
+>;
+
+type QueuedMessagePreviewSegment =
+  | ({ kind: "context" } & QueuedContextItem)
+  | {
+      kind: "text";
+      preview: QueuedMessagePreviewText;
+    };
+
+function buildQueuedMessagePreviewSegments(
   input: readonly PromptInput[],
   initiator: ThreadQueuedMessage["initiator"],
-): QueuedMessagePreviewText {
-  let text = "";
-  const mentions: PromptTextMention[] = [];
+): QueuedMessagePreviewSegment[] {
+  const segments: QueuedMessagePreviewSegment[] = [];
+  const parseContextBlocks = initiator === "user";
+  let hasVisibleContent = false;
+
+  const appendTextSegment = (chunk: QueuedMessagePreviewText) => {
+    const previous = segments.at(-1);
+    if (previous?.kind === "text") {
+      const separator = "\n\n";
+      const offset = previous.preview.text.length + separator.length;
+      previous.preview = {
+        text: previous.preview.text + separator + chunk.text,
+        mentions: [
+          ...previous.preview.mentions,
+          ...shiftMentionsBy(chunk.mentions, offset),
+        ],
+      };
+      return;
+    }
+    segments.push({ kind: "text", preview: chunk });
+  };
 
   for (const chunk of visibleQueuedMessageTextChunks(input)) {
-    const trimmedChunk = trimQueuedMessagePreviewTextRange({
-      text: chunk.text,
-      mentions: chunk.mentions,
-      // The row already says "From System", so its `[system]` tag is dropped.
-      rangeStart:
-        initiator === "system" && text.length === 0
-          ? computeMutedPrefixLength(initiator, chunk.text)
-          : 0,
-      rangeEnd: chunk.text.length,
-    });
-    if (!trimmedChunk) continue;
+    // The row already says "From System", so its `[system]` tag is dropped.
+    const rangeStart =
+      initiator === "system" && !hasVisibleContent
+        ? computeMutedPrefixLength(initiator, chunk.text)
+        : 0;
+    if (!parseContextBlocks) {
+      const trimmed = trimQueuedMessagePreviewTextRange({
+        text: chunk.text,
+        mentions: chunk.mentions,
+        rangeStart,
+        rangeEnd: chunk.text.length,
+      });
+      if (!trimmed) continue;
+      appendTextSegment(trimmed);
+      hasVisibleContent = true;
+      continue;
+    }
 
-    const separator = text.length > 0 ? "\n\n" : "";
-    const offset = text.length + separator.length;
-    text += separator + trimmedChunk.text;
-    mentions.push(...shiftMentionsBy(trimmedChunk.mentions, offset));
+    const rawSlice = chunk.text.slice(rangeStart);
+    const contextSegments = splitMessageContextSegments(rawSlice);
+
+    for (const segment of contextSegments) {
+      if (segment.kind === "context") {
+        segments.push({
+          kind: "context",
+          messageNumber: segment.messageNumber,
+          text: segment.text,
+        });
+        hasVisibleContent = true;
+        continue;
+      }
+
+      const trimmed = trimQueuedMessagePreviewTextRange({
+        text: chunk.text,
+        mentions: chunk.mentions,
+        rangeStart: rangeStart + segment.start,
+        rangeEnd: rangeStart + segment.end,
+      });
+      if (!trimmed) continue;
+      appendTextSegment(trimmed);
+      hasVisibleContent = true;
+    }
   }
 
-  return { text, mentions };
+  return segments;
+}
+
+function queuedContextChipClass(compact: boolean): string {
+  return cn(
+    PROMPT_MENTION_PILL_CLASS,
+    "min-w-0 shrink-0 select-none items-center gap-1",
+    compact ? "py-0 text-[11px] leading-[15px]" : "py-0.5 text-xs leading-4",
+  );
+}
+
+function queuedContextHeading(messageNumber: number | null): string {
+  return messageNumber !== null
+    ? `message #${messageNumber}`
+    : "quoted context";
+}
+
+function QueuedMessageContextChip({
+  compact,
+  maxWidthClass,
+  messageNumber,
+  text,
+}: QueuedContextItem & {
+  compact: boolean;
+  maxWidthClass: string;
+}) {
+  const excerpt = text.replace(/\s+/gu, " ").trim();
+
+  return (
+    <HoverCard openDelay={250} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <span
+          data-queued-message-context-chip=""
+          title=""
+          className={cn(queuedContextChipClass(compact), maxWidthClass)}
+        >
+          <MessageContextQuoteGlyph className={compact ? "size-2.5" : "size-3"} />
+          <span className="min-w-0 truncate italic">{excerpt}</span>
+          {messageNumber !== null ? (
+            <span className="shrink-0 text-muted-foreground">
+              #{messageNumber}
+            </span>
+          ) : null}
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="top"
+        align="start"
+        className="w-[min(28rem,90vw)] p-3"
+      >
+        <div className="mb-1 text-[11px] text-muted-foreground">
+          Replying to {queuedContextHeading(messageNumber)}
+        </div>
+        <div className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed">
+          {text}
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function QueuedMessageOverflowContextChip({
+  compact,
+  items,
+}: {
+  compact: boolean;
+  items: readonly QueuedContextItem[];
+}) {
+  return (
+    <HoverCard openDelay={250} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <span
+          data-queued-message-context-overflow=""
+          title=""
+          className={cn(
+            queuedContextChipClass(compact),
+            "px-1.5 font-medium tabular-nums text-muted-foreground",
+          )}
+        >
+          +{items.length}
+        </span>
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="top"
+        align="start"
+        className="w-[min(28rem,90vw)] space-y-2.5 p-3"
+      >
+        {items.map((item, index) => (
+          <div
+            key={`${item.messageNumber ?? "quote"}-${index}`}
+            className={
+              index > 0 ? "border-t border-border/60 pt-2.5" : undefined
+            }
+          >
+            <div className="mb-1 text-[11px] text-muted-foreground">
+              Replying to {queuedContextHeading(item.messageNumber)}
+            </div>
+            <div className="max-h-36 overflow-y-auto whitespace-pre-wrap break-words text-xs leading-relaxed">
+              {item.text}
+            </div>
+          </div>
+        ))}
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 function QueuedMessageFallbackTitle({
@@ -536,15 +711,16 @@ function QueuedMessagePreview({
 }) {
   const preview = useMemo(() => {
     const text = formatQueuedMessagePreview(queuedMessage.content, {
+      parseContextBlocks: queuedMessage.initiator === "user",
       truncate: false,
     });
     return queuedMessage.initiator === "system"
       ? text.slice(computeMutedPrefixLength("system", text))
       : text;
   }, [queuedMessage.content, queuedMessage.initiator]);
-  const markdownPreview = useMemo(
+  const previewSegments = useMemo(
     () =>
-      buildQueuedMessagePreviewText(
+      buildQueuedMessagePreviewSegments(
         queuedMessage.content,
         queuedMessage.initiator,
       ),
@@ -562,15 +738,97 @@ function QueuedMessagePreview({
     );
   }
 
+  const contextItems: QueuedContextItem[] = [];
+  let firstContextIndex = -1;
+  let lastTextIndex = -1;
+  for (let index = 0; index < previewSegments.length; index += 1) {
+    const segment = previewSegments[index];
+    if (segment?.kind === "context") {
+      if (firstContextIndex === -1) {
+        firstContextIndex = index;
+      }
+      contextItems.push(segment);
+    } else if (segment) {
+      lastTextIndex = index;
+    }
+  }
+  const hasText = lastTextIndex !== -1;
+
+  if (contextItems.length > 0) {
+    const collapseOverflow = contextItems.length > 2;
+    const overflowItems = collapseOverflow ? contextItems.slice(1) : [];
+    const chipMaxWidthClass = !hasText
+      ? collapseOverflow
+        ? "max-w-[min(75%,20rem)]"
+        : "max-w-[min(100%,22rem)]"
+      : collapseOverflow
+        ? "max-w-[min(40%,12rem)]"
+        : contextItems.length === 2
+          ? "max-w-[min(32%,8.75rem)]"
+          : "max-w-[min(45%,14rem)]";
+
+    return (
+      <div
+        className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden text-foreground"
+        title={preview}
+      >
+        {previewSegments.map((segment, index) => {
+          if (segment.kind === "context") {
+            if (collapseOverflow && index !== firstContextIndex) {
+              return null;
+            }
+            return (
+              <Fragment key={`ctx-${segment.messageNumber ?? "quote"}-${index}`}>
+                <QueuedMessageContextChip
+                  compact={compact}
+                  maxWidthClass={chipMaxWidthClass}
+                  messageNumber={segment.messageNumber}
+                  text={segment.text}
+                />
+                {collapseOverflow ? (
+                  <QueuedMessageOverflowContextChip
+                    compact={compact}
+                    items={overflowItems}
+                  />
+                ) : null}
+              </Fragment>
+            );
+          }
+
+          return (
+            <div
+              key={`txt-${index}`}
+              className={cn(
+                "min-w-0 overflow-hidden",
+                index === lastTextIndex ? "flex-1" : "shrink",
+              )}
+            >
+              <CompactQueuedMarkdownPreview
+                compact={compact}
+                preview={segment.preview}
+                resolveMentionLink={resolveMentionLink}
+              />
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  const singleText =
+    previewSegments.length === 1 && previewSegments[0]?.kind === "text"
+      ? previewSegments[0].preview
+      : null;
+
   return (
     <div
       className="min-w-0 flex-1 overflow-hidden text-foreground"
       title={preview}
     >
-      {markdownPreview.text.length > 0 ? (
+      {singleText && singleText.text.length > 0 ? (
         <CompactQueuedMarkdownPreview
           compact={compact}
-          preview={markdownPreview}
+          preview={singleText}
           resolveMentionLink={resolveMentionLink}
         />
       ) : (
@@ -655,6 +913,7 @@ function QueuedMessageImageThumbnail({
   attachmentCount: number;
 }) {
   const [failed, setFailed] = useState(false);
+  const thumbnail = useAttachmentThumbnail(src);
   return (
     <span
       data-queued-message-image=""
@@ -670,7 +929,7 @@ function QueuedMessageImageThumbnail({
         </span>
       ) : (
         <img
-          src={src}
+          src={thumbnail?.src}
           alt=""
           draggable={false}
           onError={() => setFailed(true)}
@@ -754,7 +1013,7 @@ const QueuedMessageRow = memo(function QueuedMessageRow({
     disabled: dragDisabled,
   });
   const rowStyle = {
-    transform: CSS.Translate.toString(transform),
+    transform: sortableTranslate(transform),
     transition,
   };
 
@@ -1116,11 +1375,7 @@ export function QueuedMessagesList({
 }: QueuedMessagesListProps) {
   const senderThreadMetadataById = useSenderThreadMetadataById();
   const processingLabel =
-    processingAction === "edit"
-      ? "Editing…"
-      : processingAction === "delete"
-        ? "Deleting…"
-        : "Sending…";
+    processingAction === "edit" ? "Editing…" : "Sending…";
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 4 },
@@ -1388,6 +1643,37 @@ export function QueuedMessagesList({
       cancelled = true;
     };
   }, [inlineEditorActive, queuedMessages.length]);
+
+  // The drawer shows only the first rows, so glide to each new message at the
+  // bottom. Waits for a collapsed queue to open first.
+  const followNewestRef = useRef(false);
+  const followCountRef = useRef(queuedMessages.length);
+  useEffect(() => {
+    if (queuedMessages.length > followCountRef.current) {
+      followNewestRef.current = !inlineEditorActive;
+    }
+    followCountRef.current = queuedMessages.length;
+    const scroll = scrollRef.current;
+    if (!followNewestRef.current || mode === "collapsed" || !scroll) return;
+    followNewestRef.current = false;
+    const reduceMotion = window.matchMedia?.(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const from = scroll.scrollTop;
+    let start: number | null = null;
+    let frame = 0;
+    const step = (now: number) => {
+      start ??= now;
+      const t = reduceMotion
+        ? 1
+        : Math.min(1, (now - start) / FOLLOW_NEWEST_SCROLL_MS);
+      const to = scroll.scrollHeight - scroll.clientHeight;
+      scroll.scrollTop = from + (to - from) * (1 - (1 - t) ** 4);
+      if (t < 1) frame = requestAnimationFrame(step);
+    };
+    frame = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(frame);
+  }, [inlineEditorActive, mode, queuedMessages.length, scrollRef]);
 
   const openWorkspace = useCallback(() => {
     setMode("workspace");

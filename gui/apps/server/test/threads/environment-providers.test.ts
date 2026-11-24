@@ -572,12 +572,14 @@ describe("machine and environment provider composition", () => {
       );
 
       release.resolve();
+      // The machine never connected, so its removal retires the environment.
       await expect
         .poll(() => getPreparingEnvironment(harness.db, thread.id))
         .toMatchObject({
-          status: "error",
+          status: "destroyed",
           statusMessage: "Cloud quota exceeded",
         });
+      expect(getThread(harness.db, thread.id)?.status).toBe("error");
     });
   });
 });
@@ -590,6 +592,7 @@ function createTargetThread(
     hostId?: string | null;
     model?: string | undefined;
     environmentProviderId?: string;
+    parentThreadId?: string;
   },
 ) {
   const model = "model" in args ? args.model : "requested-model";
@@ -611,6 +614,7 @@ function createTargetThread(
     projectId: args.projectId,
     providerId: "codex",
     ...(model !== undefined ? { model } : {}),
+    ...(args.parentThreadId ? { parentThreadId: args.parentThreadId } : {}),
     startedOnBehalfOf: null,
   });
 }
@@ -1033,6 +1037,8 @@ describe("environment providers are asked inside provisioning", () => {
       expect(queued.command).toMatchObject({
         path: producedPath,
         setupScriptTimeoutMs: 15 * 60 * 1_000,
+        // Setup reads hooks from Git where the environment branched off this base.
+        hookBaseBranch: "origin/main",
       });
 
       await reportQueuedCommandSuccess(harness, queued, {
@@ -1044,6 +1050,59 @@ describe("environment providers are asked inside provisioning", () => {
       });
       await vi.waitFor(() => {
         expect(getEnvironment(harness.db, environmentId)?.status).toBe("ready");
+      });
+    });
+  });
+
+  it("tells the parent once when its child's workspace setup fails (#2217)", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedTargetFixture(harness, "host-target-setup-failed");
+      registerTestHostRpcCapture(harness, { hostId: fixture.host.id, sessionId: fixture.session.id });
+      installTarget({ provision: () => ({ action: "ready", environment: { type: "host", hostId: fixture.host.id, ownsPath: true, path: "/tmp/setup-failed" } }) });
+      const parent = seedThread(harness.deps, { environmentId: fixture.environment.id, projectId: fixture.project.id });
+      const child = await createTargetThread(harness, { projectId: fixture.project.id, parentThreadId: parent.id });
+      const queued = await waitForQueuedCommand(harness, ({ command }) => command.type === "environment.attach");
+      await reportQueuedCommandError(harness, queued, { errorCode: "setup_failed", errorMessage: "Setup script exited with code 1" });
+      await vi.waitFor(() => expect(getThread(harness.db, child.id)?.status).toBe("error"));
+      await new Promise((resolve) => setTimeout(resolve, 2_300)); // past the notice batch window
+      const notices = listEvents(harness.db, { threadId: parent.id }).filter((event) => event.data.includes("Workspace setup failed"));
+      expect(notices.map((event) => event.type)).toEqual(["client/turn/requested"]);
+    });
+  }, 10_000);
+
+  it("sends no setup for a personal workspace, which has no repository to read hooks from", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, project, session } = seedTargetFixture(
+        harness,
+        "host-target-personal-setup",
+      );
+      registerTestHostRpcCapture(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+      });
+      installTarget({
+        id: "personal-workspace",
+        provision: () => ({
+          action: "ready",
+          environment: {
+            type: "host",
+            hostId: host.id,
+            ownsPath: true,
+            path: "/tmp/environment-providers-personal",
+          },
+        }),
+      });
+      await createTargetThread(harness, {
+        projectId: project.id,
+        environmentProviderId: "personal-workspace",
+      });
+      const queued = await waitForQueuedCommand(
+        harness,
+        (candidate) => candidate.command.type === "environment.attach",
+      );
+      expect(queued.command).toMatchObject({
+        type: "environment.attach",
+        setupScriptTimeoutMs: null,
       });
     });
   });

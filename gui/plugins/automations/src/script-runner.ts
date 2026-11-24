@@ -20,6 +20,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const SCRIPT_OUTPUT_MAX_BYTES = 1024 * 1024;
+const SLEEP_GAP_MS = 5_000;
 
 let resolvedRoomPath: string | null = null;
 
@@ -302,7 +303,7 @@ function executeWithProcessGroup(args: {
       terminateGroup();
     });
     child.once("close", (code) => {
-      clearTimeout(timeout);
+      clearInterval(timeout);
       if (forceKill) clearTimeout(forceKill);
       if (timedOut || outputLimitExceeded) {
         signalProcessGroup(child, "SIGKILL");
@@ -316,10 +317,23 @@ function executeWithProcessGroup(args: {
         timedOut,
       });
     });
-    timeout = setTimeout(() => {
-      timedOut = true;
-      terminateGroup();
-    }, args.timeoutMs);
+    // Count only awake time: with the lid closed a Mac wakes for a few seconds at a time, and a plain timer would
+    // count the sleep in between and time the script out (2026-11-18). A tick gap over SLEEP_GAP_MS was sleep.
+    let awakeMs = 0;
+    let lastTick = Date.now();
+    timeout = setInterval(
+      () => {
+        const now = Date.now();
+        const gap = now - lastTick;
+        lastTick = now;
+        if (gap > 0 && gap <= SLEEP_GAP_MS) awakeMs += gap;
+        if (awakeMs < args.timeoutMs) return;
+        clearInterval(timeout);
+        timedOut = true;
+        terminateGroup();
+      },
+      Math.min(1_000, args.timeoutMs),
+    );
     timeout.unref();
   });
 }

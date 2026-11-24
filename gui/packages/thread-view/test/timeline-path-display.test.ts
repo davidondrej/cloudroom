@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fileNameFromPath } from "../src/timeline-path-display.js";
+import { fileNameFromPath } from "../src/index.js";
 
 describe("fileNameFromPath", () => {
   it.each([

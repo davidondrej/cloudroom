@@ -267,6 +267,15 @@ it("keeps an unconfigured shared group without hosts or measurement requests", a
 });
 
 it("collapses known account observations per machine, preserves unknown identities, and normalizes display labels", async () => {
+  // "other" has no native usage: a lookup by ID names it, never a full list.
+  const listProviders = vi.fn(
+    async (args?: { capability?: string; providerId?: string }) =>
+      args?.providerId === "other"
+        ? [{ id: "other", displayName: "Other", logoUrl: "/other.svg" }]
+        : args?.capability
+          ? [{ id: "codex", displayName: "Codex", logoUrl: "/codex.svg" }]
+          : [],
+  );
   const { bb, harness } = createFakePluginHost({
     sdk: {
       system: { config: async () => ({ primaryHostId: null }) },
@@ -275,7 +284,7 @@ it("collapses known account observations per machine, preserves unknown identiti
           makeHostResponse({ id: "host", status: "connected" }),
         ],
       },
-      providers: { list: async () => [] },
+      providers: { list: listProviders },
       plugins: {
         experimental_discoverRpc: async () => [
           { pluginId: "adapter", displayName: "Adapter" },
@@ -344,13 +353,23 @@ it("collapses known account observations per machine, preserves unknown identiti
                 windows: [{ label: "Weekly limit", usedPercent: 42 }],
               },
             },
-            { id: "adapter:unknown", usage: null },
+            {
+              id: "adapter:unknown",
+              displayName: "Other",
+              logoUrl: "/other.svg",
+              usage: null,
+            },
             { id: "custom:unknown", usage: null },
           ],
         },
       ],
     });
     expect(JSON.stringify(snapshot)).not.toContain("81");
+    expect(
+      listProviders.mock.calls.filter(
+        ([args]) => !args?.capability && !args?.providerId,
+      ),
+    ).toHaveLength(0);
   } finally {
     await harness.lifecycle.dispose();
   }
@@ -426,5 +445,74 @@ it("fetches every provider on a selected machine when no provider is named", asy
     });
   } finally {
     await harness.lifecycle.dispose();
+  }
+});
+
+it("reloads saved Claude usage only on a forced machine refresh", async () => {
+  const windows = [{ label: "Five-hour limit", usedPercent: 98, resetsAt: null }];
+  const callRpc = vi.fn(async ({ method, input }) => {
+    if (method !== "accounts.list" || input.provider !== "claude-code") return [];
+    return [
+      {
+        id: "added",
+        name: "Saved",
+        email: null,
+        plan: "Max",
+        inUse: true,
+        windows: input.refresh ? [{ ...windows[0], usedPercent: 0 }] : windows,
+        limitedUntil: input.refresh ? null : Date.now() + 3_600_000,
+      },
+    ];
+  });
+  const { bb, harness } = createFakePluginHost({
+    sdk: {
+      system: { config: async () => ({ primaryHostId: "here" }) },
+      hosts: { list: async () => [makeHostResponse({ id: "here", status: "connected" })] },
+      providers: {
+        list: async () => [{ id: "claude-code", displayName: "Claude Code", logoUrl: null }],
+      },
+      plugins: {
+        experimental_discoverRpc: async ({ method } = {}) =>
+          method === "accounts.list"
+            ? [{ pluginId: "accounts", method, displayName: "Accounts" }]
+            : [],
+        callRpc,
+      },
+    },
+  });
+  plugin(bb);
+  const request = { providerId: null, machineIds: ["here"], maxAgeMs: 0 };
+  try {
+    const panel = (force: boolean) => harness.callRpc("getUsage", { ...request, force });
+    expect(await panel(false)).toMatchObject({
+      machines: [
+        {
+          providers: [
+            {
+              usage: {
+                windows: [{ usedPercent: 98 }, { label: "Limit hit", usedPercent: 100 }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    expect(await panel(true)).toMatchObject({
+      machines: [
+        {
+          providers: [
+            {
+              usage: {
+                windows: [{ usedPercent: 0 }],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    await harness.callRpc("getUsage", { ...request, force: true, machineIds: ["source:pool"] });
+    expect(callRpc.mock.calls.filter(([{ input }]) => input.refresh)).toHaveLength(1);
+  } finally {
+    await harness.dispose();
   }
 });

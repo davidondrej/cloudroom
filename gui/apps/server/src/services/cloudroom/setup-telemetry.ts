@@ -37,7 +37,7 @@ export function startSetupTelemetry(appDeps: Deps): void {
   setTimeout(() => {
     linkInstall();
     void reportUpdateAttempt(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Update report failed"));
-    if (process.platform === "win32") void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
+    void reportCrashes(appDeps.config.dataDir).catch(error => appDeps.logger.debug({ err: error }, "Crash report failed"));
     if (process.platform === "win32") void reportWindowsInstall().catch(error => appDeps.logger.debug({ err: error }, "Install report failed"));
     void readFile(marker).then(() => {}, async () => {
       await sendSnapshot("first_launch");
@@ -76,6 +76,7 @@ export function reportSignInFailed(message: string): void {
 
 /** A file path: `~/…`, `C:\…` (with `Program Files`), or `/…` not inside a URL or a word like `and/or`. */
 const PATH = /(?:~|(?<!\w)[A-Za-z]:|(?<![\w.:/\\~-]))[\\/](?:Program Files(?: \(x86\))?[\\/])?[^\s"'`<>|,;()]+/g;
+const WORKTREE = /[\\/]worktrees(?:[\\/]|$)/i;
 /** Tool and system folders: they say which install ran and name nothing of the user's. Any other path may name a project. */
 const TOOL_PATH = /^(?:~[\\/](?:\.|AppData|Library)|[A-Za-z]:[\\/](?:Program Files|ProgramData|Windows)|\/(?:usr|opt|bin|sbin|etc|nix|snap|Applications|System|Library)(?:\/|$))/i;
 
@@ -94,8 +95,9 @@ export function scrub(text: string | null | undefined): string | null {
     .replaceAll(homedir(), "~")
     .replace(/[A-Za-z]:[\\/]+Users[\\/]+[^\\/\s"':]+/gi, "~")
     .replace(/file:\/\/\S+/gi, "<path>")
-    // One segment from the root is a slash command, like Claude's `/login`.
-    .replace(PATH, path => TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path) ? path : "<path>")
+    // One segment from the root is a slash command, like Claude's `/login`. A worktree under a dot folder
+    // (`~/.gui-cloudroom/.../worktrees/`, `~/.codex/worktrees/`) holds a project, so it is never a tool folder.
+    .replace(PATH, path => !WORKTREE.test(path) && (TOOL_PATH.test(path) || /^\/[^/\\]+$/.test(path)) ? path : "<path>")
     .replace(/\s+/g, " ")
     .trim()
     .slice(-300) || null;
@@ -122,10 +124,11 @@ async function reportWindowsInstall(): Promise<void> {
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const { ms, update, lock_wait_ms, prompts } = JSON.parse(text) as Record<string, unknown>;
+  const { ms, update, staged, swap_ms, lock_wait_ms, prompts } = JSON.parse(text) as Record<string, unknown>;
   const count = (value: unknown) => typeof value === "number" && value >= 0 ? value : null;
   // lock_wait_ms: setup waited for Cloudroom.exe to unlock. prompts: "Cloudroom is still running" dialogs shown.
-  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true, lock_wait_ms: count(lock_wait_ms), prompts: count(prompts) }));
+  // staged: the update swapped in a version unpacked in the background (#2525); swap_ms is that swap alone.
+  if (typeof ms === "number" && ms >= 0) capture("windows_install", () => ({ ms, update: update === true, staged: staged === true, swap_ms: count(swap_ms), lock_wait_ms: count(lock_wait_ms), prompts: count(prompts) }));
 }
 
 async function reportUpdateAttempt(dataDir: string): Promise<void> {
@@ -153,16 +156,16 @@ export function reportAppReady(): void {
   });
 }
 
-/** Windows: crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. */
+/** Crashes the desktop app noted in last-crash.json (desktop-crash-report.ts) during the last run. Every platform. */
 async function reportCrashes(dataDir: string): Promise<void> {
   const file = join(dataDir, "last-crash.json");
   const text = await readFile(file, "utf8").catch(() => null);
   if (text === null) return;
   await rm(file, { force: true });
-  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; attempt?: number; version: string; at: number }[];
+  const crashes = JSON.parse(text) as { what: string; reason: string; exit_code: number | null; logs?: string; attempt?: number; cause?: string; version: string; at: number }[];
   for (const crash of crashes) {
     capture("app_crash", () => ({
-      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version, attempt: crash.attempt ?? null,
+      what: crash.what, reason: crash.reason, exit_code: crash.exit_code, version: crash.version, attempt: crash.attempt ?? null, cause: crash.cause ?? null,
       minutes_ago: Math.round((Date.now() - crash.at) / 60_000),
       // The newest 8,000 characters: the events endpoint drops an event whose properties pass 16 KB as JSON.
       logs: crash.logs?.split("\n").map(line => scrub(line)).filter(Boolean).join("\n").slice(-8_000) || null,

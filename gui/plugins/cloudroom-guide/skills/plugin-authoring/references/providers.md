@@ -127,10 +127,10 @@ wins and a later one from another plugin fails that plugin's load; no id is
 reserved ahead of time. Registrations replace wholesale on reload like every
 other surface. Disabling the plugin removes the provider (open threads show a
 provider-unavailable state instead of erroring). The provider picker lists
-providers in plugin install order (bundled first-party plugins first); the
-user reorders them and picks a default in Settings → Agents → Harness
-(`room-cli settings general providerOrder '["my-agent","codex"]'` and
-`room-cli settings general defaultProviderId my-agent`).
+the user's default first, then the providers they used most in the last 30
+days, then the rest in plugin install order (bundled first-party plugins
+first). The user picks a default in Settings → Agents → Harness
+(`room-cli settings general defaultProviderId my-agent`).
 
 `completedTurnDisplay` sets how the timeline shows your provider's finished
 turns by default: `"collapse"` (the default) folds the work into one "Worked

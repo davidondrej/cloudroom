@@ -1139,7 +1139,9 @@ describe("public project skills route", () => {
         ...[
           "adr-verbatim",
           "browser-harness",
+          "create-loop",
           "decisions",
+          "deepapi",
           "file-tree",
           "risky-changes",
           "self-archive",

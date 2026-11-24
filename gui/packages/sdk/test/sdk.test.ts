@@ -1457,10 +1457,13 @@ describe("@cloudroom/sdk", () => {
     await sdk.threads.update({
       threadId: "thr_section",
       sectionId: "sec_123",
+      providerId: "claude-code",
+      model: "claude-opus-5-5[1m]",
+      idleSessionOnly: true,
     });
 
     expect(queue.requests[0]).toEqual({
-      bodyText: JSON.stringify({ sectionId: "sec_123" }),
+      bodyText: JSON.stringify({ sectionId: "sec_123", providerId: "claude-code", model: "claude-opus-5-5[1m]", idleSessionOnly: true }),
       method: "PATCH",
       url: "http://bb.test/api/v1/threads/thr_section",
     });

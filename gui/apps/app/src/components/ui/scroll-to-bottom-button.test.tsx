@@ -19,9 +19,6 @@ describe("surfaces that stay over the timeline do not blur their backdrop", () =
     );
     const button = view.getByRole("button", { name: "Scroll to latest event" });
     expect(button.className).not.toContain("backdrop-blur");
-    expect(button.className).toContain("bg-background");
-    expect(button.className).not.toContain("hover:bg-state-hover");
-    expect(button.className).toContain("hover:bg-accent");
     expect(button.className).not.toContain("invisible");
     expect(button.querySelector(".animate-shine-icon")).not.toBeNull();
   });

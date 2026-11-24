@@ -92,6 +92,9 @@ export class CommandRouter {
   private readonly threadTurnLaneTails = new Map<string, Promise<void>>();
   /** Interrupting stops received and not finished yet, per thread. */
   private readonly pendingThreadStops = new Map<string, number>();
+  /** Attaches received and not finished, per environment. A cancel skips the
+   *  lane an attach may still wait in, so it aborts them on arrival (#2171). */
+  private readonly receivedAttaches = new Map<string, Set<AbortController>>();
 
   constructor(private readonly options: CommandRouterOptions) {
     this.logger = options.logger;
@@ -207,6 +210,16 @@ export class CommandRouter {
         );
       }
     }
+    if (command.type === "environment.attach.cancel") {
+      for (const attach of this.receivedAttaches.get(command.environmentId) ??
+        []) {
+        attach.abort();
+      }
+    }
+    const attach =
+      command.type === "environment.attach"
+        ? this.receiveAttach(command.environmentId)
+        : null;
     const environmentLaneMode = hostDaemonEnvironmentLaneForCommand(command);
     const threadLaneKey = this.resolveThreadLaneKey(command);
     const task = this.runAfterThreadUnarchiveBarrier(command, () =>
@@ -215,10 +228,11 @@ export class CommandRouter {
           command,
           environmentLaneMode,
           threadLaneKey,
-          () => this.executeLiveDaemonCommandBody(command),
+          () => this.executeLiveDaemonCommandBody(command, attach?.signal),
         ),
       ),
     );
+    if (attach !== null) void task.then(attach.release, attach.release);
     this.registerThreadUnarchiveBarrier(command, task);
     if (interruptingStop) {
       const { threadId } = command;
@@ -234,10 +248,31 @@ export class CommandRouter {
     return task;
   }
 
+  private receiveAttach(environmentId: string) {
+    const attaches = this.receivedAttaches.get(environmentId) ?? new Set();
+    this.receivedAttaches.set(environmentId, attaches);
+    const controller = new AbortController();
+    attaches.add(controller);
+    const release = (): void => {
+      attaches.delete(controller);
+      if (
+        attaches.size === 0 &&
+        this.receivedAttaches.get(environmentId) === attaches
+      ) {
+        this.receivedAttaches.delete(environmentId);
+      }
+    };
+    return { signal: controller.signal, release };
+  }
+
   private async executeLiveDaemonCommandBody(
     command: HostDaemonCommand,
+    attachCancelSignal?: AbortSignal,
   ): Promise<HostDaemonCommandResultForCommand> {
-    const result = await dispatchCommand(command, this.createDispatchOptions());
+    const result = await dispatchCommand(command, {
+      ...this.createDispatchOptions(),
+      ...(attachCancelSignal ? { attachCancelSignal } : {}),
+    });
     if (shouldFlushEventsBeforeReportingCommandResult(command)) {
       await this.options.eventSink.flush();
     }

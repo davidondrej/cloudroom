@@ -253,6 +253,25 @@ describe("readJsonResponse()", () => {
     );
   });
 
+  it("extracts messages from deeply nested JSON error bodies", async () => {
+    const depth = 10_000;
+    const body =
+      '{"detail":['.repeat(depth) +
+      '{"message":"failure"}' +
+      "]}".repeat(depth);
+    const response = new Response(body, {
+      status: 500,
+      statusText: "Internal Server Error",
+      headers: { "Content-Type": "application/json" },
+    });
+
+    await expect(readJson(response)).rejects.toMatchObject({
+      body: expect.any(Object),
+      message: "HTTP 500: failure",
+      name: "BbHttpError",
+    });
+  });
+
   it("carries the parsed JSON error body for structured consumers", async () => {
     const response = new Response(
       JSON.stringify({

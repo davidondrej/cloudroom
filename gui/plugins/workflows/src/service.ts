@@ -24,12 +24,14 @@ import {
   getRunRequired,
   incrementRepairAttempts,
   listCallsForRun,
+  listRunningWorkersForRun,
   listCallsForRunPage,
   listExpiredTerminalRuns,
   listActiveRunsForOriginThread,
   listRuns,
   listPendingNotificationRuns,
   listRunningCalls,
+  listSupersededCalls,
   listTimedOutRuns,
   markCallReplayedSameRun,
   markNotificationSent,
@@ -43,6 +45,7 @@ import {
   storeStructuredResult,
   updateRunPhase,
   type Db,
+  type SupersededCallRow,
   type WorkflowCallCounts,
   type WorkflowCallRow,
   type WorkflowRunRow,
@@ -99,6 +102,9 @@ const VALUE_LIMITS = { bytes: 1024 * 1024, nodes: 100_000, depth: 128 };
 const NOTIFICATION_RETRY_BASE_MS = 1_000;
 const NOTIFICATION_RETRY_MAX_MS = 60 * 60 * 1_000;
 const PROVIDER_RETRY_DELAYS_MS = [1_000, 4_000] as const;
+/** Reread a failed or slow model listing this often, for this long: past the 30 s failure cache plus one listing (#1722). */
+const MODEL_DISCOVERY_RETRY_MS = 10_000;
+const MODEL_DISCOVERY_WAIT_MS = 75_000;
 const RETENTION_SWEEP_RUNS = 20;
 const DISPATCHER_BUSY_MS = 60_000;
 const DISPATCHER_STUCK_MS = 15 * 60_000;
@@ -371,10 +377,17 @@ export interface WorkflowService {
     afterCallIndex: number,
     limit: number,
   ): WorkflowRunInspectionPage | null;
+  /** Earlier failed or cancelled attempts of calls in this index range. */
+  supersededCalls(
+    runId: string,
+    firstCallIndex: number,
+    lastCallIndex: number,
+  ): SupersededCallRow[];
   inspectLatestForThread(threadId: string): WorkflowRunInspection | null;
   inspectActiveForThread(threadId: string): WorkflowRunInspection[];
   list(projectId: string, limit: number): WorkflowRunRow[];
   queueStatus(run: WorkflowRunRow): WorkflowQueueStatus | null;
+  runningWorkers(runId: string): Array<{ callIndex: number; threadId: string }>;
   stop(runId: string): Promise<boolean>;
   updateSettings(settings: WorkflowSettings): void;
   runWorker(signal: AbortSignal): Promise<void>;
@@ -672,6 +685,7 @@ export function createWorkflowService(
     run: WorkflowRunRow,
     options: WorkflowAgentOptions,
     signal: AbortSignal,
+    discoveryDeadlines: Map<string, number>,
   ): Promise<ResolvedSelection> {
     const inherited = options.selection === null;
     const requested = options.selection ?? {
@@ -691,16 +705,37 @@ export function createWorkflowService(
         `Provider ${JSON.stringify(requested.provider)} is not available on this workflow host`,
       );
     }
-    const catalog = await room.sdk.providers.models({
-      environmentId: run.environmentId,
-      providerId: requested.provider,
-    });
+    const readCatalog = () =>
+      room.sdk.providers.models({
+        environmentId: run.environmentId,
+        providerId: requested.provider,
+      });
+    let catalog = await readCatalog();
     throwIfCancelled(signal);
+    // A discovery outage waits out one window per provider and run, not per call (#1722).
+    while (
+      catalog.modelLoadError?.code === "failed" ||
+      catalog.modelLoadError?.code === "timeout"
+    ) {
+      const deadline =
+        discoveryDeadlines.get(requested.provider) ??
+        Date.now() + MODEL_DISCOVERY_WAIT_MS;
+      discoveryDeadlines.set(requested.provider, deadline);
+      if (Date.now() >= deadline) break;
+      await sleep(
+        Math.min(MODEL_DISCOVERY_RETRY_MS, deadline - Date.now()),
+        signal,
+      );
+      throwIfCancelled(signal);
+      catalog = await readCatalog();
+      throwIfCancelled(signal);
+    }
     if (catalog.modelLoadError !== null) {
       throw new Error(
         `Could not load models for provider ${requested.provider}: ${catalog.modelLoadError.code}`,
       );
     }
+    discoveryDeadlines.delete(requested.provider);
     const eligibleModels = inherited
       ? [...catalog.models, ...catalog.selectedOnlyModels]
       : catalog.models;
@@ -1298,6 +1333,7 @@ export function createWorkflowService(
     let callIndex = 0;
     const replay = { prefix: true };
     const inFlightCalls = new Set<Promise<JsonValue>>();
+    const discoveryDeadlines = new Map<string, number>();
     let previousCacheKey = Promise.resolve<string | null>(null);
     let previousReplayDecision = Promise.resolve();
     let nestedLaunchQueue = Promise.resolve();
@@ -1306,7 +1342,12 @@ export function createWorkflowService(
         const index = callIndex;
         callIndex += 1;
         const computeIdentity = async (previousKey: string | null) => {
-          const selection = await validateSelection(run, options, callSignal);
+          const selection = await validateSelection(
+            run,
+            options,
+            callSignal,
+            discoveryDeadlines,
+          );
           const cacheKey = computeWorkflowCallCacheKey({
             version: WORKFLOW_CALL_CACHE_VERSION,
             previousCacheKey: previousKey,
@@ -1675,10 +1716,13 @@ export function createWorkflowService(
     get: (runId) => getRun(db, runId),
     inspect,
     inspectPage,
+    supersededCalls: (runId, firstCallIndex, lastCallIndex) =>
+      listSupersededCalls(db, { runId, firstCallIndex, lastCallIndex }),
     inspectLatestForThread,
     inspectActiveForThread,
     list: (projectId, limit) => listRuns(db, { projectId, limit }),
     queueStatus,
+    runningWorkers: (runId) => listRunningWorkersForRun(db, runId, 50),
     stop,
     updateSettings(settings) {
       currentSettings = settings;

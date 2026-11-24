@@ -247,8 +247,8 @@ export interface PluginTurnFailedEvent {
    */
   inputAccepted: boolean;
   /**
-   * The most recent rate-limit snapshot this thread's provider reported, or
-   * null when the provider reports no windows.
+   * The most recent rate-limit snapshot from the failed request, or null when
+   * its provider reported none during that request.
    */
   rateLimits: ProviderRateLimitState | null;
   /**
@@ -1338,6 +1338,10 @@ export interface PluginProviderCapabilities {
   /** The provider accepts an explicit context-compaction request — gates the
    * compact affordance. */
   supportsManualCompaction: boolean;
+  /** A saved session resumes in whatever folder it is started in, so a thread
+   * moved to another folder keeps its native session. Defaults to false: the
+   * moved thread then starts a fresh session with the chat as hidden context. */
+  resumesInNewFolder?: boolean;
   /** The provider keeps its own thread archive, so BB mirrors archive and
    * unarchive onto it instead of tracking the state only in bb's own rows. */
   supportsThreadArchive: boolean;
@@ -1669,6 +1673,13 @@ export interface PluginProviderDeclaration {
   ) => Readonly<Record<string, JsonValue>>;
 }
 
+export type PluginInstructionContext = {
+  threadId: string;
+  projectId: string;
+  /** Resolved target for user instructions on this message. */
+  experimental_execution?: { providerId: string; model: string | null };
+};
+
 export interface PluginAgents {
   /**
    * Select this plugin's statically registered tools and manifest skills for
@@ -1738,7 +1749,7 @@ export interface PluginAgents {
    * A repeated registration within one factory execution is rejected.
    */
   contributeInstructions(
-    provider: (ctx: { threadId: string; projectId: string }) => string | null,
+    provider: (ctx: PluginInstructionContext) => string | null,
   ): void;
 }
 

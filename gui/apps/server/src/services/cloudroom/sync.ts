@@ -85,32 +85,32 @@ export async function setupSync(deps: Deps): Promise<void> {
   // Vitest sets VITEST in every test run, so tests never install a real LaunchAgent or systemd unit for a temp data folder (#842).
   const noStart = process.env.VITEST ? ["--no-start"] : [];
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), ...noStart, ...(choice === null ? [] : ["--copy-logins", choice ? "on" : "off"])], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "configure", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json"), ...noStart, ...(choice === null ? [] : ["--copy-logins", choice ? "on" : "off"])], { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
   } catch (error) { throw new ApiError(503, "cloudroom_sync_setup", `Skills and settings sync could not start. Cloud sessions are unaffected. Cause: ${errorMessage(error)}`); }
 }
 
 export async function importCodexLogin(deps: Deps): Promise<void> {
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "auth", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json")], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "auth", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json")], { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
   } catch (error) { throw new ApiError(503, "codex_auth_unavailable", `Could not check your saved Codex login. Check the cloud connection and try again. Cause: ${errorMessage(error)}`); }
 }
 
 /** Copies Pi logins the VM lacks, custom providers, and packages. Never blocks a start: Pi reports a missing key itself. */
 export async function importPiLogin(deps: Deps): Promise<void> {
   try {
-    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "pi-auth", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json")], { timeout: 30_000, maxBuffer: 64 * 1024 });
+    await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "pi-auth", folder(deps), "--connection", join(deps.config.dataDir, "cloudroom.json")], { timeout: 30_000, maxBuffer: 64 * 1024, windowsHide: true });
   } catch (error) { console.warn(`Cloudroom Pi login import failed: ${errorMessage(error)}`); }
 }
 
 /** This Mac's custom Pi providers (keys as the Mac sees them) and packages, or null when there are none to copy. */
 export async function macPiSetup(deps: Deps): Promise<{ providers: Record<string, unknown>; packages: unknown[] } | null> {
-  const { stdout } = await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "pi-setup", folder(deps)], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+  const { stdout } = await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "pi-setup", folder(deps)], { timeout: 60_000, maxBuffer: 1024 * 1024, windowsHide: true });
   const setup = z.object({ providers: z.record(z.string(), z.unknown()), packages: z.array(z.unknown()) }).parse(JSON.parse(stdout));
   return Object.keys(setup.providers).length || setup.packages.length ? setup : null;
 }
 
 export async function stopSync(deps: Deps): Promise<void> {
   if (!await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) return;
-  try { await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "stop", folder(deps)], { timeout: 15_000, maxBuffer: 64 * 1024 }); }
+  try { await promisify(execFile)(CLOUDROOM_PYTHON_PATH, ["-B", "-E", "-s", script, "stop", folder(deps)], { timeout: 15_000, maxBuffer: 64 * 1024, windowsHide: true }); }
   catch (error) { console.warn(`Cloudroom sync stop failed: ${errorMessage(error)}`); }
 }

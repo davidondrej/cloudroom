@@ -33,9 +33,9 @@ const CODEX_TRANSCRIPTION_RESPONSE_MAX_BYTES = 1024 * 1024;
 type ReadOverflowBehavior = "throw" | "truncate";
 type CodexRequestOperation = "inference" | "transcription";
 
-interface TimeoutFetchArgs {
+interface TimeoutFetchArgs<T = Response> {
   deadline: CodexRequestDeadline;
-  work: (signal: AbortSignal) => Promise<Response>;
+  work: (signal: AbortSignal) => Promise<T>;
 }
 
 interface CodexRequestDeadline {
@@ -82,18 +82,21 @@ interface OpenAiResponsesFetchArgs {
 }
 
 interface TranscriptionFetchArgs {
+  audioBlob: Blob;
   auth: CodexAuthCredentials;
   command: VoiceTranscribeCommand;
   deadline: CodexRequestDeadline;
 }
 
 interface ChatGptTranscriptionFetchArgs {
+  audioBlob: Blob;
   auth: CodexChatGptAuthCredentials;
   command: VoiceTranscribeCommand;
   deadline: CodexRequestDeadline;
 }
 
 interface OpenAiTranscriptionFetchArgs {
+  audioBlob: Blob;
   auth: CodexOpenAiApiKeyCredentials;
   command: VoiceTranscribeCommand;
   deadline: CodexRequestDeadline;
@@ -201,7 +204,9 @@ function remainingCodexRequestTimeoutMs(
   return remainingMs;
 }
 
-async function runWithTimeout(args: TimeoutFetchArgs): Promise<Response> {
+async function runWithTimeout<T = Response>(
+  args: TimeoutFetchArgs<T>,
+): Promise<T> {
   const abortController = new AbortController();
   const timeoutMs = remainingCodexRequestTimeoutMs(args.deadline);
   const timeout = setTimeout(() => {
@@ -866,16 +871,82 @@ export async function completeCodexInference(
   };
 }
 
-function buildAudioBlob(command: VoiceTranscribeCommand): Blob {
-  const bytes = Buffer.from(command.audioBase64, "base64");
-  return new Blob([bytes], {
-    type: command.mimeType,
-  });
+const AUDIO_PULL_MAX_BYTES = 25 * 1024 * 1024;
+
+function resolveAudioPullUrl(audioUrl: string): string {
+  if (!audioUrl.startsWith("/")) {
+    return audioUrl;
+  }
+  const serverUrl = process.env.ROOM_SERVER_URL ?? process.env.BB_SERVER_URL;
+  if (!serverUrl) {
+    throw new AiServiceFailure(
+      "request_failed",
+      "codex_audio_url_unresolved",
+      "Server URL is unavailable to fetch voice audio.",
+    );
+  }
+  return new URL(audioUrl, serverUrl).href;
 }
 
-function buildTranscriptionFormData(command: VoiceTranscribeCommand): FormData {
+async function resolveAudioBlob(
+  command: VoiceTranscribeCommand,
+  deadline: CodexRequestDeadline,
+): Promise<Blob> {
+  if (command.audioBase64 !== undefined) {
+    const bytes = Buffer.from(command.audioBase64, "base64");
+    return new Blob([bytes], { type: command.mimeType });
+  }
+  if (command.audioUrl === undefined) {
+    throw new AiServiceFailure(
+      "request_failed",
+      "codex_audio_missing",
+      "Voice transcription request did not include audio.",
+    );
+  }
+  const url = resolveAudioPullUrl(command.audioUrl);
+  const bytes = await runWithTimeout({
+    deadline,
+    work: async (signal) => {
+      const response = await fetch(url, {
+        method: "GET",
+        redirect: "error",
+        signal,
+      });
+      if (!response.ok) {
+        throw new AiServiceFailure(
+          "service_unavailable",
+          "codex_audio_fetch_failed",
+          `Failed to load voice audio (HTTP ${response.status}).`,
+        );
+      }
+      const declaredLength = Number(response.headers.get("content-length"));
+      if (declaredLength > AUDIO_PULL_MAX_BYTES) {
+        throw new AiServiceFailure(
+          "request_failed",
+          "codex_audio_too_large",
+          "Voice audio exceeds the 25MB limit.",
+        );
+      }
+      const buffer = new Uint8Array(await response.arrayBuffer());
+      if (buffer.byteLength === 0 || buffer.byteLength > AUDIO_PULL_MAX_BYTES) {
+        throw new AiServiceFailure(
+          "request_failed",
+          "codex_audio_invalid",
+          "Voice audio payload was empty or exceeded 25MB.",
+        );
+      }
+      return buffer;
+    },
+  });
+  return new Blob([bytes], { type: command.mimeType });
+}
+
+function buildTranscriptionFormData(
+  command: VoiceTranscribeCommand,
+  audioBlob: Blob,
+): FormData {
   const formData = new FormData();
-  formData.set("file", buildAudioBlob(command), command.filename);
+  formData.set("file", audioBlob, command.filename);
   formData.set("model", command.model);
   if (command.prompt !== null) {
     formData.set("prompt", command.prompt);
@@ -919,7 +990,7 @@ async function fetchChatGptTranscription(
         init: (headers) => ({
           method: "POST",
           headers: createChatGptTranscriptionHeaders(args.auth, headers),
-          body: buildTranscriptionFormData(args.command),
+          body: buildTranscriptionFormData(args.command, args.audioBlob),
           signal,
         }),
       }),
@@ -935,7 +1006,7 @@ async function fetchOpenAiTranscription(
       fetch(OPENAI_TRANSCRIBE_URL, {
         method: "POST",
         headers: createOpenAiHeaders(args.auth),
-        body: buildTranscriptionFormData(args.command),
+        body: buildTranscriptionFormData(args.command, args.audioBlob),
         signal,
       }),
   });
@@ -946,11 +1017,13 @@ async function fetchTranscription(
 ): Promise<Response> {
   return args.auth.type === "chatgpt"
     ? fetchChatGptTranscription({
+        audioBlob: args.audioBlob,
         auth: args.auth,
         command: args.command,
         deadline: args.deadline,
       })
     : fetchOpenAiTranscription({
+        audioBlob: args.audioBlob,
         auth: args.auth,
         command: args.command,
         deadline: args.deadline,
@@ -962,7 +1035,13 @@ export async function transcribeCodexVoice(
 ): Promise<Extract<ExperimentalAiVoiceTranscribeOutput, { ok: true }>> {
   const deadline = createCodexRequestDeadline(command.timeoutMs);
   const auth = await readCodexAuthCredentials();
-  const response = await fetchTranscription({ auth, command, deadline });
+  const audioBlob = await resolveAudioBlob(command, deadline);
+  const response = await fetchTranscription({
+    audioBlob,
+    auth,
+    command,
+    deadline,
+  });
 
   if (!response.ok) {
     throw await createCodexHttpError({

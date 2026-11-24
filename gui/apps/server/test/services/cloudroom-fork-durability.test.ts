@@ -7,10 +7,12 @@ import { withTestHarness } from "../helpers/test-app.js";
 import { seedHostSession, seedProjectWithSource, seedThread } from "../helpers/seed.js";
 
 type Internals = {
-  holdChildReport(child: string, status: string, turn: string): Promise<void>;
-  deliverChildReports(): Promise<void>;
-  saveAgentFork(requestId: string, threadId: string): Promise<void>;
-  agentFork(parent: unknown, client: unknown, record: unknown): Promise<void>;
+  children: {
+    holdChildReport(child: string, status: string, turn: string): Promise<void>;
+    deliverChildReports(): Promise<void>;
+    saveAgentFork(requestId: string, threadId: string): Promise<void>;
+    agentFork(parent: unknown, client: unknown, record: unknown): Promise<void>;
+  };
   stop(): void;
   childTurnEnded?: (child: { id: string }, status: string) => void;
 };
@@ -27,15 +29,15 @@ it("delivers a child report held during Teleport once, after the app restarts", 
     const before = cloudroom(harness.deps) as unknown as Internals;
     const lost = vi.fn();
     before.childTurnEnded = lost;
-    await before.holdChildReport(child.id, "completed", "turn-1");
+    await before.children.holdChildReport(child.id, "completed", "turn-1");
     before.stop();
 
     const after = new (before.constructor as new (deps: unknown) => Internals)(harness.deps);
     const reports = vi.fn();
     after.childTurnEnded = reports;
     saveTeleportProgress(harness.db, parent.id, { ...progress, phase: "complete" });
-    await after.deliverChildReports();
-    await after.deliverChildReports();
+    await after.children.deliverChildReports();
+    await after.children.deliverChildReports();
 
     expect(lost).not.toHaveBeenCalled();
     expect(reports).toHaveBeenCalledTimes(1);
@@ -52,11 +54,11 @@ it("answers a retried agent fork with its first thread after Teleport and 200 la
     const fork = seedThread(harness.deps, { projectId: project.id });
     const service = cloudroom(harness.deps) as unknown as Internals;
     const requestId = `fork_${createHash("sha256").update(`${parent.id}:fork_first`).digest("hex").slice(0, 40)}`;
-    await service.saveAgentFork(requestId, fork.id);
-    for (let i = 0; i < 205; i++) await service.saveAgentFork(`fork_later_${i}`, `thr_later_${i}`);
+    await service.children.saveAgentFork(requestId, fork.id);
+    for (let i = 0; i < 205; i++) await service.children.saveAgentFork(`fork_later_${i}`, `thr_later_${i}`);
 
     const answerChild = vi.fn(async () => ({}));
-    await service.agentFork(
+    await service.children.agentFork(
       { threadId: parent.id, sessionId: "cr_parent", model: "gpt-6-luna", reasoning: "low" },
       { answerChild },
       { kind: "fork_request", sequence: 1, timestamp_ms: Date.now(), data: { id: "fork_first", prompt: "continue" } },

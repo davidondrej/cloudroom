@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { RoomDesktopBrowserApi } from "@cloudroom/desktop-contract";
-import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import type { BrowserFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import { createNoopDesktopBrowserApi } from "@/test/room-desktop-test-utils";
 import {
   createBrowserViewVisibilityCoordinator,
   resetBrowserViewPersistence,
-} from "./browserViewVisibilityCoordinator";
-import { buildBrowserTabIdSet, selectActiveBrowserTab } from "./BrowserTabDeck";
+} from "@/components/right-panel/tabs/browser-visibility";
+import { buildBrowserTabIdSet, selectActiveBrowserTab } from "@/components/right-panel/tabs/browser-tab";
 
 function makeBrowserTab(id: string, url: string): BrowserFixedPanelTab {
   return {

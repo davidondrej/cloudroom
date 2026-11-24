@@ -145,7 +145,9 @@ export function typedRoutes<Schema>(
           input = c.req.query();
         } else {
           try {
-            input = await c.req.json();
+            // An empty body reads as missing, so a schema with a default makes the body optional.
+            const text = await c.req.text();
+            input = text === "" ? undefined : JSON.parse(text);
           } catch {
             throw makeError("Invalid JSON request body");
           }

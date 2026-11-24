@@ -7,22 +7,22 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import * as PopoverPrimitive from "@radix-ui/react-popover";
-import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { preventOverlayTriggerSelection } from "@cloudroom/shared-ui/overlay-trigger";
+import { PluginActionIcon } from "@/components/plugin/PluginIcon";
 import { usePortalScopeProps } from "@/lib/portal-scope";
-import { PluginIcon, pluginIconName } from "@/components/plugin/PluginIcon";
+import { copyToClipboardWithToast } from "@/lib/clipboard";
 import type { MessageProseSelection } from "./SelectableMessageProse.js";
 import type { ThreadTimelinePluginMessageAction } from "./types.js";
 
 const SELECTION_ACTION_BUTTON_CLASS =
-  "inline-flex cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-foreground transition-colors hover:bg-surface-recessed focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring select-none max-md:pointer-coarse:min-h-7 max-md:pointer-coarse:px-2 max-md:pointer-coarse:py-1";
+  "inline-flex h-7 min-w-0 max-w-full cursor-pointer items-center justify-center gap-1.5 rounded-[5px] px-[9px] text-xs leading-none font-medium tracking-[-0.01em] text-foreground select-none transition-colors hover:bg-state-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-muted-foreground max-sm:px-2 max-md:pointer-coarse:min-h-8";
 const SELECTION_MENU_CONTENT_CLASS =
-  "z-50 flex w-auto items-center gap-0.5 rounded-md border bg-popover p-0.5 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95";
+  "z-50 flex w-max max-w-[var(--radix-popover-content-available-width)] flex-wrap items-center gap-px rounded-[9px] border border-foreground/15 bg-surface-recessed-solid p-[3px] shadow-[0_4px_12px_#0005,0_1px_3px_#0007] outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95";
 
 interface SelectionAction {
-  icon: IconName;
-  plugin?: { pluginId: string | null; icon: string | null };
   key?: string;
+  icon: string | null;
+  pluginId?: string | null;
   label: string;
   onSelect: (selection: MessageProseSelection) => void;
 }
@@ -79,28 +79,12 @@ function ActionButton({
         activate();
       }}
     >
-      {action.plugin ? (
-        action.plugin.pluginId === null ? (
-          <Icon
-            name={pluginIconName(action.plugin.icon)}
-            className="size-3.5 text-muted-foreground"
-            aria-hidden="true"
-          />
-        ) : (
-          <PluginIcon
-            pluginId={action.plugin.pluginId}
-            icon={action.plugin.icon}
-            className="size-3.5 text-muted-foreground"
-          />
-        )
-      ) : (
-        <Icon
-          name={action.icon}
-          className="size-3.5 text-muted-foreground"
-          aria-hidden="true"
-        />
-      )}
-      {action.label}
+      <PluginActionIcon
+        pluginId={action.pluginId ?? null}
+        icon={action.icon}
+        className="size-[15px] shrink-0 text-subtle-foreground"
+      />
+      <span className="truncate">{action.label}</span>
     </button>
   );
 }
@@ -152,20 +136,18 @@ export function TimelineSelectionMenu({
     ...(onAddToChat
       ? [
           {
-            icon: "ArrowTurnDown" as const,
             label: "Reply",
+            icon: "ArrowTurnBackward",
             onSelect: (currentSelection: MessageProseSelection) =>
               onAddToChat(currentSelection.text),
           },
         ]
       : []),
-    ...(onFork
-      ? [{ icon: "Fork" as const, label: "Fork", onSelect: onFork }]
-      : []),
+    ...(onFork ? [{ label: "Fork", icon: "Fork", onSelect: onFork }] : []),
     ...pluginActions.map((action) => ({
-      icon: "MessageSquarePlus" as const,
-      plugin: { pluginId: action.pluginId, icon: action.icon },
       key: action.key,
+      icon: action.icon,
+      pluginId: action.pluginId,
       label: action.label,
       onSelect: () => action.onSelect(),
     })),
@@ -192,21 +174,33 @@ export function TimelineSelectionMenu({
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
         >
-          {actions.map((action, index) => (
-            <div key={action.key ?? action.label} className="flex items-center">
-              {index > 0 ? (
-                <span
-                  aria-hidden="true"
-                  className="mx-0.5 h-4 w-px bg-border"
-                />
-              ) : null}
-              <ActionButton
-                action={action}
-                onDismiss={onDismiss}
-                selection={selection}
-              />
-            </div>
+          {actions.map((action) => (
+            <ActionButton
+              key={action.key ?? action.label}
+              action={action}
+              onDismiss={onDismiss}
+              selection={selection}
+            />
           ))}
+          <div className="flex items-center">
+            <span
+              aria-hidden="true"
+              className="mx-0.5 h-3.5 w-px bg-foreground/15"
+            />
+            <ActionButton
+              action={{
+                label: "Copy",
+                icon: "Copy",
+                onSelect: (current) =>
+                  void copyToClipboardWithToast(
+                    current.copyText ?? current.text,
+                    { chatMessage: true },
+                  ),
+              }}
+              onDismiss={onDismiss}
+              selection={selection}
+            />
+          </div>
         </PopoverPrimitive.Content>
       </PopoverPrimitive.Portal>
     </PopoverPrimitive.Root>

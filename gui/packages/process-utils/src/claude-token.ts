@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { ensureDataTempDir } from "./plugin-process-paths.js";
 
 const TOKEN = /(sk-ant-oat[A-Za-z0-9_-]{20,})[^A-Za-z0-9_-]/;
+const MAX_CURSOR_COORDINATE = 1_000;
 
 export const NO_TERMINAL = "Claude sign-in needs the `script` command, which this computer doesn't have. Install it (on Fedora: `sudo dnf install util-linux-script`) and try again, or use an API key.";
 
@@ -27,13 +28,13 @@ export function screenText(output: string, conpty = false): string {
   const rows: string[][] = [];
   let row = 0, col = 0;
   for (const [, params = "", command, char] of output.matchAll(/\x1b\[([0-9;?<>=]*)([A-Za-z@`])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()*+]?[^\[\]]|([^])/gu)) {
-    const n = Number(params) || 1;
+    const n = Math.min(Number(params) || 1, MAX_CURSOR_COORDINATE);
     if (command === "G") col = n - 1;
-    else if (command === "C") col += n;
+    else if (command === "C") col = Math.max(col, Math.min(col + n, MAX_CURSOR_COORDINATE));
     else if (command === "D") col = Math.max(0, col - n);
     else if (command === "A") row = Math.max(0, row - n);
-    else if (command === "B") row += n;
-    else if (conpty && command === "H") [row, col] = [0, 1].map(index => (Number(params.split(";")[index]) || 1) - 1) as [number, number];
+    else if (command === "B") row = Math.max(row, Math.min(row + n, MAX_CURSOR_COORDINATE));
+    else if (conpty && command === "H") [row, col] = [0, 1].map(index => Math.min(Number(params.split(";")[index]) || 1, MAX_CURSOR_COORDINATE) - 1) as [number, number];
     else if (command === "K") rows[row] = params === "2" ? [] : (rows[row] ?? []).slice(0, col);
     else if (char === "\r") col = 0;
     else if (char === "\n") row++;

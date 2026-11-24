@@ -11,7 +11,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const spawnMock = vi.hoisted(() => vi.fn());
@@ -23,11 +24,13 @@ vi.mock("@cloudroom/process-utils", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@cloudroom/process-utils")>()),
   execPortableFile: (command: string, args: string[], options: object) =>
     new Promise((resolve, reject) => {
-      spawnMock(command, args, options).on("close", (code: number) =>
-        code === 0
-          ? resolve({ stdout: "", stderr: "" })
-          : reject(new Error(`exit ${code}`)),
-      );
+      spawnMock(command, args, options)
+        .on("error", reject)
+        .on("close", (code: number) =>
+          code === 0
+            ? resolve({ stdout: "", stderr: "" })
+            : reject(new Error(`exit ${code}`)),
+        );
     }),
 }));
 
@@ -40,6 +43,7 @@ import {
 
 afterEach(() => {
   spawnMock.mockReset();
+  vi.unstubAllEnvs();
 });
 
 function stubDownloadedSkill(skillId: string, body?: string): void {
@@ -237,6 +241,91 @@ describe("installServerRegistrySkill", () => {
       await rm(dataDir, { recursive: true, force: true });
     }
   });
+
+  it("says Node.js with npm is needed when npx is not on PATH (#2160)", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "bb-registry-no-npx-test-"));
+    try {
+      const { spawn } =
+        await vi.importActual<typeof import("node:child_process")>(
+          "node:child_process",
+        );
+      spawnMock.mockImplementation(
+        (_command: string, args: string[], options) =>
+          spawn("cloudroom-test-missing-npx", args, options),
+      );
+
+      await expect(
+        installServerRegistrySkill({
+          dataDir,
+          userSkillsRootPath: join(dataDir, "skills"),
+          packageRef: "vercel-labs/skills",
+          registrySkillId: "github.com/vercel-labs/skills/find-skills",
+          skillId: "find-skills",
+        }),
+      ).rejects.toMatchObject({
+        status: 424,
+        body: { code: "registry_install_requires_npm" },
+      });
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  const nodeDir = dirname(process.execPath);
+  const failedNpxRows: [string, (cwd: string) => string, number, string][] = [
+    ["has no node", (cwd) => cwd, 424, "registry_install_requires_npm"],
+    ["has node", () => nodeDir, 502, "registry_install_failed"],
+    [
+      "has node in an entry relative to the installer's folder",
+      (cwd) => {
+        mkdirSync(join(cwd, "bin"));
+        writeFileSync(join(cwd, "bin", basename(process.execPath)), "", {
+          mode: 0o755,
+        });
+        return "bin";
+      },
+      502,
+      "registry_install_failed",
+    ],
+  ];
+  if (process.platform === "win32") {
+    failedNpxRows.push([
+      "has node in a quoted entry",
+      () => `"${nodeDir}"`,
+      502,
+      "registry_install_failed",
+    ]);
+  }
+  it.each(failedNpxRows)(
+    "maps a failed npx run when PATH %s to the matching error",
+    async (_case, pathFor, status, code) => {
+      const dataDir = await mkdtemp(join(tmpdir(), "bb-registry-npx-fails-"));
+      try {
+        const { spawn } =
+          await vi.importActual<typeof import("node:child_process")>(
+            "node:child_process",
+          );
+        spawnMock.mockImplementation(
+          (_command: string, _args, options: { cwd: string }) => {
+            vi.stubEnv("PATH", pathFor(options.cwd));
+            return spawn(process.execPath, ["-e", "process.exit(1)"], options);
+          },
+        );
+
+        await expect(
+          installServerRegistrySkill({
+            dataDir,
+            userSkillsRootPath: join(dataDir, "skills"),
+            packageRef: "vercel-labs/skills",
+            registrySkillId: "github.com/vercel-labs/skills/find-skills",
+            skillId: "find-skills",
+          }),
+        ).rejects.toMatchObject({ status, body: { code } });
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("rejects malformed downloaded skill metadata without adopting it", async () => {
     const dataDir = await mkdtemp(

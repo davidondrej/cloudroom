@@ -8,7 +8,7 @@ import {
   useLocation,
   useNavigate,
   useParams,
-} from "react-router-dom";
+} from "react-router";
 import { AppRoutes } from "./App";
 
 vi.mock("./components/layout/AppLayout", () => ({

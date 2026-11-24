@@ -715,6 +715,38 @@ async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
   });
 }
 
+/**
+ * Git for Windows stops at 260-character paths unless core.longpaths is on,
+ * and managed worktrees sit deep in the data folder (#1806). Turn it on in the
+ * repository, so the agent's own Git works there too, unless it is set anywhere.
+ */
+export async function allowLongPaths(
+  sourcePath: string,
+  signal?: AbortSignal,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform !== "win32") return;
+  const options = {
+    cwd: sourcePath,
+    ...signalOptions(signal),
+    allowFailure: true,
+  };
+  // Under the lock `worktree add` takes, which also writes this config file.
+  await withWorktreeMetadataLock(
+    await getGitCommonDir(sourcePath, signalOptions(signal)),
+    async () => {
+      // Exit 1: not set in any Git config.
+      if (
+        (await runGit(["config", "--get", "core.longpaths"], options))
+          .exitCode === 1
+      )
+        await runGit(["config", "--local", "core.longpaths", "true"], options);
+    },
+    signal,
+    true,
+  );
+}
+
 export async function createWorktree(
   args: CreateWorktreeArgs,
 ): Promise<{ path: string; startPoint?: string }> {
@@ -769,9 +801,6 @@ export async function createWorktree(
   });
 
   throwIfProvisionAborted(args.signal);
-  await ensureWorkspaceParentDirectory(args.targetPath);
-
-  throwIfProvisionAborted(args.signal);
   const reuseExistingBranch =
     args.branchMode === "reuse-existing" &&
     (await hasRef(args.sourcePath, `refs/heads/${args.branchName}`));
@@ -813,6 +842,9 @@ export async function createWorktree(
     ];
   }
 
+  await allowLongPaths(args.sourcePath, args.signal);
+  // Only now: a failed fetch would leave this folder behind empty (#1689).
+  await ensureWorkspaceParentDirectory(args.targetPath);
   const worktreeStartedAt = Date.now();
   emitStep({
     onProgress: args.onProgress,
@@ -830,6 +862,8 @@ export async function createWorktree(
         ["-c", "checkout.workers=0", ...gitArgs],
         {
           cwd: args.sourcePath,
+          // The user's post-checkout hook runs, as in their own `git worktree add`.
+          hooks: true,
           ...(args.signal !== undefined ? { signal: args.signal } : {}),
         },
       ));

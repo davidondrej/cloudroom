@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { matchPath, useLocation } from "react-router-dom";
+import { matchPath, useLocation } from "react-router";
 import {
   getRootComposeRoutePath,
   SETTINGS_ROUTE_PATH,

@@ -1,12 +1,12 @@
-import {
-  spawn,
-  execFile,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
+import { execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import os from "node:os";
 import { promisify } from "node:util";
 import type { ClaudeLoginInput, ClaudeLoginStatus } from "./login-contract.js";
-import { claudeExecutable } from "./bridge/provider-maintenance.js";
+import {
+  experimental_execPortableFile,
+  experimental_killPortableProcess,
+} from "@get-bb/plugin-sdk/provider-bridge";
+import { claudeExecutable, spawnClaude } from "./bridge/provider-maintenance.js";
 
 const lifetime = 10 * 60_000;
 const status = (
@@ -52,7 +52,9 @@ export class ClaudeLogin {
     this.onStop();
     child?.stdin.end();
     if (child) {
-      child.kill("SIGTERM");
+      void experimental_killPortableProcess(child, "SIGTERM");
+      // On Windows that already ends the whole tree; killing the root early could hide the rest from taskkill.
+      if (process.platform === "win32") return;
       const timer = setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null)
           child.kill("SIGKILL");
@@ -91,16 +93,20 @@ export class ClaudeLogin {
     let stdout = "";
     let code = 0;
     try {
-      ({ stdout } = await promisify(execFile)(
-        claudeExecutable(),
-        ["auth", "status", "--json"],
-        {
-          cwd: os.homedir(),
-          timeout: 10_000,
-          killSignal: "SIGKILL",
-          maxBuffer: 65536,
-        },
-      ));
+      const args = ["auth", "status", "--json"];
+      // On Windows an npm `claude.cmd` fails plain execFile with EINVAL, which read as signed out.
+      ({ stdout } = await (process.platform === "win32"
+        ? experimental_execPortableFile(claudeExecutable(), args, {
+            cwd: os.homedir(),
+            timeoutMs: 10_000,
+            maxBuffer: 65536,
+          })
+        : promisify(execFile)(claudeExecutable(), args, {
+            cwd: os.homedir(),
+            timeout: 10_000,
+            killSignal: "SIGKILL",
+            maxBuffer: 65536,
+          })));
     } catch (error) {
       const result = error as { code?: unknown; stdout?: string };
       code = typeof result.code === "number" ? result.code : -1;
@@ -167,7 +173,7 @@ export class ClaudeLogin {
   }
 
   private async action(input: ClaudeLoginInput): Promise<ClaudeLoginStatus> {
-    if (input.action === "status") return this.check();
+    if (input.action === "status") return this.check(input.force === true);
     if (input.action === "cancel") {
       if (input.requestId === this.value.login_id) {
         this.stop();
@@ -200,13 +206,12 @@ export class ClaudeLogin {
     await this.check(true);
     if (
       this.child ||
-      this.value.state === "connected" ||
+      (!input.force && this.value.state === "connected") ||
       this.value.state === "unavailable" ||
       !input.requestId
     )
       return this.value;
-    const child = spawn(
-      claudeExecutable(),
+    const child = spawnClaude(
       [
         "-p",
         "--no-session-persistence",
@@ -226,7 +231,7 @@ export class ClaudeLogin {
         "--mcp-config",
         '{"mcpServers":{}}',
       ],
-      { cwd: os.homedir(), stdio: "pipe" },
+      { cwd: os.homedir() },
     );
     this.child = child;
     let buffer = "";

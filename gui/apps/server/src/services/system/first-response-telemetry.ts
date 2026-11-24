@@ -1,4 +1,4 @@
-import { cloudroomCommands, cloudroomThreads, environments, events, threads, type DbConnection } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, environments, events, getThread, threads, type DbConnection } from "@cloudroom/db";
 import type { ThreadEventType } from "@cloudroom/domain";
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { NotificationHub } from "../../ws/hub.js";
@@ -6,6 +6,7 @@ import type { TelemetryEvent, TelemetryExecution, TelemetryService } from "./tel
 import type { SandboxDirectory } from "../cloudroom/sandboxes.js";
 import { secondsSinceFirstLaunch } from "../cloudroom/setup-telemetry.js";
 import { firstAgentTag } from "./first-agent.js";
+import { turnStarterAfter } from "../threads/turn-failed.js";
 
 const OUTPUT_TYPES: ThreadEventType[] = [
   "item/started",
@@ -16,6 +17,7 @@ const OUTPUT_TYPES: ThreadEventType[] = [
 ];
 const TURN_TYPES: ThreadEventType[] = ["turn/started", "turn/completed"];
 const MAX_WAIT_MS = 10 * 60_000;
+const SWEEP_MS = 60_000;
 
 interface SentMessage {
   afterSequence: number;
@@ -27,6 +29,8 @@ interface SentMessage {
   model?: string | null;
   reasoningLevel?: string | null;
   serviceTier?: string | null;
+  /** The computer slept during the wait, so a missing reply may not be ours. */
+  slept?: boolean;
 }
 
 interface Tracker {
@@ -92,12 +96,36 @@ export function installFirstResponseTelemetry(
       });
       return;
     }
-    if (types?.includes("turn/completed")) current.pending.delete(message.id);
+    if (types?.includes("turn/completed")) {
+      current.pending.delete(message.id);
+      if (lastTurnStatus(current.db, message.id, sent.afterSequence) === "completed") captureSilent(current, message.id, sent, "empty");
+    }
   });
+  // A message with no reply and no error after 10 minutes is a silent failure. A long gap between sweeps means the
+  // computer slept, which pauses Local agents and the app's view of Cloud, so those waits don't count.
+  let lastSweep = Date.now();
+  const sweep = setInterval(() => {
+    const now = Date.now();
+    const slept = now - lastSweep > 3 * SWEEP_MS;
+    lastSweep = now;
+    for (const [threadId, sent] of current.pending) {
+      if (slept) sent.slept = true;
+      if (now - sent.sentAt < MAX_WAIT_MS) continue;
+      current.pending.delete(threadId);
+      if (!sent.slept) captureSilent(current, threadId, sent, "no_reply");
+    }
+  }, SWEEP_MS);
+  sweep.unref();
   return () => {
     unsubscribe();
+    clearInterval(sweep);
     if (tracker === current) tracker = null;
   };
+}
+
+/** A stop ends the wait: stops are not failures, so no `turn_silent` and no late `first_response`. */
+export function forgetSentMessage(threadId: string): void {
+  tracker?.pending.delete(threadId);
 }
 
 export function noteMessageSent(
@@ -133,6 +161,49 @@ export function noteMessageSent(
   }
   tracker.pending.set(threadId, { ...message, model: cloud?.model ?? local?.model ?? null, reasoningLevel: cloud?.reasoning ?? local?.reasoning ?? null,
     serviceTier, afterSequence: latest?.sequence ?? 0, sentAt });
+}
+
+/** `no_reply`: nothing 10 minutes after the send. `empty`: the turn ended as completed with no output. A thread in
+ *  `error` already sent `turn_failed`, and stops are not failures. */
+function captureSilent(current: Tracker, threadId: string, sent: SentMessage, reason: "no_reply" | "empty"): void {
+  const thread = getThread(current.db, threadId);
+  if (!thread || thread.deletedAt !== null || thread.status === "error") return;
+  const startedBy = turnStarterAfter(current.db, threadId, sent.afterSequence);
+  current.telemetry.capture({
+    name: "turn_silent",
+    properties: {
+      reason,
+      ms: Date.now() - sent.sentAt,
+      execution: sent.execution,
+      is_child_thread: sent.isChildThread,
+      message_source: sent.messageSource,
+      provider: sent.provider,
+      model: sent.model ?? null,
+      thread_status: thread.status,
+      turn_started: hasEventAfter(current.db, threadId, sent.afterSequence, "turn/started"),
+      ...(startedBy ? { started_by: startedBy } : {}),
+      ...firstAgentTag(current.db, threadId),
+    },
+  });
+}
+
+function lastTurnStatus(db: DbConnection, threadId: string, afterSequence: number): string | null {
+  return db
+    .select({ status: sql<string | null>`json_extract(${events.data}, '$.status')` })
+    .from(events)
+    .where(and(eq(events.threadId, threadId), gt(events.sequence, afterSequence), eq(events.type, "turn/completed")))
+    .orderBy(desc(events.sequence))
+    .limit(1)
+    .get()?.status ?? null;
+}
+
+function hasEventAfter(db: DbConnection, threadId: string, afterSequence: number, type: ThreadEventType): boolean {
+  return db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(and(eq(events.threadId, threadId), gt(events.sequence, afterSequence), eq(events.type, type)))
+    .limit(1)
+    .get() !== undefined;
 }
 
 function environmentProviderOf(db: DbConnection, threadId: string): string | null {

@@ -9,6 +9,7 @@ import {
   isProviderCliIssue,
   isProviderCliUpdateIssue,
   providerCliEntries,
+  withAutoUpdateSetting,
   type ProviderCliIssue,
 } from "@/components/provider-cli/provider-cli-install";
 import { useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
@@ -107,7 +108,21 @@ export function useUpdateInventory(
 
   const machines: UpdateInventoryMachine[] = updateHosts.map((host) => {
     const statusQuery = providerStatusByHostId.get(host.id);
-    const providerStatus = statusQuery?.data ?? null;
+    const reported = statusQuery?.data ?? null;
+    const autoUpdate =
+      systemConfigQuery.data?.generalSettings?.providerAutoUpdate;
+    const providerStatus =
+      reported &&
+      autoUpdate &&
+      host.type === "persistent" &&
+      host.lifecycle.phase === "active"
+        ? Object.fromEntries(
+            Object.entries(reported).map(([id, status]) => [
+              id,
+              withAutoUpdateSetting(status, autoUpdate.includes(id)),
+            ]),
+          )
+        : reported;
     const issues =
       providerStatus === null
         ? []

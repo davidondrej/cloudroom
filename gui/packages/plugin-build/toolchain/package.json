@@ -1,0 +1,11 @@
+{
+  "name": "bb-plugin-toolchain",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@tailwindcss/node": "4.3.0",
+    "@tailwindcss/oxide": "4.3.0",
+    "esbuild": "0.28.1",
+    "tailwindcss": "4.3.0"
+  }
+}

@@ -1,13 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { useProjectSuggestions } from "@/hooks/queries/cloudroom-queries";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
 import {
-  findCachedProviderInfo,
-  useSystemProviders,
-} from "@/hooks/queries/system-queries";
-import {
-  COMPUTER,
   findLocalPathProjectSourceForHost,
   type EnvironmentStatus,
   type Host,
@@ -47,17 +43,14 @@ import {
   type ProjectMachineSetupDialogTarget,
 } from "@/components/dialogs/ProjectMachineSetupDialog";
 import { HEADER_ICON_BUTTON_CLASS } from "@/components/layout/AppPageHeader";
-import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/secondary-panel/panelToggleControlState";
+import { RIGHT_PANEL_TOGGLE_ICON_NAME } from "@/components/right-panel/shell/panel-tokens";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
-import type {
-  SecondaryPanelPaneRenderContext,
-  SecondaryPanelRenderableTab,
-} from "@/components/secondary-panel/ThreadSecondaryPanel";
+import type { SecondaryPanelPaneRenderContext } from "@/components/right-panel/shell/panel-shell";
 import {
   LazyBrowserTabDeck,
   preloadThreadSecondaryPanel,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
-import type { BrowserAddressFocusRequest } from "@/components/secondary-panel/BrowserTabContent";
+} from "@/components/right-panel/shell/lazy-chunks";
+import type { BrowserAddressFocusRequest } from "@/components/right-panel/tabs/browser-tab";
 import { EmptyStatePanel } from "@cloudroom/shared-ui/empty-state";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { PageShell } from "@/components/ui/page-shell.js";
@@ -66,8 +59,6 @@ import { Button } from "@cloudroom/shared-ui/button";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
-import { COARSE_POINTER_COMPACT_ICON_SIZE_CLASS } from "@cloudroom/shared-ui/coarse-pointer-sizing";
-import { PluginIcon } from "@/components/plugin/PluginIcon";
 import type { FileOpenerOverride } from "@/lib/plugin-slot-resolvers";
 import { usePluginNewThreadPanelActions } from "@/components/plugin/PluginPanelActions";
 import { usePluginSlots } from "@/lib/plugin-slots";
@@ -80,7 +71,6 @@ import {
   useEnvironmentTerminals,
   useTerminals,
 } from "@/hooks/queries/thread-terminal-queries";
-import { takeTerminalStartRequest } from "@/lib/terminal-start-request";
 import { useEnvironment } from "@/hooks/queries/environment-queries";
 import { useHostProviderCliStatus } from "@/hooks/queries/system-queries";
 import {
@@ -107,7 +97,6 @@ import {
   getRootComposeRoutePath,
   isRoutePath,
 } from "@/lib/route-paths";
-import { getBrowserUrlHost } from "@/lib/browser-url";
 import {
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
@@ -119,8 +108,8 @@ import {
   useSetFixedRightTerminalActiveTerminal,
   useTouchFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
-import { createNewTabFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/panel-atoms";
+import { createNewTabFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import type {
   HostFileTabState,
   ThreadStorageFileTabState,
@@ -157,13 +146,13 @@ import { StartingThread, type StartingThreadMessage } from "./StartingThread";
 import {
   shouldLoadThreadStorageFileList,
   useThreadStorageViewer,
-} from "@/components/secondary-panel/useThreadStorageViewer";
+} from "@/components/right-panel/tabs/thread-storage";
 import {
   useThreadFileTabs,
   type FileSearchSelection,
-} from "@/components/secondary-panel/useThreadFileTabs";
-import { isSecondaryFileTab } from "@cloudroom/client-core";
-import { RightPanelFileTabIcon } from "@/components/secondary-panel/RightPanelFileTabIcon";
+} from "@/components/right-panel/store/use-panel-tabs";
+import { isSecondaryFileTab } from "@/components/right-panel/store/tab-ops";
+import { buildSecondaryPanelTabs } from "@/components/right-panel/shell/buildSecondaryPanelTabs";
 import {
   DEFAULT_TERMINAL_COLS,
   DEFAULT_TERMINAL_ROWS,
@@ -172,7 +161,7 @@ import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   syncTerminalTabsInFixedPanelState,
-} from "@/components/secondary-panel/terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import {
   getActiveFixedSecondaryTab,
   useSetThreadSecondaryPanelSelection,
@@ -560,11 +549,12 @@ export function RootComposeView() {
   const [forkSeed, setForkSeed] = useState<ForkThreadCreateSeed | null>(() =>
     readForkThreadCreateSeedFromLocationState(location.state),
   );
-  const [startLocal] = useState(
-    () =>
-      (location.state as { executionTarget?: unknown } | null)
-        ?.executionTarget === "local",
-  );
+  // Set by a link that needs one machine, whatever the project last used.
+  const [startOn] = useState<"local" | "cloud" | null>(() => {
+    const target = (location.state as { executionTarget?: unknown } | null)
+      ?.executionTarget;
+    return target === "local" || target === "cloud" ? target : null;
+  });
 
   const handleProjectChange = useCallback(
     (projectId: string) => {
@@ -580,11 +570,13 @@ export function RootComposeView() {
         navigateToThreadAfterCreate,
       });
       const { sendAt, ...requestFields } = request;
+      // The Pinned header's "New thread" pins the thread instead of filing it in a section.
+      const pinNewThread = rootComposeSectionId === "pinned";
       const createRequest =
         forkSeed === null
           ? {
               ...requestFields,
-              ...(rootComposeSectionId
+              ...(rootComposeSectionId && !pinNewThread
                 ? { sectionId: rootComposeSectionId }
                 : {}),
             }
@@ -598,16 +590,9 @@ export function RootComposeView() {
               permissionMode: request.permissionMode,
               pluginSubmission: request.pluginSubmission,
               providerId: request.providerId,
-              providerSupportsFork:
-                request.providerId !== forkSeed.providerId ||
-                (findCachedProviderInfo(queryClient, forkSeed.providerId)
-                  ?.capabilities.supportsFork ??
-                  false),
               reasoningLevel: request.reasoningLevel,
               serviceTier: request.serviceTier,
             });
-      if (createRequest === null)
-        throw new Error(`This agent can't fork on this ${COMPUTER}. Pick Cloud instead.`);
       // A phone shows the message in a thread at once, instead of a spinner on Send.
       // Forks, scheduled sends, and plugin sends open on something else, so they wait as before.
       const showsStartingThread =
@@ -634,7 +619,7 @@ export function RootComposeView() {
                 ...(sendAt === undefined ? {} : { sendAt }),
               },
         );
-        pinIfRequested(thread.id);
+        pinIfRequested(thread.id, pinNewThread);
         setLastCreatedThreadId(thread.id);
         setForkSeed(null);
         setRootComposeSectionId(null);
@@ -681,8 +666,8 @@ export function RootComposeView() {
   const composerSeed = useMemo(
     () =>
       forkSeed === null
-        ? startLocal
-          ? { executionTarget: "local" as const }
+        ? startOn
+          ? { executionTarget: startOn }
           : undefined
         : {
             providerId: forkSeed.providerId,
@@ -700,7 +685,7 @@ export function RootComposeView() {
                   },
                 }),
           },
-    [forkSeed, startLocal],
+    [forkSeed, startOn],
   );
 
   return (
@@ -1543,20 +1528,17 @@ function RootComposeSurface({
       return;
     }
     const newTab = createNewTabFixedPanelTab();
-    const startRequest = takeTerminalStartRequest();
     const createTerminal =
       rootPanelTerminalTarget.kind === "environment"
         ? createEnvironmentTerminalMutation.mutateAsync({
             environmentId: rootPanelTerminalTarget.environmentId,
             cols: DEFAULT_TERMINAL_COLS,
             rows: DEFAULT_TERMINAL_ROWS,
-            ...startRequest,
           })
         : createHostPathTerminalMutation.mutateAsync({
             cols: DEFAULT_TERMINAL_COLS,
             rows: DEFAULT_TERMINAL_ROWS,
             target: rootPanelTerminalTarget,
-            ...startRequest,
           });
     void createTerminal
       .then((session) => {
@@ -1744,134 +1726,29 @@ function RootComposeSurface({
       shouldAutoFocusTerminal,
     ],
   );
-  const panelTabs = useMemo<readonly SecondaryPanelRenderableTab[]>(() => {
-    const filenameOf = (path: string) => path.split("/").at(-1) ?? path;
-    const tabs = syncedOrderedSecondaryFileTabs.map(
-      (tab): SecondaryPanelRenderableTab => {
-        const pluginAction =
-          tab.kind === "plugin-panel"
-            ? rootPanelNewThreadPanelActions.find(
-                (action) =>
-                  action.pluginId === tab.pluginId &&
-                  action.id === tab.actionId,
-              )
-            : undefined;
-        const shared = {
-          contentFillsRegion:
-            tab.kind === "plugin-panel" &&
-            (tab.fileOpenerOwner !== undefined ||
-              pluginAction?.layout === "flush"),
-          onClose: () => closeTab(tab.id),
-          renderContent: (pane: SecondaryPanelPaneRenderContext) =>
-            renderRootPanelTabContent(tab, pane),
-          tab,
-        };
-        switch (tab.kind) {
-          case "browser": {
-            const browserLabel =
-              tab.title ??
-              (tab.url.length > 0 ? getBrowserUrlHost(tab.url) : "");
-            return {
-              ...shared,
-              label: browserLabel.length > 0 ? browserLabel : "Browser",
-              leadingVisual: (
-                <Icon
-                  name="Globe"
-                  className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                  aria-hidden
-                />
-              ),
-              statusLabel: null,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-          }
-          case "terminal": {
-            const session = terminalsById.get(tab.terminalId);
-            return {
-              ...shared,
-              label: session?.title ?? "Terminal",
-              leadingVisual: (
-                <Icon
-                  name="Terminal"
-                  className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                  aria-hidden
-                />
-              ),
-              statusLabel:
-                session === undefined || session.status === "running"
-                  ? null
-                  : session.status,
-              onSelect: () => handleActivateTerminalTab(tab.terminalId),
-              onClose: () => handleCloseTerminalTab(tab.terminalId),
-            };
-          }
-          case "workspace-file-preview":
-            return {
-              ...shared,
-              label: filenameOf(tab.path),
-              leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-              statusLabel: tab.statusLabel,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-          case "host-file-preview":
-            return {
-              ...shared,
-              label: filenameOf(tab.path),
-              leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-              statusLabel: null,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-          case "thread-storage-file-preview":
-            return {
-              ...shared,
-              label: filenameOf(tab.path),
-              isPinned: tab.isPinned,
-              leadingVisual: <RightPanelFileTabIcon path={tab.path} />,
-              statusLabel: null,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-          case "new-tab":
-            return {
-              ...shared,
-              label: "New tab",
-              leadingVisual: (
-                <Icon
-                  name="NewTab"
-                  className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                  aria-hidden
-                />
-              ),
-              statusLabel: null,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-          case "plugin-panel":
-            return {
-              ...shared,
-              label: tab.title,
-              leadingVisual: (
-                <PluginIcon
-                  pluginId={tab.pluginId}
-                  icon={pluginAction?.icon ?? null}
-                  className={COARSE_POINTER_COMPACT_ICON_SIZE_CLASS}
-                />
-              ),
-              statusLabel: null,
-              onSelect: () => handleActivateFileTab(tab.id),
-            };
-        }
-      },
-    );
-    return tabs;
-  }, [
-    closeTab,
-    handleActivateFileTab,
-    handleActivateTerminalTab,
-    handleCloseTerminalTab,
-    renderRootPanelTabContent,
-    rootPanelNewThreadPanelActions,
-    syncedOrderedSecondaryFileTabs,
-    terminalsById,
-  ]);
+  const panelTabs = useMemo(
+    () =>
+      buildSecondaryPanelTabs({
+        tabs: syncedOrderedSecondaryFileTabs,
+        pluginActions: rootPanelNewThreadPanelActions,
+        terminalsById,
+        activateTab: handleActivateFileTab,
+        closeTab,
+        activateTerminal: handleActivateTerminalTab,
+        closeTerminal: handleCloseTerminalTab,
+        renderContent: renderRootPanelTabContent,
+      }),
+    [
+      closeTab,
+      handleActivateFileTab,
+      handleActivateTerminalTab,
+      handleCloseTerminalTab,
+      renderRootPanelTabContent,
+      rootPanelNewThreadPanelActions,
+      syncedOrderedSecondaryFileTabs,
+      terminalsById,
+    ],
+  );
   const rootPanelMetadataContent = useMemo(
     () => (
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 pt-1">

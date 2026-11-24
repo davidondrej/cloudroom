@@ -544,6 +544,34 @@ describe("room-cli thread spawn command output", () => {
     );
   });
 
+  it("room-cli thread spawn retries a relay 504 with the same request ID (#2448)", async () => {
+    const thread = fixtures.makeThread({
+      id: "thread-1",
+      projectId: "proj-1",
+      providerId: "codex",
+    });
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("cloudroom: timed out waiting for the tunnel client\n", {
+          status: 504,
+        }),
+      )
+      .mockResolvedValueOnce(thread);
+    stubServerApi({ "v1.threads.$post": post });
+
+    await runCommand(
+      ["thread", "spawn", "--project", "proj-1", "--prompt", "hello"],
+      register,
+    );
+
+    const [first, second] = post.mock.calls.map(
+      ([args]) => (args as { json: { requestId: string } }).json.requestId,
+    );
+    expect(second).toBe(first);
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
   it("room-cli thread spawn with --parent-thread forwards parent thread id", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
     const thread: domain.Thread = fixtures.makeThread({

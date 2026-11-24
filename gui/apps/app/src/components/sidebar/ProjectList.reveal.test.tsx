@@ -4,7 +4,7 @@ import { useSyncExternalStore } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, render } from "@testing-library/react";
 import { createStore, Provider as JotaiProvider } from "jotai";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";
 import { makeThreadListEntry } from "@cloudroom/test-helpers/domain-fixtures";

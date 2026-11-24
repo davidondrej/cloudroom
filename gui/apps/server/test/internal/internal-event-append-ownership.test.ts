@@ -7,7 +7,12 @@ import {
   listEvents,
   listQueuedThreadMessages,
 } from "@cloudroom/db";
-import { threadScope, turnScope } from "@cloudroom/domain";
+import {
+  threadScope,
+  turnScope,
+  UNDELIVERED_MESSAGE_WARNING,
+} from "@cloudroom/domain";
+import { cancelRetriesForExplicitStop } from "../../src/services/threads/turn-retry.js";
 import {
   groupHostDaemonEvents,
   hostDaemonEventBatchResponseSchema,
@@ -1251,6 +1256,83 @@ describe("internal event append ownership", () => {
       const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "turn.submit" && command.threadId === parentThread.id, 5_000);
       const input = command.type === "turn.submit" ? command.input[0] : undefined;
       expect(input?.type === "text" ? input.text : "").toContain(`@thread:${childThread.id} ${expected}\n`);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("tells the parent a Stop may have ended the child before it read messages, once per message of that turn (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const parentThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "idle" });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, inputText: "Coordinate", providerThreadId: "provider-parent-unread", threadId: parentThread.id });
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, parentThreadId: parentThread.id, projectId: project.id, status: "active" });
+    const next = () => getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1;
+    const warning = (turnId: string, details: string) => ({
+      threadId: childThread.id,
+      event: { type: "provider/warning" as const, threadId: childThread.id, providerThreadId: "provider-unread", scope: turnScope(turnId), category: "general" as const, summary: UNDELIVERED_MESSAGE_WARNING, details },
+    });
+    try {
+      // An earlier turn's mark is not this turn's.
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-earlier" });
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "provider/warning", scope: turnScope("turn-earlier"), providerThreadId: "provider-unread", data: { providerThreadId: "provider-unread", category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "old" } });
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "turn/completed", scope: turnScope("turn-earlier"), data: { providerThreadId: null, status: "interrupted" } });
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-unread" });
+      cancelRetriesForExplicitStop(harness.deps, childThread.id);
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: next(), type: "system/thread/interrupted", scope: threadScope(), data: { reason: "manual-stop" } });
+      // The daemon replays the batch after losing the reply.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await postEventBatch({
+          harness,
+          sessionId: session.id,
+          // Two tells with the same text are two messages.
+          events: [warning("turn-unread", "Also run the tests."), warning("turn-unread", "Also run the tests."), { threadId: childThread.id, event: { type: "turn/completed", threadId: childThread.id, providerThreadId: "provider-turn-unread", scope: turnScope("turn-unread"), status: "interrupted" } }],
+        });
+        expect(response.status).toBe(200);
+      }
+      const { command } = await waitForQueuedCommand(harness, ({ command }) => command.type === "turn.submit" && command.threadId === parentThread.id, 5_000);
+      const input = command.type === "turn.submit" ? command.input[0] : undefined;
+      expect(
+        listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning" && event.turnId === "turn-unread"),
+      ).toHaveLength(2);
+      expect(input?.type === "text" ? input.text : "").toContain(
+        `@thread:${childThread.id} was interrupted (stopped by the user or an agent; it may not have read 2 messages sent to it, so send again if still needed).\n`,
+      );
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("drops the may-not-have-read mark after a harness switch, even from a retried POST (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "active" });
+    try {
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-switched" });
+      // As thread-harness-switch.ts records its stop once the switch is done.
+      cancelRetriesForExplicitStop(harness.deps, childThread.id, { chosen: false });
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "provider/warning", threadId: childThread.id, providerThreadId: "provider-switched", scope: turnScope("turn-switched"), category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "seeded into the new harness" } }],
+      });
+      expect(response.status).toBe(200);
+      expect(listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning")).toEqual([]);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("drops the may-not-have-read mark when nobody chose the Stop (#2137)", async () => {
+    const { environment, harness, project, session } = await setupEventRoute();
+    const childThread = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id, status: "active" });
+    try {
+      seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-edited" });
+      const response = await postEventBatch({
+        harness,
+        sessionId: session.id,
+        events: [{ threadId: childThread.id, event: { type: "provider/warning", threadId: childThread.id, providerThreadId: "provider-edited", scope: turnScope("turn-edited"), category: "general", summary: UNDELIVERED_MESSAGE_WARNING, details: "edited away" } }],
+      });
+      expect(response.status).toBe(200);
+      expect(listEvents(harness.db, { threadId: childThread.id }).filter((event) => event.type === "provider/warning")).toEqual([]);
     } finally {
       await harness.cleanup();
     }

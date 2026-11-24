@@ -11,6 +11,7 @@ import {
   incrementRepairAttempts,
   listCallsForRunPage,
   listExpiredTerminalRuns,
+  listSupersededCalls,
   migrations,
   queueCallProviderRetry,
   recoverInterruptedRuns,
@@ -258,6 +259,46 @@ describe("workflow durable data", () => {
     expect(getCall(db, run.id, 0)).toMatchObject({
       status: "cancelled",
       error: "Plugin restarted",
+    });
+
+    markRunning(run.id);
+    const retry = startCall(db, {
+      runId: run.id,
+      callIndex: 0,
+      cacheKey: "cache",
+      prompt: "inspect",
+      options: {
+        selection: null,
+        outputSchema: null,
+        title: null,
+        phase: null,
+      },
+      selection: resolvedSelection,
+      replay: null,
+    });
+    expect(getCall(db, run.id, 0)).toMatchObject({
+      id: retry.id,
+      status: "queued",
+    });
+    expect(
+      listSupersededCalls(db, {
+        runId: run.id,
+        firstCallIndex: 0,
+        lastCallIndex: 0,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        id: call.id,
+        callIndex: 0,
+        status: "cancelled",
+        error: "Plugin restarted",
+        childThreadId: "child-1",
+      }),
+    ]);
+    expect(countCallsForRun(db, run.id)).toMatchObject({
+      total: 2,
+      cancelled: 1,
+      queued: 1,
     });
   });
 

@@ -1,10 +1,7 @@
 import { useMemo, type ReactNode } from "react";
 import { reuseSameItems, useStableValue } from "@/hooks/useStableValue";
 import { DndContext } from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import type { SidebarSectionId } from "./sidebarCollapsedAtoms";
 import type { ReorderDndContextProps } from "@/components/ui/useReorderDnd";
 

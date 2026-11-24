@@ -4,6 +4,7 @@ import {
   type AvailableModel,
   type ModelReasoningEffort,
   type ReasoningLevel,
+  type ServiceTier,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
 
@@ -86,6 +87,22 @@ function parseSupportedReasoningEfforts(raw: unknown): ModelReasoningEffort[] {
   return efforts.length > 0 ? efforts : cloneDefaultReasoningEfforts();
 }
 
+// Codex calls Fast "priority". Tiers Cloudroom has no name for are dropped.
+const CODEX_SERVICE_TIERS: Record<string, ServiceTier> = {
+  priority: "fast",
+  ultrafast: "ultrafast",
+};
+
+function parseServiceTiers(raw: unknown): ServiceTier[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  return raw.flatMap((tier: { id?: unknown } | null) => {
+    const id = typeof tier?.id === "string" ? tier.id : "";
+    return Object.hasOwn(CODEX_SERVICE_TIERS, id)
+      ? [CODEX_SERVICE_TIERS[id]]
+      : [];
+  });
+}
+
 function toAvailableModel(
   raw: z.infer<typeof codexModelIdentitySchema>,
 ): AvailableModel {
@@ -97,6 +114,7 @@ function toAvailableModel(
       ? mappedDefault
       : efforts[0].reasoningEffort;
 
+  const serviceTiers = parseServiceTiers(raw.serviceTiers);
   return {
     id: raw.id,
     model: raw.model,
@@ -108,6 +126,7 @@ function toAvailableModel(
     supportedReasoningEfforts: efforts,
     defaultReasoningEffort,
     isDefault: raw.isDefault === true,
+    ...(serviceTiers ? { serviceTiers } : {}),
   };
 }
 

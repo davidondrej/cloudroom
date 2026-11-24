@@ -2,6 +2,7 @@ import type { MachineBootstrapApi } from "@get-bb/plugin-sdk";
 import type { PluginMachineProviderProgress } from "@get-bb/plugin-sdk/machine-provider";
 import type { EnrollmentBootstrap, MachineEnrollments } from "./enrollments.js";
 import { readFile } from "node:fs/promises";
+import { insecureMachineUrlAllowed } from "./server-access.js";
 import { INSTALL_MACHINE_SCRIPT_PATH } from "../../install-machine-asset.js";
 
 const installerScript = `
@@ -34,6 +35,9 @@ BB_ENROLLMENT=$bundle sh "$installer_file" --bootstrap-env BB_ENROLLMENT
 function installerCommand(bootstrap: EnrollmentBootstrap) {
   return {
     command: [
+      ...(insecureMachineUrlAllowed(bootstrap.serverUrl)
+        ? ["env", "BB_ALLOW_INSECURE_SERVER_URL=1"]
+        : []),
       "sh",
       "-c",
       installerScript,

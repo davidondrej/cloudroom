@@ -366,9 +366,7 @@ describe("buildPluginApp", () => {
       bbVersion: "0.9.0",
     });
     await linkScaffoldDeps(targetDir, [
-      "@radix-ui/react-checkbox",
       "@radix-ui/react-slot",
-      "@hugeicons/react",
       "@hugeicons/core-free-icons",
     ]);
     const result = await buildPluginApp(

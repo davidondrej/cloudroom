@@ -49,6 +49,12 @@ import {
   formatTimeUntil,
   isCloudWebhook,
 } from "./lib/format-schedule.js";
+import {
+  JevDocument,
+  JevLabel,
+  TypeSafeLogo,
+  type JevLoopFields,
+} from "./jev-loop.js";
 import { SecretsPicker } from "./secrets-picker.js";
 import { LOOP_PRIORITY_STYLE, shareLabel } from "./templates-view.js";
 import type { ReviewItemStatus } from "./src/rpc-types.js";
@@ -161,10 +167,12 @@ function useLoopUsage(
   return usage;
 }
 
-function cloudAgentValue(
-  automation: CloudAutomation,
+/** Most agents a loop takes turns between (MAX_LOOP_AGENTS in src/rpc-types.ts, kept out of the frontend bundle). */
+const MAX_LOOP_AGENTS = 8;
+
+function pickerValue(
+  agent: CloudAutomation["agent"],
 ): ExperimentalProviderModelPickerValue | null {
-  const agent = automation.agent;
   if (!agent?.providerId || !agent.model) return null;
   return {
     providerId: agent.providerId,
@@ -174,11 +182,25 @@ function cloudAgentValue(
   };
 }
 
+/** A Cloud loop's agents that take turns, when it has two or more and all are known. */
+function cloudAgentValues(
+  automation: CloudAutomation,
+): ExperimentalProviderModelPickerValue[] | undefined {
+  const values = automation.agents?.map(pickerValue);
+  return values && values.length > 1 && values.every((value) => value !== null)
+    ? (values as ExperimentalProviderModelPickerValue[])
+    : undefined;
+}
+
 export type LoopDialogChanges = {
   prompt?: string;
   cron?: string;
   agent?: ExperimentalProviderModelPickerValue;
+  /** Two or more agents that take turns, one per run; a single one is `agent`. */
+  agents?: ExperimentalProviderModelPickerValue[];
   secrets?: string[];
+  /** A Jev loop's questions and scripts, saved together; on an agent's loop, they turn it into a Jev loop. */
+  jev?: JevLoopFields;
 };
 
 export type LoopDialogLoop = {
@@ -192,6 +214,8 @@ export type LoopDialogLoop = {
   timezone: string;
   webhook: boolean;
   agent: ExperimentalProviderModelPickerValue | null;
+  /** Two or more agents that take turns; `agent` is the first. */
+  agents?: ExperimentalProviderModelPickerValue[];
   agentEditable: boolean;
   agentRouting?: ExperimentalProviderModelPickerRouting;
   runsOn: string;
@@ -200,6 +224,9 @@ export type LoopDialogLoop = {
   usageKey?: { automationId: string } | { cloudId: string };
   /** Its own failures paused it (not turned off by hand). */
   paused?: FailurePause | null;
+  /** Only on a loop that can run Jev instead of an agent (a scheduled fresh-thread Cloud loop): its script, and with
+   *  an `action`, a Jev loop's questions and action script. */
+  jev?: { questions: string; script: string; action: string | null };
 };
 
 export type LoopDialogRepo = { label: string; github: string | null };
@@ -448,7 +475,18 @@ export function LoopDialog({
   ) => sameAgent(a, b, !loop.cloud);
   const [prompt, setPrompt] = useDraft(loop.prompt ?? "", Object.is);
   const [cron, setCron] = useDraft(loop.cron, Object.is);
-  const [agent, setAgent] = useDraft(loop.agent, sameAgentValue);
+  const sameAgents = (
+    a: ExperimentalProviderModelPickerValue[] | null,
+    b: ExperimentalProviderModelPickerValue[] | null,
+  ) =>
+    a === null || b === null
+      ? a === b
+      : a.length === b.length &&
+        a.every((value, index) => sameAgentValue(value, b[index]!));
+  const [agents, setAgents] = useDraft(
+    loop.agents ?? (loop.agent ? [loop.agent] : null),
+    sameAgents,
+  );
   const [secrets, setSecrets] = useDraft(
     "picked" in loop.secrets ? loop.secrets.picked : null,
     sameSecrets,
@@ -461,6 +499,14 @@ export function LoopDialog({
     setSavedPrompt(null);
   }
   const basePrompt = savedPrompt ?? loop.prompt?.trim();
+  // Picking Jev on an agent's loop only opens its questions and scripts: it is a Jev loop once they are saved.
+  const [jevDraft, setJevDraft] = useState(false);
+  const jev =
+    loop.jev && (loop.jev.action !== null || jevDraft) ? loop.jev : null;
+  const jevChoice =
+    loop.jev && loop.agentEditable && agents?.length === 1
+      ? { label: "Jev", icon: TypeSafeLogo, onSelect: () => setJevDraft(true) }
+      : undefined;
   const contentRef = useRef<HTMLDivElement>(null);
   const now = useMinuteClock();
 
@@ -480,6 +526,14 @@ export function LoopDialog({
 
   const apply = (changes: LoopDialogChanges, undo: () => void) =>
     void onSave(changes).then((saved) => saved || undo());
+  // One agent is the loop's agent; two or more take turns, one per run, in this order.
+  const saveAgents = (next: ExperimentalProviderModelPickerValue[]) => {
+    const previous = agents;
+    setAgents(next);
+    apply(next.length > 1 ? { agents: next } : { agent: next[0]! }, () =>
+      setAgents(previous),
+    );
+  };
 
   const savePrompt = async () => {
     if (!promptDirty || trimmed.length === 0 || savingPrompt) return;
@@ -492,6 +546,8 @@ export function LoopDialog({
   const onKeyDown = (event: KeyboardEvent) => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
       event.preventDefault();
+      // A Jev loop's editor saves itself (JevDocument); its prompt is never saved alone.
+      if (jev) return;
       void savePrompt();
     }
   };
@@ -533,6 +589,20 @@ export function LoopDialog({
           <DialogDescription className="sr-only">
             {loop.cloud ? "Cloud" : "Local"} loop. {next.big}.
           </DialogDescription>
+          {jev ? (
+            <JevDocument
+              saved={
+                jev.action === null
+                  ? null
+                  : { questions: jev.questions, script: jev.script, action: jev.action }
+              }
+              script={jev.script}
+              saveKey={SAVE_KEY}
+              onSave={(fields) => onSave({ jev: fields })}
+              onBack={() => setJevDraft(false)}
+            />
+          ) : (
+          <>
           {script || loop.prompt !== undefined ? (
             <div className="mt-6 flex items-center gap-2 text-xs font-medium text-subtle-foreground">
               {script ? "Script" : "Prompt"}
@@ -602,6 +672,8 @@ export function LoopDialog({
               </>
             )}
           </div>
+          </>
+          )}
         </section>
 
         <aside className="flex w-full shrink-0 flex-col md:min-h-0 border-foreground/[0.07] max-md:border-t md:w-[352px] md:border-l md:bg-sidebar">
@@ -711,25 +783,69 @@ export function LoopDialog({
                   </Select>
                 )}
               </SettingRow>
-              <SettingRow label="Agent">
-                {agent === null ? (
+              <SettingRow label={agents && agents.length > 1 ? "Agents" : "Agent"}>
+                {jev ? (
+                  <ReadOnlyValue>
+                    <JevLabel note="decides · no agent" />
+                  </ReadOnlyValue>
+                ) : agents === null ? (
                   <ReadOnlyValue>Set by the loop</ReadOnlyValue>
                 ) : (
-                  <div className="flex h-8 min-w-0 items-center rounded-md px-1 hover:bg-state-hover">
-                    <ProviderModelPicker
-                      value={agent}
-                      onChange={(value) => {
-                        const previous = agent;
-                        setAgent(value);
-                        apply({ agent: value }, () => setAgent(previous));
-                      }}
-                      {...(loop.agentRouting === undefined
-                        ? {}
-                        : { routing: loop.agentRouting })}
-                      allowProviderChange
-                      disabled={!loop.agentEditable}
-                      className="h-6 max-w-full"
-                    />
+                  <div className="flex min-w-0 flex-col">
+                    {agents.map((value, index) => (
+                      <div
+                        key={index}
+                        className="group flex h-8 min-w-0 items-center gap-1 rounded-md px-1 hover:bg-state-hover"
+                      >
+                        <ProviderModelPicker
+                          cloud={loop.cloud}
+                          value={value}
+                          onChange={(next) =>
+                            saveAgents(
+                              agents.map((each, at) => (at === index ? next : each)),
+                            )
+                          }
+                          {...(loop.agentRouting === undefined
+                            ? {}
+                            : { routing: loop.agentRouting })}
+                          allowProviderChange
+                          {...(jevChoice ? { extraChoice: jevChoice } : {})}
+                          disabled={!loop.agentEditable}
+                          className="h-6 max-w-full"
+                        />
+                        {agents.length > 1 && (
+                          <span className="ml-auto flex shrink-0 items-center gap-1">
+                            {loop.runs % agents.length === index && (
+                              <span className="text-xs text-muted-foreground/70">
+                                next
+                              </span>
+                            )}
+                            {loop.agentEditable && (
+                              <button
+                                type="button"
+                                aria-label="Remove this agent"
+                                className="rounded p-0.5 text-muted-foreground opacity-0 hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+                                onClick={() =>
+                                  saveAgents(agents.filter((_, at) => at !== index))
+                                }
+                              >
+                                <Icon name="X" className="size-3.5" aria-hidden />
+                              </button>
+                            )}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                    {loop.agentEditable && agents.length < MAX_LOOP_AGENTS && (
+                      <button
+                        type="button"
+                        className="flex h-7 items-center gap-1.5 rounded-md px-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground"
+                        onClick={() => saveAgents([...agents, agents[agents.length - 1]!])}
+                      >
+                        <Icon name="Plus" className="size-3.5" aria-hidden />
+                        {agents.length > 1 ? "Add agent" : "Add agent to take turns"}
+                      </button>
+                    )}
                   </div>
                 )}
               </SettingRow>
@@ -825,6 +941,58 @@ export function LoopDialog({
   );
 }
 
+/** A Jev loop's recent runs, from the website's run records: they start no thread, so Review never lists them. */
+function useJevRuns(
+  automation: CloudAutomation,
+): readonly LoopDialogRun[] | null {
+  const rpc = useRpc<typeof automationRpcContract>();
+  const [runs, setRuns] = useState<readonly LoopDialogRun[] | null>(null);
+  const id = automation.jev_action ? automation.id : null;
+  // Read again after each run.
+  const count = automation.runs;
+  useEffect(() => {
+    if (id === null) return;
+    let live = true;
+    rpc.call("cloud_automations", { action: "history", id, limit: 20 }).then(
+      (result) => {
+        if (!live) return;
+        const { history = [] } = (result ?? {}) as {
+          history?: {
+            started_at: string;
+            outcome: string | null;
+            reason: string | null;
+            actions: string[] | null;
+          }[];
+        };
+        setRuns(
+          history.map((run) => ({
+            id: run.started_at,
+            at: Date.parse(run.started_at),
+            status:
+              run.outcome === "failed"
+                ? "failed"
+                : run.outcome === "needs_you"
+                  ? "needs-you"
+                  : "done",
+            text: run.actions?.length
+              ? run.actions.join(" · ")
+              : (run.reason ?? "Ran"),
+            threadId: null,
+          })),
+        );
+      },
+      // Shown as no runs, never as loading for good.
+      () => {
+        if (live) setRuns([]);
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [rpc, id, count]);
+  return id === null ? null : runs;
+}
+
 export function CloudLoopDialog({
   automation,
   context,
@@ -854,15 +1022,31 @@ export function CloudLoopDialog({
       cron: automation.cron,
       timezone: automation.timezone,
       webhook: isCloudWebhook(automation),
-      agent: cloudAgentValue(automation),
+      agent: automation.jev_action ? null : pickerValue(automation.agent),
+      ...(cloudAgentValues(automation)
+        ? { agents: cloudAgentValues(automation) }
+        : {}),
       agentEditable: automation.new_thread === true,
-      runsOn: automation.new_thread
-        ? "Cloud · new thread each run"
-        : "Cloud · same thread",
+      // Jev fits a loop that runs on a schedule or once, in a sandbox of its own (web/lib/automations.ts, checkJev).
+      ...(automation.new_thread === true && !isCloudWebhook(automation)
+        ? {
+            jev: {
+              questions: automation.jev_action ? (automation.prompt ?? "") : "",
+              script: automation.script ?? "",
+              action: automation.jev_action ?? null,
+            },
+          }
+        : {}),
+      runsOn: automation.jev_action
+        ? "Cloud · no thread"
+        : automation.new_thread
+          ? "Cloud · new thread each run"
+          : "Cloud · same thread",
       secrets: automation.new_thread
         ? { picked: automation.secrets ?? null }
         : { fixed: "Same as its thread" },
-      usageKey: { cloudId: automation.id },
+      // A Jev loop uses no agent's weekly limit.
+      ...(automation.jev_action ? {} : { usageKey: { cloudId: automation.id } }),
       paused: failurePause(
         {
           enabled: automation.enabled,
@@ -874,10 +1058,15 @@ export function CloudLoopDialog({
     }),
     [automation],
   );
+  const jevRuns = useJevRuns(automation);
   return (
     <LoopDialog
       loop={loop}
-      context={context}
+      context={
+        automation.jev_action
+          ? { ...(context.repo ? { repo: context.repo } : {}), runs: jevRuns }
+          : context
+      }
       priority={priority}
       onPriorityChange={onPriorityChange}
       onEnabledChange={(enabled) =>
@@ -887,10 +1076,21 @@ export function CloudLoopDialog({
       onDelete={() => actions.onDelete(automation)}
       onSave={(changes) => {
         const cloudChanges: CloudAutomationChanges = {};
+        if (changes.jev !== undefined) {
+          cloudChanges.prompt = changes.jev.questions;
+          cloudChanges.script = changes.jev.script;
+          cloudChanges.jev_action = changes.jev.action;
+        }
         if (changes.prompt !== undefined) cloudChanges.prompt = changes.prompt;
         if (changes.cron !== undefined) cloudChanges.cron = changes.cron;
         if (changes.secrets !== undefined)
           cloudChanges.secrets = changes.secrets;
+        if (changes.agents !== undefined)
+          cloudChanges.agents = changes.agents.map((agent) => ({
+            harness: agent.providerId,
+            model: agent.model,
+            ...(agent.reasoningLevel ? { reasoning: agent.reasoningLevel } : {}),
+          }));
         if (changes.agent !== undefined) {
           cloudChanges.harness = changes.agent.providerId;
           cloudChanges.model = changes.agent.model;

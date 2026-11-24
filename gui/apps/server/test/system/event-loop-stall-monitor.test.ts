@@ -37,6 +37,7 @@ vi.mock("node:perf_hooks", async () => {
 import { performance as nodePerformance } from "node:perf_hooks";
 import { startEventLoopStallMonitor } from "../../src/services/system/event-loop-stall-monitor.js";
 import {
+  noteBlockingEventLoopWork,
   resetEventLoopWorkForTests,
   runEventLoopWork,
   runEventLoopWorkSync,
@@ -117,6 +118,11 @@ describe("event loop stall monitor", () => {
         resolutionMs: 20,
         thresholdMs: 500,
         ...EMPTY_WORK_SNAPSHOT,
+        cpuMs: expect.any(Number),
+        gcMs: expect.any(Number),
+        heapUsedMb: expect.any(Number),
+        maxGcMs: expect.any(Number),
+        rssMb: expect.any(Number),
       },
       "Event loop stalled",
     );
@@ -345,6 +351,33 @@ describe("event loop stall monitor", () => {
       }),
       "Event loop stalled",
     );
+
+    monitor.stop();
+  });
+
+  it("names a slow query run inside async work as the stall's slowest work, for one window", async () => {
+    installHistogram({
+      maxDelayMs: 20_000,
+      meanDelayMs: 4_000,
+      p99DelayMs: 20_000,
+    });
+    const logger = { info: vi.fn() };
+    const monitor = startEventLoopStallMonitor({ logger });
+    await runEventLoopWork("GET /api/v1/projects/proj_example/commands", () => {
+      noteBlockingEventLoopWork("db:all SELECT 1", 19_500);
+    });
+
+    vi.advanceTimersByTime(EVENT_LOOP_STALL_MONITOR_INTERVAL_MS);
+    vi.advanceTimersByTime(EVENT_LOOP_STALL_MONITOR_INTERVAL_MS);
+
+    expect(logger.info.mock.calls.map(([fields]) => fields)).toEqual([
+      expect.objectContaining({
+        slowestWork:
+          "GET /api/v1/projects/proj_example/commands > db:all SELECT 1",
+        slowestWorkMs: 19_500,
+      }),
+      expect.objectContaining({ slowestWork: null, slowestWorkMs: null }),
+    ]);
 
     monitor.stop();
   });

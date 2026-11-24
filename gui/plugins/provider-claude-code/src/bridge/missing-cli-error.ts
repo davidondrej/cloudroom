@@ -18,5 +18,8 @@ export function claudeCliGuidance(message: string): string | null {
 export function translateMissingClaudeCliError(error: unknown): unknown {
   const guidance =
     error instanceof Error ? claudeCliGuidance(error.message) : null;
-  return guidance === null ? error : new Error(guidance, { cause: error });
+  if (guidance === null) return error;
+  // The code reaches telemetry as the failure's category (cli-missing, cli-placeholder).
+  const code = guidance === MISSING_CLAUDE_CLI_GUIDANCE ? "cli_missing" : "cli_placeholder";
+  return Object.assign(new Error(guidance, { cause: error }), { code });
 }

@@ -91,10 +91,10 @@ fn saved_records_fold_into_segments_and_stay_readable() {
     // nor a full one, and the next run, which starts at the segments' last block, deletes it.
     fs::write(file(2000), record(2000)).unwrap();
     for known in [2000, 0] {
-        let journal = Journal::open_from(&dir.0, known).unwrap();
+        let journal = Journal::open_from(&dir.0, || known).unwrap();
         assert_eq!((journal.saved(), journal.last()), (2059, 2060));
     }
-    let mut journal = Journal::open_from(&dir.0, 2000).unwrap();
+    let mut journal = Journal::open_from(&dir.0, || 2000).unwrap();
     for id in [1, 5, 1024, 1025, 2000, 2048, 2049, 2060] {
         assert_eq!(journal.read(id).unwrap(), record(id));
     }

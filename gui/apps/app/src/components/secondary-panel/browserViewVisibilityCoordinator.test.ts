@@ -7,7 +7,7 @@ import {
   destroyPersistedBrowserViewsForThread,
   registerBrowserView,
   resetBrowserViewPersistence,
-} from "./browserViewVisibilityCoordinator";
+} from "@/components/right-panel/tabs/browser-visibility";
 
 interface VisibilityCall {
   tabId: string;

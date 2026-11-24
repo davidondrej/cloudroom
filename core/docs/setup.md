@@ -180,13 +180,13 @@ Never use `tailscale funnel` for Core: it opens the API to the whole internet.
 
 ## Connect the desktop app
 
-In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
+In the [Cloudroom app](https://github.com/davidondrej/cloudroom/releases/latest), open **Settings → Cloudroom account → Connect your own Core** (v83 or newer). From v154, first-run setup also offers **Use my own Core** at the top right. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`; the whole `CLOUDROOM_TOKEN=…` line works too. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
 
 ## Your own server vs Cloudroom Cloud
 
 **Works on your own server:**
 
-- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, Kimi Code, fx, and OpenClaw turn on once they are installed and signed in under the agent account.
+- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, Kimi Code, fx, OpenClaw, and Agent Zero's `a0` bridge turn on once they are installed and signed in under the agent account.
 - Cloud threads from the desktop app, with Mac access, web previews, secret requests, and synced skills and logins.
 - Saved history, kept on this machine.
 
@@ -211,7 +211,7 @@ sudo python3 core-$v/install/update.py upgrade "$PWD/core-$v"
 sudo cat /var/lib/cloudroom-update/state.json
 ```
 
-The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. A large history can take many minutes to load; the script keeps waiting while Core is busy loading it, for up to 2 hours. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
 
 Upgrades don't add accounts or change SSH when `CLOUDROOM_STORE=self-hosted`. Mac access, secret requests, and previews run over Core's own port. A server already on SSH previews keeps them untouched.
 

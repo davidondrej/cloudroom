@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { definePluginApp, useRpc, type StandardSchemaV1InferOutput } from "@get-bb/plugin-sdk/app";
 import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { RadioGroup, RadioGroupItem } from "@cloudroom/shared-ui/radio-group";
-import { Switch } from "@cloudroom/shared-ui/switch";
 import type { keepAwakeRpcContract } from "./server.js";
 
 type View = StandardSchemaV1InferOutput<(typeof keepAwakeRpcContract)["getConfiguration"]["output"]>;
@@ -11,8 +10,8 @@ type View = StandardSchemaV1InferOutput<(typeof keepAwakeRpcContract)["getConfig
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-function ModeOption(props: { value: "all" | "selected"; label: string; hint: string; disabled?: boolean }) {
-  const id = `keep-awake-${props.value}-hosts`;
+function Option(props: { value: string; label: string; hint: string; disabled?: boolean }) {
+  const id = `keep-awake-${props.value}`;
   return (
     <label
       htmlFor={id}
@@ -72,7 +71,7 @@ function KeepAwakeSettings() {
     setError(null);
     setSaving(true);
     saves.current = saves.current
-      .then(() => rpc.call("setConfiguration", { enabled: next.enabled, selection: next.selection }))
+      .then(() => rpc.call("setConfiguration", { level: next.level, selection: next.selection }))
       .then(
         (saved) => {
           confirmed.current = saved;
@@ -98,18 +97,28 @@ function KeepAwakeSettings() {
 
   return (
     <div className="w-full space-y-5">
-      <div className="flex items-start justify-between gap-6">
-        <div className="min-w-0">
-          <h3 className="text-sm font-medium text-foreground">Prevent sleep</h3>
-          <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
-            Keep selected {COMPUTER}s and their screens awake while Cloudroom is running.
-            Closing the lid or choosing Sleep still sleeps the {COMPUTER}.
-          </p>
-        </div>
-        <Switch checked={view.enabled} size="default" aria-label="Keep Awake" onCheckedChange={(enabled) => save({ ...view, enabled })} />
+      <div>
+        <h3 className="text-sm font-medium text-foreground">Prevent sleep</h3>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          Keep {COMPUTER}s awake so agents keep working. Closing the lid or choosing Sleep still
+          sleeps the {COMPUTER}.
+        </p>
+        <RadioGroup
+          className="mt-2 gap-1"
+          value={view.level}
+          onValueChange={(level) => save({ ...view, level: level as View["level"] })}
+        >
+          <Option value="off" label="Off" hint={`The ${COMPUTER} sleeps as usual.`} />
+          <Option
+            value="working"
+            label="While agents work"
+            hint="Stays awake while a Local thread runs, and for 10 minutes after. The screen can still turn off on Mac and Windows."
+          />
+          <Option value="always" label="Always" hint="Stays awake, screen on, while Cloudroom is open." />
+        </RadioGroup>
       </div>
 
-      {view.enabled ? (
+      {view.level !== "off" ? (
         <>
           <div className="border-t border-border/60 pt-4">
             <h3 className="text-sm font-medium text-foreground">Hosts</h3>
@@ -126,12 +135,12 @@ function KeepAwakeSettings() {
                 }
               }}
             >
-              <ModeOption
+              <Option
                 value="all"
                 label="All hosts"
                 hint="Include hosts added in the future. Only macOS, Linux and Windows hosts are supported."
               />
-              <ModeOption value="selected" label="Specific hosts" hint={`Choose individual ${COMPUTER}s below.`} disabled={!hasHosts} />
+              <Option value="selected" label="Specific hosts" hint={`Choose individual ${COMPUTER}s below.`} disabled={!hasHosts} />
             </RadioGroup>
           </div>
 

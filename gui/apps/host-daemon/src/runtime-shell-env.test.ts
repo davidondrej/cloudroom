@@ -525,6 +525,35 @@ describe("prepareRuntimeShellEnv", () => {
     );
   });
 
+  it("sets ROOM_CLI_CMD only on Windows when room-cli.cmd exists (#1052)", async () => {
+    const dir = await makeTempDir("room-cli-cmd-");
+    await fs.writeFile(path.join(dir, "room-cli.cmd"), "");
+    const env = (bbExecutableDirectory: string, platform: NodeJS.Platform) =>
+      prepareRuntimeShellEnv({
+        bbExecutableDirectory,
+        platform,
+        serverUrl: "http://127.0.0.1:1",
+      }).ROOM_CLI_CMD;
+    expect(env(dir, "win32")).toBe(path.join(dir, "room-cli.cmd"));
+    expect(env(dir, "linux")).toBeUndefined();
+    expect(env(path.join(dir, "missing"), "win32")).toBeUndefined();
+  });
+
+  it("points ROOM_PYTHON at the app's Python on Windows (#2358)", async () => {
+    const dir = await makeTempDir("room python-");
+    const python = path.join(dir, "server/dist/assets/python/python.exe");
+    await fs.mkdir(path.dirname(python), { recursive: true });
+    await fs.writeFile(python, "");
+    const env = (platform: NodeJS.Platform) =>
+      prepareRuntimeShellEnv({
+        bbExecutableDirectory: path.join(dir, "host-daemon/dist"),
+        platform,
+        serverUrl: "http://127.0.0.1:1",
+      }).ROOM_PYTHON;
+    expect(env("win32")).toBe(python);
+    expect(env("darwin")).toBeUndefined();
+  });
+
   it("uses an explicit bbExecutablePath for ROOM_CLI", () => {
     expect(
       prepareRuntimeShellEnv({

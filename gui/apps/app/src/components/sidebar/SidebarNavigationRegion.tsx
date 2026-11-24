@@ -10,7 +10,7 @@ import type {
   ExperimentalSidebarNavigationActivationOptions,
   ExperimentalSidebarNavigationItem,
 } from "@get-bb/plugin-sdk";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   useAppCommandRunner,
