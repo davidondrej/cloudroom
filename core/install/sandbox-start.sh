@@ -54,14 +54,17 @@ supervise() {
   # Containers may not allow raising the hard limit.
   ulimit -n 524288 2>/dev/null || ulimit -n "$(ulimit -Hn)"
   umask 0077
+  local previous=()
   while :; do
     # Keep the log bounded without a log daemon.
     [ "$(stat -c %s "$log/core.log" 2>/dev/null || echo 0)" -lt 52428800 ] || mv -f "$log/core.log" "$log/core.previous.log"
     started=$SECONDS
     status=0
-    setpriv "${identity[@]}" env -i PATH=/usr/local/bin:/usr/bin:/bin "${settings[@]}" "$root/cloudroom" \
+    setpriv "${identity[@]}" env -i PATH=/usr/local/bin:/usr/bin:/bin "${settings[@]}" "${previous[@]}" "$root/cloudroom" \
       >> "$log/core.log" 2>&1 || status=$?
     [ "$status" = 0 ] && break
+    # The next run names this exit on the turns it cut off (#1763).
+    previous=("CLOUDROOM_PREVIOUS_EXIT=$status")
     # Restart after a crash, backing off when it keeps failing.
     [ $((SECONDS - started)) -gt 60 ] && delay=1 || delay=$((delay < 30 ? delay * 2 : 30))
     echo "Core exited with $status; restarting in ${delay}s" >> "$log/core.log"

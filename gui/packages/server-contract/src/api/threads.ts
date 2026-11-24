@@ -133,6 +133,8 @@ export const createThreadRequestSchema = z
     sourceThreadId: z.string().min(1).optional(),
     sourceSeqEnd: z.number().int().nonnegative().optional(),
     startedOnBehalfOf: startedOnBehalfOfSchema.nullable().default(null),
+    /** The agent thread whose `room-cli` call made this thread, logged with a Cloud thread's first start (docs/scopes/credit-burn.md). */
+    launcherThreadId: z.string().regex(/^thr_[a-z0-9]{1,40}$/).optional(),
     originKind: threadOriginKindSchema.nullable().default(null),
     /**
      * Epoch ms at which this thread's first message should dispatch. Present ⇒
@@ -206,6 +208,9 @@ export const forkThreadRequestSchema = z
     sourceThreadId: z.string().min(1),
     sourceSeqEnd: z.number().int().nonnegative().optional(),
     fresh: z.literal(true).optional(),
+    providerId: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    reasoningLevel: reasoningLevelSchema.optional(),
     input: z.array(promptInputSchema).min(1).optional(),
     agentContextSeed: z.array(agentOnlyPromptInputSchema).min(1).optional(),
     title: z.string().min(1).optional(),
@@ -219,6 +224,25 @@ export const forkThreadRequestSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (
+      value.fresh !== true &&
+      (value.providerId !== undefined ||
+        value.model !== undefined ||
+        value.reasoningLevel !== undefined)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message:
+          "providerId, model, and reasoningLevel require fresh: true when forking",
+        path: [
+          value.providerId !== undefined
+            ? "providerId"
+            : value.model !== undefined
+              ? "model"
+              : "reasoningLevel",
+        ],
+      });
+    }
     if (value.origin === "plugin" && value.originPluginId === undefined) {
       ctx.addIssue({
         code: "custom",
@@ -265,6 +289,8 @@ const sendMessageRequestFieldsSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   mode: sendMessageModeSchema,
   senderThreadId: z.string().min(1).optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
   pluginSubmission: z
     .object({ pluginId: pluginIdSchema, data: jsonValueSchema })
     .optional(),
@@ -300,7 +326,12 @@ export type SendMessageDelivery = z.infer<typeof sendMessageDeliverySchema>;
  * for now" would invite every caller to check fields that cannot exist.
  */
 export const sendMessageResponseSchema = z.discriminatedUnion("delivery", [
-  z.object({ ok: z.literal(true), delivery: z.literal("sent") }),
+  z.object({
+    ok: z.literal(true),
+    delivery: z.literal("sent"),
+    /** The turn request this send created, when it created one. */
+    requestId: z.string().optional(),
+  }),
   z.object({
     ok: z.literal(true),
     delivery: z.literal("queued"),
@@ -312,7 +343,7 @@ export type SendMessageResponse = z.infer<typeof sendMessageResponseSchema>;
 // `sendAt` is deliberately dropped: an edit rewrites a message that has
 // already been dispatched, so there is nothing left to schedule.
 export const editMessageRequestSchema = sendMessageRequestFieldsSchema
-  .omit({ mode: true, sendAt: true, pluginSubmission: true })
+  .omit({ mode: true, sendAt: true, pluginSubmission: true, fromComposer: true })
   .extend({
     operationId: z.string().min(1),
     expectedRequestSequence: z.number().int().nonnegative().optional(),
@@ -353,6 +384,15 @@ export const retryTurnRequestSchema = z
     sendAt: z.number().int().nonnegative().nullable().default(null),
     /** Why the turn is being retried, shown verbatim on the queued row. */
     reason: queuedMessageWaitReasonSchema.default(DEFAULT_TURN_RETRY_REASON),
+    /** The retry continues on another account of the same agent; the plan-limit row then says so in one line. */
+    accountSwitch: z
+      .object({
+        provider: z.string().min(1),
+        from: z.string().min(1),
+        to: z.string().min(1),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type RetryTurnRequest = z.infer<typeof retryTurnRequestSchema>;
@@ -398,6 +438,8 @@ export const createQueuedMessageRequestSchema = z.object({
   executionInputSources: existingThreadExecutionInputSourcesSchema.optional(),
   senderThreadId: z.string().min(1).optional(),
   hardQueue: z.boolean().optional(),
+  /** Typed by a person in the app's message box: never held as a repeat (#264). */
+  fromComposer: z.literal(true).optional(),
 });
 export type CreateQueuedMessageRequest = z.infer<
   typeof createQueuedMessageRequestSchema
@@ -504,6 +546,10 @@ export type ThreadSearchResponse = z.infer<typeof threadSearchResponseSchema>;
 
 export const threadResponseSchema = threadWithRuntimeSchema.extend({
   activeBackgroundAgentCount: z.number().int().nonnegative(),
+  // Background commands and workflows still running; an idle Claude thread
+  // wakes itself when they finish, so its turn's text isn't final (#1371).
+  activeBackgroundCommandCount: z.number().int().nonnegative().optional(),
+  activeWorkflowCount: z.number().int().nonnegative().optional(),
   canSpawnChild: z.boolean(),
   // How many messages are waiting on this thread's queue right now — waiting on
   // the clock, on the running turn, on provisioning, on an interaction, or on
@@ -511,6 +557,12 @@ export const threadResponseSchema = threadWithRuntimeSchema.extend({
   // `GET /threads/:id/queued-messages` supplies the reasons once a surface
   // actually renders them.
   queuedMessageCount: z.number().int().nonnegative(),
+  // Queued messages a drain has claimed but not yet sent; only GET /threads/:id
+  // sets it, so `thread wait` can tell a turn's end from its follow-up (#1111).
+  dispatchingMessageCount: z.number().int().nonnegative().optional(),
+  // A Cloud thread's sandbox has slept since then, as this computer first saw it (#237). Thread cleanup archives Cloud
+  // threads only after a day of it: another computer may be using one.
+  asleepSince: z.string().optional(),
 });
 export type ThreadResponse = z.infer<typeof threadResponseSchema>;
 
@@ -631,8 +683,19 @@ export type ThreadChildSummaryResponse = z.infer<
 
 export const threadUnarchiveQuerySchema = z.object({
   keepParent: z.enum(["true", "false"]).optional(),
+  /** Also restore the threads under it that were archived with it, still under it. */
+  withChildren: z.enum(["true", "false"]).optional(),
 });
 export type ThreadUnarchiveQuery = z.infer<typeof threadUnarchiveQuerySchema>;
+
+export const threadUnarchiveResponseSchema = z.object({
+  ok: z.literal(true),
+  /** The thread itself first, then any threads restored with it. */
+  unarchivedThreadIds: z.array(z.string()),
+});
+export type ThreadUnarchiveResponse = z.infer<
+  typeof threadUnarchiveResponseSchema
+>;
 
 export const deleteThreadRequestSchema = z.object({
   childThreadsConfirmed: z.boolean(),
@@ -647,13 +710,25 @@ export const updateThreadRequestSchema = z
     /** Another harness for this thread (ADR 0211); needs `model`. */
     providerId: z.string().min(1),
     model: z.string().min(1).nullable(),
+    /** Model shortcut: the named harness must still own this stopped session. */
+    idleSessionOnly: z.literal(true),
     reasoningLevel: reasoningLevelSchema.nullable(),
     visibility: threadVisibilitySchema,
+    /** After a harness switch, the new agent continues the conversation right away. */
+    resend: z.boolean(),
   })
   .partial()
   .refine(
+    (value) => !value.idleSessionOnly || (value.providerId && typeof value.model === "string" && !value.resend),
+    "An idle-session model pick needs a harness and model and cannot resend.",
+  )
+  .refine(
     (value) => value.providerId === undefined || typeof value.model === "string",
     "providerId needs a model",
+  )
+  .refine(
+    (value) => value.resend !== true || value.providerId !== undefined,
+    "resend needs a providerId",
   )
   .refine(
     (value) =>
@@ -667,6 +742,10 @@ export const updateThreadRequestSchema = z
     "At least one field must be provided",
   );
 export type UpdateThreadRequest = z.infer<typeof updateThreadRequestSchema>;
+/** With `resend`: the new agent's turn started, is still starting, or waits in the queue. A refused start is an error. */
+export type UpdateThreadResponse = ThreadResponse & {
+  resend?: "started" | "starting" | "queued";
+};
 
 export const reorderPinnedThreadRequestSchema = z.object({
   previousThreadId: z.string().min(1).nullable(),
@@ -685,6 +764,20 @@ export interface MoveThreadResponse {
   thread: ThreadResponse;
   moved: boolean;
   previousPath: string | null;
+}
+
+/** `room-cli thread worktree`: the uncommitted files to bring along, relative to the thread's folder. */
+export const moveThreadToWorktreeRequestSchema = z.object({
+  carry: z.array(z.string().min(1)).max(10_000).optional(),
+  self: z.boolean().optional(),
+});
+export type MoveThreadToWorktreeRequest = z.infer<
+  typeof moveThreadToWorktreeRequestSchema
+>;
+
+export interface MoveThreadToWorktreeResponse {
+  previousPath: string;
+  deferred: boolean;
 }
 
 export const panelFileSourceSchema = z.enum(["workspace", "thread-storage"]);
@@ -800,15 +893,42 @@ export type ThreadPaneActionResponse = z.infer<
   typeof threadPaneActionResponseSchema
 >;
 
+/** `room-cli thread compact`: a busy thread compacts once its turn ends; `then` is sent next, so the agent keeps going. */
+export const threadCompactRequestSchema = z
+  .object({ then: z.string().trim().min(1).max(262_144).optional() })
+  .default({});
+export type ThreadCompactRequest = z.infer<typeof threadCompactRequestSchema>;
+
+/** `room-cli thread stop`: an idle thread's agent also ends what it left running (#607). */
+export const threadStopQuerySchema = z.object({
+  endProcesses: z.enum(["true", "false"]).optional(),
+});
+export type ThreadStopQuery = z.infer<typeof threadStopQuerySchema>;
+
+export const threadArchiveAllQuerySchema = z.object({
+  includeLive: z.enum(["true", "false"]).optional(),
+});
+export type ThreadArchiveAllQuery = z.infer<typeof threadArchiveAllQuerySchema>;
+
 export const threadArchiveAllResponseSchema = z.object({
   ok: z.literal(true),
   archivedThreadIds: z.array(z.string().min(1)),
+  keptLiveThreadIds: z.array(z.string().min(1)).optional(),
 });
 export type ThreadArchiveAllResponse = z.infer<
   typeof threadArchiveAllResponseSchema
 >;
 
+/** Newest first, by last update or by creation. Omitted keeps the app's order: project, pinned, created. */
+export const threadListSortSchema = z.enum(["updated", "created"]);
+export type ThreadListSort = z.infer<typeof threadListSortSchema>;
+
 export const threadListQuerySchema = z.object({
+  status: threadStatusSchema.optional(),
+  providerId: z.string().min(1).optional(),
+  executionTarget: z.enum(["local", "cloud"]).optional(),
+  pinned: z.enum(["true", "false"]).optional(),
+  sort: threadListSortSchema.optional(),
   projectId: z.string().min(1).optional(),
   environmentId: z.string().min(1).optional(),
   parentThreadId: z.string().min(1).optional(),
@@ -837,13 +957,15 @@ export type ThreadCountGroupBy = z.infer<typeof threadCountGroupBySchema>;
  * Filters for `GET /threads/count`. Every value is a string because this is a
  * query string; the route parses them once at the boundary.
  *
- * `parentThreadId` is deliberately three-valued and unambiguous: omitted means
- * "do not filter on parentage", the literal `"none"` means root threads only
- * (`parent_thread_id IS NULL`), and any other value is that parent's id. An
- * empty string would have been ambiguous with an omitted parameter, and a
- * thread id can never be `"none"` (ids are prefixed `thr_`).
+ * `parentThreadId` is deliberately unambiguous: omitted means "do not filter on
+ * parentage", the literal `"none"` means root threads only
+ * (`parent_thread_id IS NULL`), the literal `"any"` means child threads only,
+ * and any other value is that parent's id. An empty string would have been
+ * ambiguous with an omitted parameter, and a thread id can never be `"none"`
+ * or `"any"` (ids are prefixed `thr_`).
  */
 export const THREAD_COUNT_ROOT_PARENT = "none";
+export const THREAD_COUNT_ANY_PARENT = "any";
 
 export const threadCountQuerySchema = z.object({
   status: threadStatusSchema.optional(),
@@ -854,6 +976,8 @@ export const threadCountQuerySchema = z.object({
   groupBy: threadCountGroupBySchema.optional(),
   /** Count archived threads too; omitted/false excludes them (deleted always are). */
   includeArchived: z.enum(["true", "false"]).optional(),
+  /** Count archived threads only; wins over `includeArchived`. */
+  archivedOnly: z.enum(["true", "false"]).optional(),
   /** Count hidden threads too; omitted/false counts visible threads only. */
   includeHidden: z.enum(["true", "false"]).optional(),
 });
@@ -912,6 +1036,10 @@ export type ThreadRunningResponse = z.infer<typeof threadRunningResponseSchema>;
 export const threadSearchQuerySchema = z.object({
   query: z.string().trim().min(2),
   limitPerGroup: z.string().regex(/^\d+$/).optional(),
+  /** Search one project only. Applied before `limitPerGroup`, like `hasParent`. */
+  projectId: z.string().min(1).optional(),
+  /** "true" for child threads only, "false" for root threads only. */
+  hasParent: z.enum(["true", "false"]).optional(),
 });
 export type ThreadSearchQuery = z.infer<typeof threadSearchQuerySchema>;
 

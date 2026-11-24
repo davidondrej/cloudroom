@@ -1,11 +1,13 @@
 import {
+  archiveThread,
   claimQueuedThreadMessage,
+  createQueuedThreadMessage,
   getQueuedThreadMessage,
   listEvents,
   setQueuedThreadMessageFailureReason,
 } from "@cloudroom/db";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ApiError } from "../../src/errors.js";
 import {
   setPluginHookProvider,
@@ -119,6 +121,61 @@ describe("host-connected queue dispatch", () => {
         kind: "host-offline",
         hostName: "M2",
       });
+    });
+  });
+
+  it("keeps a child notice queued for the idle sweep when its parent changed mid-delivery", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { name: "M4" });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: WORKSPACE_PATH,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: WORKSPACE_PATH,
+      });
+      const parent = seedThread(harness.deps, {
+        environmentId: environment.id,
+        projectId: project.id,
+        status: "active",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-parent",
+        threadId: parent.id,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-parent",
+        threadId: parent.id,
+        turnId: "turn-parent",
+      });
+      const notice = createQueuedThreadMessage(harness.db, harness.deps.hub, {
+        threadId: parent.id,
+        content: textInput("Child completed"),
+        model: "gpt-5",
+        reasoningLevel: "medium",
+        permissionMode: "auto",
+        serviceTier: "default",
+        senderThreadId: null,
+        waitingOn: { kind: "turn-starting" },
+        sendAt: null,
+        payload: { kind: "inline" },
+        systemNotice: { kind: "unlabeled", subject: null },
+      });
+      archiveThread(harness.db, harness.hub, parent.id);
+
+      await runQueuedMessageDispatch(harness.deps, {
+        kind: "turn-started",
+        threadId: parent.id,
+      });
+
+      const row = getQueuedThreadMessage(harness.db, notice.id);
+      expect(row?.failureReason).toBeNull();
+      expect(row?.claimToken).toBeNull();
+      expect(row?.waitingOn).toBeNull();
     });
   });
 });
@@ -302,10 +359,24 @@ describe("recordQueuedMessageDrainFailure", () => {
         hostName: "M4",
       });
 
+      const capture = vi.fn();
+      harness.deps.telemetry = { ...harness.deps.telemetry, capture };
       recordQueuedMessageDrainFailure(harness.deps, {
         error: new Error("Cannot read properties of undefined (reading 'id')"),
         row,
         thread,
+      });
+      // We hear about it, with the fault but no message text or IDs (#1341).
+      expect(capture).toHaveBeenCalledWith({
+        name: "queue_delivery",
+        properties: {
+          outcome: "failed",
+          message: "user",
+          waiting_on: "thread-busy",
+          thread_status: thread.status,
+          error: "Error",
+          detail: "Cannot read properties of undefined (reading 'id')",
+        },
       });
 
       // `ApiError` messages are written for a caller; anything else was

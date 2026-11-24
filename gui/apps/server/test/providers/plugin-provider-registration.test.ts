@@ -59,6 +59,7 @@ describe("buildPluginProviderRegistration", () => {
         supportsNativeUserQuestion: true,
         supportsFork: true,
         supportsSessionRewind: true,
+        supportsManualCompaction: false,
         modelCatalogScope: "workspace",
         permissionModes: ["accept-edits", "full"],
       },
@@ -352,6 +353,11 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "acp-antigravity",
+        logoUrl: "/api/v1/system/providers/acp-antigravity/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-cursor",
         logoUrl: "/api/v1/system/providers/acp-cursor/logo",
         icon: undefined,
@@ -382,8 +388,38 @@ describe("buildPluginProviderRegistration", () => {
         icon: undefined,
       },
       {
+        id: "acp-openclaw",
+        logoUrl: "/api/v1/system/providers/acp-openclaw/logo",
+        icon: undefined,
+      },
+      {
         id: "acp-devin",
         logoUrl: "/api/v1/system/providers/acp-devin/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-droid",
+        logoUrl: "/api/v1/system/providers/acp-droid/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-kilo",
+        logoUrl: "/api/v1/system/providers/acp-kilo/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-cline",
+        logoUrl: "/api/v1/system/providers/acp-cline/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-kimi",
+        logoUrl: "/api/v1/system/providers/acp-kimi/logo",
+        icon: undefined,
+      },
+      {
+        id: "acp-agent-zero",
+        logoUrl: "/api/v1/system/providers/acp-agent-zero/logo",
         icon: undefined,
       },
     ]);
@@ -413,7 +449,14 @@ describe("buildPluginProviderRegistration", () => {
       "acp-grok": "collapse",
       "acp-fx": "collapse",
       "acp-hermes-agent": "collapse",
+      "acp-openclaw": "collapse",
       "acp-devin": "collapse",
+      "acp-droid": "collapse",
+      "acp-kilo": "collapse",
+      "acp-cline": "collapse",
+      "acp-kimi": "collapse",
+      "acp-antigravity": "collapse",
+      "acp-agent-zero": "collapse",
     });
   });
 });

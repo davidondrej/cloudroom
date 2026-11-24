@@ -86,6 +86,10 @@ export function emitPluginThreadLifecycleOutcome(
   if (outcome.applied) emitPluginThreadStatusEntered(outcome.thread);
 }
 
+/** Cloud threads whose running or last turn another computer sent (#237, docs/scopes/cloud-threads.md). That computer
+ *  notifies, writes the thread's purpose and counts a failure; here its idle and failed events say `notify: false`. */
+export const cloudTurnsElsewhere = new Set<string>();
+
 export function emitPluginThreadStatusEntered(thread: Thread): void {
   if (thread.status === "active") {
     emitter?.emitThreadActive(thread);

@@ -462,6 +462,7 @@ const hostDaemonOnlineRpcResponseSuccessSchema = z.discriminatedUnion(
     commandRpcResponseSuccessSchemaFor("thread.plan.cancel"),
     commandRpcResponseSuccessSchemaFor("thread.rename"),
     commandRpcResponseSuccessSchemaFor("thread.archive"),
+    commandRpcResponseSuccessSchemaFor("thread.processes.stop"),
     commandRpcResponseSuccessSchemaFor("thread.unarchive"),
     commandRpcResponseSuccessSchemaFor("interactive.resolve"),
     commandRpcResponseSuccessSchemaFor("environment.attach"),
@@ -850,6 +851,17 @@ export type HostDaemonInteractiveInterruptResponse = z.infer<
   typeof hostDaemonInteractiveInterruptResponseSchema
 >;
 
+/** The daemon's memory guard stopped a thread that used too much memory. */
+export const hostDaemonThreadMemoryLimitRequestSchema = z.object({
+  sessionId: z.string().min(1),
+  threadId: z.string().min(1),
+  usedBytes: z.number().nonnegative(),
+  totalBytes: z.number().positive(),
+});
+export type HostDaemonThreadMemoryLimitRequest = z.infer<
+  typeof hostDaemonThreadMemoryLimitRequestSchema
+>;
+
 const hostDaemonSkillTreeEntrySchema = z
   .object({
     path: z.string().min(1),
@@ -928,6 +940,9 @@ export type HostDaemonInternalSchema = {
       HostDaemonInteractiveInterruptResponse
     >;
   };
+  "/session/thread-memory-limit": {
+    $post: Endpoint<{ json: HostDaemonThreadMemoryLimitRequest }, { ok: true }>;
+  };
 };
 
 type HostDaemonInternalRoutes = Hono<{}, HostDaemonInternalSchema, "/">;
@@ -961,7 +976,11 @@ export function hasHostDaemonWebSocketProtocol(
   );
 }
 
-export function createHostDaemonClient(baseUrl: string, hostKey: string) {
+export function createHostDaemonClient(
+  baseUrl: string,
+  hostKey: string,
+  extraHeaders: Record<string, string> = {},
+) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
   const internalBaseUrl = normalizedBaseUrl.endsWith("/internal")
     ? normalizedBaseUrl
@@ -969,6 +988,7 @@ export function createHostDaemonClient(baseUrl: string, hostKey: string) {
   return hc<HostDaemonInternalRoutes>(internalBaseUrl, {
     headers: {
       authorization: `Bearer ${hostKey}`,
+      ...extraHeaders,
     },
   });
 }

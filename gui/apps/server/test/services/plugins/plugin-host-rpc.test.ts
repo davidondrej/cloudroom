@@ -15,70 +15,81 @@ const contract = defineRpcContract({
 });
 
 describe("callPluginHostRpc", () => {
-  it("waits for host execution to stop after forwarding cancellation", async () => {
-    await withTestHarness(async (harness) => {
-      const { host, session } = seedHostSession(harness.deps);
-      let releaseCall: (() => void) | undefined;
-      const callHeld = new Promise<void>((resolve) => {
-        releaseCall = resolve;
-      });
-      let recordCancel: (() => void) | undefined;
-      const cancelReceived = new Promise<void>((resolve) => {
-        recordCancel = resolve;
-      });
-      const responder = registerHostRpcResponder(harness, {
-        hostId: host.id,
-        sessionId: session.id,
-        handle: async (request) => {
-          if (request.command.type === "plugin.host.call") {
-            await callHeld;
-            return {
-              ok: true,
-              result: { output: { path: "/tmp/created" } },
-            };
-          }
-          if (request.command.type === "plugin.host.cancel") {
-            recordCancel?.();
-            return { ok: true, result: { cancelled: true } };
-          }
-          throw new Error(`Unexpected RPC ${request.command.type}`);
-        },
-      });
-      const controller = new AbortController();
-      const result = callPluginHostRpc(harness.deps, {
-        pluginId: "environment-test",
-        contract,
-        method: "create",
-        input: { id: "env-1" },
-        hostId: host.id,
-        signal: controller.signal,
-        artifact: stubHostArtifact("environment-test"),
-      });
-      let settled = false;
-      void result.then(
-        () => {
-          settled = true;
-        },
-        () => {
-          settled = true;
-        },
-      );
+  it.each(["answers", "drops"] as const)(
+    "waits for host execution to stop after forwarding cancellation (connection %s)",
+    async (mode) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps);
+        let releaseCall: (() => void) | undefined;
+        const callHeld = new Promise<void>((resolve) => {
+          releaseCall = resolve;
+        });
+        let recordCancel: (() => void) | undefined;
+        const cancelReceived = new Promise<void>((resolve) => {
+          recordCancel = resolve;
+        });
+        const responder = registerHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          handle: async (request) => {
+            if (request.command.type === "plugin.host.call") {
+              await callHeld;
+              return {
+                ok: true,
+                result: { output: { path: "/tmp/created" } },
+              };
+            }
+            if (request.command.type === "plugin.host.cancel") {
+              recordCancel?.();
+              return { ok: true, result: { cancelled: true } };
+            }
+            throw new Error(`Unexpected RPC ${request.command.type}`);
+          },
+        });
+        const controller = new AbortController();
+        const result = callPluginHostRpc(harness.deps, {
+          pluginId: "environment-test",
+          contract,
+          method: "create",
+          input: { id: "env-1" },
+          hostId: host.id,
+          signal: controller.signal,
+          artifact: stubHostArtifact("environment-test"),
+        });
+        let settled = false;
+        void result.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          },
+        );
 
-      await vi.waitFor(() =>
-        expect(
-          responder.requests.some(
-            (request) => request.command.type === "plugin.host.call",
-          ),
-        ).toBe(true),
-      );
-      controller.abort();
-      await cancelReceived;
-      await Promise.resolve();
-      expect(settled).toBe(false);
+        await vi.waitFor(() =>
+          expect(
+            responder.requests.some(
+              (request) => request.command.type === "plugin.host.call",
+            ),
+          ).toBe(true),
+        );
+        controller.abort();
+        await cancelReceived;
+        await Promise.resolve();
+        expect(settled).toBe(false);
 
-      releaseCall?.();
-      await expect(result).rejects.toMatchObject({ name: "AbortError" });
-      expect(settled).toBe(true);
-    });
-  });
+        if (mode === "answers") {
+          releaseCall?.();
+          await expect(result).rejects.toMatchObject({ name: "AbortError" });
+        } else {
+          // No confirmed stop: the caller must not see a clean cancel (#1366).
+          harness.hub.unregisterDaemon(session.id);
+          await expect(result).rejects.toMatchObject({
+            body: { code: "host_unavailable" },
+          });
+        }
+        expect(settled).toBe(true);
+      });
+    },
+  );
 });

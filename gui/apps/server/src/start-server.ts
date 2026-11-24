@@ -1,10 +1,12 @@
-import { cloudroom } from "./services/cloudroom/commands.js";
+import { cloudroom, configuredWebsite } from "./services/cloudroom/commands.js";
 import { serve } from "@hono/node-server";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ServerConfig } from "@cloudroom/config/server";
+import { createCallerProofIssuer } from "@cloudroom/config/caller-proof";
+import { HUMAN_CLICK_PUBLIC_KEY_ENV } from "@cloudroom/config/human-click";
 import { isLoopbackHostname } from "@cloudroom/config/loopback";
 import { moveLegacyUserSkills, resolveUserSkillsRootPath } from "@cloudroom/config/skill-storage-paths";
 import { toOptionalString } from "@cloudroom/config/strings";
@@ -20,26 +22,33 @@ import { PluginHostArtifactRegistry } from "./services/plugins/plugin-host-artif
 import { createProviderNativeRootsCache } from "./services/providers/native-roots.js";
 import { createAiServiceRegistry } from "./services/ai/ai-service-registry.js";
 import { createAppVersionService } from "./services/system/app-version.js";
-import { createBbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import { startEventLoopStallMonitor } from "./services/system/event-loop-stall-monitor.js";
+import { startRunningTurnDeadlinesAfterRestart } from "./internal/session-owner-side-effects.js";
 import {
   runPeriodicSweeps,
   runStartupRecoverySweep,
 } from "./services/system/periodic-sweeps.js";
 import { installProviderModelCatalogPrewarm } from "./services/providers/provider-model-catalog-prewarm.js";
 import {
-  PROVIDER_AUTO_UPDATE_FIRST_RUN_MS,
   PROVIDER_AUTO_UPDATE_INTERVAL_MS,
   runProviderAutoUpdates,
 } from "./services/system/provider-auto-update.js";
-import { createProviderRegistryService } from "./services/providers/provider-registry.js";
+import {
+  createProviderRegistryService,
+  createProviderUsageReader,
+} from "./services/providers/provider-registry.js";
 import { installFirstResponseTelemetry } from "./services/system/first-response-telemetry.js";
+import { installSkillTelemetry } from "./services/system/skill-telemetry.js";
+import { installTokenTelemetry } from "./services/system/token-telemetry.js";
 import { startOrgPlugin } from "./services/cloudroom/org-plugin.js";
 import { startSetupTelemetry } from "./services/cloudroom/setup-telemetry.js";
 import { installTitleRecheck } from "./services/threads/title-recheck.js";
 import { installThreadPurpose } from "./services/threads/thread-purpose.js";
+import { installProjectSummaries } from "./services/cloudroom/project-nudge.js";
 import { installAuthFailureTelemetry } from "./services/system/auth-failure-telemetry.js";
-import { createTelemetryService } from "./services/system/telemetry.js";
+import { installPlanLimitTelemetry } from "./services/system/plan-limit-telemetry.js";
+import { createTelemetryPrivacyFilter, createTelemetryService } from "./services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "./lifecycle-dedupers.js";
 import type { ServerRuntimeConfig } from "./types.js";
@@ -79,10 +88,17 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
 
   const selfDir = dirname(fileURLToPath(import.meta.url));
   const appDir = resolve(selfDir, "../../app");
-  const appDistDir = join(appDir, "dist");
+  // The desktop app packs the web app inside app.asar (fewer files to install); Electron's Node reads it there.
+  const unpackedAppDistDir = join(appDir, "dist");
+  const appDistDir = existsSync(unpackedAppDistDir)
+    ? unpackedAppDistDir
+    : unpackedAppDistDir.replace(/app\.asar\.unpacked(?=[\\/])/u, "app.asar");
   const isProduction = process.env.NODE_ENV === "production";
   const staticDir =
     isProduction && existsSync(appDistDir) ? appDistDir : undefined;
+  // Read once, then dropped, so no process this server starts inherits it.
+  const humanClickPublicKey = process.env[HUMAN_CLICK_PUBLIC_KEY_ENV];
+  delete process.env[HUMAN_CLICK_PUBLIC_KEY_ENV];
   const runtimeConfig: ServerRuntimeConfig = {
     appVersion: serverConfig.BB_APP_VERSION,
     builtinSkillsRootPath: resolveBuiltinSkillsRootPath(),
@@ -91,6 +107,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     dataDir: serverConfig.BB_DATA_DIR,
     featureFlags: serverConfig.featureFlags,
     hostDaemonPort: serverConfig.BB_HOST_DAEMON_PORT,
+    humanClickPublicKey,
     inheritedSkillsRootPaths: serverConfig.BB_INHERITED_SKILLS_ROOTS,
     inferenceFallbackModel: serverConfig.BB_INFERENCE_FALLBACK,
     inferenceModel: serverConfig.BB_INFERENCE,
@@ -98,6 +115,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     openAiApiKey: serverConfig.OPENAI_API_KEY,
     serverPort: serverConfig.BB_SERVER_PORT,
     sharedSkillRoots: { user: [], project: [] },
+    telemetryAllowed: serverConfig.BB_TELEMETRY,
     transcriptionModel: serverConfig.BB_TRANSCRIPTION,
     userSkillsRootPath: resolveUserSkillsRootPath(homedir()),
   };
@@ -113,14 +131,12 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     (error: unknown) => logger.warn({ error }, "Could not move user skills to ~/.cloudroom/skills"),
   );
 
+  const readProviderUsage = createProviderUsageReader(db);
   const providerRegistry = createProviderRegistryService({
     deferRegistrationsSettled: true,
     readUserProviderPreferences: () => {
-      const settings = getAppSettings(db);
-      return {
-        providerOrder: settings.providerOrder,
-        defaultProviderId: settings.defaultProviderId,
-      };
+      const { defaultProviderId, hiddenProviderIds, customProviderOrder } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, customOrder: customProviderOrder, usage: readProviderUsage() };
     },
   });
 
@@ -146,14 +162,13 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     hub,
     logger,
   });
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config: runtimeConfig,
     hub,
     logger,
   });
 
   const telemetry = await createTelemetryService({
-    apiKey: serverConfig.BB_POSTHOG_API_KEY,
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
@@ -189,6 +204,9 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   pendingInteractions.start();
 
+  const callerProofs = await createCallerProofIssuer({
+    dataDir: serverConfig.BB_DATA_DIR,
+  });
   const appVersion = createAppVersionService({
     config: runtimeConfig,
     desktopVersion: process.env.BB_DESKTOP_VERSION,
@@ -202,7 +220,8 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   } = createApp(
     {
       appVersion,
-      bbAppManagedConfig,
+      bbAppManagedConfig: roomAppManagedConfig,
+      callerProofs,
       config: runtimeConfig,
       db,
       hub,
@@ -230,8 +249,22 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   });
   cloud.start();
   telemetry.setPlanSource(() => cloud.sandboxes.currentPlan());
+  telemetry.setPrivacyFilter(createTelemetryPrivacyFilter({
+    db,
+    getCustomModels: () => runtimeConfig.customModels,
+    providerRegistry,
+  }));
+  telemetry.setTargetSource(async () => {
+    const account = await cloud.sandboxes.account();
+    return account
+      ? { website: account.website, authorization: `Basic ${Buffer.from(`${account.userId}:${account.token}`).toString("base64")}` }
+      : { website: configuredWebsite() };
+  });
   const stopFirstResponseTelemetry = installFirstResponseTelemetry({ db, hub, telemetry }, (threadId, at) => cloud.sandboxes.wokeSince(threadId, at), (threadId, at) => cloud.sandboxes.startupSince(threadId, at));
   const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
+  const stopPlanLimitTelemetry = installPlanLimitTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
+  const stopTokenTelemetry = installTokenTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
+  const stopSkillTelemetry = installSkillTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
 
   const sweepDeps = {
     config: runtimeConfig,
@@ -254,6 +287,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     installProviderModelCatalogPrewarm(sweepDeps);
   const stopTitleRecheck = installTitleRecheck(sweepDeps, cloud.sandboxes);
   const stopThreadPurpose = installThreadPurpose(sweepDeps);
+  const stopProjectSummaries = installProjectSummaries(sweepDeps);
   await runStartupRecoverySweep(sweepDeps).catch((error) => {
     logger.error({ err: error }, "Startup recovery sweep failed");
   });
@@ -270,6 +304,10 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     serverConfig,
   });
   injectWebSocket(server);
+  // Daemons can only reconnect once the server listens, so their grace starts then (#1956).
+  const rearmDeadlines = () => startRunningTurnDeadlinesAfterRestart(sweepDeps);
+  if (server.listening) rearmDeadlines();
+  else server.once("listening", rearmDeadlines);
 
   logger.info(
     {
@@ -291,6 +329,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
 
   pluginService.bindSdk({
     baseUrl: `http://127.0.0.1:${serverConfig.BB_SERVER_PORT}`,
+    callerToken: callerProofs.issueInternal(),
   });
   void pluginService
     .start()
@@ -304,18 +343,22 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     });
   pluginCatalogService.startPeriodicRefresh();
 
+  // Wall time advances during sleep, even on hosts that pause Node's interval timers.
+  let nextProviderCheck = Date.now() + PROVIDER_AUTO_UPDATE_INTERVAL_MS;
   const sweepInterval = setInterval(() => {
     void runPeriodicSweeps(sweepDeps);
+    if (Date.now() >= nextProviderCheck) {
+      nextProviderCheck = Date.now() + PROVIDER_AUTO_UPDATE_INTERVAL_MS;
+      void runProviderAutoUpdates(sweepDeps);
+    }
   }, 10_000);
   sweepInterval.unref();
-  const providerAutoUpdateFirstRun = setTimeout(() => {
-    void runProviderAutoUpdates(sweepDeps);
-  }, PROVIDER_AUTO_UPDATE_FIRST_RUN_MS);
-  providerAutoUpdateFirstRun.unref();
-  const providerAutoUpdateInterval = setInterval(() => {
-    void runProviderAutoUpdates(sweepDeps);
-  }, PROVIDER_AUTO_UPDATE_INTERVAL_MS);
-  providerAutoUpdateInterval.unref();
+  const stopProviderReconnectChecks = sweepDeps.hub.onChangedMessage((message) => {
+    if (message.entity === "host" && message.changes.includes("host-connected")) {
+      void runProviderAutoUpdates(sweepDeps, message.id);
+    }
+  });
+  void runProviderAutoUpdates(sweepDeps);
 
   let shutdownPromise: Promise<void> | null = null;
   const runShutdown = (): Promise<void> => {
@@ -323,21 +366,29 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       return shutdownPromise;
     }
     shutdownPromise = (async () => {
+      // The last events get as long as shutdown takes, and at most 1.5 s.
+      const sendEvents = () => Promise.race([telemetry.flush(), new Promise((resolve) => setTimeout(resolve, 1_500))]);
+      let lastEvents = sendEvents();
       providerModelCatalogPrewarm.stop();
       eventLoopStallMonitor.stop();
       cloud.stop();
       stopFirstResponseTelemetry();
       stopAuthFailureTelemetry();
+      stopPlanLimitTelemetry();
+      stopTokenTelemetry();
+      stopSkillTelemetry();
       stopTitleRecheck();
       stopThreadPurpose();
+      stopProjectSummaries();
       clearInterval(sweepInterval);
-      clearTimeout(providerAutoUpdateFirstRun);
-      clearInterval(providerAutoUpdateInterval);
+      stopProviderReconnectChecks();
       pluginCatalogService.stopPeriodicRefresh();
       await pluginService.stopPeriodicUpdateChecks();
       await pluginService.stop().catch((error: unknown) => {
         logger.warn({ err: error }, "Plugin shutdown failed");
       });
+      // Plugins send their last usage counts as they stop, after the first send took the queue.
+      lastEvents = lastEvents.then(sendEvents);
       const closeServer = new Promise<void>((resolve, reject) => {
         server.close((error) => {
           if (error) {
@@ -349,6 +400,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       });
       await closeWebSockets();
       await closeServer;
+      await lastEvents;
     })();
     return shutdownPromise;
   };

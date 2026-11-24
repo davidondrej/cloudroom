@@ -15,6 +15,10 @@ class FakeApi:
     def __init__(self, token, store):
         self.token, self.store, self.down = token, store, False
         self.files, self.diagnostics, self.reports, self.automations, self.calls = {}, [], [], [], []
+        # The thread row's session, as the website keeps it (#237): `thread` reports apply only to it.
+        self.threads, self.row_session = [], None
+        # Takes a switch but loses the answer, as when Core stops before hearing it.
+        self.lose_continue = False
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -65,6 +69,18 @@ class FakeApi:
                 if op == 'report':
                     api.reports.append(payload)
                     return self.answer(200, {'sent': True})
+                if op == 'thread':
+                    api.threads.append(payload)
+                    step = payload.get('continue')
+                    if step and api.row_session == step['session']:
+                        return self.answer(200, {'applied': True})
+                    if api.row_session != payload['session']:
+                        return self.answer(409, {'error': 'This session is not the thread\'s.'})
+                    if step:
+                        api.row_session = step['session']
+                        if api.lose_continue:
+                            return self.answer(503, {'error': 'lost'})
+                    return self.answer(200, {'applied': True})
                 if op == 'automation':
                     api.automations.append(payload)
                     return self.answer(200, {'id': '00000000-0000-4000-8000-000000000000', 'ok': True})

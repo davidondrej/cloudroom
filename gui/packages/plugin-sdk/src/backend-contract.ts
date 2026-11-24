@@ -247,8 +247,8 @@ export interface PluginTurnFailedEvent {
    */
   inputAccepted: boolean;
   /**
-   * The most recent rate-limit snapshot this thread's provider reported, or
-   * null when the provider reports no windows.
+   * The most recent rate-limit snapshot from the failed request, or null when
+   * its provider reported none during that request.
    */
   rateLimits: ProviderRateLimitState | null;
   /**
@@ -261,6 +261,12 @@ export interface PluginTurnFailedEvent {
    * the app or its host daemon restarted mid-turn. Null for provider failures.
    */
   interruptionReason: SystemThreadInterruptedReason | null;
+  /**
+   * True when a Local turn started before this computer last booted: the
+   * machine restarted (or crashed) mid-turn. A retry policy should not resume
+   * it on its own, since the turn may be what took the machine down.
+   */
+  turnStartedBeforeBoot: boolean;
 }
 
 /**
@@ -306,11 +312,19 @@ export interface PluginThreadEventPayloads {
   /** Fired when a thread transitions into `active`. */
   "thread.active": { thread: ThreadResponse };
   /** Fired when a thread transitions into `idle`. `lastAssistantText` is
-   * assembled the same way GET /threads/:id/output is. */
-  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null };
-  /** Fired when a thread transitions into `error`. `error` is the latest
-   * system/error event message, when one exists. */
-  "thread.failed": { thread: ThreadResponse; error: string | null };
+   * assembled the same way GET /threads/:id/output is. `notify: false`: another
+   * computer sent this Cloud turn and notifies for it. */
+  "thread.idle": { thread: ThreadResponse; lastAssistantText: string | null; notify?: false };
+  /** Fired when a thread transitions into `error`. `error` is the failed
+   * turn's provider error, else the latest system/error message. `errorInfo`
+   * classifies it the same way `turn.failed` does (a rate limit, an auth
+   * failure), or is null. */
+  "thread.failed": {
+    thread: ThreadResponse;
+    error: string | null;
+    errorInfo?: ProviderErrorInfo | null;
+    notify?: false;
+  };
   /** Fired after a thread is archived (including cascade archives). */
   "thread.archived": { thread: ThreadResponse };
   /**
@@ -1324,6 +1338,10 @@ export interface PluginProviderCapabilities {
   /** The provider accepts an explicit context-compaction request — gates the
    * compact affordance. */
   supportsManualCompaction: boolean;
+  /** A saved session resumes in whatever folder it is started in, so a thread
+   * moved to another folder keeps its native session. Defaults to false: the
+   * moved thread then starts a fresh session with the chat as hidden context. */
+  resumesInNewFolder?: boolean;
   /** The provider keeps its own thread archive, so BB mirrors archive and
    * unarchive onto it instead of tracking the state only in bb's own rows. */
   supportsThreadArchive: boolean;
@@ -1351,6 +1369,8 @@ export interface PluginProviderStrings {
   expiredHint: string;
   /** Where to install the agent. */
   installUrl: string;
+  /** Terminal command that starts sign-in on the host ("pi"). Adds a Sign in button when the provider lists no models. */
+  signInCommand?: string;
   /** Brand prefix stripped from model display names ("Claude "). */
   brandPrefix?: string;
   /** Plan-mode banner copy for providers that declare the `plan` action. */
@@ -1431,9 +1451,9 @@ export interface PluginProviderFallbackModel {
   displayName: string;
   description: string;
   /** Reasoning levels this model supports, lowest to highest. Non-empty.
-   * `reasoningEffort` is a standard ladder entry or any provider-specific id
-   * the bridge accepts back as `reasoningLevel`; `label` names a
-   * provider-specific id in the picker. */
+   * Only standard ladder entries ({@link PluginProviderReasoningLevel}) are
+   * kept today: the host drops any other id, here and in the live
+   * `model/list`, and keeps the model. Map provider options onto the ladder. */
   supportedReasoningEfforts: readonly {
     reasoningEffort: PluginProviderReasoningLevel | (string & {});
     label?: string;
@@ -1541,7 +1561,7 @@ export interface PluginProviderDeclaration {
    * "Worked for" row and leaves the final answer visible. `"flat"` keeps
    * every row of a finished turn visible, as it was while the turn ran. This
    * is only the provider's default: the user can choose either display for
-   * each provider in Settings → Providers or with
+   * each provider in Settings → Agents → Harness or with
    * `bb settings completed-turns`, and that choice wins.
    */
   completedTurnDisplay?: PluginProviderCompletedTurnDisplay;
@@ -1653,6 +1673,13 @@ export interface PluginProviderDeclaration {
   ) => Readonly<Record<string, JsonValue>>;
 }
 
+export type PluginInstructionContext = {
+  threadId: string;
+  projectId: string;
+  /** Resolved target for user instructions on this message. */
+  experimental_execution?: { providerId: string; model: string | null };
+};
+
 export interface PluginAgents {
   /**
    * Select this plugin's statically registered tools and manifest skills for
@@ -1722,7 +1749,7 @@ export interface PluginAgents {
    * A repeated registration within one factory execution is rejected.
    */
   contributeInstructions(
-    provider: (ctx: { threadId: string; projectId: string }) => string | null,
+    provider: (ctx: PluginInstructionContext) => string | null,
   ): void;
 }
 
@@ -1768,8 +1795,9 @@ export interface PluginProviders {
 }
 
 export interface ExperimentalPluginProviderEnvContext {
-  threadId: string;
-  projectId: string;
+  /** The thread starting a turn. Absent for a helper call, such as thread naming, that runs the provider outside a thread. */
+  threadId?: string;
+  projectId?: string;
   hostId: string;
 }
 
@@ -1927,6 +1955,15 @@ export interface PluginServerApi {
    * reading it from handlers, services, and timers.
    */
   readonly loopbackBaseUrl: string;
+
+  /**
+   * Headers that prove a request to `loopbackBaseUrl` comes from this
+   * server's own process. The local API refuses most requests from
+   * callers that cannot prove they run outside an agent sandbox, so a plugin
+   * that relays traffic back to the server (e.g. a tunnel) adds these to each
+   * relayed request. Never send them to any other origin.
+   */
+  readonly experimental_loopbackHeaders: Readonly<Record<string, string>>;
 
   /**
    * This server's data directory — the one holding `config.json`, `bb.db` and

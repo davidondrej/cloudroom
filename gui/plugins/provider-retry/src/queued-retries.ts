@@ -26,10 +26,10 @@ export interface QueuedRetry {
  * whoever asked for it, which is exactly what these surfaces act on.
  */
 export async function listQueuedRetries(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   threadId?: string,
 ): Promise<QueuedRetry[]> {
-  const rows = await bb.sdk.threads.queue.list(
+  const rows = await room.sdk.threads.queue.list(
     threadId === undefined ? {} : { threadId },
   );
   return rows
@@ -42,9 +42,9 @@ export async function listQueuedRetries(
 }
 
 export async function findQueuedRetry(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   threadId: string,
 ): Promise<QueuedRetry | null> {
-  const rows = await listQueuedRetries(bb, threadId);
+  const rows = await listQueuedRetries(room, threadId);
   return rows[0] ?? null;
 }

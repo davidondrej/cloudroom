@@ -98,7 +98,10 @@ import {
   getLastThreadErrorMessage,
   getLastThreadOutput,
 } from "../threads/thread-data.js";
-import { buildTurnFailedEvent } from "../threads/turn-failed.js";
+import {
+  buildTurnFailedEvent,
+  describeFailedTurn,
+} from "../threads/turn-failed.js";
 import type {
   PluginBrandingAssetSet,
   PluginBrandingAssetSnapshot,
@@ -175,6 +178,7 @@ import type {
   PluginResolvedProviderEnvHealth,
 } from "./plugin-service-internal.js";
 import type { PluginMachineProviderBridge } from "./plugin-machine-provider-registry.js";
+import { cloudTurnsElsewhere } from "./plugin-thread-events.js";
 export type {
   PluginAgentToolContribution,
   PluginMentionResolveResult,
@@ -229,7 +233,7 @@ export interface PluginService {
    * Bind the in-process BB SDK to the running server. Call once the HTTP
    * listener is up, before start(): bb.sdk throws until this runs.
    */
-  bindSdk(args: { baseUrl: string }): void;
+  bindSdk(args: { baseUrl: string; callerToken?: string }): void;
   start(): Promise<void>;
   stop(): Promise<void>;
   handleUncaughtException(error: unknown): boolean;
@@ -1256,13 +1260,21 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         emitThreadEvent("thread.idle", () => ({
           thread: buildThreadDto(thread),
           lastAssistantText: getLastThreadOutput(deps.db, thread.id),
+          ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
         }));
       },
       emitThreadFailed(thread) {
-        emitThreadEvent("thread.failed", () => ({
-          thread: buildThreadDto(thread),
-          error: getLastThreadErrorMessage(deps.db, thread.id),
-        }));
+        emitThreadEvent("thread.failed", () => {
+          // The provider's own words first: a rate limit leaves no system/error.
+          const failure = describeFailedTurn(deps.db, thread.id);
+          return {
+            thread: buildThreadDto(thread),
+            error:
+              failure.message ?? getLastThreadErrorMessage(deps.db, thread.id),
+            errorInfo: failure.errorInfo,
+            ...(cloudTurnsElsewhere.has(thread.id) ? { notify: false as const } : {}),
+          };
+        });
       },
       emitThreadArchived(thread) {
         emitThreadEvent("thread.archived", () => ({

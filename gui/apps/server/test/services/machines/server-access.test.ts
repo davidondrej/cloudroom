@@ -153,6 +153,31 @@ describe("machine server access", () => {
         id: host.id,
         serverUrl: "https://direct.example.com",
       });
+      vi.stubEnv("BB_EXTERNAL_URL", "http://192.0.2.10:38886");
+      const plain = { key: "plain", hostId: host.id, signal };
+      await expect(serverAccess.resolve(deps, plain)).rejects.toThrow(
+        "Use an https:// server URL",
+      );
+      vi.stubEnv("BB_ALLOW_INSECURE_SERVER_URL", "1");
+      await expect(serverAccess.resolve(deps, plain)).resolves.toMatchObject({
+        serverUrl: "http://192.0.2.10:38886",
+      });
+    });
+  });
+
+  it("refuses a plugin's plain-HTTP grant without the server opt-in", async () => {
+    await withTestHarness(async ({ deps }) => {
+      installProvider({
+        ...provider(),
+        acquire: async ({ hostId }) => ({
+          id: hostId,
+          serverUrl: "http://192.0.2.10:38886",
+        }),
+      });
+      const host = upsertHost(deps.db, deps.hub, { name: "plain" })!;
+      await expect(
+        serverAccess.resolve(deps, { key: "plain", hostId: host.id, signal }),
+      ).rejects.toThrow("Use an https:// server URL");
     });
   });
 

@@ -1,6 +1,7 @@
 import {
   acpNativeReasoningSchema,
   acpPermissionCliSchema,
+  acpPermissionEnvSchema,
   acpReasoningCliSchema,
   normalizeProviderNativeRoots,
   providerNativeRootInputSchema,
@@ -52,6 +53,7 @@ export const acpLaunchSpecSchema = z
     nativeReasoning: acpNativeReasoningSchema.optional(),
     nativeSkillRoots: acpNativeSkillRootsSchema.optional(),
     permissionCli: acpPermissionCliSchema.optional(),
+    permissionEnv: acpPermissionEnvSchema.optional(),
   })
   .strict();
 export type AcpLaunchSpec = z.infer<typeof acpLaunchSpecSchema>;
@@ -68,11 +70,16 @@ export function normalizeAcpLaunchSpec(spec: AcpLaunchSpec): AcpLaunchSpec {
     nativeReasoning,
     nativeSkillRoots,
     permissionCli,
+    permissionEnv,
   } = spec;
   const permissionCliHasMode =
     permissionCli?.full !== undefined ||
     permissionCli?.workspaceWrite !== undefined ||
     permissionCli?.readonly !== undefined;
+  const permissionEnvHasMode =
+    permissionEnv?.full !== undefined ||
+    permissionEnv?.workspaceWrite !== undefined ||
+    permissionEnv?.readonly !== undefined;
   return {
     displayName,
     command,
@@ -87,6 +94,9 @@ export function normalizeAcpLaunchSpec(spec: AcpLaunchSpec): AcpLaunchSpec {
     ...(nativeSkillRoots !== undefined ? { nativeSkillRoots } : {}),
     ...(permissionCli !== undefined && permissionCliHasMode
       ? { permissionCli }
+      : {}),
+    ...(permissionEnv !== undefined && permissionEnvHasMode
+      ? { permissionEnv }
       : {}),
   };
 }

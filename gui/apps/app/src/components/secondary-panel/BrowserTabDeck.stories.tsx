@@ -1,18 +1,18 @@
 import type { ReactNode } from "react";
-import type { BbDesktopBrowserState } from "@cloudroom/desktop-contract";
+import type { RoomDesktopBrowserState } from "@cloudroom/desktop-contract";
 import {
   getBrowserHistoryStorageKey,
   type BrowserHistoryEntry,
 } from "@/lib/browser-history";
-import type { BrowserFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import type { BrowserFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 import { WithDesktopBrowser } from "../../../.ladle/story-desktop";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { BrowserTabDeck } from "./BrowserTabDeck";
+import { BrowserTabDeck } from "@/components/right-panel/tabs/browser-tab";
 import {
   ThreadSecondaryPanel,
   type SecondaryPanelRenderableTab,
-} from "./ThreadSecondaryPanel";
+} from "@/components/right-panel/shell/panel-shell";
 
 export default {
   title: "right-panel/Browser tab",
@@ -39,7 +39,7 @@ const LOADING_TAB: BrowserFixedPanelTab = {
   title: "Example Docs",
   url: "https://example.com/docs",
 };
-const LOADING_BROWSER_STATE: BbDesktopBrowserState = {
+const LOADING_BROWSER_STATE: RoomDesktopBrowserState = {
   tabId: LOADING_TAB.id,
   url: LOADING_TAB.url,
   title: LOADING_TAB.title,

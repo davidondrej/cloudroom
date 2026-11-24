@@ -23,6 +23,32 @@ const MARKDOWN_MIME_TYPES = new Set(["text/markdown", "text/x-markdown"]);
 const CSV_FILE_EXTENSIONS = [".csv"];
 const CSV_MIME_TYPES = new Set(["application/csv", "text/csv"]);
 const HTML_FILE_EXTENSION = ".html";
+const AUDIO_FILE_EXTENSIONS = [
+  ".aac",
+  ".flac",
+  ".m4a",
+  ".mp3",
+  ".oga",
+  ".ogg",
+  ".opus",
+  ".wav",
+  ".weba",
+];
+const DOCUMENT_FILE_EXTENSIONS: readonly (readonly [
+  string,
+  DocumentFileFormat,
+])[] = [
+  [".xlsx", "xlsx"],
+  [".xlsm", "xlsx"],
+  [".docx", "docx"],
+  [".docm", "docx"],
+  [".pptx", "pptx"],
+  [".pptm", "pptx"],
+  [".zip", "zip"],
+  [".tar", "tar"],
+  [".tar.gz", "tgz"],
+  [".tgz", "tgz"],
+];
 const NULL_CHARACTER = "\u0000";
 
 export interface FilePreviewTarget {
@@ -31,8 +57,16 @@ export interface FilePreviewTarget {
   url: string;
 }
 
+export type DocumentFileFormat =
+  | "docx"
+  | "pptx"
+  | "tar"
+  | "tgz"
+  | "xlsx"
+  | "zip";
+
 interface FilePreviewBase extends FilePreviewTarget {
-  kind: "image" | "text" | "unsupported" | "video";
+  kind: "audio" | "document" | "image" | "text" | "unsupported" | "video";
   mimeType: string;
 }
 
@@ -42,6 +76,17 @@ interface ImageFilePreview extends FilePreviewBase {
 
 interface VideoFilePreview extends FilePreviewBase {
   kind: "video";
+}
+
+interface AudioFilePreview extends FilePreviewBase {
+  kind: "audio";
+  sizeBytes?: number;
+}
+
+export interface DocumentFilePreview extends FilePreviewBase {
+  kind: "document";
+  format: DocumentFileFormat;
+  contentBytes: Uint8Array;
 }
 
 export interface TextFilePreview extends FilePreviewBase {
@@ -54,6 +99,8 @@ interface UnsupportedFilePreview extends FilePreviewBase {
 }
 
 export type FilePreview =
+  | AudioFilePreview
+  | DocumentFilePreview
   | ImageFilePreview
   | VideoFilePreview
   | TextFilePreview
@@ -204,6 +251,91 @@ function hasCsvExtension(path: string): boolean {
   );
 }
 
+export interface MediaFilePreviewType {
+  kind: "audio" | "image" | "video";
+  mimeType: string;
+}
+
+const MEDIA_FILE_PREVIEW_TYPES = new Map<string, MediaFilePreviewType>([
+  [".avif", { kind: "image", mimeType: "image/avif" }],
+  [".bmp", { kind: "image", mimeType: "image/bmp" }],
+  [".gif", { kind: "image", mimeType: "image/gif" }],
+  [".heic", { kind: "image", mimeType: "image/heic" }],
+  [".heif", { kind: "image", mimeType: "image/heif" }],
+  [".ico", { kind: "image", mimeType: "image/vnd.microsoft.icon" }],
+  [".jpeg", { kind: "image", mimeType: "image/jpeg" }],
+  [".jpg", { kind: "image", mimeType: "image/jpeg" }],
+  [".png", { kind: "image", mimeType: "image/png" }],
+  [".svg", { kind: "image", mimeType: "image/svg+xml" }],
+  [".svgz", { kind: "image", mimeType: "image/svg+xml" }],
+  [".tif", { kind: "image", mimeType: "image/tiff" }],
+  [".tiff", { kind: "image", mimeType: "image/tiff" }],
+  [".webp", { kind: "image", mimeType: "image/webp" }],
+  [".3g2", { kind: "video", mimeType: "video/3gpp2" }],
+  [".3gp", { kind: "video", mimeType: "video/3gpp" }],
+  [".avi", { kind: "video", mimeType: "video/x-msvideo" }],
+  [".m4v", { kind: "video", mimeType: "video/x-m4v" }],
+  [".mov", { kind: "video", mimeType: "video/quicktime" }],
+  [".mp4", { kind: "video", mimeType: "video/mp4" }],
+  [".mpeg", { kind: "video", mimeType: "video/mpeg" }],
+  [".mpg", { kind: "video", mimeType: "video/mpeg" }],
+  [".ogv", { kind: "video", mimeType: "video/ogg" }],
+  [".webm", { kind: "video", mimeType: "video/webm" }],
+  [".wmv", { kind: "video", mimeType: "video/x-ms-wmv" }],
+  [".aac", { kind: "audio", mimeType: "audio/aac" }],
+  [".flac", { kind: "audio", mimeType: "audio/flac" }],
+  [".m4a", { kind: "audio", mimeType: "audio/mp4" }],
+  [".mp3", { kind: "audio", mimeType: "audio/mpeg" }],
+  [".oga", { kind: "audio", mimeType: "audio/ogg" }],
+  [".ogg", { kind: "audio", mimeType: "audio/ogg" }],
+  [".opus", { kind: "audio", mimeType: "audio/opus" }],
+  [".wav", { kind: "audio", mimeType: "audio/wav" }],
+  [".weba", { kind: "audio", mimeType: "audio/webm" }],
+]);
+
+export function getMediaFilePreviewType(
+  path: string,
+): MediaFilePreviewType | null {
+  const fileName = path.slice(
+    Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1,
+  );
+  const extensionIndex = fileName.lastIndexOf(".");
+  if (extensionIndex <= 0) return null;
+  return (
+    MEDIA_FILE_PREVIEW_TYPES.get(fileName.slice(extensionIndex).toLowerCase()) ??
+    null
+  );
+}
+
+export function buildDirectMediaFilePreview(
+  target: FilePreviewTarget,
+): FilePreview | null {
+  const mediaType = getMediaFilePreviewType(target.name ?? target.path);
+  if (mediaType === null) return null;
+  return {
+    ...mediaType,
+    name: target.name,
+    path: target.path,
+    url: target.url,
+  };
+}
+
+export function isAudioFilePreviewPath(path: string): boolean {
+  const normalizedPath = path.toLowerCase();
+  return AUDIO_FILE_EXTENSIONS.some((extension) =>
+    normalizedPath.endsWith(extension),
+  );
+}
+
+export function getDocumentFileFormat(path: string): DocumentFileFormat | null {
+  const normalizedPath = path.toLowerCase();
+  return (
+    DOCUMENT_FILE_EXTENSIONS.find(([extension]) =>
+      normalizedPath.endsWith(extension),
+    )?.[1] ?? null
+  );
+}
+
 export function isHtmlFilePreviewPath(path: string): boolean {
   return path.toLowerCase().endsWith(HTML_FILE_EXTENSION);
 }
@@ -245,6 +377,25 @@ export function buildFilePreview(args: BuildFilePreviewArgs): FilePreview {
     return {
       kind: "image",
       ...base,
+    };
+  }
+
+  const fileName = args.name ?? args.path;
+  if (isAudioFilePreviewPath(fileName)) {
+    return {
+      kind: "audio",
+      ...base,
+      sizeBytes: args.contentBytes.byteLength,
+    };
+  }
+
+  const documentFormat = getDocumentFileFormat(fileName);
+  if (documentFormat !== null) {
+    return {
+      kind: "document",
+      ...base,
+      contentBytes: args.contentBytes,
+      format: documentFormat,
     };
   }
 

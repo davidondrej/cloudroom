@@ -17,7 +17,12 @@ const actions = vi.hoisted(() => ({
 const state = vi.hoisted(() => ({
   data: undefined as
     | {
-        sections: never[];
+        sections: {
+          id: string;
+          name: string;
+          createdAt: number;
+          updatedAt: number;
+        }[];
         projects: { id: string; name: string; threads: ThreadListEntry[] }[];
         personalProject: {
           id: string;
@@ -58,7 +63,8 @@ vi.mock("@cloudroom/shared-ui/hooks/use-compact-viewport", () => ({
   useIsCompactViewport: () => false,
 }));
 
-vi.mock("./root-compose-selection", () => ({
+vi.mock("./root-compose-selection", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./root-compose-selection")>()),
   useSetRootComposeProjectId: () => actions.setRootComposeProjectId,
 }));
 
@@ -114,6 +120,16 @@ describe("useSidebarThreads", () => {
     expect(first.result.current.threads[0]).toBe(before);
     expect(second.result.current.threads[0]).toBe(before);
   });
+
+  it("returns the server's sections in order (#2252)", () => {
+    const sections = [
+      { id: "sec_b", name: "Later", createdAt: 2, updatedAt: 2 },
+      { id: "sec_a", name: "Slop Cop", createdAt: 1, updatedAt: 1 },
+    ];
+    state.data = { ...payload([]), sections };
+    const { result } = renderHook(() => useSidebarThreads());
+    expect(result.current.sections).toEqual(sections);
+  });
 });
 
 describe("useSidebarThreadActions", () => {
@@ -132,5 +148,24 @@ describe("useSidebarThreadActions", () => {
     expect(actions.navigate).toHaveBeenCalledWith("/", {
       state: { focusPrompt: true },
     });
+  });
+
+  it("passes the plugin's section and environment to the composer (#995)", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = renderHook(() => useSidebarThreadActions());
+
+    act(() => {
+      result.current.openNewThread({
+        sectionId: "sec_old",
+        experimental_placement: { sectionId: null, pinned: true },
+        environmentId: "env_1",
+      });
+    });
+
+    expect(actions.navigate).toHaveBeenCalledWith("/", {
+      state: { sectionId: null, reuseEnvironmentId: "env_1" },
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 });

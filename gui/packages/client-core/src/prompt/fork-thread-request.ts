@@ -30,28 +30,16 @@ interface BuildForkThreadRequestArgs extends ForkThreadCreateSeed {
   requestId?: string | undefined;
   input: PromptInput[];
   pluginSubmission: AppCreateThreadRequest["pluginSubmission"];
-  providerSupportsFork: boolean;
 }
 
-type ForkableThread = Pick<
-  Thread,
-  "archivedAt" | "environmentId" | "executionTarget" | "providerId"
->;
+type ForkableThread = Pick<Thread, "archivedAt" | "environmentId" | "executionTarget">;
 
-/** The harnesses a Cloud thread can fork (the server's FORK_HARNESSES). */
-const CLOUD_FORK_PROVIDERS = new Set(["claude-code", "codex"]);
-
-export function isThreadForkable(
-  sourceThread: ForkableThread | null,
-  providerSupportsFork: boolean,
-): boolean {
+/** Every harness can fork; the server copies the chat as text when it can't clone the session (ADR 20261121-141157). */
+export function isThreadForkable(sourceThread: ForkableThread | null): boolean {
   if (sourceThread === null || sourceThread.archivedAt !== null) {
     return false;
   }
-  if (sourceThread.executionTarget === "cloud") {
-    return CLOUD_FORK_PROVIDERS.has(sourceThread.providerId);
-  }
-  return sourceThread.environmentId !== null && providerSupportsFork;
+  return sourceThread.executionTarget === "cloud" || sourceThread.environmentId !== null;
 }
 
 export function buildForkThreadRequest({
@@ -63,17 +51,13 @@ export function buildForkThreadRequest({
   pluginSubmission,
   projectId,
   providerId,
-  providerSupportsFork,
   reasoningLevel,
   requestId,
   serviceTier,
   sourceSeqEnd,
   sourceThreadId,
-}: BuildForkThreadRequestArgs): AppCreateThreadRequest | null {
+}: BuildForkThreadRequestArgs): AppCreateThreadRequest {
   const cloud = executionTarget === "cloud";
-  if (!cloud && !providerSupportsFork) {
-    return null;
-  }
 
   return {
     environment: cloud ? { type: "project-default" } : environment,

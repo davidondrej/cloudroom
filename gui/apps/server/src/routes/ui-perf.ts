@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import { browserRequestProblem } from "../browser-request-guard.js";
 import type { AppDeps } from "../types.js";
+import { reportAppReady } from "../services/cloudroom/setup-telemetry.js";
 
 const uiPerfBatchSchema = z
   .object({
@@ -9,9 +10,16 @@ const uiPerfBatchSchema = z
       .array(
         z
           .object({
-            metric: z.enum(["app_ready", "thread_open", "ui_freeze"]),
+            metric: z.enum([
+              "app_ready",
+              "thread_open",
+              "ui_freeze",
+              "panel_toggle_noop",
+              "top_right_window_drag",
+            ]),
             ms: z.number().int().nonnegative().max(3_600_000),
             threadId: z.string().max(64).optional(),
+            detail: z.string().max(300).optional(),
           })
           .strict(),
       )
@@ -34,6 +42,7 @@ export function registerUiPerfRoutes(app: Hono, deps: AppDeps): void {
       return context.json({ message: "Invalid perf batch" }, 400);
     for (const entry of batch.data.entries) {
       deps.logger.info(entry, "UI perf");
+      if (entry.metric === "app_ready") reportAppReady();
     }
     return context.body(null, 204);
   });

@@ -8,7 +8,7 @@ import { expect, it } from "vitest";
 import {
   buildWindowsFileManagerOpenInvocation,
   buildWindowsTerminalOpenInvocation,
-} from "../src/windows-open-targets.js";
+} from "../src/windows.js";
 
 it.each([
   {

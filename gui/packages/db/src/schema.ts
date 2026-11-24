@@ -524,6 +524,7 @@ export const environments = sqliteTable(
     statusMessage: text("status_message"),
     pendingLog: text("pending_log").notNull().default(""),
     claimPath: text("claim_path"),
+    parkedAt: integer("parked_at"),
     status: text("status")
       .$type<EnvironmentStatus>()
       .notNull()
@@ -628,6 +629,12 @@ export const threads = sqliteTable(
       table.id,
     ),
     index("threads_archived_status_idx").on(table.archivedAt, table.status),
+    // Connection status reads the latest cloud thread times on every poll; without this it scans every thread.
+    index("threads_execution_target_updated_idx").on(
+      table.executionTarget,
+      table.updatedAt,
+      table.createdAt,
+    ),
     index("threads_environment_archived_deleted_idx").on(
       table.environmentId,
       table.archivedAt,
@@ -661,7 +668,7 @@ export const cloudroomThreads = sqliteTable("cloudroom_threads", {
 export const cloudroomCommands = sqliteTable("cloudroom_commands", {
   id: text("id").primaryKey(),
   threadId: text("thread_id").notNull().references(() => cloudroomThreads.threadId, { onDelete: "cascade" }),
-  command: text("command", { enum: ["prompt", "stop", "resume", "sleep", "edit", "cancel", "reorder", "steer", "compact", "goal", "rewind", "attach", "title", "teleport", "side_chat"] }).notNull(),
+  command: text("command", { enum: ["prompt", "stop", "resume", "sleep", "edit", "cancel", "reorder", "steer", "compact", "goal", "rewind", "attach", "title", "teleport", "side_chat", "model", "unarchive_session"] }).notNull(),
   input: text("input").notNull(),
   state: text("state").notNull().default("sending"),
   createdAt: integer("created_at").notNull(),
@@ -680,6 +687,21 @@ export const threadPluginMetadata = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.threadId, table.pluginId] })],
 );
+
+/** What a thread's agent last got of the user's custom instructions, so they go out once, not with every message (ADR 20261110-101441). */
+export const threadCustomInstructions = sqliteTable("thread_custom_instructions", {
+  threadId: text("thread_id")
+    .primaryKey()
+    .references(() => threads.id, { onDelete: "cascade" }),
+  /** Hash of the text last sent. Empty once the thread was told they were removed. */
+  hash: text("hash").notNull(),
+  /** The newest compaction or clear when it was sent (an event sequence, 0 for none). */
+  resetAt: integer("reset_at").notNull(),
+  /** Messages since then, counting the one that carried it. */
+  messages: integer("messages").notNull(),
+  /** That copy may be lost: its message was cancelled or failed, or the agent's session was replaced. */
+  resend: integer("resend", { mode: "boolean" }).notNull().default(false),
+});
 
 export const threadTabs = sqliteTable("thread_tabs", {
   threadId: text("thread_id")
@@ -975,6 +997,10 @@ export const queuedThreadMessages = sqliteTable(
       .$type<QueuedMessagePayloadKind>()
       .notNull()
       .default("inline"),
+    // An `inline` row typed in the app's message box, which the repeat guard never holds (#264).
+    fromComposer: integer("from_composer", { mode: "boolean" })
+      .notNull()
+      .default(false),
     // Set together, and only on a `retry` row: the ORIGINAL request this row
     // re-submits, which attempt it is (2 is the first retry), and why it is
     // being retried in the retrier's words ("Rate limited").

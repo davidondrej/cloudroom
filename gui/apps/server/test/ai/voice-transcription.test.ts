@@ -9,6 +9,7 @@ import {
   resolveVoiceTranscriptionEnabled,
   transcribeVoiceInput,
 } from "../../src/services/ai/voice-transcription.js";
+import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import {
   registerFakeAiService,
   type FakeAiServiceCall,
@@ -43,7 +44,9 @@ function emptyVoiceFile(): File {
 async function createServiceTranscriptionHarness(
   transcribe: (
     input: ExperimentalAiVoiceTranscribeInput,
-  ) => ExperimentalAiVoiceTranscribeOutput,
+  ) =>
+    | ExperimentalAiVoiceTranscribeOutput
+    | Promise<ExperimentalAiVoiceTranscribeOutput>,
 ): Promise<ServiceTranscriptionHarness> {
   const harness = await createTestAppHarness({
     inferenceFallbackModel: "codex/gpt-5.4-mini",
@@ -73,6 +76,21 @@ function expectRetryableApiError(
   expect(error.body).toMatchObject({
     code: expected.code,
     retryable: true,
+  });
+}
+
+async function waitForSettledVoiceJob(
+  app: TestAppHarness["app"],
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return vi.waitFor(async () => {
+    const res = await app.request(
+      `/api/v1/system/voice-transcription/jobs/${jobId}`,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.status).not.toBe("pending");
+    return body;
   });
 }
 
@@ -114,29 +132,199 @@ describe("voice transcription", () => {
     }
   });
 
-  it("rejects audio above the plugin-served cap before calling the service", async () => {
-    const harness = await createServiceTranscriptionHarness(() => {
-      throw new Error("Oversized audio must not reach the service");
+  it("streams audio above 5MB to plugin-served transcription via a single-use internal URL", async () => {
+    let pulledBytes = 0;
+    let secondStatus = 0;
+    let browserStatus = 0;
+    const harness = await createServiceTranscriptionHarness(async (input) => {
+      expect(input.audioBase64).toBeUndefined();
+      expect(input.audioUrl).toMatch(/^\/internal\/voice-audio\/[a-f0-9]{64}$/);
+      const browserBlocked = await harness.app.request(input.audioUrl!, {
+        headers: { Origin: "https://evil.example" },
+      });
+      browserStatus = browserBlocked.status;
+      const first = await harness.app.request(input.audioUrl!);
+      expect(first.status).toBe(200);
+      pulledBytes = (await first.arrayBuffer()).byteLength;
+      const second = await harness.app.request(input.audioUrl!);
+      secondStatus = second.status;
+      return { ok: true, model: input.model, text: "long recording" };
     });
     try {
-      const file = new File([Buffer.alloc(5 * 1024 * 1024 + 1)], "long.webm", {
+      const size = 5 * 1024 * 1024 + 1;
+      const file = new File([Buffer.alloc(size, 7)], "long.webm", {
         type: "audio/webm",
       });
-      const error = await transcribeVoiceInput(harness.deps, { file }).catch(
-        (caught: unknown) => caught,
-      );
-      expect(error).toBeInstanceOf(ApiError);
-      expect(error).toMatchObject({
-        status: 400,
-        body: {
-          code: "invalid_request",
-          message:
-            "Audio file exceeds the 5MB limit for plugin-served transcription",
-        },
-      });
-      expect(harness.calls).toHaveLength(0);
+      await expect(
+        transcribeVoiceInput(harness.deps, { file }),
+      ).resolves.toBe("long recording");
+      expect(pulledBytes).toBe(size);
+      expect(browserStatus).toBe(403);
+      expect(secondStatus).toBe(404);
+      expect(harness.calls).toHaveLength(1);
     } finally {
       await harness.cleanup();
+    }
+  });
+
+  it("runs async voice transcription jobs so clients can poll past relay timeouts", async () => {
+    let resolveTranscription: ((value: ExperimentalAiVoiceTranscribeOutput) => void) | undefined;
+    const harness = await createServiceTranscriptionHarness(
+      () =>
+        new Promise((resolve) => {
+          resolveTranscription = resolve;
+        }),
+    );
+    try {
+      const form = new FormData();
+      form.set("file", voiceFile());
+      const startRes = await harness.app.request(
+        "/api/v1/system/voice-transcription/jobs",
+        { body: form, method: "POST" },
+      );
+      expect(startRes.status).toBe(202);
+      const started = (await startRes.json()) as { id: string };
+      expect(started.id.length).toBeGreaterThan(0);
+
+      const pendingRes = await harness.app.request(
+        `/api/v1/system/voice-transcription/jobs/${started.id}`,
+      );
+      expect(pendingRes.status).toBe(200);
+      await expect(pendingRes.json()).resolves.toEqual({
+        id: started.id,
+        status: "pending",
+      });
+
+      resolveTranscription?.({
+        ok: true,
+        model: "gpt-transcribe",
+        text: "async transcript",
+      });
+
+      await expect(
+        waitForSettledVoiceJob(harness.app, started.id),
+      ).resolves.toEqual({
+        id: started.id,
+        status: "completed",
+        text: "async transcript",
+      });
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("deduplicates pending and completed jobs by clientId and starts fresh after failure", async () => {
+    let attempt = 0;
+    let resolveFirst: ((value: ExperimentalAiVoiceTranscribeOutput) => void) | undefined;
+    const harness = await createServiceTranscriptionHarness((input) => {
+      attempt += 1;
+      if (attempt === 1) {
+        return new Promise((resolve) => {
+          resolveFirst = resolve;
+        });
+      }
+      return { ok: true, model: input.model, text: "retried transcript" };
+    });
+    try {
+      const startWithClient = async (clientId: string) => {
+        const form = new FormData();
+        form.set("file", voiceFile());
+        form.set("clientId", clientId);
+        const res = await harness.app.request(
+          "/api/v1/system/voice-transcription/jobs",
+          { body: form, method: "POST" },
+        );
+        expect(res.status).toBe(202);
+        return ((await res.json()) as { id: string }).id;
+      };
+
+      // Duplicate POST while pending returns the same job ID without starting a second call.
+      const firstId = await startWithClient("rec-1");
+      const dupPendingId = await startWithClient("rec-1");
+      expect(dupPendingId).toBe(firstId);
+      expect(harness.calls).toHaveLength(1);
+
+      // Fail the first attempt; polling returns structured failed status.
+      resolveFirst?.({
+        ok: false,
+        code: "auth_required",
+        message: "Sign in required",
+      });
+      await expect(
+        waitForSettledVoiceJob(harness.app, firstId),
+      ).resolves.toMatchObject({
+        id: firstId,
+        status: "failed",
+        error: { code: "ai_service_auth_required", retryable: false },
+      });
+
+      // Manual retry with the same clientId after a failure starts a fresh job.
+      const retryId = await startWithClient("rec-1");
+      expect(retryId).not.toBe(firstId);
+      await expect(
+        waitForSettledVoiceJob(harness.app, retryId),
+      ).resolves.toEqual({
+        id: retryId,
+        status: "completed",
+        text: "retried transcript",
+      });
+
+      // Duplicate POST after completion returns the completed job ID without re-running.
+      const dupCompletedId = await startWithClient("rec-1");
+      expect(dupCompletedId).toBe(retryId);
+      expect(harness.calls).toHaveLength(2);
+    } finally {
+      await harness.cleanup();
+    }
+  });
+
+  it("uploads >4MB backup audio via 3-step R2 presigned PUT in sandboxes.transcribe", async () => {
+    const requests: { url: string; method: string; body?: unknown; contentLength?: string | null }[] = [];
+    const fetchStub = vi.fn(async (input: FetchInput, init?: FetchInit): FetchResult => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (url === "https://cloudroom.test/api/desktop/transcribe" && typeof init?.body === "string") {
+        const parsed = JSON.parse(init.body) as { action: string; bytes?: number; key?: string };
+        requests.push({ url, method, body: parsed });
+        if (parsed.action === "upload") {
+          return new Response(
+            JSON.stringify({ key: "k-123", url: "https://r2.test/transcribe/v1/u1/k-123?sig=1" }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(
+          JSON.stringify({ text: "from r2 backup" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://r2.test/transcribe/v1/u1/k-123?sig=1" && method === "PUT") {
+        const headers = new Headers(init?.headers);
+        requests.push({ url, method, contentLength: headers.get("content-length") });
+        return new Response(null, { status: 200 });
+      }
+      throw new Error(`Unexpected fetch: ${method} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchStub);
+    try {
+      const sandboxes = new SandboxDirectory(async () => ({
+        userId: "u1",
+        token: "tok",
+        website: "https://cloudroom.test",
+      }));
+      const size = 4 * 1024 * 1024 + 128;
+      const bigFile = new File([Buffer.alloc(size, 3)], "long.webm", { type: "audio/webm" });
+      await expect(sandboxes.transcribe(bigFile)).resolves.toBe("from r2 backup");
+      expect(requests).toEqual([
+        { url: "https://cloudroom.test/api/desktop/transcribe", method: "POST", body: { action: "upload", bytes: size } },
+        { url: "https://r2.test/transcribe/v1/u1/k-123?sig=1", method: "PUT", contentLength: String(size) },
+        {
+          url: "https://cloudroom.test/api/desktop/transcribe",
+          method: "POST",
+          body: { action: "transcribe", key: "k-123", filename: "long.webm", mimeType: "audio/webm" },
+        },
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 
@@ -276,7 +464,7 @@ describe("voice transcription", () => {
     }
   });
 
-  it("uses the 10 second timeout budget for OpenAI transcription", async () => {
+  it("scales the OpenAI transcription timeout with the audio size", async () => {
     const harness = await createTestAppHarness({
       transcriptionModel: "openai/gpt-4o-transcribe",
     });
@@ -297,6 +485,10 @@ describe("voice transcription", () => {
         transcribeVoiceInput(harness.deps, { file: voiceFile() }),
       ).resolves.toBe("hello openai");
       expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 10_000);
+      // Longer recordings get 30 s more per MB (#1338).
+      const longFile = new File([Buffer.alloc(2 * 1024 * 1024)], "long.webm");
+      await transcribeVoiceInput(harness.deps, { file: longFile });
+      expect(setTimeoutSpy).toHaveBeenCalledWith(expect.any(Function), 70_000);
     } finally {
       vi.unstubAllGlobals();
       setTimeoutSpy.mockRestore();

@@ -25,6 +25,7 @@ import {
   createBridgeLineHandler,
   decodeBridgeJsonRpcResponse,
   decodeToolCallResponsePayload,
+  execPortableFile,
   experimental_defineProviderBridge,
   findCliExecutable,
   mimeTypeFromExtension,
@@ -36,7 +37,6 @@ import type {
   BridgeToolCallContent,
   BridgeToolCallImage,
 } from "@cloudroom/provider-bridge-protocol/bridge-kit";
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { promises as fs, readFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -58,6 +58,7 @@ import {
   type AcpBridgeCommand,
   type AcpBridgeNativeReasoning,
   type AcpBridgePermissionCli,
+  type AcpBridgePermissionEnv,
   type AcpBridgeReasoningCli,
   acpBridgeCommandMethodValues,
 } from "../bridge-protocol.js";
@@ -95,8 +96,8 @@ import {
 } from "../session-params.js";
 import { buildCursorParameterizedModelCatalog } from "../cursor-model-selection.js";
 import {
-  acpScriptInstallerCommand,
-  acpScriptInstallerSchema,
+  acpInstallerCommand,
+  acpInstallerSchema,
   getAcpProviderHealth,
   getAcpProviderInstallationRun,
   getAcpProviderInstallationStatus,
@@ -124,6 +125,7 @@ import {
 } from "../wire.js";
 import {
   AcpAgentResponseError,
+  agentErrorHttpStatus,
   createAcpAgentConnection,
   requestAcpInitialize,
   type AcpAgentConnection,
@@ -155,6 +157,8 @@ import {
   runAcpDynamicToolMcpServer,
   type AcpMcpServerConfig,
 } from "./tool-proxy-mcp.js";
+import { createAcpWake } from "./wake.js";
+import type { AcpWake } from "./wake.js";
 import { isPathInsideRoots } from "./workspace-path.js";
 
 interface AcpSessionPolicy {
@@ -179,9 +183,11 @@ interface AcpThreadSession {
   construction: AcpSessionParams;
   providerThreadId: string;
   cwd: string;
+  env: Readonly<Record<string, string | undefined>>;
   dialect: AcpDialect;
   translator: AcpDeltaTranslator;
   contextEstimate: AcpContextEstimate | undefined;
+  lastExactContextWindow: number | undefined;
   model: string | undefined;
   connection: AcpAgentConnection;
   supportsImageInput: boolean;
@@ -191,11 +197,18 @@ interface AcpThreadSession {
   policy: AcpSessionPolicy;
   pendingInstructions: string | undefined;
   activePromptKind: "turn" | "compaction" | null;
+  wake: AcpWake;
   compactionAgentMessage: string;
   queuedInputs: AcpPendingTurnInput[];
   promptRequestPending: boolean;
   cancelRequested: boolean;
+  /** The agent's provider stream closed (#890); restart it before the next turn. */
+  providerStreamClosed: boolean;
+  /** The live agent lost this session (#889); rebuild it before the next turn. */
+  sessionLost: boolean;
   loading: boolean;
+  /** A thread/resume the daemon retries, as no message is sent yet: Stop may end it, and an outage fails it. */
+  retryableResume: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
   stopping: boolean;
@@ -212,8 +225,8 @@ type AcpDeferredStartEmitter = (
   sessionId?: string,
 ) => void;
 
-const sessionsByBbThreadId = new Map<string, AcpThreadSession>();
-const bbThreadIdByProviderThreadId = new Map<string, string>();
+const sessionsByRoomThreadId = new Map<string, AcpThreadSession>();
+const roomThreadIdByProviderThreadId = new Map<string, string>();
 const pendingRuntimeRequests = new Map<
   number,
   (response: BridgeJsonRpcResponse) => void
@@ -222,6 +235,9 @@ let runtimeRequestIdCounter = 0;
 let dynamicToolBridgePromise: Promise<AcpDynamicToolBridge> | null = null;
 
 const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
+/** An agent's own words for a session it no longer has (#889). */
+const LOST_SESSION_MESSAGE =
+  /^(?:Internal error: )?Session (?:\S+ )?not found/i;
 
 interface BridgeNotification {
   jsonrpc: "2.0";
@@ -317,7 +333,36 @@ function emitForSession(
   );
 }
 
+function emitStoredContextUsage(session: AcpThreadSession): boolean {
+  if (session.providerThreadId === "") {
+    return false;
+  }
+  const reading = session.dialect.readContextUsage?.({
+    sessionId: session.providerThreadId,
+    model: session.model,
+    env: session.env,
+  });
+  if (reading === undefined) {
+    return false;
+  }
+  session.lastExactContextWindow = reading.size;
+  sendThreadDeltas(session.bbThreadId, [
+    {
+      kind: "contextWindow",
+      used: reading.used,
+      size: reading.size,
+      estimated: reading.estimated,
+      ...(reading.snapshot ? { snapshot: reading.snapshot } : {}),
+      attach: "open",
+    },
+  ]);
+  return true;
+}
+
 function emitContextEstimate(session: AcpThreadSession): void {
+  if (emitStoredContextUsage(session)) {
+    return;
+  }
   const estimate = session.contextEstimate;
   if (estimate === undefined) {
     return;
@@ -326,19 +371,20 @@ function emitContextEstimate(session: AcpThreadSession): void {
     {
       kind: "contextWindow",
       used: estimate.used(),
-      size: estimate.windowSize(session.model),
+      size: session.lastExactContextWindow ?? estimate.windowSize(session.model),
       estimated: true,
       attach: "open",
     },
   ]);
 }
 
-function emitSessionError(session: AcpThreadSession, message: string): void {
+function emitSessionError(session: AcpThreadSession, message: string, httpStatus?: number): void {
   for (const controller of session.pendingToolCalls) controller.abort();
   if (session.activePromptKind !== null) {
     emitForSession(session, "error", {
       threadId: session.bbThreadId,
       message,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
     });
   }
   sendNotification(BRIDGE_NOTIFICATION_METHODS.error, {
@@ -381,7 +427,7 @@ async function forwardDynamicToolCall(
     }
   | { ok: false; error: string }
 > {
-  const session = sessionsByBbThreadId.get(args.threadId);
+  const session = sessionsByRoomThreadId.get(args.threadId);
   if (!session || !session.providerThreadId || session.stopping) {
     return { ok: false, error: "No active ACP session for dynamic tool call." };
   }
@@ -534,6 +580,9 @@ const MODEL_LIST_TIMEOUT_MS = 30_000;
 const ACP_NATIVE_REASONING_DISCOVERY_TIMEOUT_MS = 5_000;
 const AUTH_REQUIRED_MODEL_LIST_ERROR_MESSAGE =
   "ACP agent is not authenticated.";
+// `grok models` exits 0 and still lists models when signed out or expired; its
+// ACP side then advertises only the interactive `grok.com` login.
+const SIGNED_OUT_MODEL_LIST_LINE = "You are not authenticated.";
 
 function reasoningSupportFromCli(
   reasoningCli:
@@ -680,6 +729,41 @@ function permissionCliArgsForMode(
   }
 }
 
+function permissionEnvForMode(
+  permissionEnv: AcpBridgePermissionEnv | undefined,
+  permissionMode: AcpSessionPolicy["permissionMode"],
+): Record<string, string> {
+  switch (permissionMode) {
+    case "full":
+      return permissionEnv?.full ?? {};
+    case "accept-edits":
+      return permissionEnv?.workspaceWrite ?? {};
+  }
+}
+
+function switchesPermissionModeInPlace(
+  session: AcpThreadSession,
+  next: AcpSessionParams,
+): boolean {
+  const current = session.construction;
+  return (
+    next.permissionMode !== current.permissionMode &&
+    session.dialect.openSession === undefined &&
+    isDeepStrictEqual(
+      { ...current, permissionMode: next.permissionMode },
+      next,
+    ) &&
+    isDeepStrictEqual(
+      permissionCliArgsForMode(current.permissionCli, current.permissionMode),
+      permissionCliArgsForMode(next.permissionCli, next.permissionMode),
+    ) &&
+    isDeepStrictEqual(
+      permissionEnvForMode(current.permissionEnv, current.permissionMode),
+      permissionEnvForMode(next.permissionEnv, next.permissionMode),
+    )
+  );
+}
+
 function applyPermissionCliArgs(
   agentArgs: readonly string[],
   permissionCli: AcpBridgePermissionCli | undefined,
@@ -713,6 +797,7 @@ interface AcpDynamicToolBridge {
 let cachedModelCatalog: { key: string; catalog: AgentModelCatalog } | null =
   null;
 const SESSION_MODEL_DISCOVERY_TTL_MS = 60_000;
+const DISCOVERY_SESSION_DELETE_TIMEOUT_MS = 5_000;
 let cachedSessionDiscoveredModels: {
   key: string;
   models: AvailableModel[];
@@ -764,35 +849,32 @@ async function authenticateAcpAgent(args: {
 async function loadAgentModelCatalog(
   listCommand: AcpAgentCommandParam,
 ): Promise<AgentModelCatalog | null> {
-  const stdout = await new Promise<string | null>((resolveExec, rejectExec) => {
-    execFile(
-      listCommand.command,
-      listCommand.args,
-      {
-        ...(listCommand.cwd !== undefined ? { cwd: listCommand.cwd } : {}),
-        env: {
-          ...withoutBridgeRuntimeEnv(process.env),
-          ...(listCommand.envVars ?? {}),
-        },
-        timeout: MODEL_LIST_TIMEOUT_MS,
-      },
-      (error, out, stderr) => {
-        if (!error) {
-          resolveExec(out);
-          return;
-        }
-        if (isMissingExecutableError(error)) {
-          rejectExec(error);
-          return;
-        }
-        if (isAuthRequiredModelListError(error, out, stderr)) {
-          rejectExec(new AcpModelListAuthRequiredError());
-          return;
-        }
-        resolveExec(null);
-      },
-    );
-  });
+  const stdout = await execPortableFile(listCommand.command, listCommand.args, {
+    ...(listCommand.cwd !== undefined ? { cwd: listCommand.cwd } : {}),
+    env: {
+      ...withoutBridgeRuntimeEnv(process.env),
+      ...(listCommand.envVars ?? {}),
+    },
+    timeoutMs: MODEL_LIST_TIMEOUT_MS,
+  }).then(
+    ({ stdout: out }) => out,
+    (error: { stdout?: string; stderr?: string }) => {
+      if (isMissingExecutableError(error)) throw error;
+      if (
+        isAuthRequiredModelListError(error, error.stdout ?? "", error.stderr ?? "")
+      ) {
+        throw new AcpModelListAuthRequiredError();
+      }
+      return null;
+    },
+  );
+  if (
+    stdout
+      ?.split("\n")
+      .some((line) => line.trim() === SIGNED_OUT_MODEL_LIST_LINE)
+  ) {
+    throw new AcpModelListAuthRequiredError();
+  }
   const key = JSON.stringify(listCommand);
   if (stdout === null) {
     process.stderr.write(
@@ -815,6 +897,7 @@ async function loadSessionDiscoveredModels(
   agent: AcpAgentCommandParam,
   reasoningProbePriorityModelIds: readonly string[],
   parameterizedModelPicker: boolean,
+  deleteSessionArgs: AcpDialect["deleteSessionArgs"],
 ): Promise<AvailableModel[] | null> {
   const key = JSON.stringify({
     agent,
@@ -847,6 +930,7 @@ async function loadSessionDiscoveredModels(
   });
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let probeSessionId: string | undefined;
   const timeoutReached = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
       connection.kill();
@@ -878,6 +962,7 @@ async function loadSessionDiscoveredModels(
       })(),
       timeoutReached,
     ]);
+    probeSessionId = newSession.sessionId;
     if (timeout !== undefined) {
       clearTimeout(timeout);
       timeout = undefined;
@@ -916,6 +1001,14 @@ async function loadSessionDiscoveredModels(
     };
     return models;
   } catch (error) {
+    // A signed-out agent (agy answers session/new with -32000) must show Sign in, not a fake "Agent default" model.
+    if (error instanceof AcpAuthRequiredError || isAcpAuthRequiredResponse(error)) {
+      throw new AcpModelListAuthRequiredError();
+    }
+    // A missing CLI must show Install, not "Agent default" (the list-command path does the same).
+    if (error instanceof Error && isMissingExecutableError(error.cause)) {
+      throw error.cause;
+    }
     process.stderr.write(
       `acp bridge: ACP-native model discovery for "${agent.command}" failed: ${
         error instanceof Error ? error.message : String(error)
@@ -926,7 +1019,24 @@ async function loadSessionDiscoveredModels(
     if (timeout !== undefined) {
       clearTimeout(timeout);
     }
-    connection.kill();
+    const exited = connection.kill();
+    const deleteArgs =
+      probeSessionId === undefined
+        ? undefined
+        : deleteSessionArgs?.(agent.args, probeSessionId);
+    if (deleteArgs !== undefined) {
+      // Best effort, in the background once the agent is gone: a delete never fails or slows the list.
+      void exited
+        .then(() =>
+          execPortableFile(agent.command, deleteArgs, {
+            cwd: agent.cwd ?? process.cwd(),
+            env: childEnv,
+            timeoutMs: DISCOVERY_SESSION_DELETE_TIMEOUT_MS,
+          }),
+        )
+        // Not logged: the error quotes the whole command, which can carry a key (`env OPENAI_API_KEY=… opencode`).
+        .catch(() => undefined);
+    }
   }
 }
 
@@ -1068,6 +1178,14 @@ function isAcpAuthRequiredResponse(error: unknown): boolean {
   );
 }
 
+/** omp answers an unknown method with -32603 "Unknown ACP ext method: ...". */
+function isAcpMethodNotFound(error: unknown): boolean {
+  return (
+    error instanceof AcpAgentResponseError &&
+    (error.code === -32601 || /unknown acp ext method/i.test(error.message))
+  );
+}
+
 function withAcpAuthRequiredRecovery(error: unknown): unknown {
   if (error instanceof AcpAuthRequiredError) return error;
   if (
@@ -1166,6 +1284,7 @@ async function selectAcpNativeModel(args: {
   if (shouldSetModel) {
     let configState: AcpConfigStateResult | null = null;
     let setModel = true;
+    let configError: unknown;
     if (modelOption) {
       try {
         configState = await args.connection.request({
@@ -1178,16 +1297,35 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
         setModel = false;
-      } catch {
-        setModel = true;
+      } catch (error) {
+        configError = error;
       }
     }
     if (setModel) {
-      configState = await args.connection.request({
-        method: "session/set_model",
-        params: { sessionId: args.sessionId, modelId: selection.modelId },
-        resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
-      });
+      try {
+        configState = await args.connection.request({
+          method: "session/set_model",
+          params: { sessionId: args.sessionId, modelId: selection.modelId },
+          resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
+        });
+      } catch (error) {
+        // An agent without set_model (OpenCode, omp) already gave the real reason (#711).
+        const reason =
+          configError instanceof AcpAgentResponseError &&
+          isAcpMethodNotFound(error)
+            ? configError
+            : error;
+        if (
+          !(reason instanceof AcpAgentResponseError) ||
+          isAcpAuthRequiredResponse(reason)
+        ) {
+          throw reason;
+        }
+        throw new AcpAgentResponseError(
+          `Model "${selection.modelId}" rejected: ${reason.message}`,
+          reason.code,
+        );
+      }
     }
     configOptions = configState?.configOptions ?? configOptions;
   }
@@ -1402,12 +1540,23 @@ function handlePermissionRequest(
     return;
   }
 
-  if (
-    session.stopping ||
-    session.cancelRequested ||
-    session.activePromptKind !== "turn"
-  ) {
+  if (session.stopping || session.cancelRequested) {
     responder.result({ outcome: { outcome: "cancelled" } });
+    return;
+  }
+
+  if (session.activePromptKind !== "turn") {
+    if (session.policy.permissionMode === "full") {
+      respondPermission(
+        { responder, options: parsed.data.options },
+        "allow_once",
+      );
+    } else {
+      responder.error(
+        -32000,
+        "Permission denied: Cloudroom cannot request approval outside an active turn in accept-edits mode.",
+      );
+    }
     return;
   }
 
@@ -1475,6 +1624,12 @@ function handlePermissionRequest(
     options: parsed.data.options,
     cwd: session.cwd,
     classifyToolCall: session.dialect.classifyToolCall,
+    // Only the agent's own call, bound by its exact ID, before any output.
+    streamedArgsTitle:
+      bound?.event?.toolCallId === toolCall?.toolCallId &&
+      toolCall?.rawOutput === undefined
+        ? session.dialect.streamedArgsTitle
+        : undefined,
   });
   void sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
     providerThreadId: session.providerThreadId,
@@ -1486,6 +1641,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       const resolution = pendingInteractionResolutionSchema.safeParse(result);
       const response = resolution.success
         ? resolveAcpPermissionDecision({
@@ -1499,6 +1655,7 @@ function handlePermissionRequest(
       if (!session.pendingPermissions.delete(pending)) {
         return;
       }
+      session.wake.touch();
       respondPermission(pending, null);
     });
 }
@@ -1518,12 +1675,29 @@ function sliceFileContent(
 }
 
 async function handleFsReadTextFile(
+  session: AcpThreadSession,
   params: unknown,
   responder: AcpAgentRequestResponder,
 ): Promise<void> {
   const parsed = acpReadTextFileParamsSchema.safeParse(params);
   if (!parsed.success) {
     responder.error(-32602, "Invalid fs/read_text_file params");
+    return;
+  }
+  // Skill folders stay readable: session instructions point at their SKILL.md.
+  if (
+    session.policy.permissionMode === "accept-edits" &&
+    !(await isPathInsideRoots(parsed.data.path, [
+      ...session.policy.workspaceWriteRoots,
+      ...(configuredSkillRoots ?? []).map(
+        (root) => root.skillDirectoryRootPath,
+      ),
+    ]))
+  ) {
+    responder.error(
+      -32000,
+      `File reads outside the workspace are denied by Cloudroom's accept-edits permission mode: ${parsed.data.path}`,
+    );
     return;
   }
   try {
@@ -1581,7 +1755,9 @@ async function handleFsWriteTextFile(
       ...(oldText === undefined ? {} : { oldText }),
       content: parsed.data.content,
     });
-    responder.result(null);
+    // An object, not null: Rust ACP agents such as Devin read null as a Parse
+    // error after the write succeeded, and retry it (#2061).
+    responder.result({});
   } catch (error) {
     responder.error(
       -32603,
@@ -1591,9 +1767,9 @@ async function handleFsWriteTextFile(
 }
 
 function liveSessionForThread(
-  bbThreadId: string,
+  roomThreadId: string,
 ): AcpThreadSession | undefined {
-  const session = sessionsByBbThreadId.get(bbThreadId);
+  const session = sessionsByRoomThreadId.get(roomThreadId);
   if (!session || session.stopping || session.providerThreadId === "") {
     return undefined;
   }
@@ -1601,15 +1777,16 @@ function liveSessionForThread(
 }
 
 function removeSession(session: AcpThreadSession): void {
+  session.wake.end();
   for (const controller of session.pendingToolCalls) controller.abort();
-  if (sessionsByBbThreadId.get(session.bbThreadId) === session) {
-    sessionsByBbThreadId.delete(session.bbThreadId);
+  if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
+    sessionsByRoomThreadId.delete(session.bbThreadId);
   }
   if (
-    bbThreadIdByProviderThreadId.get(session.providerThreadId) ===
+    roomThreadIdByProviderThreadId.get(session.providerThreadId) ===
     session.bbThreadId
   ) {
-    bbThreadIdByProviderThreadId.delete(session.providerThreadId);
+    roomThreadIdByProviderThreadId.delete(session.providerThreadId);
   }
 }
 
@@ -1635,8 +1812,8 @@ async function releaseCursorMcpApproval(
 function getSessionByProviderThreadId(
   providerThreadId: string,
 ): AcpThreadSession | undefined {
-  const bbThreadId = bbThreadIdByProviderThreadId.get(providerThreadId);
-  return bbThreadId ? sessionsByBbThreadId.get(bbThreadId) : undefined;
+  const roomThreadId = roomThreadIdByProviderThreadId.get(providerThreadId);
+  return roomThreadId ? sessionsByRoomThreadId.get(roomThreadId) : undefined;
 }
 
 type AcpSessionStartRequest =
@@ -1645,6 +1822,10 @@ type AcpSessionStartRequest =
       kind: "resume";
       params: AcpSessionParams;
       resumeProviderThreadId: string;
+      /** A thread/resume, which comes before any message. */
+      beforeTurn?: true;
+      /** Restart after a lost session (#889) or closed stream (#890): aborts on Stop; `reloadOnly` never starts fresh. */
+      recovery?: { signal: AbortSignal; reloadOnly: boolean };
     }
   | {
       kind: "fork";
@@ -1656,9 +1837,9 @@ async function startAgentSession(
   request: AcpSessionStartRequest,
 ): Promise<AcpThreadSession> {
   const params = request.params;
-  const bbThreadId = params.threadId;
+  const roomThreadId = params.threadId;
 
-  const existing = sessionsByBbThreadId.get(bbThreadId);
+  const existing = sessionsByRoomThreadId.get(roomThreadId);
   if (existing) {
     await stopSession(existing);
   }
@@ -1695,7 +1876,7 @@ async function startAgentSession(
   const launch = await resolveAgentLaunchArgs(params);
   if (launch.warning) {
     emitStartNotification(ACP_WARNING_METHOD, {
-      threadId: bbThreadId,
+      threadId: roomThreadId,
       summary: launch.warning,
     });
   }
@@ -1704,20 +1885,24 @@ async function startAgentSession(
   const childEnv = {
     ...withoutBridgeRuntimeEnv(process.env),
     ...params.envVars,
+    ...permissionEnvForMode(params.permissionEnv, params.permissionMode),
   };
   await dialect.prepareLaunch?.(params.agent.command, childEnv);
+  if (request.kind === "resume" && request.recovery?.signal.aborted) {
+    throw new Error("Stopped before the agent restarted");
+  }
   const connection = createAcpAgentConnection({
     command: params.agent.command,
     args: launch.args,
     cwd: params.cwd,
     env: childEnv,
-    recordThreadId: bbThreadId,
+    recordThreadId: roomThreadId,
     onNotification: (method, notificationParams) =>
       handleAgentNotification(session, method, notificationParams),
     onRequest: (method, requestParams, responder) =>
       handleAgentRequest(session, method, requestParams, responder),
     onExit: (info) => {
-      const wasCurrent = sessionsByBbThreadId.get(bbThreadId) === session;
+      const wasCurrent = sessionsByRoomThreadId.get(roomThreadId) === session;
       cancelPendingPermissions(session);
       removeSession(session);
       if (!wasCurrent || session.stopping || session.providerThreadId === "") {
@@ -1733,17 +1918,19 @@ async function startAgentSession(
     },
   });
   session = {
-    bbThreadId,
+    bbThreadId: roomThreadId,
     turnOutput: false,
     construction: params,
     providerThreadId: "",
     cwd: params.cwd,
+    env: childEnv,
     dialect,
     translator,
     contextEstimate:
       dialect.contextEstimate === undefined
         ? undefined
         : createAcpContextEstimate(dialect.contextEstimate),
+    lastExactContextWindow: undefined,
     model: undefined,
     connection,
     supportsImageInput: false,
@@ -1754,13 +1941,33 @@ async function startAgentSession(
       permissionMode: params.permissionMode,
       workspaceWriteRoots: params.workspaceWriteRoots,
     },
-    pendingInstructions: params.instructions,
+    pendingInstructions: [params.instructions, dialect.workspaceInstructions?.(params.cwd)].filter(Boolean).join("\n\n") || undefined,
     activePromptKind: null,
+    wake: createAcpWake({
+      isIdle: () => session.activePromptKind === null,
+      isHeld: () =>
+        session.pendingPermissions.size > 0 ||
+        session.pendingToolCalls.size > 0,
+      isNotice: dialect.isNotice,
+      openTurn: () => {
+        session.activePromptKind = "turn";
+        emitForSession(session, ACP_TURN_STARTED_METHOD, {
+          threadId: roomThreadId,
+        });
+      },
+      closeTurn: () => finishTurn(session, "end_turn"),
+    }),
     compactionAgentMessage: "",
     queuedInputs: [],
     promptRequestPending: false,
     cancelRequested: false,
+    providerStreamClosed: false,
+    sessionLost: false,
     loading: false,
+    retryableResume:
+      request.kind === "resume" &&
+      request.beforeTurn === true &&
+      dialect.unreachableError !== undefined,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
     stopping: false,
@@ -1770,7 +1977,7 @@ async function startAgentSession(
     cursorMcpApproval: undefined,
     deferStartEmit: emitStartNotification,
   };
-  sessionsByBbThreadId.set(bbThreadId, session);
+  sessionsByRoomThreadId.set(roomThreadId, session);
 
   try {
     const initializeResult = await requestAcpInitialize(connection, {
@@ -1814,7 +2021,7 @@ async function startAgentSession(
       });
       if (session.cursorMcpApproval?.installedByBb) {
         process.stderr.write(
-          `acp bridge: installed Cursor session MCP approval for thread "${bbThreadId}"\n`,
+          `acp bridge: installed Cursor session MCP approval for thread "${roomThreadId}"\n`,
         );
       }
     }
@@ -1852,9 +2059,10 @@ async function startAgentSession(
         try {
           opened = await open(request.resumeProviderThreadId);
         } catch (error) {
+          if (request.recovery?.reloadOnly) throw error;
           console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
           emitStartNotification(ACP_WARNING_METHOD, {
-            threadId: bbThreadId,
+            threadId: roomThreadId,
             summary: `${agentLabel} could not restore the previous session; continuing in a fresh session without in-agent history.`,
           });
         }
@@ -1908,6 +2116,16 @@ async function startAgentSession(
         loadedModels = configState?.models;
         sessionId = request.resumeProviderThreadId;
       } catch (error) {
+        if (
+          session.retryableResume &&
+          error instanceof AcpAgentResponseError &&
+          error.message.includes(dialect.unreachableError!)
+        ) {
+          throw Object.assign(
+            new Error(`The agent couldn't reach its servers: ${error.message}`, { cause: error }),
+            { code: "agent_unreachable" },
+          );
+        }
         // Resume failed, so a fresh session starts below; log why so the lost context is traceable.
         console.error(`ACP session restore failed for ${request.resumeProviderThreadId}; starting a new session:`, error);
         sessionId = undefined;
@@ -1917,6 +2135,15 @@ async function startAgentSession(
       }
     }
 
+    if (
+      sessionId === undefined &&
+      request.kind === "resume" &&
+      request.recovery?.reloadOnly
+    ) {
+      throw new Error(`ACP agent "${agentLabel}" could not reload the session`);
+    }
+    let loadedSession = false;
+    let emittedLoadUsage = false;
     if (sessionId === undefined) {
       session.loading = false;
       session.loadingSessionId = undefined;
@@ -1950,11 +2177,12 @@ async function startAgentSession(
       });
       if (request.kind === "resume") {
         emitStartNotification(ACP_WARNING_METHOD, {
-          threadId: bbThreadId,
+          threadId: roomThreadId,
           summary: `${agentLabel} could not restore the previous session; continuing in a fresh session without in-agent history.`,
         });
       }
     } else {
+      loadedSession = true;
       session.model = await selectAcpNativeModel({
         connection,
         sessionId,
@@ -1968,6 +2196,7 @@ async function startAgentSession(
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
       if (loadUsageUpdate) {
+        emittedLoadUsage = true;
         emitStartNotification(ACP_UPDATE_METHOD, {
           threadId: session.bbThreadId,
           update: loadUsageUpdate,
@@ -1977,17 +2206,17 @@ async function startAgentSession(
 
     if (session.stopping) {
       throw new Error(
-        `ACP session for thread "${bbThreadId}" was released during construction`,
+        `ACP session for thread "${roomThreadId}" was released during construction`,
       );
     }
     session.providerThreadId = sessionId;
-    bbThreadIdByProviderThreadId.set(sessionId, bbThreadId);
+    roomThreadIdByProviderThreadId.set(sessionId, roomThreadId);
     sendNotification(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
-      threadId: bbThreadId,
+      threadId: roomThreadId,
       providerThreadId: sessionId,
       sessionRestorable: session.supportsLoadSession,
     });
-    sendThreadDeltas(bbThreadId, [{ kind: "session.reset" }]);
+    sendThreadDeltas(roomThreadId, [{ kind: "session.reset" }]);
     session.deferStartEmit = undefined;
     for (const deferred of deferredEmits) {
       if (
@@ -1999,6 +2228,9 @@ async function startAgentSession(
       emitForSession(session, deferred.method, deferred.params);
     }
     deferredEmits.length = 0;
+    if (loadedSession && !emittedLoadUsage) {
+      emitStoredContextUsage(session);
+    }
     return session;
   } catch (error) {
     session.stopping = true;
@@ -2006,11 +2238,60 @@ async function startAgentSession(
     connection.kill();
     removeSession(session);
     await releaseCursorMcpApproval(session);
-    throw error;
+    const startError =
+      error instanceof Error
+        ? dialect.startError?.(error.message, params.agent.command)
+        : undefined;
+    throw startError === undefined ? error : new Error(startError);
   }
 }
 
-async function stopSession(session: AcpThreadSession): Promise<void> {
+const sessionRecoveries = new Map<string, AbortController>();
+
+/**
+ * Restarts an agent whose provider stream closed (#890) and reloads its
+ * session, or whose session was lost (#889) and reloads it or starts fresh.
+ * Returns why the message must not be sent when Stop came first or the
+ * restart failed; a failed restart keeps the session marked for a retry.
+ */
+async function recoverSession(
+  old: AcpThreadSession,
+  params: AcpSessionParams,
+): Promise<AcpThreadSession | string> {
+  const stop = new AbortController();
+  sessionRecoveries.set(old.bbThreadId, stop);
+  try {
+    await stopSession(old, { tree: true });
+    const session = await startAgentSession({
+      kind: "resume",
+      params,
+      resumeProviderThreadId: old.providerThreadId,
+      recovery: { signal: stop.signal, reloadOnly: old.providerStreamClosed },
+    });
+    if (!stop.signal.aborted) return session;
+    await stopSession(session);
+  } catch (error) {
+    if (!stop.signal.aborted && !sessionsByRoomThreadId.has(old.bbThreadId)) {
+      old.stopping = false;
+      sessionsByRoomThreadId.set(old.bbThreadId, old);
+      roomThreadIdByProviderThreadId.set(old.providerThreadId, old.bbThreadId);
+      console.error("ACP session recovery failed:", error);
+      return old.providerStreamClosed
+        ? "The agent lost its connection and could not reload this conversation. Your message was not sent; send it again to retry."
+        : "The agent lost this session and could not restart. Your message was not sent; send it again to retry.";
+    }
+  } finally {
+    if (sessionRecoveries.get(old.bbThreadId) === stop) {
+      sessionRecoveries.delete(old.bbThreadId);
+    }
+  }
+  return "Stopped before the agent restarted; your message was not sent.";
+}
+
+async function stopSession(
+  session: AcpThreadSession,
+  killOptions?: { tree?: boolean },
+): Promise<void> {
   if (session.stopping) {
     return;
   }
@@ -2036,9 +2317,11 @@ async function stopSession(session: AcpThreadSession): Promise<void> {
   }
   settleInterruptedPrompt(session);
 
-  session.connection.kill();
+  const exited = session.connection.kill(
+    session.dialect.stopEndsCommands ? { ...killOptions, descendants: true } : killOptions,
+  );
   removeSession(session);
-  await releaseCursorMcpApproval(session);
+  await Promise.all([exited, releaseCursorMcpApproval(session)]);
 }
 
 function settleInterruptedPrompt(session: AcpThreadSession): void {
@@ -2064,9 +2347,13 @@ async function releaseSession(session: AcpThreadSession): Promise<void> {
     "ACP session released before the steer was sent",
   );
   cancelPendingPermissions(session);
-  session.connection.kill();
+  // A turn the agent started itself has no prompt to end it.
+  if (session.wake.active) {
+    finishTurn(session, "cancelled");
+  }
+  const exited = session.connection.kill();
   removeSession(session);
-  await releaseCursorMcpApproval(session);
+  await Promise.all([exited, releaseCursorMcpApproval(session)]);
 }
 
 function joinSteer(
@@ -2142,6 +2429,7 @@ function sessionSystemPrompt(
 
 function requestSteerCancel(session: AcpThreadSession): void {
   if (
+    session.dialect.steerWaits === true ||
     session.stopping ||
     session.cancelRequested ||
     !session.promptRequestPending ||
@@ -2197,6 +2485,7 @@ function finishTurn(
   if (session.activePromptKind !== "turn") {
     return;
   }
+  endWake(session);
   for (const controller of session.pendingToolCalls) controller.abort();
   session.activePromptKind = null;
   dropQueuedTurnInputs(session, "ACP turn ended before the steer was sent");
@@ -2215,16 +2504,31 @@ const TURN_OUTPUT_UPDATES: ReadonlySet<string> = new Set([
   "tool_call",
 ]);
 
+/** Ends a turn the agent started itself, whether it is over or a prompt takes it over. */
+function endWake(session: AcpThreadSession): void {
+  if (!session.wake.active) {
+    return;
+  }
+  session.wake.end();
+  cancelPendingPermissions(session);
+}
+
 function runTurn(
   session: AcpThreadSession,
   firstInput: AcpPendingTurnInput,
 ): void {
   session.activePromptKind = "turn";
-  session.turnOutput = false;
   emitForSession(session, ACP_TURN_STARTED_METHOD, {
     threadId: session.bbThreadId,
   });
+  runPrompts(session, firstInput);
+}
 
+/** Sends the input, then each steer queued behind it, and ends the turn. */
+function runPrompts(
+  session: AcpThreadSession,
+  firstInput: AcpPendingTurnInput,
+): void {
   session.turnSettled = (async () => {
     let pending = firstInput;
     for (;;) {
@@ -2236,6 +2540,9 @@ function runTurn(
 
       let stopReason: z.infer<typeof acpStopReasonSchema>;
       session.cancelRequested = false;
+      // Only this prompt's output counts: a follow-up sent after a steer's
+      // cancel must not borrow the earlier reply's (#1721).
+      session.turnOutput = false;
       try {
         session.promptRequestPending = true;
         const prompt = buildPromptContentBlocks(session, pending.input);
@@ -2250,6 +2557,9 @@ function runTurn(
           requestSteerCancel(session);
         }
         const result = await promptResult;
+        session.wake.promptEnded();
+        const lateText = session.dialect.lateTextMs;
+        if (lateText !== undefined) await new Promise((resolve) => setTimeout(resolve, lateText));
         stopReason = result.stopReason;
         for (
           let joined = session.joinedSteers.shift();
@@ -2259,6 +2569,7 @@ function runTurn(
           stopReason = (await joined) ?? stopReason;
         }
       } catch (error) {
+        session.wake.promptEnded();
         session.promptRequestPending = false;
         dropTurnInput(pending, "ACP turn failed before the prompt was sent");
         dropQueuedTurnInputs(
@@ -2267,9 +2578,39 @@ function runTurn(
         );
         session.cancelRequested = false;
         if (!session.stopping && !session.connection.exited) {
+          const message = error instanceof Error ? error.message : String(error);
+          const code =
+            error instanceof AcpAgentResponseError ? error.code : undefined;
+          // Cursor keeps failing this way until its process restarts (#890).
+          session.providerStreamClosed =
+            session.supportsLoadSession &&
+            code === -32603 &&
+            message === "Internal error: WritableIterable is closed";
+          // A live agent that dropped the session fails every later prompt
+          // (#889). Needs a "not found" naming exactly this session (text or
+          // data.sessionId/uri): -32002 alone also means a file, which may
+          // sit in a folder named after the session.
+          const id = session.providerThreadId;
+          const data =
+            error instanceof AcpAgentResponseError ? error.data : undefined;
+          const dataNamesSession =
+            typeof data === "object" &&
+            data !== null &&
+            (("sessionId" in data && data.sessionId === id) ||
+              ("uri" in data && data.uri === id));
+          session.sessionLost =
+            error instanceof AcpAgentResponseError &&
+            (LOST_SESSION_MESSAGE.test(message) ||
+              /not found: (.*)$/i.exec(message)?.[1] === id ||
+              (/not found/i.test(message) && dataNamesSession));
           emitSessionError(
             session,
-            error instanceof Error ? error.message : String(error),
+            session.providerStreamClosed
+              ? `${message}. The agent lost its connection; your next message restarts it and reloads this conversation.`
+              : session.sessionLost
+                ? `${message}. The agent lost this session; your next message restarts it.`
+                : message,
+            agentErrorHttpStatus(data),
           );
         }
         session.activePromptKind = null;
@@ -2380,7 +2721,7 @@ function handleAgentRequest(
       handlePermissionRequest(session, params, responder);
       return;
     case "fs/read_text_file":
-      void handleFsReadTextFile(params, responder);
+      void handleFsReadTextFile(session, params, responder);
       return;
     case "fs/write_text_file":
       void handleFsWriteTextFile(session, params, responder);
@@ -2455,6 +2796,7 @@ function handleAgentNotification(
     return;
   }
   session.contextEstimate?.addUpdate(parsed.data.update);
+  session.wake.note(parsed.data.update);
   if (TURN_OUTPUT_UPDATES.has(parsed.data.update.sessionUpdate)) {
     session.turnOutput = true;
   }
@@ -2522,14 +2864,27 @@ async function handleModelList(
   params: AcpModelListParams,
   dialectId: string | undefined,
 ): Promise<void> {
+  const defaultLevel = resolveAcpDialect({
+    ...(dialectId === undefined ? {} : { dialectId }),
+    command: params.listCommand?.command ?? params.agent?.command ?? "",
+  }).defaultReasoningLevel;
   function sendModels(models: readonly AvailableModel[]): void {
+    const configured = applyConfiguredReasoningToModels(models, {
+      reasoningCli: params.reasoningCli,
+      nativeReasoning: params.nativeReasoning,
+    });
     sendResult(
       id,
       splitPrimaryModels(
-        applyConfiguredReasoningToModels(models, {
-          reasoningCli: params.reasoningCli,
-          nativeReasoning: params.nativeReasoning,
-        }),
+        defaultLevel === undefined
+          ? configured
+          : configured.map((model) =>
+              model.supportedReasoningEfforts.some(
+                (effort) => effort.reasoningEffort === defaultLevel,
+              )
+                ? { ...model, defaultReasoningEffort: defaultLevel }
+                : model,
+            ),
         params.primaryModels,
       ),
     );
@@ -2557,6 +2912,10 @@ async function handleModelList(
           params.agent,
           params.reasoningProbePriorityModelIds,
           params.parameterizedModelPicker,
+          resolveAcpDialect({
+            ...(dialectId === undefined ? {} : { dialectId }),
+            command: params.agent.command,
+          }).deleteSessionArgs,
         )
       : null;
   if (sessionDiscoveredModels) {
@@ -2654,17 +3013,20 @@ function maintenanceTarget(
 ): AcpMaintenanceTarget {
   const launchSpec = decodeLaunchSpec(providerOptions);
   const maintenance = maintenanceForRequest(providerOptions, launchSpec);
-  const scriptInstaller = acpScriptInstallerSchema.safeParse(
+  const installer = acpInstallerSchema.safeParse(
     providerOptions?.["acpInstaller"],
   );
   return {
     maintenance,
     installer:
       maintenance?.installer ??
-      (scriptInstaller.success
-        ? () => acpScriptInstallerCommand(scriptInstaller.data)
+      (installer.success
+        ? () => acpInstallerCommand(installer.data)
         : undefined),
     command: launchSpec?.command ?? null,
+    ...(typeof providerOptions?.["acpMinimumVersion"] === "string"
+      ? { minimumVersion: providerOptions["acpMinimumVersion"] }
+      : {}),
   };
 }
 
@@ -2686,6 +3048,7 @@ async function handleRequest(
           approvalEnforcedBy: "runtime",
           grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
           steerMode: "queue",
+          stopsUnopenedTurns: false,
           skills: { configure: true },
         },
       };
@@ -2696,10 +3059,15 @@ async function handleRequest(
       const modelPicker = decodeAcpModelPickerOptions(
         request.params.providerOptions,
       );
+      const launchSpec = decodeLaunchSpec(request.params.providerOptions);
+      const { cwd } = request.params;
       await handleModelList(
         request.id,
         buildAcpModelListParams(
-          decodeLaunchSpec(request.params.providerOptions),
+          // Like thread start: list in the project, where its agent config applies (#1236).
+          launchSpec !== null && launchSpec.cwd === undefined && cwd
+            ? { ...launchSpec, cwd }
+            : launchSpec,
           modelPicker,
         ),
         decodeDialectId(request.params.providerOptions),
@@ -2793,6 +3161,7 @@ async function handleRequest(
               kind: "resume",
               params: sessionParams,
               resumeProviderThreadId: request.params.providerThreadId,
+              beforeTurn: true,
             }
           : request.method === "thread/fork"
             ? {
@@ -2816,7 +3185,7 @@ async function handleRequest(
         sendError(request.id, -32000, "No active ACP session");
         return;
       }
-      if (session.activePromptKind !== null) {
+      if (session.activePromptKind !== null && !session.wake.active) {
         sendError(request.id, -32000, "A turn is already active");
         return;
       }
@@ -2825,7 +3194,38 @@ async function handleRequest(
         decodeLaunchSpec(params.options.providerOptions),
         params.options,
       );
-      if (!isDeepStrictEqual(construction, session.construction)) {
+      // A message that compacts, or needs a new session, first ends a turn the agent started itself.
+      if (
+        session.wake.active &&
+        (isStandaloneBuiltinCompactCommand(params.input) ||
+          session.providerStreamClosed ||
+          session.sessionLost ||
+          (!switchesPermissionModeInPlace(session, construction) &&
+            !isDeepStrictEqual(construction, session.construction)))
+      ) {
+        finishTurn(session, "end_turn");
+      }
+      if (session.providerStreamClosed || session.sessionLost) {
+        const closed = session.providerStreamClosed;
+        const previousProviderThreadId = session.providerThreadId;
+        const recovered = await recoverSession(session, construction);
+        if (typeof recovered === "string") {
+          sendError(request.id, -32000, recovered);
+          return;
+        }
+        session = recovered;
+        sendNotification(BRIDGE_NOTIFICATION_METHODS.sessionReplaced, {
+          threadId: params.threadId,
+          providerThreadId: session.providerThreadId,
+          reason: closed
+            ? "The agent's connection closed; the ACP session was restarted and reloaded."
+            : "The agent lost its session; the ACP session was restarted.",
+          contextLost: session.providerThreadId !== previousProviderThreadId,
+        });
+      } else if (switchesPermissionModeInPlace(session, construction)) {
+        session.construction = construction;
+        session.policy.permissionMode = construction.permissionMode;
+      } else if (!isDeepStrictEqual(construction, session.construction)) {
         const previousProviderThreadId = session.providerThreadId;
         session = await startAgentSession({
           kind: "resume",
@@ -2847,6 +3247,10 @@ async function handleRequest(
       };
       if (isStandaloneBuiltinCompactCommand(params.input)) {
         startCompaction(session, pending);
+      } else if (session.wake.active) {
+        // The message becomes the prompt of the turn the agent started itself.
+        endWake(session);
+        runPrompts(session, pending);
       } else {
         runTurn(session, pending);
       }
@@ -2867,11 +3271,36 @@ async function handleRequest(
         });
         return;
       }
+      const construction = applyAcpTurnSettings(session.construction, null, {
+        permissionMode: params.options.permissionMode,
+      });
+      if (construction !== session.construction) {
+        if (!switchesPermissionModeInPlace(session, construction)) {
+          const agent =
+            decodeLaunchSpec(params.options.providerOptions)?.displayName ??
+            "This agent";
+          sendError(
+            request.id,
+            -32000,
+            `${agent} can't change its permission mode in the middle of a turn. Wait for the turn to finish or stop it, then send your message again.`,
+          );
+          return;
+        }
+        session.construction = construction;
+        session.policy.permissionMode = construction.permissionMode;
+      }
       const pending: AcpPendingTurnInput = {
         clientRequestId: params.clientRequestId,
         input: params.input,
         requestId: null,
       };
+      // A turn the agent started itself has no prompt to steer: this one becomes its prompt.
+      if (session.wake.active) {
+        endWake(session);
+        sendResult(request.id, { threadId: params.threadId });
+        runPrompts(session, pending);
+        return;
+      }
       const steerMeta = session.dialect.steerMeta;
       if (
         session.joinsSteering &&
@@ -2890,7 +3319,8 @@ async function handleRequest(
     }
 
     case "thread/stop": {
-      const session = sessionsByBbThreadId.get(request.params.threadId);
+      sessionRecoveries.get(request.params.threadId)?.abort();
+      const session = sessionsByRoomThreadId.get(request.params.threadId);
       if (session) {
         if (request.params.intent === "release") {
           await releaseSession(session);
@@ -2920,7 +3350,22 @@ async function handleRequest(
   }
 }
 
+// Runtime notification: a Stop waits behind this thread's turn/start (#890).
+const threadStopRequestedSchema = z.object({
+  method: z.literal("thread/stopRequested"),
+  params: z.object({ threadId: z.string().min(1) }),
+});
+
 function handleParsedMessage(parsed: unknown): void {
+  const stopRequested = threadStopRequestedSchema.safeParse(parsed);
+  if (stopRequested.success) {
+    const { threadId } = stopRequested.data.params;
+    sessionRecoveries.get(threadId)?.abort();
+    const opening = sessionsByRoomThreadId.get(threadId);
+    // Cut off from its servers, Cursor never answers session/load, so Stop ends it.
+    if (opening?.retryableResume && opening.loading) void opening.connection.kill();
+    return;
+  }
   const response = decodeBridgeJsonRpcResponse(parsed);
   if (response && typeof response.id === "number") {
     const pending = pendingRuntimeRequests.get(response.id);
@@ -2965,7 +3410,7 @@ export const handleLine = createBridgeLineHandler({ handleParsedMessage });
 
 async function stopAllSessions(): Promise<void> {
   await Promise.all(
-    Array.from(sessionsByBbThreadId.values()).map((session) =>
+    Array.from(sessionsByRoomThreadId.values()).map((session) =>
       stopSession(session),
     ),
   );

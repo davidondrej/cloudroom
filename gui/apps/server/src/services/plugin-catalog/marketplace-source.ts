@@ -60,10 +60,10 @@ export function parseMarketplaceSource(raw: string): MarketplaceSource {
   }
   if (/^http:\/\//iu.test(source)) {
     throw new Error(
-      `invalid marketplace source "${source}": plain http is refused, use https`,
+      "invalid marketplace source: plain http is refused, use https",
     );
   }
-  throw new Error(`invalid marketplace source "${source}": ${SOURCE_FORMS}`);
+  throw new Error(`invalid marketplace source: ${SOURCE_FORMS}`);
 }
 
 export function marketplaceSourceDisplay(source: MarketplaceSource): string {

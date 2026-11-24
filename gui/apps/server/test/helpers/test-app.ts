@@ -10,6 +10,11 @@ import {
   resolveBuiltinSkillsRootPath,
 } from "../../src/services/skills/builtin-skills-copy.js";
 import { serve } from "@hono/node-server";
+import type { Hono } from "hono";
+import {
+  CALLER_TOKEN_HEADER,
+  createCallerProofIssuer,
+} from "@cloudroom/config/caller-proof";
 import type { AddressInfo } from "node:net";
 import { createConnection, getAppSettings, type DbConnection } from "@cloudroom/db";
 import { defaultFeatureFlags } from "@cloudroom/domain";
@@ -17,7 +22,10 @@ import { initDb } from "../../src/db.js";
 import { createApp } from "../../src/server.js";
 import { PendingInteractionLifecycle } from "../../src/services/interactions/pending-interactions.js";
 import { createMachineAuthService } from "../../src/services/machine-auth.js";
-import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
+import {
+  createProviderRegistryService,
+  createProviderUsageReader,
+} from "../../src/services/providers/provider-registry.js";
 import { registerFirstPartyProviders } from "./provider-registry.js";
 import { validatePluginProviderDeclaration } from "@get-bb/plugin-sdk/internal/host-policy";
 import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
@@ -30,7 +38,7 @@ import {
   createAppVersionService,
   type AppVersionService,
 } from "../../src/services/system/app-version.js";
-import { createBbAppManagedConfigReloader } from "../../src/services/system/bb-app-managed-config.js";
+import { createRoomAppManagedConfigReloader } from "../../src/services/system/app-managed-config.js";
 import { createNoopTelemetryService } from "../../src/services/system/telemetry.js";
 import { TerminalSessionLifecycle } from "../../src/services/terminals/terminal-session-lifecycle.js";
 import { createLifecycleDedupers } from "../../src/lifecycle-dedupers.js";
@@ -42,10 +50,26 @@ import { HostSharedPortCoordinator } from "../../src/ws/host-shared-ports.js";
 import { WorkspaceReadCaches } from "../../src/services/environments/workspace-read-cache.js";
 
 const TEST_MACHINE_KEY_PREFIX = "test-daemon-key";
+
+export const ANONYMOUS_CALLER = { [CALLER_TOKEN_HEADER]: "anonymous" };
+
+function withCallerToken(request: Request, token: string): Request {
+  if (request.headers.has(CALLER_TOKEN_HEADER)) return request;
+  const withToken = new Request(request);
+  withToken.headers.set(CALLER_TOKEN_HEADER, token);
+  return withToken;
+}
+
+export function sendCallerToken(app: Hono, token: string): void {
+  const fetch = app.fetch;
+  app.fetch = ((request, ...rest) =>
+    fetch(withCallerToken(request, token), ...rest)) as Hono["fetch"];
+}
 const TEST_SERVER_HOST = "127.0.0.1";
 
 export interface TestAppHarness {
   app: ReturnType<typeof createApp>["app"];
+  callerToken: string;
   config: ServerRuntimeConfig;
   db: DbConnection;
   deps: ServerAppDeps;
@@ -150,7 +174,7 @@ export async function createTestAppHarness(
     ...configOverrides
   } = overrides;
   const logger = createTestLogger();
-  const dataDir = await mkdtemp(join(tmpdir(), "bb-server-test-"));
+  const dataDir = await mkdtemp(join(tmpdir(), "cloudroom-server-test-"));
   await copySharedBuiltinSkills(
     resolveSharedBuiltinSkillsRootPath(resolveBuiltinSkillsRootPath()),
     join(dataDir, "shared-skills"),
@@ -160,13 +184,11 @@ export async function createTestAppHarness(
   const watchInterests = new WatchInterestCoordinator({ db, hub });
   const sharedPorts = new HostSharedPortCoordinator({ db, hub });
   const workspaceReadCaches = new WorkspaceReadCaches({ hub });
+  const readProviderUsage = createProviderUsageReader(db, 0);
   const providerRegistry = createProviderRegistryService({
     readUserProviderPreferences: () => {
-      const settings = getAppSettings(db);
-      return {
-        providerOrder: settings.providerOrder,
-        defaultProviderId: settings.defaultProviderId,
-      };
+      const { defaultProviderId, hiddenProviderIds, customProviderOrder } = getAppSettings(db);
+      return { defaultProviderId, hiddenProviderIds, customOrder: customProviderOrder, usage: readProviderUsage() };
     },
   });
   const pluginHostArtifacts = new PluginHostArtifactRegistry();
@@ -243,7 +265,7 @@ export async function createTestAppHarness(
     logger,
     openTimeoutMs: 50,
   });
-  const bbAppManagedConfig = await createBbAppManagedConfigReloader({
+  const roomAppManagedConfig = await createRoomAppManagedConfigReloader({
     config,
     hub,
     logger,
@@ -267,9 +289,12 @@ export async function createTestAppHarness(
   });
   pendingInteractions.start();
   const appVersion = appVersionService ?? createAppVersionService({ config });
+  const callerProofs = await createCallerProofIssuer({ dataDir });
+  const callerToken = callerProofs.issueInternal();
   const deps: ServerAppDeps = {
     appVersion,
-    bbAppManagedConfig,
+    bbAppManagedConfig: roomAppManagedConfig,
+    callerProofs,
     config,
     db,
     hub,
@@ -289,10 +314,12 @@ export async function createTestAppHarness(
     workspaceReadCaches,
   };
   const { app, pluginCatalogService, pluginService } = createApp(deps);
+  sendCallerToken(app, callerToken);
   installDefaultEnvironmentProviders();
 
   return {
     app,
+    callerToken,
     config,
     db,
     deps,
@@ -303,7 +330,7 @@ export async function createTestAppHarness(
       clearAllThreadProvisionSchedules();
       setPluginEnvironmentProviderBridge(undefined);
       await pluginService.stop();
-      await rm(dataDir, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     },
   };
 }

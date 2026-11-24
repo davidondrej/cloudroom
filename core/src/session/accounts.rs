@@ -123,7 +123,7 @@ impl Session {
             && !self.queue_paused
             && !self.archived
             && self.close_request.is_none()
-            && self.state != "closed";
+            && self.state != SessionState::Closed;
         match &self.resume_loop {
             Some(id) => (!stopped).then(|| Change::Delete(id.clone())),
             None if stopped && !self.resume_refused => {
@@ -141,6 +141,7 @@ impl Session {
         let provider = match self.harness {
             runtime::Kind::Claude => "Claude ",
             runtime::Kind::Codex => "Codex ",
+            runtime::Kind::Cursor => "Cursor ",
             _ => "",
         };
         format!("Resume after {provider}plan limit · {}", self.session_id)
@@ -298,13 +299,24 @@ impl Manager {
         self.continue_limited(&[runtime::Kind::Claude])
     }
 
-    /// Send "keep working" to these harnesses' sessions stopped by a usage limit.
-    /// The harness restarts or wakes first, so it loads the new login before the prompt runs.
+    /// The website wrote a new Cursor login: continue Cursor work its plan limit stopped. Each Cursor run reads the
+    /// login, so no restart is needed.
+    pub fn cursor_switched(self: &Arc<Self>) -> Vec<String> {
+        self.continue_limited(&[runtime::Kind::Cursor])
+    }
+
+    /// Send "keep working" to these harnesses' sessions stopped by a usage limit. Turns still running on the old login
+    /// continue too, once the limit stops them (`advance`).
     fn continue_limited(self: &Arc<Self>, harnesses: &[runtime::Kind]) -> Vec<String> {
         if self.is_stopping() || self.storage.blocks() {
             return Vec::new();
         }
         let mut local = self.local.lock().unwrap();
+        for session in local.sessions.values_mut() {
+            if harnesses.contains(&session.harness) && session.current_request.is_some() {
+                session.switched_mid_turn = true;
+            }
+        }
         let ids: Vec<_> = local
             .sessions
             .values()
@@ -313,9 +325,9 @@ impl Manager {
                     && !s.archived
                     && harnesses.contains(&s.harness)
                     // Awake and idle, going to sleep (the app's switch asks for it), or asleep.
-                    && ((s.ready && s.handle.is_some() && s.state == "idle")
+                    && ((s.ready && s.handle.is_some() && s.state == SessionState::Idle)
                         || s.releasing
-                        || (s.handle.is_none() && s.state == "sleeping"))
+                        || (s.handle.is_none() && s.state == SessionState::Sleeping))
                     && s.current_request.is_none()
                     && s.queue.is_empty()
                     && !s.queue_paused
@@ -325,8 +337,24 @@ impl Manager {
             })
             .map(|s| s.session_id.clone())
             .collect();
+        self.continue_sessions(&mut local, ids)
+    }
+
+    /// Send these sessions "keep working". The harness restarts or wakes first, so it loads the new login before the
+    /// prompt runs.
+    pub(super) fn continue_sessions(
+        self: &Arc<Self>,
+        local: &mut Local,
+        ids: Vec<String>,
+    ) -> Vec<String> {
+        if self.is_stopping() || self.storage.blocks() {
+            return Vec::new();
+        }
         let mut continued = Vec::new();
         for id in ids {
+            if !local.sessions[&id].can_resume() {
+                continue;
+            }
             // The continuation of a `plan_only` loop run stays `plan_only` (ADR 0292).
             let mut input = json!({"text":"keep working"});
             if local.sessions[&id].resume_plan_only {
@@ -348,9 +376,10 @@ impl Manager {
             if local.append(&id, "receipt", data, None).is_err() {
                 continue;
             }
-            if let Some(handle) = &local.sessions[&id].handle {
-                handle.request_shutdown();
-            } else if self.wake(&mut local, &id).is_err() {
+            // A sleep, not a crash: it settles the switch's own pending sleep and keeps the turn's one recovery.
+            if local.sessions[&id].handle.is_some() {
+                self.release(local, &id);
+            } else if self.wake(local, &id).is_err() {
                 continue;
             }
             continued.push(id);
@@ -686,7 +715,10 @@ impl Manager {
             s.harness == runtime::Kind::Codex
                 && (s.current_request.is_some()
                     || (!s.queue_paused && !s.queue.is_empty())
-                    || matches!(s.state.as_str(), "starting" | "resuming" | "pending"))
+                    || matches!(
+                        s.state,
+                        SessionState::Starting | SessionState::Resuming | SessionState::Pending
+                    ))
         }) {
             return Err(Error::Conflict(
                 "finish active Codex work before signing in",
@@ -744,7 +776,10 @@ impl Manager {
                 && (session.handle.is_some()
                     || session.current_request.is_some()
                     || (!session.queue_paused && !session.queue.is_empty())
-                    || matches!(session.state.as_str(), "starting" | "resuming" | "pending"))
+                    || matches!(
+                        session.state,
+                        SessionState::Starting | SessionState::Resuming | SessionState::Pending
+                    ))
         }) {
             return Err(Error::Conflict(
                 "close Cursor sessions before changing the cloud login",

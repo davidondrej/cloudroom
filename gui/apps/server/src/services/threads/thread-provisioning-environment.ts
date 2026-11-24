@@ -16,7 +16,10 @@ import {
 import type { AppDeps } from "../../types.js";
 import type { CommandResultSideEffectsDeps } from "../../internal/command-result-side-effects.js";
 import { ApiError } from "../../errors.js";
-import { advanceEnvironmentProvisioning } from "../environments/environment-engine.js";
+import {
+  advanceEnvironmentProvisioning,
+  restoreParkedWorktree,
+} from "../environments/environment-engine.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import {
@@ -245,6 +248,7 @@ export async function ensureThreadProvisionEnvironmentReady(
   }
   if (environment === null)
     throw new ApiError(404, "environment_not_found", "Environment not found");
+  await restoreParkedWorktree(deps, thread.id, environment.id);
   if (
     context.state.environmentId === environment.id &&
     thread.environmentId === environment.id &&

@@ -15,19 +15,17 @@ import {
 } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { DndContext, DragOverlay, useDroppable } from "@dnd-kit/core";
-import { useComposedRefs } from "@radix-ui/react-compose-refs";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { useComposedRefs } from "@/hooks/useComposedRefs";
+import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { createPortal } from "react-dom";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { ProjectResponse } from "@cloudroom/server-contract";
-import { NavLink } from "react-router-dom";
+import { NavLink } from "react-router";
 import {
   usePromptDraftHasInput,
   usePromptDraftInputThreadIds,
 } from "@/hooks/usePromptDraftStorage";
+import { reuseSameItems, useStableValue } from "@/hooks/useStableValue";
 import { EmptyState } from "@cloudroom/shared-ui/empty-state";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import {
@@ -448,15 +446,15 @@ function SectionDndSortableList({
   sectionDnd?: SectionThreadDndState | null;
   parentKey: string;
 }) {
+  // A new `items` array changes dnd-kit's context and redraws every sortable row.
+  const itemIds = sectionDnd?.itemIdsByParentKey.get(parentKey);
+  const items = useMemo(() => [...(itemIds ?? [])], [itemIds]);
   if (!sectionDnd) {
     return <>{children}</>;
   }
 
   return (
-    <SortableContext
-      items={[...(sectionDnd.itemIdsByParentKey.get(parentKey) ?? [])]}
-      strategy={verticalListSortingStrategy}
-    >
+    <SortableContext items={items} strategy={verticalListSortingStrategy}>
       {children}
     </SortableContext>
   );
@@ -1457,6 +1455,10 @@ export const ChronologicalSectionThreadSections = memo(
     });
     const sectionItems = rootItems.filter((item) => item.kind === "section");
     const looseItems = rootItems.filter((item) => item.kind !== "section");
+    const looseItemIds = useStableValue(
+      looseItems.map(getSidebarDndItemId),
+      reuseSameItems,
+    );
     const loosePreviewBeforeKey =
       renderedSectionDnd?.dropPreview?.parentKey === CHRONOLOGICAL_CONTAINER_ID
         ? renderedSectionDnd.dropPreview.beforeItemKey
@@ -1500,7 +1502,7 @@ export const ChronologicalSectionThreadSections = memo(
         <ThreadTreeLoadingSkeleton />
       ) : looseItems.length > 0 ? (
         <SortableContext
-          items={looseItems.map(getSidebarDndItemId)}
+          items={looseItemIds}
           strategy={verticalListSortingStrategy}
         >
           {renderItems(looseItems)}

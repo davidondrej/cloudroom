@@ -1489,7 +1489,7 @@ describe("thread lifecycle transitions and read state", () => {
     }
   });
 
-  it("does not mark child thread completion as unread by itself", () => {
+  it("marks child thread completion as unread", () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(1_000);
@@ -1518,7 +1518,7 @@ describe("thread lifecycle transitions and read state", () => {
 
       expect(idleThread.status).toBe("idle");
       expect(idleThread.updatedAt).toBe(2_000);
-      expect(idleThread.latestAttentionAt).toBe(1_000);
+      expect(idleThread.latestAttentionAt).toBe(2_000);
       expect(idleThread.lastReadAt).toBe(1_000);
     } finally {
       vi.useRealTimers();

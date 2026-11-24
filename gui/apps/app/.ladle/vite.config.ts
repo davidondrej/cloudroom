@@ -2,9 +2,9 @@ import { readFileSync } from "fs";
 import path from "path";
 import { defineConfig, parseSync, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-import tailwindcss from "@tailwindcss/vite";
 import { resolveCurrentDevInstanceConfig } from "@cloudroom/config/runtime";
 import { sharedUiEnvSeam } from "../vite-shared-ui-seam.js";
+import { tailwindcss } from "../vite-tailwind.js";
 
 const repoRoot = path.resolve(__dirname, "../../..");
 const devInstance = resolveCurrentDevInstanceConfig(repoRoot);

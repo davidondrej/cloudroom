@@ -119,7 +119,7 @@ function normalizeGeneratedThreadMetadata(
 
 /** A configured BB_INFERENCE_FALLBACK wins. Otherwise naming falls back to the other harness, so one signed-out
  *  harness never blocks it; the primary still gets a final retry. */
-function namingFallbackModel(config: AppDeps["config"], model: string): string {
+export function namingFallbackModel(config: AppDeps["config"], model: string): string {
   if (config.inferenceFallbackModel !== config.inferenceModel) {
     return config.inferenceFallbackModel;
   }

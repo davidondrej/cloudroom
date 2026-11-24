@@ -46,6 +46,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -292,6 +293,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).not.toHaveBeenCalled();
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -340,6 +342,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -541,6 +544,34 @@ describe("room-cli thread spawn command output", () => {
     );
   });
 
+  it("room-cli thread spawn retries a relay 504 with the same request ID (#2448)", async () => {
+    const thread = fixtures.makeThread({
+      id: "thread-1",
+      projectId: "proj-1",
+      providerId: "codex",
+    });
+    const post = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("cloudroom: timed out waiting for the tunnel client\n", {
+          status: 504,
+        }),
+      )
+      .mockResolvedValueOnce(thread);
+    stubServerApi({ "v1.threads.$post": post });
+
+    await runCommand(
+      ["thread", "spawn", "--project", "proj-1", "--prompt", "hello"],
+      register,
+    );
+
+    const [first, second] = post.mock.calls.map(
+      ([args]) => (args as { json: { requestId: string } }).json.requestId,
+    );
+    expect(second).toBe(first);
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
   it("room-cli thread spawn with --parent-thread forwards parent thread id", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
     const thread: domain.Thread = fixtures.makeThread({
@@ -575,6 +606,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -588,15 +620,15 @@ describe("room-cli thread spawn command output", () => {
     });
   });
 
-  it("room-cli thread spawn does not default parent thread id from ROOM_THREAD_ID", async () => {
+  it("room-cli thread spawn names ROOM_THREAD_ID as its launcher, not its parent", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
-    vi.stubEnv("ROOM_THREAD_ID", "thread-context-parent");
+    vi.stubEnv("ROOM_THREAD_ID", "thr_contextparent");
     const thread: domain.Thread = fixtures.makeThread({
       id: "thread-2",
       projectId: "proj-1",
       providerId: "codex",
       status: "starting",
-      parentThreadId: "thread-context-parent",
+      parentThreadId: "thr_contextparent",
       createdAt: 1,
       updatedAt: 1,
     });
@@ -621,8 +653,10 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
+        launcherThreadId: "thr_contextparent",
         originKind: null,
         projectId: "proj-1",
         providerId: "codex",
@@ -818,6 +852,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -866,6 +901,7 @@ describe("room-cli thread spawn command output", () => {
     expect(resolveLocalHostIdMock).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,
@@ -947,6 +983,7 @@ describe("room-cli thread spawn command output", () => {
 
     expect(post).toHaveBeenCalledWith({
       json: {
+        requestId: expect.any(String),
         origin: "cli",
         startedOnBehalfOf: null,
         originKind: null,

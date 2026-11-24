@@ -11,6 +11,7 @@ import {
   readGitRepositoryState,
   runGit,
   WorkspaceError,
+  type GitCommandResult,
   type GitProcessOptions,
 } from "bb-environment-provider-host/git";
 import {
@@ -35,6 +36,7 @@ import {
   WORKTREE_INCLUDE_FILE_NAME,
   type CopyWorktreeIncludeFilesResult,
 } from "./worktree-include.js";
+import { resolveWorktreeAttemptRoot } from "./paths.js";
 
 export type BranchMode = "reset" | "reuse-existing";
 
@@ -42,6 +44,12 @@ interface CreateWorktreeArgs {
   sourcePath: string;
   targetPath: string;
   completionPath: string;
+  /** Brings the remote base branch up to date. Defaults to waiting for a fetch. */
+  refreshBase?: ((baseBranch: string) => Promise<void>) | undefined;
+  /** A faster way to get the checkout: moves a prebuilt one into place. Null when there is none. */
+  claimSpare?:
+    | ((startPoint: string) => Promise<GitCommandResult | null>)
+    | undefined;
   ownWorktreesRoot: string;
   branchName: string;
   baseBranch: string | null;
@@ -52,6 +60,10 @@ interface CreateWorktreeArgs {
 
 interface RemoveWorktreeArgs {
   path: string;
+  /** Leave the folder unless it is safe to remove for this key (#1284). */
+  owner?: { dataDir: string; pathKey: string } | undefined;
+  /** For callers that outlive their host call, whose environment is gone by then. */
+  env?: NodeJS.ProcessEnv | undefined;
   onProgress?: ProgressCallback | undefined;
   signal?: AbortSignal | undefined;
 }
@@ -120,14 +132,106 @@ async function ensureExistingWorkspaceMatches(
     return false;
   }
 
+  let currentBranch: string | undefined;
   try {
-    const currentBranch = await getCurrentBranch(targetPath);
+    currentBranch = await getCurrentBranch(targetPath);
     throwIfProvisionAborted(signal);
-    return currentBranch === branchName;
+    if (currentBranch === branchName) return true;
   } catch (error) {
     if (signal?.aborted) throw error;
     return false;
   }
+  // The caller replaces a mismatched folder. Never replace one holding
+  // uncommitted work (an agent's own branch, a rebase, a renamed thread).
+  if (await hasUncommittedWork(targetPath, signal)) {
+    throw new WorkspaceError(
+      "abandoned_worktree_dirty",
+      `The worktree at ${targetPath} is on ${currentBranch === undefined ? "a detached HEAD" : `branch ${currentBranch}`}, not ${branchName}, and has uncommitted changes, so it was left alone instead of being replaced. Commit or stash them, or remove the folder, to retry.`,
+    );
+  }
+  return false;
+}
+
+/**
+ * True when this folder is a Git checkout (has its own `.git`) with changes.
+ * Once `.git` exists, any Git failure counts as changes, so nothing is
+ * deleted on a guess.
+ */
+export async function hasUncommittedWork(
+  targetPath: string,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  try {
+    await fs.access(path.join(targetPath, ".git"));
+  } catch {
+    return false;
+  }
+  try {
+    // Explicit flags, so user config can't hide changes; no optional locks, so
+    // the agent's own Git commands aren't blocked.
+    const status = await runGit(
+      [
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+      ],
+      { cwd: targetPath, ...signalOptions(signal), allowFailure: true },
+    );
+    return status.exitCode !== 0 || status.stdout.trim() !== "";
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return true;
+  }
+}
+
+/**
+ * True when the folder holds files Git doesn't track, ignored ones too, other
+ * than unchanged `.worktreeinclude` copies from the checkout (#1213).
+ */
+async function hasFilesOfItsOwn(
+  folder: string,
+  sourcePath: string,
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  try {
+    await fs.access(folder);
+  } catch {
+    return false;
+  }
+  try {
+    const others = await runGit(
+      ["--no-optional-locks", "ls-files", "--others", "-z"],
+      {
+        cwd: folder,
+        ...signalOptions(signal),
+        allowFailure: true,
+      },
+    );
+    if (others.exitCode !== 0) return true;
+    for (const file of others.stdout.split("\0").filter(Boolean)) {
+      const [own, copy] = await Promise.all(
+        [folder, sourcePath].map((root) =>
+          fs.readFile(path.join(root, file)).catch(() => null),
+        ),
+      );
+      if (own === null || copy === null || !own.equals(copy)) return true;
+    }
+    return false;
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    return true;
+  }
+}
+
+/** Removes a completion marker, never a folder that shares its name (#1213). */
+export async function removeCompletionMarker(
+  markerPath: string,
+): Promise<void> {
+  const stat = await fs.lstat(markerPath).catch(() => null);
+  if (stat !== null && !stat.isDirectory())
+    await fs.rm(markerPath, { force: true });
 }
 
 async function realpathOrResolved(target: string): Promise<string> {
@@ -148,8 +252,53 @@ async function isPathInside(root: string, target: string): Promise<boolean> {
   );
 }
 
+/**
+ * Git lists `target` as a linked worktree of its repository, or Git sees no
+ * repository of its own there and it sits in the key's own folder (its
+ * repository was moved or deleted, or an interrupted removal took its .git).
+ * Never a main checkout or a folder inside one.
+ */
+async function isRemovableWorktree(
+  target: string,
+  owner: { dataDir: string; pathKey: string },
+  signal: AbortSignal | undefined,
+): Promise<boolean> {
+  const git = (args: string[]) =>
+    runGit(args, { cwd: target, ...signalOptions(signal), allowFailure: true });
+  const resolved = await realpathOrResolved(target);
+  const top = await git(["rev-parse", "--show-toplevel"]);
+  const toplevel =
+    top.exitCode === 0 ? await realpathOrResolved(top.stdout.trim()) : null;
+  if (toplevel !== null && path.relative(toplevel, resolved) === "") {
+    const listed = await git(["worktree", "list", "--porcelain"]);
+    // The first entry is the main checkout.
+    const linked = listed.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .slice(1);
+    for (const line of linked) {
+      const worktree = await realpathOrResolved(line.slice("worktree ".length));
+      if (path.relative(worktree, resolved) === "") return true;
+    }
+    return false;
+  }
+  // No repository, or only an ancestor's (a Git-tracked home folder): fine
+  // in the key's own folder, unless a checkout lives in that folder.
+  const root = resolveWorktreeAttemptRoot(owner);
+  const gitDirectory = await fs.stat(path.join(target, ".git")).then(
+    (stat) => stat.isDirectory(),
+    () => false,
+  );
+  return (
+    !gitDirectory &&
+    (await isPathInside(root, target)) &&
+    (toplevel === null || (await isPathInside(toplevel, root)))
+  );
+}
+
 async function removeAbandonedAttemptWorktree(args: {
   sourcePath: string;
+  targetPath: string;
   ownWorktreesRoot: string;
   branchName: string;
   onProgress: ProgressCallback | undefined;
@@ -160,14 +309,16 @@ async function removeAbandonedAttemptWorktree(args: {
     return;
   }
   throwIfProvisionAborted(args.signal);
-  const status = await runGit(["status", "--porcelain"], {
-    cwd: holder,
-    ...(args.signal !== undefined ? { signal: args.signal } : {}),
-  });
-  if (status.stdout.trim() !== "") {
+  // A sibling in this folder is a failed rebuild from before the checkout was
+  // renamed; the user may have added ignored files there (#1213).
+  if (
+    (await hasUncommittedWork(holder, args.signal)) ||
+    ((await isPathInside(path.dirname(args.targetPath), holder)) &&
+      (await hasFilesOfItsOwn(holder, args.sourcePath, args.signal)))
+  ) {
     throw new WorkspaceError(
       "abandoned_worktree_dirty",
-      `Branch ${args.branchName} is still checked out at ${holder} by an earlier attempt, and that worktree has uncommitted changes, so it was left alone. Remove it to retry.`,
+      `Branch ${args.branchName} is still checked out at ${holder} by an earlier attempt, and that worktree has uncommitted changes or files of its own, so it was left alone. Remove it to retry.`,
     );
   }
   const startedAt = Date.now();
@@ -178,10 +329,25 @@ async function removeAbandonedAttemptWorktree(args: {
     status: "started",
     startedAt,
   });
+  const deletedByHand = await fs.access(holder).then(
+    () => false,
+    () => true,
+  );
+  await removeCompletionMarker(`${holder}.completed`);
   await removeWorktree({
     path: holder,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
   });
+  // Git still records a folder deleted by hand, and keeps its branch taken.
+  if (deletedByHand)
+    await runGitWithWorktreeMetadataLock(
+      ["worktree", "remove", "--force", holder],
+      {
+        cwd: args.sourcePath,
+        ...signalOptions(args.signal),
+        allowFailure: true,
+      },
+    );
   emitStep({
     onProgress: args.onProgress,
     key: "abandoned-worktree-completed",
@@ -216,7 +382,27 @@ async function waitForProvisionRetry(
   }
 }
 
-async function resolveRemoteBaseBranch(
+async function listRemotes(
+  sourcePath: string,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  return (
+    await runGit(["remote"], { cwd: sourcePath, ...signalOptions(signal) })
+  ).stdout
+    .split("\n")
+    .map((remote) => remote.trim())
+    .filter(Boolean);
+}
+
+function isMissingRemoteRef(error: unknown): boolean {
+  return (
+    error instanceof WorkspaceError &&
+    error.code === "git_command_failed" &&
+    error.message.includes("couldn't find remote ref")
+  );
+}
+
+export async function resolveRemoteBaseBranch(
   sourcePath: string,
   baseBranch: string,
   signal: AbortSignal | undefined,
@@ -225,16 +411,7 @@ async function resolveRemoteBaseBranch(
     return null;
   }
 
-  const remotes = (
-    await runGit(["remote"], {
-      cwd: sourcePath,
-      ...(signal !== undefined ? { signal } : {}),
-    })
-  ).stdout
-    .split("\n")
-    .map((remote) => remote.trim())
-    .filter(Boolean);
-  const matchingRemotes = remotes
+  const matchingRemotes = (await listRemotes(sourcePath, signal))
     .filter(
       (remote) =>
         baseBranch.startsWith(`${remote}/`) &&
@@ -252,19 +429,27 @@ async function resolveRemoteBaseBranch(
   };
 }
 
+/**
+ * "none" when the base is not a remote branch, "local" when only the local
+ * copy exists (#985), "fresh" when `skipIf` found it up to date.
+ */
 export async function fetchRemoteBaseBranch(args: {
   sourcePath: string;
   baseBranch: string;
   onProgress: ProgressCallback | undefined;
   signal: AbortSignal | undefined;
-}): Promise<void> {
+  /** For a fetch that outlives its host call, whose environment is gone by then. */
+  env?: NodeJS.ProcessEnv | undefined;
+  /** Checked once this fetch holds the ref lock: another fetch may have just finished. */
+  skipIf?: (() => Promise<boolean>) | undefined;
+}): Promise<"fetched" | "local" | "none" | "fresh"> {
   const remoteBase = await resolveRemoteBaseBranch(
     args.sourcePath,
     args.baseBranch,
     args.signal,
   );
   if (!remoteBase) {
-    return;
+    return "none";
   }
 
   const startedAt = Date.now();
@@ -282,17 +467,23 @@ export async function fetchRemoteBaseBranch(args: {
   try {
     throwIfProvisionAborted(args.signal);
     const commonDir = await getGitCommonDir(args.sourcePath, gitProcessOptions);
+    let skipped = false;
     const fetchBaseBranch = async (): Promise<void> => {
       try {
         await withGitRefMutationLock(
           commonDir,
-          () =>
-            runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
+          async () => {
+            if (await args.skipIf?.()) {
+              skipped = true;
+              return;
+            }
+            await runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
               cwd: args.sourcePath,
               ...gitProcessOptions,
-              env: { GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+              env: { ...args.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
               timeoutMs: REMOTE_BASE_FETCH_TIMEOUT_MS,
-            }),
+            });
+          },
           args.signal !== undefined ? { signal: args.signal } : {},
         );
       } catch (error) {
@@ -344,6 +535,7 @@ export async function fetchRemoteBaseBranch(args: {
         );
       }
     }
+    if (skipped) return "fresh";
     emitStep({
       onProgress: args.onProgress,
       key: "git-fetch-completed",
@@ -352,7 +544,24 @@ export async function fetchRemoteBaseBranch(args: {
       startedAt,
       metadata: { durationMs: Date.now() - startedAt },
     });
+    return "fetched";
   } catch (error) {
+    // An alias from a custom fetch refspec (a pull request ref) has no
+    // refs/heads twin on the remote, so use the local copy (#985).
+    if (
+      isMissingRemoteRef(error) &&
+      (await hasRef(args.sourcePath, remoteRef))
+    ) {
+      emitStep({
+        onProgress: args.onProgress,
+        key: "git-fetch-completed",
+        text: `Using local ${args.baseBranch}`,
+        status: "completed",
+        startedAt,
+        metadata: { durationMs: Date.now() - startedAt },
+      });
+      return "local";
+    }
     emitStep({
       onProgress: args.onProgress,
       key: "git-fetch-failed",
@@ -363,6 +572,43 @@ export async function fetchRemoteBaseBranch(args: {
     });
     throw error;
   }
+}
+
+/**
+ * `git worktree add -B` never falls back to `origin/<base>`, so a branch that
+ * only exists on the remote is found or fetched here (#985).
+ */
+async function resolveStartPoint(args: {
+  sourcePath: string;
+  baseBranch: string;
+  onProgress: ProgressCallback | undefined;
+  signal: AbortSignal | undefined;
+}): Promise<string> {
+  const found = await runGit(
+    ["rev-parse", "--verify", "--quiet", `${args.baseBranch}^{commit}`],
+    { cwd: args.sourcePath, ...signalOptions(args.signal), allowFailure: true },
+  );
+  if (found.exitCode === 0) return args.baseBranch;
+  const remotes = await listRemotes(args.sourcePath, args.signal);
+  const remote = remotes.includes("origin")
+    ? "origin"
+    : remotes.length === 1
+      ? remotes[0]
+      : undefined;
+  const notFound = new WorkspaceError(
+    "base_branch_not_found",
+    `Base branch ${args.baseBranch} was not found locally${remote === undefined ? "" : ` or on ${remote}`}. Push it or pick another base.`,
+  );
+  if (remote === undefined) throw notFound;
+  const remoteBase = `${remote}/${args.baseBranch}`;
+  if (!(await hasRef(args.sourcePath, `refs/remotes/${remoteBase}`))) {
+    try {
+      await fetchRemoteBaseBranch({ ...args, baseBranch: remoteBase });
+    } catch (error) {
+      throw isMissingRemoteRef(error) ? notFound : error;
+    }
+  }
+  return remoteBase;
 }
 
 function summarizePaths(paths: readonly string[]): string {
@@ -462,16 +708,48 @@ async function finishWorktreeSetup(args: CreateWorktreeArgs): Promise<void> {
 }
 
 async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
-  await fs.rm(args.completionPath, { force: true });
+  await removeCompletionMarker(args.completionPath);
   await removeWorktree({
     path: args.targetPath,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
   });
 }
 
+/**
+ * Git for Windows stops at 260-character paths unless core.longpaths is on,
+ * and managed worktrees sit deep in the data folder (#1806). Turn it on in the
+ * repository, so the agent's own Git works there too, unless it is set anywhere.
+ */
+export async function allowLongPaths(
+  sourcePath: string,
+  signal?: AbortSignal,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform !== "win32") return;
+  const options = {
+    cwd: sourcePath,
+    ...signalOptions(signal),
+    allowFailure: true,
+  };
+  // Under the lock `worktree add` takes, which also writes this config file.
+  await withWorktreeMetadataLock(
+    await getGitCommonDir(sourcePath, signalOptions(signal)),
+    async () => {
+      // Exit 1: not set in any Git config.
+      if (
+        (await runGit(["config", "--get", "core.longpaths"], options))
+          .exitCode === 1
+      )
+        await runGit(["config", "--local", "core.longpaths", "true"], options);
+    },
+    signal,
+    true,
+  );
+}
+
 export async function createWorktree(
   args: CreateWorktreeArgs,
-): Promise<{ path: string }> {
+): Promise<{ path: string; startPoint?: string }> {
   throwIfProvisionAborted(args.signal);
   const existingWorkspaceMatches = await ensureExistingWorkspaceMatches(
     args.targetPath,
@@ -486,7 +764,8 @@ export async function createWorktree(
       await finishWorktreeSetup(args);
       return { path: args.targetPath };
     } catch (error) {
-      await removeCreateTarget(args);
+      if (!(await hasUncommittedWork(args.targetPath, args.signal)))
+        await removeCreateTarget(args);
       throw error;
     }
   }
@@ -514,6 +793,7 @@ export async function createWorktree(
   throwIfProvisionAborted(args.signal);
   await removeAbandonedAttemptWorktree({
     sourcePath: args.sourcePath,
+    targetPath: args.targetPath,
     ownWorktreesRoot: args.ownWorktreesRoot,
     branchName: args.branchName,
     onProgress: args.onProgress,
@@ -521,14 +801,12 @@ export async function createWorktree(
   });
 
   throwIfProvisionAborted(args.signal);
-  await ensureWorkspaceParentDirectory(args.targetPath);
-
-  throwIfProvisionAborted(args.signal);
   const reuseExistingBranch =
     args.branchMode === "reuse-existing" &&
     (await hasRef(args.sourcePath, `refs/heads/${args.branchName}`));
 
   let gitArgs: string[];
+  let startPoint: string | undefined;
   if (reuseExistingBranch) {
     gitArgs = ["worktree", "add", args.targetPath, args.branchName];
   } else {
@@ -541,7 +819,14 @@ export async function createWorktree(
       );
     }
     throwIfProvisionAborted(args.signal);
-    await fetchRemoteBaseBranch({
+    await (args.refreshBase?.(baseBranch) ??
+      fetchRemoteBaseBranch({
+        sourcePath: args.sourcePath,
+        baseBranch,
+        onProgress: args.onProgress,
+        signal: args.signal,
+      }));
+    startPoint = await resolveStartPoint({
       sourcePath: args.sourcePath,
       baseBranch,
       onProgress: args.onProgress,
@@ -553,10 +838,13 @@ export async function createWorktree(
       "-B",
       args.branchName,
       args.targetPath,
-      baseBranch,
+      startPoint,
     ];
   }
 
+  await allowLongPaths(args.sourcePath, args.signal);
+  // Only now: a failed fetch would leave this folder behind empty (#1689).
+  await ensureWorkspaceParentDirectory(args.targetPath);
   const worktreeStartedAt = Date.now();
   emitStep({
     onProgress: args.onProgress,
@@ -567,10 +855,18 @@ export async function createWorktree(
   });
   let worktreeCreated = false;
   try {
-    const result = await runGitWithWorktreeMetadataLock(gitArgs, {
-      cwd: args.sourcePath,
-      ...(args.signal !== undefined ? { signal: args.signal } : {}),
-    });
+    const result =
+      (startPoint === undefined ? null : await args.claimSpare?.(startPoint)) ??
+      // One checkout worker per core; Git's default is one in total.
+      (await runGitWithWorktreeMetadataLock(
+        ["-c", "checkout.workers=0", ...gitArgs],
+        {
+          cwd: args.sourcePath,
+          // The user's post-checkout hook runs, as in their own `git worktree add`.
+          hooks: true,
+          ...(args.signal !== undefined ? { signal: args.signal } : {}),
+        },
+      ));
     emitGitOutput(args.onProgress, "git-worktree", result);
     emitStep({
       onProgress: args.onProgress,
@@ -582,7 +878,10 @@ export async function createWorktree(
     });
     worktreeCreated = true;
     await finishWorktreeSetup(args);
-    return { path: args.targetPath };
+    return {
+      path: args.targetPath,
+      ...(startPoint === undefined ? {} : { startPoint }),
+    };
   } catch (error) {
     if (!worktreeCreated) {
       emitStep({
@@ -626,13 +925,23 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     await removeDirectoryIfEmpty(parentPath);
     return;
   }
+  if (
+    args.owner !== undefined &&
+    !(await isRemovableWorktree(workspacePath, args.owner, args.signal))
+  )
+    throw new WorkspaceError(
+      "not_a_worktree",
+      `${workspacePath} is not a Git worktree, so it was left in place. Delete it by hand if you no longer need it.`,
+    );
 
   await experimental_killProcessesWithCwdUnder({ directory: workspacePath });
   throwIfProvisionAborted(args.signal);
 
+  const env = args.env !== undefined ? { env: args.env } : {};
   const commonDirResult = await runGit(["rev-parse", "--git-common-dir"], {
     cwd: workspacePath,
     ...(args.signal !== undefined ? { signal: args.signal } : {}),
+    ...env,
     allowFailure: true,
   });
 
@@ -644,22 +953,27 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     await tryWithCheckoutMutationLock(
       workspacePath,
       () =>
-        withWorktreeMetadataLock(commonDir, () =>
-          runGit(
-            [
-              "--git-dir",
-              commonDir,
-              "worktree",
-              "remove",
-              workspacePath,
-              "--force",
-            ],
-            {
-              cwd: path.dirname(workspacePath),
-              ...(args.signal !== undefined ? { signal: args.signal } : {}),
-              allowFailure: true,
-            },
-          ),
+        withWorktreeMetadataLock(
+          commonDir,
+          () =>
+            runGit(
+              [
+                "--git-dir",
+                commonDir,
+                "worktree",
+                "remove",
+                workspacePath,
+                "--force",
+              ],
+              {
+                cwd: path.dirname(workspacePath),
+                ...(args.signal !== undefined ? { signal: args.signal } : {}),
+                ...env,
+                allowFailure: true,
+              },
+            ),
+          undefined,
+          true,
         ),
       args.signal,
       signalOptions(args.signal),

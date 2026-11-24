@@ -15,15 +15,17 @@ const PROVIDER_THREAD_ID = "rollout-archive-idempotency-1";
 let harness: ReturnType<typeof createBridgeJsonRpcTestHarness>;
 let workspaceDir: string;
 let processLogPath: string;
+let archiveStatePath: string;
 
 beforeEach(() => {
   workspaceDir = mkdtempSync(join(tmpdir(), "bb-codex-archive-ws-"));
   processLogPath = join(workspaceDir, "app-server-processes.log");
+  archiveStatePath = join(workspaceDir, "fake-codex-archived.json");
   const fakeScriptPath = join(workspaceDir, "fake-codex-script.json");
   writeFileSync(
     fakeScriptPath,
     JSON.stringify({
-      archiveStatePath: join(workspaceDir, "fake-codex-archived.json"),
+      archiveStatePath,
       processLogPath,
       sigtermDelayMs: 250,
     }),
@@ -76,6 +78,30 @@ it("answers a repeated archive and a repeated unarchive as already done", async 
   expect((await request(2, "thread/archive")).result).toEqual({ ok: true });
   expect((await request(3, "thread/unarchive")).result).toEqual({ ok: true });
   expect((await request(4, "thread/unarchive")).result).toEqual({ ok: true });
+}, 30_000);
+
+it("repairs a rollout Codex refuses as archived but cannot unarchive (#1808)", async () => {
+  writeFileSync(
+    archiveStatePath,
+    JSON.stringify([`stale:${PROVIDER_THREAD_ID}`]),
+  );
+  const resume = (id: number) => {
+    harness.sendRequest(id, "thread/resume", {
+      threadId: THREAD_ID,
+      providerThreadId: PROVIDER_THREAD_ID,
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: FULL_ACCESS_SESSION_OPTIONS,
+    });
+    return harness.waitForResponse(id);
+  };
+  expect((await resume(1)).error?.data).toMatchObject({
+    recovery: { kind: "sessionArchived" },
+  });
+
+  expect((await request(2, "thread/unarchive")).result).toEqual({ ok: true });
+  expect((await resume(3)).error).toBeUndefined();
+  expect((await request(4, "thread/archive")).result).toEqual({ ok: true });
 }, 30_000);
 
 it("keeps a discard of an already-archived rollout as a failure", async () => {

@@ -1,4 +1,4 @@
-import ReconnectingWebSocket from "partysocket/ws";
+import { ReconnectingWebSocket } from "@cloudroom/domain/reconnecting-websocket";
 import {
   type HostDaemonActiveThread,
   type HostDaemonLoadedEnvironment,
@@ -11,7 +11,10 @@ import {
 import type { HostDaemonLogger } from "./logger.js";
 import type { ServerClient } from "./server-client.js";
 import type { ProtocolSelfUpdater } from "./protocol-self-update.js";
-import { createNodeWebSocketConstructor } from "./websocket-constructor.js";
+import {
+  createNodeWebSocketConstructor,
+  type NodeWebSocketHeaders,
+} from "./websocket-constructor.js";
 
 export interface ReconnectingWebSocketLike {
   readonly bufferedAmount?: number;
@@ -30,7 +33,7 @@ interface ReconnectingWebSocketOptions {
   maxReconnectionDelay: number;
   reconnectionDelayGrowFactor: number;
   connectionTimeout: number;
-  headers?: Record<string, string>;
+  headers?: NodeWebSocketHeaders;
   maxRetries: number;
   protocols?: string[];
 }

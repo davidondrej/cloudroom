@@ -173,9 +173,9 @@ interface WorkflowSettingsHandle {
 }
 
 export function registerWorkflowSettings(
-  bb: Pick<BbPluginApi, "settings">,
+  room: Pick<BbPluginApi, "settings">,
 ): WorkflowSettingsHandle {
-  const handle = bb.settings.define(WORKFLOW_SETTING_DESCRIPTORS);
+  const handle = room.settings.define(WORKFLOW_SETTING_DESCRIPTORS);
   let lastValid = DEFAULT_WORKFLOW_SETTINGS;
   return {
     async get() {

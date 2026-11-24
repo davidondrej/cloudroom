@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { BbDesktopVersionFeed } from "@cloudroom/desktop-contract";
+import type { RoomDesktopVersionFeed } from "@cloudroom/desktop-contract";
 import {
   createDesktopUpdateService,
   DESKTOP_UPDATE_CHECK_TIMEOUT_MS,
@@ -9,7 +9,7 @@ import { DESKTOP_UPDATE_ACTIVE_MIN_INTERVAL_MS } from "../src/desktop-update-sch
 
 const checkedAt = "2026-05-21T00:00:00.000Z";
 
-function createFeed(version: string): BbDesktopVersionFeed {
+function createFeed(version: string): RoomDesktopVersionFeed {
   return {
     channel: "latest",
     files: [

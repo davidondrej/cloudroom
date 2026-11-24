@@ -79,7 +79,7 @@ describe("machine Git environment", () => {
       await exec("git", ["init", "-q", repo], { env });
       await writeFile(join(repo, "file.txt"), "content\n");
       await exec("git", ["add", "file.txt"], { cwd: repo, env });
-      await exec(
+      const commit = await exec(
         "git",
         [
           "commit",
@@ -103,8 +103,59 @@ describe("machine Git environment", () => {
       expect(stdout.trim()).toBe(
         "Add file\n\nCo-authored-by: Ada Lovelace <ada@example.com>",
       );
+      expect(commit.stderr).toBe(
+        "Cloudroom removed AI Co-authored-by lines (turn off: room-cli settings general stripAiCoAuthorsEnabled false)\n",
+      );
+      const human = await exec(
+        "git",
+        ["commit", "-q", "--allow-empty", "-m", "Human only"],
+        { cwd: repo, env },
+      );
+      expect(human.stderr).toBe("");
     },
   );
+
+  it.skipIf(!gitHasConfigHooks)(
+    "strips AI co-authors after a legacy-encoded line and after a 1 MiB line",
+    async () => {
+      const { home, env } = await gitEnv(withAiCoAuthorStripping([]));
+      env.LC_ALL = process.platform === "darwin" ? "en_US.UTF-8" : "C.UTF-8";
+      const repo = join(home, "repo");
+      await exec("git", ["init", "-q", repo], { env });
+      const trailer = "Co-authored-by: Claude <noreply@anthropic.com>\n";
+      for (const body of [
+        Buffer.from([0x63, 0x61, 0x66, 0xe9]),
+        "a".repeat(1 << 20),
+      ]) {
+        const file = join(home, "message.txt");
+        await writeFile(
+          file,
+          Buffer.concat([
+            Buffer.from("x\n\n"),
+            Buffer.from(body),
+            Buffer.from(`\n${trailer}`),
+          ]),
+        );
+        const started = Date.now();
+        await exec("git", ["commit", "-q", "--allow-empty", "-F", file], {
+          cwd: repo,
+          env,
+        });
+        expect(Date.now() - started).toBeLessThan(2_000);
+        const { stdout } = await exec("git", ["log", "-1", "--format=%B"], {
+          cwd: repo,
+          env,
+          maxBuffer: 4 << 20,
+        });
+        expect(stdout).not.toMatch(/co-authored-by/iu);
+      }
+    },
+  );
+
+  it("keeps JS replacement patterns out of env values (Astro < 7.4.6, #2529)", async () => {
+    const entries = withAiCoAuthorStripping(await resolveGitCredentials(gh()));
+    expect(JSON.stringify(entries)).not.toMatch(/\$['&`]/u);
+  });
 
   it("lets agent-provider contributions override host credentials", async () => {
     const host = await resolveGitCredentials(gh());

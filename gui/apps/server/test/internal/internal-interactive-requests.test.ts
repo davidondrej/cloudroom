@@ -1,9 +1,16 @@
 import { setTimeout as sleep } from "node:timers/promises";
-import { deleteThread, listPendingInteractionsByThread } from "@cloudroom/db";
+import {
+  deleteThread,
+  listPendingInteractionsByThread,
+  listQueuedThreadMessages,
+  updateQueuedThreadMessage,
+} from "@cloudroom/db";
 import type { HostDaemonInteractiveRequest } from "@cloudroom/host-daemon-contract";
 import { renderTemplate } from "@cloudroom/templates";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { toPendingInteraction } from "../../src/services/interactions/pending-interaction-serialization.js";
+import { sendQueuedMessageNow } from "../../src/services/threads/queued-messages.js";
+import * as threadEvents from "../../src/services/threads/thread-events.js";
 import {
   internalAuthHeaders,
   reportQueuedCommandSuccess,
@@ -11,11 +18,13 @@ import {
   waitForQueuedCommandAfter,
 } from "../helpers/commands.js";
 import { readJson } from "../helpers/json.js";
+import { textInput } from "../helpers/prompt-input.js";
 import {
   seedEnvironment,
   seedHostSession,
   seedThreadFixture,
   seedProjectWithSource,
+  seedQueuedMessage,
   seedThread,
   seedThreadRuntimeState,
   seedTurnStarted,
@@ -456,7 +465,10 @@ describe("internal interactive request lifecycle", () => {
 
       const response = await registerInteractiveRequest({ body, harness });
       expect(response.status).toBe(200);
-      await expect(readJson(response)).resolves.toMatchObject({
+      const registered = (await readJson(response)) as {
+        interactionId: string;
+      };
+      expect(registered).toMatchObject({
         outcome: "created",
         status: "pending",
       });
@@ -481,6 +493,7 @@ describe("internal interactive request lifecycle", () => {
             "Blocked on command approval:",
             "Command: git push",
             "Cwd: /tmp/project",
+            `\`room-cli thread interactions show ${registered.interactionId} ${childThread.id}\` prints the details. A \`thread tell\` only queues behind it.`,
           ].join("\n"),
           threadMention,
         },
@@ -528,6 +541,100 @@ describe("internal interactive request lifecycle", () => {
       ).rejects.toThrow("Timed out waiting for queued command");
     });
   });
+
+  it.each(["untouched", "edited", "sent during compaction"])(
+    "drains a %s needs-attention notice once its child approval is settled",
+    async (mode) => {
+      await withTestHarness(async (harness) => {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-stale-needs-attention",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environmentId = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/stale-needs-attention",
+          projectId: project.id,
+        }).id;
+        const parent = seedThread(harness.deps, {
+          environmentId,
+          projectId: project.id,
+        });
+        seedThreadRuntimeState(harness.deps, {
+          environmentId,
+          providerThreadId: "provider-stale-needs-attention",
+          threadId: parent.id,
+        });
+        const child = seedThread(harness.deps, {
+          environmentId,
+          parentThreadId: parent.id,
+          projectId: project.id,
+        });
+        // The parent waits on its own approval, so the child's notice queues.
+        for (const threadId of [parent.id, child.id]) {
+          await registerInteractiveRequest({
+            body: buildCommandApprovalInteractiveRequest({
+              sessionId: session.id,
+              suffix: threadId,
+              threadId,
+            }),
+            harness,
+          });
+        }
+        await vi.waitFor(() =>
+          expect(listQueuedThreadMessages(harness.db, parent.id)).toHaveLength(
+            1,
+          ),
+        );
+        const notice = listQueuedThreadMessages(harness.db, parent.id)[0]!;
+        if (mode === "edited") {
+          updateQueuedThreadMessage(harness.db, harness.deps.hub, {
+            content: textInput("Edited by the user"),
+            expectedUpdatedAt: notice.updatedAt,
+            id: notice.id,
+            threadId: parent.id,
+          });
+        }
+        if (mode === "sent during compaction") {
+          vi.spyOn(threadEvents, "isManualCompactionActive").mockReturnValueOnce(
+            true,
+          );
+          await expect(
+            sendQueuedMessageNow(harness.deps, {
+              mode: "auto",
+              queuedMessageId: notice.id,
+              threadId: parent.id,
+            }),
+          ).resolves.toMatchObject({ delivery: "queued" });
+        }
+        seedQueuedMessage(harness.deps, {
+          content: textInput("Later message"),
+          threadId: parent.id,
+        });
+
+        // An ancestor answers the child, and the parent's own wait clears.
+        harness.deps.pendingInteractions.interruptPendingInteractionsForThreadIds(
+          { reason: "answered", threadIds: [child.id, parent.id] },
+        );
+
+        // A stale notice is dropped and the same drain sends the next row; one
+        // the user edited or sent is theirs and still goes first.
+        const sent = await waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "turn.submit" && command.threadId === parent.id,
+        );
+        expect(JSON.stringify(sent.command)).toContain(
+          { untouched: "Later message", edited: "Edited by the user" }[mode] ??
+            "needs help",
+        );
+        expect(listQueuedThreadMessages(harness.db, parent.id)).toHaveLength(
+          mode === "untouched" ? 0 : 1,
+        );
+      });
+    },
+  );
 
   it("notifies a parent when a hidden delegated child needs attention", async () => {
     await withTestHarness(async (harness) => {

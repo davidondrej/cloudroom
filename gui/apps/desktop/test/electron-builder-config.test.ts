@@ -301,8 +301,8 @@ describe("electron-builder signing config", () => {
     );
     const config = electronBuilderConfigSchema.parse(JSON.parse(configText));
 
-    expect(config.asarUnpack).toContain("dist/bb-app-bridge.mjs");
-    expect(config.asarUnpack).not.toContain("dist/bb-app-bridge.js");
+    expect(config.asarUnpack).toContain("dist/launcher-bridge.mjs");
+    expect(config.asarUnpack).not.toContain("dist/launcher-bridge.js");
   });
 
   it("runs a native module preparation hook after packaging", async () => {
@@ -396,6 +396,8 @@ describe("electron-builder signing config", () => {
 
     expect(config.files.indexOf("!**/*.map")).toBeGreaterThan(-1);
     expect(config.files.indexOf("!**/*.map")).toBeLessThan(firstFileSet);
+    // A platform `files` list of only exclusions makes electron-builder pack the whole app folder.
+    for (const platform of ["mac", "linux", "win"]) expect(JSON.parse(configText)[platform].files).toBeUndefined();
   });
 
   it("copies the app scaffold template as a dedicated file set", async () => {
@@ -582,7 +584,7 @@ describe("electron-builder signing config", () => {
     const script = await readFile(resolve(desktopPackageRoot, "build", "installer.nsh"), "utf8");
     const powershell = script.split("\n").filter((line) => line.includes("powershell.exe"));
 
-    expect(script).toMatch(/!macro customInit\s+!insertmacro stopPreviewHelper/);
+    expect(script).toMatch(/!macro customInit(?:(?!!macroend)[\s\S])*!insertmacro stopPreviewHelper/);
     expect(script).toMatch(/!macro customUnInit\s+!insertmacro stopPreviewHelper/);
     expect(script).toMatch(/!macro customCheckAppRunning[\s\S]*!insertmacro cloudroomAppCheck/);
     expect(powershell).toHaveLength(2);
@@ -590,7 +592,7 @@ describe("electron-builder signing config", () => {
       expect(line).toContain("$$env:CLOUDROOM_INSTALL_DIR");
       expect(line).not.toContain("$INSTDIR");
       // Windows PowerShell 5.1: a lone match unrolls to one object, so count through @(...).
-      expect(line.match(/@\(& \$\$left\)\.Count/g)).toHaveLength(2);
+      expect(line).toContain("@(& $$left)");
       expect(line).not.toMatch(/[^@]\(& \$\$left\)\.Count/);
     }
     expect(script).toContain("${If} $0 == 1");

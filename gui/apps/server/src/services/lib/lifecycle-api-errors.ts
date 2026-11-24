@@ -17,7 +17,10 @@ type EnvironmentReadinessFields = Pick<Environment, "path" | "status">;
 
 type ThreadEnvironmentStatusFields = Pick<Environment, "status">;
 
-type ThreadWritableFields = Pick<Thread, "archivedAt" | "deletedAt" | "status">;
+type ThreadWritableFields = Pick<
+  Thread,
+  "archivedAt" | "deletedAt" | "id" | "status"
+>;
 
 type HostUnavailableStatus = 404 | 502;
 
@@ -79,7 +82,9 @@ export function throwThreadEnvironmentUnavailable(
   throw new ApiError(
     409,
     "thread_environment_unavailable",
-    "Thread environment is unavailable",
+    details.reason === "destroyed" && details.environmentStatus === null
+      ? "This thread's workspace was deleted. Start a new thread to continue."
+      : "Thread environment is unavailable",
     { details },
   );
 }
@@ -92,6 +97,7 @@ function threadNotWritableDetails(
     reason,
     archivedAt: thread.archivedAt,
     threadStatus: thread.status,
+    threadId: thread.id,
   };
 }
 

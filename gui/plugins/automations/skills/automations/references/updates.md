@@ -40,7 +40,7 @@ room-cli loop update <loopId> --project <id> \
 
 `--target-thread`, `--environment`, and `--new-environment` are mutually
 exclusive. These flags apply only to agent automations; script automations have
-no execution environment.
+no execution environment. Cloud loops can't move: update refuses these flags.
 
 Every command supports `--json`. For `list` and `show`, the JSON result is a
 union discriminated by `problem`: canonical records omit it, while degraded

@@ -1,3 +1,4 @@
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -850,7 +851,10 @@ describe("plugin WebSocket routes", () => {
       `${server.baseUrl}/api/v1/plugins/wire/http/socket`,
       {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          [CALLER_TOKEN_HEADER]: server.callerToken,
+        },
         body: JSON.stringify({ value: 42 }),
       },
     );
@@ -858,7 +862,12 @@ describe("plugin WebSocket routes", () => {
 
     const connection = await openPluginWebSocketWithFirstMessage(
       pluginWebSocketUrl(server.baseUrl, "/socket"),
-      { headers: { "x-test-marker": "connected" } },
+      {
+        headers: {
+          "x-test-marker": "connected",
+          [CALLER_TOKEN_HEADER]: server.callerToken,
+        },
+      },
     );
     const { socket } = connection;
     sockets.add(socket);
@@ -945,6 +954,7 @@ describe("plugin WebSocket routes", () => {
   it("closes sockets from the replaced generation with code 1012", async () => {
     const connection = await openPluginWebSocketWithFirstMessage(
       pluginWebSocketUrl(server.baseUrl, "/socket"),
+      { headers: { [CALLER_TOKEN_HEADER]: server.callerToken } },
     );
     const { socket } = connection;
     sockets.add(socket);

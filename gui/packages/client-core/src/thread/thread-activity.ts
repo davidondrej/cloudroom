@@ -271,10 +271,6 @@ export function getCollapsedChildActivity(
 }
 
 export function isUnreadDoneThread(thread: ThreadStatusShape): boolean {
-  if (thread.parentThreadId != null) {
-    return false;
-  }
-
   switch (thread.status) {
     case "error":
     case "idle":

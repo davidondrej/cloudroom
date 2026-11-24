@@ -125,8 +125,6 @@ describe("browser cookie import output", () => {
         "chrome",
         "--profile",
         "Default",
-        "--into",
-        "automation:agent-1",
       ],
       (program) => registerBrowserCommands(program, () => "http://server"),
     );
@@ -137,7 +135,6 @@ describe("browser cookie import output", () => {
         generation: "generation",
         sourceId: "chrome",
         sourceProfileDirectory: "Default",
-        profile: { kind: "automation", id: "agent-1" },
       },
     });
     expect(collectLogLines(vi.mocked(console.log))).toEqual([

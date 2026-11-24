@@ -3,6 +3,14 @@ import type {
   CommandOf,
 } from "../command-dispatch-support.js";
 import {
+  DEFAULT_ENV_SETUP_SCRIPT_NAME,
+  DEFAULT_ENV_TEARDOWN_SCRIPT_NAME,
+} from "@cloudroom/domain";
+import {
+  readEnvironmentHookScripts,
+  removeEnvironmentHookScripts,
+} from "../environment-hook-scripts.js";
+import {
   LifecycleScriptTerminationUnverifiedError,
   runSetupScript,
   runTeardownScript,
@@ -52,33 +60,56 @@ export async function runEnvironmentHook(
     throw new Error("Environment hook outcome is unknown after daemon restart");
   const controller = new AbortController();
   const outcome: HookOutcome = { terminationUnverified: false };
+  const emit = (entry: {
+    type: "step" | "output";
+    text: string;
+    status?: "started" | "completed" | "failed";
+  }) =>
+    options.emitEnvironmentHookProgress?.({
+      type: "environment.hook.progress",
+      operationId: command.operationId,
+      entry: { type: entry.type, text: entry.text, status: entry.status ?? null },
+    });
   const done = Promise.resolve().then(
     async (): Promise<Record<string, never>> => {
       const run = command.kind === "setup" ? runSetupScript : runTeardownScript;
       try {
+        // Only the copy read from Git at the environment's first setup runs,
+        // never the file in the folder, which sandboxed agents can write.
+        const scripts = await readEnvironmentHookScripts(
+          options.dataDir,
+          command.environmentId,
+        );
+        if (scripts === null) {
+          emit({
+            type: "output",
+            text: `Skipped ${command.kind === "setup" ? DEFAULT_ENV_SETUP_SCRIPT_NAME : DEFAULT_ENV_TEARDOWN_SCRIPT_NAME}: this environment was set up before Cloudroom saved its hooks from Git, so there is no copy it may run.`,
+          });
+          return {};
+        }
         await run({
           workspacePath: command.path,
+          script: command.kind === "setup" ? scripts.setup : scripts.teardown,
+          dataDir: options.dataDir,
           contributedEnv: command.contributedEnv,
           env: { ...process.env, ...options.runtimeManager.getShellEnv() },
           timeoutMs: command.timeoutMs,
           shellPath: options.runtimeManager.getShellEnv().PATH,
           signal: controller.signal,
-          onProgress: (entry) =>
-            options.emitEnvironmentHookProgress?.({
-              type: "environment.hook.progress",
-              operationId: command.operationId,
-              entry: {
-                type: entry.type,
-                text: entry.text,
-                status: entry.status ?? null,
-              },
-            }),
+          onProgress: emit,
         });
       } catch (error) {
         if (error instanceof LifecycleScriptTerminationUnverifiedError) {
           outcome.terminationUnverified = true;
         }
         throw new Error(error instanceof Error ? error.message : String(error));
+      } finally {
+        // The server runs an environment's teardown operation once.
+        if (command.kind === "teardown")
+          await removeEnvironmentHookScripts(
+            options.dataDir,
+            command.environmentId,
+          ).catch(() => undefined);
       }
       return {};
     },

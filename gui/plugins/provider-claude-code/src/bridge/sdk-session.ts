@@ -1,7 +1,9 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
+import { join } from "node:path";
 import {
   query,
   type CanUseTool,
+  type HookCallbackMatcher,
   type McpSdkServerConfigWithInstance,
   type OnElicitation,
   type Options,
@@ -19,8 +21,7 @@ import {
 } from "@get-bb/plugin-sdk/provider-bridge";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import {
-  isMissingClaudeCliMessage,
-  missingClaudeCliGuidance,
+  claudeCliGuidance,
   translateMissingClaudeCliError,
 } from "./missing-cli-error.js";
 
@@ -108,9 +109,7 @@ function appendBoundedText(args: AppendBoundedTextArgs): string {
 
 function getErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return isMissingClaudeCliMessage(message)
-    ? missingClaudeCliGuidance()
-    : message;
+  return claudeCliGuidance(message) ?? message;
 }
 
 function buildSdkDoneErrorMessage(args: BuildSdkDoneErrorMessageArgs): string {
@@ -190,6 +189,75 @@ function stopClaudeTree(child: ChildProcess): ClaudeTreeStop {
   return stop;
 }
 
+interface WindowsProcess {
+  pid: number;
+  parentPid: number;
+  startedAt: number;
+}
+
+const LIST_WINDOWS_PROCESSES =
+  "Get-CimInstance Win32_Process | Where-Object CreationDate | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }";
+
+/** Windows: every running process, from one CIM query; null if it fails. */
+function listWindowsProcesses(): Promise<WindowsProcess[] | null> {
+  return new Promise((resolve) => {
+    const shell = join(
+      process.env.SystemRoot ?? "C:\\Windows",
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    );
+    const args = ["-NoProfile", "-NonInteractive", "-Command"];
+    const options = { maxBuffer: 8 << 20, timeout: 10_000, windowsHide: true };
+    execFile(
+      shell,
+      [...args, LIST_WINDOWS_PROCESSES],
+      options,
+      (error, out) => {
+        const rows = error
+          ? []
+          : String(out)
+              .split(/\r?\n/u)
+              .map((line) => line.trim().split(/\s+/u).map(Number))
+              .filter(
+                (row) => row.length === 3 && row.every(Number.isSafeInteger),
+              );
+        resolve(
+          rows.length === 0
+            ? null
+            : rows.map(([pid, parentPid, startedAt]) => ({
+                pid: pid!,
+                parentPid: parentPid!,
+                startedAt: startedAt!,
+              })),
+        );
+      },
+    ).stdin?.end();
+  });
+}
+
+/** What root started, directly or not. No child predates its parent. */
+function descendantsOf(
+  processes: WindowsProcess[],
+  root: WindowsProcess,
+): WindowsProcess[] {
+  const found: WindowsProcess[] = [];
+  for (let queue = [root], parent = queue.pop(); parent; parent = queue.pop()) {
+    for (const child of processes) {
+      if (
+        child.parentPid === parent.pid &&
+        child.startedAt >= parent.startedAt &&
+        !found.includes(child)
+      ) {
+        found.push(child);
+        queue.push(child);
+      }
+    }
+  }
+  return found;
+}
+
 /**
  * The SDK spawn hook Claude needs: always on Windows (portable launch and
  * tree kill), and when recording provider I/O. Empty otherwise, so macOS and
@@ -246,6 +314,9 @@ export class SdkSession {
   private stderrTail = "";
   /** Windows only: Claude's launcher, whose tree a stop ends first. */
   private windowsChild: ChildProcess | null = null;
+  private windowsSpawnedAt = 0;
+  /** Windows: what stops left of Claude's tree; null when Windows can't list it. */
+  private windowsLeftovers: WindowsProcess[] | null | undefined;
   private stopping = false;
   private mcpReconnecting = false;
   private readonly mcpRetryAt = new Map<string, number>();
@@ -254,6 +325,8 @@ export class SdkSession {
     private readonly options: SdkSessionOptions,
     private readonly onMessage: SdkSessionMessageHandler,
     private readonly onDone: SdkSessionDoneHandler,
+    /** This session's own PreToolUse hook, run before the shared ones. */
+    private readonly preToolUse?: HookCallbackMatcher,
   ) {
     this.completion = new Promise((resolve) => {
       this.complete = resolve;
@@ -262,6 +335,14 @@ export class SdkSession {
 
   getSessionId(): string | undefined {
     return this.sessionId;
+  }
+
+  /** Windows only: whether Claude's own process still runs. */
+  isRunning(): boolean {
+    const child = this.windowsChild;
+    return (
+      child !== null && child.exitCode === null && child.signalCode === null
+    );
   }
 
   canPushInput(): boolean {
@@ -282,7 +363,8 @@ export class SdkSession {
     this.options.model = model;
   }
 
-  async reconnectFailedMcpServers(): Promise<void> {
+  /** Retries `failed` and `needs-auth` servers, so a sign-in made after the thread started connects (#661). */
+  async reconnectMcpServers(): Promise<void> {
     const q = this.query;
     if (!q || this.mcpReconnecting) return;
     this.mcpReconnecting = true;
@@ -292,7 +374,7 @@ export class SdkSession {
       reconnects = (await q.mcpServerStatus())
         .filter(
           (server) =>
-            server.status === "failed" &&
+            (server.status === "failed" || server.status === "needs-auth") &&
             now >= (this.mcpRetryAt.get(server.name) ?? 0),
         )
         .map((server) => this.reconnectMcpServer(q, server.name));
@@ -362,6 +444,7 @@ export class SdkSession {
       ...claudeSpawnOptions({
         onSpawn: (child) => {
           this.windowsChild = child;
+          this.windowsSpawnedAt = Date.now() - 1_000;
         },
         onStderr,
         record: experimental_isProviderBridgeRecording(),
@@ -388,7 +471,19 @@ export class SdkSession {
         ? { onElicitation: this.options.onElicitation }
         : {}),
       ...(this.options.sandbox ? { sandbox: this.options.sandbox } : {}),
-      ...(this.options.hooks ? { hooks: this.options.hooks } : {}),
+      ...(this.preToolUse
+        ? {
+            hooks: {
+              ...this.options.hooks,
+              PreToolUse: [
+                this.preToolUse,
+                ...(this.options.hooks?.PreToolUse ?? []),
+              ],
+            },
+          }
+        : this.options.hooks
+          ? { hooks: this.options.hooks }
+          : {}),
       ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(!resumeSessionId && this.options.sessionId
         ? { sessionId: this.options.sessionId }
@@ -476,17 +571,69 @@ export class SdkSession {
     this.stopping = true;
     this.rejectQueuedInputs("Claude SDK session stopped before input consumed");
     const child = this.windowsChild;
-    let stopped: Awaited<ClaudeTreeStop> = { treeTermination: "confirmed" };
+    let ended = true;
     try {
-      if (child) stopped = await stopClaudeTree(child);
+      if (child) ended = await this.endWindowsTree(child);
     } finally {
       this.endSession();
     }
-    if (stopped.treeTermination !== "confirmed") {
-      throw new Error(
-        "Claude stopped, but Cloudroom could not confirm its tool processes ended. Some may still be running.",
+    if (!ended) {
+      throw Object.assign(
+        new Error(
+          "Claude stopped, but Cloudroom could not confirm its tool processes ended. Some may still be running.",
+        ),
+        { code: "stop_unconfirmed" },
       );
     }
+  }
+
+  /**
+   * Lists Claude's tree first: once Claude is gone, taskkill can't find it.
+   * When taskkill can't confirm the end, the stop is confirmed once Claude
+   * and everything listed (same PID and start time) have exited.
+   */
+  private async endWindowsTree(child: ChildProcess): Promise<boolean> {
+    const running = this.isRunning();
+    if (!running && this.windowsLeftovers?.length === 0) return true;
+    const before = await listWindowsProcesses();
+    if ((await stopClaudeTree(child)).treeTermination === "confirmed") {
+      this.windowsLeftovers = [];
+      return true;
+    }
+    const after = running ? await listWindowsProcesses() : before;
+    const root = {
+      pid: child.pid ?? -1,
+      parentPid: -1,
+      startedAt: this.windowsSpawnedAt,
+    };
+    // Leftover tools can start children after Claude exits. Keep following
+    // their trees, including after a tool itself exits between lists.
+    const leftovers = this.windowsLeftovers ?? [];
+    const roots =
+      running || this.windowsLeftovers === undefined
+        ? [root, ...leftovers]
+        : leftovers;
+    const processes = [...(before ?? []), ...(after ?? [])];
+    const found = [
+      ...leftovers,
+      ...roots.flatMap((parent) => descendantsOf(processes, parent)),
+    ];
+    // Once Claude has exited, a failed list loses nothing already tracked:
+    // keep it, and the next retry lists those PIDs again.
+    this.windowsLeftovers =
+      before === null || after === null
+        ? roots.includes(root)
+          ? null
+          : this.windowsLeftovers
+        : this.windowsLeftovers === null
+          ? null
+          : after.filter((now) =>
+              found.some(
+                (left) =>
+                  now.pid === left.pid && now.startedAt === left.startedAt,
+              ),
+            );
+    return !this.isRunning() && this.windowsLeftovers?.length === 0;
   }
 
   private endSession(): void {
@@ -496,6 +643,22 @@ export class SdkSession {
     this.abortController.abort();
     this.query?.close();
     this.query = undefined;
+  }
+
+  /**
+   * Ends the running turn and keeps Claude alive. False when Claude still
+   * holds a message that would start a turn of its own afterwards, or is too
+   * old to say.
+   */
+  async interrupt(): Promise<boolean> {
+    this.rejectQueuedInputs("Claude turn stopped before input consumed");
+    const receipt = await this.query?.interrupt();
+    return receipt !== undefined && receipt.still_queued.length === 0;
+  }
+
+  /** Ends one command, agent, or workflow Claude runs. Fine if it already ended. */
+  async stopTask(taskId: string): Promise<void> {
+    await this.query?.stopTask(taskId);
   }
 
   async closeGracefully(timeoutMs: number): Promise<void> {

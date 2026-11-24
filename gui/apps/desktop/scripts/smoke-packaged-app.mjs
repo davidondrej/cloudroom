@@ -10,7 +10,7 @@ import {
   resolveDesktopBuildPlatform,
   resolveDesktopReleaseChannel,
 } from "./desktop-release-channel.mjs";
-import { createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
+import { assertPatchedBrotli, createPackagedAppLaunchArguments } from "./packaged-app-launch.mjs";
 import { resolvePackagedAppBinary } from "./packaged-app-paths.mjs";
 import { smokePackagedNpm } from "./smoke-packaged-npm.mjs";
 import { readCloudroomVersion } from "./cloudroom-version.mjs";
@@ -319,6 +319,7 @@ async function smokePackagedApp() {
 }
 
 async function runPackagedSmoke(appBinary, smokeRoot) {
+  await assertPatchedBrotli(appBinary);
   const desktopVersion = await readDesktopPackageVersion(appBinary);
   const desktopPlatform = resolveDesktopBuildPlatform(process.platform);
   await smokePackagedNpm(appBinary);

@@ -56,6 +56,7 @@ type TerminalMessageObserver = (message: HostDaemonDaemonWsMessage) => void;
 interface CreateHarnessOptions {
   closeGracePeriodMs?: number;
   onSendMessage: TerminalMessageObserver;
+  refreshShellEnv?: () => Promise<unknown>;
   resolveShell: ResolveTerminalShell;
 }
 
@@ -312,6 +313,7 @@ function createHarnessWithOptions(
     closeGracePeriodMs: args.closeGracePeriodMs,
     logger: createFakeLogger(),
     ptyAdapter: adapter,
+    refreshShellEnv: args.refreshShellEnv,
     resolveShell: args.resolveShell,
     runtimeManager,
     sendMessage: (message) => {
@@ -673,6 +675,66 @@ describe("TerminalManager", () => {
         },
       ]),
     );
+  });
+
+  it("reports a stuck shell lookup before the server's open limit", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let resolveShellCalls = 0;
+    const harness = createHarnessWithShell({
+      resolveShell: () => {
+        resolveShellCalls += 1;
+        return new Promise<string>(() => undefined);
+      },
+    });
+
+    const openPromise = harness.manager.handleMessage({
+      type: "terminal.open",
+      contributedEnv: [],
+      requestId: "open-1",
+      terminalId: "term-1",
+      target: { kind: "host_path", cwd: null },
+      cols: 100,
+      rows: 30,
+      start: DEFAULT_TERMINAL_START,
+    });
+    await vi.waitFor(() => expect(resolveShellCalls).toBe(1));
+    await vi.advanceTimersByTimeAsync(8_000);
+    await openPromise;
+
+    expect(harness.adapter.spawned).toHaveLength(0);
+    expect(harness.messages).toContainEqual(
+      expect.objectContaining({
+        type: "terminal.error",
+        code: "terminal_open_step_timeout",
+        message: expect.stringContaining("Finding the shell"),
+      }),
+    );
+  });
+
+  it("opens a Windows terminal with the refreshed PATH (#1881)", async () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      const harness: TerminalManagerHarness = createHarnessWithOptions({
+        onSendMessage: () => undefined,
+        refreshShellEnv: () =>
+          harness.runtimeManager.replaceBaseShellEnv({ PATH: "C:\\new\\bin" }),
+        resolveShell: async () => "C:\\Windows\\System32\\cmd.exe",
+      });
+      await harness.manager.handleMessage({
+        type: "terminal.open",
+        contributedEnv: [],
+        requestId: "open-1",
+        terminalId: "term-1",
+        target: { kind: "host_path", cwd: os.tmpdir() },
+        cols: 80,
+        rows: 24,
+        start: DEFAULT_TERMINAL_START,
+      });
+      expect(harness.adapter.spawned[0]?.args.env.PATH).toBe("C:\\new\\bin");
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
   });
 
   it("shuts down terminals after in-progress opens finish", async () => {

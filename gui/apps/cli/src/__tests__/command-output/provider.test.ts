@@ -132,8 +132,32 @@ describe("room-cli provider command output", () => {
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
       "Models for claude-code:",
       "",
-      "Model             Name              Default\n----------------  ----------------  -------\nclaude-opus-4-6   Claude Opus 4.6\n----------------  ----------------  -------\nclaude-haiku-4-5  Claude Haiku 4.5  *",
+      "Model             Name              Default\n----------------  ----------------  -------\nclaude-opus-4-6   Claude Opus 4.6\nclaude-haiku-4-5  Claude Haiku 4.5  *",
       "",
+    ]);
+  });
+
+  it("room-cli provider models says how to sign in when a provider has no models", async () => {
+    stubServerApi({
+      "v1.system.execution-options.$get": vi.fn(async () => ({
+        providers: [
+          {
+            id: "pi",
+            strings: {
+              signInHint: "Run `pi`, type /login, and pick a provider.",
+            },
+          },
+        ],
+        models: [],
+        selectedOnlyModels: [],
+        modelLoadError: null,
+      })),
+    });
+
+    await runCommand(["provider", "models", "pi"], register);
+
+    expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
+      "No models available. Run `pi`, type /login, and pick a provider.",
     ]);
   });
 
@@ -155,6 +179,55 @@ describe("room-cli provider command output", () => {
       query: { environmentId: "env-remote", providerId: "codex" },
     });
     expect(collectLogPayloads(vi.mocked(console.log))).toEqual(["[]"]);
+  });
+
+  it("room-cli provider models lists the calling thread's project, or --project (#1236)", async () => {
+    // A project whose folder moved lists nothing; the machine lists gpt-5.
+    const get = vi.fn(async (args: { query: { projectId?: string } }) => ({
+      providers: [],
+      models: args.query.projectId
+        ? []
+        : [{ model: "gpt-5", displayName: "GPT-5", isDefault: true }],
+      selectedOnlyModels: [],
+      modelLoadError: null,
+    }));
+    stubServerApi({ "v1.system.execution-options.$get": get });
+    vi.stubEnv("ROOM_PROJECT_ID", "proj-env");
+
+    await runCommand(
+      ["provider", "models", "acp-opencode", "--json"],
+      register,
+    );
+    await runCommand(
+      [
+        "provider",
+        "models",
+        "acp-opencode",
+        "--project",
+        "proj-flag",
+        "--json",
+      ],
+      register,
+    );
+
+    expect(get).toHaveBeenNthCalledWith(1, {
+      query: { providerId: "acp-opencode", projectId: "proj-env" },
+    });
+    expect(get).toHaveBeenNthCalledWith(2, {
+      query: { providerId: "acp-opencode" },
+    });
+    expect(get).toHaveBeenNthCalledWith(3, {
+      query: { providerId: "acp-opencode", projectId: "proj-flag" },
+    });
+    expect(get).toHaveBeenCalledTimes(3);
+    expect(collectLogPayloads(vi.mocked(console.log))).toEqual([
+      JSON.stringify(
+        [{ model: "gpt-5", displayName: "GPT-5", isDefault: true }],
+        null,
+        2,
+      ),
+      "[]",
+    ]);
   });
 
   it("rejects simultaneous machine and environment selectors", async () => {

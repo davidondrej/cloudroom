@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { WebSocket } from "ws";
 import { z } from "zod";
-import { createNodeBbSdk } from "@cloudroom/sdk";
+import { createNodeRoomSdk } from "@cloudroom/sdk";
 import { getStoredThreadTabs } from "@cloudroom/db";
 import { desktopBrowserCommandSchema } from "@cloudroom/host-daemon-contract";
 import { threadTabsSchema } from "@cloudroom/server-contract";
@@ -180,7 +180,7 @@ const electronExited = new Promise((resolve) =>
   electron.once("exit", () => resolve()),
 );
 electron.once("error", (error) => capture(Buffer.from(error.message)));
-const sdk = createNodeBbSdk({ baseUrl: server.baseUrl, timeoutMs: 15e3 });
+const sdk = createNodeRoomSdk({ baseUrl: server.baseUrl, timeoutMs: 15e3 });
 const api = sdk.experimental_desktopBrowsers;
 let devStarted = false;
 let devBrowserVersion = "";

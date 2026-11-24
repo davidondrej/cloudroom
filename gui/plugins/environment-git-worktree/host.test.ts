@@ -1,12 +1,22 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { promisify } from "node:util";
 import { experimental_createHostEntryHarness } from "@get-bb/plugin-sdk/testing/host";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createWorktreeHostEntry } from "./host.js";
+import { withWorktreeMetadataLock } from "bb-environment-provider-host/locks";
+import { allowLongPaths } from "./host/worktree.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryRoots: string[] = [];
@@ -43,7 +53,9 @@ async function createSourceRepository(repositoryName = "repo"): Promise<{
   temporaryRoots.push(root);
   const sourcePath = join(root, repositoryName);
   const dataDir = join(root, "plugin-data");
-  await execFileAsync("mkdir", ["-p", sourcePath, dataDir]);
+  await Promise.all(
+    [sourcePath, dataDir].map((dir) => mkdir(dir, { recursive: true })),
+  );
   await git(sourcePath, "init", "--initial-branch=main");
   await writeFile(join(sourcePath, "README.md"), "hello\n");
   await git(sourcePath, "add", ".");
@@ -61,7 +73,9 @@ async function createDetachedSingleBranchRepository(): Promise<{
   const originPath = join(root, "origin");
   const sourcePath = join(root, "repo");
   const dataDir = join(root, "plugin-data");
-  await execFileAsync("mkdir", ["-p", originPath, dataDir]);
+  await Promise.all(
+    [originPath, dataDir].map((dir) => mkdir(dir, { recursive: true })),
+  );
   await git(originPath, "init", "--initial-branch=main");
   await writeFile(join(originPath, "README.md"), "hello\n");
   await git(originPath, "add", ".");
@@ -79,10 +93,13 @@ async function createDetachedSingleBranchRepository(): Promise<{
   return { root, sourcePath, dataDir };
 }
 
-function createHarness(dataDir: string) {
-  return experimental_createHostEntryHarness(createWorktreeHostEntry(), {
-    experimental_paths: { dataDir, tempDir: join(dataDir, "tmp") },
-  });
+function createHarness(dataDir: string, spares = false) {
+  return experimental_createHostEntryHarness(
+    createWorktreeHostEntry({ spares }),
+    {
+      experimental_paths: { dataDir, tempDir: join(dataDir, "tmp") },
+    },
+  );
 }
 
 function createInput(args: {
@@ -151,6 +168,53 @@ describe("worktree host entry", () => {
       ).toEqual({ status: "removed" });
       expect(existsSync(join(dataDir, "worktrees", pathKey))).toBe(false);
       await harness.experimental_dispose();
+    },
+  );
+
+  it.each([
+    ["win32", null, "true"],
+    ["win32", "false", "false"],
+    ["linux", null, ""],
+    ["darwin", null, ""],
+  ] as const)(
+    "turns on core.longpaths on %s when it is set to %s (#1806)",
+    async (platform, existing, expected) => {
+      const { root, sourcePath } = await createSourceRepository();
+      // Only this repository's config counts, not the machine's.
+      const globalConfig = join(root, "gitconfig");
+      await writeFile(globalConfig, "");
+      vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig);
+      vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+      try {
+        if (existing !== null)
+          await git(sourcePath, "config", "core.longpaths", existing);
+        const value = async () =>
+          (
+            await git(
+              sourcePath,
+              "config",
+              "--local",
+              "--default",
+              "",
+              "--get",
+              "core.longpaths",
+            )
+          ).trim();
+        // It waits for the lock `worktree add` holds while it writes config.
+        let release = () => {};
+        const held = withWorktreeMetadataLock(
+          join(sourcePath, ".git"),
+          () => new Promise<void>((resolve) => (release = resolve)),
+        );
+        const allowed = allowLongPaths(sourcePath, undefined, platform);
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(await value()).toBe(existing ?? "");
+        release();
+        await Promise.all([held, allowed]);
+        expect(await value()).toBe(expected);
+      } finally {
+        vi.unstubAllEnvs();
+      }
     },
   );
 
@@ -238,6 +302,19 @@ describe("worktree host entry", () => {
     expect(
       (await git(result.path, "rev-parse", "--abbrev-ref", "HEAD")).trim(),
     ).toBe("bb/named-thr_1");
+    // A fork starts from its snapshot branch but compares against main.
+    const fork = await harness.experimental_call("create", {
+      operationId: "fork",
+      sourcePath,
+      pathKey: "thr_2",
+      branchName: "bb/fork-thr_2",
+      baseBranch: { kind: "named", name: "release" },
+      diffBase: { kind: "named", name: "main" },
+      branchMode: "reset",
+    });
+    expect(fork).toMatchObject({ status: "created", baseBranch: "main" });
+    if (fork.status !== "created") throw new Error(fork.message);
+    expect(existsSync(join(fork.path, "release.txt"))).toBe(true);
     await harness.experimental_dispose();
   });
 
@@ -260,6 +337,19 @@ describe("worktree host entry", () => {
     });
     if (result.status !== "created") throw new Error(result.message);
     expect(existsSync(join(result.path, "README.md"))).toBe(true);
+    // A branch only on the remote, and a pull request alias, work too (#985).
+    await git(sourcePath, "fetch", "origin", "main:refs/remotes/origin/pr/1");
+    for (const name of ["main", "origin/pr/1"]) {
+      const remote = await harness.experimental_call("create", {
+        operationId: name,
+        sourcePath,
+        pathKey: `thr_${name.length}`,
+        branchName: `bb/remote-${name.length}`,
+        baseBranch: { kind: "named", name },
+        branchMode: "reset",
+      });
+      expect(remote).toMatchObject({ status: "created" });
+    }
     await harness.experimental_dispose();
   });
 
@@ -328,7 +418,7 @@ describe("worktree host entry", () => {
     await harness.experimental_dispose();
   });
 
-  it("replaces an invalid target before recreating the expected branch", async () => {
+  it("replaces a clean target on the wrong branch before recreating the expected branch", async () => {
     const { sourcePath, dataDir } = await createSourceRepository();
     const harness = createHarness(dataDir);
     const input = createInput({
@@ -350,6 +440,47 @@ describe("worktree host entry", () => {
     ).toBe("bb/expected");
     await harness.experimental_dispose();
   });
+
+  it.each([
+    ["its own branch", ["checkout", "-b", "agent-branch"], "bb/expected"],
+    ["a detached HEAD", ["checkout", "--detach"], "bb/expected"],
+    ["a renamed expected branch", null, "bb/renamed"],
+  ])(
+    "keeps a dirty target on %s instead of replacing it",
+    async (_label, checkout, retryBranch) => {
+      const { sourcePath, dataDir } = await createSourceRepository();
+      const harness = createHarness(dataDir);
+      const input = createInput({
+        operationId: "first",
+        sourcePath,
+        pathKey: "dirty",
+        branchName: "bb/expected",
+      });
+      const first = await harness.experimental_call("create", input);
+      if (first.status !== "created") throw new Error(first.message);
+      await writeFile(join(first.path, "agent.txt"), "work\n");
+      await git(sourcePath, "config", "status.showUntrackedFiles", "no");
+      if (checkout !== null) await git(first.path, ...checkout);
+      const retry = await harness.experimental_call("create", {
+        ...input,
+        operationId: "retry",
+        branchName: retryBranch,
+      });
+      expect(retry).toMatchObject({
+        status: "failed",
+        message: expect.stringContaining("uncommitted changes"),
+      });
+      expect(
+        await harness.experimental_call("remove", {
+          operationId: "cleanup",
+          pathKey: "dirty",
+          path: null,
+        }),
+      ).toEqual({ status: "removed" });
+      expect(existsSync(join(first.path, "agent.txt"))).toBe(true);
+      await harness.experimental_dispose();
+    },
+  );
 
   it("leaves setup execution to core", async () => {
     const { sourcePath, dataDir } = await createSourceRepository();
@@ -396,6 +527,7 @@ describe("worktree host entry", () => {
     );
     if (first.status !== "created") throw new Error(first.message);
     await writeFile(join(first.path, "notes.txt"), "work in progress\n");
+    await git(sourcePath, "config", "status.showUntrackedFiles", "no");
     const retry = await harness.experimental_call(
       "create",
       createInput({
@@ -451,6 +583,114 @@ describe("worktree host entry", () => {
     expect(existsSync(join(root, "teardown.marker"))).toBe(false);
     expect(existsSync(created.path)).toBe(false);
     expect(await readdir(join(dataDir, "worktrees"))).toEqual([]);
+    await harness.experimental_dispose();
+  });
+
+  it("claims the prebuilt spare, and falls back when it is broken", async () => {
+    const { root, sourcePath, dataDir } = await createSourceRepository();
+    const hookLog = join(root, "hook.log");
+    await writeFile(
+      join(sourcePath, ".git", "hooks", "post-checkout"),
+      `#!/bin/sh\necho "$1 $(git branch --show-current)" >> "${hookLog}"\n`,
+      { mode: 0o755 },
+    );
+    const harness = createHarness(dataDir, true);
+    const create = async (name: string) => {
+      const created = await harness.experimental_call(
+        "create",
+        createInput({
+          operationId: `create-${name}`,
+          sourcePath,
+          pathKey: name,
+          branchName: `bb/${name}`,
+        }),
+      );
+      if (created.status !== "created") throw new Error(created.message);
+      return created.path;
+    };
+    const worktrees = join(dataDir, "worktrees");
+    const spareDir = async () =>
+      join(
+        worktrees,
+        (await readdir(worktrees)).find((name) => name.startsWith(".spare-")) ??
+          "none",
+      );
+    const spareReady = async () =>
+      vi.waitFor(
+        async () =>
+          expect(existsSync(join(await spareDir(), "ready"))).toBe(true),
+        { timeout: 15_000, interval: 100 },
+      );
+
+    await create("first");
+    await spareReady();
+    const claimed = await create("claimed");
+    // The spare was moved into place, not copied.
+    expect(existsSync(join(await spareDir(), "ready"))).toBe(false);
+    expect(await git(claimed, "branch", "--show-current")).toBe("bb/claimed\n");
+    expect(await git(claimed, "status", "--porcelain")).toBe("");
+    // Its hook saw what a normal create's hook sees: no previous commit.
+    const zero = "0".repeat(40);
+    expect(await readFile(hookLog, "utf8")).toBe(
+      `${zero} bb/first\n${zero} bb/claimed\n`,
+    );
+
+    await spareReady();
+    await rm(join(await spareDir(), "checkout"), { recursive: true });
+    const fallback = await create("fallback");
+    expect(await git(fallback, "branch", "--show-current")).toBe(
+      "bb/fallback\n",
+    );
+    expect(await git(fallback, "status", "--porcelain")).toBe("");
+    await harness.experimental_dispose();
+  }, 30_000);
+
+  it("skips a recent fetch, and starts from the last fetched copy when offline", async () => {
+    const {
+      root,
+      sourcePath: origin,
+      dataDir,
+    } = await createSourceRepository("origin");
+    const sourcePath = join(root, "repo");
+    await git(root, "clone", origin, sourcePath);
+    // Counts fetches, and fails like a laptop with no network while "offline" exists.
+    const fetches = join(root, "fetches");
+    const offline = join(root, "offline");
+    await writeFile(
+      join(root, "upload-pack"),
+      `#!/bin/sh\necho x >> "${fetches}"\n[ -e "${offline}" ] && { echo "fatal: Could not resolve host" >&2; exit 128; }\nexec git upload-pack "$@"\n`,
+      { mode: 0o755 },
+    );
+    await git(
+      sourcePath,
+      "config",
+      "remote.origin.uploadpack",
+      join(root, "upload-pack"),
+    );
+    const harness = createHarness(dataDir);
+    const create = (name: string) =>
+      harness.experimental_call(
+        "create",
+        createInput({
+          operationId: `create-${name}`,
+          sourcePath,
+          pathKey: name,
+          branchName: `bb/${name}`,
+        }),
+      );
+
+    // A clone writes no FETCH_HEAD, so the first create fetches; the next one doesn't.
+    expect(await create("first")).toMatchObject({ status: "created" });
+    expect(await create("second")).toMatchObject({ status: "created" });
+    expect(await readFile(fetches, "utf8")).toBe("x\n");
+
+    const anHourAgo = new Date(Date.now() - 60 * 60_000);
+    await utimes(join(sourcePath, ".git", "FETCH_HEAD"), anHourAgo, anHourAgo);
+    await writeFile(offline, "");
+    expect(await create("offline")).toMatchObject({ status: "created" });
+    expect(progressText(harness)).toContain(
+      "Couldn't fetch origin/main, so this starts from the copy fetched 1 hour ago",
+    );
     await harness.experimental_dispose();
   });
 });

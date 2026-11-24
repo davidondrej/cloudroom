@@ -10,7 +10,7 @@ import {
   type ImperativePanelHandle,
 } from "react-resizable-panels";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { usePanelResizeSnap } from "./usePanelResizeSnap";
+import { usePanelResizeSnap } from "@/components/right-panel/shell/panel-resize";
 
 vi.mock("react-resizable-panels", async () => {
   const { createRequire } = await import("node:module");

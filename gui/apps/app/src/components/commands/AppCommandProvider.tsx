@@ -16,12 +16,13 @@ import {
   matchesAppShortcut,
   type AppCommandContext,
   type AppCommandContextKey,
+  type AppShortcutInput,
   type KeyboardCommandId,
   type AppShortcut,
 } from "@cloudroom/domain";
 import { usePluginCommandBindings } from "@/hooks/usePluginCommandBindings";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 import {
   browserPlatform,
   isEditableKeyboardTarget,
@@ -98,7 +99,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
   const showKeyboardHints =
     systemConfig.data?.generalSettings?.showKeyboardHints ??
     defaultAppSettings.showKeyboardHints;
-  const isDesktop = getBbDesktopInfo() !== null;
+  const isDesktop = getRoomDesktopInfo() !== null;
   const [isShortcutHintModifierHeld, setIsShortcutHintModifierHeld] =
     useState(false);
   const modifierHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -292,6 +293,30 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     [isDesktop, keybindings],
   );
 
+  // Last matching binding wins; context is read only once a shortcut matches.
+  const findCommand = useCallback(
+    (
+      input: AppShortcutInput,
+      getContext: () => AppCommandContext,
+    ): KeyboardCommandId | null => {
+      const bindings = keybindingsRef.current;
+      let context: AppCommandContext | null = null;
+      const isMac = isMacKeyboardPlatform(browserPlatform());
+      for (let index = bindings.length - 1; index >= 0; index -= 1) {
+        const binding = bindings[index];
+        if (!binding) continue;
+        if (!isAppKeybindingAvailableForClient(binding, { isDesktop, isMac })) {
+          continue;
+        }
+        if (!matchesAppShortcut(input, binding.shortcut, isMac)) continue;
+        context ??= getContext();
+        if (matchesAppCommandContext(binding, context)) return binding.command;
+      }
+      return null;
+    },
+    [isDesktop],
+  );
+
   const handleKeyboardEvent = useCallback(
     (event: KeyboardEvent): boolean => {
       if (event.defaultPrevented || event.isComposing || event.repeat) {
@@ -305,19 +330,9 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       }
       const optionOnly = event.altKey && !event.ctrlKey && !event.metaKey;
       if (optionOnly && optionTypedCharRef.current) return false;
-      const bindings = keybindingsRef.current;
-      let context: AppCommandContext | null = null;
-      const isMac = isMacKeyboardPlatform(browserPlatform());
-      for (let index = bindings.length - 1; index >= 0; index -= 1) {
-        const binding = bindings[index];
-        if (!binding) continue;
-        if (!isAppKeybindingAvailableForClient(binding, { isDesktop, isMac })) {
-          continue;
-        }
-        if (!matchesAppShortcut(event, binding.shortcut, isMac)) continue;
-        context ??= currentContext(event.target);
-        if (!matchesAppCommandContext(binding, context)) continue;
-        if (!dispatch(binding.command, event.target)) return false;
+      const command = findCommand(event, () => currentContext(event.target));
+      if (command !== null) {
+        if (!dispatch(command, event.target)) return false;
         clearShortcutHintHoldRef.current();
         event.preventDefault();
         event.stopPropagation();
@@ -328,7 +343,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       }
       return false;
     },
-    [currentContext, dispatch, isDesktop],
+    [currentContext, dispatch, findCommand],
   );
 
   useEffect(() => {
@@ -340,12 +355,21 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
   }, [handleKeyboardEvent]);
 
   useEffect(() => {
-    const desktop = getBbDesktopInfo();
+    const desktop = getRoomDesktopInfo();
     if (!desktop?.onAppCommand) return;
-    return desktop.onAppCommand((command) => {
-      dispatch(command, null);
+    return desktop.onAppCommand((payload) => {
+      if (typeof payload === "string") {
+        dispatch(payload, null);
+        return;
+      }
+      // A shortcut pressed in a focused native browser page.
+      const command = findCommand(payload, () => ({
+        ...currentContext(null),
+        browserFocus: true,
+      }));
+      if (command !== null) dispatch(command, null);
     });
-  }, [dispatch]);
+  }, [currentContext, dispatch, findCommand]);
 
   const value = useMemo<AppCommandProviderValue>(
     () => ({

@@ -81,14 +81,28 @@ const systemProviderHostQueryFields = {
   environmentId: z.string().min(1),
 } as const;
 
+// `providerId` returns just that registered provider, without checking any host.
 export const systemProvidersQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     capability: z.enum(["usage"]),
+    providerId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);
 export type SystemProvidersQuery = z.infer<typeof systemProvidersQuerySchema>;
+
+// `providerId` checks just that provider, never waiting on the others.
+export const systemProviderStatesQuerySchema = z
+  .object({
+    ...systemProviderHostQueryFields,
+    providerId: z.string().min(1),
+  })
+  .partial()
+  .superRefine(rejectMultipleWorkspaceSelectors);
+export type SystemProviderStatesQuery = z.infer<
+  typeof systemProviderStatesQuerySchema
+>;
 
 export const systemInstallableProvidersQuerySchema = z
   .object(systemProviderHostQueryFields)
@@ -98,10 +112,12 @@ export type SystemInstallableProvidersQuery = z.infer<
   typeof systemInstallableProvidersQuerySchema
 >;
 
+// `projectId` lists in that project's checkout on the host, where a new thread there starts (#1236).
 export const systemExecutionOptionsQuerySchema = z
   .object({
     ...systemProviderHostQueryFields,
     providerId: z.string().min(1),
+    projectId: z.string().min(1),
   })
   .partial()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -114,6 +130,7 @@ export const systemRestartModelDiscoveryRequestSchema = z
     hostId: z.string().min(1).optional(),
     environmentId: z.string().min(1).optional(),
     providerId: z.string().min(1),
+    projectId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine(rejectMultipleWorkspaceSelectors);
@@ -141,6 +158,42 @@ export const systemVoiceTranscriptionResponseSchema = z.object({
 });
 export type SystemVoiceTranscriptionResponse = z.infer<
   typeof systemVoiceTranscriptionResponseSchema
+>;
+
+export const systemVoiceTranscriptionJobStartResponseSchema = z.object({
+  id: z.string().min(1),
+});
+export type SystemVoiceTranscriptionJobStartResponse = z.infer<
+  typeof systemVoiceTranscriptionJobStartResponseSchema
+>;
+
+export const systemVoiceTranscriptionJobErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  retryable: z.boolean().optional(),
+});
+export type SystemVoiceTranscriptionJobError = z.infer<
+  typeof systemVoiceTranscriptionJobErrorSchema
+>;
+
+export const systemVoiceTranscriptionJobResponseSchema = z.discriminatedUnion(
+  "status",
+  [
+    z.object({ id: z.string().min(1), status: z.literal("pending") }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("completed"),
+      text: z.string(),
+    }),
+    z.object({
+      id: z.string().min(1),
+      status: z.literal("failed"),
+      error: systemVoiceTranscriptionJobErrorSchema,
+    }),
+  ],
+);
+export type SystemVoiceTranscriptionJobResponse = z.infer<
+  typeof systemVoiceTranscriptionJobResponseSchema
 >;
 
 export const systemProviderStateSchema = providerHealthSchema.extend({
@@ -202,6 +255,7 @@ export const systemConfigResponseSchema = z.object({
   serverAccess: serverAccessStatusSchema,
   generalSettings: appSettingsSchema.extend({
     showUnhandledProviderEvents: z.boolean().optional(),
+    providerOrder: z.array(z.string()).optional(),
   }),
   keybindings: appKeybindingsSchema,
   defaultKeybindings: appDefaultKeybindingsSchema,
@@ -318,6 +372,69 @@ export const systemInstallCliSkillsResponseSchema = z.object({
 export type SystemInstallCliSkillsResponse = z.infer<
   typeof systemInstallCliSkillsResponseSchema
 >;
+
+export const SKILL_USAGE_RANGES = ["30", "90", "365"] as const;
+export const systemSkillUsageQuerySchema = z.object({
+  days: z.enum(SKILL_USAGE_RANGES).optional(),
+  utcOffsetMinutes: z.string().regex(/^-?\d{1,4}$/).optional(),
+});
+export type SystemSkillUsageQuery = z.infer<typeof systemSkillUsageQuerySchema>;
+
+/** Daily skill runs, oldest day first, most used skill first. */
+export interface SystemSkillUsageResponse {
+  startDate: string;
+  days: number;
+  skills: { name: string; total: number; daily: number[] }[];
+}
+
+export const USAGE_ANALYTICS_METRICS = ["agentHours", "models", "tokens", "prompts"] as const;
+export const USAGE_ANALYTICS_RANGES = ["7", "30", "90", "365"] as const;
+export const systemUsageAnalyticsQuerySchema = z.object({
+  metric: z.enum(USAGE_ANALYTICS_METRICS),
+  days: z.enum(USAGE_ANALYTICS_RANGES).optional(),
+  utcOffsetMinutes: z.string().regex(/^-?\d{1,4}$/).optional(),
+});
+export type SystemUsageAnalyticsQuery = z.infer<typeof systemUsageAnalyticsQuerySchema>;
+
+const dailySchema = z.array(z.number());
+/**
+ * Settings → Analytics. Only the asked metric is filled. Daily lists run
+ * oldest day first, one entry per day from `startDate`.
+ */
+export const systemUsageAnalyticsResponseSchema = z.object({
+  startDate: z.string(),
+  days: z.number(),
+  /** Hours per day: agents working, split Local and Cloud, and you in the app. */
+  agentHours: z.object({ local: dailySchema, cloud: dailySchema, you: dailySchema }).optional(),
+  /** Prompts per model, most used first with the rest as "Other", and how many ran Local and Cloud. */
+  models: z.object({
+    local: z.number(),
+    cloud: z.number(),
+    list: z.array(z.object({ name: z.string(), total: z.number(), daily: dailySchema })),
+  }).optional(),
+  /**
+   * Tokens by kind. The three daily lists start one range early (`days` × 2 entries), so this range can be
+   * compared with the one before. `models` and `top` cover this range only: models that used the most first with
+   * the rest as "Other", and each day's heaviest threads.
+   */
+  tokens: z.object({
+    written: dailySchema,
+    read: dailySchema,
+    cached: dailySchema,
+    models: z.array(z.object({ name: z.string(), written: dailySchema, read: dailySchema, cached: dailySchema })),
+    top: z.array(z.array(z.object({ name: z.string(), written: z.number(), read: z.number(), cached: z.number() }))),
+  }).optional(),
+  /** Your prompts per day, and per hour of the week (Monday 12 AM first, 168 entries). */
+  prompts: z.object({ daily: dailySchema, hours: dailySchema }).optional(),
+});
+export type SystemUsageAnalyticsResponse = z.infer<typeof systemUsageAnalyticsResponseSchema>;
+
+export interface SystemWorktreeStorageResponse {
+  freeBytes: number | null;
+  usedBytes: number | null;
+  low: boolean;
+}
+
 export type SystemConfigReloadResponse = z.infer<
   typeof systemConfigReloadResponseSchema
 >;

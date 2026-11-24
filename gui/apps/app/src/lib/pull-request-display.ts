@@ -220,3 +220,30 @@ export function getPullRequestAttentionDisplay(
 ): PullRequestDisplay {
   return ATTENTION_DISPLAY[pullRequest.attention];
 }
+
+/**
+ * The one-click fix for what blocks an open pull request: its button label and the prompt sent to the
+ * thread's agent. The agent reads the logs or comments itself with `gh`, so the app fetches nothing.
+ */
+export function getPullRequestFix(
+  pullRequest: ThreadPullRequest,
+): { label: string; prompt: string } | null {
+  if (pullRequest.state !== "open" && pullRequest.state !== "draft") {
+    return null;
+  }
+  const name = `PR #${pullRequest.number} (${pullRequest.url})`;
+  if (pullRequest.checks.state === "failing") {
+    const { failedCount, totalCount } = pullRequest.checks;
+    return {
+      label: "Fix checks",
+      prompt: `CI is failing on ${name}: ${failedCount} of ${totalCount} checks failed. Find the failed checks with \`gh pr checks ${pullRequest.number}\`, read their logs with \`gh run view <run-id> --log-failed\`, fix the cause, and push the fix to this PR's branch.`,
+    };
+  }
+  if (pullRequest.review.state === "changes_requested") {
+    return {
+      label: "Address review",
+      prompt: `A reviewer requested changes on ${name}. Read the reviews and every review comment with \`gh pr view ${pullRequest.number} --comments\` and \`gh api repos/{owner}/{repo}/pulls/${pullRequest.number}/comments\`, address each one, and push the changes to this PR's branch.`,
+    };
+  }
+  return null;
+}

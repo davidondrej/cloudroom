@@ -54,6 +54,8 @@ function renderPluginCommandsSkill(
     "---",
     `name: ${SKILL_NAME}`,
     "description: Discover CLI commands contributed by installed Cloudroom plugins and their invocation paths.",
+    // Kept out of the model's skill list: `room-cli --help` shows the same commands.
+    "disable-model-invocation: true",
     "---",
     "",
     "# Plugin Commands",

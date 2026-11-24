@@ -38,6 +38,7 @@ describe("Cloudroom CLI isolation and message delivery", () => {
         return reply({ dataDir: directory });
       if (path === "/api/v1/plugins") return reply({ plugins: [] });
       if (path === "/api/v1/threads") return reply([]);
+      if (path === "/api/v1/hosts") return;
       if (path === "/api/v1/threads/thr_cloud/timeline")
         return reply({ pendingTodos: null });
       const match = /^\/api\/v1\/threads\/(thr_cloud|thr_local)(\/send)?$/.exec(
@@ -88,7 +89,15 @@ describe("Cloudroom CLI isolation and message delivery", () => {
   const run = (args: string[], context: NodeJS.ProcessEnv = {}) =>
     execFileAsync(
       process.execPath,
-      ["--conditions=source", "--import", "tsx", "src/index.ts", ...args],
+      [
+        "--conditions=source",
+        "--import",
+        "tsx",
+        "--import",
+        `data:text/javascript,${encodeURIComponent('const exit = process.exit; process.exit = (code) => { process.stderr.write("forced exit\\n"); exit(code); };')}`,
+        "src/index.ts",
+        ...args,
+      ],
       {
         cwd: cliRoot,
         env: {
@@ -177,6 +186,18 @@ describe("Cloudroom CLI isolation and message delivery", () => {
     expect(sends.at(-1)).toEqual({ id: "thr_local", mode: "steer-if-active" });
   });
 
+  // Node.js 18 has no global File, which undici 7 needs (#1800).
+  it.each([
+    ["File", `room-cli: this command needs Node.js 22 or newer, but this is Node.js ${process.version}. Run room-cli itself, not with node, so it uses Cloudroom's own runtime.`],
+    ["File;delete%20globalThis.Blob", "Blob is not defined"],
+  ])("on Node without File, deleting %s prints one line, not the bundle", async (globals, message) => {
+    const error = await run(["loop", "list"], {
+      NODE_OPTIONS: `--import=data:text/javascript,delete%20globalThis.${globals}`,
+    }).catch((caught: { code: number; stderr: string }) => caught);
+    expect(error).toMatchObject({ code: 1 });
+    expect(error.stderr.trim()).toBe(message);
+  });
+
   it("rejects explicit Cloud steering instead of silently changing intent", async () => {
     await expect(
       run(["thread", "tell", "thr_cloud", "Interrupt", "--mode", "steer"]),
@@ -184,5 +205,21 @@ describe("Cloudroom CLI isolation and message delivery", () => {
       stderr: expect.stringContaining("Cloud steering is not enabled"),
     });
     expect(sends.at(-1)).toEqual({ id: "thr_cloud", mode: "steer-if-active" });
+  });
+
+  // A forced exit after a request can abort Node on Windows (#1815).
+  it.each([
+    [["thread", "tell", "thr_cloud", "Hi", "--mode", "steer"], "HTTP 409"],
+    // GET /hosts stalls while its parallel request fails.
+    [["updates", "status"], "/api/v1/system/version"],
+  ])("%j fails without a forced exit", async (args, message) => {
+    const failure = await run(args).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: 1,
+      stderr: expect.stringContaining(message),
+    });
+    expect(failure).not.toMatchObject({
+      stderr: expect.stringContaining("forced exit"),
+    });
   });
 });

@@ -8,7 +8,7 @@ export default defineWorkspaceTestConfig({
     silent: "passed-only",
     setupFiles: ["test/setup/stored-event-decode-freeze.ts"],
     env: {
-      BB_DATA_DIR: "/tmp/bb-server-test",
+      BB_DATA_DIR: "/tmp/cloudroom-server-test",
       BB_SERVER_PORT: "49161",
       BB_HOST_DAEMON_PORT: "49162",
     },

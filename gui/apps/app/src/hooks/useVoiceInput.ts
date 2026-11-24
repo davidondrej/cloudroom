@@ -19,6 +19,7 @@ import { retryTransient } from "@/lib/retry-transient";
 import {
   createRecordingFile,
   deleteVoiceRecording,
+  downloadVoiceRecording,
   loadVoiceRecordings,
   releaseVoiceRecording,
   saveVoiceChunk,
@@ -33,13 +34,14 @@ interface UseVoiceInputOptions {
     file: File;
     promptContext?: string;
     signal?: AbortSignal;
+    clientId?: string;
   }) => Promise<string>;
   getPromptContext?: () => string | undefined;
 }
 
 const MIN_RECORDING_DURATION_MS = 1_000;
-const CHUNK_TIMESLICE_MS = 250;
-const RECORDING_BITS_PER_SECOND = 64_000;
+const CHUNK_TIMESLICE_MS = 2_000;
+const RECORDING_BITS_PER_SECOND = 24_000;
 
 const HTML_DOCUMENT_PATTERN = /<!doctype html|<html[\s>]/i;
 
@@ -121,6 +123,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const transcribingIdRef = useRef<number | null>(null);
+  const transcribingFileRef = useRef<File | null>(null);
   const startedAtMsRef = useRef<number | null>(null);
   const promptContextRef = useRef<string | undefined>(undefined);
   const shouldTranscribeRef = useRef(true);
@@ -137,7 +140,10 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   const [stream, setStream] = useState<MediaStream | null>(null);
 
   const showError = useCallback(
-    (message: string, retry?: { recordingId: number; run: () => void }) => {
+    (
+      message: string,
+      retry?: { recordingId: number; file: File; run: () => void },
+    ) => {
       setState("error");
       appToast.error("Voice input failed", {
         description: message,
@@ -145,6 +151,19 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
           ? {
               id: recordingToastId(retry.recordingId),
               action: { label: "Retry", onClick: retry.run },
+              extraActions: [
+                {
+                  label: "Download",
+                  onClick: (event) => {
+                    event.preventDefault();
+                    downloadVoiceRecording(retry.file, retry.recordingId);
+                  },
+                },
+              ],
+              cancel: {
+                label: "Discard",
+                onClick: () => void deleteVoiceRecording(retry.recordingId),
+              },
               duration: Infinity,
             }
           : {}),
@@ -161,6 +180,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     ): Promise<void> {
       setState("transcribing");
       transcribingIdRef.current = recordingId;
+      transcribingFileRef.current = file;
       const abortController = new AbortController();
       transcriptionAbortRef.current = abortController;
       try {
@@ -169,6 +189,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
             file,
             promptContext,
             signal: abortController.signal,
+            ...(recordingId > 0 ? { clientId: String(recordingId) } : {}),
           }),
         );
         const normalized = normalizeTranscript(transcript);
@@ -190,6 +211,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         offeredRecordingIds.add(recordingId);
         showError(resolveRecordingErrorMessage(error), {
           recordingId,
+          file,
           run: () => void transcribeRecording(recordingId, file, promptContext),
         });
       } finally {
@@ -197,6 +219,7 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         if (transcriptionAbortRef.current === abortController) {
           transcriptionAbortRef.current = null;
           transcribingIdRef.current = null;
+          transcribingFileRef.current = null;
         }
       }
     },
@@ -204,32 +227,47 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   );
   const transcribeRef = useLatestRef(transcribe);
 
+  const showUnsentRecordingToast = useCallback(
+    (id: number, file: File) => {
+      offeredRecordingIds.add(id);
+      appToast.warning("Unsent voice recording", {
+        id: recordingToastId(id),
+        description:
+          id > 0
+            ? `Recorded ${new Date(id).toLocaleString()}, never transcribed.`
+            : "Your last recording was never transcribed.",
+        duration: Infinity,
+        action: {
+          label: "Transcribe",
+          onClick: () => void transcribeRef.current(id, file),
+        },
+        extraActions: [
+          {
+            label: "Download",
+            onClick: (event) => {
+              event.preventDefault();
+              downloadVoiceRecording(file, id);
+            },
+          },
+        ],
+        cancel: {
+          label: "Discard",
+          onClick: () => void deleteVoiceRecording(id),
+        },
+      });
+    },
+    [transcribeRef],
+  );
+
   useEffect(() => {
     void loadVoiceRecordings().then((saved) => {
       for (const { id, file } of saved) {
         const toastId = recordingToastId(id);
         if (offeredRecordingIds.has(id) && !appToast.isOpen(toastId)) continue;
-        offeredRecordingIds.add(id);
-        appToast.warning("Unsent voice recording", {
-          id: toastId,
-          description:
-            id > 0
-              ? `Recorded ${new Date(id).toLocaleString()}, never transcribed.`
-              : "Your last recording was never transcribed.",
-          duration: Infinity,
-          action: {
-            label: "Transcribe",
-            onClick: () => void transcribeRef.current(id, file),
-          },
-          cancel: {
-            label: "Discard",
-            onClick: () => void deleteVoiceRecording(id),
-          },
-          onClose: () => void deleteVoiceRecording(id),
-        });
+        showUnsentRecordingToast(id, file);
       }
     });
-  }, [transcribeRef]);
+  }, [showUnsentRecordingToast]);
 
   const stopMediaStream = useCallback(() => {
     const stream = streamRef.current;
@@ -499,17 +537,21 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     }
 
     if (state === "transcribing") {
-      if (transcribingIdRef.current !== null) {
-        void deleteVoiceRecording(transcribingIdRef.current);
-      }
+      const id = transcribingIdRef.current;
+      const file = transcribingFileRef.current;
       const abortController = transcriptionAbortRef.current;
       if (abortController) {
         abortController.abort();
         transcriptionAbortRef.current = null;
       }
+      transcribingIdRef.current = null;
+      transcribingFileRef.current = null;
       setState("idle");
+      if (id !== null && file !== null) {
+        showUnsentRecordingToast(id, file);
+      }
     }
-  }, [showError, state]);
+  }, [showError, showUnsentRecordingToast, state]);
 
   return {
     state,

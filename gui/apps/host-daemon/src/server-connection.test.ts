@@ -95,6 +95,7 @@ function createServerClientFixture(args: CreateServerClientFixtureArgs = {}) {
     callTool: unused,
     registerInteractiveRequest: unused,
     interruptInteractiveRequests: unused,
+    reportThreadMemoryLimit: unused,
   } satisfies ServerClient;
 
   return {
@@ -111,7 +112,11 @@ function createWebSocketFixture(args: CreateWebSocketFixtureArgs = {}) {
     urlProvider,
     options,
   ) => {
-    headers.push(options.headers);
+    headers.push(
+      typeof options.headers === "function"
+        ? options.headers()
+        : options.headers,
+    );
     let readyState = 0;
     const socket: ReconnectingWebSocketLike = {
       get bufferedAmount() {
@@ -540,33 +545,52 @@ describe("ServerConnection", () => {
     }
   });
 
-  it("closes the connection when a terminal websocket send throws", async () => {
-    const { connection, webSocket } = createConnectionFixture();
-    try {
-      await connection.start();
-      const socket = webSocket.sockets[0];
-      if (!socket) {
-        throw new Error("Expected test socket");
+  it.each([
+    ["send-failed", false, 1],
+    ["terminal-backpressure", true, 1],
+    ["send-failed", false, 3],
+  ] as const)(
+    "reconnects after a growing delay instead of closing for good on %s (backed up: %s, failures: %i)",
+    async (reason, backedUp, failures) => {
+      vi.useFakeTimers();
+      const { connection, webSocket } = createConnectionFixture();
+      try {
+        await connection.start();
+        const socket = webSocket.sockets[0];
+        if (!socket) {
+          throw new Error("Expected test socket");
+        }
+        if (backedUp) {
+          webSocket.setBufferedAmount(socket, 2 * 1024 * 1024);
+        } else {
+          vi.mocked(socket.send).mockImplementation(() => {
+            throw new Error("send failed");
+          });
+        }
+        const dataBase64 = Buffer.alloc(48 * 1024).toString("base64");
+        let seq = 0;
+        for (let failure = 0; failure < failures; failure += 1) {
+          while (
+            seq < 1_000 * (failure + 1) &&
+            connection.sendMessage({
+              type: "terminal.output",
+              terminalId: "term-1",
+              chunk: { seq: seq++, dataBase64 },
+            })
+          ) {}
+          expect(socket.close).toHaveBeenLastCalledWith(1013, reason);
+          await vi.advanceTimersByTimeAsync(1_000 * 2 ** failure - 1);
+          expect(socket.reconnect).toHaveBeenCalledTimes(failure);
+          await vi.advanceTimersByTimeAsync(1);
+          expect(socket.reconnect).toHaveBeenLastCalledWith(1013, reason);
+          expect(socket.reconnect).toHaveBeenCalledTimes(failure + 1);
+          expect(connection.sessionId).not.toBeNull();
+        }
+      } finally {
+        await connection.shutdown();
       }
-      vi.mocked(socket.send).mockImplementation(() => {
-        throw new Error("send failed");
-      });
-
-      expect(
-        connection.sendMessage({
-          type: "terminal.output",
-          terminalId: "term-1",
-          chunk: {
-            seq: 0,
-            dataBase64: Buffer.from("hello").toString("base64"),
-          },
-        }),
-      ).toBe(false);
-      expect(socket.close).toHaveBeenCalledWith(1013, "send-failed");
-    } finally {
-      await connection.shutdown();
-    }
-  });
+    },
+  );
 
   it("rejects a malformed host RPC command without disconnecting", async () => {
     const { connection, logger, setSession, webSocket } =
@@ -604,16 +628,92 @@ describe("ServerConnection", () => {
       expect(socket.close).not.toHaveBeenCalled();
       expect(setSession).not.toHaveBeenLastCalledWith(null);
       expect(logger.warn).toHaveBeenCalledWith(
-        expect.objectContaining({
+        {
           commandType: "thread.stop",
-          requestId: "invalid-transcription",
-        }),
+          issueCodes: ["too_small"],
+          messageType: "host-rpc.request",
+          payloadLength: expect.any(Number),
+        },
         "Rejected invalid host RPC command",
       );
     } finally {
       await connection.shutdown();
     }
   });
+
+  const secretRpc = {
+    type: "host-rpc.request",
+    // UUID-shaped secret: a valid request ID can still be private.
+    requestId: "5ec2e7aa-0000-4000-8000-5ec2e7aa5ec2",
+    command: { type: "thread.stop", "sk-secret-key": true },
+  };
+  it.each([
+    ["invalid JSON", "OPENAI_API_KEY=sk-secret-value", null, null, null],
+    [
+      "an unknown type",
+      JSON.stringify({ type: "sk-secret-value", env: { KEY: "sk-secret" } }),
+      null,
+      ["invalid_union"],
+      null,
+    ],
+    [
+      "a secret property name",
+      JSON.stringify({ type: "heartbeat-ack", "sk-secret-value": true }),
+      null,
+      ["unrecognized_keys"],
+      "heartbeat-ack",
+    ],
+    [
+      "a rejected RPC command",
+      JSON.stringify(secretRpc),
+      "thread.stop",
+      ["invalid_union"],
+      "host-rpc.request",
+    ],
+  ])(
+    "logs %s without its payload",
+    async (_label, data, commandType, issueCodes, messageType) => {
+      const logFields = {
+        commandType,
+        issueCodes,
+        messageType,
+        payloadLength: data.length,
+      };
+      const { connection, logger, webSocket } = createConnectionFixture();
+      try {
+        await connection.start();
+        const socket = webSocket.sockets[0];
+        socket?.onmessage?.({ data });
+
+        if (data.includes(secretRpc.requestId)) {
+          expect(logger.warn).toHaveBeenCalledWith(
+            logFields,
+            "Rejected invalid host RPC command",
+          );
+          expect(socket?.send).toHaveBeenCalledWith(
+            expect.stringContaining(secretRpc.requestId),
+          );
+          expect(socket?.close).not.toHaveBeenCalled();
+        } else {
+          expect(logger.error).toHaveBeenCalledWith(
+            logFields,
+            "Invalid server websocket message; closing connection",
+          );
+          await vi.waitFor(() => expect(socket?.close).toHaveBeenCalled());
+        }
+        const logged = JSON.stringify(
+          Object.values(logger).flatMap((log) => log.mock.calls),
+          (_key, value: unknown) =>
+            value instanceof Error
+              ? { ...value, message: value.message, stack: value.stack }
+              : value,
+        );
+        expect(logged).not.toMatch(/OPENAI|sk-secret|5ec2e7aa/);
+      } finally {
+        await connection.shutdown();
+      }
+    },
+  );
 
   it("deduplicates inactive-session invalidation and reconnects only the current session", async () => {
     const { connection, logger, setSession, webSocket } =

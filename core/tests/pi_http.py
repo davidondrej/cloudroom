@@ -73,6 +73,24 @@ class MixedHarnessTests(unittest.TestCase):
         users = [json.loads(line)['message']['content'] for line in Path(self.service.session('cr_pi')['native_path']).read_text().splitlines() if json.loads(line).get('message',{}).get('role')=='user']
         self.assertEqual(users,['hello','hello'])
 
+    def test_restart_keeps_stop_pause_until_the_new_message_is_first(self):
+        # #844 review: Stop, an older queued message, a timed-out restart; the user's new message must run first.
+        self.env.update(CLOUDROOM_TEST_RPC_TIMEOUT_MS='2000')  # 8s startup deadline.
+        self.service.request('POST','/v1/sessions/cr_pi/stop',{'request_id':'stop'},202)
+        self.service.stop(); (self.repo/'startup-delay').write_text('121'); self.start()
+        self.send('pi','older','older message')
+        until(lambda:self.service.session('cr_pi').get('startup_error')=='startup_timeout','classified startup timeout',30)
+        self.service.stop(); (self.repo/'startup-delay').unlink(); self.start()
+        self.service.request('POST','/v1/sessions/cr_pi/resume',{'request_id':'restart','keep_paused':True},202)
+        self.settled('pi','restart')
+        self.assertTrue(self.service.session('cr_pi')['queue_paused'])
+        self.send('pi','newer','newer message')
+        self.service.request('POST','/v1/sessions/cr_pi/reorder',{'request_id':'jump','order':['newer']},202)
+        self.service.request('POST','/v1/sessions/cr_pi/resume',{'request_id':'release'},202)
+        self.settled('pi','older')
+        users = [json.loads(line)['message']['content'] for line in Path(self.service.session('cr_pi')['native_path']).read_text().splitlines() if json.loads(line).get('message',{}).get('role')=='user']
+        self.assertEqual(users,['newer message','older message'])
+
     def test_same_api_queue_interrupt_replay_and_restart(self):
         for kind in ['codex','pi']:
             self.assertEqual(self.service.request('POST','/v1/sessions',{'request_id':kind,'harness':kind},202)['session_id'],'cr_'+kind)

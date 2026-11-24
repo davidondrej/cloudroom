@@ -1,4 +1,11 @@
 import {
+  CLOUD_AGENT_GONE_STATES,
+  cloudBackgroundCommandEnd,
+  cloudBackgroundCommandEvent,
+  type CloudBackgroundCommand,
+  cloudDeltaEvent,
+  cloudItemEvent,
+  codexItemEvent,
   encodeClientTurnRequestIdNumber,
   threadEventSchema,
   threadScope,
@@ -93,6 +100,8 @@ export class CloudThreadEvents {
   readonly promptLog: { requestId: string; text: string }[] = [];
   private readonly prompts = new Map<string, Data>();
   private readonly started = new Set<string>();
+  // Background commands that started and have not ended, by item ID.
+  private readonly commands = new Map<string, CloudBackgroundCommand>();
   private turnId: string | null = null;
   private piReply: { id: string; turnId: string; text: string } | null = null;
 
@@ -204,7 +213,7 @@ export class CloudThreadEvents {
         });
       }
       if (
-        ["failed", "unknown"].includes(text(data.state)) &&
+        ["failed", "unknown", "unknown_after_restart"].includes(text(data.state)) &&
         text(data.error)
       ) {
         out.push({
@@ -218,6 +227,11 @@ export class CloudThreadEvents {
     }
     if (record.kind === "state") {
       this.state = text(data.state) || this.state;
+      // The agent's process is gone, and its commands with it: Claude never reports how they ended.
+      if (CLOUD_AGENT_GONE_STATES.includes(this.state)) {
+        for (const [id, command] of this.commands) out.push(cloudBackgroundCommandEnd(this.commandBase(), id, command, "stopped", record.timestamp_ms));
+        this.commands.clear();
+      }
       const requestId = text(data.request_id);
       if (this.state === "starting_turn" && requestId) {
         this.turnId = requestId;
@@ -267,6 +281,16 @@ export class CloudThreadEvents {
     const native = object(record.native);
     if (typeof native.method === "string")
       return this.codexFrame(native.method, object(native.params));
+    if (data.type === "system") {
+      const task = cloudBackgroundCommandEvent(native, this.commandBase(), (id) => this.commands.get(id) ?? null, record.timestamp_ms);
+      if (task) {
+        const item = object(task.item);
+        if (task.type === "item/backgroundTask/progress") this.commands.set(text(item.id), { description: text(item.description), startedAt: record.timestamp_ms });
+        else this.commands.delete(text(item.id));
+        out.push(task);
+      }
+      return out;
+    }
     const turnId = text(data.request_id) || this.turnId;
     if (!turnId || !this.started.has(turnId) || !(piText || data.item_id))
       return out;
@@ -289,62 +313,15 @@ export class CloudThreadEvents {
       this.piReply.text += text(data.delta);
       id = this.piReply.id;
     }
-    if (record.kind === "text_delta" && text(data.delta)) {
-      out.push({
-        ...base,
-        type: "item/agentMessage/delta",
-        itemId: id,
-        delta: text(data.delta),
-      });
-    } else if (
-      record.kind === "item_started" ||
-      record.kind === "item_completed"
-    ) {
-      const type =
-        record.kind === "item_started" ? "item/started" : "item/completed";
-      const itemType = text(data.item_type);
-      if (itemType === "text" || itemType === "agentMessage") {
-        out.push({
-          ...base,
-          type,
-          item: { type: "agentMessage", id, text: text(data.text) },
-        });
-      } else if (itemType === "thinking" || itemType === "reasoning") {
-        out.push({
-          ...base,
-          type,
-          item: {
-            type: "reasoning",
-            id,
-            summary: [],
-            content: text(data.text) ? [text(data.text)] : [],
-          },
-        });
-      } else if (text(data.tool_name)) {
-        out.push({
-          ...base,
-          type,
-          item: {
-            type: "toolCall",
-            id,
-            tool: text(data.tool_name),
-            status:
-              type === "item/started"
-                ? "pending"
-                : data.is_error === true || data.status === "failed"
-                  ? "failed"
-                  : "completed",
-            ...(data.input && typeof data.input === "object"
-              ? { arguments: data.input }
-              : {}),
-            ...(data.result !== undefined && data.result !== null
-              ? { result: data.result }
-              : {}),
-          },
-        });
-      }
-    }
+    const event =
+      cloudDeltaEvent(record.kind, data, base, id) ??
+      cloudItemEvent(record.kind, data, base, id);
+    if (event) out.push(event);
     return out;
+  }
+
+  private commandBase() {
+    return { threadId: this.threadId, providerThreadId: PROVIDER_THREAD, scope: threadScope() };
   }
 
   private codexFrame(method: string, params: Data): unknown[] {
@@ -356,75 +333,12 @@ export class CloudThreadEvents {
       scope: turnScope(turnId),
     };
     const itemId = (id: unknown) => `${turnId}:${text(id)}`;
-    if (method === "item/started" || method === "item/completed") {
-      const native = object(params.item);
-      if (
-        ["userMessage", "subAgentActivity", "collabAgentToolCall"].includes(
-          text(native.type),
-        )
-      )
-        return [];
-      const status =
-        method === "item/started"
-          ? "pending"
-          : ["failed", "declined"].includes(text(native.status))
-            ? "failed"
-            : native.status === "interrupted"
-              ? "interrupted"
-              : "completed";
-      const item: Data = {
-        ...native,
-        id: itemId(native.id),
-        status,
-        approvalStatus: null,
-      };
-      for (const key of ["exitCode", "durationMs", "aggregatedOutput"])
-        if (item[key] === null) delete item[key];
-      if (native.type === "fileChange" && Array.isArray(native.changes)) {
-        item.changes = native.changes.map((entry) => {
-          const change = object(entry);
-          return {
-            ...change,
-            kind:
-              typeof change.kind === "string"
-                ? change.kind
-                : text(object(change.kind).type),
-          };
-        });
-      }
-      const event = { ...base, type: method, item };
-      return threadEventSchema.safeParse(event).success
-        ? [event]
-        : [
-            {
-              ...base,
-              type: method,
-              item: {
-                type: "toolCall",
-                id: itemId(native.id),
-                tool: text(native.type),
-                status,
-                result: native,
-              },
-            },
-          ];
-    }
-    if (
-      /^item\/(agentMessage\/delta|commandExecution\/outputDelta|fileChange\/outputDelta|reasoning\/(summaryTextDelta|textDelta)|plan\/delta)$/.test(
-        method,
-      )
-    ) {
-      return typeof params.delta === "string"
-        ? [
-            {
-              ...base,
-              type: method,
-              itemId: itemId(params.itemId),
-              delta: params.delta,
-            },
-          ]
-        : [];
-    }
+    // Sub-agent rows link to threads the phone doesn't have.
+    const native = object(params.item);
+    if (["subAgentActivity", "collabAgentToolCall"].includes(text(native.type)))
+      return [];
+    const event = codexItemEvent(method, params, base, itemId);
+    if (event) return [event];
     if (method === "error") {
       return [
         {
@@ -441,11 +355,11 @@ export class CloudThreadEvents {
 
 export type { CompletedTurnDisplay };
 
-export function cloudTimelineRows(
+export function cloudTimeline(
   feed: CloudThreadEvents,
   threadName: string,
   completedTurnDisplay: CompletedTurnDisplay,
-): TimelineRow[] {
+) {
   return buildThreadTimelineFromEvents({
     acceptedClientRequestContext: {
       acceptedClientRequestEvents: [],
@@ -463,7 +377,7 @@ export function cloudTimelineRows(
       turnMessageDetail: "summary",
       workspaceRoot: null,
     },
-  }).rows;
+  });
 }
 
 export function cloudTurnDetails(

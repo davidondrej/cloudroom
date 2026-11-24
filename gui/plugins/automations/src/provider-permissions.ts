@@ -1,3 +1,4 @@
+import { clampPermissionModeToCeiling } from "@cloudroom/domain";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { AgentEnvironment, PermissionMode } from "./rpc-types.js";
 
@@ -24,12 +25,14 @@ export function providerRoutingForEnvironment(
 }
 
 export async function resolvePermissionMode(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   requested: PermissionMode | undefined,
   routing: ProviderRouting = {},
+  /** The creating thread's mode when it is below Full Access: the default never goes above it (#2093). */
+  ceiling?: PermissionMode,
 ): Promise<PermissionMode> {
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const provider = providers.find((candidate) => candidate.id === providerId);
   if (provider === undefined || provider.available === false) {
     throw new Error(`Provider ${providerId} is not available.`);
@@ -43,11 +46,25 @@ export async function resolvePermissionMode(
     );
   }
   if (requested !== undefined) return requested;
-  if (provider.capabilities.permissionModes.includes("auto")) {
-    return "auto";
+  if (ceiling !== undefined) {
+    const capped = clampPermissionModeToCeiling({
+      ceiling,
+      permissionMode: "full",
+      permissionModes: provider.capabilities.permissionModes,
+    });
+    if (capped === null) {
+      throw new Error(
+        `Provider ${providerId} has no permission mode at or below ${ceiling}, this thread's.`,
+      );
+    }
+    return capped;
   }
+  // Loops run unattended, so they default to Full like new threads do.
   if (provider.capabilities.permissionModes.includes("full")) {
     return "full";
+  }
+  if (provider.capabilities.permissionModes.includes("auto")) {
+    return "auto";
   }
   throw new Error(
     `Provider ${providerId} has no supported default permission mode.`,
@@ -55,12 +72,12 @@ export async function resolvePermissionMode(
 }
 
 export async function requireReasoningLevel(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   reasoningLevel: string,
   routing: ProviderRouting = {},
 ): Promise<void> {
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const supported =
     providers
       .find((candidate) => candidate.id === providerId)
@@ -73,13 +90,13 @@ export async function requireReasoningLevel(
 }
 
 export async function requireServiceTier(
-  bb: ProviderPermissionApi,
+  room: ProviderPermissionApi,
   providerId: string,
   serviceTier: string | undefined,
   routing: ProviderRouting = {},
 ): Promise<void> {
   if (serviceTier === undefined || serviceTier === "default") return;
-  const providers = await bb.sdk.providers.list(routing);
+  const providers = await room.sdk.providers.list(routing);
   const provider = providers.find((candidate) => candidate.id === providerId);
   if (provider?.capabilities.supportsServiceTier === false) {
     throw new Error(

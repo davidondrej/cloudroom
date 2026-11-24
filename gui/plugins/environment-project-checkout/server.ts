@@ -12,6 +12,12 @@ import {
 import { PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID } from "./provider-id.js";
 
 const ATTACH_TIMEOUT_MS = 15 * 60 * 1000;
+// The host's first folder reads hang when macOS blocks or must download the
+// folder (#1366). Its first progress signal ends this window: a branch switch
+// may then run silently for minutes.
+const ATTACH_STALL_MS = 60 * 1000;
+const ATTACH_STALLED_MESSAGE =
+  "The project folder didn't respond for 60 seconds. If it's on a Mac, Cloudroom may lack access to it (System Settings → Privacy & Security → Files & Folders or Full Disk Access), or its iCloud files may not be downloaded.";
 const LIVE_THREAD_STATUSES = new Set([
   "starting",
   "active",
@@ -30,20 +36,21 @@ export const checkoutInputsSchema = z.object({
   branch: checkoutBranchSelectionSchema.optional(),
 });
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
-  const host = bb.hosts.experimental_client({
+export default async function checkoutPlugin(room: BbPluginApi): Promise<void> {
+  const host = room.hosts.experimental_client({
     contract: checkoutHostContract,
     experimental_signals: checkoutHostSignals,
   });
-  const reports = new Map<string, PluginEnvironmentProviderProgress>();
+  const reports = new Map<
+    string,
+    { report: PluginEnvironmentProviderProgress; progressed: () => void }
+  >();
 
   host.experimental_onSignal("progress", (event) => {
-    const report = reports.get(event.payload.operationId);
-    if (report !== undefined) reportHostProgress(report, event.payload);
+    const attach = reports.get(event.payload.operationId);
+    if (attach === undefined) return;
+    attach.progressed();
+    reportHostProgress(attach.report, event.payload);
   });
 
   async function otherLiveThreadUsesPath(args: {
@@ -51,12 +58,12 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     path: string;
     threadId: string | null;
   }): Promise<boolean> {
-    const rows = await bb.sdk.environments.list({
+    const rows = await room.sdk.environments.list({
       hostId: args.hostId,
       path: args.path,
     });
     for (const row of rows) {
-      const threads = await bb.sdk.threads.list({
+      const threads = await room.sdk.threads.list({
         environmentId: row.id,
         archived: false,
       });
@@ -125,7 +132,7 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     hostId: string;
     path: string;
   }): Promise<string | null> {
-    const rows = await bb.sdk.environments.list({
+    const rows = await room.sdk.environments.list({
       hostId: args.hostId,
       path: args.path,
     });
@@ -138,7 +145,7 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
     return environment?.id ?? null;
   }
 
-  bb.experimental_environments.register({
+  room.experimental_environments.register({
     id: PROJECT_CHECKOUT_ENVIRONMENT_PROVIDER_ID,
     displayName: "Project checkout",
     description: "Work in a project checkout on this machine.",
@@ -220,12 +227,21 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
                 baseBranch: branchInput.baseBranch,
               };
       const operationId = `${context.pathKey}#${context.attempt}`;
-      reports.set(operationId, context.report);
+      const stall = new AbortController();
+      const stallTimer = setTimeout(() => stall.abort(), ATTACH_STALL_MS);
+      reports.set(operationId, {
+        report: context.report,
+        progressed: () => clearTimeout(stallTimer),
+      });
       try {
         const result = await host.call(
           "attach",
           { operationId, path, branch },
-          { hostId, signal: context.signal, timeoutMs: ATTACH_TIMEOUT_MS },
+          {
+            hostId,
+            signal: AbortSignal.any([context.signal, stall.signal]),
+            timeoutMs: ATTACH_TIMEOUT_MS,
+          },
         );
         if (result.status === "failed") {
           return {
@@ -242,13 +258,19 @@ export default async function checkoutPlugin(bb: BbPluginApi): Promise<void> {
             context.projectCheckout.experimental_ownsPath === true,
         };
       } catch (error) {
-        if (context.signal.aborted) throw error;
-        return {
-          status: "failed",
-
-          message: errorMessage(error),
-        };
+        // Only a stall cancel the host confirmed (an AbortError) is a known
+        // stop. Any other error, such as a connection that drops before or
+        // after the cancel, may leave a branch switch running, so it throws
+        // and the engine keeps the folder claimed (#1366).
+        if (
+          context.signal.aborted ||
+          !stall.signal.aborted ||
+          !(error instanceof Error && error.name === "AbortError")
+        )
+          throw error;
+        return { status: "failed", message: ATTACH_STALLED_MESSAGE };
       } finally {
+        clearTimeout(stallTimer);
         reports.delete(operationId);
       }
     },

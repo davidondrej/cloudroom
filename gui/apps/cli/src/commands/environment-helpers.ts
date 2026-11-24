@@ -3,7 +3,8 @@ import {
   type EnvironmentDisplayProviderLookup,
   formatEnvironmentDisplay,
 } from "@cloudroom/core-ui";
-import type { BbSdk } from "@cloudroom/sdk";
+import { BbRequestTimeoutError, type BbSdk } from "@cloudroom/sdk";
+import { getErrorMessage } from "./helpers.js";
 
 export interface ThreadEnvironmentInfo {
   display: EnvironmentDisplayInfo;
@@ -17,7 +18,14 @@ async function resolveEnvironmentProvider(args: {
   if (args.environmentProviderId === null) {
     return { status: "loaded", provider: null };
   }
-  const providers = await args.sdk.environments.listProviders();
+  // Provider names are optional display metadata and need caller proof, so a
+  // failed lookup keeps the environment and falls back to the raw provider ID.
+  const providers = await args.sdk.environments
+    .listProviders()
+    .catch((error: unknown) => {
+      if (error instanceof BbRequestTimeoutError) throw error;
+      return [];
+    });
   const provider = providers.find(
     (candidate) => candidate.id === args.environmentProviderId,
   );
@@ -56,7 +64,11 @@ export async function fetchEnvironmentInfo(args: {
       }),
       hostId: env.hostId,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof BbRequestTimeoutError) throw error;
+    console.error(
+      `Warning: could not load environment ${args.environmentId}: ${getErrorMessage(error)}`,
+    );
     return null;
   }
 }

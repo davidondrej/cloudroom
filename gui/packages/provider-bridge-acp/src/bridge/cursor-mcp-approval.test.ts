@@ -1,7 +1,50 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const renameFault = vi.hoisted(() => ({
+  calls: 0,
+  code: "",
+  clock: 0,
+  external: false,
+  failures: 0,
+  handoffs: 0,
+}));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs/promises")>();
+  const rename: typeof fs.rename = async (...args) => {
+    renameFault.calls += 1;
+    if (renameFault.failures-- > 0) {
+      if (renameFault.external) {
+        renameFault.external = false;
+        writeFileSync(args[1], '["cursor-added"]');
+      }
+      throw Object.assign(new Error("rename"), { code: renameFault.code });
+    }
+    return fs.rename(...args);
+  };
+  // Each waiter check sees a new lock holder one simulated second later.
+  const stat = (async (...args: Parameters<typeof fs.stat>) => {
+    const stats = await fs.stat(...args);
+    if (renameFault.handoffs === 0 || !String(args[0]).endsWith(".bb-lock")) {
+      return stats;
+    }
+    if ((renameFault.handoffs += 1) > 30) {
+      throw new Error("still waiting");
+    }
+    renameFault.clock += 1_000;
+    return Object.assign(stats, { mtimeMs: renameFault.clock });
+  }) as typeof fs.stat;
+  return { ...fs, rename, stat };
+});
 import {
   approveCursorSessionMcpServer,
   buildCursorMcpApprovalIdentifier,
@@ -29,7 +72,17 @@ function mcpConfig(threadId = "thread-1"): AcpMcpServerConfig {
   };
 }
 
+const realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+
 afterEach(() => {
+  Object.defineProperty(process, "platform", realPlatform ?? {});
+  vi.restoreAllMocks();
+  Object.assign(renameFault, {
+    calls: 0,
+    external: false,
+    failures: 0,
+    handoffs: 0,
+  });
   for (const path of tempDirs.splice(0)) {
     rmSync(path, { recursive: true, force: true });
   }
@@ -137,4 +190,79 @@ describe("Cursor ACP session MCP approvals", () => {
       [installed.approval],
     );
   });
+
+  it.each([
+    ["win32", "EPERM", 7, 1, false, 8, 1],
+    ["win32", "EBUSY", 8, 1, false, 8, 0],
+    ["win32", "ENOSPC", 1, 1, false, 1, 0],
+    ["linux", "EPERM", 1, 1, false, 1, 0],
+    ["win32", "EPERM", 1, 1, true, 2, 1],
+    ["win32", "EBUSY", 40, 6, false, 41, 1],
+  ])(
+    "on %s after %s x%i with %i writers (external %s) renames %i times, saves %i",
+    async (platform, code, failures, writers, external, renames, saved) => {
+      const cursorDataDir = makeTempDir("bb-cursor-data-");
+      const cwd = makeTempDir("bb-cursor-workspace-");
+      Object.defineProperty(process, "platform", { value: platform });
+      Object.assign(renameFault, { code, external, failures });
+      const results = await Promise.allSettled(
+        Array.from({ length: writers }, (_, index) =>
+          approveCursorSessionMcpServer({
+            agentCommand: "cursor-agent.exe",
+            config: mcpConfig(`thread-${index}`),
+            cwd,
+            env: { CURSOR_DATA_DIR: cursorDataDir },
+          }),
+        ),
+      );
+      const installed = results.flatMap((result) =>
+        result.status === "fulfilled" && result.value ? [result.value] : [],
+      );
+      expect(installed).toHaveLength(saved);
+      for (const result of results) {
+        if (result.status === "rejected") {
+          expect(result.reason).toMatchObject({ code });
+        }
+      }
+      expect(renameFault.calls).toBe(renames);
+      const [project = ""] = readdirSync(join(cursorDataDir, "projects"));
+      const dir = join(cursorDataDir, "projects", project);
+      const files = saved > 0 || external ? ["mcp-approvals.json"] : [];
+      expect(readdirSync(dir)).toEqual(files);
+      if (files.length > 0) {
+        expect(
+          JSON.parse(readFileSync(join(dir, files[0] ?? ""), "utf8")),
+        ).toEqual([
+          ...(external ? ["cursor-added"] : []),
+          ...installed.map(({ approval }) => approval),
+        ]);
+      }
+    },
+    10_000,
+  );
+
+  it.each([
+    ["linux", 5],
+    ["win32", 15],
+  ])(
+    "on %s a waiter behind endless lock hand-offs gives up after %i s",
+    async (platform, seconds) => {
+      const env = { CURSOR_DATA_DIR: makeTempDir("bb-cursor-data-") };
+      const args = {
+        agentCommand: "cursor-agent.exe",
+        config: mcpConfig(),
+        cwd: makeTempDir("bb-cursor-workspace-"),
+        env,
+      };
+      const seed = await approveCursorSessionMcpServer(args);
+      mkdirSync(`${seed?.path}.bb-lock`);
+      Object.defineProperty(process, "platform", { value: platform });
+      Object.assign(renameFault, { clock: Date.now(), handoffs: 1 });
+      vi.spyOn(Date, "now").mockImplementation(() => renameFault.clock);
+      await expect(approveCursorSessionMcpServer(args)).rejects.toThrow(
+        "Timed out updating Cursor MCP approvals",
+      );
+      expect(renameFault.handoffs - 1).toBe(seconds);
+    },
+  );
 });

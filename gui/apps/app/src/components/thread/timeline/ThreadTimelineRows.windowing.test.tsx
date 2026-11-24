@@ -2,7 +2,7 @@
 
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CompactViewportOverrideProvider } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { buildTimelineViewRows } from "@cloudroom/thread-view";

@@ -1,17 +1,32 @@
 import { createServer, type ServerResponse } from "node:http";
 import { once } from "node:events";
-import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import * as sync from "../../src/services/cloudroom/sync.js";
 import { listQueuedCommands } from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
-import { command, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { appRequestId, installTag, readInstallTag } from "../../src/services/cloudroom/cloud-threads.js";
+import { binding, command, coreStates, saveBinding, saveCommandState, saveStatus, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { projectRecords } from "../../src/services/cloudroom/events.js";
+import type { SessionRecord } from "../../src/services/cloudroom/client.js";
+import { getLastThreadOutput } from "../../src/services/threads/thread-data.js";
 import { teleports } from "../../src/services/cloudroom/teleport.js";
 import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
-import { seedEnvironment, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
-import { archiveThread, createThread, getThread, setProjectGitRemoteUrlIfMissing, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+import { beginProjectDeletion } from "../../src/services/projects/project-deletion.js";
+import { availableModelFixture } from "../helpers/available-models.js";
+import { registerProviderHostRpcResponder } from "../helpers/host-rpc.js";
+import { seedEnvironment, seedEvent, seedHostSession, seedPrimaryHost, seedProjectWithSource, seedThread, seedThreadRuntimeState, seedTurnStarted } from "../helpers/seed.js";
+import { turnScope } from "@cloudroom/domain";
+import { archiveThread, unarchiveThread, createThread, listQueuedThreadMessages, getThread, setProjectGitRemoteUrlIfMissing, upsertProjectExecutionDefaults, events, cloudroomThreads, cloudroomCommands } from "@cloudroom/db";
+
+/** The app tags each prompt, steer, edit and rewind with its install (#237): `tagged` names one, `untagged` reads one. */
+const untagged = (id: string | undefined) => id?.replace(/^app_[a-f0-9]{12}_/, "");
+const plain = (body: object | undefined) => body && { ...body, request_id: untagged((body as { request_id?: string }).request_id) };
+const tagger = async (dataDir: string) => { const tag = await installTag(dataDir); return (raw: string) => appRequestId(tag, raw); };
 
 it("forwards Cursor login and keys without creating conversation records", async () => {
   const harness = await createTestAppHarness();
@@ -87,8 +102,9 @@ it("reports storage before models and preserves transiently blocked messages thr
     expect(prompts).toHaveLength(0);
     reason = "measurement_unavailable";
     expect(await (await request("/cloudroom")).json()).toMatchObject({ error: expect.stringContaining("measured") });
+    // A sandbox clock a minute behind this computer's is not a missing measurement (#1463).
     reason = "disk_capacity"; level = "normal"; sampleAge = 60_000;
-    expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: false, storage: { workspace_available_bytes: null }, error: expect.stringContaining("measured") });
+    expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, storage: { workspace_available_bytes: 3e9 }, error: null });
     sampleAge = 0; level = "low_space";
     expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, storage: { level: "low_space" } });
     const response = await request("/threads", input);
@@ -97,16 +113,16 @@ it("reports storage before models and preserves transiently blocked messages thr
     await expect.poll(() => prompts.length).toBe(1);
     rejectPrompt = true;
     await request(`/threads/${thread.id}/send`, { requestId: "storage-follow", mode: "auto", input: [{ type: "text", text: "Keep this follow-up", mentions: [] }] });
-    await expect.poll(() => prompts.filter(id => id === "storage-follow").length).toBe(1);
-    expect(harness.db.select().from(cloudroomCommands).all().find(c => c.id === "storage-follow")?.state).toBe("sending");
+    await expect.poll(() => prompts.filter(id => untagged(id) === "storage-follow").length).toBe(1);
+    expect(harness.db.select().from(cloudroomCommands).all().find(c => untagged(c.id) === "storage-follow")?.state).toBe("sending");
     level = "blocked";
     expect((await request(`/threads/${thread.id}/timeline`)).status).toBe(200);
     const blockedFollow = await request(`/threads/${thread.id}/send`, { requestId: "blocked-follow", mode: "auto", input: [{ type: "text", text: "Stay in draft", mentions: [] }] });
     expect(blockedFollow.status).toBe(503);
     expect(await blockedFollow.json()).toMatchObject({ code: "storage_blocked", message: expect.stringContaining("cloud disk is almost full") });
     rejectPrompt = false; level = "normal";
-    await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find(c => c.id === "storage-follow")?.state, { timeout: 5000 }).toBe("accepted");
-    expect(prompts.filter(id => id === "storage-follow").length).toBeGreaterThanOrEqual(2);
+    await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find(c => untagged(c.id) === "storage-follow")?.state, { timeout: 5000 }).toBe("accepted");
+    expect(prompts.filter(id => untagged(id) === "storage-follow").length).toBeGreaterThanOrEqual(2);
     expect(await (await request("/cloudroom")).json()).toMatchObject({ ready: true, error: null, storage: { level: "normal" } });
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
@@ -295,6 +311,8 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
     expect(await (await request(`/threads/${saved.threadId}/queued-messages`)).json()).toEqual([]);
     expect(service.threadStatus(saved.threadId)?.error).not.toContain("SECRET-CANARY");
     expect((await request(`/threads/${saved.threadId}/send`, { mode: "auto", input: [{ type: "text", text: "Must not be accepted", mentions: [] }] })).status).toBe(409);
+    // `thread retry` names the Cloud recovery instead of the generic refusal (#1325).
+    expect(await (await request(`/threads/${saved.threadId}/retry`, {})).json()).toMatchObject({ code: "cloudroom_unsupported", message: expect.stringContaining(`room-cli cloud retry-start ${saved.threadId}`) });
     reject = false;
     service.stop(); service.start();
     await new Promise(resolve => setTimeout(resolve, 1700));
@@ -321,6 +339,10 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
     expect(service.threadStatus(legacy.id)).toMatchObject({ failedStart: true, pendingDelivery: 0 });
     expect(firstMessages(legacy.id)).toHaveLength(1);
     expect(JSON.parse(firstMessages(legacy.id)[0]!.data).input[0].text).toBe("Saved old prompt");
+    // A rejected side chat starts with `side_chat`, not `prompt`, and retries the same way.
+    harness.deps.db.update(cloudroomCommands).set({ command: "side_chat" }).where(eq(cloudroomCommands.id, `first_${legacy.id}`)).run();
+    expect((await (await request(`/threads/${legacy.id}/retry`, {})).json()).message).toContain(`room-cli cloud retry-start ${legacy.id}`);
+    harness.deps.db.update(cloudroomCommands).set({ command: "prompt" }).where(eq(cloudroomCommands.id, `first_${legacy.id}`)).run();
     expect((await request(`/cloudroom/threads/${legacy.id}/retry-start`, {})).status).toBe(200);
     expect(attempts.legacy).toBe(1);
     expect(prompts).toContainEqual(expect.objectContaining({ text: "Saved old prompt" }));
@@ -332,6 +354,7 @@ it.each(["invalid_reasoning_effort", "codex_auth_required"])("holds rejected clo
 
 it("routes Cloud through the core, projects conversations, pauses queues, and replays after detach without native hosts", async () => {
   const harness = await createTestAppHarness();
+  const tagged = await tagger(harness.config.dataDir);
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
   const service = cloudroom(harness.deps);
@@ -415,7 +438,7 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     }
     if (command === "stop") { stopped = true; if (active) finish(); receipt(id, command, "completed"); }
     if (command === "resume") { stopped = false; receipt(id, command, "completed"); if (pending.length) begin(pending.shift()!); }
-    if (id === "follow" && !droppedReply) { droppedReply = true; res.destroy(); return; }
+    if (untagged(id) === "follow" && !droppedReply) { droppedReply = true; res.destroy(); return; }
     json({ session_id: sid, receipt: accepted, saving: {} }, 202);
   });
   core.listen(0, "127.0.0.1");
@@ -451,7 +474,8 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     const followUp = { requestId: "follow", mode: "auto", input: [{ type: "text", text: "follow up", mentions: [] }] };
     expect((await request(`/threads/${thread.id}/send`, followUp)).status).toBe(200);
     expect((await request(`/threads/${thread.id}/send`, followUp)).status).toBe(200);
-    await expect.poll(() => pending, { timeout: 5000 }).toEqual(["follow"]);
+    expect(await (await request(`/threads/${thread.id}/retry`, {})).json()).toMatchObject({ code: "cloudroom_unsupported", message: expect.stringContaining(`room-cli thread show ${thread.id}`) });
+    await expect.poll(() => pending.map(untagged), { timeout: 5000 }).toEqual(["follow"]);
     await expect.poll(() => service.queue(thread.id).length).toBe(1);
     expect(await (await request(`/threads/${thread.id}`)).json()).toMatchObject({ queuedMessageCount: 1 });
     await expect.poll(() => harness.db.select().from(cloudroomThreads).get()?.cursor).toBe(records.length);
@@ -468,10 +492,13 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     service.start();
     await new Promise((resolve) => setTimeout(resolve, 1800));
     expect(harness.db.select().from(events).all()).toHaveLength(count);
-    expect((await request(`/threads/${thread.id}/queued-messages/follow/send`, {})).status).toBe(200);
+    expect((await request(`/threads/${thread.id}/queued-messages/${service.queue(thread.id)[0]!.id}/send`, {})).status).toBe(200);
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("active");
+    // Codex retries, then recovers: the retry folds into the finished turn, not a stale Reconnecting row (#949).
+    native("error", { turnId: active, willRetry: true, error: { message: "Reconnecting... 1/5", codexErrorInfo: null, additionalDetails: "stream disconnected" } });
     finish();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    expect((await (await request(`/threads/${thread.id}/timeline`)).json()).rows.filter((row: { systemKind?: string }) => row.systemKind === "reconnect")).toEqual([]);
     const stored = harness.db.select().from(events).all();
     expect(stored.some((event) => event.type === "item/agentMessage/delta")).toBe(true);
     expect(stored.filter((event) => event.type === "turn/started")).toHaveLength(2);
@@ -488,20 +515,30 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     expect((await request(`/threads/${thread.id}/send`, { ...followUp, requestId: "archive-queued" })).status).toBe(200);
     const archived = await request(`/threads/${thread.id}/archive-all`, {});
     expect(archived.status, await archived.clone().text()).toBe(200);
-    expect(await archived.json()).toEqual({ ok: true, archivedThreadIds: [thread.id] });
+    expect(await archived.json()).toEqual({ ok: true, archivedThreadIds: [thread.id], keptLiveThreadIds: [] });
     expect(getThread(harness.db, thread.id)?.archivedAt).not.toBeNull();
+    expect((await (await request(`/threads/${thread.id}/retry`, {})).json()).message).toContain(`room-cli thread unarchive ${thread.id}`);
     await expect.poll(() => service.threadStatus(thread.id)?.paused).toBe(true);
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
-    expect(pending).toEqual(["archive-queued"]);
+    expect(pending.map(untagged)).toEqual(["archive-queued"]);
     expect((await request(`/threads/${thread.id}/timeline`)).status).toBe(200);
     expect((await request(`/threads/${thread.id}/unarchive`, {})).status).toBe(200);
     expect(getThread(harness.db, thread.id)?.archivedAt).toBeNull();
     expect(service.threadStatus(thread.id)?.paused).toBe(true);
-    expect((await request(`/threads/${thread.id}/queued-messages/archive-queued/send`, {})).status).toBe(200);
+    expect((await request(`/threads/${thread.id}/queued-messages/${service.queue(thread.id)[0]!.id}/send`, {})).status).toBe(200);
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("active");
     expect(starts).toBe(1);
     finish();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    // A queued prompt Core delivered reports sent without reaching Core again; a starting turn or unknown ID still fails (#1203).
+    const sentRecords = records.length;
+    const queued = tagged("archive-queued");
+    for (const [id, state, status, body] of [[queued, "delivered", 200, { ok: true, delivery: "sent" }], [queued, "interrupted", 200, { ok: true, delivery: "sent" }], [queued, "running", 404, { code: "invalid_request" }], [queued, "completed", 200, { ok: true, delivery: "sent" }], ["missing", null, 404, { code: "invalid_request" }]] as const) {
+      if (state) saveCommandState(harness.db, thread.id, id, state);
+      const sent = await request(`/threads/${thread.id}/queued-messages/${id}/send`, {});
+      expect({ status: sent.status, body: await sent.json() }).toMatchObject({ status, body });
+    }
+    expect(records.length).toBe(sentRecords);
     expect((await request(`/threads/${thread.id}/compact`, {})).status).toBe(409);
     expect((await request("/threads", { ...input, requestId: "bad", environment: { type: "host", hostId: host.id, workspace: { type: "personal" } } })).status).toBe(400);
     expect(starts).toBe(1);
@@ -510,7 +547,7 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     core.closeAllConnections();
     await new Promise<void>((resolve) => core.close(() => resolve()));
     expect((await request(`/threads/${thread.id}/send`, { ...followUp, requestId: "offline" })).status).toBe(200);
-    expect(harness.db.select().from(cloudroomCommands).all().find((command) => command.id === "offline")?.state).toBe("sending");
+    expect(harness.db.select().from(cloudroomCommands).all().find((command) => untagged(command.id) === "offline")?.state).toBe("sending");
     expect(getThread(harness.db, thread.id)?.executionTarget).toBe("cloud");
     expect(starts).toBe(1);
     expect((await request(`/threads/${thread.id}/archive-all`, {})).status).toBe(200);
@@ -523,7 +560,7 @@ it("routes Cloud through the core, projects conversations, pauses queues, and re
     await once(core, "listening");
     service.start();
     await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find((command) => command.id === pendingStops[0]!.id)?.state, { timeout: 5000 }).toBe("completed");
-    expect(harness.db.select().from(cloudroomCommands).all().find((command) => command.id === "offline")?.state).not.toBe("sending");
+    expect(harness.db.select().from(cloudroomCommands).all().find((command) => untagged(command.id) === "offline")?.state).not.toBe("sending");
     expect(stopped).toBe(true);
     expect(starts).toBe(1);
     expect((await request(`/threads/${thread.id}/unarchive`, {})).status).toBe(200);
@@ -558,7 +595,7 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     if (!available) return json({}, 503);
     paths.push(req.url ?? "");
     if (req.url === "/v1/health") return json({});
-    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: direct, command_guard: true, sync: true, harnesses: [{ id:"codex", model:"test-model" }] });
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: direct, command_guard: true, sync: true, room_ids: true, harnesses: [{ id:"codex", model:"test-model" }] });
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write(": connected\n\n"); return; }
     let body = "";
@@ -567,7 +604,7 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     const input = JSON.parse(body || "{}");
     if (req.url === "/v1/sessions") {
       starts++;
-      expect(input).toMatchObject({ workspace: workspace.id, workspace_name: expect.any(String) });
+      expect(input).toMatchObject({ workspace: workspace.id, workspace_name: expect.any(String), thread_id: expect.stringMatching(/^thr_/), project_id: project.id });
       return json({session_id:"cr_waiting",receipt:{request_id:input.request_id, command:"start", input, state:"accepted"}, saving:{}}, 202);
     }
     if (req.url === "/v1/sessions/cr_waiting/prompts") return json({session_id:"cr_waiting",receipt:{request_id:input.request_id,command:"prompt",input,state:"accepted"},saving:{}},202);
@@ -608,7 +645,8 @@ it.each([true, false, null])("starts without copying local files or waiting for 
     expect(firstMessages()).toEqual([originalMessage]);
     expect(service.queue(thread.id)).toEqual([]);
     expect(state).not.toHaveProperty("syncProgress");
-    expect(paths.some(path => path.startsWith("/v1/workspaces"))).toBe(targetExists !== null);
+    // Every case sets up the workspace: a missing folder clones its GitHub origin, cleaned of its token (#2190).
+    expect(paths.some(path => path.startsWith("/v1/workspaces"))).toBe(true);
     expect(requestText).toContain("Keep my message");
     expect(requestText).not.toContain("project contents");
     expect(requestText).not.toContain("SECRET-URL-CANARY");
@@ -622,6 +660,64 @@ it.each([true, false, null])("starts without copying local files or waiting for 
   }
 });
 
+// #337: the plan's first request drops. #1040: the sandbox answers only after both of the plan's first tries timed out,
+// so it is planned again once the thread's stream connects.
+it.each([["drops", 1], ["times out", 11_000]] as const)("clones a new Cloud thread's project when its copy plan %s", async (_, outage) => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const { host } = seedHostSession(harness.deps);
+  seedPrimaryHost(harness.deps, host.id);
+  const root = join(harness.config.dataDir, "project");
+  await mkdir(root, { recursive: true });
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: root });
+  setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
+  await sync.setCopyMacGithub(harness.deps, false);
+  // Never install a real sync helper LaunchAgent on the developer's Mac.
+  const setup = vi.spyOn(sync, "setupSync").mockResolvedValue();
+  let started = false;
+  let lookups = 0, slowUntil = 0;
+  const commands: string[] = [], states: string[] = [];
+  const core = createServer(async (req, res) => {
+    const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, command_guard: true, sync: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url === "/v1/ready") return json({ ready: true });
+    if (req.url?.includes("/stream?")) { res.writeHead(200, { "Content-Type": "text/event-stream" }); res.write(": connected\n\n"); return; }
+    if (req.url?.startsWith("/v1/workspaces/")) {
+      slowUntil ||= Date.now() + outage;
+      if (++lookups === 1) return req.socket.destroy();
+      await new Promise(resolve => setTimeout(resolve, slowUntil - Date.now()));
+      return started ? json({ id: decodeURIComponent(req.url.split("/")[3]!), path: "/code/project" }) : json({}, 404);
+    }
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const input = JSON.parse(body || "{}");
+    if (req.url?.split("?")[0] === "/v1/vm/run") {
+      commands.push(input.command);
+      if (input.command.includes(".cloudroom-files")) states.push(Buffer.from(input.stdin, "hex").toString());
+      return json({ code: 0, stdout: "", stderr: "" });
+    }
+    if (req.url === "/v1/sessions") { started = true; return json({ session_id: "cr_copy", receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202); }
+    if (req.url === "/v1/sessions/cr_copy/prompts") return json({ session_id: "cr_copy", receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+    return json({}, 404);
+  });
+  core.listen(0, "127.0.0.1");
+  await once(core, "listening");
+  const address = core.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "fixture-" + "x".repeat(40), projectId: project.id });
+    const created = await harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId: "dropped-plan", title: "Dropped plan", projectId: project.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "high", environment: { type: "project-default" }, input: [{ type: "text", text: "Read the code", mentions: [] }] }) });
+    expect(created.status, await created.clone().text()).toBe(201);
+    await expect.poll(() => states.at(-1), { timeout: 25000 }).toBe("ready");
+    expect(commands.some(command => command.includes("git clone") && command.includes("https://github.com/example/project"))).toBe(true);
+    expect(states.some(state => state.startsWith("failed"))).toBe(false);
+    expect(lookups).toBeGreaterThan(1);
+  } finally {
+    setup.mockRestore();
+    service.stop(); core.closeAllConnections(); await new Promise<void>((resolve) => core.close(() => resolve())); await harness.cleanup();
+  }
+}, 30000);
+
 it.each(["starting", "stopping"] as const)("archives and restores a %s Cloud child without a native environment or connection", async (status) => {
   const harness = await createTestAppHarness();
   try {
@@ -629,21 +725,27 @@ it.each(["starting", "stopping"] as const)("archives and restores a %s Cloud chi
     const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
     const parent = seedThread(harness.deps, { projectId: project.id });
     const child = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status });
-    const response = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all`, { method: "POST" });
+    const response = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all?includeLive=true`, { method: "POST" });
     expect(response.status, await response.clone().text()).toBe(200);
-    expect(await response.json()).toEqual({ ok: true, archivedThreadIds: [child.id, parent.id] });
+    expect(await response.json()).toEqual({ ok: true, archivedThreadIds: [child.id, parent.id], keptLiveThreadIds: [] });
     for (const id of [parent.id, child.id]) {
       expect(getThread(harness.db, id)?.archivedAt).not.toBeNull();
       expect((await harness.app.request(`/api/v1/threads/${id}/unarchive`, { method: "POST" })).status).toBe(200);
       expect(getThread(harness.db, id)?.archivedAt).toBeNull();
     }
+    const live = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status });
+    const kept = await harness.app.request(`/api/v1/threads/${parent.id}/archive-all`, { method: "POST" });
+    const keptBody = await kept.json() as { archivedThreadIds: string[]; keptLiveThreadIds: string[] };
+    expect(keptBody.archivedThreadIds).toEqual([parent.id]);
+    expect(keptBody.keptLiveThreadIds.sort()).toEqual([child.id, live.id].sort());
+    expect(getThread(harness.db, live.id)?.archivedAt).toBeNull();
   } finally {
     await harness.cleanup();
   }
 });
 
 
-it.each(["codex", "pi"])("renames a Cloud %s thread offline without native execution or execution-setting changes", async (providerId) => {
+it.each(["codex", "pi"])("renames and hides a Cloud %s thread offline without native execution or execution-setting changes", async (providerId) => {
   const harness = await createTestAppHarness();
   try {
     const { host } = seedHostSession(harness.deps);
@@ -665,6 +767,11 @@ it.each(["codex", "pi"])("renames a Cloud %s thread offline without native execu
       }
       expect((await patch({ title: null })).status).toBe(200);
       expect(getThread(harness.db, thread.id)?.title).toBeNull();
+      // Visibility is sidebar state (#2210).
+      for (const visibility of ["hidden", "visible"] as const) {
+        expect((await patch({ visibility })).status).toBe(200);
+        expect(getThread(harness.db, thread.id)?.visibility).toBe(visibility);
+      }
     }
     expect(listQueuedCommands(harness, "thread.rename")).toEqual([]);
     expect(harness.db.select().from(cloudroomCommands).all()).toEqual([]);
@@ -681,6 +788,8 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
     if (input.action === "label") labels.push({ thread: input.thread, parent: input.parent, local: getThread(harness.db, input.thread)?.parentThreadId });
     const lost = replyLost && input.action === "label";
     if (lost) replyLost = false;
+    // An older website: it refuses to list threads (#1655).
+    if (input.action === "threads") { res.writeHead(400, { "Content-Type": "application/json" }); return void res.end('{"error":"Invalid sandbox request."}'); }
     res.writeHead((labelFails || lost) && input.action === "label" ? 503 : 200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(req.url === "/api/desktop/logins" ? { claude: false, codex: false, pi: false, github: false } : input.action === "label" ? { saved: true } : {}));
   });
@@ -715,11 +824,11 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
     expect(parentOf(own.id)).toBeNull();
     expect((await patch(own.id, lead.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(lead.id);
-    const service = cloudroom(harness.deps) as unknown as { childTurnEnded?: (child: { id: string; parentThreadId: string }, status: string) => void; tellLocalParent(threadId: string, status: string, turn: string): void; noticeCloudParent(threadId: string, status: string, turn: string): Promise<void> };
+    const service = cloudroom(harness.deps) as unknown as { childTurnEnded?: (child: { id: string; parentThreadId: string }, status: string) => void; children: { tellLocalParent(threadId: string, status: string, turn: string): void; noticeCloudParent(threadId: string, status: string, turn: string): Promise<void> } };
     const reports = vi.fn();
     service.childTurnEnded = reports;
-    service.tellLocalParent(own.id, "completed", "turn-1");
-    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed");
+    service.children.tellLocalParent(own.id, "completed", "turn-1");
+    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed", undefined);
     expect((await patch(own.id, cloudParent.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(cloudParent.id);
 
@@ -749,16 +858,191 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
 
     const notices = (id: string) => harness.db.select().from(cloudroomCommands).all().filter(row => row.threadId === id).map(row => JSON.parse(row.input).text);
     harness.db.insert(cloudroomCommands).values({ id: `first_${own.id}`, threadId: own.id, command: "prompt", input: JSON.stringify({ text: "Start", parent_thread: cloudParent.id }), state: "completed", createdAt: 1 }).run();
-    await service.noticeCloudParent(own.id, "completed", "turn-2");
+    await service.children.noticeCloudParent(own.id, "completed", "turn-2");
     expect(notices(cloudParent.id)).toEqual([]);
     expect((await patch(own.id, shared.id)).status).toBe(200);
-    await service.noticeCloudParent(own.id, "completed", "turn-3");
+    await service.children.noticeCloudParent(own.id, "completed", "turn-3");
     expect(notices(shared.id)).toEqual([expect.stringContaining(`Child thread ${own.id} completed`)]);
   } finally { cloudroom(harness.deps).stop(); website.close(); await harness.cleanup(); }
 });
 
+it("keeps an install's tag when the OS can't name the computer, and gives a copied data folder its own (#237)", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "cloudroom-tag-"));
+  const first = await readInstallTag(dataDir, async () => "machine-1");
+  expect(await readInstallTag(dataDir, async () => { throw new Error("ioreg timed out"); })).toBe(first);
+  expect(await readInstallTag(dataDir, async () => "machine-1")).toBe(first);
+  expect(await readInstallTag(dataDir, async () => "machine-2")).not.toBe(first);
+  // The OS can't say on the run that makes the tag: it's saved anyway, and kept once the computer ID is known.
+  const fresh = await mkdtemp(join(tmpdir(), "cloudroom-tag-")), unknown = await readInstallTag(fresh, async () => "");
+  expect([await readInstallTag(fresh, async () => "machine-3"), await readInstallTag(fresh, async () => "machine-3"), await readInstallTag(fresh, async () => "")]).toEqual([unknown, unknown, unknown]);
+});
+
+it("adopts another computer's Cloud thread into the project with its repo, and follows its archive without sending it back (#237)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const calls: string[] = [];
+  let state: "open" | "archived" = "open", here = "";
+  const updated = () => new Date(Date.now() - (state === "open" ? 60_000 : 0)).toISOString();
+  // Its turn, saved on the website: this computer's stream stopped after "Halfway" (#1687).
+  const codex = (method: string, params: object) => ({ kind: method === "item/completed" ? "item_completed" : "native_event", data: { harness: "codex", method }, native: JSON.stringify({ method, params: { threadId: "native", ...params } }) });
+  const reply = (text: string) => codex("item/completed", { item: { type: "agentMessage", id: text, text } });
+  const turn: Pick<SessionRecord, "kind" | "data" | "native">[] = [{ kind: "native_identity", data: { id: "native" } }, { kind: "state", data: { state: "starting_turn", request_id: "t1" } }, codex("turn/started", { turn: { id: "t1" } }), reply("Halfway"), reply("Final report")];
+  const replies = turn.map((record, index) => ({ ...record, sequence: index + 1, timestamp_ms: 1700000000000 + index, session_id: "cr_elsewhere" }));
+  const website = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const input = text ? JSON.parse(text) : {};
+    calls.push(String(input.action));
+    if (input.action === "records") return void res.end(JSON.stringify({ records: replies.filter((item) => item.sequence > input.after), more: false }));
+    const row = { thread: "thr_234567abcd", session: "cr_elsewhere", project: "proj_on_another_mac", project_name: "Another name", repository: "https://github.com/example/app", title: "Started elsewhere", state, sandbox: state === "open" ? "asleep" : null, harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: new Date(Date.now() - 3_600_000).toISOString(), woke_at: null, updated_at: updated() };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    // Archived before this computer saw them, in its project (so it's their home): launches from a Cloud thread and the
+    // phone, and a loop run; before them, a child of the first launch that waits for it (#1072).
+    const late = (thread: string, session: string) => ({ ...row, thread, session, project: here, state: "archived", sandbox: null, repository: null, loop: session.startsWith("cr_auto_") });
+    const child = { ...row, thread: "thr_234567abcg", session: "cr_sub_late", project: here, parent: "thr_234567abce", parent_state: "open" };
+    res.end(JSON.stringify(input.action === "threads" ? { threads: [row, child, ...[["abce", "cr_launch_late"], ["abch", "cr_phone_late"], ["abcf", "cr_auto_late"]].map(([id, session]) => late(`thr_234567${id}`, session!))], next: `${new Date().toISOString()}~`, more: false } : {}));
+  });
+  website.listen(0, "127.0.0.1"); await once(website, "listening");
+  const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    here = project.id;
+    setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "git@github.com:example/app.git");
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
+    await service.sync.run();
+    expect(getThread(harness.db, "thr_234567abcd")).toMatchObject({ projectId: project.id, executionTarget: "cloud", status: "idle", title: "Started elsewhere", archivedAt: null });
+    // The launches show in the archived list, the loop run stays out, and the child stays open: nothing cascades.
+    const shown = (id: string) => { const thread = getThread(harness.db, `thr_234567${id}`); return thread && (thread.archivedAt ? "archived" : "open"); };
+    expect(["abce", "abch", "abcf", "abcg"].map(shown)).toEqual(["archived", "archived", null, "open"]);
+    projectRecords(harness.db, "thr_234567abcd", replies.slice(0, 4));
+    expect(getLastThreadOutput(harness.db, "thr_234567abcd")).toBe("Halfway");
+    saveStatus(harness.db, "thr_234567abcd", "active");
+    state = "archived";
+    await service.sync.run();
+    expect(getThread(harness.db, "thr_234567abcd")).toMatchObject({ archivedAt: expect.any(Number), status: "idle" });
+    // The rest of its turn is shown from the website's saved history, never woken.
+    await expect.poll(() => getLastThreadOutput(harness.db, "thr_234567abcd")).toBe("Final report");
+    expect(calls.filter((action) => ["archive", "label", "restore", "remove", "wake"].includes(action))).toEqual([]);
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
+});
+
+it("keeps a Cloud thread open when its restore is still on the way and the website lists it archived", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  let state: "open" | "archived" = "open", restored = () => {}, hold: Promise<void> | null = null;
+  const calls: string[] = [];
+  const website = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const input = text ? JSON.parse(text) : {};
+    calls.push(String(input.action));
+    const row = { thread: "thr_234567abcd", session: "cr_elsewhere", project: "proj_elsewhere", project_name: null, repository: "https://github.com/example/app", title: "Started elsewhere", state, sandbox: state === "open" ? "asleep" : null, harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: new Date(Date.now() - 3_600_000).toISOString(), woke_at: null, updated_at: new Date().toISOString() };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (input.action === "archive") state = "archived";
+    // The sandbox is still stopping for the archive, so the restore waits (the app's 3 s retries on "busy").
+    if (input.action === "restore") { await new Promise<void>(resolve => { restored = resolve; }); state = "open"; }
+    const body = JSON.stringify(input.action === "threads" ? { threads: [row], next: `${new Date().toISOString()}~`, more: false } : {});
+    if (input.action === "threads") await hold;
+    res.end(body);
+  });
+  website.listen(0, "127.0.0.1"); await once(website, "listening");
+  const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "git@github.com:example/app.git");
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
+    await service.sync.run();
+    const restoredHere = vi.spyOn(service.sync, "archivedOnWebsite");
+    const post = (action: string) => harness.app.request(`/api/v1/threads/thr_234567abcd/${action}`, { method: "POST" });
+    expect((await post("archive-all")).status).toBe(200);
+    await vi.waitFor(() => expect(state).toBe("archived"));
+    expect((await post("unarchive")).status).toBe(200);
+    await vi.waitFor(() => expect(calls).toContain("restore"));
+    // The archive's signal: the list still says archived, and the thread the user just restored stays open.
+    await service.sync.run();
+    expect(getThread(harness.db, "thr_234567abcd")?.archivedAt).toBeNull();
+    // A list the website read before the restore and answered after it is as old.
+    let answer = () => {};
+    hold = new Promise(resolve => { answer = resolve; });
+    const lists = calls.filter(action => action === "threads").length, stale = service.sync.run();
+    await vi.waitFor(() => expect(calls.filter(action => action === "threads").length).toBe(lists + 1));
+    restored();
+    await vi.waitFor(() => expect(restoredHere).toHaveBeenCalledWith("thr_234567abcd", false));
+    hold = null; answer();
+    await stale;
+    expect(getThread(harness.db, "thr_234567abcd")?.archivedAt).toBeNull();
+    await service.sync.run();
+    expect(getThread(harness.db, "thr_234567abcd")?.archivedAt).toBeNull();
+    // Another computer's archive after that is still followed.
+    state = "archived";
+    await service.sync.run();
+    expect(getThread(harness.db, "thr_234567abcd")?.archivedAt).toEqual(expect.any(Number));
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
+});
+
+it("keeps an archived Cloud child under its archived parent, so the parent restores with it", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const [parentId, childId] = ["thr_456789abcd", "thr_456789abce"];
+  let state: "open" | "archived" = "open", here = "";
+  const website = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const input = text ? JSON.parse(text) : {};
+    const row = (thread: string, session: string, parent: string | null) => ({ thread, session, project: here, project_name: "App", repository: null, title: thread, state, sandbox: state === "open" ? "asleep" : null, harness: "codex", model: "test-model", reasoning: "medium", parent, parent_state: parent ? (state === "open" ? "open" : "closed") : null, loop: false, created_at: new Date(Date.now() - 3_600_000).toISOString(), woke_at: null, updated_at: new Date().toISOString() });
+    res.writeHead(200, { "Content-Type": "application/json" });
+    // The parent's row comes first, so its archive here runs before the child's.
+    res.end(JSON.stringify(input.action === "threads" ? { threads: [row(parentId, "cr_parent", null), row(childId, "cr_child", parentId)], next: `${new Date().toISOString()}~`, more: false } : {}));
+  });
+  website.listen(0, "127.0.0.1"); await once(website, "listening");
+  const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  const shown = (id: string) => { const thread = getThread(harness.db, id); return thread && { archived: thread.archivedAt !== null, parent: thread.parentThreadId }; };
+  try {
+    const { host } = seedHostSession(harness.deps);
+    here = seedProjectWithSource(harness.deps, { hostId: host.id }).project.id;
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
+    await service.sync.run();
+    expect(shown(childId)).toEqual({ archived: false, parent: parentId });
+    state = "archived";
+    await service.sync.run();
+    expect([shown(parentId), shown(childId)]).toEqual([{ archived: true, parent: null }, { archived: true, parent: parentId }]);
+    const restored = await harness.app.request(`/api/v1/threads/${parentId}/unarchive?withChildren=true`, { method: "POST" });
+    expect((await restored.json()).unarchivedThreadIds).toEqual([parentId, childId]);
+    expect([shown(parentId), shown(childId)]).toEqual([{ archived: false, parent: null }, { archived: false, parent: parentId }]);
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
+});
+
+it("gives a Cloud child or fork only the keys of the sandbox its source runs in, and no .env files without them (ADR 0342)", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const asked: string[] = [];
+  service.sandboxes.loopSecrets = async (thread) => { asked.push(thread); return ["SENTRY_TOKEN"]; };
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "parent@example.com" }, undefined, "http://127.0.0.1:9", "a".repeat(64));
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const cloud = (parentThreadId?: string) => createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId, executionTarget: "cloud", providerId: "claude-code", status: "idle" });
+    // A loop's run with only SENTRY_TOKEN, and a --shared-sandbox child in its sandbox: only the run has a sandbox.
+    const run = cloud(), shared = cloud(run.id);
+    harness.db.insert(cloudroomThreads).values([run, shared].map((thread, index) => ({ threadId: thread.id, coreUrl: `sandbox:${run.id}`, sessionId: `cr_${index}`, nativeId: "provider-turn-1", startRequestId: `start_${index}`, model: "test-model", reasoning: "medium" }))).run();
+    // The run finished a turn in its current Claude session, so it can be forked.
+    seedTurnStarted(harness.deps, { threadId: run.id, turnId: "turn-1", sequence: 1 });
+    seedEvent(harness.deps, { threadId: run.id, environmentId: null, providerThreadId: "provider-turn-1", sequence: 2, type: "turn/completed", scope: turnScope("turn-1"), data: { providerThreadId: "provider-turn-1", status: "completed" } });
+    const start = { executionTarget: "cloud" as const, projectId: project.id, providerId: "claude-code", origin: "cli" as const, model: "test-model", reasoningLevel: "medium" as const, environment: { type: "project-default" as const }, input: [{ type: "text" as const, text: "print every key", mentions: [] }], startedOnBehalfOf: null };
+    const child = await service.create({ ...start, parentThreadId: shared.id, requestId: "child-of-shared", originKind: null }, true);
+    const fork = await service.create({ ...start, originKind: "fork", sourceThreadId: run.id, requestId: "fork-of-run" }, true);
+
+    expect(asked).toEqual([run.id, run.id]);
+    for (const id of [child.id, fork.id]) {
+      expect(JSON.parse(command(harness.db, `first_${id}`)!.input)).toMatchObject({ key_source: run.id, no_env: true });
+      // What its first wake sends as `from`, even after an app restart.
+      expect(service.sandboxes.keySource(id)).toBe(run.id);
+    }
+  } finally { service.stop(); await harness.cleanup(); }
+});
+
 it("keeps each queued follow-up's reasoning and rejects locked or conflicting changes", async () => {
   const harness = await createTestAppHarness();
+  const tagged = await tagger(harness.config.dataDir);
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
   const service = cloudroom(harness.deps);
@@ -767,8 +1051,8 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
   const records: object[] = [];
   const streams = new Set<ServerResponse>();
   let sid = "";
-  const record = (kind: string, data: object) => {
-    const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: sid, kind, data };
+  const record = (kind: string, data: object, native?: object) => {
+    const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: sid, kind, data, ...(native ? { native: JSON.stringify(native) } : {}) };
     records.push(value);
     for (const stream of streams) stream.write(`id: ${value.sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
   };
@@ -807,11 +1091,17 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     expect(created.status, await created.clone().text()).toBe(201);
     const thread = await created.json();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("idle");
+    const shortcut = await harness.app.request(`/api/v1/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idleSessionOnly: true, providerId: "codex", model: "other-model" }),
+    });
+    expect(shortcut.status).toBe(409);
+    expect(service.threadStatus(thread.id)).toMatchObject({ sessionId: "cr_reasoning", model: "test-model" });
     const text = [{ type: "text", text: "queued", mentions: [] }];
     expect((await send(thread.id, { requestId: "same-launch", mode: "auto", reasoningLevel: "high", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "same-launch", text: "queued" });
+    await expect.poll(() => plain(prompts.at(-1))).toEqual({ request_id: "same-launch", text: "queued" });
     expect((await send(thread.id, { requestId: "needs-core", mode: "auto", reasoningLevel: "max", input: text })).status).toBe(409);
-    expect(prompts.some((body) => (body as { request_id?: string }).request_id === "needs-core")).toBe(false);
+    expect(prompts.some((body) => untagged((body as { request_id?: string }).request_id) === "needs-core")).toBe(false);
     promptReasoning = true;
     expect((await send(thread.id, { requestId: "max-turn", mode: "auto", reasoningLevel: "max", input: text })).status).toBe(200);
     expect((await send(thread.id, { requestId: "xhigh-turn", mode: "auto", reasoningLevel: "xhigh", input: text })).status).toBe(200);
@@ -824,22 +1114,27 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
     expect((await send(thread.id, { mode: "auto", model: "other-model", reasoningLevel: "max", input: text })).status).toBe(409);
     expect((await send(thread.id, { mode: "auto", reasoningLevel: "low", input: text })).status).toBe(400);
     expect((await send(thread.id, { requestId: "plain", mode: "auto", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toEqual({ request_id: "plain", text: "queued", reasoning: "xhigh" });
-    record("state", { state: "starting_turn", request_id: "same-launch" });
-    record("state", { state: "starting_turn", request_id: "max-turn" });
-    record("state", { state: "starting_turn", request_id: "xhigh-turn" });
+    await expect.poll(() => plain(prompts.at(-1))).toEqual({ request_id: "plain", text: "queued", reasoning: "xhigh" });
+    record("state", { state: "starting_turn", request_id: tagged("same-launch") });
+    record("state", { state: "starting_turn", request_id: tagged("max-turn") });
+    record("state", { state: "starting_turn", request_id: tagged("xhigh-turn") });
     await expect.poll(() => harness.db.select().from(events).all().filter((event) => event.type === "client/turn/requested").map((event) => JSON.parse(event.data).execution.reasoningLevel)).toEqual(["high", "high", "max", "xhigh"]);
     expect(service.threadStatus(thread.id)?.reasoning).toBe("xhigh");
     expect(harness.db.select().from(cloudroomThreads).get()?.reasoning).toBe("high");
     harness.deps.db.insert(cloudroomCommands).values({ id: "legacy-launch", threadId: thread.id, command: "prompt", input: JSON.stringify({ text: "queued", reasoning: "high" }), state: "sending", createdAt: Date.now() }).run();
     expect((await send(thread.id, { requestId: "legacy-launch", mode: "auto", reasoningLevel: "high", input: text })).status).toBe(200);
-    await expect.poll(() => prompts.at(-1)).toMatchObject({ request_id: "legacy-launch", text: "queued", reasoning: "high" });
+    await expect.poll(() => plain(prompts.at(-1))).toMatchObject({ request_id: "legacy-launch", text: "queued", reasoning: "high" });
     expect((await send(thread.id, { requestId: "legacy-launch", mode: "auto", reasoningLevel: "max", input: text })).status).toBe(409);
-    record("receipt", { request_id: "plain", command: "prompt", state: "failed", error: "Pi model does not support the selected thinking level" });
+    record("receipt", { request_id: tagged("plain"), command: "prompt", state: "failed", error: "Pi model does not support the selected thinking level" });
     await expect.poll(() => harness.db.select().from(events).all().some((event) => event.type === "system/error" && JSON.parse(event.data).message.includes("thinking level"))).toBe(true);
     // Core restarts a killed agent idle and keeps the cause on the lost turn.
-    record("receipt", { request_id: "xhigh-turn", command: "prompt", state: "unknown_after_restart", error: "invalid native state: unmanaged Claude subagent emitted output (signal 9)" });
+    record("receipt", { request_id: tagged("xhigh-turn"), command: "prompt", state: "unknown_after_restart", error: "invalid native state: unmanaged Claude subagent emitted output (signal 9)" });
     await expect.poll(() => harness.db.select().from(events).all().some((event) => event.type === "system/error" && JSON.parse(event.data).message.includes("unmanaged Claude subagent"))).toBe(true);
+    // A Codex error too long for a title keeps its code and text; the failed turn's receipt adds no second card (#949).
+    const full = "Codex ran out of room in the model's context window. Start a new thread or clear earlier history before retrying.";
+    record("native_event", { method: "error" }, { method: "error", params: { threadId: "native", turnId: "t", willRetry: false, error: { message: full, codexErrorInfo: "contextWindowExceeded", additionalDetails: null } } });
+    record("receipt", { request_id: "xhigh-turn", command: "prompt", state: "failed", error: full });
+    await expect.poll(() => harness.db.select().from(events).all().filter((event) => event.type === "system/error" && event.data.includes("context window")).map((event) => JSON.parse(event.data))).toMatchObject([{ code: "contextWindowExceeded", message: "Codex error (contextWindowExceeded)", detail: full }]);
   } finally {
     service.stop();
     core.closeAllConnections();
@@ -850,6 +1145,7 @@ it("keeps each queued follow-up's reasoning and rejects locked or conflicting ch
 
 it("shows a Cloud follow-up in the chat at once, like Local, and queues the next one", async () => {
   const harness = await createTestAppHarness();
+  const tagged = await tagger(harness.config.dataDir);
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
   const service = cloudroom(harness.deps);
@@ -900,16 +1196,71 @@ it("shows a Cloud follow-up in the chat at once, like Local, and queues the next
     expect(chat()).toEqual(["start", "now"]);
     expect(service.queue(thread.id)).toEqual([]);
     expect(await send(thread.id, "next")).toMatchObject({ delivery: "queued" });
-    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["next"]);
-    await expect.poll(() => prompts.slice(1)).toEqual(["now", "next"]);
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).toEqual(["next"]);
+    await expect.poll(() => prompts.slice(1).map(untagged)).toEqual(["now", "next"]);
     record("state", { state: "resuming" });
     record("state", { state: "idle" });
     await expect.poll(() => harness.db.select().from(cloudroomThreads).get()?.cursor).toBe(records.length);
     expect(getThread(harness.db, thread.id)?.status).toBe("active");
-    record("state", { state: "starting_turn", request_id: "now" });
-    await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find((command) => command.id === "now")?.state).toBe("running");
+    record("state", { state: "starting_turn", request_id: tagged("now") });
+    await expect.poll(() => harness.db.select().from(cloudroomCommands).all().find((command) => untagged(command.id) === "now")?.state).toBe("running");
     expect(chat()).toEqual(["start", "now"]);
-    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["next"]);
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).toEqual(["next"]);
+  } finally {
+    service.stop();
+    core.closeAllConnections();
+    await new Promise<void>((resolve) => core.close(() => resolve()));
+    await harness.cleanup();
+  }
+});
+
+it("starts Cloud Claude with no level at the Mac catalog default, after a retry's saved level and the project's remembered one (#656)", async () => {
+  const harness = await createTestAppHarness();
+  const { host, session } = seedHostSession(harness.deps);
+  seedPrimaryHost(harness.deps, host.id);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const catalogDown = registerProviderHostRpcResponder(harness, { hostId: host.id, sessionId: session.id, modelErrorsByProviderId: { "claude-code": { errorCode: "unavailable", errorMessage: "catalog down" } } });
+  const service = cloudroom(harness.deps);
+  const core = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const requestId = text ? JSON.parse(text).request_id : undefined;
+    if (req.url === "/v1/sessions/cr_shortcut/model" && JSON.parse(text).idle_only !== true) { res.writeHead(400); res.end(); return; }
+    if (req.url === "/v1/sessions/cr_shortcut/model" && JSON.parse(text).model === "declined") {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ code: "invalid_model" }));
+      return;
+    }
+    res.writeHead(requestId ? 202 : 200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "claude-code", model: "test-model", set_model: true, idle_set_model: true, models: ["test-model", "opus", "declined"].map(model => ({ model, reasoning_levels: ["low", "medium", "xhigh"] })) }] }
+      : requestId ? { session_id: req.url?.endsWith("/model") ? "cr_shortcut" : "cr_effort", receipt: { request_id: requestId, command: req.url === "/v1/sessions" ? "start" : req.url?.endsWith("/model") ? "model" : "prompt", state: "accepted", input: {} }, saving: {} } : {}));
+  });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const address = core.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
+    const start = (requestId: string) => harness.app.request("/api/v1/threads", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ executionTarget: "cloud", requestId, projectId: project.id, providerId: "claude-code", origin: "cli", model: "test-model", environment: { type: "project-default" }, input: [{ type: "text", text: "start", mentions: [] }] }) });
+    const level = (requestId: string) => harness.db.select().from(cloudroomThreads).all().find((row) => row.startRequestId === requestId)?.reasoning;
+    expect((await start("first")).status).toBe(201);
+    expect(level("first")).toBe("medium");
+    catalogDown.unregister();
+    registerProviderHostRpcResponder(harness, { hostId: host.id, sessionId: session.id, modelsByProviderId: { "claude-code": { models: [availableModelFixture({ model: "test-model", reasoningLevels: ["medium", "xhigh"], defaultReasoningLevel: "xhigh" })], selectedOnlyModels: [] } } });
+    expect((await start("first")).status).toBe(201); // the retry keeps "medium" instead of a 409
+    expect((await start("second")).status).toBe(201);
+    expect(level("second")).toBe("xhigh");
+    upsertProjectExecutionDefaults(harness.db, { projectId: project.id, providerId: "claude-code", model: "test-model", reasoningLevel: "low", permissionMode: "full", serviceTier: "default" });
+    expect((await start("third")).status).toBe(201);
+    expect(level("third")).toBe("low"); // the project's remembered effort beats the catalog
+    const thread = createThread(harness.db, harness.hub, { projectId: project.id, providerId: "claude-code", executionTarget: "cloud", status: "error" });
+    harness.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `http://127.0.0.1:${address.port}`, sessionId: "cr_shortcut", startRequestId: "shortcut", model: "test-model", reasoning: "medium" }).run();
+    const pick = (model: string) => harness.app.request(`/api/v1/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ idleSessionOnly: true, providerId: "claude-code", model }),
+    });
+    const picked = await pick("opus");
+    expect(picked.status, await picked.clone().text()).toBe(200);
+    for (const unavailable of ["absent", "declined"]) expect((await pick(unavailable)).status).toBe(409);
+    expect(service.threadStatus(thread.id)).toMatchObject({ model: "opus", sessionId: "cr_shortcut" });
   } finally {
     service.stop();
     core.closeAllConnections();
@@ -972,6 +1323,17 @@ it("credits Claude usage that arrives after a follow-up was sent to the turn tha
     await expect.poll(() => harness.db.select().from(cloudroomThreads).get()!.cursor >= records.findIndex((value) => (value as { kind: string }).kind === "usage") + 1).toBe(true);
     expect(harness.db.select().from(events).all().filter((event) => event.type === "thread/tokenUsage/updated").map((event) => event.turnId)).toEqual(["one"]);
     expect(service.threadStatus(thread.id)?.error ?? null).toBeNull();
+    // The same plan limit on two turns in a row gets a card each; one turn reporting it twice gets one (#949).
+    const limit = "Claude's plan limit (not Cloudroom's). Switch accounts to keep working. Claude said: You've hit your Fable limit";
+    for (const turn of ["three", "four"]) {
+      expect(await send(thread.id, turn)).toMatchObject({ delivery: "sent" });
+      record("state", { state: "starting_turn", request_id: turn });
+      record("receipt", { request_id: turn, command: "prompt", state: "failed", error: limit });
+    }
+    record("receipt", { request_id: "four", command: "prompt", state: "failed", error: limit });
+    const repeated = records.length;
+    await expect.poll(() => harness.db.select().from(cloudroomThreads).get()!.cursor >= repeated).toBe(true);
+    expect(harness.db.select().from(events).all().filter((event) => event.type === "system/error").map((event) => JSON.parse(event.data).message)).toEqual([limit, limit]);
   } finally {
     service.stop();
     core.closeAllConnections();
@@ -982,6 +1344,7 @@ it("credits Claude usage that arrives after a follow-up was sent to the turn tha
 
 it("queues Cloud follow-ups at once while the cloud is still starting, then delivers them in order", async () => {
   const harness = await createTestAppHarness();
+  const tagged = await tagger(harness.config.dataDir);
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
   const service = cloudroom(harness.deps);
@@ -990,7 +1353,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
   const streams = new Set<ServerResponse>();
   let release = () => {};
   let starting: Promise<void> | null = null;
-  let holdCapabilities = false;
+  let holdCapabilities = false, failStart = false, blocked = false;
   const record = (kind: string, data: object) => {
     const value = { sequence: records.length + 1, timestamp_ms: 1700000000000 + records.length, session_id: "cr_slow", kind, data };
     records.push(value);
@@ -998,10 +1361,10 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
   };
   const core = createServer(async (req, res) => {
     const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
-    if (req.url === "/v1/health") return json({});
+    if (req.url === "/v1/health") return json(blocked ? { storage: { enabled: true, level: "blocked", reason: "disk_capacity", workspace_available_bytes: 0, history_available_bytes: 0, workspace_total_bytes: 80e9, history_total_bytes: 80e9, sampled_at: Date.now() } } : {});
     if (req.url === "/v1/capabilities") {
       if (holdCapabilities && starting) await starting;
-      return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "codex", model: "test-model" }] });
+      return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, queue_cancel: true, harnesses: [{ id: "codex", model: "test-model" }] });
     }
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url?.includes("/stream?")) {
@@ -1014,6 +1377,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     const body = JSON.parse(text);
     if (req.url === "/v1/sessions") {
       if (starting) await starting;
+      if (failStart) return json({ error: "refused" }, 400);
       record("native_identity", { id: "native" });
       record("state", { state: "idle" });
       return json({ session_id: "cr_slow", receipt: { request_id: body.request_id, command: "start", state: "completed", input: {} }, saving: {} }, 202);
@@ -1037,10 +1401,34 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
     expect(getThread(harness.db, thread.id)?.status).toBe("pending");
     expect(await quick(send(thread.id, "second"))).toMatchObject({ delivery: "queued" });
     expect(await quick(send(thread.id, "third"))).toMatchObject({ delivery: "queued" });
-    expect(service.queue(thread.id).map((item) => item.id)).toEqual(["second", "third"]);
+    expect(await quick(send(thread.id, "fourth"))).toMatchObject({ delivery: "queued" });
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).toEqual(["second", "third", "fourth"]);
     expect(prompts).toEqual([]);
+    // #866: before its session starts, a follow-up is removed at once with no request: with the VM gone and, as after a
+    // restart, no capabilities cached, or after a failed start whose retry would send it. Missing or blank IDs are refused.
+    const remove = async (id: string) => { const response = await harness.app.request(`/api/v1/threads/${thread.id}/queued-messages/${id}`, { method: "DELETE" }); return { status: response.status, ...await response.json() }; };
+    const config = join(harness.config.dataDir, "cloudroom.json"), connection = await readFile(config, "utf8");
+    await writeFile(config, JSON.stringify({ sandboxToken: "a".repeat(64) }), { mode: 0o600 });
+    (service as unknown as { rt: { lastCapabilities: null } }).rt.lastCapabilities = null;
+    for (const [id, status] of [["%20", 404], ["missing", 404], [tagged("second"), 200]] as const) {
+      expect(await quick(remove(id))).toMatchObject({ status });
+    }
+    await writeFile(config, connection, { mode: 0o600 });
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).toEqual(["third", "fourth"]);
+    failStart = true;
     release();
-    await expect.poll(() => prompts, { timeout: 5000 }).toEqual([`first_${thread.id}`, "second", "third"]);
+    await expect.poll(() => command(harness.db, `first_${thread.id}`)?.state).toBe("failed");
+    expect(await remove(tagged("third"))).toMatchObject({ status: 200 });
+    failStart = false;
+    await harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    await expect.poll(() => prompts.map(untagged), { timeout: 2000 }).toEqual([`first_${thread.id}`, "fourth"]);
+    // A message Core can't take yet, here for blocked storage, is deleted at once: its delete is saved, it leaves the
+    // queue, and it is never sent.
+    blocked = true;
+    await send(thread.id, "fifth");
+    expect(await quick(remove(tagged("fifth")))).toMatchObject({ status: 200 });
+    expect(service.queue(thread.id).map((item) => untagged(item.id))).not.toContain("fifth");
+    expect(prompts.map(untagged)).not.toContain("fifth");
   } finally {
     release();
     service.stop();
@@ -1052,6 +1440,7 @@ it("queues Cloud follow-ups at once while the cloud is still starting, then deli
 
 it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers, compacts, and rewinds through core", async (providerId) => {
   const harness = await createTestAppHarness();
+  const tagged = await tagger(harness.config.dataDir);
   const { host } = seedHostSession(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
   const service = cloudroom(harness.deps);
@@ -1060,8 +1449,8 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
   const commands: object[] = [];
   const sid = "cr_features";
   let holdPrompts = false;
-  const input = (text: string) => [{ type: "text", text, mentions: [] }, { type: "localImage", path: "image.png" }, { type: "localFile", path: "note.txt" }];
   const attachmentRoot = join(harness.config.dataDir, "attachments", project.id);
+  const input = (text: string) => [{ type: "text", text, mentions: [] }, { type: "localImage", path: join(attachmentRoot, "image.png") }, { type: "localFile", path: "note.txt" }];
   await mkdir(attachmentRoot, { recursive: true });
   await writeFile(join(attachmentRoot, "image.png"), "image bytes");
   await writeFile(join(attachmentRoot, "note.txt"), "file bytes");
@@ -1090,6 +1479,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
       const query = new URL(req.url, "http://fixture").searchParams;
       const id = query.get("request_id");
       expect(text).toBe(query.get("kind") === "image" ? "image bytes" : "file bytes");
+      expect(query.get("name")).toBe(query.get("kind") === "image" ? "image.png" : "note.txt");
       return json({ session_id: sid, receipt: { request_id: id, command: "attach", state: "completed", input: { id, path: `/code/test/.cloudroom/attachments/${id}/${query.get("name")}` } }, saving: {} }, 202);
     }
     const body = text ? JSON.parse(text) : {};
@@ -1123,9 +1513,9 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     expect(created.status, await created.clone().text()).toBe(201);
     const thread = await created.json();
     await expect.poll(() => getThread(harness.db, thread.id)?.status).toBe("active");
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "queued-1", mode: "auto", input: input("old") })).status).toBe(200);
-    await expect.poll(() => service.queue(thread.id)).toEqual([expect.objectContaining({ id: "queued-1", content: input("old") })]);
-    await expect.poll(() => command(harness.db, "queued-1")?.state).toBe("accepted");
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("queued-1"), mode: "auto", input: input("old") })).status).toBe(200);
+    await expect.poll(() => service.queue(thread.id)).toEqual([expect.objectContaining({ id: tagged("queued-1"), content: input("old") })]);
+    await expect.poll(() => command(harness.db, tagged("queued-1"))?.state).toBe("accepted");
     const queued = service.queue(thread.id)[0]!;
     expect((await request(`/threads/${thread.id}/queued-messages/${queued.id}`, { input: input("rejected edit"), expectedUpdatedAt: queued.updatedAt }, "PATCH")).status).toBeGreaterThanOrEqual(400);
     expect(service.queue(thread.id)[0]).toMatchObject({ content: queued.content, updatedAt: queued.updatedAt });
@@ -1136,33 +1526,38 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     const confirmedRevision = service.queue(thread.id)[0]!.updatedAt;
     expect((await request(`/threads/${thread.id}/queued-messages/${queued.id}`, { input: input("new"), expectedUpdatedAt: queued.updatedAt }, "PATCH")).status).toBe(200);
     expect(service.queue(thread.id)[0]!.updatedAt).toBe(confirmedRevision);
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "queued-1", mode: "auto", input: queued.content })).status).toBe(200);
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("queued-1"), mode: "auto", input: queued.content })).status).toBe(200);
     expect(service.queue(thread.id)[0]?.content).toEqual(input("new"));
     expect((await request(`/threads/${thread.id}/queued-messages/${queued.id}`, undefined, "DELETE")).status).toBe(200);
     await expect.poll(() => commands.some((item) => (item as { url?: string }).url?.endsWith("/cancel"))).toBe(true);
     await expect.poll(() => service.queue(thread.id)).toEqual([]);
     holdPrompts = true;
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "queued-2", mode: "auto", input: input("draft") })).status).toBe(200);
-    const waiting = service.queue(thread.id).find((item) => item.id === "queued-2")!;
-    expect(command(harness.db, "queued-2")?.state).toBe("sending");
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("queued-2"), mode: "auto", input: input("draft") })).status).toBe(200);
+    const waiting = service.queue(thread.id).find((item) => item.id === tagged("queued-2"))!;
+    expect(command(harness.db, tagged("queued-2"))?.state).toBe("sending");
     expect(waiting.editable).toBe(true);
-    const offline = await request(`/threads/${thread.id}/queued-messages/queued-2`, { input: input("final"), expectedUpdatedAt: waiting.updatedAt }, "PATCH");
+    const offline = await request(`/threads/${thread.id}/queued-messages/${tagged("queued-2")}`, { input: input("final"), expectedUpdatedAt: waiting.updatedAt }, "PATCH");
     expect(offline.status, await offline.clone().text()).toBe(200);
-    expect(service.queue(thread.id).find((item) => item.id === "queued-2")?.content).toEqual(input("final"));
+    expect(service.queue(thread.id).find((item) => item.id === tagged("queued-2"))?.content).toEqual(input("final"));
     holdPrompts = false;
-    const sentTo = (name: string) => commands.findIndex((item) => { const sent = item as { url?: string; request_id?: string; target_request_id?: string }; return Boolean(sent.url?.endsWith(name)) && (sent.request_id === "queued-2" || sent.target_request_id === "queued-2"); });
+    const sentTo = (name: string) => commands.findIndex((item) => { const sent = item as { url?: string; request_id?: string; target_request_id?: string }; return Boolean(sent.url?.endsWith(name)) && (sent.request_id === tagged("queued-2") || sent.target_request_id === tagged("queued-2")); });
     await expect.poll(() => sentTo("/edit")).toBeGreaterThan(-1);
     expect(sentTo("/prompts")).toBeGreaterThan(-1);
     expect(sentTo("/prompts")).toBeLessThan(sentTo("/edit"));
-    expect(service.queue(thread.id).find((item) => item.id === "queued-2")?.content).toEqual(input("final"));
-    expect((await request(`/threads/${thread.id}/queued-messages/queued-2`, undefined, "DELETE")).status).toBe(200);
+    expect(service.queue(thread.id).find((item) => item.id === tagged("queued-2"))?.content).toEqual(input("final"));
+    expect((await request(`/threads/${thread.id}/queued-messages/${tagged("queued-2")}`, undefined, "DELETE")).status).toBe(200);
     await expect.poll(() => service.queue(thread.id)).toEqual([]);
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "steer-1", mode: "steer", input: [{ type: "text", text: "course correct", mentions: [] }] })).status).toBe(200);
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("steer-1"), mode: "steer", input: [{ type: "text", text: "course correct", mentions: [] }] })).status).toBe(200);
     await expect.poll(() => commands.some((item) => (item as { url?: string }).url?.endsWith("/steer"))).toBe(true);
+    // Core steers text only, so a steer's files are uploaded first and named by their sandbox paths.
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("steer-files"), mode: "steer", input: input("see files") })).status).toBe(200);
+    await expect.poll(() => commands.find((item) => (item as { request_id?: string }).request_id === tagged("steer-files"))).toMatchObject({
+      text: expect.stringMatching(new RegExp(`see files[\\s\\S]*\\[Attached image: /code/test/\\.cloudroom/attachments/${tagged("steer-files")}a0/image\\.png\\]\n\\[Attached file: /code/test/\\.cloudroom/attachments/${tagged("steer-files")}a1/note\\.txt\\]$`)),
+    });
     // A refused steer, here because its turn just ended, is queued instead of blocking every command behind it.
-    expect((await request(`/threads/${thread.id}/send`, { requestId: "steer-late", mode: "steer", input: [{ type: "text", text: "too late", mentions: [] }] })).status).toBe(200);
+    expect((await request(`/threads/${thread.id}/send`, { requestId: tagged("steer-late"), mode: "steer", input: [{ type: "text", text: "too late", mentions: [] }] })).status).toBe(200);
     await expect.poll(() => commands.some((item) => { const sent = item as { url?: string; text?: string }; return Boolean(sent.url?.endsWith("/prompts") && sent.text?.includes("too late")); })).toBe(true);
-    expect(command(harness.db, "steer-late")?.state).toBe("failed");
+    expect(command(harness.db, tagged("steer-late"))?.state).toBe("failed");
     const late = service.queue(thread.id);
     expect(late).toHaveLength(1);
     expect((await request(`/threads/${thread.id}/queued-messages/${late[0]!.id}`, undefined, "DELETE")).status).toBe(200);
@@ -1174,7 +1569,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     await service.control(thread.id, "stop");
     await expect.poll(() => service.threadStatus(thread.id)?.paused).toBe(true);
     const requested = harness.db.select().from(events).all().find((event) => event.type === "client/turn/requested");
-    expect((await request(`/threads/${thread.id}/edit-message`, { operationId: "edit-1", input: input("rewritten"), expectedRequestSequence: requested?.sequence })).status).toBe(200);
+    const rewritten = request(`/threads/${thread.id}/edit-message`, { operationId: "edit-1", input: input("rewritten"), expectedRequestSequence: requested?.sequence });
     await expect.poll(() => commands.some((item) => (item as { url?: string }).url?.endsWith("/rewind"))).toBe(true);
     // Editing after Stop must not leave the replacement stuck behind a paused queue.
     expect(commands.map((item) => (item as { url?: string }).url?.split("/").pop()).filter((name) => name === "resume" || name === "rewind")).toEqual(["resume", "rewind"]);
@@ -1183,6 +1578,7 @@ it.each(["codex", "pi"])("edits and cancels queued Cloud %s prompts, then steers
     expect(rewind.replacement.text).toBe("rewritten");
     record("rewind", { id: "corrected-native", request_id: rewind.request_id, before: rewind.before, replacement: { request_id: rewind.replacement.request_id, input: rewind.replacement } });
     record("state", { state: "starting_turn", request_id: rewind.replacement.request_id });
+    expect((await rewritten).status).toBe(200);
     await expect.poll(() => harness.db.select().from(events).all().filter((event) => event.type === "client/turn/requested").map((event) => JSON.parse(event.data).input[0].text)).toEqual(["rewritten"]);
     expect((await request(`/threads/${thread.id}/edit-message`, { operationId: "edit-1", input: input("rewritten"), expectedRequestSequence: requested?.sequence })).status).toBe(200);
     expect(commands.filter((item) => (item as { url?: string }).url?.endsWith("/rewind"))).toHaveLength(1);
@@ -1235,6 +1631,14 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
 
     saveTeleportProgress(harness.db, thread.id, { id: "interrupted", owner: thread.id, phase: "checking", completed: 0, total: 0 });
     teleports(harness.deps).recover();
+    expect(await phase()).toBe("cancelled");
+
+    // Saved state that is gone pauses the transfer for good instead of crashing the server (#2046).
+    const gone = { id: "missing", owner: thread.id, completed: 0, total: 0 };
+    saveTeleportProgress(harness.db, thread.id, { ...gone, phase: "stopping" });
+    teleports(harness.deps).recover();
+    await vi.waitFor(async () => expect(await phase()).toBe("error"));
+    teleports(harness.deps).abandon(thread.id);
     expect(await phase()).toBe("cancelled");
 
     const stopped = api(`/cloudroom/threads/${thread.id}/teleport`, { action: "start" });
@@ -1300,6 +1704,7 @@ async function fakeLoginsWebsite(refuse = false) {
     let text = ""; for await (const chunk of req) text += chunk;
     const body = JSON.parse(text) as { action?: string; name: string; value?: string };
     const reply = (status: number, value: unknown) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (body.action === "status") return reply(200, { claude: false, codex: false, pi: false, github: logins.has("github") });
     if (body.action === "remove") {
       if (refuse) return reply(400, { error: "Invalid login." });
       logins.delete(body.name);
@@ -1349,6 +1754,122 @@ it("a background login save never brings back a login Disconnect removed, whethe
   }
 });
 
+// The clone signs gh in with this Mac's login, and sleep wipes it, so Cloud must hold it to give it back on wake (#1628).
+// It only fills a gap: another computer's or account's saved login stays.
+it.each([
+  { case: "toggle off", copyLogins: false, githubCard: true, github: "gho_fake" },
+  { case: "toggle never chosen", copyLogins: null, githubCard: true, github: "gho_fake" },
+  { case: "Disconnect, or another account picked here", copyLogins: false, githubCard: false, github: null },
+  { case: "Cloud already holds another computer's login", copyLogins: false, githubCard: true, cloud: "other", github: "other" },
+  { case: "a second wake during the copy waits for it", copyLogins: false, githubCard: true, steps: "concurrent", github: "gho_fake" },
+  { case: "another Cloudroom account signed in within a minute", copyLogins: false, githubCard: true, steps: "reset", github: "gho_fake" },
+])("GitHub login sync to Cloud: $case", async ({ copyLogins, githubCard, cloud, steps, github }) => {
+  const home = await mkdtemp(join(tmpdir(), "cloudroom-gh-"));
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME };
+  await writeFile(join(home, "gh"), "#!/bin/sh\n[ \"$1 $2\" = 'auth token' ] && echo gho_fake\n", { mode: 0o755 });
+  process.env.PATH = `${home}:${env.PATH}`; process.env.HOME = home;
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const website = await fakeLoginsWebsite();
+  (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
+  (service as unknown as { rt: { sandboxMode: () => Promise<boolean> } }).rt.sandboxMode = async () => true;
+  const syncLogins = () => (service as unknown as { auth: { syncLogins: () => Promise<void> } }).auth.syncLogins();
+  try {
+    if (copyLogins !== null) await sync.setCopyLogins(harness.deps, copyLogins);
+    await sync.setCopyMacGithub(harness.deps, githubCard);
+    if (cloud) website.logins.set("github", JSON.stringify({ token: cloud }));
+    if (steps === "concurrent") { void syncLogins(); await syncLogins(); }
+    else await syncLogins();
+    if (steps === "reset") { website.logins.clear(); service.sandboxes.reset(); await syncLogins(); }
+    expect(website.logins.has("github") ? JSON.parse(website.logins.get("github")!).token : null).toBe(github);
+  } finally {
+    service.stop(); await website.close(); await harness.cleanup();
+    process.env.PATH = env.PATH; process.env.HOME = env.HOME;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+// A Cloud parent's child wakes on the website, so a sign-in in Settings must reach Cloud then, not at this Mac's next
+// wake, even when a wake just copied the logins (#1708). Only Kimi is read here: every other login is skipped.
+it.each([
+  { case: "signed in after a wake's copy", copyLogins: true, removed: false, kimi: true },
+  { case: "Auth my agents off", copyLogins: false, removed: false, kimi: false },
+  { case: "agent removed in Settings", copyLogins: true, removed: true, kimi: false },
+])("a finished Settings sign-in copies the login to Cloud: $case", async ({ copyLogins, removed, kimi }) => {
+  const home = await mkdtemp(join(tmpdir(), "cloudroom-kimi-"));
+  const saved = process.env.KIMI_CODE_HOME;
+  process.env.KIMI_CODE_HOME = home;
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const website = await fakeLoginsWebsite();
+  (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
+  (service as unknown as { rt: { sandboxMode: () => Promise<boolean> } }).rt.sandboxMode = async () => true;
+  const rules = service.sandboxes.skipLogins;
+  service.sandboxes.skipLogins = async () => new Set([...await rules(), "codex", "pi", "opencode", "hermes", "devin", "openclaw", "cursor", "github"]);
+  try {
+    await sync.setCopyLogins(harness.deps, copyLogins);
+    if (removed) await sync.markLogin(harness.deps, "kimi", "blocked");
+    await (service as unknown as { auth: { syncLogins: () => Promise<void> } }).auth.syncLogins();
+    await mkdir(join(home, "credentials"));
+    await writeFile(join(home, "config.toml"), 'default_model = "fake"\n');
+    await writeFile(join(home, "credentials", "kimi-code.json"), '{"access_token":"fake"}');
+    expect((await harness.app.request("/api/v1/cloudroom/mac/logins", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status).toBe(200);
+    expect(website.logins.has("kimi")).toBe(kimi);
+  } finally {
+    service.stop(); await website.close(); await harness.cleanup();
+    if (saved === undefined) delete process.env.KIMI_CODE_HOME; else process.env.KIMI_CODE_HOME = saved;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+it("lists again by itself a minute after a startup probe that wasn't a real no, and keeps an older website's no (#1655)", async () => {
+  // [answer, adopted a minute later with no signal, stopped while it asks]: only an older website's 400 means it doesn't
+  // list threads; a stopped sync never asks again.
+  let held: ServerResponse | undefined;
+  const realTimeout = globalThis.setTimeout;
+  const rows: [string, (res: ServerResponse) => void, boolean, boolean?][] = [
+    ["no answer", res => res.socket?.destroy(), true],
+    ["a proxy's page", res => { res.writeHead(200, { "Content-Type": "text/html" }); res.end("<html></html>"); }, true],
+    ["an edge refusal", res => { res.writeHead(403, { "Content-Type": "text/html" }); res.end("<html></html>"); }, true],
+    ["an older website", res => { res.writeHead(400, { "Content-Type": "application/json" }); res.end('{"error":"Invalid sandbox request."}'); }, false],
+    ["no answer after a stop", res => { held = res; }, false, true],
+  ];
+  for (const [name, hiccup, adopted, stop] of rows) {
+    const harness = await createTestAppHarness();
+    const service = cloudroom(harness.deps);
+    let healthy = false, probes = 0;
+    const row = { thread: "thr_234567abcd", session: "cr_elsewhere", project: "proj_elsewhere", project_name: null, repository: "https://github.com/example/app", title: "Started elsewhere", state: "open", sandbox: "asleep", harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: new Date().toISOString(), woke_at: null, updated_at: new Date().toISOString() };
+    const website = createServer(async (req, res) => {
+      let text = ""; for await (const chunk of req) text += chunk;
+      if (JSON.parse(text || "{}").action !== "threads") return void res.end("{}");
+      probes++;
+      if (!healthy || !adopted) return hiccup(res);
+      res.end(JSON.stringify({ threads: [row], next: `${row.updated_at}~${row.thread}`, more: false }));
+    });
+    website.listen(0, "127.0.0.1"); await once(website, "listening");
+    const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+    try {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+      setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "git@github.com:example/app.git");
+      await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      const first = service.sync.run();
+      if (stop) { await vi.waitFor(() => expect(held).toBeDefined()); service.sync.stop(); held!.socket?.destroy(); }
+      await first;
+      healthy = true;
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect([name, probes, Boolean(getThread(harness.db, row.thread))]).toEqual([name, 1, false]);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.waitFor(() => expect([name, Boolean(getThread(harness.db, row.thread))]).toEqual([name, adopted]));
+      // An older website's no is asked again only hourly; a blip's retry is one timer, never a loop.
+      await vi.advanceTimersByTimeAsync(180_000);
+      await new Promise(resolve => realTimeout(resolve, 300));
+      expect([name, probes]).toEqual([name, adopted ? 3 : 1]);
+    } finally { vi.useRealTimers(); service.stop(); website.closeAllConnections(); website.close(); await harness.cleanup(); }
+  }
+}, 30_000);
+
 it("concurrent Disconnects keep every marker", async () => {
   const harness = await createTestAppHarness();
   try {
@@ -1357,4 +1878,209 @@ it("concurrent Disconnects keep every marker", async () => {
   } finally {
     await harness.cleanup();
   }
+});
+
+it("a message to a lost Cloud agent restarts it from its saved chat, and a refused one fails instead of saying sent (#154, #155)", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const sid = "cr_lost", calls: string[] = [], records: object[] = [], streams = new Set<ServerResponse>();
+  let state = "idle", history = true, keepPausedCapability = true;
+  const record = (kind: string, data: object) => {
+    const value = { sequence: records.length + 1, timestamp_ms: Date.now(), session_id: sid, kind, data };
+    records.push(value);
+    for (const stream of streams) stream.write(`id: ${value.sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
+  };
+  const core = createServer(async (req, res) => {
+    const json = (body: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
+    if (req.url === "/v1/health") return json({});
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, queue_reorder: true, resume_keep_paused: keepPausedCapability, harnesses: [{ id: "codex", model: "test-model", models: [{ model: "test-model", reasoning_levels: ["high"] }] }] });
+    if (req.url === "/v1/ready") return json({ ready: true });
+    if (req.url?.includes("/stream?")) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const after = Number(new URL(req.url, "http://fixture").searchParams.get("after"));
+      for (const value of records.slice(after)) res.write(`id: ${(value as { sequence: number }).sequence}\nevent: record\ndata: ${JSON.stringify(value)}\n\n`);
+      res.flushHeaders(); streams.add(res); res.on("close", () => streams.delete(res)); return;
+    }
+    if (req.method !== "POST") return json({}, 404);
+    let text = ""; for await (const chunk of req) text += chunk;
+    const body = JSON.parse(text);
+    const command = req.url === "/v1/sessions" ? "start" : req.url!.split("/").pop()!.replace(/s$/, "");
+    calls.push(`${command}${body.keep_paused ? "+keep" : ""}:${state}`);
+    // Real Core: only `resume` may restart a lost session, and only with its saved chat intact.
+    if (state === "process_lost" && command === "resume" && !history) return json({ code: "request_rejected", error: "saved conversation is unavailable; inspect session recovery before retrying" }, 409);
+    if (state === "process_lost" && command !== "resume") return json({ code: "request_rejected", error: "process unavailable; history does not restore execution" }, 409);
+    const receipt = { request_id: body.request_id, command, state: command === "resume" ? "completed" : "accepted", input: command === "prompt" ? { text: body.text } : body.keep_paused ? { keep_paused: true } : {} };
+    if (command === "resume") { state = "idle"; record("state", { state: "resuming" }); record("state", { state: "idle" }); }
+    record("receipt", receipt);
+    json({ session_id: sid, receipt, saving: {} }, 202);
+  });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const address = core.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  const request = (path: string, body?: unknown) => harness.app.request(`/api/v1${path}`, { method: body === undefined ? "GET" : "POST", headers: { "Content-Type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  // How `room-cli thread tell` sends to a Cloud thread.
+  const tell = (threadId: string, text: string, requestId?: string) => request(`/threads/${threadId}/send`, { requestId, mode: "queue-if-active", input: [{ type: "text", text, mentions: [] }] });
+  const lose = () => { state = "process_lost"; record("state", { state: "process_lost", reason: "Agent process exited unexpectedly (out of memory)", out_of_memory: true }); };
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
+    const created = await request("/threads", { executionTarget: "cloud", requestId: "lost-start", projectId: project.id, providerId: "codex", origin: "app", model: "test-model", reasoningLevel: "high", environment: { type: "project-default" }, input: [{ type: "text", text: "Build it", mentions: [] }] });
+    expect(created.status).toBe(201);
+    const threadId = (await created.json()).id as string;
+    await expect.poll(() => calls).toContain("prompt:idle");
+    lose();
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    calls.length = 0;
+    const revived = await tell(threadId, "Memory is free now; carry on");
+    expect({ status: revived.status, body: await revived.json() }).toMatchObject({ status: 200, body: { ok: true } });
+    expect(calls).toEqual(["resume:process_lost", "prompt:idle"]);
+    // #844 review: Stop paused an older message. Two quick sends restart once, keeping the pause until a message is first.
+    keepPausedCapability = false;
+    await service.status();
+    harness.db.insert(cloudroomCommands).values({ id: "older-resume", threadId, command: "resume", input: "{}", state: "accepted", createdAt: Date.now() - 1000 }).run();
+    record("receipt", { request_id: "stop", command: "stop", state: "accepted", input: {} });
+    record("receipt", { request_id: "older", command: "prompt", state: "accepted", input: { text: "Older" } });
+    lose();
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    expect(service.threadStatus(threadId)?.paused).toBe(true);
+    // #967: a message Stop holds says so, not that it waits for the current turn, despite an older accepted resume; a
+    // session that replaced the stopped one isn't held by it.
+    for (const [sessionId, held] of [["cr_replaced", false], [sid, true]] as const) {
+      saveBinding(harness.db, threadId, { sessionId });
+      expect(service.queue(threadId).map(row => row.pausedByStop), sessionId).toEqual([held]);
+    }
+    calls.length = 0;
+    const unsupported = await tell(threadId, "Correction A", "correction-a");
+    expect(unsupported.ok).toBe(false);
+    expect(await unsupported.json()).toMatchObject({ message: expect.stringContaining("Update the cloud core") });
+    expect(calls).toEqual([]);
+    // The saved send succeeds once Core supports it, even while the app's cached capabilities still say otherwise.
+    keepPausedCapability = true;
+    expect((await Promise.all([tell(threadId, "Correction A", "correction-a"), tell(threadId, "Correction B")])).map(response => response.status)).toEqual([200, 200]);
+    expect(calls.slice(0, 4)).toEqual(["resume+keep:process_lost", "prompt:idle", "reorder:idle", "resume:idle"]);
+    expect(calls.filter(call => call.startsWith("prompt"))).toHaveLength(2);
+    lose(); history = false;
+    await expect.poll(() => getThread(harness.db, threadId)?.status).toBe("error");
+    const refused = await tell(threadId, "Are you there?");
+    expect(refused.ok).toBe(false);
+    expect(await refused.json()).toMatchObject({ message: expect.stringContaining("saved conversation is unavailable") });
+  } finally {
+    service.stop(); core.closeAllConnections(); await new Promise<void>(resolve => core.close(() => resolve())); await harness.cleanup();
+  }
+}, 15000);
+
+it("maps exactly the Core session states core/docs/api.md lists", async () => {
+  const doc = await readFile(new URL("../../../../../core/docs/api.md", import.meta.url), "utf8");
+  const documented = [...(doc.match(/Session `state` values: (.*)/)?.[1] ?? "").matchAll(/`(\w+)`/g)].map((match) => match[1]);
+  expect(documented.length).toBeGreaterThan(10);
+  expect([...documented].sort()).toEqual([...coreStates].sort());
+});
+
+// #2513: a Local parent hears why its Cloud child's turn failed, in Core's words on the failed receipt.
+it("tells a Local parent why its Cloud child's turn failed", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id });
+    const parent = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, providerThreadId: "provider-parent", threadId: parent.id });
+    const child = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status: "active" });
+    harness.db.insert(cloudroomThreads).values({ threadId: child.id, coreUrl: `sandbox:${child.id}`, sessionId: "cr_child", startRequestId: "start", nativeId: "native", model: "m", reasoning: "medium" }).run();
+    const service = cloudroom(harness.deps) as unknown as { rt: { me(): Promise<string>; state(id: string): { actFrom: number | null } }; stream: { handleStreamRecord(...args: unknown[]): Promise<unknown> }; messaging: { failStart(id: string, message: string): void } };
+    const state = Object.assign(service.rt.state(child.id), { actFrom: 0 });
+    const error = "Codex's plan limit (not Cloudroom's). Switch accounts to keep working. Codex said: usage limit reached";
+    const record = { sequence: 1, timestamp_ms: 1, session_id: "cr_child", kind: "receipt", data: { request_id: appRequestId(await service.rt.me(), "turn"), command: "prompt", state: "failed", error } };
+    await service.stream.handleStreamRecord(binding(harness.db, child.id), null, record, new AbortController().signal, false, false, null, 0, 0, () => state, () => {});
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    const notice = harness.db.select().from(events).where(eq(events.threadId, parent.id)).all().find((row) => row.type === "client/turn/requested" && row.data.includes('"initiator":"system"'));
+    expect(notice?.data).toContain(`failed.\\n\\nError: ${error}`);
+    // A start Core refuses for good, say at a Codex usage limit, too; it waits behind the first notice.
+    const refused = "Your Codex usage limit is reached. Sign in with another ChatGPT account to keep working, or wait for it to reset.";
+    service.messaging.failStart(child.id, refused);
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    expect(listQueuedThreadMessages(harness.db, parent.id)[0]?.content).toContain(`failed.\\n\\nError: ${refused}`);
+  } finally { await harness.cleanup(); }
+});
+
+it("tells a Cloud parent once when Core keeps refusing its child's start for now, and keeps it trying (#865)", async () => {
+  const harness = await createTestAppHarness(), service = cloudroom(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: seedHostSession(harness.deps).host.id });
+  // Every start gets the 409 Core gives while its agent's model check fails, which says it will pass.
+  let held: (() => void) | null = null, hold = false;
+  const core = createServer(async (req, res) => { if (hold && req.url === "/v1/sessions") await new Promise<void>(resolve => { held = resolve; }); res.writeHead(req.url === "/v1/sessions" ? 409 : 200, { "Content-Type": "application/json" }); res.end(JSON.stringify(req.url === "/v1/capabilities" ? { version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, harnesses: [{ id: "codex", model: "test-model" }] } : { error: "model catalog unavailable", code: "model_catalog_unavailable" })); });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const url = `http://127.0.0.1:${(core.address() as { port: number }).port}`, now = Date.now();
+  try {
+    await service.configure({ url, token: "x".repeat(40), projectId: project.id });
+    const parent = createThread(harness.db, harness.hub, { projectId: project.id, executionTarget: "cloud", providerId: "codex", status: "idle" });
+    const [child, archived] = [0, 1].map(() => createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId: parent.id, executionTarget: "cloud", providerId: "codex", status: "pending" }));
+    harness.db.insert(cloudroomThreads).values([{ threadId: parent.id, coreUrl: "http://127.0.0.1:9", sessionId: "cr_parent" }, { threadId: child.id, coreUrl: url }, { threadId: archived.id, coreUrl: url }].map(row => ({ startRequestId: `start_${row.threadId}`, model: "test-model", reasoning: "medium", ...row }))).run();
+    harness.db.insert(cloudroomCommands).values([child, archived].map(({ id }) => ({ id: `first_${id}`, threadId: id, command: "prompt" as const, input: JSON.stringify({ text: "Start" }), state: "sending" as const, createdAt: now }))).run();
+    const notices = () => harness.db.select().from(cloudroomCommands).all().filter(row => row.threadId === parent.id).map(row => JSON.parse(row.input).text);
+    // The last row archives its child while the start that crosses 2 minutes is still waiting for Core.
+    // The last row unarchives it 3 minutes later: its next refusal starts a new 2 minutes.
+    for (const [id, after, sent, archive, unarchive] of [[child.id, 0, 0], [child.id, 60_000, 0], [child.id, 120_000, 1], [child.id, 600_000, 1], [archived.id, 0, 1], [archived.id, 120_000, 1, true], [archived.id, 300_000, 1, false, true]] as const) {
+      vi.spyOn(Date, "now").mockReturnValue(now + after);
+      hold = Boolean(archive);
+      if (unarchive) unarchiveThread(harness.db, harness.hub, id);
+      const started = (service as unknown as { delivery: { deliver(id: string): Promise<void> } }).delivery.deliver(id);
+      if (archive) { await expect.poll(() => held, { interval: 5 }).not.toBeNull(); archiveThread(harness.db, harness.hub, id); held!(); }
+      await expect(started).rejects.toThrow();
+      await new Promise(resolve => setImmediate(resolve));
+      vi.restoreAllMocks();
+      expect({ id, after, sent: notices().length, first: command(harness.db, `first_${id}`)?.state }).toEqual({ id, after, sent, first: "sending" });
+    }
+    expect(notices()[0]).toMatch(/has not started: Cloud model discovery is unavailable.*don't spawn a replacement/);
+  } finally { service.stop(); core.closeAllConnections(); core.close(); await harness.cleanup(); }
+});
+
+it("pauses a deleted project's own new-thread Cloud loops and leaves every other loop alone (#1673)", async () => {
+  const harness = await createTestAppHarness(), service = cloudroom(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: seedHostSession(harness.deps).host.id });
+  // [loop, paused]: on, off already, same-thread (its thread's archive pauses it), another project's, an older website's row.
+  const rows = [
+    [{ id: "own", enabled: true, new_thread: true, project_id: project.id }, true],
+    [{ id: "off", enabled: false, new_thread: true, project_id: project.id }, false],
+    [{ id: "same", enabled: true, new_thread: false, project_id: project.id }, false],
+    [{ id: "other", enabled: true, new_thread: true, project_id: "proj_another" }, false],
+    [{ id: "older", enabled: true }, false],
+  ] as const;
+  const calls: Record<string, unknown>[] = [];
+  vi.spyOn(service.sandboxes, "automations").mockImplementation(async (body) => { calls.push(body); return body.action === "list" ? { automations: rows.map(([loop]) => loop) } : {}; });
+  try {
+    beginProjectDeletion(harness.deps, { projectId: project.id });
+    await expect.poll(() => calls.filter(call => call.action === "list").length).toBe(1);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(calls.filter(call => call.action !== "list")).toEqual(rows.filter(([, paused]) => paused).map(([loop]) => ({ action: "update", id: loop.id, enabled: false })));
+  } finally { vi.restoreAllMocks(); service.stop(); await harness.cleanup(); }
+});
+
+it("never takes the website's copy of an untitled Cloud thread's fallback as its title, so the generated title still lands", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const fallback = "why is renaming broken for me? for some reason new threads dont get named pro...";
+  const thread = createThread(harness.db, harness.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", titleFallback: fallback, status: "idle" });
+  harness.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `sandbox:${thread.id}`, sessionId: "cr_one", startRequestId: "start_one", model: "test-model", reasoning: "medium" }).run();
+  let title = fallback;
+  const website = createServer(async (req, res) => {
+    let text = ""; for await (const chunk of req) text += chunk;
+    const input = text ? JSON.parse(text) : {};
+    const row = { thread: thread.id, session: "cr_one", project: project.id, project_name: project.name, repository: null, title, state: "open", sandbox: "awake", harness: "codex", model: "test-model", reasoning: "medium", parent: null, parent_state: null, loop: false, created_at: new Date().toISOString(), woke_at: null, updated_at: new Date().toISOString() };
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(input.action === "threads" ? { threads: [row], next: `${row.updated_at}~${row.thread}`, more: false } : {}));
+  });
+  website.listen(0, "127.0.0.1"); await once(website, "listening");
+  const address = website.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "two@example.com" }, undefined, `http://127.0.0.1:${address.port}`, "a".repeat(64));
+    await service.sync.run();
+    expect(getThread(harness.db, thread.id)?.title).toBeNull();
+    // A rename made on another computer still comes through.
+    title = "Rename broken";
+    await service.sync.run();
+    expect(getThread(harness.db, thread.id)?.title).toBe("Rename broken");
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
 });

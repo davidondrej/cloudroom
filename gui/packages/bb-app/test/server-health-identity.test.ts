@@ -9,14 +9,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { waitForProcessExit } from "@cloudroom/config/child-process-exit";
-import type {
-  BbAppStartContext,
-  ManagedFullStackProcesses,
-} from "../src/launcher.js";
-import {
-  startFullStackServerProcess,
-  waitForServerHealth,
-} from "../src/launcher.js";
+import type { AppContext } from "../src/context.js";
+import { waitForServerHealth } from "../src/processes.js";
+import { startServerProcess, type Processes } from "../src/start.js";
 
 interface ListeningServer {
   close(): Promise<void>;
@@ -73,12 +68,11 @@ setTimeout(() => {
 function createStartContext(args: {
   serverEntry: string;
   serverPort: number;
-}): BbAppStartContext {
+}): AppContext {
   const dataDir = dirname(args.serverEntry);
   return {
     appDistDir: `${dataDir}/app/dist`,
     appVersion: "0.0.0-test",
-    configFile: `${dataDir}/config.json`,
     daemonBundleDir: `${dataDir}/host-daemon/dist`,
     daemonEntry: `${dataDir}/host-daemon/dist/daemon-bundle.mjs`,
     daemonLockDir: `${dataDir}/daemon.lock.lock`,
@@ -88,7 +82,6 @@ function createStartContext(args: {
     dbPath: `${dataDir}/bb.db`,
     envFile: `${dataDir}/env.json`,
     logDir: `${dataDir}/logs`,
-    packageRoot: `${dataDir}/package`,
     serverEntry: args.serverEntry,
     serverPort: args.serverPort,
     serverUrl: `http://127.0.0.1:${args.serverPort}`,
@@ -179,7 +172,7 @@ describe("waitForServerHealth", () => {
   });
 });
 
-describe("startFullStackServerProcess", () => {
+describe("startServerProcess", () => {
   const scratchDirs: string[] = [];
 
   afterEach(() => {
@@ -202,12 +195,12 @@ describe("startFullStackServerProcess", () => {
       serverEntry: writeFakeServerEntry(),
       serverPort,
     });
-    const processes: ManagedFullStackProcesses = {
-      daemonRun: null,
-      serverRun: null,
+    const processes: Processes = {
+      daemon: null,
+      server: null,
     };
 
-    const serverRun = await startFullStackServerProcess({
+    const serverRun = await startServerProcess({
       context,
       env: {
         BB_SERVER_PORT: String(context.serverPort),
@@ -216,7 +209,7 @@ describe("startFullStackServerProcess", () => {
       processes,
     });
     try {
-      expect(processes.serverRun).toBe(serverRun);
+      expect(processes.server).toBe(serverRun);
       const health = await fetch(`${context.serverUrl}/health`).then(
         (response) => response.json(),
       );
@@ -235,14 +228,14 @@ describe("startFullStackServerProcess", () => {
       serverEntry: writeFakeServerEntry(),
       serverPort,
     });
-    const processes: ManagedFullStackProcesses = {
-      daemonRun: null,
-      serverRun: null,
+    const processes: Processes = {
+      daemon: null,
+      server: null,
     };
     const preflightError = new Error("native module ABI mismatch");
 
     await expect(
-      startFullStackServerProcess({
+      startServerProcess({
         beforeStart: () => {
           throw preflightError;
         },
@@ -254,7 +247,7 @@ describe("startFullStackServerProcess", () => {
         processes,
       }),
     ).rejects.toBe(preflightError);
-    expect(processes.serverRun).toBeNull();
+    expect(processes.server).toBeNull();
   });
 
   it("fails startup instead of adopting a server that already owns the port", async () => {
@@ -265,14 +258,14 @@ describe("startFullStackServerProcess", () => {
       serverEntry: writeFakeServerEntry(),
       serverPort: foreign.port,
     });
-    const processes: ManagedFullStackProcesses = {
-      daemonRun: null,
-      serverRun: null,
+    const processes: Processes = {
+      daemon: null,
+      server: null,
     };
 
     try {
       await expect(
-        startFullStackServerProcess({
+        startServerProcess({
           context,
           env: {
             BB_SERVER_PORT: String(context.serverPort),
@@ -283,7 +276,7 @@ describe("startFullStackServerProcess", () => {
       ).rejects.toThrow(
         `Server failed to become healthy: Process exited before becoming healthy: another server is already answering at ${context.serverUrl}/health`,
       );
-      expect(processes.serverRun).toBeNull();
+      expect(processes.server).toBeNull();
     } finally {
       await foreign.close();
     }

@@ -1,8 +1,8 @@
 import { useState, type ReactNode } from "react";
 import type { WorkspaceFile } from "@cloudroom/server-contract";
 import { DetailCard } from "@/components/ui/detail-card.js";
-import { ThreadStorageRow } from "./ThreadMetadataContent";
-import { useThreadStorageBrowser } from "./useThreadStorageBrowser";
+import { ThreadStorageRow } from "@/components/right-panel/tabs/thread-info";
+import { useThreadStorageBrowser } from "@/components/right-panel/tabs/thread-storage";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 
 export default {

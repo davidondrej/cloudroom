@@ -3,14 +3,11 @@ use crate::config::{Config, HarnessConfig};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, Read},
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, TryRecvError, sync_channel},
-    time::Duration,
 };
 use tokio::process::Command;
 
-const HISTORY: &str = include_str!("cursor-history.py");
 const PLAIN_CHAT: &str = "Ask the user questions in plain chat. Do not use structured question or plan-approval tools. Never infer the user's answer or approval.";
 
 fn invalid(message: &str) -> io::Error {
@@ -22,9 +19,11 @@ fn invalid(message: &str) -> io::Error {
 pub(super) struct Flavor {
     pub harness: &'static str,
     pub name: &'static str,
-    /// Where the agent keeps a session, from its home and session ID, when Core does not capture it.
+    /// Where the agent keeps a session, from its home and session ID, unless its open reply says so (`capture`).
     pub native_path: fn(&Path, &str) -> PathBuf,
     pub valid_id: fn(&str) -> bool,
+    /// The open reply says where the chat lives (Cursor's print driver). Core never copies the chat itself: Cursor's
+    /// store is one SQLite file, so each copy was all of it and history grew by its size every turn (#606).
     pub capture: bool,
     /// Diagnostics the agent sends as message text; never part of the reply.
     pub notices: &'static [&'static str],
@@ -34,6 +33,8 @@ pub(super) struct Flavor {
     pub explain_stops: bool,
     /// Fails a turn the agent ended without any output, with this reason.
     pub empty_turn: Option<&'static str>,
+    /// Each message chunk repeats the whole message so far (Agent Zero).
+    pub cumulative_text: bool,
 }
 pub(super) const CURSOR: Flavor = Flavor {
     harness: "cursor",
@@ -45,11 +46,29 @@ pub(super) const CURSOR: Flavor = Flavor {
     replay: true,
     explain_stops: true,
     empty_turn: None,
+    cumulative_text: false,
 };
 
+/// Cursor's own words when the account's usage is used up (its PRO_USER_USAGE_LIMIT-style errors). Not its short
+/// capacity limits, which retry on their own.
+fn cursor_plan_limit(message: &str) -> bool {
+    // Error codes like PRO_USER_USAGE_LIMIT read as words.
+    let text = message.to_ascii_lowercase().replace('_', " ");
+    [
+        "usage limit",
+        "hit your limit",
+        "out of usage",
+        "weekly usage",
+        "weekly pool",
+    ]
+    .iter()
+    .any(|words| text.contains(words))
+}
+
 pub(crate) fn capabilities(kind: Kind) -> Value {
+    // Agent Zero can't take a prompt right after a cancel, so its follow-ups queue instead of steering.
     json!({"resume":true,"interrupt":true,"system_notice":false,"interactive_dialogs":false,
-        "steer":true,"compact":false,"rewind":false,"attachments":true,
+        "steer":kind != Kind::AgentZero,"compact":false,"rewind":false,"attachments":true,
         "service_tier":kind.fast(),"subagents":false,"usage":false,"command_guard":false})
 }
 
@@ -121,10 +140,7 @@ pub(super) async fn attach(
 }
 
 async fn select_model(handle: &Handle, id: &str, session: &Value) -> io::Result<()> {
-    let requested = match handle.profile.model.as_str() {
-        "auto" => "default",
-        value => value,
-    };
+    let requested = super::cursor_models::catalog_name(&handle.profile.model);
     let catalog = session["models"]["availableModels"]
         .as_array()
         .ok_or_else(|| io::Error::other("Cursor model catalog unavailable"))?;
@@ -169,17 +185,50 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
             )
             .await?;
     }
-    prompt(handle, request, input, false, Vec::new()).await
+    let inline = if handle.kind == Kind::Antigravity {
+        images(handle, input).await?
+    } else {
+        Vec::new()
+    };
+    prompt(handle, request, input, false, inline).await
 }
 
 /// Cloudroom's rules for the agent: plain-chat questions and the Cloudroom system prompt.
 pub(super) fn instructions(handle: &Handle) -> String {
-    match &handle.system_prompt {
+    let rules = match &handle.system_prompt {
         Some(system_prompt) => {
             format!("{PLAIN_CHAT}\n\n[Cloudroom system prompt]\n{system_prompt}")
         }
         None => PLAIN_CHAT.to_owned(),
+    };
+    match handle.kind {
+        Kind::AgentZero => format!(
+            "{}\n\n{rules}",
+            super::agent_zero::workspace(&handle.repository)
+        ),
+        _ => rules,
     }
+}
+
+/// Image attachments go inline when the ACP server accepts images; their paths still follow the text.
+pub(super) async fn images(handle: &Handle, input: &Value) -> io::Result<Vec<Value>> {
+    if handle.acp.lock().unwrap()["promptCapabilities"]["image"] != true {
+        return Ok(Vec::new());
+    }
+    // Leave room in the ACP frame for the text, the instructions, and the envelope.
+    let used = serde_json::to_vec(input)?.len() + instructions(handle).len() + 4096;
+    let remaining = super::process::MAX_LINE.saturating_sub(used);
+    let (reader, input) = (handle.clone(), input.clone());
+    tokio::task::spawn_blocking(move || super::files::images(&reader, &input, remaining))
+        .await
+        .map_err(io::Error::other)?
+        // No prompt was sent: reject this request and allow queued work to continue.
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot read image attachment: {error}"),
+            )
+        })
 }
 
 /// Sends one turn, with any inline images after the text. Agents that do not keep the instructions
@@ -217,6 +266,17 @@ pub(super) async fn prompt(
 
 pub(super) async fn steer(handle: &Handle, request: &str, text: &str) -> io::Result<()> {
     let _control = handle.controls.lock().await;
+    if handle.kind == Kind::Antigravity {
+        return handle
+            .process
+            .dispatch(
+                "cloudroom/join",
+                json!({"sessionId":handle.native()?,"prompt":[{"type":"text","text":text}]}),
+                None,
+                Some(request),
+            )
+            .await;
+    }
     handle
         .process
         .control(
@@ -326,23 +386,19 @@ pub(super) struct Protocol {
     restart: Option<(u64, Value)>,
     /// Steering prompts the agent joins to the running turn; each is answered when that turn ends.
     steering: Vec<u64>,
+    /// The current prompt got output. A steer's new prompt starts without, so its empty end is still silent (#1721).
+    replied: bool,
     acknowledgement: Option<(Value, u64)>,
     responses: Vec<Value>,
     closing: bool,
     tools: BTreeMap<String, Value>,
-    capture: Capture,
-    terminal: Option<(String, String, Option<String>)>,
+    terminal: Option<Event>,
     message: u64,
     text: String,
     thinking: String,
 }
 impl Protocol {
-    pub fn new(
-        config: &Config,
-        profile: &HarnessConfig,
-        resume: Option<&Resume>,
-        flavor: Flavor,
-    ) -> Self {
+    pub fn new(profile: &HarnessConfig, resume: Option<&Resume>, flavor: Flavor) -> Self {
         Self {
             flavor,
             home: profile.home.clone(),
@@ -352,11 +408,11 @@ impl Protocol {
             cancel: None,
             restart: None,
             steering: Vec::new(),
+            replied: false,
             acknowledgement: None,
             responses: Vec::new(),
             closing: false,
             tools: BTreeMap::new(),
-            capture: Capture::new(profile, config.storage.clone()),
             terminal: None,
             message: 0,
             text: String::new(),
@@ -372,8 +428,8 @@ impl Protocol {
     }
     fn finish_message(&mut self, state: &mut Progress, events: &mut Vec<Event>) {
         for (kind, text) in [
-            ("agentMessage", std::mem::take(&mut self.text)),
             ("reasoning", std::mem::take(&mut self.thinking)),
+            ("agentMessage", std::mem::take(&mut self.text)),
         ] {
             if !text.is_empty() {
                 if kind == "agentMessage" {
@@ -411,6 +467,7 @@ impl Adapter for Protocol {
         }
         if request.is_some() {
             self.prompt = Some(id);
+            self.replied = false;
         }
         if method == "cloudroom/join" {
             self.steering.push(id);
@@ -476,8 +533,7 @@ impl Adapter for Protocol {
                         .as_str()
                         .ok_or_else(|| io::Error::other("Missing Cursor chat location"))?,
                 );
-                self.capture.root = chat_root(&self.home, &id, &path)?;
-                self.capture.id = Some(id.clone());
+                chat_root(&self.home, &id, &path)?;
                 path
             } else {
                 (self.flavor.native_path)(&self.home, &id)
@@ -499,6 +555,7 @@ impl Adapter for Protocol {
                 kind,
                 "agent_message_chunk" | "agent_thought_chunk" | "tool_call" | "tool_call_update"
             ) {
+                self.replied = true;
                 events.extend(state.started());
             }
             let text = update["content"]["text"].as_str().unwrap_or_default();
@@ -511,26 +568,41 @@ impl Adapter for Protocol {
             match kind {
                 "agent_message_chunk" | "agent_thought_chunk" if !notice => {
                     let thinking = kind == "agent_thought_chunk";
-                    let item_type = if thinking {
-                        "reasoning"
+                    // Keep only what is new; a chunk that doesn't continue the message starts the next one.
+                    let text = if self.flavor.cumulative_text && !thinking {
+                        match text.strip_prefix(self.text.as_str()) {
+                            Some(rest) => rest,
+                            None => {
+                                self.finish_message(state, &mut events);
+                                text
+                            }
+                        }
                     } else {
-                        "agentMessage"
+                        text
                     };
-                    let item_id = format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
-                    let empty = if thinking {
-                        self.thinking.is_empty()
-                    } else {
-                        self.text.is_empty()
-                    };
-                    if empty {
-                        events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                    if !text.is_empty() {
+                        let item_type = if thinking {
+                            "reasoning"
+                        } else {
+                            "agentMessage"
+                        };
+                        let item_id =
+                            format!("{}:{}:{}", self.flavor.harness, self.message, item_type);
+                        let empty = if thinking {
+                            self.thinking.is_empty()
+                        } else {
+                            self.text.is_empty()
+                        };
+                        if empty {
+                            events.push(self.record("item_started", json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"item_type":item_type})));
+                        }
+                        if thinking {
+                            self.thinking.push_str(text);
+                        } else {
+                            self.text.push_str(text);
+                        }
+                        events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                     }
-                    if thinking {
-                        self.thinking.push_str(text);
-                    } else {
-                        self.text.push_str(text);
-                    }
-                    events.push(self.record(if thinking { "thinking_delta" } else { "text_delta" }, json!({"harness":self.flavor.harness,"request_id":state.request,"item_id":item_id,"delta":text})));
                 }
                 "tool_call" | "tool_call_update" => {
                     if kind == "tool_call" {
@@ -560,9 +632,6 @@ impl Adapter for Protocol {
                         },
                         data,
                     ));
-                    if complete {
-                        self.capture.dirty = true;
-                    }
                 }
                 _ => {}
             }
@@ -609,7 +678,6 @@ impl Adapter for Protocol {
             && value["id"].as_u64() == self.prompt
         {
             self.finish_message(state, &mut events);
-            self.capture.dirty = true;
             let stop = value["result"]["stopReason"].as_str();
             if value.get("error").is_none()
                 && matches!(stop, Some("cancelled" | "end_turn"))
@@ -621,6 +689,7 @@ impl Adapter for Protocol {
                 );
                 self.acknowledgement = Some((value["id"].clone(), id));
                 self.prompt = Some(id);
+                self.replied = false;
             } else if value.get("error").is_none()
                 && stop == Some("end_turn")
                 && !self.steering.is_empty()
@@ -637,7 +706,7 @@ impl Adapter for Protocol {
                 {
                     self.acknowledgement = Some((value["id"].clone(), id));
                 }
-                let silent = stop == Some("end_turn") && !state.started;
+                let silent = stop == Some("end_turn") && !self.replied;
                 let status = match stop {
                     _ if silent && self.flavor.empty_turn.is_some() => "failed",
                     Some("end_turn") => "completed",
@@ -650,6 +719,18 @@ impl Adapter for Protocol {
                     }
                     match (stop, value["error"]["message"].as_str()) {
                         (Some(stop), _) => format!("{} stopped the turn: {stop}", self.flavor.name),
+                        (None, Some(message))
+                            if self.flavor.harness == "cursor" && cursor_plan_limit(message) =>
+                        {
+                            // Marks the session stopped by a plan limit, so a new Cursor login continues it (ADR 0117).
+                            // Not reported: the website holds loops only at Claude and Codex limits.
+                            let mut limited = super::plan_limited("cursor", None);
+                            if let Event::Record { data, .. } = &mut limited {
+                                data["model_only"] = json!(true);
+                            }
+                            events.push(limited);
+                            super::plan_limit_error("Cursor", None, message)
+                        }
                         (None, Some(message)) => {
                             format!("{} failed the turn: {message}", self.flavor.name)
                         }
@@ -661,7 +742,12 @@ impl Adapter for Protocol {
                 if let Some(request) = state.request.clone() {
                     events.extend(state.started());
                     state.finished = true;
-                    self.terminal = Some((request, status.into(), error));
+                    self.terminal = Some(Event::Finished {
+                        request,
+                        status: status.into(),
+                        error,
+                        text: state.last_text.clone(),
+                    });
                 }
             }
         }
@@ -712,20 +798,10 @@ impl Adapter for Protocol {
         self.responses.clone()
     }
     fn capture(&mut self) -> io::Result<Vec<Event>> {
-        let mut events = self.capture.poll()?;
-        if !self.capture.pending()
-            && let Some((request, status, error)) = self.terminal.take()
-        {
-            events.push(Event::Finished {
-                request,
-                status,
-                error,
-            });
-        }
-        Ok(events)
+        Ok(self.terminal.take().into_iter().collect())
     }
     fn capture_pending(&self) -> bool {
-        self.capture.pending() || self.terminal.is_some()
+        self.terminal.is_some()
     }
     fn close(&mut self) -> Vec<Value> {
         self.closing = true;
@@ -741,143 +817,4 @@ impl Adapter for Protocol {
     fn closed(&mut self, _: &Value) -> bool {
         self.closing && self.prompt.is_none()
     }
-}
-
-struct Capture {
-    policy: Option<crate::workspace::storage::Policy>,
-    root: PathBuf,
-    id: Option<String>,
-    dirty: bool,
-    worker: Option<Receiver<io::Result<Event>>>,
-}
-impl Capture {
-    fn new(profile: &HarnessConfig, policy: Option<crate::workspace::storage::Policy>) -> Self {
-        Self {
-            policy,
-            root: profile.home.join("chats"),
-            id: None,
-            dirty: false,
-            worker: None,
-        }
-    }
-    fn pending(&self) -> bool {
-        self.worker.is_some() || self.dirty && self.id.is_some()
-    }
-    fn poll(&mut self) -> io::Result<Vec<Event>> {
-        let mut events = Vec::new();
-        if let Some(worker) = &self.worker {
-            loop {
-                match worker.try_recv() {
-                    Ok(event) => events.push(event?),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.worker = None;
-                        break;
-                    }
-                }
-            }
-        }
-        if self.worker.is_none()
-            && self.dirty
-            && let Some(id) = self.id.clone()
-        {
-            self.dirty = false;
-            let mut command = Command::new("python3");
-            command
-                .env_clear()
-                .env("PATH", "/usr/local/bin:/usr/bin:/bin")
-                .current_dir("/")
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped());
-            command
-                .args(["-I", "-c", HISTORY, "capture"])
-                .arg(&self.root)
-                .arg(id);
-            let group = self
-                .policy
-                .as_ref()
-                .map(|policy| {
-                    let group = super::linux::Workload::create(policy)?;
-                    group.attach(&mut command, policy)?;
-                    Ok::<_, io::Error>(group)
-                })
-                .transpose()?;
-            let (sender, receiver) = sync_channel(8);
-            self.worker = Some(receiver);
-            std::thread::spawn(move || {
-                let _group = group;
-                let result = (|| {
-                    let mut child = command.as_std_mut().spawn()?;
-                    drop(child.stdin.take());
-                    let stdout = child
-                        .stdout
-                        .take()
-                        .ok_or_else(|| io::Error::other("Missing Cursor capture output"))?;
-                    let result = (|| {
-                        for line in BufReader::new(stdout).lines() {
-                            let line = line?;
-                            let value: Value = serde_json::from_str(&line)?;
-                            let native = value["record"]
-                                .as_str()
-                                .ok_or_else(|| io::Error::other("Invalid Cursor snapshot"))?
-                                .to_owned();
-                            let event = Event::Record {
-                                kind: "native_record",
-                                data: json!({"harness":"cursor","snapshot":value["snapshot"],"index":value["index"],"complete":value["complete"]}),
-                                native: Some(native + "\n"),
-                            };
-                            sender.send(Ok(event)).map_err(|_| {
-                                io::Error::other("Cursor capture owner disconnected")
-                            })?;
-                        }
-                        Ok::<_, io::Error>(())
-                    })();
-                    if result.is_err() {
-                        let _ = child.kill();
-                    }
-                    let status = child.wait()?;
-                    result?;
-                    if !status.success() {
-                        let mut error = String::new();
-                        if let Some(stderr) = child.stderr.take() {
-                            let _ = stderr.take(4096).read_to_string(&mut error);
-                        }
-                        return Err(io::Error::other(format!(
-                            "Cursor native snapshot failed: {error}"
-                        )));
-                    }
-                    Ok(())
-                })();
-                if let Err(error) = result {
-                    let _ = sender.send(Err(error));
-                }
-            });
-        }
-        Ok(events)
-    }
-}
-
-pub(super) fn recover(
-    profile: &HarnessConfig,
-    saved: &Resume,
-    policy: Option<&crate::workspace::storage::Policy>,
-    mut emit: impl FnMut(Event) -> io::Result<()>,
-) -> io::Result<()> {
-    validate(
-        profile,
-        saved,
-        policy.map(|policy| (policy.agent_uid, policy.agent_gid)),
-    )?;
-    let mut capture = Capture::new(profile, policy.cloned());
-    capture.root = chat_root(&profile.home, &saved.id, &saved.path)?;
-    capture.id = Some(saved.id.clone());
-    capture.dirty = true;
-    while capture.pending() {
-        for event in capture.poll()? {
-            emit(event)?;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    Ok(())
 }

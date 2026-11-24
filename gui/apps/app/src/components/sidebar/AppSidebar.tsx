@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { OverflowFade } from "@/components/ui/overflow-fade.js";
 import {
   Sidebar,
@@ -27,8 +29,8 @@ import { useQuickCreateProjectController } from "@/hooks/useQuickCreateProject";
 import { useSidebarPreload } from "@/hooks/useCloudThreadWake";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { usePaneContentSplitDrag } from "./usePaneContentSplitDrag";
-import { CloudroomSignInButton } from "./CloudroomSignInButton";
 import { MacAccessChip } from "./MacAccessChip";
+import { ViewingMacBar } from "@/components/settings/YourComputers";
 import { CloudQueueChip, PlanCard } from "@/components/CloudQueue";
 import {
   EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS,
@@ -48,6 +50,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
+import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
 
@@ -75,6 +78,12 @@ export function AppSidebar({
     label: "New thread",
   });
   const closeOnMobile = useCloseMobileSidebar();
+  const cardsRef = useCallback(
+    (element: HTMLDivElement | null) =>
+      setSidebarCards(element && { element, close: closeOnMobile }),
+    [closeOnMobile],
+  );
+  const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
   const [threadShortcutKeysById, setThreadShortcutKeysById] = useState<
@@ -144,10 +153,10 @@ export function AppSidebar({
 
   const activateThreadShortcut = useCallback(
     (index: number): boolean => {
-      const target =
+      return openNavigationTarget(
         threadShortcutTargetsRef.current[index] ??
-        getSidebarThreadShortcutTargets(sidebarRef.current)[index];
-      return target?.element ? openNavigationTarget(target) : false;
+          getSidebarThreadShortcutTargets(sidebarRef.current)[index],
+      );
     },
     [openNavigationTarget],
   );
@@ -176,9 +185,15 @@ export function AppSidebar({
       activeProjectId ??
       targets.find((target) => target.threadId === activeThreadId)?.projectId;
     if (!projectId) return false;
+    // Skip the open thread: after a send it stays last until the list re-sorts.
     return openNavigationTarget(
       targets
-        .filter((target) => target.projectId === projectId && !target.isChild)
+        .filter(
+          (target) =>
+            target.projectId === projectId &&
+            !target.isChild &&
+            target.threadId !== activeThreadId,
+        )
         .at(-1),
     );
   }, [activeProjectId, activeThreadId, openNavigationTarget]);
@@ -191,10 +206,12 @@ export function AppSidebar({
             '[data-sidebar-section-id="pinned"]',
           ) ?? null,
         )
-          .filter((target) => !target.isChild)
+          .filter(
+            (target) => !target.isChild && target.threadId !== activeThreadId,
+          )
           .at(-1),
       ),
-    [openNavigationTarget],
+    [activeThreadId, openNavigationTarget],
   );
 
   const isHiddenHostedBody = mobileHosted?.hidden === true;
@@ -256,6 +273,7 @@ export function AppSidebar({
   const body = (
     <>
       <SidebarTopReserveRow testId="app-sidebar-top-reserve-row" />
+      <ViewingMacBar />
       <SidebarNavigationRegion
         compactCustomizeMode={isCompactCustomizeModeActive}
         onCompactCustomizeModeChange={setCompactCustomizeMode}
@@ -277,6 +295,8 @@ export function AppSidebar({
         className={cn(isCompactCustomizeModeActive && "hidden")}
         aria-hidden={isCompactCustomizeModeActive ? true : undefined}
         inert={isCompactCustomizeModeActive ? true : undefined}
+        onPointerLeave={closePurposeCard}
+        onScroll={closePurposeCard}
       >
         <PluginThreadList
           replacement={threadListReplacement}
@@ -289,13 +309,16 @@ export function AppSidebar({
         <OverflowFade placement="above" tone="sidebar" size="sm" />
         <PluginSidebarFooterDisclosure
           item={pluginSidebarFooter.activeItem}
+          warmItem={pluginSidebarFooter.warmItem}
           onDismiss={pluginSidebarFooter.dismiss}
         />
+        <div ref={cardsRef} className="empty:hidden" />
         <PlanCard />
         <SidebarMenu className="flex-row flex-wrap-reverse items-center gap-1">
           <PluginSidebarFooterItems
             activeDisclosureKey={pluginSidebarFooter.activeKey}
             onDisclosureCommand={pluginSidebarFooter.handleCommand}
+            onDisclosureWarm={pluginSidebarFooter.handleWarm}
             onNavigate={closeOnMobile}
             builtInActions={[
               {
@@ -312,7 +335,6 @@ export function AppSidebar({
               },
             ]}
           />
-          <CloudroomSignInButton />
           <li aria-hidden="true" className="min-w-0 flex-1" />
           <SidebarPluginAttentionGlyph
             className={SIDEBAR_FOOTER_ACTION_CLASS}
@@ -320,7 +342,7 @@ export function AppSidebar({
           />
           <SidebarUpdatesBadge onNavigate={closeOnMobile} />
           <CloudQueueChip />
-          <MacAccessChip />
+          <MacAccessChip hidden={isHiddenHostedBody} />
         </SidebarMenu>
       </SidebarFooter>
       <SidebarResizeHandle
@@ -343,13 +365,7 @@ export function AppSidebar({
           {body}
         </div>
       ) : (
-        <Sidebar
-          ref={sidebarRef}
-          // The footer popup spills past the sidebar; lift the sidebar above the thread composer while it is open.
-          className={pluginSidebarFooter.activeItem ? "md:z-40" : undefined}
-        >
-          {body}
-        </Sidebar>
+        <Sidebar ref={sidebarRef}>{body}</Sidebar>
       )}
     </SidebarThreadShortcutKeysContext.Provider>
   );

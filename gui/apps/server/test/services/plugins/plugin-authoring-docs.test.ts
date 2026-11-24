@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import ts from "typescript";
 
 const GUIDE_URL = new URL(
-  "../../../../../plugins/bb-guide/skills/plugin-authoring/references/backend-machines.md",
+  "../../../../../plugins/cloudroom-guide/skills/plugin-authoring/references/backend-machines.md",
   import.meta.url,
 );
 

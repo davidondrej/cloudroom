@@ -31,6 +31,8 @@ export const availableModelSchema = z.object({
   supportedReasoningEfforts: z.array(modelReasoningEffortSchema),
   defaultReasoningEffort: reasoningLevelSchema,
   isDefault: z.boolean(),
+  /** Speeds this model offers beside the standard one. Missing: not known. */
+  serviceTiers: z.array(serviceTierSchema).optional(),
 });
 export type AvailableModel = z.infer<typeof availableModelSchema>;
 
@@ -46,6 +48,8 @@ const providerCapabilitiesSchema = z.object({
   supportsNativeUserQuestion: z.boolean(),
   supportsFork: z.boolean(),
   supportsSessionRewind: z.boolean(),
+  /** Local only: the agent takes a manual `/compact`. Cloud asks Core. */
+  supportsManualCompaction: z.boolean().optional(),
   permissionModes: z.array(permissionModeSchema).min(1),
   modelCatalogScope: providerModelCatalogScopeSchema,
 });
@@ -85,6 +89,7 @@ export const providerStringsSchema = z.object({
   signInHint: z.string().min(1),
   expiredHint: z.string().min(1),
   installUrl: z.string().min(1),
+  signInCommand: z.string().min(1).optional(),
   brandPrefix: z.string().min(1).optional(),
   planModeCopy: z.string().min(1).optional(),
   iconTint: z

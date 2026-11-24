@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveGitDiffTabStatus } from "./gitDiffTabEligibility";
+import { resolveGitDiffTabStatus } from "@/components/diff/diff-store";
 
 describe("resolveGitDiffTabStatus", () => {
   it("keeps eligibility unresolved while thread or environment data loads", () => {

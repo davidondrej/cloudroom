@@ -134,6 +134,12 @@ describe("provider usage footer disclosure", () => {
                             resetsAt: "2026-09-02T18:42:00.000Z",
                             cost: null,
                           },
+                          {
+                            label: "Weekly · Fable",
+                            usedPercent: 6,
+                            resetsAt: null,
+                            cost: null,
+                          },
                         ],
                       },
                     },
@@ -220,6 +226,7 @@ describe("provider usage footer disclosure", () => {
     const mounted = await mountPluginContentScripts(app, {
       pluginId: "provider-usage",
     });
+    expect(app.settingsSections).toHaveLength(0);
     const item = app.experimentalSidebarFooterItems[0];
     expect(item).toMatchObject({
       kind: "disclosure",
@@ -287,6 +294,14 @@ describe("provider usage footer disclosure", () => {
     expect(slot.getByText("82%")).toBeTruthy();
     expect(slot.getByText("37%")).toBeTruthy();
     expect(slot.getByText("claude@example.com")).toBeTruthy();
+    // A model's weekly row shows "7d fable" in a column sized for it, shared by the agent's rows; never "7d · …".
+    expect(
+      slot.getByTitle("Weekly · Fable · Reset time not reported").textContent,
+    ).toBe("└7d Fable6%—");
+    expect(claudeSection.style.getPropertyValue("--usage-label")).toBe(
+      "calc(8ch + 1px)",
+    );
+    expect(codexSection.style.getPropertyValue("--usage-label")).toBe("");
 
     fireEvent.pointerDown(
       slot.getByRole("button", { name: "Usage machine: M4" }),
@@ -395,7 +410,7 @@ describe("provider usage footer disclosure", () => {
       await waitFor(() =>
         expect(
           slot.getByText(
-            "Couldn’t refresh usage. Showing the last available update.",
+            "Refresh failed · Showing saved usage",
           ),
         ).toBeTruthy(),
       );
@@ -411,7 +426,7 @@ describe("provider usage footer disclosure", () => {
       await waitFor(() =>
         expect(
           slot.queryByText(
-            "Couldn’t refresh usage. Showing the last available update.",
+            "Refresh failed · Showing saved usage",
           ),
         ).toBeNull(),
       );
@@ -431,7 +446,7 @@ it.each([
   ["no-limits", "No usage limits reported for this plan."],
   [
     "source-error",
-    "Couldn’t refresh usage. Showing the last available update.",
+    "Refresh failed · Showing saved usage",
   ],
 ] as const)("renders the %s shared-source state", async (state, expected) => {
   const usage: UsageProvider["usage"] =

@@ -2,7 +2,7 @@ import { useEffect, useMemo, type ReactNode } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { WorkerPoolContextProvider } from "@pierre/diffs/react";
 import { Provider as JotaiProvider, createStore } from "jotai";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { AppToaster } from "../src/components/AppToaster";
 import { RouteNavigationProvider } from "../src/components/ui/app-route-anchor";
 import { TooltipProvider } from "@cloudroom/shared-ui/tooltip";

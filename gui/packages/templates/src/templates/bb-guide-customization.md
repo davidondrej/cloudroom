@@ -1,8 +1,8 @@
 ---
 kind: instruction
 title: Cloudroom Guide — Customization
-summary: Command reference for customizing the cloudroom app color palette, typography, keyboard shortcuts, and mobile push notifications.
-intent: Explain the CLI theme surface, server-backed app customization, and push-notification device registration.
+summary: Command reference for customizing the cloudroom app color palette, typography, keyboard shortcuts, and web and desktop notifications.
+intent: Explain the CLI theme surface, server-backed app customization, and notification switches.
 editingNotes: Keep flags accurate against the CLI implementation. Theme details live in the room-cli skill's references/theming.md.
 ---
 Customization commands
@@ -48,15 +48,11 @@ Add --json to any theme command for machine-readable output.
 
 Packaged launcher settings
 
-`bb-app config` and `bb-app env` reload runtime settings in a running server,
-but the CLI identifies server and launcher settings that are startup-only,
-including binding/ports, data and the dev-app port, telemetry, inherited skill
-roots, and `BB_FF_*` flags. `BB_LOG_LEVEL` is also startup-only. Use
-`bb-app config`, not `bb-app env`, to change `BB_APP_URL`, `BB_INFERENCE`,
-`BB_INFERENCE_FALLBACK`, or `BB_TRANSCRIPTION` live. After a startup-only
-change, run `bb-app stop && bb-app start` or restart the desktop app. Until
-then, changing or unsetting `BB_SERVER_BIND_HOST` does not close a previous
-`0.0.0.0` listener.
+Saved settings live in the data folder: `config.json` (under `"config"`, such
+as `BB_APP_URL`, `BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`,
+`BB_LOG_LEVEL`) and `env.json` (provider credentials and environment). Edit the
+JSON, then restart the app. Until then, changing or removing
+`BB_SERVER_BIND_HOST` does not close a previous `0.0.0.0` listener.
 
 With `--server-bind-host 0.0.0.0`, the startup listener and `app` rows show
 `http://0.0.0.0:<port>`. Health checks and the colocated daemon still connect
@@ -67,18 +63,20 @@ Server helper completions use `BB_INFERENCE` first, then
 `BB_INFERENCE_FALLBACK` after a transient timeout, rate limit, or
 service-unavailable failure. Both default to `codex/gpt-5.6-luna`.
 
-  bb-app config set BB_INFERENCE <provider/model>
-  bb-app config set BB_INFERENCE_FALLBACK <provider/model>
+  config.json: {"config": {"BB_INFERENCE": "<provider/model>", "BB_INFERENCE_FALLBACK": "<provider/model>"}}
 
 Server-backed General settings
 
 Settings → General includes app-wide preferences stored server-side so every
 window and restart sees the same value. Keep Awake is instead owned by its
 builtin plugin: use its autosaving page under Settings → Installed plugins or run
-`room-cli keep-awake enable` or `room-cli keep-awake disable`. Choose every host with `room-cli
+`room-cli keep-awake level <off|working|always>`. Choose every host with `room-cli
 keep-awake hosts all`, or name individual host ids after `room-cli keep-awake hosts`.
-On macOS it prevents system idle sleep while Cloudroom is running; closing the lid or
-choosing Sleep still sleeps the Mac. On Linux it uses `systemd-inhibit`.
+The default, `working`, prevents idle sleep while a Local thread runs and for 10
+minutes after; `always` also keeps the screen on while Cloudroom runs. Closing the lid or
+choosing Sleep still sleeps the Mac. On GNOME it uses
+`gnome-session-inhibit`, and the lid and Suspend still work. On other Linux
+desktops it uses `systemd-inhibit`.
 
 Settings → Keyboard also includes `showKeyboardHints`, which defaults to true.
 Turn it off to hide the delayed shortcut badges shown while holding Command or
@@ -131,8 +129,8 @@ branches cloudroom creates after the change.
   room-cli settings reload
 
 `room-cli settings ai-services` shows the helper-inference and voice-transcription
-settings (`BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`, set with
-`bb-app config`) and the plugin-registered AI services they may name as
+settings (`BB_INFERENCE`, `BB_INFERENCE_FALLBACK`, `BB_TRANSCRIPTION`, set in
+`config.json`) and the plugin-registered AI services they may name as
 `<service>/<model>`.
 
 `room-cli settings general` accepts any key from `generalSettings` in
@@ -144,7 +142,7 @@ and `null` clears a preference that can be unset.
 answer visible, and `flat` keeps every step visible. Each provider has a
 default (Claude Code is `flat`, the other first-party providers `collapse`).
 `room-cli settings completed-turns <provider-id> <collapse|flat>` overrides it for
-that provider, and `default` removes the override. Settings → Providers has
+that provider, and `default` removes the override. Settings → Agents → Harness has
 the same per-provider switch.
 
 The default-off `changelogPreview` experiment shows the latest release notes
@@ -216,27 +214,19 @@ bindings in the same update; plugin defaults yield to explicit bindings.
 
 Push notifications
 
-The built-in Push notifications plugin sends mobile updates through Expo and
-system notifications to connected web and desktop clients. Web tabs or desktop
-windows must stay open; browser permission is requested in the plugin settings.
+The built-in Push notifications plugin shows system notifications in connected
+web and desktop clients when a thread asks a question, fails, or finishes. Web
+tabs or desktop windows must stay open; browser permission is requested in the
+plugin settings.
 
-  room-cli push-notifications list
-  room-cli push-notifications add --token <expo-push-token>
-      --platform <ios|android> --label <device-name>
-  room-cli push-notifications remove <id>
-  room-cli push-notifications status
+  room-cli push-notifications status [--json]
   room-cli push-notifications test <web|desktop>
-  room-cli plugin config push-notifications set <mobileEnabled|webEnabled|desktopEnabled> <true|false>
+  room-cli plugin config push-notifications set <webEnabled|desktopEnabled> <true|false>
 
-`add` is an upsert by token: a known token refreshes its label and last-seen
-time and keeps its id. Expo tokens that are no longer registered are removed
-automatically after a failed delivery. Use `room-cli plugin disable
-push-notifications` to stop delivery. Change the relay URL with `room-cli plugin
-config push-notifications set expoPushUrl <url>`. Add `--json` to `list` or
-`status` for machine-readable output. The list returns token suffixes only.
-The three channel switches default to true and apply immediately across this
-server. `test` broadcasts to all connected clients of the selected type with
-permission; OS notification settings still control whether a banner appears.
+Use `room-cli plugin disable push-notifications` to stop delivery. Both channel
+switches default to true and apply immediately across this server. `test`
+broadcasts to all connected clients of the selected type with permission; OS
+notification settings still control whether a banner appears.
 
 Host files and voice transcription
 
@@ -245,7 +235,7 @@ Host files and voice transcription
 
 Voice transcription uses the `BB_TRANSCRIPTION` model, which defaults to
 `codex/gpt-transcribe`. Override it with
-`bb-app config set BB_TRANSCRIPTION <provider/model>`.
+`BB_TRANSCRIPTION` in `config.json`, then restart the app.
 
 `room-cli file` supports `--host` for remote machines and `--root` on mutating
 commands to confine access beneath an absolute directory. `room-cli file list` and
@@ -313,5 +303,6 @@ command and does not change the server-side transcription model.
 Usage telemetry can be disabled in Settings → General → Privacy & diagnostics → Share usage data and setup errors,
 or with `room-cli settings general telemetryEnabled false`. The saved server-wide preference
 takes effect immediately and persists across restarts. SDK callers can use
-`system.updateGeneralSettings` with `telemetryEnabled`. `BB_TELEMETRY=false`
-always disables telemetry, even when the saved preference is enabled.
+`system.updateGeneralSettings` with `telemetryEnabled`. `CLOUDROOM_TELEMETRY=false`,
+`BB_TELEMETRY=false`, or `DO_NOT_TRACK=1` always disables telemetry, even when the saved
+preference is enabled. Details: https://cloudroom.dev/privacy.

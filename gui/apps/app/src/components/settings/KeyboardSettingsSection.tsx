@@ -30,7 +30,12 @@ import {
   resetCommandShortcutOverride,
   setCommandShortcutOverride,
 } from "@/lib/keyboard-shortcut-settings";
-import { browserPlatform, presentAppShortcut } from "@/lib/app-keybindings";
+import {
+  browserPlatform,
+  formatAppShortcut,
+  presentAppShortcut,
+} from "@/lib/app-keybindings";
+import { useClipboardCopy } from "@/lib/clipboard";
 import {
   useUpdateGeneralSettings,
   useUpdateKeyboardSettings,
@@ -44,7 +49,7 @@ import {
   SettingsWithControl,
 } from "@/components/ui/settings-section";
 import { AppCommandShortcutPill } from "@/components/commands/AppCommandShortcutHint";
-import { getBbDesktopInfo } from "@/lib/bb-desktop";
+import { getRoomDesktopInfo } from "@/lib/room-desktop";
 
 const EMPTY_OVERRIDES: AppKeybindingOverrides = [];
 const SETTINGS_SHORTCUT_PILL_CLASS =
@@ -455,6 +460,47 @@ const KeyboardCommandRow = memo(
   },
 );
 
+const AGENT_TIP_SHORTCUT: AppShortcut = {
+  key: "w",
+  mod: true,
+  meta: false,
+  control: false,
+  alt: false,
+  shift: true,
+};
+
+// Tells users any agent can change shortcuts for them (room-cli settings keyboard).
+function AgentShortcutTip({ platform }: { platform: string }) {
+  const keys = formatAppShortcut(AGENT_TIP_SHORTCUT, platform);
+  // Mac symbols read better without gaps ("⇧⌘W"); keep "Ctrl + Shift + W" as is.
+  const prompt = `Set Archive thread to ${keys.includes("+") ? keys : keys.replaceAll(" ", "")}`;
+  const { copied, copy } = useClipboardCopy({ text: prompt });
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 bg-primary px-4 py-3 text-primary-foreground">
+      <div className="flex min-w-0 items-center gap-3">
+        <Icon name="Zap" className="size-4 shrink-0" />
+        <span className="text-[10px] font-bold tracking-[0.2em] uppercase">
+          Pro tip
+        </span>
+        <span className="text-sm font-semibold">
+          Your agents can change these.
+        </span>
+      </div>
+      <div className="flex min-w-0 items-stretch bg-black text-xs text-white">
+        <span className="truncate px-3 py-1.5 font-mono">“{prompt}”</span>
+        <button
+          className="flex shrink-0 items-center gap-1.5 border-l border-white/15 px-3 py-1.5 font-semibold hover:bg-white/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+          onClick={() => void copy()}
+          type="button"
+        >
+          <Icon name={copied ? "Check" : "Copy"} className="size-3.5" />
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function KeyboardSettingsSection() {
   const systemConfig = useSystemConfig();
   const updateGeneralSettings = useUpdateGeneralSettings();
@@ -462,7 +508,7 @@ export function KeyboardSettingsSection() {
     isPending: isKeyboardSettingsPending,
     mutate: mutateKeyboardSettings,
   } = useUpdateKeyboardSettings();
-  const isDesktop = getBbDesktopInfo() !== null;
+  const isDesktop = getRoomDesktopInfo() !== null;
   const platform = browserPlatform();
   const generalSettings =
     systemConfig.data?.generalSettings ?? defaultAppSettings;
@@ -707,6 +753,7 @@ export function KeyboardSettingsSection() {
             }
           />
         </SettingsWithControl>
+        <AgentShortcutTip platform={platform} />
         <Input
           aria-label="Search keyboard shortcuts"
           onChange={(event) => setSearch(event.target.value)}

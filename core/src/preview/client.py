@@ -4,6 +4,8 @@ import argparse
 import base64
 import concurrent.futures
 import contextlib
+import errno
+import functools
 import http.client
 import hashlib
 import http.server
@@ -16,6 +18,7 @@ import plistlib
 import random
 import select
 import shlex
+import shutil
 import signal
 import socket
 import ssl
@@ -36,6 +39,153 @@ else:
     import pwd
 # Windows files have no owner IDs or mode bits; the user's profile folder ACL keeps this folder private there.
 NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
+# The system Mac jobs run on, for agents' `room-cli mac status` (#958).
+MAC_OS = 'windows' if WINDOWS else 'macos' if sys.platform == 'darwin' else 'linux'
+# Windows jobs and their tools never open a console window: the helper runs detached.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if WINDOWS else 0
+
+
+def native(path):
+    r"""Windows (#958): a job's path as Python reads it, with / for \. Git Bash's /c/x becomes C:/x, which pathlib
+    would read as C:\c\x. Other systems keep the path."""
+    if not WINDOWS:
+        return path
+    path = path.replace('\\', '/')
+    return path[1].upper() + ':/' + path[3:] if path[:1] == '/' and path[1:2].isascii() and path[1:2].isalpha() and path[2:3] in ('', '/') else path
+
+
+def posix(path):
+    r"""Windows (#958): a path as Git Bash names it, C:\Users\me as /c/Users/me. Its tar reads a C: in an archive's path
+    as a remote host. Other systems keep the path."""
+    path = str(path)
+    if not WINDOWS:
+        return path
+    path = path.replace('\\', '/')
+    if len(path) >= 2 and path[0].isascii() and path[0].isalpha() and path[1] == ':' and (len(path) == 2 or path[2] == '/'):
+        return '/' + path[0].lower() + path[2:]
+    return path
+
+
+WINDOWS_DEVICES = {'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
+                   *(f'{kind}{n}' for kind in ('COM', 'LPT') for n in (*range(1, 10), '¹', '²', '³'))}
+
+
+def windows_name(name):
+    r"""Whether Windows can store a pushed item under this name: no \ : * ? " < > | or control characters (a : would
+    write a hidden data stream), no device name such as NUL or CON.txt, and no trailing dot or space."""
+    return bool(name) and not (set(name) & set('\\:*?"<>|') or any(ord(c) < 32 for c in name) or name[-1] in '. '
+                               or name.split('.')[0].rstrip(' ').upper() in WINDOWS_DEVICES)
+
+
+@functools.cache  # Once per helper; each app launch restarts it.
+def git_bash():
+    """Windows runs Mac jobs in Git for Windows' bash, which Cloudroom requires there, so agents' sh and Core's copy
+    scripts (tar, mktemp, sha256sum) work unchanged. Found as the host daemon finds it; None without Git."""
+    found = []
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        shell = subprocess.run(['git', 'var', 'GIT_SHELL_PATH'], capture_output=True, text=True, timeout=10,
+                               creationflags=NO_WINDOW).stdout.strip()
+        if shell:
+            found.append(Path(shell).parent / 'bash.exe')
+        # Older Git reports no shell, or a POSIX one; <Git>\mingw64\libexec\git-core is three folders below <Git>.
+        libexec = subprocess.run(['git', '--exec-path'], capture_output=True, text=True, timeout=10,
+                                 creationflags=NO_WINDOW).stdout.strip()
+        if libexec:
+            parents = Path(libexec).parents
+            if len(parents) >= 3:
+                found.append(parents[2] / 'usr' / 'bin' / 'bash.exe')
+    found.append(Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Git' / 'usr' / 'bin' / 'bash.exe')
+    if local := os.environ.get('LOCALAPPDATA'):
+        found.append(Path(local) / 'Programs' / 'Git' / 'usr' / 'bin' / 'bash.exe')
+    return next((str(path) for path in found if path.is_file()), None)
+
+
+WINDOWS_STRIP_ENV = {'ELECTRON_RUN_AS_NODE', 'NODE_ENV', 'CLOUDROOM_PREVIEW_START', 'CLOUDROOM_SERVER_URL', 'CLOUDROOM_ROOM_CLI'}
+WINDOWS_STRIP_PREFIXES = ('BB_', 'ROOM_')
+
+
+def windows_job_env(command, base=None):
+    """Environment for a Windows Mac job (#958). Drops the Electron server's own variables (the helper inherits them on
+    Windows because there is no launchd/systemd), including NODE_ENV=production, BB_*, and ROOM_*."""
+    source = os.environ if base is None else base
+    env = {key: value for key, value in source.items()
+           if key.upper() not in WINDOWS_STRIP_ENV and not key.upper().startswith(WINDOWS_STRIP_PREFIXES)}
+    env.update(MSYSTEM='MINGW64', CHERE_INVOKING='1', CLOUDROOM_COMMAND=command)
+    return env
+
+
+def windows_start(command, **options):
+    """Windows (#958): starts a Mac job in its own job object, which holds every process it starts. taskkill /T misses
+    Git Bash's children, which leave the Windows parent tree. It starts suspended and runs only once assigned, so nothing
+    escapes. No kill-on-close: as on a Mac, what a finished command leaves running keeps running. Returns the process and
+    the job's handle for windows_stop. Without a job, a stop couldn't end what the command starts, so it never runs."""
+    import ctypes
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateJobObjectW.restype = k.CreateToolhelp32Snapshot.restype = k.OpenThread.restype = w.HANDLE
+    k.CreateJobObjectW.argtypes, k.AssignProcessToJobObject.argtypes = (w.LPVOID, w.LPCWSTR), (w.HANDLE, w.HANDLE)
+    k.CloseHandle.argtypes = k.ResumeThread.argtypes = (w.HANDLE,)
+    k.ResumeThread.restype = w.DWORD
+    k.OpenThread.argtypes, k.CreateToolhelp32Snapshot.argtypes = (w.DWORD, w.BOOL, w.DWORD), (w.DWORD, w.DWORD)
+
+    class Entry(ctypes.Structure):  # THREADENTRY32
+        _fields_ = [('size', w.DWORD), ('usage', w.DWORD), ('thread', w.DWORD), ('owner', w.DWORD), ('base', w.LONG),
+                    ('delta', w.LONG), ('flags', w.DWORD)]
+    k.Thread32First.argtypes = k.Thread32Next.argtypes = (w.HANDLE, ctypes.POINTER(Entry))
+    invalid = ctypes.c_void_p(-1).value
+    process = subprocess.Popen(command, creationflags=0x4 | subprocess.CREATE_NEW_PROCESS_GROUP | NO_WINDOW, **options)  # CREATE_SUSPENDED
+    job = None
+    try:
+        job = k.CreateJobObjectW(None, None)
+        if not job or not k.AssignProcessToJobObject(job, int(process._handle)):
+            raise OSError("Windows couldn't set up a way to stop this command, so it did not run. Try again.")
+        # Popen keeps no thread handle, so resume the new process's only thread through a snapshot.
+        snapshot, entry, resumed = k.CreateToolhelp32Snapshot(4, 0), Entry(), 0  # TH32CS_SNAPTHREAD
+        if snapshot not in (None, 0, invalid):
+            try:
+                entry.size = ctypes.sizeof(entry)
+                more = k.Thread32First(snapshot, ctypes.byref(entry))
+                while more:
+                    if entry.owner == process.pid:
+                        thread = k.OpenThread(2, False, entry.thread)  # THREAD_SUSPEND_RESUME
+                        if thread:
+                            resumed += k.ResumeThread(thread) != 0xFFFFFFFF
+                            k.CloseHandle(thread)
+                    more = k.Thread32Next(snapshot, ctypes.byref(entry))
+            finally:
+                k.CloseHandle(snapshot)
+        if not resumed:
+            raise OSError("Windows didn't start the command")
+    except BaseException:
+        if job:
+            k.CloseHandle(job)
+        process.kill()  # Never left suspended.
+        process.wait()
+        raise
+    return process, job
+
+
+def sweep_windows_copies():
+    """Removes Core's copy staging (/tmp/cloudroom.*, /tmp/cloudroom-copy-*) over a day old: a `room-cli mac` copy whose
+    CLI was stopped never asks for its cleanup, and Git Bash's /tmp is the user's temp folder, which Windows keeps (#958)."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError, TypeError):
+        bash = git_bash()
+        if not bash:
+            return
+        # Explicit /usr/bin paths: non-login bash.exe doesn't add /usr/bin to PATH, so bare `find` hits System32\find.exe.
+        subprocess.run([bash, '-c', "/usr/bin/find /tmp -maxdepth 1 -type d \\( -name 'cloudroom.*' -o -name 'cloudroom-copy-*' \\) -mmin +1440 "
+                        "-exec /usr/bin/rm -rf {} +"], stdin=subprocess.DEVNULL, capture_output=True, timeout=300, creationflags=NO_WINDOW)
+
+
+def windows_stop(job, terminate):
+    """Ends every process in a Mac job's job object (terminate), and frees its handle."""
+    import ctypes
+    from ctypes import wintypes as w
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.TerminateJobObject.argtypes, k.CloseHandle.argtypes = (w.HANDLE, w.UINT), (w.HANDLE,)
+    if terminate:
+        k.TerminateJobObject(job, 1)
+    k.CloseHandle(job)
 
 
 def private_json(path):
@@ -244,6 +394,9 @@ def issuer(url):
 def cores(config):
     """The paired VM's core, if any, then every awake cloud sandbox's core (docs/scopes/sandboxes.md)."""
     connection = private_json(config['connectionFile'])
+    # Another account signed in while this setup still runs (its stop failed): this device never pairs with its cores (#109).
+    if (connection.get('account') or {}).get('id') != config['binding'][1]:
+        return []
     found = [Core(config)] if connection.get('url') else []
     account, token = (connection.get('account') or {}).get('id'), connection.get('sandboxToken')
     if not account or not token:
@@ -264,7 +417,13 @@ def cores(config):
                 uuid.UUID(account)
                 credential = base64.b64encode((account + ':' + token).encode()).decode()
                 listed = control(website(config, connection) + '/api/desktop/sandboxes', {'action': 'awake'}, 'POST', {'Authorization': 'Basic ' + credential})
-                AWAKE['list'] = [(entry['origin'], entry['token'], entry.get('thread')) for entry in listed['sandboxes']]
+                parsed = []
+                for entry in listed['sandboxes']:
+                    origin, secret, thread = entry['origin'], entry['token'], entry.get('thread')
+                    if not isinstance(origin, str) or not isinstance(secret, str) or not (thread is None or isinstance(thread, str)):
+                        raise ValueError('Invalid sandbox list entry')
+                    parsed.append((origin, secret, thread))
+                AWAKE['list'] = parsed
                 PROBLEMS.pop('sandboxes', None)
                 AWAKE['blocked'] = 0
             except (OSError, ValueError, KeyError, TypeError) as error:
@@ -344,26 +503,42 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 
     def setup(self):
         super().setup()
+        # A browser connection keeps its tunnel for its next requests: a new tunnel per request cost every dev module its
+        # own HTTPS upgrade (#2428).
+        self.upstream = None
         with self.server.tunnel.connections_lock:
             self.server.tunnel.connections.add(self.connection)
 
     def finish(self):
+        if self.upstream:
+            self.upstream.close()
         with self.server.tunnel.connections_lock:
             self.server.tunnel.connections.discard(self.connection)
         super().finish()
 
     def handle_one_request(self):
         try:
+            # 15 s for the browser's next request. A kept tunnel the app closed meanwhile ends this connection too, so the
+            # browser's next request opens a new one.
+            kept = self.upstream and self.upstream.sock
+            if kept and self.connection not in select.select([self.connection, kept], [], [], 15)[0]:
+                self.close_connection = True
+                return
             super().handle_one_request()
         except (OSError, ValueError, http.client.HTTPException):
             self.close_connection = True
 
     def forward(self):
-        self.close_connection = True
+        keep, self.close_connection = not self.close_connection, True
         expected = self.server.authority
         origin = self.headers.get('Origin')
         if self.headers.get_all('Host') != [expected] or origin is not None and origin != 'http://' + expected:
-            self.send_error(403, 'Preview origin is not allowed'); return
+            # A plain loopback visit, like a Windows browser expecting an app in WSL on the same port, learns why (#1879).
+            port = self.server.server_port
+            hint = None
+            if origin is None and self.headers.get_all('Host') in ([f'localhost:{port}'], [f'127.0.0.1:{port}'], [f'[::1]:{port}']):
+                hint = f"Cloudroom's preview helper uses this port. Open http://{expected}/ for the preview, or run your own app on another port"
+            self.send_error(403, 'Preview origin is not allowed', hint); return
         if self.headers.get('Sec-Fetch-Site') == 'cross-site' and not (self.command in {'GET', 'HEAD'} and self.headers.get('Sec-Fetch-Mode') == 'navigate' and self.headers.get('Sec-Fetch-Dest') == 'document'):
             self.send_error(403, 'Cross-site preview request blocked'); return
         if not self.path.startswith('/') or self.path.startswith('//') or len(self.headers.get_all('Content-Length', [])) > 1:
@@ -380,7 +555,10 @@ class Proxy(http.server.BaseHTTPRequestHandler):
         if websocket and origin != 'http://' + expected:
             self.send_error(403, 'WebSocket origin is required'); return
         connection_headers = {v.strip().lower() for v in self.headers.get('Connection', '').split(',')}
-        upstream = Upstream(self.server.tunnel.socket_path)
+        upstream, self.upstream = self.upstream or Upstream(self.server.tunnel.socket_path), None
+        reused = upstream.sock is not None
+        if reused:
+            upstream.sock.settimeout(upstream.timeout)
         if websocket:
             upstream.response_class = UpgradeResponse
         response = None
@@ -390,9 +568,8 @@ class Proxy(http.server.BaseHTTPRequestHandler):
             for key, value in self.headers.items():
                 if key.lower() not in HOP | connection_headers:
                     upstream.putheader(key, value)
-            upstream.putheader('Connection', 'Upgrade' if websocket else 'close')
             if websocket:
-                upstream.putheader('Upgrade', 'websocket')
+                upstream.putheader('Connection', 'Upgrade'); upstream.putheader('Upgrade', 'websocket')
             upstream.endheaders()
             while length:
                 data = self.rfile.read(min(length, 64 * 1024))
@@ -408,7 +585,12 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                     self.send_header(key, value)
             self.send_header('X-Cloudroom-Preview', self.server.tunnel.generation)
             self.send_header('Content-Security-Policy', "frame-ancestors 'self'")
-            self.send_header('Connection', 'Upgrade' if response.status == 101 else 'close')
+            # A body whose end is known (a length, chunks, or none) lets the browser send its next request here.
+            chunks = response.chunked and response.length is None
+            keep = keep and response.status != 101 and (chunks or response.length is not None)
+            if chunks:
+                self.send_header('Transfer-Encoding', 'chunked')
+            self.send_header('Connection', 'Upgrade' if response.status == 101 else 'keep-alive' if keep else 'close')
             if response.status == 101:
                 self.send_header('Upgrade', 'websocket')
             self.end_headers()
@@ -426,15 +608,27 @@ class Proxy(http.server.BaseHTTPRequestHandler):
                         (upstream.sock if source is self.connection else self.connection).sendall(data)
             else:
                 while data := response.read1(64 * 1024):
-                    self.wfile.write(data); self.wfile.flush()
-        except (OSError, ValueError, http.client.HTTPException):
-            if not sent_headers and not self.wfile.closed:
+                    self.wfile.write(b'%x\r\n%s\r\n' % (len(data), data) if chunks else data); self.wfile.flush()
+                if chunks:
+                    self.wfile.write(b'0\r\n\r\n'); self.wfile.flush()
+                keep = keep and not response.length  # A length left means the app ended early.
+                if keep and self.server.tunnel.reuse:
+                    self.upstream = upstream
+                self.close_connection = not keep
+        except (OSError, ValueError, http.client.HTTPException) as error:
+            self.close_connection = True
+            # A kept tunnel the app just closed: the browser retries on a new connection, as after any keep-alive close.
+            if not sent_headers and not self.wfile.closed and not (reused and isinstance(error, ConnectionError)):
                 with contextlib.suppress(OSError):
-                    self.send_error(502, 'Cloud preview unavailable; reconnecting')
+                    if getattr(self.server.tunnel.process, 'down', False):
+                        self.send_error(502, "Your app's server in the sandbox isn't running. A sleep stops every server: ask the agent to start it again")
+                    else:
+                        self.send_error(502, 'Cloud preview unavailable; reconnecting')
         finally:
             if response is not None:
                 response.close()
-            upstream.close()
+            if upstream is not self.upstream:
+                upstream.close()
 
     do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = forward
 
@@ -442,23 +636,30 @@ class Proxy(http.server.BaseHTTPRequestHandler):
 class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
     # Windows lets a second program bind a port in use: always with SO_REUSEADDR, and on 127.0.0.1 over another program's
-    # 0.0.0.0 or :: listener. Either would take over the user's own local server, so a port that answers counts as taken.
+    # 0.0.0.0 or :: listener; macOS too, with SO_REUSEADDR. That would take over the user's own local server, so a port
+    # that answers counts as taken.
     allow_reuse_address = not WINDOWS
 
     def server_bind(self):
+        port = self.server_address[1]
+        with socket.socket(self.address_family) as probe:
+            probe.settimeout(.5)
+            if port and probe.connect_ex(self.server_address) == 0:
+                raise OSError(f'Port {port} is in use by another program')
         if WINDOWS:
-            port = self.server_address[1]
-            with socket.socket() as probe:
-                probe.settimeout(.5)
-                if port and probe.connect_ex(('127.0.0.1', port)) == 0:
-                    raise OSError(f'Port {port} is in use by another program')
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(15)
+        # A head and its body go out as separate writes: Nagle would hold the body for the browser's ACK.
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return connection, address
+
+
+class Server6(Server):
+    address_family = socket.AF_INET6
 
 
 # Windows' Python has no Unix sockets, so there each relay is found by its tunnel's socket path and hands out socket pairs.
@@ -475,6 +676,10 @@ class Relay:
     joins it to the agent's port. It mimics the SSH process interface the tunnel code expects."""
     def __init__(self, core, port, device, path):
         self.core, self.port, self.device, self.stopped = core, port, device, False
+        self.down = False  # Core found nothing listening on the port, as after a sleep.
+        # Nothing came back through the last tunnel attempt: turned away, as by the relay in front of a VPS (#1798), failed,
+        # or no app answer yet, as through a stalled sandbox (#2016). Core's 409 is an answer: nothing listens on the port.
+        self.refused = False
         self.stderr = io.BytesIO()
         self.path, self.listener = path, None
         if WINDOWS:
@@ -489,7 +694,10 @@ class Relay:
             try:
                 client, _ = self.listener.accept()
             except OSError:
-                return
+                # A client that left first or a full file table passes; ending here left the tunnel looking alive but
+                # dead until the preview was reopened (#902). Only terminate() stops it.
+                time.sleep(.1)
+                continue
             threading.Thread(target=self.pipe, args=(client,), daemon=True).start()
 
     def client(self):
@@ -498,6 +706,7 @@ class Relay:
         return local
 
     def open(self):
+        self.down, self.refused = False, True  # Only this attempt's answer counts, never an older one's.
         # Some sandbox proxies relay bytes only after a WebSocket handshake; cores before 0.1.35 know only cloudroom-tunnel.
         try:
             return self.connect('websocket')
@@ -519,9 +728,11 @@ class Relay:
                 raise OSError('Preview tunnel closed')
             head += chunk
         status, rest = head.split(b'\r\n', 1)[0].split(), head.split(b'\r\n\r\n', 1)[1]
+        self.refused = status[1:2] != [b'409']
         if len(status) >= 2 and status[1] == b'400':
             remote.close()
             raise PermissionError('Preview tunnel protocol refused')
+        self.down = status[1:2] == [b'409']
         if len(status) < 2 or status[1] != b'101':
             raise OSError('Preview tunnel refused')
         remote.settimeout(None)
@@ -535,6 +746,8 @@ class Relay:
         def copy(source, target):
             with contextlib.suppress(OSError):
                 while data := source.recv(65536):
+                    if source is remote:
+                        self.refused = False  # The app's answer came back through the tunnel.
                     target.sendall(data)
             with contextlib.suppress(OSError):
                 target.shutdown(socket.SHUT_WR)
@@ -567,6 +780,8 @@ class Tunnel:
         self.endpoint, self.core = metadata, core
         self.port, self.generation = port, generation
         self.relay = bool(metadata.get('tunnel'))
+        # A tunnel may carry a browser connection's next requests: SSH, or a Core that counts page loads on every read.
+        self.reuse = not self.relay or metadata.get('reuse') is True
         suffix = hashlib.sha256(core.url.encode()).hexdigest()[:8] if core.sandbox else ''
         self.socket_path = folder / f'p{port}{suffix}.sock'
         self.socket_path.unlink(missing_ok=True)
@@ -607,14 +822,27 @@ class Tunnel:
         self.capture = threading.Thread(target=capture, daemon=True)
         self.capture.start()
         try:
-            try:
-                self.server = Server(('127.0.0.1', local_port), Proxy)
-            except OSError:
-                self.server = Server(('127.0.0.1', 0), Proxy)
-            self.server.authority = f'p{port}-{device[:8]}.localhost:{self.server.server_port}'
-            self.server.tunnel = self
-            self.thread = threading.Thread(target=self.server.serve_forever, kwargs={'poll_interval': .1}, daemon=True)
-            self.thread.start()
+            # Browsers try ::1 first for *.localhost, so hold the port on both loopbacks. Otherwise another app on
+            # [::1]:port answers the browser while the IPv4 health check still passes (#837).
+            for attempt in (local_port, 0, 0, 0):
+                try:
+                    self.server = Server(('127.0.0.1', attempt), Proxy)
+                except OSError:
+                    continue
+                try:
+                    self.servers = [self.server, Server6(('::1', self.server.server_port), Proxy)]
+                    break
+                except OSError as error:
+                    if error.errno in (errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT):  # No IPv6 loopback, so browsers use IPv4.
+                        self.servers = [self.server]
+                        break
+                    self.server.server_close()
+            else:
+                raise OSError('No free local preview port')
+            for server in self.servers:
+                server.authority = f'p{port}-{device[:8]}.localhost:{self.server.server_port}'
+                server.tunnel = self
+                threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .1}, daemon=True).start()
         except BaseException:
             self.process.terminate(); self.process.wait(timeout=6)
             self.capture.join(timeout=1); self.process.stderr.close()
@@ -624,16 +852,19 @@ class Tunnel:
         if self.process.poll() is not None or not reachable(self.socket_path):
             return False
         try:
-            with contextlib.closing(http.client.HTTPConnection('127.0.0.1', self.server.server_port, timeout=10)) as connection:
-                connection.request('HEAD', '/', headers={'Host': self.server.authority})
-                response = connection.getresponse()
-                return response.getheader('X-Cloudroom-Preview') == self.generation
+            for server in self.servers:  # Each loopback the browser may use.
+                with contextlib.closing(http.client.HTTPConnection(server.server_address[0], self.server.server_port, timeout=10)) as connection:
+                    connection.request('HEAD', '/', headers={'Host': self.server.authority})
+                    if connection.getresponse().getheader('X-Cloudroom-Preview') != self.generation:
+                        return False
+            return True
         except (OSError, http.client.HTTPException):
             return False
 
     def close(self):
         self.closed = True
-        self.server.shutdown(); self.server.server_close()
+        for server in self.servers:
+            server.shutdown(); server.server_close()
         with self.connections_lock:
             for connection in self.connections:
                 with contextlib.suppress(OSError):
@@ -664,10 +895,10 @@ MAC_LIMIT = 16 * 1024 * 1024
 MAC_LEVELS = ('off', 'read-only', 'ask', 'full')
 # Read-only commands (ADR 0186): no file writes outside temp folders, no signals to other processes, and no tools that
 # drive apps or system settings. Beyond those named tools, they cannot run programs from the writable temp folders, open
-# apps or URLs through Launch Services, send Apple Events, create background jobs, or write preferences through cfprefsd.
-# macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
+# apps or URLs through Launch Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
+# Nothing they start outlives them (end). macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
 # They also cannot reach this Mac's own servers and sockets (the app's local API, ssh-agent, Docker; DNS still works) or
-# read Cloudroom's folder beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
+# read Cloudroom's folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
 READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
              '(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero")'
              ' (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))'
@@ -682,16 +913,125 @@ READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
              # Seatbelt's localhost misses IPv4-mapped IPv6 like ::ffff:127.0.0.1, so IPv6 is blocked outright and clients fall
              # back to IPv4. It must be ip4 here: next to an ip6 rule, (remote ip "localhost:*") stops matching 127.0.0.1.
              '(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))'
-             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))'
-             '(deny file-read* (subpath (param "DATA")))'
-             '(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))')
+             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))')
+# Cloudroom's own tools stay readable in its hidden data folder.
+READ_ONLY_TOOLS = '(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))'
+# Older machine installers kept the relay key in a temp file, and an interrupted install left it behind.
+READ_ONLY_OLD_KEYS = '(regex #"/bb-app\\.[^/]+/access\\.curl$")'
 
 
-def read_only(data):
-    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens."""
+def real_paths(paths):
+    """Seatbelt matches real paths. A path that can't be resolved stays as given."""
+    real = []
+    for path in paths:
+        with contextlib.suppress(OSError, RuntimeError):
+            path = path.resolve()
+        real.append(path)
+    return list(dict.fromkeys(real))
+
+
+def hidden_folders(data):
+    """Cloudroom's folders with keys: its data folders (this app's and any other copy's, like a dev build's), and each
+    machine install here for another Mac (~/.bb-machines), which holds that Mac's relay key. An install can be a link.
+    Older installs could use another folder; their LaunchAgent names it (install-machine.sh)."""
+    home = Path.home()
+    machines = [home / '.bb-machines']
+    with contextlib.suppress(OSError):
+        machines += list(machines[0].iterdir())
+    with contextlib.suppress(OSError):
+        for agent in (home / 'Library' / 'LaunchAgents').glob('app.getbb.host-daemon.*.plist'):
+            with contextlib.suppress(Exception):  # A broken plist must not stop Read-only commands.
+                folder = Path(plistlib.loads(agent.read_bytes())['EnvironmentVariables']['BB_DATA_DIR'])
+                if folder.is_absolute():
+                    machines.append(folder)
+    return real_paths([data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev']), real_paths(machines)
+
+
+def read_only(data, *marks):
+    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens. The sandbox
+    denies the `marks`, names no Mach service has, so end() can find all the command started."""
     data = data.resolve()  # Seatbelt matches real paths.
-    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness'}
-    return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', READ_ONLY]
+    folders, machines = hidden_folders(data)
+    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness',
+              **{f'FOLDER_{n}': path for n, path in enumerate(folders)},
+              **{f'MACHINE_{n}': path for n, path in enumerate(machines)}}
+    subpaths = lambda name, paths: ''.join(f' (subpath (param "{name}_{n}"))' for n in range(len(paths)))
+    names = ''.join(f' (global-name "{mark}")' for mark in marks)  # Labels and hex only, so nothing to escape.
+    # Machine installs come last, after the tools and temp-folder exceptions, so neither can reopen them.
+    profile = (READ_ONLY + (f'(deny mach-lookup{names})' if names else '') +
+               f'(deny file-read*{subpaths("FOLDER", folders)}){READ_ONLY_TOOLS}'
+               f'(deny file-read* file-write*{subpaths("MACHINE", machines)} {READ_ONLY_OLD_KEYS})')
+    return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', profile]
+
+
+def sandbox_checks():
+    """libSystem's process list and sandbox check: `listing()` gives every PID, and `covered(pid, names)` whether that
+    process's sandbox denies names[0] (a mark, read_only) but allows names[1]. Raises OSError when this Mac can't tell. No
+    process carries a mark off macOS, where read-only commands never run."""
+    if sys.platform != 'darwin':
+        return lambda: [], lambda pid, names: False
+    try:
+        import ctypes
+        system = ctypes.CDLL('/usr/lib/libSystem.B.dylib')
+        check, count = system.sandbox_check, system.proc_listallpids
+        check.argtypes, check.restype = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int), ctypes.c_int  # The name follows, as `...`.
+        kind = 2 | ctypes.c_int.in_dll(system, 'SANDBOX_CHECK_NO_REPORT').value  # SANDBOX_FILTER_GLOBAL_NAME, not logged.
+    except (ImportError, AttributeError, ValueError) as error:
+        raise OSError('This Mac cannot check sandboxes') from error
+    def listing():
+        size = max(count(None, 0), 0) + 256
+        while True:
+            pids = (ctypes.c_int * size)()
+            found = count(pids, ctypes.sizeof(pids))
+            if found <= 0:  # 0 is an error too: the list always holds launchd and this helper.
+                raise OSError('This Mac cannot list its processes')
+            if found < size:
+                return [pid for pid in pids[:found] if pid > 0]
+            size *= 2  # A full list may have left some out.
+    def covered(pid, names):
+        return check(pid, b'mach-lookup', kind, ctypes.c_char_p(names[0])) == 1 and check(pid, b'mach-lookup', kind, ctypes.c_char_p(names[1])) == 0
+    return listing, covered
+
+
+def marks(mark, allowed=None):
+    """The names for covered(): the mark, and one its processes' sandbox allows, by default a random one beside it. Many
+    other sandboxes deny every name, and so do processes that have ended, so those never count."""
+    return [mark.encode(), (allowed or f'{mark}.{uuid.uuid4().hex[:16]}').encode()]
+
+
+def marked(mark, allowed=None):
+    """This user's live processes in a read-only sandbox with this mark (read_only). They can leave their process group,
+    session, or parent, never their sandbox. Raises OSError when this Mac can't tell."""
+    listing, covered = sandbox_checks()
+    names = marks(mark, allowed)
+    return [pid for pid in listing() if covered(pid, names)]
+
+
+def end(mark, allowed=None, seconds=5):
+    """Ends every process marked() would find, each as soon as it is found. One may start another and end before its own
+    check, so the list is taken again until 20 lists in a row show none alive; after the first, only processes new to the
+    list, and those killed but not gone yet, need a check. SIGKILL, since it only read and a handler could start more. A
+    PID is killed right after its check, and macOS hands out new PIDs in order, so it is still that process's. True once
+    none is left; False if some still run after `seconds`, or if this Mac can't tell."""
+    try:
+        listing, covered = sandbox_checks()
+        names, deadline, previous, alive, clean = marks(mark, allowed), time.monotonic() + seconds, set(), set(), 0
+        while clean < 20:
+            pids = listing()
+            found = set()
+            for pid in [*alive, *(pid for pid in pids if pid not in previous)]:
+                if covered(pid, names):
+                    with contextlib.suppress(OSError):
+                        os.kill(pid, signal.SIGKILL)
+                    found.add(pid)
+            previous, alive, clean = set(pids), found, 0 if found else clean + 1
+            if found and time.monotonic() > deadline:
+                return False
+        return True
+    except OSError:
+        return False
+
+
 ASK = '''on run argv
 activate
 display dialog (item 1 of argv) with title "Cloudroom" buttons {"Allow", "Allow for this sandbox", "Deny"} default button "Deny" cancel button "Deny" with icon caution giving up after 300
@@ -724,14 +1064,33 @@ MAC_PART = 1024 * 1024
 MAC_POST_SECONDS = 60
 # New per helper process: when it changes, Core ends jobs the old process was running (#569).
 MAC_BOOT = uuid.uuid4().hex
+# A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
+# longest job line comes from cores up to 0.1.75, which send a job's input inside it as hex, beside a 64 KiB command
+# that JSON escaping can make 6 times longer.
+MAC_LINE = 2 * MAC_LIMIT + 1024 * 1024
+
+
+@functools.cache
+def computer_name():
+    """This computer's name as the user knows it, so `mac run` and `mac status` say which Mac runs commands (#608).
+    Looked up once, on the first job stream."""
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if sys.platform == 'darwin':
+            name = subprocess.run(['/usr/sbin/scutil', '--get', 'ComputerName'], capture_output=True, text=True, timeout=3).stdout.strip()
+            if name:
+                return name[:64]
+    return socket.gethostname()[:64]
 
 
 def mac_stdin(core, device, job):
     """A job's input, downloaded after confirming it, so a big push never holds up other jobs on the stream (#576).
-    Older cores send it inside the job instead. None if it can't be downloaded."""
+    Older cores send it inside the job instead. None if it can't be downloaded or is over Core's 16 MiB limit."""
     size = job.get('stdin_bytes')
     if not size:
-        return job.get('stdin') or ''
+        stdin = job.get('stdin') or ''
+        return stdin if len(stdin) <= 2 * MAC_LIMIT else None
+    if type(size) is not int or not 0 < size <= MAC_LIMIT:
+        return None
     url = core.url + '/v1/mac/jobs/' + urllib.parse.quote(job['id']) + '/stdin?device=' + urllib.parse.quote(device)
     for _ in range(3):
         try:
@@ -754,8 +1113,22 @@ def mac_level(config):
     return 'full' if value is True else value if value in MAC_LEVELS else 'off'
 
 
+def saved_level(config):
+    """The level the app saved, which setup may not have applied yet, or None without an app. Unreadable means off."""
+    if not config.get('connectionFile'):
+        return None
+    try:
+        saved = json.loads((Path(config['connectionFile']).parent / 'cloudroom-mac-access.json').read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        return 'off'
+    return mac_level({'macAccess': saved.get('level', saved.get('enabled') is True)}) if isinstance(saved, dict) else 'off'
+
+
 # Each Mac command also goes to the website's Jev check (ADR 0224). It runs beside the job and never delays it:
-# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped.
+# at most four reports in flight, a repeated command is skipped for an hour, and failures are dropped. Commands are
+# kept as fixed-size hashes, at most 4,096 of them, so a sandbox's many long commands can't fill memory.
 REVIEWS = {'sent': {}, 'lock': threading.Lock(), 'slots': threading.BoundedSemaphore(4)}
 SCRIPT_TYPES = ('.sh', '.bash', '.zsh', '.py', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl')
 
@@ -773,11 +1146,14 @@ def script_of(job):
 
 def review(core, job, level, script):
     account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
-    key, now = (core.url, job.get('command')), time.monotonic()
+    key = hashlib.sha256(f"{core.url}\0{job.get('command')}".encode(errors='surrogatepass')).digest()
+    now = time.monotonic()
     with REVIEWS['lock']:
         sent = REVIEWS['sent']
         for old in [k for k, at in sent.items() if now - at > 3600]:
             del sent[old]
+        if len(sent) >= 4096:
+            sent.clear()
         if not account or not token or key in sent or not REVIEWS['slots'].acquire(blocking=False):
             return
         sent[key] = now
@@ -811,18 +1187,216 @@ def deliver(post, result):
     post(result)
 
 
+# A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when the user's PATH puts GNU tar first.
+# Windows Git Bash also pins /usr/bin/tar so a user profile can't shadow it with Windows' System32\tar.exe (#958).
+COPY_TAR = '/usr/bin/tar' if sys.platform in ('darwin', 'win32') else 'tar'
+# Permissions in octal, one line per path, through links. On macOS its own stat, even when PATH puts GNU's first.
+COPY_MODE = '/usr/bin/stat -Lf %OLp' if sys.platform == 'darwin' else 'stat -Lc %a'
+# Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
+# attributes hides that +, so also its entries, each on its own line.
+COPY_ACL = '/bin/ls -ldeL' if sys.platform == 'darwin' else 'ls -ldL'
+# Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
+TEMP_FOLDERS = ('/private/tmp', '/private/var/folders')
+
+
+def disk_path(path):
+    """macOS: an open folder's real path in the letter case stored on disk, as `pwd -P` shows it (F_GETPATH). realpath
+    keeps the typed case, such as ~/CODE for ~/code. None if it can't tell."""
+    if sys.platform != 'darwin' or not hasattr(fcntl, 'F_GETPATH'):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b'\0', 1)[0]) or None
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+
+
+def real_folder(path):
+    """The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..`
+    never skips a missing part, and its real path must be that same folder. Raises OSError as starting there would."""
+    info, real = os.stat(path), disk_path(path) or os.path.realpath(path)
+    if not os.path.isdir(path):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(path))
+    same = os.stat(real)
+    if (same.st_dev, same.st_ino) != (info.st_dev, info.st_ino):
+        raise PermissionError('The folder changed while the Mac checked it, so this command did not run.')
+    return real, [info.st_dev, info.st_ino]
+
+
+def in_temp(folder):
+    """Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same
+    folder, such as other letter case, still counts."""
+    roots = set()
+    for root in TEMP_FOLDERS:
+        with contextlib.suppress(OSError):
+            info = os.stat(root)
+            roots.add((info.st_dev, info.st_ino))
+    for path in (folder, *map(str, Path(folder).parents)):
+        if any(path == root for root in TEMP_FOLDERS):
+            return True
+        with contextlib.suppress(OSError):
+            info = os.stat(path)
+            if (info.st_dev, info.st_ino) in roots:
+                return True
+    return False
+
+
+# Windows (#958): checks a push's archive listing before anything is unpacked. GNU tar lists a control character in a
+# name as an escape (\t, \n), and a \ as \\, so both show as a backslash. Refuses names Windows can't store (\ : * ? " < >
+# |, a trailing dot or space, device names such as NUL, CON.txt, or COM¹, a ..) and two spellings of one path, after
+# dropping . and empty parts, that differ only in case, which a Windows folder would merge into one. Exits 1 to refuse.
+WINDOWS_ARCHIVE_NAMES = r"""
+{ if ($0 ~ /[\\:*?"<>|]/) bad = 1
+  n = split($0, part, "/"); path = ""
+  for (i = 1; i <= n; i++) {
+    if (part[i] == "" || part[i] == ".") continue
+    if (part[i] == "..") { bad = 1; continue }
+    if (part[i] ~ /[. ]$/) bad = 1
+    base = tolower(part[i]); sub(/\..*$/, "", base); sub(/ +$/, "", base)
+    if (base ~ /^(con|prn|aux|nul|conin\$|conout\$)$/ || base ~ /^(com|lpt)([1-9]|¹|²|³)$/) bad = 1
+    # Each folder and the entry itself, as Windows would match them: two spellings of one path differ only in case.
+    path = path "/" part[i]; key = tolower(path)
+    if ((key in seen) && seen[key] != path) bad = 1
+    seen[key] = path
+  } }
+END { exit bad }
+"""
+
+
+def copy_command(copy, token=None):
+    """The command for a `room-cli mac push` (#222), built here from the job's names, never from the sandbox's command.
+    Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
+
+    The place is resolved here, from the home folder like any push and through any links, so the popup names the real
+    place and the command writes nowhere else. Outside temp folders, agents can't change that path without asking. In a
+    temp folder they can, so there the command runs read-only (as_copy). It unpacks in a new, empty folder at the place
+    and keeps only the named item, so an archive can't add other files or reach existing ones through a hard link. Like
+    cp, the item gets a new name, which must not exist yet, or goes into a folder: it moves in if new, else is re-packed
+    there so that folders merge and files replace as before. Raises ValueError for a name or place it can't use.
+
+    Windows (#958): a stop ends the job without running its traps, so the unpack folder is named after `token` and the
+    helper removes it itself (as_copy, execute). Names Windows can't store are refused, in the place and in the archive."""
+    name, to, staged = copy['name'], copy['to'], copy.get('staged')
+    to = native(to) if isinstance(to, str) else to  # Windows: C:\x and /c/x as C:/x (#958).
+    if not (isinstance(name, str) and isinstance(to, str) and 0 < len(to) <= 4096 and name not in ('', '.', '..')
+            and '/' not in name and '\0' not in name + to and len(name.encode()) <= 255 and (not WINDOWS or windows_name(name))):
+        raise ValueError('Invalid copy')
+    if WINDOWS and len(to) >= 2 and to[1] == ':' and (len(to) == 2 or to[2] != '/'):
+        raise ValueError('Invalid copy')
+    if staged is not None and not (isinstance(staged, str) and staged.startswith('/tmp/cloudroom.') and staged[15:].isascii() and staged[15:].isalnum()):
+        raise ValueError('Invalid copy')
+    home = str(Path.home())  # ~ and ~/ mean the home folder, as in Core's quote(); other paths start there too.
+    path = os.path.join(home, home + to[1:] if to == '~' or to.startswith('~/') else to)
+    inside = to.endswith('/') or os.path.isdir(path)
+    folder, final = (path, name) if inside else os.path.split(path)
+    folder = os.path.realpath(folder)
+    if final in ('', '.', '..'):
+        raise ValueError('Invalid copy')
+    if WINDOWS and not all(windows_name(part) for part in [*to.split('/'), final] if part not in ('', '~', '.', '..')
+                           and not (len(part) == 2 and part[1] == ':')):
+        raise ValueError('Invalid copy')
+    place, temp = os.path.join(folder, final), any(folder == root or folder.startswith(root + '/') for root in TEMP_FOLDERS)
+    taken = '{ [ ! -e "$to" ] && [ ! -L "$to" ] || taken; }'
+    return (f"b={shlex.quote(posix(folder))}; n={shlex.quote(name)}; to={shlex.quote(posix(place))}; s={staged or ''}; "
+            "taken() { printf '%s already exists; nothing was copied\\n' \"$to\" >&2; return 1; }; "
+            + ('' if inside else f'{taken} || exit 1; ') +
+            (f'mkdir -p -- "$b" && x="$b/.cloudroom.{token}" && mkdir -- "$x" && mkdir -- "$x/i" || exit 1; ' if token else
+               'mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; ') +
+            'clean() { find "$x" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$x" $s; }; '
+            "trap 'clean; exit 1' HUP INT TERM; "
+            + ((f'cat {staged}/* > "$x/a.tgz"' if staged else 'cat > "$x/a.tgz"') + '; c=$?; '
+               f'if [ $c = 0 ] && ! {COPY_TAR} -tzf "$x/a.tgz" | awk {shlex.quote(WINDOWS_ARCHIVE_NAMES)}; then '
+               'echo "The copy holds names Windows cannot store, or names that differ only in case, so nothing was copied" >&2; c=1; fi; '
+               f'[ $c != 0 ] || {{ {COPY_TAR} -xzf "$x/a.tgz" -C "$x/i"; c=$?; }}; ' if WINDOWS else
+               (f'cat {staged}/* | ' if staged else '') + f'{COPY_TAR} -xzf - -C "$x/i"; c=$?; ') +
+            # Exactly one item, named $n. Entries are counted by NUL, since a name may hold a line break.
+            'if [ $c = 0 ] && ! { { [ -e "$x/i/$n" ] || [ -L "$x/i/$n" ]; } && '
+            '[ $(( $(find "$x/i" -mindepth 1 -maxdepth 1 -print0 | tr -dc \'\\000\' | wc -c) )) = 1 ]; }; '
+            'then echo "The copy held other files, so nothing was copied" >&2; c=1; fi; '
+            'if [ $c = 0 ]; then '
+            # The sandbox makes every file private, so its modes never count (#1066). New files and folders get this Mac's
+            # own (its umask), and executables stay executable. Any failed stat or chmod fails the push before it places
+            # anything.
+            '[ -L "$x/i/$n" ] || chmod -R \'=rwX\' "$x/i/$n" || { clean; exit 1; }; '
+            # A hard-linked file that replaces one here first gets its own copy, so its modes can't reach a linked file.
+            'find "$x/i/$n" -type f -links +1 -exec sh -c \'h=$1/h p=$2 t=$3; shift 3; for f; do d=$t${f#"$p"}; '
+            '[ ! -e "$d" ] || { cp -p -- "$f" "$h" && mv -f -- "$h" "$f"; } || exit; done\' sh "$x" "$x/i/$n" "$to" {} + '
+            # A file that replaces one here, even through a link, gets its modes, so it is never more readable. The owner
+            # can always read, and an executable runs wherever readable. One stat for each batch, then one chmod per mode for
+            # the files whose mode changes. One with an ACL stops the push, named: the new file would drop it, and its group
+            # bits, which on Linux show the ACL's mask, would let its whole group read it. One listing for each batch.
+            '|| { clean; exit 1; }; find "$x/i/$n" -type f -exec sh -c \'x=$1 p=$2 t=$3 e="^.{10}[+]|^ [0-9]+: "; shift 3; for f; do d=$t${f#"$p"}; '
+            f'if [ -f "$d" ]; then printf "%s\\0" "$d" >&3; else d=$f; fi; printf "%s\\0" "$d" "$f"; done 3>"$x/r" | xargs -0 {COPY_MODE} >"$x/s" || exit; '
+            f'[ ! -s "$x/r" ] || {{ xargs -0 {COPY_ACL} <"$x/r" >"$x/a" || exit; ! grep -Eq "$e" "$x/a" || for f; do d=$t${{f#"$p"}}; '
+            f'[ -f "$d" ] && {COPY_ACL} "$d" | grep -Eq "$e" && {{ printf "%s has an access control list (ACL) that replacing it would drop, so nothing was copied\\n" "$d" >&2; exit 1; }}; done; }}; '
+            'for f; do read -r m && read -r o || exit; '
+            'm=$((0$m & 0777 | 0400)); [ -x "$f" ] && m=$((m | (m & 0444) >> 2)); [ $m = $((0$o)) ] || printf "%s\\0" "$f" >>"$x/m$m"; '
+            'done <"$x/s"; for g in "$x"/m*; do [ -f "$g" ] || break; xargs -0 chmod "$(printf %o "${g#"$x"/m}")" <"$g" || exit; done; rm -f "$x"/m*\' '
+            'sh "$x" "$x/i/$n" "$to" {} + || { clean; exit 1; }; '
+            # Into a folder: a new item moves in. Otherwise it is packed whole first, so a failure changes nothing there, and
+            # unpacked with exactly its modes, under umask 0 in a subshell, so the login shell's exit hooks keep the user's. A
+            # push never changes a folder already there, sticky and setgid bits included: bsdtar (macOS, some Linux) leaves it
+            # as is without -p and ignores TAR_OPTIONS; GNU tar does only with both of these options.
+            + (f'{{ [ ! -e "$to" ] && [ ! -L "$to" ] && mv -- "$x/i/$n" "$to" 2>/dev/null; }} || {{ (cd -- "$x/i" && '
+               f'COPYFILE_DISABLE=1 {COPY_TAR} --no-xattrs -cf ../p.tar -- "$n") && '
+               f'(umask 0 && TAR_OPTIONS="--no-overwrite-dir -p" {COPY_TAR} -xf "$x/p.tar" -C "$b"); }}; ' if inside else
+               f'{taken} && mv -- "$x/i/$n" "$to"; ')
+            + """c=$?; fi; clean; [ $c != 0 ] || printf '%s\\n' "$to"; exit $c"""), place, inside, temp
+
+
+def as_copy(job):
+    """A push runs only the command built here (copy_command), from the home folder, and always counts as a change. One
+    into a temp folder also runs read-only. Why it can't run, or None."""
+    if job.get('copy') is None:
+        return None
+    token = uuid.uuid4().hex[:16] if WINDOWS else None
+    try:
+        command, place, inside, temp = copy_command(job['copy'], token)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return f"This copy has a name or place {'this computer' if WINDOWS else 'the Mac'} cannot use, so nothing was copied."
+    job.update(command=command, cwd=None, write=True, sandbox=temp, place=(place, inside))
+    if token:  # What a stopped push leaves, for execute to remove: its unpack folder and staged pieces.
+        job['leftovers'] = [posix(os.path.dirname(place)) + '/.cloudroom.' + token, *([job['copy']['staged']] if job['copy'].get('staged') else [])]
+    return None
+
+
 class MacJobs:
     """Mac access (ADR 0113, levels in ADR 0186): run commands from the user's cloud agents as this user, only while enabled."""
     def __init__(self, folder):
         self.folder, self.running, self.lock = folder, {}, threading.Lock()
-        # Jobs the agent stopped before they started; execute skips them.
-        self.cancelled = set()
+        # How many jobs taken from the streams are not finished, by ID (two sandboxes' Cores can use the same one), and which
+        # of those IDs the agent stopped before they started; execute skips those. A stop for any other job is dropped,
+        # so a sandbox's Core can't fill this.
+        self.taken, self.cancelled = {}, set()
         # Ask first: one dialog at a time. "Allow for this sandbox" trusts every agent on that sandbox's core (jobs carry no
         # thread), until the helper restarts or the access level changes.
         self.asking, self.trusted, self.level = threading.Lock(), set(), None
+        # Whether each sandbox core has a key list, asked once per wake (limited), one question at a time. The helper
+        # restarts with every app launch, so this stays small.
+        self.lists, self.checking = {}, threading.Lock()
+        # Read-only commands carry this helper's mark, this run's (`boot`), and their own (read_only). `sandboxes` maps
+        # each mark to end to the core whose stream keeps it (None: none), the name its processes must allow (marked), and
+        # its running shell; end_unwanted ends each until nothing carries it, starting with what earlier runs left.
+        # `stopping`: no command starts any more. `contained`: end() was seen to work on this Mac.
+        self.mark = label(folder) + '.read-only'
+        self.boot = f'{self.mark}.{MAC_BOOT[:16]}'  # Marks stay short, well below Mach's 128-byte names.
+        self.sandboxes, self.wanted, self.stopping, self.contained = {self.mark: (None, self.boot, None)}, set(), False, False
 
     def enabled(self):
-        config = private_json(self.folder / 'config.json')
+        try:
+            config = private_json(self.folder / 'config.json')
+            # An old job stream may outlive a failed stop during an account switch (#109).
+            if config.get('connectionFile') and (private_json(config['connectionFile']).get('account') or {}).get('id') != config['binding'][1]:
+                return None
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None  # Anything unreadable counts as off.
+        # Off or a lower level counts from the next job, before setup applies it (#109). Raising waits for setup.
+        saved = saved_level(config)
+        if saved and MAC_LEVELS.index(saved) < MAC_LEVELS.index(mac_level(config)):
+            config['macAccess'] = saved
         return config if mac_level(config) != 'off' and not config.get('revoked') else None
 
     def approve(self, core, job):
@@ -831,10 +1405,25 @@ class MacJobs:
                 return True
             # Show what will run, including a script sent as input. Hidden parts still run: warn above them, where
             # padding cannot push the warning out of view. The command comes first, and the folder after it on one
-            # line, so a folder name cannot pose as the command. Return always denies.
+            # line, so a folder name cannot pose as the command. A push shows only where its one item lands, because
+            # the command built here places nothing else (#222). Return always denies.
+            if job.get('copy'):
+                (place, inside), home = job['place'], os.path.realpath(Path.home())
+                lands, cut = visible('~' + place[len(home):] if place.startswith(home + '/') else place, 300, 1)
+                note = ('It replaces a file with the same name there, and merges into a folder with the same name.' if inside else
+                        'It gets this new name.')
+                text = f"A cloud agent wants to copy a file or folder to your Mac.\n\nCopy to: {lands}{'…' if cut else ''}\n\nOnly this one item is copied. {note}"
+                return self.ask(core, job, text)
             command, hidden = visible(job['command'].rstrip(), 600, 10)
             warnings = f"Warning: {hidden:,} more characters of this command are not shown, and will also run.\n\n" if hidden else ''
-            folder, cut = visible(job.get('cwd') or '~', 200, 1)
+            # The folder is the real path the command runs in (refusal resolves it), so `.`, `..` and links can't hide it.
+            cwd, home = job.get('cwd') or '~', os.path.realpath(Path.home())
+            folder, cut = visible('~' + cwd[len(home):] if cwd == home or cwd.startswith(home + '/') else cwd, 200, 1)
+            if cut:
+                warnings += f"Warning: {cut:,} more characters of the folder are not shown.\n\n"
+            if (any(word in job['command'] for word in ('/tmp', '/var/folders', 'TMPDIR')) or
+                    in_temp(cwd)):
+                warnings += 'Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n'
             text = f"Command:\n{block(command)}\n\nFolder: {folder}{'…' if cut else ''}"
             if job.get('stdin'):
                 try:
@@ -846,70 +1435,174 @@ class MacJobs:
                     text += f"\n\nInput ({count:,} line{'s' if count != 1 else ''}{', all shown' if not hidden else ''}):\n{block(script)}"
                     if hidden:
                         warnings += f"Warning: {hidden:,} more characters of its input are not shown, and will also run.\n\n"
-                except ValueError:  # Not text, such as the archive a push unpacks.
-                    warnings += f"Warning: the command also reads {len(job['stdin']) // 2:,} bytes of input that cannot be shown.\n\n"
-            text = f"A cloud agent wants to change your Mac.\n\n{warnings}{text}"
-            process = subprocess.Popen(['/usr/bin/osascript', '-e', ASK, text], stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, text=True, start_new_session=True)
-            with self.lock:
-                self.running[job['id']] = process
-            answer = process.communicate()[0].strip()
-            with self.lock:
-                self.running.pop(job['id'], None)
-            if answer == 'Allow for this sandbox':
-                self.trusted.add(core.key)
-            return answer in ('Allow', 'Allow for this sandbox')
+                except ValueError:  # Not text, such as an archive.
+                    warnings += (f"Warning: the command also reads {len(job['stdin']) // 2:,} bytes of input that cannot be shown, such as an archive. "
+                                 'What it changes can depend on that input.\n\n')
+            return self.ask(core, job, f"A cloud agent wants to change your Mac.\n\n{warnings}{text}")
+
+    def ask(self, core, job, text):
+        """Shows the Ask first popup; call it holding `asking`. Allow and "Allow for this sandbox" approve."""
+        process = subprocess.Popen(['/usr/bin/osascript', '-e', ASK, text], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        with self.lock:
+            self.running[job['id']] = process
+        answer = process.communicate()[0].strip()
+        with self.lock:
+            self.running.pop(job['id'], None)
+        if answer == 'Allow for this sandbox':
+            self.trusted.add(core.key)
+        return answer in ('Allow', 'Allow for this sandbox')
 
     def track(self, level):
         """Any access level change, even Off and back, ends "Allow for this sandbox"."""
         if level != self.level:
             self.trusted, self.level = set(), level
 
-    def refusal(self, core, job):
-        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+    def limited(self, core):
+        """Why this sandbox may not use the Mac at all, or None. A sandbox with a key list (a Cloud loop's run, its
+        children and forks, ADR 0342) gets only the keys picked for it, and the Mac holds every file. The website's row
+        decides, never the sandbox, whose agent has root: only a row it found without a list allows. Each wake brings a
+        new token, so the answer is kept per core. A failed check refuses and asks again at the next job."""
+        if not core.sandbox:
+            return None
+        with self.checking:
+            limited = self.lists.get(core.key)
+            if limited is None:
+                try:
+                    account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
+                    uuid.UUID(account)
+                    if not token or not core.thread:
+                        raise ValueError('No thread or sign-in to check')
+                    credential = base64.b64encode((account + ':' + token).encode()).decode()
+                    answer = control(website(core.config, core.connection) + '/api/desktop/sandboxes', {'action': 'secrets', 'thread': core.thread},
+                                     'POST', {'Authorization': 'Basic ' + credential})
+                    if answer.get('found') is not True or answer['secrets'] is not None and not isinstance(answer['secrets'], list):
+                        raise ValueError('Unconfirmed key list')
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    return "The Mac could not confirm this sandbox's API keys with Cloudroom, so the command did not run. Try again."
+                limited = self.lists[core.key] = answer['secrets'] is not None
+        if limited:
+            return ("This sandbox has only the API keys picked for its Cloud loop, so it can't use the Mac. Do not retry. "
+                    'If the loop needs the Mac, the user can give it all secrets in its Secrets row. That applies from its next run.')
+        return None
+
+    def closed(self, core):
+        """The access level, and why this sandbox may not use the Mac at all now (Off or a key list), or None."""
         level = mac_level(self.enabled() or {})
         self.track(level)
-        if level == 'off':
-            return 'Mac access is off.'
+        return level, 'Mac access is off.' if level == 'off' else self.limited(core)
+
+    def refusal(self, core, job):
+        """Why this job may not run as asked, or None. Everything else that is not full access runs read-only."""
+        job.pop('approved_folder', None)  # Only Ask first's own check below approves a folder, never the job itself.
+        level, closed = self.closed(core)
+        if closed:
+            return closed
+        # After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
+        unusable = as_copy(job)
+        if unusable:
+            return unusable
         if level == 'full' or not job.get('write') and sys.platform == 'darwin' and level in ('read-only', 'ask'):
             return None
         if sys.platform != 'darwin':
             return 'Read-only and Ask first Mac access need macOS. The user can switch Mac access to Full in the Cloudroom sidebar.'
         if level == 'read-only':
             return 'Mac access is Read-only, so this command cannot change the Mac. The user can switch it to Ask first or Full in the Cloudroom sidebar.'
-        if level == 'ask' and self.approve(core, job):
-            return None
+        if level != 'ask':
+            return 'The user did not approve this command on their Mac. Do not retry it unless they ask you to.'
+        # Ask first shows, and then runs in, the same real folder: never the agent's text, whose `..` or links could point
+        # elsewhere, such as a temp folder it filled.
+        try:
+            job['cwd'], job['approved_folder'] = real_folder(str(Path.home() / os.path.expanduser(job.get('cwd') or '~')))
+        except OSError as error:
+            return str(error)
+        if self.approve(core, job):
+            # The user may have lowered Mac access while the popup was open.
+            return None if mac_level(self.enabled() or {}) in ('ask', 'full') else 'Mac access was lowered, so this command did not run.'
         return 'The user did not approve this command on their Mac. Do not retry it unless they ask you to.'
 
     def serve(self):
         """One job stream per reachable core: the VM's, and each awake sandbox's while it stays awake."""
-        self.wanted, streams = set(), {}
+        streams, swept = {}, None
         while True:
             with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
                 config = self.enabled()
                 self.track(mac_level(config or {}))
+                # Windows never empties its temp folder, so copies a dropped `room-cli` left there go after a day, checked hourly.
+                if WINDOWS and config and (swept is None or time.monotonic() - swept > 3600):
+                    swept = time.monotonic()
+                    threading.Thread(target=sweep_windows_copies, daemon=True).start()
                 listed = {core.key: core for core in cores(config)} if config else {}
                 self.wanted = set(listed)
                 for key, core in listed.items():
                     if key not in streams or not streams[key].is_alive():
                         streams[key] = threading.Thread(target=self.follow, args=(core, config['device']), daemon=True)
                         streams[key].start()
+            with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
+                self.end_unwanted()  # Also when the list failed: it ends only what no listed stream keeps.
             time.sleep(5)
+
+    def end_unwanted(self):
+        """Ends each read-only command whose core's stream ended (Mac access Off, sign-out, or a sandbox no longer awake),
+        and what earlier runs or a failed end() left, until nothing carries its mark."""
+        with self.lock:
+            unwanted = [(mark, allowed, shell) for mark, (key, allowed, shell) in self.sandboxes.items() if key not in self.wanted]
+        for mark, allowed, shell in unwanted:
+            if shell:
+                shell.kill()  # Its sandbox may not be set up yet. Popen never signals a process it has already reaped.
+            if end(mark, allowed):
+                with self.lock:
+                    self.sandboxes.pop(mark, None)
+            else:
+                self.contained = False  # The next read-only command checks again first (containable).
+
+    def containable(self):
+        """Whether end() works on this Mac and spares other sandboxes, tried on two `sleep`s: marked() must find one whose
+        sandbox denies a test mark, and not one whose sandbox denies every name but one, as apps' sandboxes do. Checked once
+        per run, and again after a failure. Without it, read-only commands don't run."""
+        if not self.contained:
+            mark = self.boot + '.check'
+            rules = (f'(deny mach-lookup (global-name "{mark}"))', f'(deny mach-lookup)(allow mach-lookup (global-name "{mark}.open"))')
+            with contextlib.suppress(OSError):
+                ours, apps = tests = [subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)' + rule, '/bin/sleep', '10'],
+                                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) for rule in rules]
+                try:
+                    for _ in range(200):  # Until both sandboxes are set up.
+                        if ours.pid in marked(mark) and apps.pid in marked(mark, mark + '.open'):
+                            self.contained = apps.pid not in marked(mark)
+                            break
+                        time.sleep(.01)
+                finally:
+                    for test in tests:
+                        test.kill(); test.wait()
+        return self.contained
+
+    def close(self):
+        """The helper is stopping: no command starts any more, and none of its read-only commands outlives it."""
+        with self.lock:
+            self.stopping = True
+            shells = [shell for _, _, shell in self.sandboxes.values() if shell]
+        for shell in shells:
+            shell.kill()  # As in end_unwanted.
+        end(self.mark)
 
     def follow(self, core, device):
         delay = 2
         while core.key in self.wanted:
             try:
-                request = urllib.request.Request(core.url + '/v1/mac/jobs?device=' + device + '&boot=' + MAC_BOOT + '&fetch=true',
+                request = urllib.request.Request(core.url + '/v1/mac/jobs?device=' + device + '&boot=' + MAC_BOOT + '&fetch=true&name='
+                                                 + urllib.parse.quote(computer_name(), safe='') + '&os=' + MAC_OS,
                                                  headers={**core.headers, 'Accept': 'text/event-stream'})
                 with NET['opener'].open(request, timeout=60) as stream:
                     delay, event = 2, None
-                    for raw in stream:
+                    while raw := stream.readline(MAC_LINE + 1):
+                        if len(raw) > MAC_LINE:
+                            raise ValueError('Mac job is too large')
                         line = raw.decode().rstrip('\r\n')
                         if line.startswith('event:'):
                             event = line[6:].strip()
                         elif line.startswith('data:') and event == 'job':
-                            threading.Thread(target=self.execute, args=(core, device, json.loads(line[5:])), daemon=True).start()
+                            self.take(core, device, json.loads(line[5:]))
                         elif line.startswith('data:') and event == 'cancel':
                             self.cancel(json.loads(line[5:])['id'])
                         elif line.startswith(':') and (not self.enabled() or core.key not in self.wanted):
@@ -923,6 +1616,21 @@ class MacJobs:
                         delay = 1
             with NUDGE:  # Check now wakes this wait.
                 NUDGE.wait(delay)
+
+    def take(self, core, device, job):
+        """Starts a job from the stream. Until it ends, a stop for it is kept (see cancel)."""
+        with self.lock:
+            self.taken[job['id']] = self.taken.get(job['id'], 0) + 1
+        def run():
+            try:
+                self.execute(core, device, job)
+            finally:
+                with self.lock:
+                    self.taken[job['id']] -= 1
+                    if not self.taken[job['id']]:
+                        del self.taken[job['id']]
+                        self.cancelled.discard(job['id'])
+        threading.Thread(target=run, daemon=True).start()
 
     def execute(self, core, device, job):
         def post(body, timeout=MAC_POST_SECONDS):
@@ -942,43 +1650,111 @@ class MacJobs:
             except (OSError, ValueError):
                 time.sleep(1)
         result = {'state': 'done', 'code': 127, 'stdout': '', 'stderr': '', 'truncated': False}
+        job.pop('leftovers', None)  # Only as_copy sets it, from the helper's own names: never trust the stream's.
         # Core may have taken a confirmation whose reply was lost, so it still gets this result instead of waiting forever.
-        job['stdin'] = mac_stdin(core, device, job) if confirmed else ''
+        # Off and the key list come before the input, so a sandbox that may not use the Mac never makes it download any.
         refused = ('The Mac could not confirm this command with the cloud, so it did not run. Try again.' if not confirmed else
-                   "The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
-                   self.refusal(core, job))
+                   self.closed(core)[1])
+        authorized = not refused
+        # Windows: a push's staged pieces, tracked only once authorized (confirmed, access on, no key list), so a refused
+        # or stopped authorized push cleans them while an unauthorized sandbox never touches disk.
+        staged = (job.get('copy') or {}).get('staged') if authorized and isinstance(job.get('copy'), dict) else None
+        staging = [staged] if WINDOWS and isinstance(staged, str) and staged.startswith('/tmp/cloudroom.') and staged[15:].isascii() and staged[15:].isalnum() else []
+        if not refused:
+            job['stdin'] = mac_stdin(core, device, job)
+            refused = ("The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
+                       self.refusal(core, job))
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
-        sandboxed = not refused and not job.get('write') and mac_level(self.enabled() or {}) != 'full'
-        login = pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
+        # A push into a temp folder (as_copy) runs read-only even once approved, since agents can swap paths there.
+        sandboxed = not refused and (not job.get('write') or job.get('sandbox')) and mac_level(self.enabled() or {}) != 'full'
+        if sandboxed and not self.containable():
+            refused, sandboxed = "This Mac can't make sure a read-only command leaves nothing running, so it did not run.", False
+        mark = f'{self.boot}.{uuid.uuid4().hex[:16]}' if sandboxed else None  # Never the job's ID, which a sandbox can pick.
+        login = (git_bash() or '') if WINDOWS else pwd.getpwuid(os.getuid()).pw_shell or '/bin/zsh'
+        if WINDOWS and not login and not refused:
+            refused = ("This Windows computer has no Git for Windows, which runs cloud agents' commands there, so the command "
+                       'did not run. Ask the user to install it from https://git-scm.com/download/win, then restart Cloudroom.')
         # As in Local threads, Cloudroom's own tools (browser-harness) come first, then the PATH the app read from an
         # interactive login shell, so tools set up in ~/.zshrc are found, all after the user's profile sets PATH. On macOS
         # that lookup always uses /bin/zsh, so other shells keep their own PATH. The shell stays non-interactive: rc files
         # could print into a `mac pull` archive or wait on a prompt (#338).
         data = Path(core.config['connectionFile']).parent
-        tools, saved = shlex.quote(str(data / 'bin')), core.config.get('shellPath')
+        tools, saved = shlex.quote(posix(data / 'bin')), core.config.get('shellPath')
+        if core.config.get('roomCli'):  # Windows: the app's own room-cli, which no Git Bash PATH has (#958).
+            tools += ':' + shlex.quote(posix(core.config['roomCli']))
         if saved and (sys.platform != 'darwin' or login.endswith('/zsh')):
             tools += (' ' if login.endswith('/fish') else ':') + shlex.quote(saved)
         path = f'set -gx PATH {tools} $PATH; ' if login.endswith('/fish') else f'PATH={tools}:"$PATH"; '
+        # A nested room-cli reaches the app that owns this helper, not a ROOM_SERVER_URL left in the helper's or the
+        # login shell's environment, nor the default port of another app such as a Dev build (#1243, #1290).
+        server = core.config.get('serverUrl')
+        if server:
+            path += (f'set -gx ROOM_SERVER_URL {shlex.quote(server)}; ' if login.endswith('/fish') else
+                     f'export ROOM_SERVER_URL={shlex.quote(server)}; ')
         # Agents and Core's copy scripts write sh, which fish can't parse (#204), so fish loads its login setup, then
         # hands the unchanged command to sh. Inside fish's '…' only \ and ' are special.
-        command = ("exec /bin/sh -c '" + job['command'].replace('\\', '\\\\').replace("'", "\\'") + "'"
-                   if login.endswith('/fish') else job['command'])
+        fish = lambda text: "'" + text.replace('\\', '\\\\').replace("'", "\\'") + "'"
+        command = 'exec /bin/sh -c ' + fish(job['command']) if login.endswith('/fish') else job['command']
+        # An approved command must start in its folder, whatever the login files did: builtins, so their functions can't
+        # pose as cd, and the folder checked once there (#2470). zsh's `command` skips builtins; dash and ksh have no
+        # `builtin`, so other shells use `command`.
+        approved = job.get('cwd') if job.get('approved_folder') is not None and isinstance(job.get('cwd'), str) else None
+        changed = 'The folder changed after it was approved, so this command did not run.'
+        if approved and login.endswith('/fish'):
+            command = (f'builtin cd {fish(approved)}; and builtin test (builtin pwd -P) = {fish(approved)}; '
+                       f'or begin; builtin echo {fish(changed)} >&2; builtin exit 126; end; {command}')
+        elif approved:
+            b = 'builtin' if login.endswith('/zsh') else 'command'
+            command = (f'{b} cd -- {shlex.quote(approved)} && {b} test "$({b} pwd -P)" = {shlex.quote(approved)} '
+                       f'|| {{ {b} echo {shlex.quote(changed)} >&2; {b} exit 126; }}; {command}')
         shell = [login, '-lc', path + command]
+        command_file = None
         try:
             if refused:
                 raise PermissionError(refused)
-            folder = Path.home() / os.path.expanduser(job.get('cwd') or '~')
+            folder = Path.home() / os.path.expanduser(native(job.get('cwd') or '~'))
+            # The folder the user approved must still be the same folder, at the same real path.
+            if approved and real_folder(str(folder)) != (approved, job['approved_folder']):
+                raise PermissionError(changed)
+            env = None
+            if WINDOWS:
+                # The command travels in the environment, so Windows' command line rules and MSYS globbing never touch it.
+                # A login shell stays in the job's folder (CHERE_INVOKING) and finds Git's tools (MSYSTEM). Commands too long
+                # for one variable (32,767 characters) go through a file in the helper's private folder, created only after
+                # refusal checks pass. Unset CLOUDROOM_COMMAND before eval so child processes never inherit it.
+                full = path + command
+                if len(full) > 30_000:
+                    command_file = self.folder / f'command-{uuid.uuid4().hex}'
+                    command_file.write_text(full, encoding='utf-8', newline='\n')
+                    full = f'. {shlex.quote(posix(command_file))}'
+                env = windows_job_env(full)
+                shell = [login, '-lc', '__cloudroom_cmd=$CLOUDROOM_COMMAND; unset CLOUDROOM_COMMAND; eval "unset __cloudroom_cmd\n$__cloudroom_cmd"']
             with self.lock:  # A stop that arrives while the command starts either skips or kills it.
                 if job['id'] in self.cancelled:
                     self.cancelled.discard(job['id'])
                     raise PermissionError('The agent stopped this command before it started, so it did not run.')
-                process = subprocess.Popen([*read_only(data), *shell] if sandboxed else shell, cwd=folder,
-                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                if self.stopping:
+                    raise PermissionError('Cloudroom on the Mac is stopping, so this command did not run. Try again in a minute.')
+                # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on. A write
+                # command too: approved after its sandbox slept, it would change the Mac with nobody to read the result.
+                if core.key not in self.wanted:
+                    raise PermissionError('The Mac stopped taking commands from this sandbox, so this command did not run.')
+                if WINDOWS:
+                    process, process.job = windows_start(shell, cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                                         stderr=subprocess.PIPE)
+                else:
+                    process = subprocess.Popen([*read_only(data, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
+                                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self.running[job['id']] = process
+                if sandboxed:
+                    self.sandboxes[mark] = (core.key, None, process)
         except OSError as error:
             result['code'] = 126 if isinstance(error, PermissionError) else 127
+            if getattr(error, 'winerror', None) == 225:  # ERROR_VIRUS_INFECTED: Defender or other antivirus blocked it.
+                error = PermissionError("Windows security software blocked this command, so it did not run. Don't retry it; "
+                                        'tell the user, who can check Windows Security → Protection history.')
             result['stderr'] = str(error).encode().hex()
         else:
             output = {'stdout': bytearray(), 'stderr': bytearray()}
@@ -994,10 +1770,18 @@ class MacJobs:
             for thread in [*readers, threading.Thread(target=feed, daemon=True)]:
                 thread.start()
             result['code'] = process.wait()
+            ended = sandboxed and end(mark)  # A read-only command leaves nothing running, so its output ends here too.
             for thread in readers:
                 thread.join(2)  # A background process may keep the pipe open.
             with self.lock:
                 self.running.pop(job['id'], None)
+                if getattr(process, 'job', None):  # What it left running keeps running, as on a Mac.
+                    windows_stop(process.job, False)
+                    process.job = None
+                if ended:
+                    self.sandboxes.pop(mark, None)
+                elif sandboxed:
+                    self.sandboxes[mark], self.contained = (None, None, None), False  # end_unwanted keeps ending it.
             # Blocked local connections fail as EPERM, or as curl's "couldn't connect".
             if sandboxed and result['code'] and any(sign in output['stderr'].lower() for sign in (b'not permitted', b'eperm', b"couldn't connect")) and b'deadlock avoided' not in output['stderr'].lower():
                 output['stderr'] += (b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files.\n"
@@ -1013,6 +1797,18 @@ class MacJobs:
                     b"Or download it first with `room-cli mac run --write 'brctl download PATH'`. The user approves either.\n")
             result['truncated'] = any(len(value) > MAC_LIMIT for value in output.values())
             result.update({name: bytes(value[:MAC_LIMIT]).hex() for name, value in output.items()})
+        if command_file:
+            with contextlib.suppress(OSError):
+                command_file.unlink()
+        # Windows: a push that was stopped ran no trap, and an authorized push stopped or refused before it started never
+        # cleaned its staged pieces, so remove what it left with Git's own rm. A push that ran to its end cleaned up itself.
+        if WINDOWS and authorized and result['code'] and login and (job.get('leftovers') or staging):
+            for _ in range(3):
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    if not subprocess.run([str(Path(login).parent / 'rm.exe'), '-rf', '--', *(job.get('leftovers') or staging)], stdin=subprocess.DEVNULL,
+                                          capture_output=True, timeout=120, creationflags=NO_WINDOW).returncode:
+                        break
+                time.sleep(2)
         # The result survives disconnects: retry until the VM accepts it, forgets the job, or an hour passes.
         deadline = time.monotonic() + 3600
         while time.monotonic() < deadline:
@@ -1027,16 +1823,53 @@ class MacJobs:
             time.sleep(5)
 
     def cancel(self, job):
+        handle = None
         with self.lock:
             process = self.running.get(job)
-            if not process:
+            if not process and job in self.taken:
                 self.cancelled.add(job)
-        if process:
+            elif process and WINDOWS:
+                handle, process.job = getattr(process, 'job', None), None
+        if process and WINDOWS:  # Its job object holds everything it started; without one, only the shell itself.
+            with contextlib.suppress(OSError):
+                if handle:
+                    windows_stop(handle, True)
+                else:
+                    process.kill()
+        elif process:
             def kill(signal_number):
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(process.pid, signal_number)
             kill(signal.SIGTERM)
             threading.Timer(2, kill, (signal.SIGKILL,)).start()
+
+
+# Each core gets a check every 10 s, not 2 s: that cost about one new HTTPS connection a second on metered networks.
+# Core trusts a report for 15 s (FRESH_SECONDS), and an agent's `room-cli preview` waits 30 s for this Mac.
+POLL_SECONDS = 10
+# Pairing gives the same answer until a sandbox wakes with a new token, so it repeats once a minute or after a failure.
+PAIR_SECONDS = 60
+PAIRED = {}  # core.key -> (pairing answer, when)
+
+
+def paired(core, config, folder):
+    saved = PAIRED.get(core.key)
+    if saved and time.monotonic() - saved[1] < PAIR_SECONDS:
+        return saved[0]
+    PAIRED[core.key] = (core.request('/device', {'device': config['device'], 'public_key': identity(folder)}), time.monotonic())
+    return PAIRED[core.key][0]
+
+
+def rest(folder, seconds):
+    """Waits `seconds`, or less when the app touches `woke` after waking a sandbox, so it is listed at once."""
+    def touched():
+        with contextlib.suppress(OSError):
+            return (folder / 'woke').stat().st_mtime
+    before, end = touched(), time.monotonic() + seconds
+    while (left := end - time.monotonic()) > 0:
+        time.sleep(min(left, 1))
+        if touched() != before:
+            return
 
 
 def run(folder):
@@ -1052,13 +1885,10 @@ def run(folder):
     def stop(*_):
         raise KeyboardInterrupt()
     signal.signal(signal.SIGTERM, stop)
-    if not WINDOWS:  # Mac access is macOS and Linux only (macAccessSupported).
-        threading.Thread(target=MacJobs(folder).serve, daemon=True).start()
     with (folder / 'lock').open('a') as lock:
-        if WINDOWS:
-            claim(folder, lock)
-        else:
-            exclusive(lock)
+        claim(folder, lock)  # Before Mac jobs, so a second helper never takes any.
+        jobs = MacJobs(folder)
+        threading.Thread(target=jobs.serve, daemon=True).start()
         try:
             while True:
                 try:
@@ -1080,10 +1910,12 @@ def run(folder):
                     if denied:
                         raise denied
                     desired, reached, failure = {}, 0, None
+                    for key in set(PAIRED) - {core.key for core in listed}:
+                        del PAIRED[key]
                     # Sandboxes first, so a VM that turns this Mac away can't block their Mac access.
                     for core in sorted(listed, key=lambda core: not core.sandbox):
                         try:
-                            metadata = core.request('/device', {'device': config['device'], 'public_key': identity(folder)})
+                            metadata = paired(core, config, folder)
                             reached += core.sandbox
                             for entry in core.request('')['previews']:
                                 port = entry['port']
@@ -1091,6 +1923,7 @@ def run(folder):
                                     raise ValueError('Invalid preview registration')
                                 desired[(core.key, port)] = (core, entry['generation'], metadata)
                         except (OSError, ValueError) as error:
+                            PAIRED.pop(core.key, None)
                             if not core.sandbox:
                                 raise  # A sandbox may fall asleep at any moment; the others keep working.
                             # An HTTP answer means this Mac reaches sandboxes and the sandbox side declined: paired with
@@ -1133,7 +1966,8 @@ def run(folder):
                         ready = tunnel.healthy()
                         error = None
                         if not ready:
-                            if tunnel.process.poll() is not None:
+                            # Nothing came back through the tunnel, so this says nothing about the app (#1798, #2016).
+                            if tunnel.process.poll() is not None or getattr(tunnel.process, 'refused', False):
                                 error = 'Tunnel unavailable' if tunnel.relay else 'SSH connection unavailable'
                             elif reachable(tunnel.socket_path):
                                 error = 'Cloud HTTP server unavailable'
@@ -1141,7 +1975,9 @@ def run(folder):
                             tunnel.core.request('/report', {'device': config['device'], 'port': tunnel.port, 'generation': tunnel.generation,
                                                             'local_port': tunnel.server.server_port if ready else None, 'error': error})
                         except ControlError as failure:
-                            if failure.code != 409 and not tunnel.core.sandbox:
+                            if failure.code == 409:
+                                PAIRED.pop(tunnel.core.key, None)  # Core lost this Mac's pairing: pair at the next check.
+                            elif not tunnel.core.sandbox:
                                 raise
                         except (OSError, ValueError):
                             if not tunnel.core.sandbox:
@@ -1158,9 +1994,10 @@ def run(folder):
                         save(folder / 'status.json', {'state': 'offline', 'message': problem[0], 'detail': problem[1], 'checkedAt': int(time.time() * 1000)})
                     else:
                         save(folder / 'status.json', {'state': 'connected', 'count': len(tunnels), 'ready': ready, 'checkedAt': int(time.time() * 1000)})
-                    delay = 2
+                    delay, wait = 2, POLL_SECONDS
                 except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
                     refresh = True
+                    PAIRED.clear()
                     if time.monotonic() - NET['at'] >= NETWORK_SECONDS:
                         network()  # An unreachable VM may sit behind a proxy that just changed.
                     transient = isinstance(error, (OSError, ControlError)) and not (isinstance(error, ControlError) and error.code not in (429, 500, 502, 503, 504))
@@ -1169,11 +2006,13 @@ def run(folder):
                             tunnel.close()
                         tunnels.clear()
                     save(folder / 'status.json', {'state': 'offline', 'message': str(error) if isinstance(error, ValueError) else 'Preview connection unavailable; reconnecting automatically', 'checkedAt': int(time.time() * 1000)})
-                    delay = min(delay * 2, 30) if not tunnels else 2
-                time.sleep(delay)
+                    delay = wait = min(delay * 2, 30) if not tunnels else 2
+                rest(folder, wait)
         except KeyboardInterrupt:
             pass
         finally:
+            if jobs:  # First, so a failing tunnel can't skip it.
+                jobs.close()
             for tunnel in tunnels.values():
                 tunnel.close()
 
@@ -1187,7 +2026,7 @@ def systemd(folder, label, stop):
     unit = label + '.service'
     path = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'systemd/user' / unit
     def systemctl(*args):
-        subprocess.run(['systemctl', '--user', *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['systemctl', '--user', *args], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if stop:
         if path.exists():
             systemctl('disable', '--now', unit)
@@ -1202,6 +2041,8 @@ def systemd(folder, label, stop):
     systemctl('enable', '--now', unit)
 
 
+# A start can be slow at login, or macOS can block the helper from running in the background (#109).
+LOGIN_ITEMS = 'Wait a minute, or allow Cloudroom in System Settings > General > Login Items'
 # Runs the helper under the signed Cloudroom app, so macOS applies Cloudroom's Desktop/Documents/Downloads permission, not python3's.
 LAUNCHER = ("const e={...process.env};delete e.ELECTRON_RUN_AS_NODE;"
             "const c=require('child_process').spawn(process.argv[1],process.argv.slice(2),{stdio:'inherit',env:e});"
@@ -1215,14 +2056,15 @@ def running(folder):
             exclusive(lock)
         except BlockingIOError:
             return True
-        lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        if WINDOWS:  # Elsewhere closing the file unlocks it.
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
         return False
 
 
 def claim(folder, lock):
-    """Windows: take the folder's lock (a running() check may hold it for a moment), drop an old stop request, confirm the
-    start to the launcher, and exit as soon as a stop request arrives."""
+    """Take the folder's lock (a running() check may hold it for a moment). Windows: also drop an old stop request, confirm
+    the start to the launcher, and exit as soon as a stop request arrives."""
     deadline = time.monotonic() + 5
     while True:
         try:
@@ -1232,6 +2074,8 @@ def claim(folder, lock):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(.05)
+    if not WINDOWS:
+        return
     (folder / 'stop').unlink(missing_ok=True)
     if os.environ.get('CLOUDROOM_PREVIEW_START'):
         (folder / 'started').write_text(os.environ['CLOUDROOM_PREVIEW_START'])
@@ -1277,7 +2121,12 @@ def windows(folder, stop):
             return
         start = uuid.uuid4().hex
         (folder / 'started').unlink(missing_ok=True)
-        command = [sys.executable, '-B', '-E', '-s', str(folder / 'client.py'), 'run', str(folder)]
+        # The helper needs these before it confirms, and its own error is lost once it detaches (#2459).
+        (folder / 'stop').unlink(missing_ok=True)
+        if (folder / 'ports.json').exists():
+            (folder / 'ports.json').open('rb').close()
+        # UTF-8 mode (-X utf8): -E ignores PYTHONUTF8, and Windows' code page can't encode every character (#958).
+        command = [sys.executable, '-B', '-E', '-s', '-X', 'utf8', str(folder / 'client.py'), 'run', str(folder)]
         flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         for extra in (subprocess.CREATE_BREAKAWAY_FROM_JOB, 0):  # Outlive the app's job object when it allows that.
             try:
@@ -1335,18 +2184,58 @@ def launch(folder, stop=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open('wb') as file:
         plistlib.dump(job, file)
-    subprocess.run(['launchctl', 'bootstrap', domain, str(path)], check=True, capture_output=True)
+    started = subprocess.run(['launchctl', 'bootstrap', domain, str(path)], capture_output=True)
+    if started.returncode:
+        reason = ' '.join(started.stderr.decode(errors='replace').split())[:150]
+        raise OSError(f'launchctl failed (exit code {started.returncode})' + (': ' + reason if reason else '') + '. ' + LOGIN_ITEMS)
 
 
-def configure(folder, connection_file, activate, allow_private, mac_access=None, launcher=None, restart=False, own=False):
-    folder.mkdir(mode=0o700, parents=True, exist_ok=True); folder.chmod(0o700)
+def grant_user(folder):
+    """Windows: mkdir's 0o700 gives the user only OWNER RIGHTS, so a file an elevated Cloudroom or installer writes here
+    belongs to Administrators and the normal app can't open it (#2459). Name the user too; new files inherit it. Best effort,
+    and only with the user's normal token: an elevated grant could reach a folder the user may not change."""
+    import ctypes
+    system = Path(os.environ.get('SystemRoot', r'C:\Windows')) / 'System32'
+    run = lambda *command: subprocess.run(command, capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return
+        # Not while a file is already blocked: icacls would pin its entries, and then the repair in Settings would fail.
+        for path in folder.iterdir():
+            if path.is_file():
+                path.open('rb').close()
+        sid = run(str(system / 'whoami.exe'), '/user', '/fo', 'csv', '/nh').stdout.strip().split(',')[-1].strip('"')
+        if sid.startswith('S-1-'):
+            run(str(system / 'icacls.exe'), str(folder), '/grant', f'*{sid}:(OI)(CI)F', '/C', '/Q')
+
+
+def parked(folder, account):
+    """Where an account's setup waits while another account is signed in (#109)."""
+    return folder.with_name(folder.name + '-' + (str(uuid.UUID(account)) if account else 'none'))
+
+
+def configure(folder, connection_file, activate, allow_private, mac_access=None, launcher=None, restart=False, own=False, grant=True):
     connection = private_json(connection_file)
     # Sandbox-only accounts have no VM address; their cores come from the website while awake.
     binding = [(connection.get('url') or 'sandboxes').rstrip('/'), (connection.get('account') or {}).get('id')]
     old = private_json(folder / 'config.json') if (folder / 'config.json').exists() else None
-    # The same account may move from its VM to sandboxes; another account never reuses this setup.
+    # The same account may move from its VM to sandboxes. Another account never reuses this setup's key or device: its folder
+    # waits beside this one, and an account that signs in again gets its own back, so sandboxes that slept through the
+    # switch still know its device (#109). Each step is one rename, so nothing is lost halfway.
     if old and old['binding'][1] != binding[1]:
-        raise ValueError('Preview setup belongs to another account; use a separate directory')
+        launch(folder, stop=True)
+        if running(folder):  # Linux skips a helper whose unit file is gone.
+            raise OSError('The previous helper is still running')
+        shutil.rmtree(parked(folder, old['binding'][1]), ignore_errors=True)  # A stale copy; this folder is newer.
+        folder.rename(parked(folder, old['binding'][1]))
+        old = None
+    if not old and parked(folder, binding[1]).is_dir():
+        shutil.rmtree(folder, ignore_errors=True)  # No setup in it.
+        parked(folder, binding[1]).rename(folder)
+        old = private_json(folder / 'config.json') if (folder / 'config.json').exists() else None
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True); folder.chmod(0o700)
+    if WINDOWS and grant:  # The folder this account uses, before any helper file is written; each launch also fixes an older one.
+        grant_user(folder)
     source = Path(__file__).resolve()
     target = folder / 'client.py'
     allow_private = bool(allow_private if allow_private is not None else (old or {}).get('allowPrivateSsh', False))
@@ -1361,16 +2250,20 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
     # bundled git. launchd starts the helper with a bare PATH, so Mac jobs add this one. A failed lookup (unset) keeps the
     # last good one, so a slow launch neither loses it nor restarts the helper (#338).
     shell_path = os.environ.get('CLOUDROOM_SHELL_PATH') or (old or {}).get('shellPath')
+    # The app's own loopback server, so a nested room-cli in a Mac job reaches this app (#1243, #1290).
+    server_url = os.environ.get('CLOUDROOM_SERVER_URL') or None
+    # Windows: the folder of the app's bundled room-cli, for Mac jobs' PATH (#958). Each launch reconfigures, so updates follow.
+    room_cli = os.environ.get('CLOUDROOM_ROOM_CLI') or None
     if (activate and not restart and old and old['binding'] == binding and old.get('connectionFile') == str(connection_file)
             and old.get('allowPrivateSsh', False) == allow_private and old.get('macAccess') == mac_access
             and old.get('launcher') == launcher and old.get('binary') == binary and old.get('ownThreads', False) == own
-            and old.get('website') == trusted and old.get('shellPath') == shell_path and target.is_file() and target.read_bytes() == source.read_bytes()):
+            and old.get('website') == trusted and old.get('shellPath') == shell_path and old.get('serverUrl') == server_url and old.get('roomCli') == room_cli and target.is_file() and target.read_bytes() == source.read_bytes()):
         if WINDOWS:
             if running(folder):
                 return {'enabled': True}
         else:
             check = ['systemctl', '--user', 'is-active', '--quiet', label(folder) + '.service'] if sys.platform.startswith('linux') else ['launchctl', 'print', f'gui/{os.getuid()}/' + label(folder)]
-            if subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            if subprocess.run(check, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0 and running(folder):
                 return {'enabled': True}
     if activate:
         launch(folder, stop=True)
@@ -1379,11 +2272,18 @@ def configure(folder, connection_file, activate, allow_private, mac_access=None,
         temporary.write_bytes(source.read_bytes()); temporary.chmod(0o600); temporary.replace(target)
     config = {'device': old['device'] if old else uuid.uuid4().hex, 'binding': binding, 'connectionFile': str(connection_file),
               'allowPrivateSsh': allow_private, 'macAccess': mac_access, 'launcher': launcher, 'binary': binary, **({'ownThreads': True} if own else {}),
-              **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {})}
+              **({'shellPath': shell_path} if shell_path else {}), **({'website': trusted} if trusted else {}),
+              **({'serverUrl': server_url} if server_url else {}), **({'roomCli': room_cli} if room_cli else {})}
     save(folder / 'config.json', config)
     identity(folder)
     if activate:
         launch(folder)
+        # launchd can take the job and never run it, say when macOS blocks Cloudroom's background items (#109).
+        deadline = time.monotonic() + 10
+        while not running(folder):
+            if time.monotonic() >= deadline:
+                raise OSError("The helper didn't start" + ('. ' + LOGIN_ITEMS if sys.platform == 'darwin' else ''))
+            time.sleep(.2)
     return {'enabled': True}
 
 
@@ -1400,12 +2300,14 @@ def main():
     parser.add_argument('--own-threads', action='store_true', help='Cloudroom Dev: use only the sandboxes of threads this app woke')
     args = parser.parse_args()
     folder = args.directory.expanduser().resolve()
+    # Windows: no access grant through a junction or link, which could point it at another folder (#2459).
+    grant = os.path.normcase(os.path.abspath(args.directory.expanduser())) == os.path.normcase(str(folder))
     if args.command == 'configure':
         if args.connection is None:
             raise ValueError('--connection is required')
         print(json.dumps(configure(folder, args.connection.expanduser().resolve(strict=True), not args.no_start, args.allow_private_ssh,
                                    'full' if args.mac_access == 'on' else args.mac_access,
-                                   str(args.launcher.resolve(strict=True)) if args.launcher else None, args.restart, args.own_threads)))
+                                   str(args.launcher.resolve(strict=True)) if args.launcher else None, args.restart, args.own_threads, grant)))
     elif args.command == 'run':
         run(folder)
     elif args.command in {'stop', 'pause'}:
@@ -1416,10 +2318,20 @@ def main():
             return
         config = private_json(folder / 'config.json')
         if not config.get('revoked', False):
-            # Best effort: a sleeping sandbox or an archived VM must never block sign-out.
-            for core in cores(config):
-                with contextlib.suppress(OSError, ValueError):
-                    core.request('/device/' + config['device'], method='DELETE')
+            # Best effort: a sleeping sandbox or an archived VM must never block sign-out. Ask 32 cores at a time, so
+            # open files stay far below macOS's 256, and stop waiting after 12 s, inside the app's 20 s (#1691).
+            path = '/device/' + config['device']
+            def revoke():
+                for core in pending:  # One shared iterator: each core is asked once.
+                    with contextlib.suppress(OSError, ValueError):
+                        core.request(path, method='DELETE')
+            deadline = time.monotonic() + 12
+            pending = iter(cores(config))
+            asks = [threading.Thread(target=revoke, daemon=True) for _ in range(32)]
+            for ask in asks:
+                ask.start()
+            for ask in asks:
+                ask.join(max(0, deadline - time.monotonic()))
             config['revoked'] = True
             save(folder / 'config.json', config)
         save(folder / 'status.json', {'state': 'offline', 'checkedAt': int(time.time() * 1000)})
@@ -1432,5 +2344,10 @@ if __name__ == '__main__':
     try:
         main()
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
-        print(str(error) if isinstance(error, ValueError) else 'Preview setup failed; inspect private configuration, SSH access, and macOS background-job permissions', file=sys.stderr)
+        # The real cause, so Settings can show it (#109). A failed launchctl says why on stderr.
+        text = str(error) if isinstance(error, (ValueError, OSError)) else f'{type(error).__name__}: {error}'
+        if isinstance(error, subprocess.CalledProcessError):
+            output = error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr or ''
+            text = f'{Path(str(error.cmd[0])).name} failed (exit code {error.returncode})' + (': ' + ' '.join(output.split()) if output.strip() else '')
+        print(text[:300], file=sys.stderr)
         sys.exit(1)

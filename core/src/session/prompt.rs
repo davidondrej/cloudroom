@@ -1,7 +1,10 @@
 use super::Receipt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs, path::Path, sync::Mutex};
+
+/// Claiming, putting back and adding a note take turns, so a note added mid-claim is never lost.
+static NOTICE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PromptState {
@@ -83,6 +86,101 @@ pub fn apply(prompts: &mut BTreeMap<String, PromptState>, receipt: &Receipt) {
             }
         }
         _ => {}
+    }
+}
+
+/// The website leaves `notice` in the state folder when it restores a thread onto a fresh machine
+/// (web/lib/sandboxes.ts). The next prompt the agent gets carries it, once: deleting the file claims it, so two
+/// sessions never both add it. A prompt starting with a slash command stays as it is; the note waits for the next one.
+/// Returns the note it took, so a send that fails can put it back (`put_back_notice`).
+pub fn with_notice(state_dir: &Path, mut input: Value) -> (Value, Option<String>) {
+    if !input.is_object() || text(&input).trim_start().starts_with('/') {
+        return (input, None);
+    }
+    let _turn = NOTICE.lock().unwrap();
+    let path = state_dir.join("notice");
+    let Ok(note) = fs::read_to_string(&path) else {
+        return (input, None);
+    };
+    if fs::remove_file(&path).is_err() || note.trim().is_empty() {
+        return (input, None);
+    }
+    let note = note.trim().to_owned();
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut)
+        && !parts.is_empty()
+    {
+        parts.push(serde_json::json!({"type":"text","text":format!("\n{note}")}));
+    }
+    input["text"] = Value::String(format!("{}\n\n{note}", text(&input)));
+    (input, Some(note))
+}
+
+fn session_note(state_dir: &Path, session: &str) -> std::path::PathBuf {
+    state_dir.join("notes").join(session)
+}
+
+/// A note for one session's next prompt: a switched session's history (#237). Kept until a prompt delivers it.
+pub fn add_session_note(state_dir: &Path, session: &str, note: &str) {
+    let path = session_note(state_dir, session);
+    let _ = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(&path, note));
+}
+
+fn history_copy(state_dir: &Path, session: &str) -> std::path::PathBuf {
+    state_dir.join("histories").join(session)
+}
+
+/// Core's own copy of the history a switched session got (#237). The session's next switch reads this one, never the
+/// file in the agent's folder: the agent can replace that with a link to a file only Core may read.
+pub fn save_history(state_dir: &Path, session: &str, history: &str) {
+    let path = history_copy(state_dir, session);
+    let _ = fs::create_dir_all(path.parent().unwrap()).and_then(|_| fs::write(&path, history));
+}
+
+pub fn saved_history(state_dir: &Path, session: &str) -> Option<String> {
+    fs::read_to_string(history_copy(state_dir, session)).ok()
+}
+
+/// Adds the session's note to its prompt, once: before the user's text, as the agent should read it first.
+pub fn with_session_note(
+    state_dir: &Path,
+    session: &str,
+    mut input: Value,
+) -> (Value, Option<String>) {
+    let path = session_note(state_dir, session);
+    let Ok(note) = fs::read_to_string(&path) else {
+        return (input, None);
+    };
+    if !input.is_object() || fs::remove_file(&path).is_err() {
+        return (input, None);
+    }
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut) {
+        parts.insert(
+            0,
+            serde_json::json!({"type":"text","text":format!("{note}\n\n")}),
+        );
+    }
+    input["text"] = Value::String(format!("{note}\n\n{}", text(&input)));
+    (input, Some(note))
+}
+
+/// A note whose prompt never reached the agent waits for the next one, after any note written since.
+pub fn put_back_notice(state_dir: &Path, note: &str) {
+    add_notice(state_dir, note);
+}
+
+/// Core's own notes (idle burn) join any note still waiting, once each, so the next prompt carries them all.
+pub fn add_notice(state_dir: &Path, note: &str) {
+    let _turn = NOTICE.lock().unwrap();
+    let path = state_dir.join("notice");
+    let waiting = fs::read_to_string(&path).unwrap_or_default();
+    // Bounded: a note that repeats while no prompt comes is added once.
+    if waiting.contains(note.trim()) || waiting.len() > 16 * 1024 {
+        return;
+    }
+    let temporary = state_dir.join(".notice");
+    let text = format!("{}\n{note}", waiting.trim_end());
+    if fs::write(&temporary, text.trim_start()).is_ok() {
+        let _ = fs::rename(temporary, path);
     }
 }
 

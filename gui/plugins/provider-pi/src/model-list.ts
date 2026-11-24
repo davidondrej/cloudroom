@@ -125,6 +125,8 @@ function getPiReasoningEfforts(model: PiCatalogModel): ModelReasoningEffort[] {
 }
 
 function describePiModel(model: PiCatalogModel): string {
+  // Cloudroom Agent's one model (plugins/provider-cloudroom-agent) runs on this bridge but isn't "via Pi" to the user.
+  if (model.provider === "cloudroom") return "Frontier open source models";
   const capabilities: string[] = [];
   capabilities.push(model.reasoning ? "reasoning" : "non-reasoning");
   if (model.input.includes("image")) {

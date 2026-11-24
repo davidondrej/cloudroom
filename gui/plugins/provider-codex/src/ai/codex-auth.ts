@@ -19,6 +19,8 @@ export interface CodexChatGptAuthCredentials {
   accountId: string;
   accountEmail: string | null;
   expired: boolean;
+  /** A refresh token is saved, so Codex renews an expired access token on its next request. Never used here. */
+  canRenew: boolean;
   isFedrampAccount: boolean;
 }
 
@@ -157,6 +159,7 @@ function classifyAuthJson(value: JsonValue): ClassifiedAuthJson {
         accountEmail(accessToken) ??
         (idToken === null ? null : accountEmail(idToken)),
       expired: tokenExpired(accessToken),
+      canRenew: nonEmptyString(tokens.refresh_token) !== null,
       isFedrampAccount:
         claims?.chatgpt_account_is_fedramp === true ||
         idTokenClaims?.chatgpt_account_is_fedramp === true,

@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 import type {
   DirectoryEntry,
   HostDaemonOnlineRpcResult,
@@ -33,6 +34,7 @@ import {
   readWindowsDriveTypes,
 } from "./filesystem-roots.js";
 import { resolveNonSymlinkDirectoryPath } from "./root-path.js";
+import { folderActivity, isPrivacyFolder, searchFolders } from "./folder-search.js";
 
 const SAFE_GIT_REF_REGEX = /^[A-Za-z0-9_./~^@-]+$/;
 
@@ -52,9 +54,36 @@ function assertSafeGitRef(ref: string): void {
   }
 }
 
+// Agents often write Windows paths as `/C:/...` (file-URL style). On Windows
+// that form never names a real file (`:` is invalid in names), so drop the slash.
+export function normalizeWindowsDrivePath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === "win32" && /^\/[A-Za-z]:[\\/]/u.test(filePath)
+    ? filePath.slice(1)
+    : filePath;
+}
+
+export function isWindowsNetworkPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "win32" && isWindowsNetworkOrDevicePath(filePath);
+}
+
 function assertAbsoluteHostDiskPathCommand(command: HostDiskPathCommand): void {
   if (!path.isAbsolute(command.path)) {
     throw new CommandDispatchError("invalid_path", "Path must be absolute");
+  }
+  if (
+    isWindowsNetworkPath(command.path) ||
+    (command.rootPath !== undefined && isWindowsNetworkPath(command.rootPath))
+  ) {
+    throw new CommandDispatchError(
+      "invalid_path",
+      "Network paths are not supported",
+    );
   }
 
   const rootPath = command.rootPath;
@@ -134,6 +163,8 @@ export async function listHostPaths(
 }
 
 const DIRECTORY_BROWSE_SKIP_NAMES = new Set(["node_modules"]);
+/** Above this many folders a listing skips the per-folder activity probe. */
+const ACTIVITY_PROBE_MAX_FOLDERS = 2_000;
 const resolveBrowsedDirectory = promisify(resolveSymlinksPreservingDrive);
 
 function compareDirectoryEntries(a: DirectoryEntry, b: DirectoryEntry): number {
@@ -175,8 +206,20 @@ export async function browseHostDirectory(
       ? await resolveBrowsedDirectory(requestedPath)
       : await fs.realpath(requestedPath);
 
+  const parent = path.dirname(directory);
+  const listing = async (entries: DirectoryEntry[]) => ({
+    directory,
+    parent: parent === directory ? null : parent,
+    entries,
+    roots: await listFilesystemRoots({ readDriveTypes }),
+  });
+  if (command.search !== undefined) {
+    return listing(await searchFolders(directory, command.search));
+  }
+
   const dirents = await fs.readdir(directory, { withFileTypes: true });
   const entries: DirectoryEntry[] = [];
+  const links = new Set<string>();
   for (const dirent of dirents) {
     if (dirent.name.startsWith(".")) continue;
     if (DIRECTORY_BROWSE_SKIP_NAMES.has(dirent.name)) continue;
@@ -189,6 +232,7 @@ export async function browseHostDirectory(
       } catch {
         continue;
       }
+      links.add(fullPath);
     } else if (dirent.isDirectory()) {
       kind = "directory";
     } else if (dirent.isFile()) {
@@ -201,14 +245,14 @@ export async function browseHostDirectory(
   }
 
   entries.sort(compareDirectoryEntries);
-
-  const parent = path.dirname(directory);
-  return {
-    directory,
-    parent: parent === directory ? null : parent,
-    entries,
-    roots: await listFilesystemRoots({ readDriveTypes }),
-  };
+  // A link may point into a privacy-protected folder, so it gets no activity probe.
+  const folders = entries.filter((entry) => entry.kind === "directory" && !links.has(entry.path));
+  if (folders.length <= ACTIVITY_PROBE_MAX_FOLDERS) {
+    await Promise.all(folders.map(async (folder) => {
+      Object.assign(folder, await folderActivity(folder.path, !isPrivacyFolder(folder.path)));
+    }));
+  }
+  return listing(entries);
 }
 
 export async function checkHostPathsExist(
@@ -232,6 +276,7 @@ export async function readHostFile(
   command: CommandOf<"host.read_file">,
   options?: Pick<CommandDispatchOptions, "runtimeManager">,
 ): Promise<HostDaemonOnlineRpcResult<"host.read_file">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
 
   if (command.ref !== undefined) {
@@ -269,6 +314,7 @@ export async function readHostFile(
 export async function readHostFileMetadata(
   command: CommandOf<"host.file_metadata">,
 ): Promise<HostDaemonOnlineRpcResult<"host.file_metadata">> {
+  command = { ...command, path: normalizeWindowsDrivePath(command.path) };
   assertAbsoluteHostDiskPathCommand(command);
   return readFileMetadataForTransport({
     resolvedPath: command.path,
@@ -288,8 +334,9 @@ export async function readHostRelativeFile(
 }
 
 async function pathExists(path: string): Promise<boolean> {
+  if (isWindowsNetworkPath(path)) return false;
   try {
-    await fs.stat(path);
+    await fs.stat(normalizeWindowsDrivePath(path));
     return true;
   } catch (error) {
     if (

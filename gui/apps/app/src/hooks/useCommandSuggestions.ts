@@ -193,9 +193,21 @@ export function useCommandSuggestions(
     if (!isActive) {
       return [];
     }
+    const actionNames = new Set(
+      (args.promptActions ?? []).flatMap(({ command }) =>
+        command?.trigger === trigger ? [command.name] : [],
+      ),
+    );
     const discoveredSuggestions = filterCommandSuggestions(
       (commandsQuery.data?.commands ?? [])
         .map(toProviderCommandSuggestion)
+        .map((suggestion) =>
+          suggestion.source === "command" &&
+          suggestion.origin !== "builtin" &&
+          actionNames.has(suggestion.name)
+            ? { ...suggestion, insertAsText: true as const }
+            : suggestion,
+        )
         .filter(
           (suggestion) =>
             args.commandScope === "thread" ||
@@ -209,15 +221,26 @@ export function useCommandSuggestions(
       args.commandScope === "thread"
         ? filterCommandSuggestions([COPY_COMMAND_SUGGESTION], trimmedQuery)
         : [];
+    // The user's own command wins its name; the action stays in the + menu.
+    const ownNames = new Set(
+      discoveredSuggestions.flatMap((suggestion) =>
+        suggestion.insertAsText ? [suggestion.name] : [],
+      ),
+    );
     return mergeCommandSuggestions(
-      [...appSuggestions, ...promptActionSuggestions],
+      [
+        ...appSuggestions,
+        ...promptActionSuggestions.filter(({ name }) => !ownNames.has(name)),
+      ],
       discoveredSuggestions,
     );
   }, [
     commandsQuery.data?.commands,
     args.commandScope,
+    args.promptActions,
     isActive,
     promptActionSuggestions,
+    trigger,
     trimmedQuery,
   ]);
 

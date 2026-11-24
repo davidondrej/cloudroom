@@ -1,10 +1,12 @@
 import { rebuiltResponse } from "./response-encoding.js";
+import { withTimeout } from "./timeout.js";
 
 const CACHE_HOST = "https://bb-connect-asset-cache.internal";
 const SHELL_CACHE_HOST = "https://bb-connect-shell-cache.internal";
 const MIN_CACHEABLE_MAX_AGE = 300;
 const SHELL_CACHE_CONTROL = "no-cache";
 const SHELL_STORE_CACHE_CONTROL = "max-age=300";
+const CACHE_TIMEOUT_MS = 2_000;
 
 export type FetchOrigin = (init?: { ifNoneMatch: string }) => Promise<Response>;
 
@@ -28,6 +30,11 @@ function isCacheable(resp: Response): boolean {
   if (/\b(no-store|no-cache|private)\b/i.test(cc)) return false;
   const maxAge = cc.match(/max-age=(\d+)/i);
   return maxAge ? Number(maxAge[1]) >= MIN_CACHEABLE_MAX_AGE : false;
+}
+
+/** A slow cache counts as a miss. */
+function match(key: Request): Promise<Response | undefined> {
+  return withTimeout(caches.default.match(key), CACHE_TIMEOUT_MS, "cache").catch(() => undefined);
 }
 
 export interface CacheResult {
@@ -122,16 +129,14 @@ export async function serveWithCache(
 
   const url = new URL(request.url);
   const key = cacheKey(namespace, url);
-  const cache = caches.default;
-
-  const hit = await cache.match(key);
+  const hit = await match(key);
   if (hit) {
     const r = rebuiltResponse(hit.body, hit);
     r.headers.set("x-bb-cache", "hit");
     return { cacheable: true, response: r };
   }
 
-  const shellHit = await cache.match(shellCacheKey(namespace, url));
+  const shellHit = await match(shellCacheKey(namespace, url));
   if (shellHit) {
     return serveRevalidatedShell(
       request,
@@ -148,7 +153,7 @@ export async function serveWithCache(
     return storeShellAndServe(resp, namespace, url, ctx);
   }
   if (isCacheable(resp)) {
-    ctx.waitUntil(cache.put(key, resp.clone()));
+    ctx.waitUntil(caches.default.put(key, resp.clone()));
     const r = new Response(resp.body, resp);
     r.headers.set("x-bb-cache", "miss");
     return { cacheable: true, response: r };

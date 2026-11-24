@@ -3,6 +3,7 @@ import { decodeBase64Bytes, encodeBase64Bytes } from "@/lib/base64-bytes";
 import { sdk } from "@/lib/sdk";
 import {
   buildFilePreview,
+  getMediaFilePreviewType,
   isHtmlFilePreviewPath,
   normalizeFilePreviewMimeType,
   type FilePreview,
@@ -10,39 +11,6 @@ import {
 import type { QueryOptions } from "./query-helpers";
 import { hostFilePreviewQueryKey } from "./query-keys";
 import { HEAVY_PAYLOAD_QUERY_POLICY } from "./query-policies";
-
-interface HostMediaPreviewType {
-  kind: "image" | "video";
-  mimeType: string;
-}
-
-const HOST_MEDIA_PREVIEW_TYPES = new Map<string, HostMediaPreviewType>([
-  [".avif", { kind: "image", mimeType: "image/avif" }],
-  [".bmp", { kind: "image", mimeType: "image/bmp" }],
-  [".gif", { kind: "image", mimeType: "image/gif" }],
-  [".heic", { kind: "image", mimeType: "image/heic" }],
-  [".heif", { kind: "image", mimeType: "image/heif" }],
-  [".ico", { kind: "image", mimeType: "image/vnd.microsoft.icon" }],
-  [".jpeg", { kind: "image", mimeType: "image/jpeg" }],
-  [".jpg", { kind: "image", mimeType: "image/jpeg" }],
-  [".png", { kind: "image", mimeType: "image/png" }],
-  [".svg", { kind: "image", mimeType: "image/svg+xml" }],
-  [".svgz", { kind: "image", mimeType: "image/svg+xml" }],
-  [".tif", { kind: "image", mimeType: "image/tiff" }],
-  [".tiff", { kind: "image", mimeType: "image/tiff" }],
-  [".webp", { kind: "image", mimeType: "image/webp" }],
-  [".3g2", { kind: "video", mimeType: "video/3gpp2" }],
-  [".3gp", { kind: "video", mimeType: "video/3gpp" }],
-  [".avi", { kind: "video", mimeType: "video/x-msvideo" }],
-  [".m4v", { kind: "video", mimeType: "video/x-m4v" }],
-  [".mov", { kind: "video", mimeType: "video/quicktime" }],
-  [".mp4", { kind: "video", mimeType: "video/mp4" }],
-  [".mpeg", { kind: "video", mimeType: "video/mpeg" }],
-  [".mpg", { kind: "video", mimeType: "video/mpeg" }],
-  [".ogv", { kind: "video", mimeType: "video/ogg" }],
-  [".webm", { kind: "video", mimeType: "video/webm" }],
-  [".wmv", { kind: "video", mimeType: "video/x-ms-wmv" }],
-]);
 
 function splitAbsoluteHostFilePath(path: string): {
   name: string;
@@ -59,15 +27,6 @@ function splitAbsoluteHostFilePath(path: string): {
     rootPath = `${rootPath}${path[lastSeparatorIndex] ?? "\\"}`;
   }
   return { name, rootPath };
-}
-
-function getHostMediaPreviewType(name: string): HostMediaPreviewType | null {
-  const extensionIndex = name.lastIndexOf(".");
-  if (extensionIndex <= 0) return null;
-  return (
-    HOST_MEDIA_PREVIEW_TYPES.get(name.slice(extensionIndex).toLowerCase()) ??
-    null
-  );
 }
 
 export function useHostFilePreview(
@@ -94,7 +53,7 @@ export function useHostFilePreview(
         previewLease === null
           ? null
           : `${previewLease.baseUrl}/${encodeURIComponent(name)}`;
-      const mediaPreviewType = getHostMediaPreviewType(name);
+      const mediaPreviewType = getMediaFilePreviewType(name);
       if (previewUrl !== null && mediaPreviewType !== null) {
         return { ...mediaPreviewType, name, path: activePath, url: previewUrl };
       }
@@ -120,6 +79,7 @@ export function useHostFilePreview(
         previewUrl !== null ||
         (preview.kind !== "image" &&
           preview.kind !== "video" &&
+          preview.kind !== "audio" &&
           !isHtmlFilePreviewPath(activePath))
       ) {
         return preview;

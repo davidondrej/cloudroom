@@ -77,9 +77,53 @@ async fn probe(config: &Config, storage: &Guard, key: Option<&str>) -> Status {
             Ok::<_, io::Error>(result)
         }).await;
         let _ = child.kill().await;
-        check.map_err(|_| io::Error::other("Cursor account check timed out"))?
+        let mut result = check.map_err(|_| io::Error::other("Cursor account check timed out"))??;
+        // `status` vouches for any saved token, even one Cursor no longer accepts, so a sign-in is proven by listing
+        // models, as a key is. A dead one then asks the user to connect again, not retry for ever.
+        if !api_key && result.state == "connected" {
+            match lists_models(config, storage).await {
+                Some(true) => {}
+                Some(false) => result = Status::new("missing", None),
+                None => return Err(io::Error::other("Cursor sign-in could not be checked")),
+            }
+        }
+        Ok(result)
     }.await;
     result.unwrap_or_else(|_| Status::new("unavailable", Some("Could not verify Cursor on the cloud machine. Check its installation, connection and disk space.")))
+}
+
+/// Whether Cursor accepts the saved sign-in: listing models needs it. None when its answer doesn't say (a network
+/// error, a timeout), so the check counts as unavailable and is retried, as before.
+async fn lists_models(config: &Config, storage: &Guard) -> Option<bool> {
+    let attempt = async {
+        let mut command = command(config)?;
+        command
+            .arg("--list-models")
+            .stdout(std::process::Stdio::null());
+        let (mut child, _workload) = storage.spawn_writer(&mut command)?;
+        drop(child.stdin.take());
+        let mut errors = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("Cursor stderr unavailable"))?;
+        let mut bytes = Vec::new();
+        let done = tokio::time::timeout(Duration::from_secs(30), async {
+            (&mut errors).take(65536).read_to_end(&mut bytes).await?;
+            child.wait().await
+        })
+        .await;
+        let _ = child.kill().await;
+        let status = done.map_err(|_| io::Error::other("Cursor model list timed out"))??;
+        Ok::<_, io::Error>((status.success(), bytes))
+    }
+    .await;
+    match attempt {
+        Ok((true, _)) => Some(true),
+        Ok((false, errors)) if String::from_utf8_lossy(&errors).contains("Authentication") => {
+            Some(false)
+        }
+        _ => None,
+    }
 }
 
 struct Login {

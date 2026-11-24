@@ -1,4 +1,5 @@
 pub mod files;
+pub mod repo_sync;
 pub mod storage;
 
 use axum::body::Body;
@@ -256,6 +257,37 @@ impl Workspaces {
         Ok(())
     }
 
+    /// Touches the app's project copy heartbeat next to the folder (#2168), as the agent: `/code` is the agent's, and on
+    /// Metal Core's own account can't write there.
+    pub async fn alive(&self, workspace: &Workspace) -> io::Result<()> {
+        let mut command = Command::new("touch");
+        command
+            .env_clear()
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .arg("--")
+            .arg(files::heartbeat(&workspace.path))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        if let Some(policy) = &self.policy {
+            crate::runtime::linux::as_agent(
+                &mut command,
+                policy.agent_uid,
+                policy.agent_gid,
+                None,
+                true,
+            )?;
+        }
+        let status =
+            tokio::time::timeout(std::time::Duration::from_secs(5), command.status()).await??;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!("touch exited with {status}")))
+        }
+    }
+
     pub async fn checkout(&self, workspace: &Workspace) -> io::Result<serde_json::Value> {
         let git = async |args: &[&str]| -> io::Result<Option<String>> {
             let mut command = Command::new("git");
@@ -312,6 +344,10 @@ impl Workspaces {
                         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
                         .collect::<String>()
                 ),
+            ),
+            Some((profile, crate::runtime::Kind::Antigravity, native_id)) => (
+                profile.home.join("conversations"),
+                format!("{native_id}.db"),
             ),
             Some((profile, crate::runtime::Kind::Cursor, _)) => {
                 (profile.home.join("chats"), format!(".teleport-{id}.jsonl"))

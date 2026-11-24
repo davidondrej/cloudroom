@@ -4,8 +4,9 @@ import {
 } from "../environments/path-admission.js";
 import type { EnvironmentRow } from "@cloudroom/db";
 import type { Thread } from "@cloudroom/domain";
-import type { DbConnection } from "@cloudroom/db";
+import { threadHasProviderSession, type DbConnection } from "@cloudroom/db";
 import type { WorkSessionDeps } from "../../types.js";
+import { restoreParkedWorktree } from "../environments/environment-engine.js";
 import { requireEnvironment } from "../lib/entity-lookup.js";
 import {
   goneThreadEnvironmentDetails,
@@ -61,6 +62,11 @@ export async function requireThreadCommandEnvironment(
   args: RequireThreadCommandEnvironmentArgs,
 ): Promise<EnvironmentRow> {
   if (args.thread.environmentId !== null) {
+    await restoreParkedWorktree(
+      deps,
+      args.thread.id,
+      args.thread.environmentId,
+    );
     const environment = requireEnvironment(deps.db, args.thread.environmentId);
     const goneDetails = goneThreadEnvironmentDetails(environment);
     if (goneDetails && environment.environmentProviderId === null) {
@@ -76,6 +82,11 @@ export async function requireThreadCommandEnvironment(
   }
 
   throwThreadEnvironmentUnavailable(
-    threadEnvironmentUnavailableDetails("never_attached", null),
+    threadEnvironmentUnavailableDetails(
+      threadHasProviderSession(deps.db, args.thread.id)
+        ? "destroyed"
+        : "never_attached",
+      null,
+    ),
   );
 }

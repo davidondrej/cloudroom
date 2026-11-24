@@ -1,10 +1,12 @@
 import { type PromptInput } from "@cloudroom/domain";
 import { fileNameFromPath } from "@cloudroom/thread-view";
+import { splitMessageContextSegments } from "./message-context.js";
 import { promptInputToDraft, type PromptDraftState } from "./prompt-draft.js";
 
 const QUEUED_MESSAGE_PREVIEW_MAX_CHARS = 140;
 
 interface FormatQueuedMessagePreviewOptions {
+  parseContextBlocks?: boolean;
   truncate?: boolean;
 }
 
@@ -32,13 +34,50 @@ export function countQueuedMessageAttachments(
   return count;
 }
 
-function getQueuedMessageVisibleText(input: readonly PromptInput[]): string {
+function formatQueuedTextChunkForPreview(text: string): string {
+  const segments = splitMessageContextSegments(text);
+  if (!segments.some((segment) => segment.kind === "context")) {
+    return text.trim();
+  }
+
+  const hasNonContextText = segments.some(
+    (segment) => segment.kind === "text" && segment.text.trim().length > 0,
+  );
+  const parts: string[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "context") {
+      const ref =
+        segment.messageNumber !== null ? `#${segment.messageNumber}` : "Quote";
+      if (hasNonContextText) {
+        parts.push(`[${ref}]`);
+      } else {
+        const excerpt = segment.text.replace(/\s+/gu, " ").trim();
+        parts.push(excerpt ? `[${ref}] ${excerpt}` : `[${ref}]`);
+      }
+    } else {
+      const trimmed = segment.text.trim();
+      if (trimmed.length > 0) {
+        parts.push(trimmed);
+      }
+    }
+  }
+  return parts.join(" ");
+}
+
+function getQueuedMessageVisibleText(
+  input: readonly PromptInput[],
+  parseContextBlocks: boolean,
+): string {
   return visibleQueuedMessageInput(input)
     .filter(
       (chunk): chunk is Extract<PromptInput, { type: "text" }> =>
         chunk.type === "text",
     )
-    .map((chunk) => chunk.text.trim())
+    .map((chunk) =>
+      parseContextBlocks
+        ? formatQueuedTextChunkForPreview(chunk.text)
+        : chunk.text.trim(),
+    )
     .filter((chunk) => chunk.length > 0)
     .join("\n\n");
 }
@@ -48,7 +87,10 @@ export function formatQueuedMessagePreview(
   options: FormatQueuedMessagePreviewOptions = {},
 ): string {
   const visibleInput = visibleQueuedMessageInput(input);
-  const text = getQueuedMessageVisibleText(visibleInput);
+  const text = getQueuedMessageVisibleText(
+    visibleInput,
+    options.parseContextBlocks !== false,
+  );
   const trimmedText = text.replace(/\s+/g, " ").trim();
   if (trimmedText.length > 0) {
     if (

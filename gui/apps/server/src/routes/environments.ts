@@ -40,7 +40,10 @@ import {
   callHostRetryableOnlineRpc,
   callHostRetryableOnlineRpcForWork,
 } from "../services/hosts/online-rpc.js";
-import { requireDaemonFileContentResult } from "../services/hosts/daemon-file-response.js";
+import {
+  remapDaemonFileRouteError,
+  requireDaemonFileContentResult,
+} from "../services/hosts/daemon-file-response.js";
 import { generateCommitMessage } from "../services/ai/commit-message.js";
 import { archiveEnvironmentThreads } from "../services/threads/thread-archive.js";
 import {
@@ -55,6 +58,7 @@ import {
 } from "./path-list-policy.js";
 import {
   requireWorkspaceCommandTarget,
+  WORKTREE_PARKED_MESSAGE,
   type WorkspaceCommandTarget,
 } from "../services/environments/workspace-command-target.js";
 import {
@@ -371,6 +375,15 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
         message: "Workspace status is not available for non-git environments",
       });
     }
+    if (environment.parkedAt !== null)
+      return context.json({
+        outcome: "unavailable",
+        failure: {
+          code: "unknown",
+          workspacePath: environment.path ?? "",
+          message: WORKTREE_PARKED_MESSAGE,
+        },
+      });
     const target = requireWorkspaceCommandTarget(environment);
     const result = await deps.workspaceReadCaches.status.read({
       environmentId: environment.id,
@@ -405,6 +418,11 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
     if (!environment.isGitRepo) {
       return context.json({ outcome: "absent" });
     }
+    if (environment.parkedAt !== null)
+      return context.json({
+        outcome: "unavailable",
+        message: WORKTREE_PARKED_MESSAGE,
+      });
     const target = requireWorkspaceCommandTarget(environment);
     const result = await deps.workspaceReadCaches.pullRequest.read({
       environmentId: environment.id,
@@ -561,16 +579,21 @@ export function registerEnvironmentRoutes(app: Hono, deps: AppDeps): void {
       repoRelativePath,
     );
     const ref = resolveDiffFileRef(query);
-    const result = await callHostRetryableOnlineRpc(deps, {
-      hostId: environment.hostId,
-      timeoutMs: COMMAND_TIMEOUT_MS,
-      command: {
-        type: "host.read_file",
-        path: absolutePath,
-        rootPath: environment.path,
-        ...(ref !== undefined ? { ref } : {}),
-      },
-    });
+    let result;
+    try {
+      result = await callHostRetryableOnlineRpc(deps, {
+        hostId: environment.hostId,
+        timeoutMs: COMMAND_TIMEOUT_MS,
+        command: {
+          type: "host.read_file",
+          path: absolutePath,
+          rootPath: environment.path,
+          ...(ref !== undefined ? { ref } : {}),
+        },
+      });
+    } catch (error) {
+      return remapDaemonFileRouteError(error);
+    }
     const contentResult = requireDaemonFileContentResult(result);
     return context.json({
       path: contentResult.path,

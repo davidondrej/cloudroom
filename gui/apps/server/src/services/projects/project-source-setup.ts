@@ -19,6 +19,7 @@ import { runLiveHostCommand } from "../hosts/live-command.js";
 import { readPrimaryHostIdFromDataDir } from "../hosts/primary-host.js";
 import { cloneTarget } from "../cloudroom/local-repos.js";
 import { randomUUID } from "node:crypto";
+import { stripGitUrlCredentials } from "@cloudroom/domain";
 
 export function projectSourceHostConflict(): ApiError {
   return new ApiError(
@@ -256,7 +257,13 @@ async function recoverOrCloneProjectSource(
       timeoutMs: COMMAND_TIMEOUT_MS,
       command: { type: "project.inspect", path },
     });
-    if (inspected.path !== path || inspected.gitRemoteUrl !== args.remoteUrl) {
+    // The machine reports its remote without a username or token (#2190).
+    if (
+      inspected.path !== path ||
+      inspected.gitRemoteUrl === null ||
+      stripGitUrlCredentials(inspected.gitRemoteUrl) !==
+        stripGitUrlCredentials(args.remoteUrl)
+    ) {
       throw new ApiError(
         409,
         "project_source_target_conflict",

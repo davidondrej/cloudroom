@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { confirmDestructiveAction, outputJson } from "./helpers.js";
 
 interface FileTargetOptions {
@@ -80,7 +80,7 @@ export function registerFileCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (path: string, opts: FileTargetOptions) => {
-        const result = await createCliBbSdk(getUrl()).files.read({
+        const result = await createCliRoomSdk(getUrl()).files.read({
           path,
           ...commonTarget(opts),
         });
@@ -110,7 +110,7 @@ export function registerFileCommands(
           throw new Error("Provide exactly one of --content or --stdin.");
         }
         const content = opts.stdin ? await readStdin() : (opts.content ?? "");
-        const result = await createCliBbSdk(getUrl()).files.write({
+        const result = await createCliRoomSdk(getUrl()).files.write({
           path,
           content,
           ...commonTarget(opts),
@@ -142,7 +142,7 @@ export function registerFileCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (path: string, opts: FileListOptions) => {
-        const result = await createCliBbSdk(getUrl()).files.list({
+        const result = await createCliRoomSdk(getUrl()).files.list({
           path,
           ...listFilterArgs(opts),
           ...(opts.host ? { hostId: opts.host } : {}),
@@ -173,7 +173,7 @@ export function registerFileCommands(
         const includeFiles = opts.files || !opts.directories;
         const includeDirectories = opts.directories || !opts.files;
         const limit = parseLimit(opts.limit);
-        const result = await createCliBbSdk(getUrl()).files.listPaths({
+        const result = await createCliRoomSdk(getUrl()).files.listPaths({
           path,
           includeFiles,
           includeDirectories,
@@ -201,7 +201,7 @@ export function registerFileCommands(
           path: string,
           opts: FileTargetOptions & { recursive?: boolean },
         ) => {
-          const result = await createCliBbSdk(getUrl()).files.mkdir({
+          const result = await createCliRoomSdk(getUrl()).files.mkdir({
             path,
             ...commonTarget(opts),
             recursive: opts.recursive,
@@ -225,7 +225,7 @@ export function registerFileCommands(
           destination: string,
           opts: FileTargetOptions,
         ) => {
-          const result = await createCliBbSdk(getUrl()).files.move({
+          const result = await createCliRoomSdk(getUrl()).files.move({
             sourcePath: source,
             destinationPath: destination,
             ...commonTarget(opts),
@@ -248,7 +248,7 @@ export function registerFileCommands(
       action(async (path: string, opts: FileRemoveOptions) => {
         if (!opts.yes && !(await confirmDestructiveAction(`Remove ${path}?`)))
           return;
-        const result = await createCliBbSdk(getUrl()).files.remove({
+        const result = await createCliRoomSdk(getUrl()).files.remove({
           path,
           ...commonTarget(opts),
           recursive: opts.recursive,
@@ -257,4 +257,17 @@ export function registerFileCommands(
         console.log(`Removed ${path}`);
       }),
     );
+}
+
+/** Same command as Cloud, where `room-cli files wait` holds an agent until its project copy lands (ADR 0209).
+ *  A Local thread already runs in the real folder, so its files are always ready (#684). */
+export function registerFilesCommand(program: Command): void {
+  program
+    .command("files")
+    .description("Project files (same as Cloud threads)")
+    .command("wait")
+    .description("Wait for the project's files; Local threads always have them")
+    .action(() => {
+      console.log(`Project files are ready in ${process.cwd()}.`);
+    });
 }

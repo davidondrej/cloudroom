@@ -37,6 +37,7 @@ import {
   DEFAULT_COMPOSER_SCOPE,
   PromptBoxInternal,
   promptFastModeCommand,
+  promptModelShortcuts,
   type AttachmentsConfig,
   type HistoryConfig,
   type PromptBoxAction,
@@ -56,7 +57,10 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { ThreadTimelineScrollToBottomButton } from "@/views/thread-detail/ThreadTimelineScrollToBottomButton";
 import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
-import { ThreadContextWindowIndicator } from "@/components/thread/timeline";
+import {
+  ThreadContextWindowIndicator,
+  type ThreadContextWindowActions,
+} from "@/components/thread/timeline";
 import { PROMPT_STACK_TRACK_CLASS } from "@/components/promptbox/banner/PromptStackCard";
 
 type PromptBoxWithScrollAnchorProps = ComponentProps<
@@ -134,6 +138,8 @@ export interface FollowUpComposerProps {
   compactPromptPlaceholder: string;
   promptPlaceholder: string;
   promptPlaceholderHint?: string;
+  ghostText?: string | null;
+  onGhostText?: (action: "shown" | "accepted") => void;
   canModifierSubmit: boolean;
   steerActiveThreadOnEnter: boolean;
   submitMode: FollowUpSubmitMode;
@@ -153,10 +159,14 @@ export interface FollowUpPromptBoxProps {
   environmentSummary: ReactNode | null;
   contextWindowUsage: ContextWindowUsage | null;
   contextWindowNote?: string | undefined;
+  contextWindowActions?: ThreadContextWindowActions | undefined;
   execution: ExecutionControlsProps;
+  threadProviderId?: string | undefined;
+  cloudShortcutModels?: readonly string[] | undefined;
   permission: ExecutionPermissionConfig;
   executionReadOnly?: boolean;
   permissionReadOnly?: boolean;
+  permissionInToolbar?: boolean;
   typeahead: TypeaheadConfig;
   promptActions?: readonly PromptBoxAction[];
   suppressPluginComposerCustomizations?: boolean;
@@ -225,10 +235,14 @@ function FollowUpPromptBoxWithComposer({
   environmentSummary,
   contextWindowUsage,
   contextWindowNote,
+  contextWindowActions,
   execution,
+  threadProviderId,
+  cloudShortcutModels,
   permission,
   executionReadOnly,
   permissionReadOnly,
+  permissionInToolbar = false,
   typeahead,
   promptActions,
   suppressPluginComposerCustomizations,
@@ -609,12 +623,18 @@ function FollowUpPromptBoxWithComposer({
     onModifierSubmit ? `, ${modifierSubmitShortcutLabel()} to ${action}` : "";
   const executionControlsDisabled =
     (executionReadOnly ?? false) || hasPendingInteraction;
-  const footerStart = useMemo(
-    () => (
-      <ExecutionControls {...execution} disabled={execution.disabled || executionControlsDisabled} />
-    ),
-    [execution, executionControlsDisabled],
-  );
+  const executionCommandsEnabled =
+    !execution.disabled &&
+    !executionControlsDisabled &&
+    !isLoadingExecutionOptions &&
+    !execution.model.isLoading &&
+    !execution.model.loadFailed;
+  const canSwitchModel =
+    executionCommandsEnabled &&
+    !execution.lockModelSelection &&
+    (composer.threadRuntimeDisplayStatus === "idle" || composer.threadRuntimeDisplayStatus === "error") &&
+    submitMode.kind === "ready" &&
+    !composer.isFollowUpSubmitting;
   const { permissionDisplayOverride, permissionPickerDisabledByPlanMode } =
     usePromptModePermissionDisplay({
       execution,
@@ -648,6 +668,19 @@ function FollowUpPromptBoxWithComposer({
       permissionPickerDisabledByPlanMode,
       permissionPickerDisabled,
     ],
+  );
+  const footerStart = useMemo(
+    () => (
+      <>
+        <ExecutionControls {...execution} disabled={execution.disabled || executionControlsDisabled} />
+        {permissionInToolbar ? (
+          <div className="ml-auto flex shrink-0 items-center">
+            {permissionControl}
+          </div>
+        ) : null}
+      </>
+    ),
+    [execution, executionControlsDisabled, permissionControl, permissionInToolbar],
   );
   const composerElement = (
     <div
@@ -687,7 +720,13 @@ function FollowUpPromptBoxWithComposer({
         placeholderHint={
           isCompactViewport ? undefined : composer.promptPlaceholderHint
         }
-        containerCompactPlaceholder={composer.compactPromptPlaceholder}
+        ghostText={composer.ghostText}
+        onGhostText={composer.onGhostText}
+        containerCompactPlaceholder={
+          isPointerCoarse && composer.ghostText
+            ? composer.ghostText
+            : composer.compactPromptPlaceholder
+        }
         heightAnimationKey={isInteractionExpanded ? "expanded" : "compact"}
         mentionMenuPlacement="top"
         submission={{
@@ -723,23 +762,17 @@ function FollowUpPromptBoxWithComposer({
           isRunning: canStopRuntime,
         }}
         typeahead={typeahead}
-        reasoning={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : execution.reasoning
-        }
+        reasoning={executionCommandsEnabled ? execution.reasoning : undefined}
         fastMode={
-          execution.disabled ||
-          executionControlsDisabled ||
-          isLoadingExecutionOptions ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : promptFastModeCommand(execution.serviceTier)
+          executionCommandsEnabled ? promptFastModeCommand(execution.serviceTier) : undefined
+        }
+        modelShortcuts={
+          canSwitchModel && threadProviderId
+            ? promptModelShortcuts(execution, {
+                providerId: threadProviderId,
+                models: cloudShortcutModels ?? [...execution.model.options, ...execution.model.moreOptions].map(({ value }) => value),
+              })
+            : undefined
         }
         attachments={attachments}
         promptActions={promptActions}
@@ -751,7 +784,7 @@ function FollowUpPromptBoxWithComposer({
         onCollapse={isCompactViewport ? undefined : collapseWidePromptBox}
         footerStart={footerStart}
       />
-      {!isPromptBoxCompact ? (
+      {!isPromptBoxCompact && !permissionInToolbar ? (
         <div
           data-follow-up-composer-footer=""
           className="mt-1 flex min-h-6 max-h-6 select-none items-center justify-between gap-2 overflow-hidden pl-[15px] pr-3.5 opacity-100 transition-[max-height,min-height,margin-top,opacity] duration-[180ms] ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none"
@@ -765,6 +798,7 @@ function FollowUpPromptBoxWithComposer({
               <ThreadContextWindowIndicator
                 usage={contextWindowUsage}
                 note={contextWindowNote}
+                actions={contextWindowActions}
               />
             ) : null}
           </div>

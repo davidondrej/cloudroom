@@ -144,7 +144,7 @@ describe("automations frontend bundle", () => {
         "detail-view.tsx",
         "overview-view.tsx",
         "lib/format-schedule.ts",
-        "../../packages/domain/src/update-state.ts",
+        "../../packages/domain/src/cloud-login.ts",
         "../../packages/shared-ui/src/components/ui/button.tsx",
       ]),
     );

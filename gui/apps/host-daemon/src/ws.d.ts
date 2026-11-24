@@ -3,7 +3,7 @@ declare module "ws" {
   import type { IncomingMessage } from "node:http";
   import type { Duplex } from "node:stream";
 
-  export type RawData = string | Buffer | ArrayBuffer | Buffer[];
+  export type RawData = Buffer | ArrayBuffer | Buffer[];
 
   export interface ClientOptions {
     headers?: Record<string, string>;
@@ -17,18 +17,24 @@ declare module "ws" {
       options?: ClientOptions,
     );
     static readonly OPEN: number;
-    readonly readyState: number;
+    readonly readyState: 0 | 1 | 2 | 3;
+    readonly bufferedAmount: number;
     readonly protocol: string;
-    send(data: string | Buffer | Uint8Array): void;
-    close(code?: number, reason?: string): void;
+    send(
+      data: string | Buffer | Uint8Array | ArrayBuffer,
+      options?: { binary?: boolean; compress?: boolean },
+    ): void;
+    close(code?: number, reason?: string | Buffer): void;
     terminate(): void;
     on(event: "open", listener: () => void): this;
-    on(event: "message", listener: (data: RawData) => void): this;
+    on(
+      event: "message",
+      listener: (data: RawData, isBinary: boolean) => void,
+    ): this;
     on(
       event: "message",
       listener: (data: Buffer, isBinary: boolean) => void,
     ): this;
-    on(event: "close", listener: () => void): this;
     on(event: "close", listener: (code: number, reason: Buffer) => void): this;
     on(event: "error", listener: (error: Error) => void): this;
     on(

@@ -4,7 +4,10 @@ export {
   createAgentRuntime,
 } from "./runtime.js";
 export { bridgeLaunchProcessKey } from "./bridge-launch-process-key.js";
-export { buildThreadShellEnvironment } from "./thread-shell-environment.js";
+export {
+  FNM_SHELL_LINK,
+  buildThreadShellEnvironment,
+} from "./thread-shell-environment.js";
 export type {
   AgentRuntime,
   AgentRuntimeBridgeLaunch,

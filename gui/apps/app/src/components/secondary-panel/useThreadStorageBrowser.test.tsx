@@ -2,17 +2,13 @@
 import { cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { WorkspaceFile } from "@cloudroom/server-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { useThreadStorageBrowser } from "./useThreadStorageBrowser";
+import { useThreadStorageBrowser } from "@/components/right-panel/tabs/thread-storage";
 
 const { treesModuleEvaluated } = vi.hoisted(() => ({
   treesModuleEvaluated: vi.fn<(specifier: string) => void>(),
 }));
-vi.mock("@pierre/trees", async (importOriginal) => {
-  treesModuleEvaluated("@pierre/trees");
-  return importOriginal();
-});
-vi.mock("@pierre/trees/react", async (importOriginal) => {
-  treesModuleEvaluated("@pierre/trees/react");
+vi.mock("@/components/right-panel/tabs/ThreadStorageFileTree", async (importOriginal) => {
+  treesModuleEvaluated("@/components/right-panel/tabs/ThreadStorageFileTree");
   return importOriginal();
 });
 
@@ -27,7 +23,7 @@ afterEach(() => {
 });
 
 describe("useThreadStorageBrowser", () => {
-  it("loads the tree library only once there are files to show", async () => {
+  it("loads the tree module only once there are files to show", async () => {
     const onSelectPath = vi.fn();
     const initialProps: { files: readonly WorkspaceFile[] | undefined } = {
       files: undefined,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bbDesktopInfoSchema } from "../src/info.js";
+import { roomDesktopInfoSchema } from "../src/info.js";
 
 const baseInfo = {
   lastCheckedAt: null,
@@ -14,17 +14,17 @@ const baseInfo = {
 describe("bbDesktopInfoSchema", () => {
   it("accepts both explicit download state and legacy shell payloads", () => {
     expect(
-      bbDesktopInfoSchema.safeParse({
+      roomDesktopInfoSchema.safeParse({
         ...baseInfo,
         downloadState: "downloading",
       }).success,
     ).toBe(true);
-    expect(bbDesktopInfoSchema.safeParse(baseInfo).success).toBe(true);
+    expect(roomDesktopInfoSchema.safeParse(baseInfo).success).toBe(true);
   });
 
   it("rejects an unknown download state", () => {
     expect(
-      bbDesktopInfoSchema.safeParse({
+      roomDesktopInfoSchema.safeParse({
         ...baseInfo,
         downloadState: "available",
       }).success,
@@ -33,7 +33,7 @@ describe("bbDesktopInfoSchema", () => {
 
   it("accepts linux", () => {
     expect(
-      bbDesktopInfoSchema.safeParse({
+      roomDesktopInfoSchema.safeParse({
         ...baseInfo,
         platform: "linux",
       }).success,
@@ -42,7 +42,7 @@ describe("bbDesktopInfoSchema", () => {
 
   it("rejects win32", () => {
     expect(
-      bbDesktopInfoSchema.safeParse({
+      roomDesktopInfoSchema.safeParse({
         ...baseInfo,
         platform: "win32",
       }).success,

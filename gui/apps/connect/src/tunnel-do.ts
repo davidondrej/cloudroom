@@ -8,8 +8,9 @@ import {
   type HeaderPair,
 } from "@cloudroom/tunnel-contract";
 import { relayedResponse } from "./response-encoding.js";
-import { TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
+import { RELAY_SIGNAL_HEADER, TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
 import { machineOwner, markServerSeen, sessionByToken } from "./store.js";
+import { timedDb } from "./timeout.js";
 
 export interface Env {
   TUNNEL_DO: DurableObjectNamespace;
@@ -17,14 +18,28 @@ export interface Env {
   BASE_DOMAIN: string;
   WEBSITE_URL: string;
   ASSETS?: Fetcher;
+  /** Shared with the website (Vercel), which alone tells the relay an account's Cloud threads changed (#237). */
+  CONNECT_SIGNAL_SECRET?: string;
 }
 
 const TUNNEL_TAG = "tunnel";
 const RESP_HEAD_TIMEOUT_MS = 30_000;
 /** The Mac pings every 10s. A sleeping Mac's socket can still look open for minutes, so a silent one is gone. */
 const HEARTBEAT_STALE_MS = 30_000;
+/** From protocol 2 the Mac pings every 4s, so a dead tunnel is spotted sooner. */
+const FAST_HEARTBEAT_STALE_MS = 12_000;
+/** A dropped Mac is usually back in a second or two. New requests wait for it this long after the drop instead of failing.
+ * With the 30s answer deadline this stays under the Worker's 40s limit. */
+const GAP_HOLD_MS = 8_000;
+const GAP_MAX_WAITERS = 200;
+/** A Mac sending a big download can't get its ping through: the ping waits behind megabytes of data.
+ * So while its data arrives, the relay tells it so this often. Any message from the relay counts as alive on the Mac. */
+const HEARD_EVERY_MS = 2_000;
 
 const WS_READY_STATE_OPEN = 1;
+/** The Mac's app fetches the account's changed Cloud threads when it gets this (#237). Older apps answer 404. */
+export const SIGNAL_PATH = "/api/v1/cloudroom/threads-changed";
+const SIGNAL_EVERY_MS = 1_000;
 
 /** Saved on the Mac's tunnel socket, never in Durable Object storage: a storage hiccup resets the object and drops the Mac. */
 type TunnelInfo = { connectedAt?: number; mac?: string; serverId?: string; protocolVersion?: number };
@@ -34,6 +49,8 @@ function tunnelInfo(ws: WebSocket): TunnelInfo {
 }
 
 export const TUNNEL_OFFLINE_HEADER = "x-bb-tunnel-offline";
+/** Marks errors the relay made itself (tunnel dropped, Mac too slow), so the Worker can tell them from the Mac's own. */
+export const TUNNEL_ERROR_HEADER = "x-cloudroom-tunnel-error";
 
 const HOP_HEADERS = new Set([
   "connection",
@@ -48,6 +65,7 @@ const HOP_HEADERS = new Set([
   TUNNEL_TARGET_HEADER,
   TUNNEL_SESSION_HEADER,
   TUNNEL_MACHINE_HEADER,
+  TUNNEL_VPS_HEADER,
 ]);
 
 function forwardableHeaders(headers: Headers): HeaderPair[] {
@@ -73,21 +91,38 @@ export function parseClientProtocolVersion(raw: string | null): number {
 const PORT_SHARE_TOO_OLD =
   "this Mac's Cloudroom is too old for port sharing — update Cloudroom";
 
+type OpenHttp = Extract<Frame, { type: "open-http" }>;
+
 interface PendingHttp {
   resolve: (response: Response) => void;
   writer: WritableStreamDefaultWriter<Uint8Array> | null;
   writeChain: Promise<void>;
   timeout: ReturnType<typeof setTimeout>;
+  deadline: number;
+  /** A bodyless GET or HEAD can be sent once more on the next tunnel, if the Mac hadn't answered when the tunnel dropped. */
+  resend: OpenHttp | null;
+  held: boolean;
 }
 
 export class TunnelDO {
   private readonly pendingHttp = new Map<number, PendingHttp>();
   private nextStreamId: number;
+  /** Requests waiting for the Mac's next tunnel. Each is called with that tunnel, or null when the wait is over. */
+  private readonly gapWaiters = new Set<(tunnel: WebSocket | null) => void>();
+  /** When the Mac's tunnel dropped; 0 while it is connected or was closed on purpose. In memory only: losing it just means no waiting. */
+  private droppedAt = 0;
+  /** When the Mac last sent a frame. A big download can queue pings behind it, so frames count as alive too. */
+  private lastFrameAt = 0;
+  private lastHeardSentAt = 0;
+
+  private readonly env: Env;
 
   constructor(
     private readonly state: DurableObjectState,
-    private readonly env: Env,
+    env: Env,
   ) {
+    // Its sign-in checks run under blockConcurrencyWhile, so a hung query would stall the whole object.
+    this.env = { ...env, DB: timedDb(env.DB) };
     let maxSeen = 0;
     for (const ws of this.state.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as {
@@ -116,7 +151,12 @@ export class TunnelDO {
     if (url.pathname === "/__control/close") {
       for (const ws of this.state.getWebSockets(TUNNEL_TAG))
         ws.close(1000, "revoked by owner");
+      this.releaseWaiters(null);
       return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/__control/threads-changed") {
+      this.signalThreads();
+      return new Response(null, { status: 202 });
     }
     if (url.pathname === "/__control/status") {
       return Response.json({ online: this.tunnelSocket() !== null });
@@ -126,14 +166,37 @@ export class TunnelDO {
       url.pathname === "/__control/revoke-visitors"
     ) {
       this.abandonStreams("phone access revoked", "phone access revoked");
+      this.releaseWaiters(null);
       return new Response(null, { status: 204 });
     }
 
     const tunnel = this.tunnelSocket();
     if (!tunnel) {
-      return this.offlineResponse();
+      return this.waitForTunnel().then((next) => (next ? this.relay(request, url, next) : this.offlineResponse()));
     }
+    return this.relay(request, url, tunnel);
+  }
 
+  /** Resolves with the Mac's next tunnel, or null when it dropped too long ago or does not return in time. */
+  private waitForTunnel(): Promise<WebSocket | null> {
+    const waitMs = this.droppedAt + GAP_HOLD_MS - Date.now();
+    if (waitMs <= 0 || this.gapWaiters.size >= GAP_MAX_WAITERS) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      const waiter = (tunnel: WebSocket | null) => {
+        clearTimeout(timer);
+        this.gapWaiters.delete(waiter);
+        resolve(tunnel);
+      };
+      const timer = setTimeout(() => waiter(null), waitMs);
+      this.gapWaiters.add(waiter);
+    });
+  }
+
+  private releaseWaiters(tunnel: WebSocket | null): void {
+    for (const waiter of [...this.gapWaiters]) waiter(tunnel);
+  }
+
+  private relay(request: Request, url: URL, tunnel: WebSocket): Response | Promise<Response> {
     const target = readTunnelTarget(request.headers);
     if (target !== undefined && (tunnelInfo(tunnel).protocolVersion ?? 0) < 1) {
       return new Response(`cloudroom: ${PORT_SHARE_TOO_OLD}\n`, {
@@ -183,11 +246,14 @@ export class TunnelDO {
     for (let i = sockets.length - 1; i >= 0; i--) {
       const ws = sockets[i];
       if (ws.readyState !== WS_READY_STATE_OPEN) continue;
-      const { connectedAt = 0, mac } = tunnelInfo(ws);
+      const { connectedAt = 0, mac, protocolVersion = 0 } = tunnelInfo(ws);
       const lastPing = this.state.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
-      const silentMs = Date.now() - Math.max(connectedAt, lastPing);
-      if (silentMs <= HEARTBEAT_STALE_MS) return ws;
+      const lastHeard = Math.max(connectedAt, lastPing, this.lastFrameAt);
+      const silentMs = Date.now() - lastHeard;
+      if (silentMs <= (protocolVersion >= 2 ? FAST_HEARTBEAT_STALE_MS : HEARTBEAT_STALE_MS)) return ws;
       console.log({ event: "tunnel_silent_dropped", mac, silentSeconds: Math.round(silentMs / 1000) });
+      // Counted from when the Mac was last heard, so a sleeping Mac answers "offline" at once.
+      this.droppedAt ||= lastHeard;
       try {
         ws.close(1011, "heartbeat timed out");
       } catch {}
@@ -244,10 +310,14 @@ export class TunnelDO {
         existing.close(1000, "replaced by a new tunnel connection");
       } catch {}
     }
-    this.abandonStreams("tunnel reconnected mid-request", "tunnel reconnected");
+    this.abandonStreams("tunnel reconnected mid-request", "tunnel reconnected", true);
     void this.markPresence(serverId ?? undefined);
     const mac = new URL(request.url).hostname.split(".")[0];
     console.log({ event: "tunnel_connected", mac });
+    if (this.droppedAt) {
+      console.log({ event: "tunnel_gap", mac, gapMs: Date.now() - this.droppedAt, waiting: this.gapWaiters.size });
+      this.droppedAt = 0;
+    }
     const pair = new WebSocketPair();
     pair[1].serializeAttachment({
       connectedAt: Date.now(),
@@ -256,7 +326,32 @@ export class TunnelDO {
       protocolVersion,
     } satisfies TunnelInfo);
     this.state.acceptWebSocket(pair[1], [TUNNEL_TAG]);
+    this.resendHeld(pair[1]);
+    this.releaseWaiters(pair[1]);
+    if (this.signalPending) this.signalThreads();
     return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  /** In memory only: an evicted object forgets a signal, and the app also fetches after every reconnect. */
+  private signalPending = false;
+  private signalAt = 0;
+  private signalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Tells the Mac its account's Cloud threads changed (#237): at most once a second, and a burst always ends with one,
+   *  so its last change is never left for the hourly check. With no tunnel, the next tunnel gets it. */
+  private signalThreads(): void {
+    const tunnel = this.tunnelSocket();
+    if (!tunnel) { this.signalPending = true; return; }
+    const wait = this.signalAt + SIGNAL_EVERY_MS - Date.now();
+    if (wait > 0) {
+      this.signalTimer ??= setTimeout(() => { this.signalTimer = null; this.signalThreads(); }, wait);
+      return;
+    }
+    this.signalPending = false;
+    this.signalAt = Date.now();
+    const url = new URL(`https://${tunnelInfo(tunnel).mac ?? "mac"}.${this.env.BASE_DOMAIN}${SIGNAL_PATH}`);
+    // The JSON content type is required: the app answers 415 to any other POST under /api/v1/cloudroom.
+    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads", "content-type": "application/json" } }), url, tunnel))
+      .then((response) => response.body?.cancel(), () => {});
   }
 
   private openVisitorWebSocket(
@@ -309,35 +404,30 @@ export class TunnelDO {
   ): Promise<Response> {
     const streamId = this.nextStreamId++;
     const hasBody = request.body !== null;
+    const open: OpenHttp = {
+      type: "open-http",
+      streamId,
+      method: request.method,
+      path: url.pathname + url.search,
+      headers: forwardableHeaders(request.headers),
+      hasBody,
+      ...(target !== undefined ? { target } : {}),
+    };
 
     const responsePromise = new Promise<Response>((resolve) => {
-      const timeout = setTimeout(() => {
-        this.failHttpStream(
-          streamId,
-          504,
-          "timed out waiting for the tunnel client",
-        );
-      }, RESP_HEAD_TIMEOUT_MS);
+      const deadline = Date.now() + RESP_HEAD_TIMEOUT_MS;
       this.pendingHttp.set(streamId, {
         resolve,
         writer: null,
         writeChain: Promise.resolve(),
-        timeout,
+        timeout: this.headDeadline(streamId, deadline),
+        deadline,
+        resend: !hasBody && (request.method === "GET" || request.method === "HEAD") ? open : null,
+        held: false,
       });
     });
 
-    const opened = this.trySend(
-      tunnel,
-      encodeFrame({
-        type: "open-http",
-        streamId,
-        method: request.method,
-        path: url.pathname + url.search,
-        headers: forwardableHeaders(request.headers),
-        hasBody,
-        ...(target !== undefined ? { target } : {}),
-      }),
-    );
+    const opened = this.trySend(tunnel, encodeFrame(open));
     if (!opened) {
       const entry = this.pendingHttp.get(streamId);
       if (entry) {
@@ -351,6 +441,26 @@ export class TunnelDO {
       void this.pumpRequestBody(streamId, request.body!, tunnel);
     }
     return responsePromise;
+  }
+
+  private headDeadline(streamId: number, deadline: number): ReturnType<typeof setTimeout> {
+    return setTimeout(() => {
+      this.failHttpStream(streamId, 504, "timed out waiting for the tunnel client");
+    }, Math.max(0, deadline - Date.now()));
+  }
+
+  /** Sends held reads again on the new tunnel, under new stream ids, so late frames from the old tunnel are ignored. */
+  private resendHeld(tunnel: WebSocket): void {
+    for (const [oldId, entry] of [...this.pendingHttp]) {
+      if (!entry.held || !entry.resend) continue;
+      const streamId = this.nextStreamId++;
+      const open = { ...entry.resend, streamId };
+      this.pendingHttp.delete(oldId);
+      clearTimeout(entry.timeout);
+      this.pendingHttp.set(streamId, { ...entry, held: false, resend: null, timeout: this.headDeadline(streamId, entry.deadline) });
+      console.log({ event: "tunnel_request_resent", path: open.path });
+      if (!this.trySend(tunnel, encodeFrame(open))) this.failHttpStream(streamId, 502, "tunnel reconnected mid-request");
+    }
   }
 
   private async pumpRequestBody(
@@ -389,9 +499,14 @@ export class TunnelDO {
     }
   }
 
-  private abandonStreams(httpReason: string, wsReason: string): void {
+  /** With `hold`, unanswered reads wait for the next tunnel instead of failing (until their own deadline). */
+  private abandonStreams(httpReason: string, wsReason: string, hold = false): void {
     const tunnel = this.tunnelSocket();
-    for (const streamId of [...this.pendingHttp.keys()]) {
+    for (const [streamId, entry] of [...this.pendingHttp]) {
+      if (hold && entry.resend && !entry.writer) {
+        entry.held = true;
+        continue;
+      }
       if (tunnel) {
         this.trySend(tunnel, encodeFrame({
           type: "close-stream", streamId, code: 1000, reason: httpReason,
@@ -431,7 +546,7 @@ export class TunnelDO {
       entry.resolve(
         new Response(`cloudroom: ${message}\n`, {
           status,
-          headers: { "content-type": "text/plain; charset=utf-8" },
+          headers: { "content-type": "text/plain; charset=utf-8", [TUNNEL_ERROR_HEADER]: "1" },
         }),
       );
     }
@@ -459,7 +574,14 @@ export class TunnelDO {
     if (ws.readyState !== WS_READY_STATE_OPEN) return;
     const tags = this.state.getTags(ws);
     if (tags.includes(TUNNEL_TAG)) {
+      this.lastFrameAt = Date.now();
       if (typeof message === "string") return;
+      if (this.lastFrameAt - this.lastHeardSentAt >= HEARD_EVERY_MS) {
+        this.lastHeardSentAt = this.lastFrameAt;
+        try {
+          ws.send(HEARTBEAT_RESPONSE);
+        } catch {}
+      }
       this.onTunnelFrame(decodeFrame(message));
       return;
     }
@@ -490,6 +612,7 @@ export class TunnelDO {
         const entry = this.pendingHttp.get(frame.streamId);
         if (!entry) return;
         clearTimeout(entry.timeout);
+        entry.resend = null;
         const headers = frame.headers.filter(
           ([name]) => !HOP_HEADERS.has(name.toLowerCase()),
         );
@@ -498,6 +621,7 @@ export class TunnelDO {
           frame.status === 205 ||
           frame.status === 304
         ) {
+          this.pendingHttp.delete(frame.streamId);
           entry.resolve(new Response(null, { status: frame.status, headers }));
           return;
         }
@@ -595,10 +719,14 @@ export class TunnelDO {
       const connectedSeconds = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : null;
       console.log({ event: "tunnel_closed", mac, code, reason, connectedSeconds });
       if (this.tunnelSocket() !== null) return;
+      // A normal close (1000) was on purpose, such as a Mac that signed out. Anything else is a drop.
+      if (code === 1000) this.droppedAt = 0;
+      else this.droppedAt ||= Date.now();
       void this.markPresence(serverId);
       this.abandonStreams(
         "tunnel disconnected mid-request",
         "tunnel disconnected",
+        true,
       );
       return;
     }

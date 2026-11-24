@@ -1,7 +1,8 @@
 import type { ThreadListEntry, ThreadWithRuntime } from "@cloudroom/domain";
 import { makeThreadWithRuntime as makeThreadWithRuntimeFixture } from "@cloudroom/test-helpers/domain-fixtures";
 import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
-import { describe, expect, it } from "vitest";
+import { QueryObserver } from "@tanstack/react-query";
+import { describe, expect, it, vi } from "vitest";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { makeThreadListEntry as makeThreadListEntryFixture } from "@cloudroom/test-helpers/domain-fixtures";
 import {
@@ -9,6 +10,7 @@ import {
   makeSidebarBootstrapResponse,
 } from "@/test/fixtures/projects";
 import {
+  archivedThreadsListQueryKey,
   sidebarNavigationQueryKey,
   threadListQueryKey,
   threadQueryKey,
@@ -16,8 +18,11 @@ import {
 import {
   beginThreadReadStateTransaction,
   beginThreadMetadataTransaction,
+  beginUnarchiveThreadTransaction,
   rollbackThreadListMutationTransaction,
+  rollbackUnarchiveThreadTransaction,
   rollbackThreadReadStateTransaction,
+  type ThreadListMutationTransaction,
 } from "./thread-state-cache-owner";
 
 function makeThreadWithRuntime(
@@ -71,6 +76,41 @@ function makeSidebarNavigation(
 }
 
 describe("thread state cache owner", () => {
+  // Each failed restore puts back only its own row: restoring whole lists made the later failure drop the earlier row.
+  it.each([
+    { failFirst: "a", failLast: "b" },
+    { failFirst: "b", failLast: "a" },
+  ])(
+    "brings both rows back when two restores fail ($failFirst first)",
+    async ({ failFirst, failLast }) => {
+      const { queryClient } = createQueryClientTestHarness();
+      const queryKey = archivedThreadsListQueryKey({});
+      const rows = ["a", "b", "c"].map((id) =>
+        makeThreadListEntry({ id, archivedAt: 10 }),
+      );
+      queryClient.setQueryData(queryKey, { pages: [rows], pageParams: [0] });
+      const transactions: Record<string, ThreadListMutationTransaction> = {
+        a: await beginUnarchiveThreadTransaction({ queryClient, threadId: "a" }),
+        b: await beginUnarchiveThreadTransaction({ queryClient, threadId: "b" }),
+      };
+      const listed = () =>
+        queryClient
+          .getQueryData<{ pages: ThreadListEntry[][] }>(queryKey)
+          ?.pages.map((page) => page.map((thread) => thread.id));
+      expect(listed()).toEqual([["c"]]);
+
+      for (const threadId of [failFirst, failLast]) {
+        rollbackUnarchiveThreadTransaction({
+          queryClient,
+          threadId,
+          transaction: transactions[threadId],
+        });
+      }
+
+      expect(listed()).toEqual([["a", "b", "c"]]);
+    },
+  );
+
   it.each([
     {
       source: "sidebar",
@@ -286,6 +326,43 @@ describe("thread state cache owner", () => {
         sidebarNavigationQueryKey(),
       )?.projects[0]?.threads[0]?.lastReadAt,
     ).toBe(10);
+  });
+
+  it("fetches the sidebar once more when a change ran during its first fetch (#1347)", async () => {
+    const { queryClient } = createQueryClientTestHarness();
+    const entry = (lastReadAt: number) =>
+      makeSidebarNavigation([makeThreadListEntry({ lastReadAt })]);
+    let answerFirst = () => {};
+    const queryFn = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise((resolve) => (answerFirst = () => resolve(entry(10)))),
+      )
+      .mockResolvedValue(entry(100));
+    const unsubscribe = new QueryObserver(queryClient, {
+      queryKey: sidebarNavigationQueryKey(),
+      queryFn,
+      staleTime: Infinity,
+    }).subscribe(() => {});
+    const markRead = () =>
+      beginThreadReadStateTransaction({
+        lastReadAt: 100,
+        queryClient,
+        threadId: "thread-1",
+      });
+    await markRead();
+    await markRead();
+    answerFirst();
+    await vi.waitFor(() =>
+      expect(
+        queryClient.getQueryData<SidebarBootstrapResponse>(
+          sidebarNavigationQueryKey(),
+        )?.projects[0]?.threads[0]?.lastReadAt,
+      ).toBe(100),
+    );
+    await markRead();
+    expect(queryFn).toHaveBeenCalledTimes(2);
+    unsubscribe();
   });
 });
 

@@ -19,7 +19,7 @@ const mocks = vi.hoisted(() => ({
   setRootComposeProjectId: vi.fn(),
 }));
 
-vi.mock("react-router-dom", () => ({
+vi.mock("react-router", () => ({
   useLocation: () => ({ pathname: "/" }),
   useNavigate: () => mocks.navigate,
 }));

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readProcessIdentity } from "@cloudroom/process-utils";
 
 const execFileAsync = promisify(execFile);
 const POLL_INTERVAL_MS = 100;
@@ -93,7 +94,7 @@ async function waitForProcessExit(
 }
 
 export function createNodeVerifiedProcessOps(): VerifiedProcessOps {
-  return {
+  const ops: VerifiedProcessOps = {
     isRunning: (pid) => isProcessRunning(pid),
     kill(pid, signal) {
       process.kill(pid, signal);
@@ -104,6 +105,16 @@ export function createNodeVerifiedProcessOps(): VerifiedProcessOps {
       return rawElapsed === null ? null : parseElapsedSeconds(rawElapsed);
     },
     waitForExit: (args) => waitForProcessExit(args),
+  };
+  if (process.platform !== "win32") return ops;
+  return {
+    ...ops,
+    readCommand: async (pid) =>
+      (await readProcessIdentity(pid))?.command ?? null,
+    async readElapsedSeconds(pid) {
+      const startedAt = (await readProcessIdentity(pid))?.startedAt ?? null;
+      return startedAt === null ? null : (Date.now() - startedAt) / 1_000;
+    },
   };
 }
 

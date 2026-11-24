@@ -116,14 +116,14 @@ describe("general settings mutation", () => {
     expect(queryClient.getQueryState(providersKey)?.isInvalidated).toBe(false);
   });
 
-  it("refreshes the provider directory after its picker order changes", async () => {
+  it("refreshes the provider directory after the default harness changes", async () => {
     const { queryClient, wrapper } = createQueryClientTestHarness();
     const providersKey = systemProvidersQueryKey();
     queryClient.setQueryData(systemConfigQueryKey(), systemConfig());
     queryClient.setQueryData(providersKey, [{ id: "alpha" }, { id: "beta" }]);
     const nextSettings = {
       ...defaultAppSettings,
-      providerOrder: ["beta", "alpha"],
+      defaultProviderId: "beta",
     };
     vi.mocked(sdk.system.updateGeneralSettings).mockResolvedValue(nextSettings);
     const { result } = renderHook(() => useUpdateGeneralSettings(), {
@@ -143,7 +143,7 @@ describe("general settings mutation", () => {
       const providersKey = systemProvidersQueryKey();
       const nextSettings = {
         ...defaultAppSettings,
-        providerOrder: ["beta", "alpha"],
+        defaultProviderId: "beta",
       };
       queryClient.setQueryData(systemConfigQueryKey(), systemConfig());
       queryClient.setQueryData(providersKey, ["alpha", "beta"]);

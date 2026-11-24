@@ -1,5 +1,5 @@
 //! Preview registration, not web-server or harness lifecycle ownership.
-use crate::config::Config;
+use crate::{config::Config, observability::Signal};
 use axum::{
     Json, Router,
     body::Body,
@@ -20,13 +20,30 @@ use std::{
         net::UnixStream as StdUnixStream,
     },
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::net::{TcpStream, UnixListener};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpStream, UnixListener},
+};
 
 const SOCKET: &str = "/run/cloudroom/preview.sock";
 const FRESH_SECONDS: u64 = 15;
+/// An open preview keeps a hosted sandbox's pairing while its helper reported within this long (#608). Helpers report
+/// every 10 s, one sandbox at a time with 5 s timeouts, so a slow sandbox can delay a report past FRESH_SECONDS. The
+/// app's `previewStatus` uses the same 45 s.
+const BROWSING_SECONDS: u64 = 45;
+/// An awake helper pairs every 60 s plus one check (PAIR_SECONDS, POLL_SECONDS in client.py). A longer gap may be a
+/// sleep, so the next pairing starts a new streak; a slow helper then just keeps the usual message.
+const PAIRING_GAP: Duration = Duration::from_secs(75);
+/// A helper that kept pairing this long without reporting a preview isn't asleep, so its pending message says so (#1839).
+/// Generous: a helper checking many slow sandboxes can take over 100 s between reports.
+const SILENT: Duration = Duration::from_secs(180);
+const MAX_PAIRING_SEEN: usize = 16;
 pub const SKILL: &str = include_str!("cloud-preview/SKILL.md");
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -98,6 +115,23 @@ pub struct Previews {
     reports: Mutex<BTreeMap<(String, u16), (u64, Report)>>,
     tunnels: Mutex<Vec<Live>>,
     core_port: u16,
+    /// When a browser last loaded a preview page or called its API, in ms; 0 for never. The website counts it as activity.
+    active: AtomicU64,
+    /// Each device's last recorded pairing outcome and holder. Helpers retry every few seconds; only changes are recorded.
+    pairing_seen: Mutex<BTreeMap<String, (&'static str, Option<String>)>>,
+    /// The paired device, when it last paired, and since when it has kept pairing: an awake helper does once a minute,
+    /// a sleeping Mac never.
+    checked_in: Mutex<Option<(String, Instant, Instant)>>,
+    /// When each port was last reported, and when a preview was last registered or reports were cleared (initially,
+    /// Core's start). Monotonic, unlike the reports' own times, so a clock change can't fake a silence.
+    reported: Mutex<BTreeMap<u16, Instant>>,
+    reset: Mutex<Instant>,
+    /// A pairing just freed for a Mac that asked for jobs waits a few seconds for it, so the device that lost it
+    /// can't pair again first (#608).
+    reserved: Mutex<Option<(String, Instant)>>,
+    /// A hosted Cloud sandbox: the website names each one's Core `room-…` (CLOUDROOM_INSTANCE). Only these move their
+    /// pairing on their own; VMs and self-hosted servers, which may use tunnels too, keep theirs (#608).
+    sandbox: bool,
 }
 #[derive(Debug)]
 pub struct Failure(StatusCode, String);
@@ -123,6 +157,9 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+fn short_device(device: &str) -> String {
+    device.chars().take(8).collect()
 }
 fn valid_device(device: &str) -> bool {
     device.len() == 32 && device.bytes().all(|b| b.is_ascii_hexdigit())
@@ -199,6 +236,16 @@ impl Previews {
             reports: Mutex::new(BTreeMap::new()),
             tunnels: Mutex::new(Vec::new()),
             core_port: config.listen.port(),
+            active: AtomicU64::new(0),
+            pairing_seen: Mutex::default(),
+            checked_in: Mutex::default(),
+            reported: Mutex::default(),
+            reset: Mutex::new(Instant::now()),
+            reserved: Mutex::default(),
+            sandbox: config
+                .instance
+                .as_deref()
+                .is_some_and(|name| name.starts_with("room-")),
         }))
     }
     /// Mac access shares the preview pairing and agent identity.
@@ -211,6 +258,106 @@ impl Previews {
     }
     pub(crate) fn paired(&self, device: &str) -> bool {
         self.saved.lock().unwrap().devices.contains_key(device)
+    }
+    /// Frees a hosted sandbox's pairing for `next`, a Mac that asked for jobs (#608), if the paired device has no
+    /// preview open and `may_free(device, when it last paired since Core started)` agrees. The registry stays locked
+    /// from check to revoke, as in `while_paired` and `track`, so a reconnect or new tunnel can't slip in between.
+    pub(crate) fn release_for(
+        &self,
+        next: &str,
+        may_free: impl FnOnce(&str, Option<Instant>) -> bool,
+    ) -> bool {
+        if !self.sandbox {
+            return false;
+        }
+        let mut saved = self.saved.lock().unwrap();
+        let Some(holder) = saved.devices.keys().next().cloned() else {
+            return false;
+        };
+        // Tunnels open per request, so an idle preview tab shows only as the helper's report, about every 10 s.
+        let browsing =
+            self.tunnels
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|live| live.device == holder && !live.task.is_finished())
+                || self.reports.lock().unwrap().values().any(|(at, r)| {
+                    r.device == holder && now().saturating_sub(*at) <= BROWSING_SECONDS
+                });
+        let checked_in = self
+            .checked_in
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(device, _, _)| *device == holder)
+            .map(|(_, at, _)| *at);
+        if browsing || !may_free(&holder, checked_in) {
+            return false;
+        }
+        let mut after = saved.clone();
+        after.devices.remove(&holder);
+        if self.save(&after).is_err() {
+            return false;
+        }
+        *saved = after;
+        *self.reserved.lock().unwrap() = Some((next.to_owned(), Instant::now()));
+        self.clear_reports();
+        let _ = self.disconnect(|live| live.device == holder);
+        true
+    }
+    /// Runs `attach` only while `device` is paired, with the registry locked against `release_for`.
+    pub(crate) fn while_paired(&self, device: &str, attach: impl FnOnce()) -> bool {
+        let saved = self.saved.lock().unwrap();
+        let paired = saved.devices.contains_key(device);
+        if paired {
+            attach();
+        }
+        paired
+    }
+    fn clear_reports(&self) {
+        self.reports.lock().unwrap().clear();
+        *self.reset.lock().unwrap() = Instant::now();
+    }
+    /// The device that holds this sandbox's pairing, shortened for diagnostics.
+    pub(crate) fn holder(&self) -> Option<String> {
+        let saved = self.saved.lock().unwrap();
+        saved
+            .devices
+            .keys()
+            .next()
+            .map(|device| short_device(device))
+    }
+    /// What to record for this pairing try: nothing unless its outcome or holder changed.
+    fn pairing_signal(&self, device: &str, paired: bool) -> Option<Signal> {
+        if !valid_device(device) {
+            return None;
+        }
+        let holder = self.holder();
+        let outcome = if paired {
+            "paired"
+        } else if holder.as_deref() == Some(short_device(device).as_str()) {
+            "failed"
+        } else {
+            "refused"
+        };
+        let mut seen = self.pairing_seen.lock().unwrap();
+        let unseen = !seen.contains_key(device);
+        if (unseen && seen.len() >= MAX_PAIRING_SEEN)
+            || seen
+                .get(device)
+                .is_some_and(|(o, h)| *o == outcome && *h == holder)
+        {
+            return None;
+        }
+        seen.insert(device.to_owned(), (outcome, holder.clone()));
+        Some(Signal::MacPairing {
+            device: short_device(device),
+            outcome,
+            holder,
+        })
+    }
+    pub fn last_activity(&self) -> Option<u64> {
+        Some(self.active.load(Ordering::Relaxed)).filter(|at| *at > 0)
     }
     pub fn enabled(&self) -> bool {
         self.setup.lock().unwrap().is_some()
@@ -280,6 +427,7 @@ impl Previews {
             next.previews.insert(port, Entry { generation });
             self.save(&next)?;
             *saved = next;
+            *self.reset.lock().unwrap() = Instant::now();
         }
         drop(saved);
         self.view(port)
@@ -291,7 +439,7 @@ impl Previews {
         next.previews.remove(&port);
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.clear_reports();
         self.disconnect(|live| live.port == port)?;
         Ok(json!({"port":port,"state":"closed"}))
     }
@@ -303,11 +451,46 @@ impl Previews {
             "Preview is not registered".into(),
         ))?;
         let reports = self.reports.lock().unwrap();
-        let active = reports.values().filter(|(at, r)| {
-            r.port == port
-                && r.generation == entry.generation
-                && now().saturating_sub(*at) <= FRESH_SECONDS
-        });
+        let mine = reports
+            .values()
+            .filter(|(_, r)| r.port == port && r.generation == entry.generation);
+        let last = mine.clone().map(|(at, _)| now().saturating_sub(*at)).min();
+        let active = mine.filter(|(at, _)| now().saturating_sub(*at) <= FRESH_SECONDS);
+        // Say which wait it is (#1060). Reports for an older generation are refused, so none are stored.
+        let pending = match last {
+            None if saved.devices.is_empty() => {
+                "No Mac is paired with this sandbox yet (room-cli mac status says why)".into()
+            }
+            None => "The paired Mac has not reported this preview yet (it checks every 10 seconds)"
+                .into(),
+            Some(age) if age > FRESH_SECONDS => format!(
+                "The paired Mac stopped reporting this preview {age} seconds ago, so it may be asleep or offline"
+            ),
+            Some(_) => "The paired Mac is still opening its tunnel to this preview".into(),
+        } + "; check again with room-cli preview status";
+        // A helper that kept pairing all along but hasn't reported this preview for SILENT is online (#1839).
+        let silent = self
+            .checked_in
+            .lock()
+            .unwrap()
+            .as_ref()
+            .filter(|(device, at, _)| {
+                saved.devices.contains_key(device) && at.elapsed() < PAIRING_GAP
+            })
+            .map(|(_, _, since)| {
+                let reported = self.reported.lock().unwrap().get(&port).copied();
+                let waiting = (*since).max(*self.reset.lock().unwrap());
+                reported.map_or(waiting, |at| at.max(waiting)).elapsed()
+            })
+            .filter(|waited| *waited > SILENT);
+        let pending = match silent {
+            Some(waited) => format!(
+                "The paired Mac is online but its preview helper hasn't reported this preview for {} seconds. \
+                 If this doesn't clear, the user can restart Cloudroom on that Mac; check again with room-cli preview status",
+                waited.as_secs()
+            ),
+            None => pending,
+        };
         let ready = active.clone().find(|(_, r)| r.local_port.is_some());
         let error = active.filter_map(|(_, r)| r.error.as_ref()).next();
         let url = ready.map(|(_, r)| {
@@ -319,7 +502,7 @@ impl Previews {
         });
         Ok(
             json!({"port":port,"generation":entry.generation,"state":if ready.is_some() {"ready"} else if error.is_some() {"error"} else {"pending"},
-            "url":url,"message":error.map(String::as_str).unwrap_or(if ready.is_some() {"Preview connected"} else {"Waiting for the paired Mac; check again with room-cli preview status"})}),
+            "url":url,"message":error.map(String::as_str).unwrap_or(if ready.is_some() {"Preview connected"} else {&pending})}),
         )
     }
     pub fn list(&self) -> Result<Value> {
@@ -357,18 +540,36 @@ impl Previews {
             return Err(conflict("This preview device already has a different key"));
         }
         if !saved.devices.contains_key(&device.device) {
-            if !saved.devices.is_empty() {
+            let reserved = self
+                .reserved
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(next, at)| {
+                    *next != device.device && at.elapsed() < Duration::from_secs(10)
+                });
+            if !saved.devices.is_empty() || reserved {
                 return Err(conflict(
                     "Previews are paired with another Mac; disconnect its previews first",
                 ));
             }
             let mut next = saved.clone();
-            next.devices.insert(device.device, device.public_key);
+            next.devices
+                .insert(device.device.clone(), device.public_key);
             self.save(&next)?;
             *saved = next;
         }
+        let mut checked_in = self.checked_in.lock().unwrap();
+        let since = checked_in
+            .as_ref()
+            .filter(|(held, at, _)| *held == device.device && at.elapsed() < PAIRING_GAP)
+            .map_or_else(Instant::now, |(_, _, since)| *since);
+        *checked_in = Some((device.device, Instant::now(), since));
+        drop(checked_in);
         if setup.tunnel {
-            return Ok(json!({"tunnel":true}));
+            // Core counts page loads on every read of a tunnel, so a helper may keep one for a browser connection's next
+            // requests. Older Cores count only a tunnel's first request (#2428).
+            return Ok(json!({"tunnel":true,"reuse":true}));
         }
         let text = fs::read_to_string(&setup.host_key_file)?;
         let host_key = text
@@ -388,7 +589,7 @@ impl Previews {
         next.devices.remove(device);
         self.save(&next)?;
         *saved = next;
-        self.reports.lock().unwrap().clear();
+        self.clear_reports();
         self.disconnect(|live| live.device == device)?;
         Ok(json!({"revoked":true}))
     }
@@ -418,6 +619,10 @@ impl Previews {
         {
             return Err(conflict("Invalid preview status"));
         }
+        self.reported
+            .lock()
+            .unwrap()
+            .insert(input.port, Instant::now());
         self.reports
             .lock()
             .unwrap()
@@ -576,25 +781,66 @@ async fn tunnel(
     };
     let mut upstream = m.previews.connect(port, &input.device).await?;
     let upgrade = hyper::upgrade::on(&mut request);
+    let previews = m.previews.clone();
     let task = tokio::spawn(async move {
         if let Ok(upgraded) = upgrade.await {
-            let mut mac = hyper_util::rt::TokioIo::new(upgraded);
-            let _ = tokio::io::copy_bidirectional(&mut mac, &mut upstream).await;
+            let (mut mac_read, mut mac_write) =
+                tokio::io::split(hyper_util::rt::TokioIo::new(upgraded));
+            let (mut app_read, mut app_write) = upstream.split();
+            // The Mac keeps a tunnel for its browser connection's next requests (#2428), so any read may start one.
+            let requests = async {
+                let mut chunk = vec![0; 8192];
+                while let Ok(read @ 1..) = mac_read.read(&mut chunk).await {
+                    if page_request(&chunk[..read]) {
+                        previews
+                            .active
+                            .store(crate::observability::now_ms(), Ordering::Relaxed);
+                    }
+                    if app_write.write_all(&chunk[..read]).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = app_write.shutdown().await;
+            };
+            let answers = async {
+                let _ = tokio::io::copy(&mut app_read, &mut mac_write).await;
+                let _ = mac_write.shutdown().await;
+            };
+            tokio::join!(requests, answers);
         }
     });
-    let mut tunnels = m.previews.tunnels.lock().unwrap();
-    tunnels.retain(|live| !live.task.is_finished());
-    tunnels.push(Live {
+    let live = Live {
         port,
         device: input.device,
         task: task.abort_handle(),
-    });
+    };
+    // Registered with the registry locked, so `release_for` sees this tunnel or the tunnel sees the release (#608).
+    if !m.previews.while_paired(&live.device.clone(), || {
+        let mut tunnels = m.previews.tunnels.lock().unwrap();
+        tunnels.retain(|live| !live.task.is_finished());
+        tunnels.push(live);
+    }) {
+        task.abort();
+        return Err(conflict(
+            "Preview or device changed; refresh before connecting",
+        ));
+    }
     Ok(Response::builder()
         .status(StatusCode::SWITCHING_PROTOCOLS)
         .header(header::CONNECTION, "upgrade")
         .header(header::UPGRADE, protocol)
         .body(Body::empty())
         .unwrap())
+}
+/// A browser's page load or its own API call. Assets, WebSockets and the Mac helper's health checks
+/// (they send no Sec-Fetch headers) don't count.
+fn page_request(head: &[u8]) -> bool {
+    let head = String::from_utf8_lossy(head).to_ascii_lowercase();
+    let headers = head.split("\r\n\r\n").next().unwrap_or("");
+    headers.lines().any(|line| {
+        line.strip_prefix("sec-fetch-dest:")
+            .is_some_and(|dest| matches!(dest.trim(), "document" | "iframe" | "empty"))
+    })
 }
 async fn list(State(m): State<Arc<crate::session::Manager>>) -> Result<Json<Value>> {
     Ok(Json(m.previews.list()?))
@@ -627,13 +873,27 @@ async fn pair(
     State(m): State<Arc<crate::session::Manager>>,
     Json(input): Json<Device>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.pair(input)?))
+    let device = input.device.clone();
+    let result = m.previews.pair(input);
+    if let Some(signal) = m.previews.pairing_signal(&device, result.is_ok()) {
+        m.observability.record(signal);
+    }
+    Ok(Json(result?))
 }
 async fn revoke(
     State(m): State<Arc<crate::session::Manager>>,
     RoutePath(id): RoutePath<String>,
 ) -> Result<Json<Value>> {
-    Ok(Json(m.previews.revoke(&id)?))
+    let held = m.previews.paired(&id);
+    let revoked = m.previews.revoke(&id)?;
+    if held {
+        m.observability.record(Signal::MacPairing {
+            device: short_device(&id),
+            outcome: "revoked",
+            holder: None,
+        });
+    }
+    Ok(Json(revoked))
 }
 async fn report(
     State(m): State<Arc<crate::session::Manager>>,
@@ -827,13 +1087,15 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
     if !status && port.is_none() {
         return Err(io::Error::other("preview requires a port"));
     }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let left = || deadline.saturating_duration_since(Instant::now());
     let request = |method: &str, path: &str, body: Option<Value>| -> io::Result<Value> {
         let mut command = std::process::Command::new("curl");
         command.args([
             "--silent",
             "--show-error",
             "--max-time",
-            "5",
+            &format!("{:.3}", left().as_secs_f64()),
             "--unix-socket",
             &socket,
             "-X",
@@ -845,6 +1107,11 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
             command.args(["--data-binary", &body.to_string()]);
         }
         let output = command.arg(format!("http://localhost{path}")).output()?;
+        if output.status.code() == Some(28) {
+            return Err(io::Error::other(
+                "Cloudroom is busy; retry room-cli preview in a moment",
+            ));
+        }
         if !output.status.success() {
             return Err(io::Error::other(
                 "Preview service unavailable; install preview setup or use the local thread's localhost server",
@@ -872,6 +1139,9 @@ pub async fn cli(args: &[String]) -> io::Result<()> {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if left() < Duration::from_secs(1) {
+                break;
+            }
             result = request("GET", &path, None)?;
         }
     }

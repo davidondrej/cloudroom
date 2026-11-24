@@ -4,7 +4,6 @@ import type { TaskThread, TaskThreadLiveStatus } from "../db";
 import { createSystemComment, publishThreadsChanged } from "../delegate";
 import { errorMessage } from "../shared/errors";
 
-const TERMINAL_LIVE_STATUSES = new Set<TaskThreadLiveStatus>(["completed"]);
 export const THREAD_STATUS_RECONCILE_INTERVAL_MS = 5 * 60_000;
 export const THREAD_STATUS_IDLE_INTERVAL_MS = 60_000;
 
@@ -26,16 +25,6 @@ function liveStatusFromThread(thread: SdkThread): TaskThreadLiveStatus {
   }
 }
 
-function trackedThreads(store: TasksApiStore): TaskThread[] {
-  const tracked: TaskThread[] = [];
-  for (const task of store.tasks.listTasks()) {
-    for (const thread of store.tasks.listTaskThreads(task.id)) {
-      tracked.push(thread);
-    }
-  }
-  return tracked;
-}
-
 function statusCommentBody(
   thread: TaskThread,
   liveStatus: Extract<TaskThreadLiveStatus, "completed" | "failed">,
@@ -53,15 +42,12 @@ function sdkErrorCode(error: unknown): string | undefined {
 }
 
 function transitionThread(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   thread: TaskThread,
   liveStatus: TaskThreadLiveStatus,
 ): void {
-  if (
-    thread.liveStatus === liveStatus ||
-    TERMINAL_LIVE_STATUSES.has(thread.liveStatus)
-  ) {
+  if (thread.liveStatus === liveStatus || thread.liveStatus === "completed") {
     return;
   }
 
@@ -77,37 +63,37 @@ function transitionThread(
     }
   });
 
-  publishThreadsChanged(bb, thread.taskId);
-  publishCommentsChanged(bb, thread.taskId);
+  publishThreadsChanged(room, thread.taskId);
+  publishCommentsChanged(room, thread.taskId);
 }
 
 function transitionTrackedThread(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   threadId: string,
   liveStatus: TaskThreadLiveStatus,
 ): void {
   for (const thread of store.tasks.listTaskThreadsByThreadId(threadId)) {
-    transitionThread(bb, store, thread, liveStatus);
+    transitionThread(room, store, thread, liveStatus);
   }
 }
 
 async function reconcileTrackedThread(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
   trackedThread: TaskThread,
 ): Promise<void> {
   try {
-    const thread = await bb.sdk.threads.get({
+    const thread = await room.sdk.threads.get({
       threadId: trackedThread.threadId,
     });
-    transitionThread(bb, store, trackedThread, liveStatusFromThread(thread));
+    transitionThread(room, store, trackedThread, liveStatusFromThread(thread));
   } catch (error) {
     if (sdkErrorCode(error) === "thread_not_found") {
-      transitionThread(bb, store, trackedThread, "completed");
+      transitionThread(room, store, trackedThread, "completed");
       return;
     }
-    bb.log.warn(
+    room.log.warn(
       `Could not reconcile task thread ${trackedThread.threadId}: ${errorMessage(
         error,
       )}`,
@@ -116,22 +102,12 @@ async function reconcileTrackedThread(
 }
 
 async function reconcileTrackedThreads(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
 ): Promise<void> {
-  const nonTerminalThreads = trackedThreads(store).filter(
-    (thread) => !TERMINAL_LIVE_STATUSES.has(thread.liveStatus),
-  );
-
-  for (const trackedThread of nonTerminalThreads) {
-    await reconcileTrackedThread(bb, store, trackedThread);
+  for (const trackedThread of store.tasks.listUnfinishedTaskThreads()) {
+    await reconcileTrackedThread(room, store, trackedThread);
   }
-}
-
-function hasNonTerminalTrackedThreads(store: TasksApiStore): boolean {
-  return trackedThreads(store).some(
-    (thread) => !TERMINAL_LIVE_STATUSES.has(thread.liveStatus),
-  );
 }
 
 function waitForNextReconciliation(
@@ -153,29 +129,29 @@ function waitForNextReconciliation(
 }
 
 export async function registerLifecycle(
-  bb: BbPluginApi,
+  room: BbPluginApi,
   store: TasksApiStore,
 ): Promise<void> {
-  bb.events.on("thread.created", ({ thread }) => {
-    transitionTrackedThread(bb, store, thread.id, liveStatusFromThread(thread));
+  room.events.on("thread.created", ({ thread }) => {
+    transitionTrackedThread(room, store, thread.id, liveStatusFromThread(thread));
   });
-  bb.events.on("thread.active", ({ thread }) => {
-    transitionTrackedThread(bb, store, thread.id, "working");
+  room.events.on("thread.active", ({ thread }) => {
+    transitionTrackedThread(room, store, thread.id, "working");
   });
-  bb.events.on("thread.idle", ({ thread }) => {
-    transitionTrackedThread(bb, store, thread.id, "idle");
+  room.events.on("thread.idle", ({ thread }) => {
+    transitionTrackedThread(room, store, thread.id, "idle");
   });
-  bb.events.on("thread.failed", ({ thread }) => {
-    transitionTrackedThread(bb, store, thread.id, "failed");
+  room.events.on("thread.failed", ({ thread }) => {
+    transitionTrackedThread(room, store, thread.id, "failed");
   });
-  bb.events.on("thread.deleted", ({ thread }) => {
-    transitionTrackedThread(bb, store, thread.id, "completed");
+  room.events.on("thread.deleted", ({ thread }) => {
+    transitionTrackedThread(room, store, thread.id, "completed");
   });
 
-  bb.background.service("thread-status-reconcile", {
+  room.background.service("thread-status-reconcile", {
     async start(signal) {
       while (!signal.aborted) {
-        if (!hasNonTerminalTrackedThreads(store)) {
+        if (!store.tasks.hasUnfinishedTaskThreads()) {
           await waitForNextReconciliation(
             signal,
             THREAD_STATUS_IDLE_INTERVAL_MS,
@@ -187,10 +163,10 @@ export async function registerLifecycle(
           THREAD_STATUS_RECONCILE_INTERVAL_MS,
         );
         if (signal.aborted) break;
-        await reconcileTrackedThreads(bb, store);
+        await reconcileTrackedThreads(room, store);
       }
     },
   });
 
-  await reconcileTrackedThreads(bb, store);
+  await reconcileTrackedThreads(room, store);
 }
