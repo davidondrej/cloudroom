@@ -25,6 +25,7 @@ describe("GitHub app navigation", () => {
                 title: "Route-backed issue",
                 state: "OPEN",
                 author: "octocat",
+                authorAssociation: "OWNER",
                 labels: [],
                 assignees: [],
                 url: "https://github.com/get-bb/bb/issues/42",
@@ -53,6 +54,98 @@ describe("GitHub app navigation", () => {
       options: { subPath: "issues/get-bb/bb/42" },
     });
     slot.lifecycle.unmount();
+  });
+
+  it("makes outside authors' issues and PRs open before an agent can start", async () => {
+    const item = (
+      kind: "issue" | "pr",
+      number: number,
+      author: string,
+      authorAssociation: string,
+    ) => ({
+      repo: "acme/widgets",
+      number,
+      kind,
+      title: `${kind} by ${author}`,
+      state: "OPEN",
+      author,
+      authorAssociation,
+      labels: [],
+      assignees: [],
+      url: `https://github.com/acme/widgets/${kind === "pr" ? "pull" : "issues"}/${number}`,
+      body: "",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+    });
+    const items = [
+      item("issue", 1, "alice", "MEMBER"),
+      item("issue", 2, "mallory", "NONE"),
+      item("pr", 3, "eve", "CONTRIBUTOR"),
+    ];
+    const rpc = {
+      listItems: (input: unknown) => ({
+        items: items.filter(
+          (entry) => entry.kind === (input as { kind?: string }).kind,
+        ),
+      }),
+      listLinks: () => ({ links: {} }),
+      status: () => ({
+        ghOk: true,
+        ghState: "ready",
+        ghError: null,
+        repos: [{ repo: "acme/widgets", projectId: null }],
+        lastSyncedAt: null,
+      }),
+      viewer: () => ({ login: "octocat" }),
+      startWork: () => ({ threadId: "thr-started" }),
+      startReview: () => ({ threadId: "thr-started" }),
+      getIssue: () => ({
+        issue: {
+          ...item("issue", 2, "mallory", "NONE"),
+          comments: [],
+        },
+      }),
+    };
+    const panel = app.navPanels[0]!;
+
+    const issues = renderSlot(panel, { subPath: "issues" }, { rpc });
+    expect(await issues.findByText("Start")).toBeTruthy();
+    await act(async () => issues.getByText("View").click());
+    expect(issues.navigateCalls).toContainEqual({
+      method: "toPluginPanel",
+      path: "github",
+      options: { subPath: "issues/acme/widgets/2" },
+    });
+    issues.lifecycle.unmount();
+
+    const pulls = renderSlot(panel, { subPath: "pulls" }, { rpc });
+    const viewPull = await pulls.findByText("View");
+    await act(async () => viewPull.click());
+    expect(pulls.navigateCalls).toContainEqual({
+      method: "toPluginPanel",
+      path: "github",
+      options: { subPath: "pulls/acme/widgets/3" },
+    });
+    expect(pulls.queryByText("Review")).toBeNull();
+    pulls.lifecycle.unmount();
+
+    const detail = renderSlot(
+      panel,
+      { subPath: "issues/acme/widgets/2" },
+      { rpc },
+    );
+    expect(
+      await detail.findByText(/@mallory is not a member of acme\/widgets\./),
+    ).toBeTruthy();
+    detail.lifecycle.unmount();
+
+    for (const slot of [issues, pulls, detail]) {
+      expect(
+        slot.rpcCalls.filter(
+          (call) =>
+            call.method === "startWork" || call.method === "startReview",
+        ),
+      ).toEqual([]);
+    }
   });
 
   it("uses the standard responsive page inset for the main panel", () => {
@@ -99,6 +192,7 @@ describe("GitHub app navigation", () => {
               title: "Navigation fix",
               state: "OPEN",
               author: "octocat",
+              authorAssociation: "OWNER",
               body: "",
               url: "https://github.com/get-bb/bb/pull/42",
               createdAt: "2026-08-20T00:00:00.000Z",
@@ -136,11 +230,13 @@ describe("GitHub app navigation", () => {
             },
           }),
           listLinks: () => ({ links: {} }),
+          viewer: () => ({ login: "octocat" }),
         },
       },
     );
 
     await act(async () => {});
+    expect(slot.queryByText(/is not a member of/)).toBeNull();
     const removedFile = slot.getByText("removed.ts");
     const modifiedFile = slot.getByText("modified.ts");
     expect(removedFile.closest("a")).toBeNull();

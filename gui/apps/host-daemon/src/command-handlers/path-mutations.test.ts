@@ -6,7 +6,7 @@ import {
   mkdirHostPath,
   moveHostPath,
   removeHostPath,
-} from "./path-mutations.js";
+} from "./files.js";
 
 const roots: string[] = [];
 

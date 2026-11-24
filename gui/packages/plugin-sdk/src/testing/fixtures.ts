@@ -365,6 +365,7 @@ export function makeTurnFailedEvent(
     rateLimits: null,
     attemptNumber: 1,
     interruptionReason: null,
+    turnStartedBeforeBoot: false,
     ...overrides,
   };
 }

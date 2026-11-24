@@ -4,6 +4,8 @@ import {
 } from "../services/machines/environment-settings.js";
 import { getGateAuthKind } from "../request-context.js";
 import { serverAccessStatus } from "../services/machines/server-access.js";
+import { readSkillUsage } from "../services/system/skill-usage.js";
+import { readUsageAnalytics } from "../services/system/usage-analytics.js";
 import {
   getAppSettings,
   getAppKeybindingOverrides,
@@ -50,11 +52,15 @@ import {
 import type { ServerAppDeps, ServerRuntimeConfig } from "../types.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
 import { ApiError } from "../errors.js";
-import { rescheduleWorktreeRetirement } from "../services/environments/environment-engine.js";
+import { worktreeDiskStatus } from "../services/environments/worktree-storage.js";
 import {
   resolveVoiceTranscriptionEnabled,
   transcribeVoiceInput,
 } from "../services/ai/voice-transcription.js";
+import {
+  getVoiceTranscriptionJob,
+  startVoiceTranscriptionJob,
+} from "../services/ai/voice-transcription-jobs.js";
 import {
   listInstallableProviderInfos,
   listSystemProviderInfos,
@@ -242,6 +248,8 @@ export function registerSystemRoutes(
     return {
       ...settings,
       showUnhandledProviderEvents: settings.showDiagnosticEvents,
+      // Retired; older apps and CLIs still require it when they read settings.
+      providerOrder: [] as string[],
     };
   }
   get(routes.machineEnvironment, async (context) =>
@@ -263,7 +271,11 @@ export function registerSystemRoutes(
   });
 
   put(routes.generalSettings, (context, payload) => {
-    const { showUnhandledProviderEvents, ...settings } = payload;
+    const {
+      showUnhandledProviderEvents,
+      providerOrder: _retiredProviderOrder,
+      ...settings
+    } = payload;
     const current = getAppSettings(deps.db);
     const diagnosticValue =
       "showDiagnosticEvents" in settings
@@ -279,7 +291,7 @@ export function registerSystemRoutes(
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
       hiddenProviderIds: settings.hiddenProviderIds ?? current.hiddenProviderIds,
-      worktreeRetention: settings.worktreeRetention ?? current.worktreeRetention,
+      customProviderOrder: settings.customProviderOrder ?? current.customProviderOrder,
       showDiagnosticEvents:
         diagnosticValue === undefined ||
         (showUnhandledProviderEvents !== undefined &&
@@ -290,8 +302,11 @@ export function registerSystemRoutes(
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
     deps.hub.notifySystem(["config-changed"]);
-    if (updatedSettings.worktreeRetention !== current.worktreeRetention)
-      rescheduleWorktreeRetirement(deps);
+    if (current.providerAutoUpdate.some((id) => !updatedSettings.providerAutoUpdate.includes(id))) {
+      for (const hostId of deps.hub.listConnectedHostIds()) {
+        deps.hub.notifyHost(hostId, ["provider-cli-status-changed"]);
+      }
+    }
     if (
       updatedSettings.providerAutoUpdate.some(
         (provider) => !current.providerAutoUpdate.includes(provider),
@@ -371,6 +386,15 @@ export function registerSystemRoutes(
     return context.json({ ok: true });
   });
 
+  get(routes.skillUsage, (context, query) =>
+    context.json(readSkillUsage(deps, query)),
+  );
+  get(routes.usageAnalytics, async (context, query) =>
+    context.json(await readUsageAnalytics(deps, query)),
+  );
+  get(routes.worktreeStorage, (context) =>
+    context.json(worktreeDiskStatus(deps)),
+  );
   get(routes.cliSkillsStatus, async (context, query) =>
     context.json(
       await readGlobalCliSkillStatus(deps, {
@@ -606,22 +630,41 @@ export function registerSystemRoutes(
     context.json(await restartSystemModelDiscovery(deps, body)),
   );
 
-  post(routes.voiceTranscription, async (context) => {
+  async function readVoiceForm(context: {
+    req: { formData(): Promise<FormData> };
+  }): Promise<{ file: File; prompt?: string; clientId?: string }> {
     const formData = await context.req.formData();
     const file = formData.get("file");
     if (!(file instanceof File)) {
       throw new ApiError(400, "invalid_request", "Audio file is required");
     }
+    const rawPrompt = formData.get("prompt");
+    const rawClientId = formData.get("clientId");
+    return {
+      file,
+      prompt: typeof rawPrompt === "string" ? rawPrompt : undefined,
+      clientId: typeof rawClientId === "string" ? rawClientId : undefined,
+    };
+  }
+
+  post(routes.voiceTranscription, async (context) => {
+    const form = await readVoiceForm(context);
     return context.json({
       text: await transcribeVoiceInput(deps, {
-        file,
-        prompt:
-          typeof formData.get("prompt") === "string"
-            ? String(formData.get("prompt"))
-            : undefined,
+        ...form,
+        relayed: getGateAuthKind(context) !== null,
       }),
     });
   });
+
+  post(routes.startVoiceTranscriptionJob, async (context) => {
+    const form = await readVoiceForm(context);
+    return context.json(startVoiceTranscriptionJob(deps, form), 202);
+  });
+
+  get(routes.voiceTranscriptionJob, (context) =>
+    context.json(getVoiceTranscriptionJob(deps, context.req.param("id"))),
+  );
 
   get(routes.version, async (context, query) =>
     context.json(

@@ -360,6 +360,8 @@ export const skillSummarySchema = z.object({
   filePath: z.string(),
   manageable: z.boolean(),
   registrySkillId: z.string().min(1).nullable(),
+  /** Linked skills: the skill folder with symlinks resolved. */
+  realDirectoryPath: z.string().optional(),
 });
 export type SkillSummary = z.infer<typeof skillSummarySchema>;
 

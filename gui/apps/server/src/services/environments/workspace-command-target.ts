@@ -1,12 +1,17 @@
 import type { EnvironmentStatus } from "@cloudroom/domain";
 import type { WorkspaceContext } from "@cloudroom/host-daemon-contract";
+import { ApiError } from "../../errors.js";
 import { throwEnvironmentNotReady } from "../lib/lifecycle-api-errors.js";
+
+export const WORKTREE_PARKED_MESSAGE =
+  "Parked to save disk. Returns on your next message.";
 
 interface WorkspaceCommandTargetEnvironment {
   hostId: string;
   id: string;
   path: string | null;
   status: EnvironmentStatus;
+  parkedAt?: number | null;
 }
 
 interface WorkspaceCommandTargetPath {
@@ -33,6 +38,9 @@ export function requireWorkspaceCommandTarget(
   if (environment.status !== "ready" || !environment.path) {
     throwEnvironmentNotReady(environment);
   }
+  // Its folder is gone until the thread's next message rebuilds it.
+  if (environment.parkedAt != null)
+    throw new ApiError(409, "environment_parked", WORKTREE_PARKED_MESSAGE);
 
   return {
     environmentId: environment.id,

@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import type { MachineEnvironmentList } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { outputJson } from "./helpers.js";
 
 function printEnvironment(
@@ -50,7 +50,7 @@ export function registerMachineEnvironmentCommands(
     .action(
       action(async (options: { json?: boolean }) => {
         printEnvironment(
-          await createCliBbSdk(getUrl()).system.machineEnvironment(),
+          await createCliRoomSdk(getUrl()).system.machineEnvironment(),
           options,
         );
       }),
@@ -63,7 +63,7 @@ export function registerMachineEnvironmentCommands(
     .action(
       action(
         async (name: string, options: { note?: string; json?: boolean }) => {
-          const system = createCliBbSdk(getUrl()).system;
+          const system = createCliRoomSdk(getUrl()).system;
           const current = await system.machineEnvironment();
           const result = await system.replaceMachineEnvironment({
             variables: [
@@ -90,7 +90,7 @@ export function registerMachineEnvironmentCommands(
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (name: string, options: { json?: boolean }) => {
-        const system = createCliBbSdk(getUrl()).system;
+        const system = createCliRoomSdk(getUrl()).system;
         const current = await system.machineEnvironment();
         printEnvironment(
           await system.replaceMachineEnvironment({

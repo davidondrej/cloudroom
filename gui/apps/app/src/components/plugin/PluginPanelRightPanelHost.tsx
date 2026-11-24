@@ -24,8 +24,8 @@ import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import {
   getCompactPanelPresentation,
   RIGHT_PANEL_TOGGLE_ICON_NAME,
-} from "@/components/secondary-panel/panelToggleControlState";
-import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPanelLayout";
+} from "@/components/right-panel/shell/panel-tokens";
+import { SecondaryPanelLayout } from "@/components/right-panel/shell/responsive-panel-host";
 import {
   LazyBrowserTabDeck,
   LazyHostScopedFilePreviewTabContent,
@@ -34,17 +34,17 @@ import {
   LazyThreadStorageFilePreviewTabContent,
   LazyThreadTerminalPanel,
   LazyWorkspaceFilePreviewTabContent,
-} from "@/components/secondary-panel/lazySecondaryPanelComponents";
+} from "@/components/right-panel/shell/lazy-chunks";
 import type {
   SecondaryPanelFixedTab,
   SecondaryPanelRenderableTab,
-} from "@/components/secondary-panel/ThreadSecondaryPanel";
-import { useThreadFileTabs } from "@/components/secondary-panel/useThreadFileTabs";
+} from "@/components/right-panel/shell/panel-shell";
+import { useThreadFileTabs } from "@/components/right-panel/store/use-panel-tabs";
 import {
   useCloseFixedSecondaryPanel,
   useReconciledFixedPanelTabsState,
   useUpdateFixedPanelTabsState,
-} from "@/lib/fixed-panel-tabs";
+} from "@/components/right-panel/store/panel-atoms";
 import type { TerminalCreateTarget } from "@cloudroom/server-contract";
 import {
   createPluginPageFixedPanelTab,
@@ -52,9 +52,9 @@ import {
   type PluginPageFixedPanelTab,
   type SecondaryFileFixedPanelTab,
   type TerminalFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import { createFileOpenerOriginalTab } from "./file-opener-tabs";
-import { activateSecondaryPanelTabInState } from "@cloudroom/client-core";
+import { activateSecondaryPanelTabInState } from "@/components/right-panel/store/tab-ops";
 import {
   useCloseTerminal,
   useCreateTerminal,
@@ -65,7 +65,7 @@ import { useSystemConfig } from "@/hooks/queries/system-queries";
 import {
   getDesktopBrowserApi,
   isDesktopBrowserAvailable,
-} from "@/lib/bb-desktop";
+} from "@/lib/room-desktop";
 import { getBrowserUrlHost } from "@/lib/browser-url";
 import { isRoutePath } from "@/lib/route-paths";
 import { UrlOpenRoutingProvider } from "@/lib/url-open-routing";
@@ -89,7 +89,7 @@ import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
 import {
   resolveTerminalHost,
   TerminalHostSelector,
-} from "@/components/secondary-panel/TerminalHostSelector";
+} from "@/components/right-panel/tabs/tab-primitives";
 import { getPluginPagePanelStateId } from "./plugin-page-panel-state";
 import { PluginPanelTabContent } from "./PluginPanelActions";
 import { PluginDetailRouteNavigationProvider } from "@/components/ui/app-route-anchor";

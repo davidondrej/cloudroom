@@ -1,56 +1,49 @@
 import { and, asc, eq } from "drizzle-orm";
 import type { DbConnection, DbQueryConnection } from "../connection.js";
 import { pluginMarketplaceIcons, pluginMarketplaces } from "../schema.js";
+import {
+  stripPluginGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "./plugins.js";
 
 export type PluginMarketplaceSourceKind = "https" | "git" | "path";
 
-export interface PluginMarketplaceRow {
-  name: string;
-  sourceKind: PluginMarketplaceSourceKind;
-  manifestUrl: string;
-  sourceGitRef: string | null;
-  sourceGitCommit: string | null;
-  manifestJson: string;
-  statsJson: string | null;
-  etag: string | null;
-  lastModified: string | null;
-  lastSuccessfulRefreshAt: number | null;
-  lastAttemptedRefreshAt: number | null;
-  lastError: string | null;
-  createdAt: number;
-  updatedAt: number;
-}
+export type PluginMarketplaceRow = typeof pluginMarketplaces.$inferSelect;
 
 export type UpsertPluginMarketplaceInput = Omit<
   PluginMarketplaceRow,
   "createdAt" | "updatedAt"
 >;
 
-export interface PluginMarketplaceIconRow {
-  marketplaceName: string;
-  entryId: string;
-  sourceUrl: string;
-  contentType: string;
-  etag: string | null;
-  contentHash: string;
-  bytes: Buffer;
-  updatedAt: number;
-}
+export type PluginMarketplaceIconRow = typeof pluginMarketplaceIcons.$inferSelect;
 
 export type UpsertPluginMarketplaceIconInput = Omit<
   PluginMarketplaceIconRow,
   "updatedAt"
 >;
 
+// Git marketplaces saved before #1935 can hold a token in their URL. Strip it
+// on read so it never reaches git argv or the API (same as installed plugins).
+function withoutUrlCredentials(
+  row: PluginMarketplaceRow,
+): PluginMarketplaceRow {
+  return {
+    ...row,
+    manifestUrl: stripPluginGitUrlCredentials(row.manifestUrl),
+    lastError: row.lastError && stripTextGitUrlCredentials(row.lastError),
+  };
+}
+
 export function getPluginMarketplace(
   db: DbQueryConnection,
   name: string,
 ): PluginMarketplaceRow | undefined {
-  return db
+  const row = db
     .select()
     .from(pluginMarketplaces)
     .where(eq(pluginMarketplaces.name, name))
     .get();
+  return row && withoutUrlCredentials(row);
 }
 
 export function listPluginMarketplaces(
@@ -60,7 +53,8 @@ export function listPluginMarketplaces(
     .select()
     .from(pluginMarketplaces)
     .orderBy(asc(pluginMarketplaces.name))
-    .all();
+    .all()
+    .map(withoutUrlCredentials);
 }
 
 export function deletePluginMarketplace(

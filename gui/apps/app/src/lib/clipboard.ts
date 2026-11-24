@@ -5,6 +5,7 @@ interface CopyToClipboardOptions {
   successMessage?: string | null;
   errorMessage?: string | null;
   imageUrl?: string;
+  chatMessage?: boolean;
 }
 
 async function convertImageBlobToPng(blob: Blob): Promise<Blob> {
@@ -157,12 +158,14 @@ export async function copyToClipboardWithToast(
     successMessage = "Copied",
     errorMessage = "Failed to copy",
     imageUrl,
+    chatMessage,
   }: CopyToClipboardOptions = {},
 ): Promise<boolean> {
   const copied = imageUrl
     ? await copyTextAndImageToClipboard(text, imageUrl)
     : await copyTextToClipboard(text);
   if (copied) {
+    if (chatMessage) document.dispatchEvent(new CustomEvent("cloudroom:chat-copied", { detail: text }));
     if (successMessage) appToast.success(successMessage);
     return true;
   }
@@ -172,6 +175,8 @@ export async function copyToClipboardWithToast(
 
 export interface ClipboardCopyOptions extends CopyToClipboardOptions {
   text: string;
+  /** How long `copied` stays true. */
+  resetMs?: number;
 }
 
 export function useClipboardCopy({
@@ -179,24 +184,27 @@ export function useClipboardCopy({
   successMessage = null,
   errorMessage = "Failed to copy",
   imageUrl,
+  chatMessage,
+  resetMs = 2000,
 }: ClipboardCopyOptions) {
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!copied) return;
-    const timeoutId = window.setTimeout(() => setCopied(false), 2000);
+    const timeoutId = window.setTimeout(() => setCopied(false), resetMs);
     return () => window.clearTimeout(timeoutId);
-  }, [copied]);
+  }, [copied, resetMs]);
 
-  const copy = useCallback(async () => {
+  const copy = useCallback(async (event?: { currentTarget: EventTarget | null }) => {
     if ((!text && !imageUrl) || copied) return;
     const success = await copyToClipboardWithToast(text, {
       successMessage,
       errorMessage,
       imageUrl,
+      chatMessage: chatMessage || (event?.currentTarget instanceof Element && !!event.currentTarget.closest("[data-timeline-row-id]")),
     });
     if (success) setCopied(true);
-  }, [text, imageUrl, copied, successMessage, errorMessage]);
+  }, [text, imageUrl, copied, successMessage, errorMessage, chatMessage]);
 
   return { copied, copy };
 }

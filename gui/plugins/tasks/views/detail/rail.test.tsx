@@ -36,9 +36,9 @@ function RailHarness(props: ComponentProps<typeof PropertiesRail>) {
 afterEach(cleanup);
 
 const PROJECT_ID = "01HZZZZZZZZZZZZZZZZZZZZZP1";
-const BB_PROJECT_ID = "proj_bb0000000000000000000001";
+const ROOM_PROJECT_ID = "proj_bb0000000000000000000001";
 
-function projectRow(linkedBbProjectId: string | null) {
+function projectRow(linkedRoomProjectId: string | null) {
   return {
     id: PROJECT_ID,
     name: "Tasks Plugin",
@@ -46,7 +46,7 @@ function projectRow(linkedBbProjectId: string | null) {
     nextTaskNumber: 6,
     color: "blue",
     folderId: null,
-    linkedBbProjectId,
+    linkedBbProjectId: linkedRoomProjectId,
     createdAt: "2026-07-15T00:00:00.000Z",
   };
 }
@@ -60,10 +60,10 @@ const task = makeTask({
   position: 1,
 });
 
-function railProps(linkedBbProjectId: string | null) {
+function railProps(linkedRoomProjectId: string | null) {
   return {
     task,
-    project: projectRow(linkedBbProjectId),
+    project: projectRow(linkedRoomProjectId),
     labels: [],
     threads: [],
     presets: [],
@@ -78,7 +78,7 @@ describe("dispatch target rail control", () => {
     const slot = renderSlot({ component: RailHarness }, railProps(null), {
       rpc: {
         listBbProjects: () => ({
-          bbProjects: [{ id: BB_PROJECT_ID, name: "bb monorepo" }],
+          bbProjects: [{ id: ROOM_PROJECT_ID, name: "bb monorepo" }],
         }),
         updateProject: (input: Record<string, unknown>) => {
           updateCalls.push(input);
@@ -97,7 +97,7 @@ describe("dispatch target rail control", () => {
     await waitFor(() => expect(updateCalls).toHaveLength(1));
     expect(updateCalls[0]).toEqual({
       projectId: PROJECT_ID,
-      linkedBbProjectId: BB_PROJECT_ID,
+      linkedBbProjectId: ROOM_PROJECT_ID,
     });
   });
 
@@ -105,11 +105,11 @@ describe("dispatch target rail control", () => {
     const updateCalls: Array<Record<string, unknown>> = [];
     const slot = renderSlot(
       { component: RailHarness },
-      railProps(BB_PROJECT_ID),
+      railProps(ROOM_PROJECT_ID),
       {
         rpc: {
           listBbProjects: () => ({
-            bbProjects: [{ id: BB_PROJECT_ID, name: "bb monorepo" }],
+            bbProjects: [{ id: ROOM_PROJECT_ID, name: "bb monorepo" }],
           }),
           updateProject: (input: Record<string, unknown>) => {
             updateCalls.push(input);

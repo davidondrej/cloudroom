@@ -13,3 +13,7 @@ room-cli tasks preset create --name "Codex high" --provider codex \
 ```
 
 `preset update` accepts the same flags; `--service-tier none` clears a tier.
+
+From an agent thread, `preset create`, `preset update` and `dispatch` refuse a
+preset whose permission is above the thread's own mode. Ask the user to
+dispatch it from the Tasks app instead.

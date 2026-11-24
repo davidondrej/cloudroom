@@ -1,7 +1,7 @@
 import type { JsonObject } from "@cloudroom/domain";
 import { describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { createBbSdk } from "../src/core.js";
+import { createRoomSdk } from "../src/core.js";
 import type { FetchImplementation } from "../src/response.js";
 import { createHttpTransport } from "../src/transport-http.js";
 
@@ -21,7 +21,7 @@ function createRecordingSdk() {
     });
     return Response.json({ ok: true });
   });
-  const sdk = createBbSdk({
+  const sdk = createRoomSdk({
     transport: createHttpTransport({
       baseUrl: "http://bb.test",
       fetch,

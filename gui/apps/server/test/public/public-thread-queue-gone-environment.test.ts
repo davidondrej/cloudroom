@@ -8,6 +8,7 @@ import {
 import { applyEnvironmentLifecycleEvent } from "@cloudroom/db/internal-environment-lifecycle";
 import {
   encodeClientTurnRequestIdNumber,
+  THREAD_CONTEXT_CLEAR_OPERATION,
   threadScope,
   type EnvironmentStatus,
 } from "@cloudroom/domain";
@@ -124,46 +125,81 @@ describe("queued message into a thread whose environment is gone (#1789)", () =>
     });
   }
 
-  it("rejects queue-create when a thread that ran before lost its environment row", async () => {
-    await withTestHarness(async (harness) => {
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-queue-pruned",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: null,
-        status: "idle",
-      });
-      seedEvent(harness.deps, {
-        threadId: thread.id,
-        environmentId: null,
-        sequence: 1,
-        type: "client/turn/requested",
-        scope: threadScope(),
-        data: earlierTurnEventData,
-      });
-      seedTurnStarted(harness.deps, {
-        threadId: thread.id,
-        environmentId: null,
-        turnId: "turn-1",
-      });
+  it.each([false, true])(
+    "rejects queue-create and send with a deleted-workspace error when a thread that ran before lost its environment row (context cleared: %s)",
+    async (contextCleared) => {
+      await withTestHarness(async (harness) => {
+        const { host } = seedHostSession(harness.deps, {
+          id: "host-queue-pruned",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const thread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: null,
+          status: "idle",
+        });
+        seedEvent(harness.deps, {
+          threadId: thread.id,
+          environmentId: null,
+          sequence: 1,
+          type: "client/turn/requested",
+          scope: threadScope(),
+          data: earlierTurnEventData,
+        });
+        seedTurnStarted(harness.deps, {
+          threadId: thread.id,
+          environmentId: null,
+          turnId: "turn-1",
+        });
+        if (contextCleared) {
+          seedEvent(harness.deps, {
+            threadId: thread.id,
+            environmentId: null,
+            sequence: 3,
+            type: "system/operation",
+            scope: threadScope(),
+            data: {
+              operation: THREAD_CONTEXT_CLEAR_OPERATION,
+              operationId: "clear",
+              status: "completed",
+              message: "Fresh context",
+            },
+          });
+        }
 
-      const queueResponse = await postQueuedMessage(
-        harness,
-        thread.id,
-        "queued into a pruned env",
-      );
-      expect(queueResponse.status).toBe(409);
-      expect(await readJson(queueResponse)).toMatchObject({
-        code: "thread_environment_unavailable",
-        details: { reason: "never_attached", environmentStatus: null },
+        const queueResponse = await postQueuedMessage(
+          harness,
+          thread.id,
+          "queued into a pruned env",
+        );
+        const deletedWorkspace = {
+          code: "thread_environment_unavailable",
+          message:
+            "This thread's workspace was deleted. Start a new thread to continue.",
+          details: { reason: "destroyed", environmentStatus: null },
+        };
+        expect(queueResponse.status).toBe(409);
+        expect(await readJson(queueResponse)).toMatchObject(deletedWorkspace);
+        expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(0);
+
+        const sendResponse = await harness.app.request(
+          `/api/v1/threads/${thread.id}/send`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              input: [{ type: "text", text: "sent into a pruned env" }],
+              mode: "auto",
+            }),
+          },
+        );
+        expect(sendResponse.status).toBe(409);
+        expect(await readJson(sendResponse)).toMatchObject(deletedWorkspace);
       });
-      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(0);
-    });
-  });
+    },
+  );
 
   it("still accepts queue-create for a thread that has not run and has no environment yet", async () => {
     await withTestHarness(async (harness) => {
@@ -198,7 +234,7 @@ describe("queued message into a thread whose environment is gone (#1789)", () =>
       });
       const environment = seedEnvironment(harness.deps, {
         hostId: host.id,
-          projectId: project.id,
+        projectId: project.id,
         status: "ready",
         isGitRepo: false,
       });

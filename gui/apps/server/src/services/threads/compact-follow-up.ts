@@ -1,0 +1,88 @@
+import { and, eq } from "drizzle-orm";
+import {
+  deleteQueuedThreadMessage,
+  events,
+  getQueuedThreadMessage,
+  getStoredTurnRequestEventForTurn,
+  listQueuedThreadMessages,
+  reorderQueuedThreadMessage,
+  updateQueuedThreadMessage,
+} from "@cloudroom/db";
+import { isStandaloneBuiltinCompactCommand, type PromptInput } from "@cloudroom/domain";
+import type { AppDeps } from "../../types.js";
+import { parseStoredTurnRequestEvent } from "./thread-events.js";
+
+/**
+ * `room-cli thread compact`'s follow-up on a Local thread: a queued row right behind its compaction. When the
+ * compaction turn ends it gets a line saying how it went, or goes away after a stop. Held only in memory: after a
+ * restart the row still runs, without that line.
+ */
+const held = new Map<string, string>();
+
+type Deps = Pick<AppDeps, "db" | "hub">;
+
+export function holdCompactFollowUp(threadId: string, queuedMessageId: string): void {
+  held.set(threadId, queuedMessageId);
+}
+
+/** True while this thread has a queued `/compact`. */
+export function hasQueuedCompaction(deps: Pick<AppDeps, "db">, threadId: string): boolean {
+  return listQueuedThreadMessages(deps.db, threadId).some((row) =>
+    isStandaloneBuiltinCompactCommand(JSON.parse(row.content) as PromptInput[]),
+  );
+}
+
+/** Moves these queued rows, in this order, ahead of the rest. */
+export function queueFirst(deps: Deps, threadId: string, ids: string[]): void {
+  ids.forEach((id, index) => {
+    const placed = ids.slice(0, index + 1);
+    const next = listQueuedThreadMessages(deps.db, threadId).find((row) => !placed.includes(row.id));
+    reorderQueuedThreadMessage({
+      db: deps.db,
+      notifier: deps.hub,
+      threadId,
+      queuedMessageId: id,
+      previousQueuedMessageId: ids[index - 1] ?? null,
+      nextQueuedMessageId: next?.id ?? null,
+    });
+  });
+}
+
+/** When a compaction turn ends: the follow-up says how it went, or goes after a stop. True when it is ready to send. */
+export function settleCompactFollowUp(
+  deps: Deps,
+  args: { threadId: string; turnId: string; status: string; error?: string },
+): boolean {
+  const id = held.get(args.threadId);
+  if (id === undefined) return false;
+  const request = getStoredTurnRequestEventForTurn(deps.db, { threadId: args.threadId, turnId: args.turnId });
+  if (!request || !isStandaloneBuiltinCompactCommand(parseStoredTurnRequestEvent(request).input)) return false;
+  held.delete(args.threadId);
+  const row = getQueuedThreadMessage(deps.db, id);
+  if (!row || row.threadId !== args.threadId) return false;
+  if (args.status === "interrupted") {
+    deleteQueuedThreadMessage(deps.db, deps.hub, id);
+    return false;
+  }
+  const compacted = deps.db
+    .select({ type: events.type })
+    .from(events)
+    .where(
+      and(eq(events.threadId, args.threadId), eq(events.turnId, args.turnId), eq(events.type, "thread/compacted")),
+    )
+    .get();
+  const outcome = compacted
+    ? "Your context was compacted."
+    : `Context compaction failed: ${args.error ?? "the agent didn't compact it"}. Your context is unchanged.`;
+  const [first, ...rest] = JSON.parse(row.content) as PromptInput[];
+  if (first?.type !== "text") return true;
+  const prefix = `${outcome}\n\n`;
+  const mentions = first.mentions.map((m) => ({ ...m, start: m.start + prefix.length, end: m.end + prefix.length }));
+  updateQueuedThreadMessage(deps.db, deps.hub, {
+    id,
+    threadId: args.threadId,
+    expectedUpdatedAt: row.updatedAt,
+    content: [{ ...first, text: prefix + first.text, mentions }, ...rest],
+  });
+  return true;
+}

@@ -1,16 +1,20 @@
-import { CopyButton } from "@/components/ui/copy-button";
+import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { useClipboardCopy } from "@/lib/clipboard";
 
-export function FixPrompt({ prompt, className }: { prompt: string; className?: string }) {
+/** A quiet button that copies a prompt for the user's own AI agent (ADR 0131). The prompt stays out of sight;
+ *  `iconOnly` fits it into a one-line banner. */
+export function FixPrompt({ prompt, className, iconOnly = false }: { prompt: string; className?: string; iconOnly?: boolean }) {
+  const { copied, copy } = useClipboardCopy({ text: prompt });
   return (
-    <div className={cn("rounded-md border border-border bg-background text-xs", className)}>
-      <div className="flex items-center justify-between gap-2 px-2 pt-1.5 text-muted-foreground">
-        <span>Stuck? Send this to your AI agent</span>
-        <CopyButton text={prompt} label="Copy fix prompt" />
-      </div>
-      <p className="max-h-28 select-text overflow-y-auto whitespace-pre-wrap break-words px-2 pb-2 pt-1 font-mono text-foreground">
-        {prompt}
-      </p>
-    </div>
+    <button
+      type="button"
+      aria-label="Copy fix prompt for your AI agent"
+      className={cn("inline-flex shrink-0 cursor-pointer items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground", iconOnly && "size-5 justify-center", className)}
+      onClick={() => void copy()}
+    >
+      <Icon name={copied ? "Check" : "Copy"} aria-hidden className="size-3" />
+      {!iconOnly && (copied ? "Copied" : "Copy fix prompt")}
+    </button>
   );
 }

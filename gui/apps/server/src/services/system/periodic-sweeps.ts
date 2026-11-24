@@ -1,4 +1,5 @@
 import { sweepProviderLifecycles } from "../environments/environment-engine.js";
+import { runLowDiskWorktreeCleanup } from "../environments/low-disk-cleanup.js";
 import { and, eq, isNull, isNotNull, inArray } from "drizzle-orm";
 import { sweepMachineLifecycles } from "../machines/provider-orchestration.js";
 import {
@@ -56,6 +57,7 @@ import {
 } from "../threads/queued-message-dispatch.js";
 import { deliverLegacyDeferredThreadMessages } from "../threads/legacy-deferred-messages.js";
 import { runEventLoopWork, runEventLoopWorkSync } from "./event-loop-work.js";
+import { runLeftoverStreamPiecePruneSweep } from "./event-pruning.js";
 
 type DatabaseMaintenanceSweepDeps = Pick<AppDeps, "db" | "logger">;
 
@@ -490,6 +492,12 @@ const PERIODIC_SWEEP_JOBS: PeriodicSweepJob[] = [
     run: sweepThreadTitleRetries,
   },
   {
+    cadenceMs: 60_000,
+    category: "retention",
+    name: "low-disk-worktree-cleanup",
+    run: runLowDiskWorktreeCleanup,
+  },
+  {
     cadenceMs: 0,
     category: "durable-intent-retry",
     name: "environment-provider-lifecycle",
@@ -518,6 +526,12 @@ const PERIODIC_SWEEP_JOBS: PeriodicSweepJob[] = [
     category: "retention",
     name: "retained-event-output-expiry",
     run: runRetainedEventOutputExpirySweep,
+  },
+  {
+    cadenceMs: 0,
+    category: "retention",
+    name: "leftover-stream-piece-prune",
+    run: runLeftoverStreamPiecePruneSweep,
   },
   {
     cadenceMs: 0,

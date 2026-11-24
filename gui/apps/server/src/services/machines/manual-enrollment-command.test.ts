@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   enrolledInstallerScript,
   manualEnrollmentCommand,
@@ -28,6 +28,13 @@ it("passes the exact bootstrap and arguments to the installer without shell expa
 
 it("builds the transient curl command from the enrollment bootstrap", () => {
   expect(manualEnrollmentCommand(bootstrap)).toBe(
-    "curl -fsSL -H 'X-BB-Enrollment: short-lived-code' 'https://test.getbb.app/install.sh' | sh",
+    "curl -q -fsS -H 'X-BB-Enrollment: short-lived-code' 'https://test.getbb.app/install.sh' | sh",
   );
+  const plain = { ...bootstrap, serverUrl: "http://192.0.2.10:38886" };
+  expect(manualEnrollmentCommand(plain)).toMatch(/' \| sh$/u);
+  vi.stubEnv("BB_ALLOW_INSECURE_SERVER_URL", "1");
+  expect(manualEnrollmentCommand(plain)).toMatch(
+    / \| BB_ALLOW_INSECURE_SERVER_URL=1 sh$/u,
+  );
+  vi.unstubAllEnvs();
 });

@@ -1,6 +1,9 @@
 import type { ModelInfo } from "@anthropic-ai/claude-agent-sdk";
 import { describe, expect, it } from "vitest";
-import { buildClaudeCodeModels } from "./model-list.js";
+import {
+  applyClaudeEffortSettings,
+  buildClaudeCodeModels,
+} from "./model-list.js";
 
 const DISCOVERED_MODELS: ModelInfo[] = [
   {
@@ -37,6 +40,7 @@ const DISCOVERED_MODELS: ModelInfo[] = [
 
 const CURATED_MODELS = [
   "claude-opus-5-5[1m]",
+  "claude-fable-5-2",
   "claude-fable-5-1",
   "claude-opus-5[1m]",
   "claude-opus-4-8[1m]",
@@ -62,6 +66,7 @@ describe("buildClaudeCodeModels", () => {
     ]);
     expect(result.models.map((model) => model.displayName)).toEqual([
       "Opus 5.5 (1M)",
+      "Fable 5.2",
       "Fable 5.1",
       "Opus 5 (1M)",
       "Opus 4.8 (1M)",
@@ -129,4 +134,36 @@ describe("buildClaudeCodeModels", () => {
       "claude-sonnet-5",
     );
   });
+});
+
+const OPUS = "claude-opus-5-5[1m]";
+const perModel = (model: string, effortLevel: string) => ({
+  modelSettings: { [model]: { effortLevel } },
+});
+
+// #656: per-model setting (no [1m], aliases resolved), then effortLevel.
+it.each([
+  [{}, "high", OPUS],
+  [{ effortLevel: "xhigh" }, "xhigh", OPUS],
+  [
+    { effortLevel: "xhigh", ...perModel("claude-opus-5-5", "low") },
+    "low",
+    OPUS,
+  ],
+  [
+    { effortLevel: "low", ...perModel("claude-opus-5", "xhigh") },
+    "xhigh",
+    "opus[1m]",
+  ],
+  [{ effortLevel: "turbo" }, "high", OPUS],
+])("applies Claude effort settings %j -> %s", (settings, expected, model) => {
+  const { models, selectedOnlyModels } = applyClaudeEffortSettings(
+    buildClaudeCodeModels(DISCOVERED_MODELS),
+    settings,
+    DISCOVERED_MODELS,
+  );
+  const found = [...models, ...selectedOnlyModels].find(
+    (item) => item.model === model,
+  );
+  expect(found?.defaultReasoningEffort).toBe(expected);
 });

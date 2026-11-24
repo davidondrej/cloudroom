@@ -1,7 +1,7 @@
 import { getEnvironment, getThread } from "@cloudroom/db";
 import type { EnvironmentRow } from "@cloudroom/db";
-import type { PromptInput, Thread } from "@cloudroom/domain";
-import type { ForkThreadRequest } from "@cloudroom/server-contract";
+import { CLOUD_NATIVE_FORK_PROVIDERS, PERSONAL_PROJECT_ID, type PromptInput, type Thread } from "@cloudroom/domain";
+import type { CreateThreadEnvironmentArgs, ForkThreadRequest } from "@cloudroom/server-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { resolveExistingThreadPermissionMode } from "./thread-execution-plan.js";
@@ -9,6 +9,9 @@ import { getLastExecutionOptions } from "./thread-events.js";
 import { createThreadFromRequest } from "./thread-create.js";
 import { cloudExecution, cloudroom, isCloudThread } from "../cloudroom/commands.js";
 import { binding } from "../cloudroom/store.js";
+import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
+import { resolvePrimaryHostId } from "../hosts/primary-host.js";
+import { worktreeProviderInputs } from "./thread-environment-placement.js";
 
 type ThreadForkDeps = LoggedPendingInteractionWorkSessionDeps;
 
@@ -30,19 +33,6 @@ function requireForkSourceThread(
   return sourceThread;
 }
 
-function requireForkCapableProvider(
-  deps: Pick<ThreadForkDeps, "providerRegistry">,
-  sourceThread: Thread,
-): void {
-  if (!deps.providerRegistry.supportsFork(sourceThread.providerId)) {
-    throw new ApiError(
-      400,
-      "invalid_request",
-      `Provider ${sourceThread.providerId} does not support thread forks`,
-    );
-  }
-}
-
 function requireSourceEnvironment(
   deps: Pick<ThreadForkDeps, "db">,
   sourceThread: Thread,
@@ -59,6 +49,21 @@ function requireSourceEnvironment(
     );
   }
   return environment;
+}
+
+/** A Local fork defaults to a new worktree (createThreadFromRequest gives it the source's code), so the two threads
+ *  never edit the same files. A side chat (ADR 0189, 0273), a personal thread, or a source on another machine keeps
+ *  the source's folder. */
+function defaultLocalForkEnvironment(deps: ThreadForkDeps, sourceThread: Thread, source: EnvironmentRow, fresh: boolean): CreateThreadEnvironmentArgs {
+  if (fresh || sourceThread.projectId === PERSONAL_PROJECT_ID || !source.hostId || source.hostId !== resolvePrimaryHostId(deps)) {
+    return { type: "reuse", environmentId: source.id };
+  }
+  return {
+    type: "provider",
+    environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+    machine: { type: "existing", hostId: source.hostId },
+    inputs: worktreeProviderInputs({ kind: "default" }),
+  };
 }
 
 /** A Cloud thread forks into a new sandbox, and its first message makes the native fork, so it needs one. */
@@ -146,6 +151,10 @@ export async function createThreadForkFromRequest(
       : "local");
   // A fork without a first message (a side chat) stays in its source's sandbox, like a Local one (ADR 0189, 0273).
   if (target === "cloud" && isCloudThread(sourceThread) && !request.input) {
+    // Only a fresh side chat, or a copy of a Claude Code or Codex session, starts without a first message.
+    if (!request.fresh && !CLOUD_NATIVE_FORK_PROVIDERS.includes(sourceThread.providerId)) {
+      throw new ApiError(400, "invalid_request", "A Cloud fork needs a first message");
+    }
     const thread = await cloudroom(deps).sideChat(sourceThread, request);
     deps.telemetry.capture({ name: "thread_created", properties: { execution: cloudExecution(deps, thread.id), is_child_thread: false, provider: thread.providerId } });
     return thread;
@@ -156,9 +165,20 @@ export async function createThreadForkFromRequest(
   if (isCloudThread(sourceThread)) {
     return createLocalForkOfCloudFromRequest(deps, sourceThread, request);
   }
-  if (!request.fresh) requireForkCapableProvider(deps, sourceThread);
   const sourceEnvironment = requireSourceEnvironment(deps, sourceThread);
   const sourceExecution = getLastExecutionOptions(deps, sourceThread.id);
+  const providerId =
+    request.fresh && request.providerId
+      ? request.providerId
+      : sourceThread.providerId;
+  const sameProvider = providerId === sourceThread.providerId;
+  const model =
+    (request.fresh ? request.model : undefined) ??
+    (sameProvider ? sourceExecution?.model : undefined);
+  const reasoningLevel =
+    (request.fresh ? request.reasoningLevel : undefined) ??
+    (sameProvider ? sourceExecution?.reasoningLevel : undefined);
+  const serviceTier = sameProvider ? sourceExecution?.serviceTier : undefined;
   const visibleInput = request.input ?? [];
   const agentContextSeed = request.agentContextSeed ?? [];
   const input: PromptInput[] = [...agentContextSeed, ...visibleInput];
@@ -168,10 +188,7 @@ export async function createThreadForkFromRequest(
   return createThreadFromRequest(
     deps,
     {
-      environment: request.environment ?? {
-        type: "reuse",
-        environmentId: sourceEnvironment.id,
-      },
+      environment: request.environment ?? defaultLocalForkEnvironment(deps, sourceThread, sourceEnvironment, request.fresh === true),
       input,
       origin: request.origin,
       ...(request.originPluginId === undefined
@@ -184,15 +201,11 @@ export async function createThreadForkFromRequest(
       permissionMode:
         request.permissionMode ??
         resolveExistingThreadPermissionMode(deps, sourceThread.id),
-      ...(sourceExecution?.model ? { model: sourceExecution.model } : {}),
-      ...(sourceExecution?.reasoningLevel
-        ? { reasoningLevel: sourceExecution.reasoningLevel }
-        : {}),
-      ...(sourceExecution?.serviceTier
-        ? { serviceTier: sourceExecution.serviceTier }
-        : {}),
+      ...(model ? { model } : {}),
+      ...(reasoningLevel ? { reasoningLevel } : {}),
+      ...(serviceTier ? { serviceTier } : {}),
       projectId: sourceThread.projectId,
-      providerId: sourceThread.providerId,
+      providerId,
       ...(request.sourceSeqEnd === undefined
         ? {}
         : { sourceSeqEnd: request.sourceSeqEnd }),

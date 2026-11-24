@@ -141,14 +141,20 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
         .as_str()
         .ok_or_else(|| io::Error::other("missing Pi session ID"))?;
     let path = handle.session_file.as_ref().unwrap();
-    if state["sessionFile"].as_str() != path.to_str()
-        || state["model"]["id"].as_str() != Some(&handle.profile.model)
+    // Pi falls back to a custom ID it reshapes (`openrouter/x` becomes `x`) when its list lacks the model.
+    if state["model"]["id"].as_str() != Some(&handle.profile.model)
         || state["model"]["provider"].as_str() != handle.profile.provider.as_deref()
+    {
+        return Err(io::Error::other(
+            "This Pi doesn't know the selected model. Pick another model",
+        ));
+    }
+    if state["sessionFile"].as_str() != path.to_str()
         || state["isStreaming"] != false
         || state["isCompacting"] != false
     {
         return Err(io::Error::other(
-            "Pi startup state does not match configured session/model",
+            "Pi startup state does not match configured session",
         ));
     }
     if handle.resume.as_ref().is_some_and(|s| s.id != id) {
@@ -223,6 +229,18 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
                 )
             })?;
     if !images.is_empty() {
+        // Pi silently swaps images for a placeholder when its list says the model takes no images. A model the list
+        // lacks copies its provider's default, which may be text-only (#1580): say so instead.
+        let state = handle.call("get_state", json!({})).await?;
+        if state["model"]["input"]
+            .as_array()
+            .is_some_and(|input| !input.iter().any(|kind| kind == "image"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "This Pi doesn't list the selected model as accepting images. Remove the images or pick another model",
+            ));
+        }
         params["images"] = json!(images);
     }
     handle.process.call("prompt", params, Some(request)).await?;

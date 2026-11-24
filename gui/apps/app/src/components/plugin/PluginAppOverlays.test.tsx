@@ -9,7 +9,7 @@ import {
   screen,
 } from "@testing-library/react";
 import { createPortal } from "react-dom";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ThreadActionsProvider } from "@/components/thread/ThreadActionsProvider";
@@ -20,8 +20,8 @@ import {
 } from "@/lib/plugin-slots";
 import { pluginSdkAppImplementation } from "@/lib/plugin-sdk-app-impl";
 import {
-  useBbContext,
-  useBbNavigate,
+  useRoomContext,
+  useRoomNavigate,
   useRpc,
   useSettings,
 } from "@/lib/plugin-sdk-hooks";
@@ -74,8 +74,8 @@ function LocationProbe() {
 }
 
 function PortaledProbe() {
-  const context = useBbContext();
-  const navigate = useBbNavigate();
+  const context = useRoomContext();
+  const navigate = useRoomNavigate();
   const rpc = useRpc();
   const settings = useSettings();
   const sidebarThreadActions =

@@ -1,9 +1,14 @@
+import {
+  CALLER_PROOF_REQUIRED_MESSAGE,
+  CALLER_PROOF_STATUS_HEADER,
+} from "@cloudroom/config/caller-proof";
+import { callerProofStatus, isTrustedCaller } from "../caller-access.js";
 import { timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import type { Context, Hono } from "hono";
-import type { createNodeWebSocket } from "@hono/node-ws";
+import type { createNodeWebSocket } from "../node-websocket.js";
 import type { WSContext, WSMessageReceive, WSEvents } from "hono/ws";
 import type {
   ExperimentalPluginWebSocket,
@@ -138,9 +143,14 @@ function localAuthProblem(
   context: Context,
   deps: PluginRoutesDeps,
 ): WireAuthProblem | null {
-  return browserRequestProblem(context, deps, {
-    requireJsonForMutation: true,
-  });
+  return (
+    browserRequestProblem(context, deps, {
+      requireJsonForMutation: true,
+    }) ??
+    (isTrustedCaller(context)
+      ? null
+      : { status: 401, error: CALLER_PROOF_REQUIRED_MESSAGE })
+  );
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -324,6 +334,9 @@ export function registerPluginRoutes(
   );
   const upgradePluginWebSocket = upgradeWebSocket?.(async (context) => {
     const id = context.req.param("id");
+    if (id === undefined) {
+      throw new ApiError(404, "unknown_plugin", "missing plugin id");
+    }
     const subPath = pluginHttpSubPath(context, id);
     const lookup = plugins.getWebSocketRoute(id, subPath);
     if (lookup.outcome === "unknown-plugin") {
@@ -432,6 +445,14 @@ export function registerPluginRoutes(
   });
 
   app.post("/plugins/:id/cli", async (context) => {
+    if (
+      getGateAuthKind(context) === "machine" &&
+      BUNDLED_PLUGINS.some(
+        (plugin) => plugin.pluginId === context.req.param("id") && plugin.refuseMachineCli,
+      )
+    ) {
+      return context.json({ ok: false, error: "This plugin command requires the account owner." }, 403);
+    }
     const authProblem = localAuthProblem(context, deps);
     if (authProblem) {
       return context.json(
@@ -805,7 +826,13 @@ export function registerPluginRoutes(
           ? await tokenAuthProblem(context, plugins, id)
           : null;
     if (problem) {
-      return context.json({ ok: false, error: problem.error }, problem.status);
+      return context.json(
+        { ok: false, error: problem.error },
+        problem.status,
+        problem.status === 401 && auth === "local"
+          ? { [CALLER_PROOF_STATUS_HEADER]: callerProofStatus(context) }
+          : undefined,
+      );
     }
     const fresh = plugins.getHttpRoute(id, context.req.method, subPath);
     if (fresh.outcome !== "found" || fresh.value.auth !== auth) {

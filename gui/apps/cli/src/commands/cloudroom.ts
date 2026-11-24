@@ -1,16 +1,17 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { constants, copyFile, link, lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink } from "node:fs/promises";
+import { chmod, constants, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readdir, readlink, realpath, rename, rm, rmdir, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { promisify } from "node:util";
 import { Command } from "commander";
 import type { AutoDeleteDays, CloudEnvironmentChange } from "@cloudroom/sdk";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
 import { resolveContextThreadId } from "../context-env.js";
 import { resolveLocalHostId } from "../daemon.js";
 import { outputJson, type JsonOutputOptions } from "./helpers.js";
+import { VPS_HINT_TIMEOUT_MS, vpsDiskLine } from "./machine.js";
 
 /** VM paths may start with ~ (the agent home); everything else stays literal. */
 function quote(path: string): string {
@@ -20,6 +21,19 @@ function quote(path: string): string {
 
 function literal(text: string): string {
   return `'${text.replaceAll("'", "'\\''")}'`;
+}
+
+const TAR = process.platform === "win32" ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\tar.exe` : "tar";
+
+// One `&&` step, so a missing path fails here instead of sending an empty archive. A pulled symlink is followed (-H, -h):
+// skipping it also left nothing to unpack (#1454).
+export const WINDOWS_PULL_ARCHIVE = `ls -d -- "$n" >/dev/null && { l=$(find -H "$n" -type l | wc -l); [ "$l" = 0 ] || printf 'Skipped %s symlink(s): Windows tar cannot create them.\\n' "$l" >&2; find -H "$n" ! -type l -print0 | tar -h --null --no-recursion -czf - -T -; }`;
+
+const THIS_COMPUTER = process.platform === "win32" ? "this PC" : "this Mac";
+const COMPUTER_TITLE = process.platform === "darwin" ? "Mac" : "Computer";
+
+function endsWithSeparator(path: string): boolean {
+  return path.endsWith("/") || (process.platform === "win32" && path.endsWith("\\"));
 }
 
 function lastLine(output: Buffer): string {
@@ -39,7 +53,7 @@ const THREAD_OPTION = ["--thread <id>", "Cloud thread whose sandbox to use; requ
 
 /** Runs on the VM or sandbox and fails with its error output unless the command succeeds. */
 async function runOnVm(url: string, target: VmTarget, command: string, stdin = Buffer.alloc(0)): Promise<{ stdout: Buffer; stderr: Buffer }> {
-  const result = await createCliBbSdk(url).cloudroom.runOnVm({ command, stdin: stdin.toString("hex"), threadId: target.thread });
+  const result = await createCliRoomSdk(url).cloudroom.runOnVm({ command, stdin: stdin.toString("hex"), threadId: target.thread });
   if (result.truncated) throw new Error("Transfer exceeded the 16 MiB limit.");
   if (result.code !== 0) throw new Error(Buffer.from(result.stderr, "hex").toString().trimEnd() || `VM command failed (${result.code})`);
   return { stdout: Buffer.from(result.stdout, "hex"), stderr: Buffer.from(result.stderr, "hex") };
@@ -69,52 +83,100 @@ async function uploadFile(url: string, target: VmTarget, file: string, remote: s
   }
 }
 
+/** A pulled copy's name in a folder: the VM path's last part, or null for `.`, `..`, and `~`, which only the VM can name. */
+function pullName(source: string): string | null {
+  const path = source.replace(/\/+$/, "");
+  const name = path === "~" ? "" : posix.basename(path);
+  return ["", ".", ".."].includes(name) ? null : name;
+}
+
+/** Removes a staging folder, even when the VM's archive left read-only folders tar extracted, which block removal. */
+async function discard(staging: string): Promise<void> {
+  await rm(staging, { recursive: true, force: true }).catch(async () => {
+    const open = async (path: string): Promise<void> => {
+      await chmod(path, 0o700).catch(() => {});
+      for (const kid of await readdir(path, { withFileTypes: true }).catch(() => [])) if (kid.isDirectory()) await open(join(path, kid.name));
+    };
+    await open(staging);
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  });
+}
+
+/** Unpacks a pulled archive in a temp folder and places only its one item, so the VM can't add other files. `inside`:
+ *  into the `target` folder, under a name chosen here; else at `target`, a new name. Returns where the copy landed.
+ *  Into a folder it is like `cp -R`: a folder merges with one of the same name (which keeps its own mode),
+ *  a file or symlink replaces what is there, and a type clash is refused. A symlink at `to` is replaced, never followed. */
+export async function placePull(archive: Buffer, source: string, target: string, inside: boolean): Promise<string> {
+  const taken = (path: string) => new Error(`${path} already exists; nothing was copied.`);
+  const staging = await mkdtemp(join(await realpath(inside ? target : dirname(target)), ".cloudroom-"));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const tar = spawn(TAR, ["-xzf", "-", "-C", staging], { stdio: ["pipe", "inherit", "inherit"] });
+      tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error("Could not unpack the copied files.")));
+      tar.stdin.end(archive);
+    });
+    const [entry, ...rest] = await readdir(staging);
+    if (!entry || rest.length) throw new Error("Could not unpack the copied files.");
+    const copy = join(staging, entry);
+    const kind = await lstat(copy);
+    if (!inside) {
+      // mkdir claims the name. Windows can't rename a folder onto it, even empty (#1396), so it moves the contents in.
+      const fill = async () => { if (process.platform !== "win32") return rename(copy, target); for (const kid of await readdir(copy)) await rename(join(copy, kid), join(target, kid)); };
+      const placed = kind.isDirectory() ? mkdir(target).then(() => fill().catch(async (error) => { await rmdir(target).catch(() => {}); throw error; }))
+        : kind.isSymbolicLink() ? readlink(copy).then((path) => symlink(path, target))
+        : link(copy, target).catch((error: NodeJS.ErrnoException) => { if (error.code === "EEXIST") throw error; return copyFile(copy, target, constants.COPYFILE_EXCL); });
+      await placed.catch((error: NodeJS.ErrnoException) => { throw error.code === "EEXIST" ? taken(target) : error; });
+      return target;
+    }
+    const name = pullName(source);
+    const hint = `Give the copy a new name instead: room-cli vm pull ${source} ${join(target, "<new-name>")}`;
+    if (name === null && (!/^[\p{L}\p{N}]/u.test(entry) || !kind.isDirectory())) throw new Error(`The VM named this copy "${entry}". ${hint}`);
+    if (name !== null && process.platform === "win32" && /[\\:]/.test(name)) throw new Error(`"${name}" isn't a file name on ${THIS_COMPUTER}. ${hint}`);
+    const to = join(await realpath(target), name ?? entry);
+    const there = await lstat(to).catch(() => null);
+    if (!there) await rename(copy, to);
+    else if (name === null) throw taken(to);
+    else if (kind.isDirectory() && there.isDirectory()) await cp(copy, to, { recursive: true, force: true, verbatimSymlinks: true });
+    else if (kind.isDirectory() || there.isDirectory()) throw new Error(`Can't copy a ${kind.isDirectory() ? "folder" : "file"} onto the ${there.isDirectory() ? "folder" : "file"} ${to}.`);
+    else await rename(copy, to);
+    return to;
+  } finally {
+    await discard(staging);
+  }
+}
+
 export function registerVmCommands(program: Command, getUrl: () => string): void {
   const vm = program.command("vm").description("Run commands and copy files on your cloud VM or a Cloud thread's sandbox, as its agent account");
-  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code.")
+  vm.command("run <command>").description("Run a shell command on the VM or sandbox (quote it). Exits with its code, except 1 when it succeeded but its output passed 16 MiB and was cut (it still ran; redirect output there if only the status matters).")
     .option(...THREAD_OPTION)
     .option("--cwd <dir>", "Folder, relative to the agent home")
     .option("--stdin", "Forward standard input")
     .action(action(async (command: string, options: VmTarget & { cwd?: string; stdin?: boolean }) => {
       const stdin = options.stdin ? await readStdin() : Buffer.alloc(0);
-      const result = await createCliBbSdk(getUrl()).cloudroom.runOnVm({ command, stdin: stdin.toString("hex"), cwd: options.cwd, threadId: options.thread });
+      const result = await createCliRoomSdk(getUrl()).cloudroom.runOnVm({ command, stdin: stdin.toString("hex"), cwd: options.cwd, threadId: options.thread });
       process.stdout.write(Buffer.from(result.stdout, "hex"));
       process.stderr.write(Buffer.from(result.stderr, "hex"));
       if (result.truncated) process.stderr.write("Output exceeded 16 MiB and was truncated.\n");
-      process.exitCode = result.code ?? 1;
+      // #1817: cut output must not pass `&&` or `set -e` as complete. A failed command keeps its own code.
+      const cut = result.truncated && result.code === 0;
+      if (cut) process.stderr.write("The command exited 0, but its output was cut, so this exits 1. Write it to a file and copy it with `room-cli vm pull`.\n");
+      process.exitCode = cut ? 1 : result.code ?? 1;
     }));
-  vm.command("pull <vm-path> [local-path]").description("Copy a VM or sandbox file or folder to this Mac, like cp: into an existing folder or a path ending in / (default: current folder), else under that new name, which must not exist yet.")
+  vm.command("pull <vm-path> [local-path]").description(`Copy a VM or sandbox file or folder to ${THIS_COMPUTER}, like cp: into an existing folder or a path ending in / (default: current folder), else under that new name, which must not exist yet.`)
     .option(...THREAD_OPTION)
     .action(action(async (source: string, target = ".", options: VmTarget = {}) => {
-      const inside = target.endsWith("/") || await stat(target).then((s) => s.isDirectory(), () => false);
+      // Git Bash turns /code/x into C:/Program Files/Git/code/x before room-cli sees it (#1454).
+      if (process.platform === "win32" && /^[A-Za-z]:[\\/]/.test(source)) throw new Error(`${source} is a path on ${THIS_COMPUTER}, not the VM. Git Bash rewrites arguments that start with /; run MSYS_NO_PATHCONV=1 room-cli vm pull <vm-path> <local-path> instead.`);
+      const inside = endsWithSeparator(target) || await stat(target).then((s) => s.isDirectory(), () => false);
       const taken = new Error(`${target} already exists; nothing was copied.`);
       if (!inside && await lstat(target).then(() => true, () => false)) throw taken;
       const { stdout: archive, stderr } = await runOnVm(getUrl(), options, `p=${quote(source)}; case $p in */) [ -L "\${p%/}" ] && p=$p.;; esac; case $(basename -- "$p") in .|..) p=$(cd -P -- "$p" >/dev/null && pwd -P) || exit 1;; esac; `
-        + `n=$(basename -- "$p"); cd -- "$(dirname -- "$p")" && tar -czf - -- "$n" && printf '%s\\n' "$n" >&2`);
+        + `n=$(basename -- "$p"); cd -- "$(dirname -- "$p")" && ${process.platform === "win32" ? WINDOWS_PULL_ARCHIVE : `tar -czf - -- "$n"`} && printf '%s\\n' "$n" >&2`);
+      if (process.platform === "win32") process.stderr.write(stderr.toString().trim().split("\n").slice(0, -1).map((line) => `${line}\n`).join(""));
       await mkdir(inside ? target : dirname(target), { recursive: true });
-      const folder = inside ? target : await mkdtemp(join(await realpath(dirname(target)), ".cloudroom-"));
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const tar = spawn("tar", ["-xzf", "-", "-C", folder], { stdio: ["pipe", "inherit", "inherit"] });
-          tar.on("error", reject).on("close", (code) => code === 0 ? resolve() : reject(new Error("Could not unpack the copied files.")));
-          tar.stdin.end(archive);
-        });
-        if (!inside) {
-          const [entry, ...rest] = await readdir(folder);
-          if (!entry || rest.length) throw new Error("Could not unpack the copied files.");
-          const copy = join(folder, entry);
-          const kind = await lstat(copy);
-          const placed = kind.isDirectory() ? mkdir(target).then(() => rename(copy, target).catch(async (error) => { await rmdir(target).catch(() => {}); throw error; }))
-            : kind.isSymbolicLink() ? readlink(copy).then((path) => symlink(path, target))
-            : link(copy, target).catch((error: NodeJS.ErrnoException) => { if (error.code === "EEXIST") throw error; return copyFile(copy, target, constants.COPYFILE_EXCL); });
-          await placed.catch((error: NodeJS.ErrnoException) => { throw error.code === "EEXIST" ? taken : error; });
-        }
-      } finally {
-        if (!inside) await rm(folder, { recursive: true, force: true });
-      }
-      console.log(JSON.stringify({ copied: source, to: inside ? join(await realpath(target), lastLine(stderr)) : target }));
+      console.log(JSON.stringify({ copied: source, to: await placePull(archive, source, target, inside) }));
     }));
-  vm.command("push <local-path> [vm-path]").description("Copy a file or folder from this Mac to the VM or sandbox, like cp: into an existing folder or a path ending in / (default: agent home), else under that new name, which must not exist yet.")
+  vm.command("push <local-path> [vm-path]").description(`Copy a file or folder from ${THIS_COMPUTER} to the VM or sandbox, like cp: into an existing folder or a path ending in / (default: agent home), else under that new name, which must not exist yet.`)
     .option(...THREAD_OPTION)
     .action(action(async (source: string, target = "~", options: VmTarget = {}) => {
       const linked = source.endsWith("/") && await lstat(source.replace(/\/+$/, "")).then((s) => s.isSymbolicLink(), () => false);
@@ -124,7 +186,7 @@ export function registerVmCommands(program: Command, getUrl: () => string): void
       const remote = `~/.cache/cloudroom/push-${randomUUID()}.tgz`;
       let to: string;
       try {
-        await promisify(execFile)("tar", ["--no-xattrs", "-czf", archive, "-C", dirname(from), "--", basename(from)], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
+        await promisify(execFile)(TAR, ["--no-xattrs", "-czf", archive, "-C", dirname(from), "--", basename(from)], { env: { ...process.env, COPYFILE_DISABLE: "1" } });
         await uploadFile(getUrl(), options, archive, remote);
         to = lastLine((await runOnVm(getUrl(), options, `f=${remote}; d=${quote(target)}; n=${literal(basename(from))}; p=$(dirname -- "$d"); mkdir -p -- "${target.endsWith("/") ? "$d" : "$p"}" || exit 1; `
           + `used() { [ -e "$d" ] || [ -L "$d" ] && printf 'VM path %s already exists; nothing was copied.\\n' "$d" >&2; }; `
@@ -146,37 +208,66 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
   group.command("bb").description("Copy open BB threads into idle Local threads with full history. Sends no prompts; BB is never changed.")
     .option("--json", "Print JSON")
     .action(action(async (options: JsonOutputOptions) => {
-      const result = await createCliBbSdk(getUrl()).cloudroom.importBb(await resolveLocalHostId());
+      const result = await createCliRoomSdk(getUrl()).cloudroom.importBb(await resolveLocalHostId());
       if (outputJson(options, result)) return;
       for (const thread of result.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
       for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
       if (!result.imported.length && !result.skipped.length) console.log("No open BB threads found.");
     }));
-  for (const [command, harness, app] of [["claude-code", "claude-code", "Claude Code"], ["codex", "codex", "Codex"], ["pi", "pi", "Pi"], ["hermes", "acp-hermes-agent", "Hermes Agent"], ["t3code", "t3code", "T3 Code"]] as const) {
-    group.command(command).description(`Copy recent ${app} chats from this Mac into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""} Sends no prompts; ${app} is never changed.`)
+  for (const [command, harness, app] of [["claude-code", "claude-code", "Claude Code"], ["codex", "codex", "Codex"], ["pi", "pi", "Pi"], ["hermes", "acp-hermes-agent", "Hermes Agent"], ["t3code", "t3code", "T3 Code"], ["conductor", "conductor", "Conductor"]] as const) {
+    const sub = group.command(command).description(`Copy recent ${app} chats from ${THIS_COMPUTER} into idle Local threads with their messages.${harness === "acp-hermes-agent" ? " Text only: the agent reads the old messages instead of resuming the session." : harness === "t3code" || harness === "conductor" ? " Claude Code and Codex chats keep their memory; chats from other agents come over as text." : ""}${harness === "conductor" ? " --path imports every chat in a Conductor Cloud export (its unzipped folder or the .zip)." : ""} Sends no prompts; ${app} is never changed.`)
       .option("--days <days>", "Only chats active in the last N days", "30")
       .option("--dry-run", "List the chats without importing them")
-      .option("--json", "Print JSON")
-      .action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean }) => {
-        const sdk = createCliBbSdk(getUrl()).cloudroom;
+      .option("--json", "Print JSON");
+    if (harness === "conductor") sub.option("--path <path>", "A Conductor Cloud export: its unzipped folder or the .zip");
+    if (harness === "claude-code") sub.option("--config-dir <folder>", "Read chats from another Claude Code config folder (a CLAUDE_CONFIG_DIR). Each imported chat is copied into the default one; the original stays");
+    sub.action(action(async (options: JsonOutputOptions & { days: string; dryRun?: boolean; path?: string; configDir?: string }) => {
+        if (harness === "conductor" || !options.dryRun) {
+          (await import("../plugin-cli-proxy.js")).allowLongRequests();
+        }
+        const sdk = createCliRoomSdk(getUrl()).cloudroom;
+        if (options.path && options.dryRun) {
+          const { sessions } = await sdk.conductorExport(resolve(options.path));
+          if (outputJson(options, { sessions })) return;
+          for (const session of sessions) console.log(`${session.title}  (${session.cwd})`);
+          if (!sessions.length) console.log("No new chats in this Conductor export.");
+          return;
+        }
+        if (options.path) {
+          const result = await sdk.importConductorExport(await resolveLocalHostId(), resolve(options.path));
+          if (outputJson(options, result)) return;
+          for (const thread of result.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
+          for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+          if (!result.imported.length && !result.skipped.length) console.log("No new chats in this Conductor export.");
+          return;
+        }
         const since = Date.now() - Number(options.days) * 86_400_000;
-        const sessions = (await sdk.nativeSessions()).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
+        const configDir = options.configDir === undefined ? undefined : resolve(options.configDir);
+        const sessions = (await sdk.nativeSessions(undefined, configDir)).sessions.filter((session) => session.harness === harness && session.updatedAt >= since);
         if (options.dryRun || !sessions.length) {
           if (outputJson(options, { sessions })) return;
           for (const session of sessions) console.log(`${session.title}  (${session.cwd})`);
           if (!sessions.length) console.log(`No new ${app} chats from the last ${options.days} days.`);
           return;
         }
-        const result = await sdk.importSessions(await resolveLocalHostId(), sessions.map(({ harness, id }) => ({ harness, id })));
-        if (outputJson(options, result)) return;
-        for (const thread of result.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
-        for (const thread of result.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+        // Batches of 20 like the app, so each request stays short and progress prints as it goes.
+        const hostId = await resolveLocalHostId();
+        const result: Awaited<ReturnType<typeof sdk.importSessions>> = { imported: [], skipped: [] };
+        for (let index = 0; index < sessions.length; index += 20) {
+          const batch = await sdk.importSessions(hostId, sessions.slice(index, index + 20).map(({ harness, id }) => ({ harness, id })), configDir);
+          result.imported.push(...batch.imported);
+          result.skipped.push(...batch.skipped);
+          if (options.json) continue;
+          for (const thread of batch.imported) console.log(`Imported  ${thread.title} → ${thread.threadId}`);
+          for (const thread of batch.skipped) console.log(`Skipped   ${thread.title}: ${thread.reason}`);
+        }
+        outputJson(options, result);
       }));
   }
   group.command("share <link>").description("Copy a thread someone shared with you (a cloudroom.dev/s/... link) into a new Local thread. Its agent starts by reading it and summing up.")
     .option("--json", "Print JSON")
     .action(action(async (link: string, options: JsonOutputOptions) => {
-      const result = await createCliBbSdk(getUrl()).cloudroom.continueShare(link);
+      const result = await createCliRoomSdk(getUrl()).cloudroom.continueShare(link);
       if (!outputJson(options, result)) console.log(`Copied into ${result.threadId}.`);
     }));
 }
@@ -185,74 +276,91 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
 export function registerFeedbackCommand(program: Command, getUrl: () => string, name: "feedback" | "report"): void {
   program.command(`${name} <message>`, { hidden: name === "report" }).description("Send David, Cloudroom's founder, a bug, friction, or idea: what happened and the exact error. No secrets or code.")
     .action(action(async (message: string) => {
-      console.log(JSON.stringify(await createCliBbSdk(getUrl()).cloudroom.reportBug({ message, threadId: resolveContextThreadId() })));
+      console.log(JSON.stringify(await createCliRoomSdk(getUrl()).cloudroom.reportBug({ message, threadId: resolveContextThreadId() })));
     }));
 }
 
 export function registerCloudCommands(program: Command, getUrl: () => string): void {
   const group = program.command("cloud").description("Connect this app to your Cloudroom account and VM");
   group.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const status = await createCliBbSdk(getUrl()).cloudroom.status();
-    if (!outputJson(options, status)) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\nMac access and previews can't connect: ${status.previews.message}` : ""}`);
+    // Sandbox `storage` is null; the account's own VPS has one disk for all its threads, so status shows it (#1512).
+    const [status, vps] = await Promise.all([
+      createCliRoomSdk(getUrl()).cloudroom.status(),
+      createCliRoomSdk(getUrl(), VPS_HINT_TIMEOUT_MS).cloudroom.vps().then((found) => (found.connected ? found : null), () => null),
+    ]);
+    if (!outputJson(options, { ...status, vps })) console.log(`${status.account?.email ?? "Signed out"}\n${status.signingIn ? "Waiting for browser confirmation" : status.ready ? "Cloud connected" : status.error ?? "Cloud unavailable"}${status.signInError ? `\n${status.signInError}` : ""}${status.previews?.explained && status.previews.state === "offline" && status.previews.message ? `\n${COMPUTER_TITLE} access and previews can't connect: ${status.previews.message}` : ""}${vps ? `\n${vpsDiskLine(vps)}` : ""}`);
   }));
-  group.command("check").description("Make Mac access and previews check their connection to Cloudroom now").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    await createCliBbSdk(getUrl()).cloudroom.checkPreviews();
+  group.command("check").description(`Make ${COMPUTER_TITLE} access and previews check their connection to Cloudroom now`).option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
+    await createCliRoomSdk(getUrl()).cloudroom.checkPreviews();
     if (!outputJson(options, { ok: true })) console.log("Checking now. Run room-cli cloud status in a few seconds for the result.");
   }));
   const codex = group.command("codex").description("Connect Codex on your cloud VM");
   codex.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.codexAuth();
+    const result = await createCliRoomSdk(getUrl()).cloudroom.codexAuth();
     if (!outputJson(options, result)) console.log(`${result.state}${result.email ? ` · ${result.email}` : ""}${result.message ? `\n${result.message}` : ""}`);
   }));
   codex.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string }) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.codexLogin(options.requestId);
+    const result = await createCliRoomSdk(getUrl()).cloudroom.codexLogin(options.requestId);
     if (!outputJson(options, result)) console.log(result.state === "waiting" ? `Open ${result.verification_url}\nEnter code: ${result.user_code}\nRun room-cli cloud codex status to verify.` : result.message ?? result.state);
   }));
   codex.command("cancel <request-id>").option("--json", "Print JSON").action(action(async (id: string, options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.cancelCodexLogin(id);
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cancelCodexLogin(id);
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
-  const github = group.command("github").description("Connect GitHub for cloud sandboxes");
-  github.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.githubAuth();
-    if (!outputJson(options, result)) console.log(`${result.state}${result.message ? `\n${result.message}` : ""}`);
+  const gitlab = group.command("gitlab").description("Connect GitLab.com for Cloud projects");
+  gitlab.command("add <url>").description("Add a GitLab.com project").option("--json", "Print JSON").action(action(async (url:string,options:JsonOutputOptions)=>{
+    const project=await createCliRoomSdk(getUrl()).cloudroom.addGitlabRepo({repo:url});
+    if(!outputJson(options,project)) console.log(project.projectId);
   }));
-  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string }) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.githubLogin(options.requestId);
-    if (!outputJson(options, result)) console.log(result.state === "waiting" ? `Open ${result.verification_url}\nEnter code: ${result.user_code}\nRun room-cli cloud github status to verify.` : result.message ?? result.state);
+  for (const command of ["status","login","cancel","disconnect"] as const) {
+    gitlab.command(command).option("--json","Print JSON").action(action(async (options:JsonOutputOptions)=>{
+      const state=await createCliRoomSdk(getUrl()).cloudroom.gitlabConnection(command==="login"?"start":command);
+      if (!outputJson(options,state)) console.log(state.waiting ? "Open "+state.url : state.expired ? "Reconnect GitLab" : state.login ? "Connected as @"+state.login : "GitLab disconnected");
+    }));
+  }
+  const github = group.command("github").description("Connect GitHub for cloud sandboxes");
+  // With --repos, the code's page comes first, then GitHub's page for picking repos, with no code.
+  const githubNext = (result: { verification_url: string | null; user_code: string | null }) => `Open ${result.verification_url}\n${result.user_code ? `Enter code: ${result.user_code}` : "Pick your repos there."}`;
+  github.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
+    const result = await createCliRoomSdk(getUrl()).cloudroom.githubAuth();
+    if (!outputJson(options, result)) console.log(`${result.state}${result.state === "waiting" ? `\n${githubNext(result)}` : ""}${result.message ? `\n${result.message}` : ""}`);
+  }));
+  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--repos", "Give Cloud only the repos you then pick on GitHub").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string; repos?: boolean }) => {
+    const result = await createCliRoomSdk(getUrl()).cloudroom.githubLogin(options.requestId, options.repos);
+    if (!outputJson(options, result)) console.log(result.state === "waiting" ? `${githubNext(result)}\nRun room-cli cloud github status to verify.` : result.message ?? result.state);
   }));
   github.command("cancel <request-id>").option("--json", "Print JSON").action(action(async (id: string, options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.cancelGithubLogin(id);
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cancelGithubLogin(id);
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
   const cursor = group.command("cursor").description("Connect Cursor on your cloud VM");
   cursor.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.cursorAuth();
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cursorAuth();
     if (!outputJson(options, result)) console.log(`${result.state}${result.email ? ` · ${result.email}` : ""}${result.verification_url ? `\nOpen ${result.verification_url}` : result.message ? `\n${result.message}` : ""}`);
   }));
   cursor.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string }) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.cursorLogin(options.requestId);
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cursorLogin(options.requestId);
     if (!outputJson(options, result)) console.log(result.verification_url ? `Open ${result.verification_url}` : `${result.message ?? result.state}\nRun room-cli cloud cursor status for the sign-in link.`);
   }));
   cursor.command("cancel <request-id>").option("--json", "Print JSON").action(action(async (id: string, options: JsonOutputOptions) => {
-    const result = await createCliBbSdk(getUrl()).cloudroom.cancelCursorLogin(id);
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cancelCursorLogin(id);
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
   cursor.command("key").description("Read a Cursor API key from stdin, never a command argument").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     if (process.stdin.isTTY) throw new Error("Pipe your Cursor API key into this command.");
     let key = "";
     for await (const chunk of process.stdin) { key += String(chunk); if (key.length > 4097) throw new Error("Cursor key is too long"); }
-    const result = await createCliBbSdk(getUrl()).cloudroom.cursorApiKey(crypto.randomUUID(), key.trim());
+    const result = await createCliRoomSdk(getUrl()).cloudroom.cursorApiKey(crypto.randomUUID(), key.trim());
     if (!outputJson(options, result)) console.log(result.message ?? result.state);
   }));
   const pi = group.command("pi").description("Connect Pi providers on your cloud VM");
   pi.command("key <provider>").description("Read a provider API key from stdin, never a command argument").option("--json", "Print JSON").action(action(async (provider: string, options: JsonOutputOptions) => {
     if (process.stdin.isTTY) throw new Error(`Pipe your ${provider} API key into this command.`);
-    const result = await createCliBbSdk(getUrl()).cloudroom.piApiKey(provider, (await readStdin()).toString().trim());
+    const result = await createCliRoomSdk(getUrl()).cloudroom.piApiKey(provider, (await readStdin()).toString().trim());
     if (!outputJson(options, result)) console.log(`Saved. Pi on your VM has logins for: ${result.providers.join(", ")}`);
   }));
   const change = async (update: CloudEnvironmentChange, options: JsonOutputOptions, done: string) => {
-    const environment = await createCliBbSdk(getUrl()).cloudroom.updateEnvironment(update);
+    const environment = await createCliRoomSdk(getUrl()).cloudroom.updateEnvironment(update);
     if (!outputJson(options, environment)) console.log(done);
   };
   const piped = async (what: string) => {
@@ -261,14 +369,16 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
   };
   const env = group.command("env").description("API keys every cloud thread gets as environment variables");
   env.command("list").description("Show key names (values stay hidden), GitHub repos, and the setup script").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-    const { variables, repos, setup } = await createCliBbSdk(getUrl()).cloudroom.environment();
+    const { variables, repos, setup } = await createCliRoomSdk(getUrl()).cloudroom.environment();
     if (outputJson(options, { variables, repos, setup })) return;
     console.log(`API keys:${variables.map(({ name, hint }) => `\n  ${name}${hint ? `  …${hint}` : ""}`).join("") || " none"}`);
     console.log(`GitHub repos:${repos.map((repo) => `\n  ${repo}`).join("") || " none"}`);
     console.log(`Setup script:${setup ? `\n${setup.replace(/^/gm, "  ")}` : " none"}`);
   }));
   env.command("set <name>").description("Read the value from stdin, never a command argument").option("--json", "Print JSON").action(action(async (name: string, options: JsonOutputOptions) => {
-    await change({ action: "set", variables: { [name]: await piped(`value of ${name}`) } }, options, `Saved ${name}.`);
+    // Core keeps a Cloud Claude login over an app's key; only the commands Claude runs get the key (#1340).
+    const note = /^ANTHROPIC_(API_KEY|AUTH_TOKEN)$/.test(name) ? "\nCloud Claude Code keeps using its own Claude login. Your app and the commands Claude runs still get this key." : "";
+    await change({ action: "set", variables: { [name]: await piped(`value of ${name}`) } }, options, `Saved ${name}.${note}`);
   }));
   env.command("unset <name>").option("--json", "Print JSON").action(action(async (name: string, options: JsonOutputOptions) => {
     await change({ action: "remove", name }, options, `Removed ${name}.`);
@@ -286,7 +396,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     await change({ action: "setup", setup: script }, options, script.trim() ? "Saved. New cloud sandboxes run it once." : "Setup script cleared.");
   }));
   group.command("auto-delete [days]").description("Show or set how long unused cloud threads are kept: 30, 90, 180, 365, or never (as long as your plan allows)").option("--json", "Print JSON").action(action(async (days: string | undefined, options: JsonOutputOptions) => {
-    const sdk = createCliBbSdk(getUrl()).cloudroom;
+    const sdk = createCliRoomSdk(getUrl()).cloudroom;
     if (days !== undefined && !AUTO_DELETE_CHOICES.includes(days)) throw new Error(`Pick one of: ${AUTO_DELETE_CHOICES.join(", ")}.`);
     const result = days === undefined ? await sdk.autoDelete() : await sdk.setAutoDelete(days === "never" ? null : Number(days) as AutoDeleteDays);
     const kept = result.kept ?? result.days;
@@ -297,12 +407,12 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     .option("--website-url <url>", "Loopback website for local development")
     .option("--json", "Print JSON")
     .action(action(async (options: JsonOutputOptions & { project?: string; websiteUrl?: string }) => {
-      const result = await createCliBbSdk(getUrl()).cloudroom.signIn({ projectId: options.project, websiteUrl: options.websiteUrl });
+      const result = await createCliRoomSdk(getUrl()).cloudroom.signIn({ projectId: options.project, websiteUrl: options.websiteUrl });
       if (!outputJson(options, result)) console.log(`Open this link in your browser:\n${result.url}`);
     }));
   for (const name of ["cancel", "logout"] as const) {
     group.command(name).option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
-      await createCliBbSdk(getUrl()).cloudroom[name]();
+      await createCliRoomSdk(getUrl()).cloudroom[name]();
       if (!outputJson(options, { ok: true })) console.log(name === "logout" ? "Signed out of this app. Cloud agents keep running." : "Sign-in cancelled.");
     }));
   }
@@ -317,7 +427,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     .option("--timeout <seconds>", "Stop waiting after this many seconds (with --wait)", "600")
     .option("--json", "Print JSON")
     .action(action(async (threadId: string, options: JsonOutputOptions & { cancel?: boolean; status?: boolean; model?: string; reasoning?: string; toLocal?: boolean; wait?: boolean; timeout: string; check?: boolean }) => {
-      const sdk = createCliBbSdk(getUrl());
+      const sdk = createCliRoomSdk(getUrl());
       if (options.toLocal) {
         const moved = await sdk.cloudroom.teleportLocal(threadId);
         if (!outputJson(options, moved)) console.log(`Moved to this Mac.${moved.conflicts ? ` ${moved.conflicts} changed files were kept in both versions; cloud copies are in .cloudroom/teleport/.` : ""}`);
@@ -342,7 +452,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     .option("--stop", "Turn the link off and delete the shared copy")
     .option("--json", "Print JSON")
     .action(action(async (threadId: string, options: JsonOutputOptions & { status?: boolean; stop?: boolean }) => {
-      const sdk = createCliBbSdk(getUrl()).cloudroom;
+      const sdk = createCliRoomSdk(getUrl()).cloudroom;
       if (options.stop) {
         await sdk.stopSharingThread(threadId);
         if (!outputJson(options, null)) console.log("Sharing stopped. The link no longer works.");
@@ -352,11 +462,15 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
       if (!outputJson(options, share)) console.log(share ? share.url : "Not shared.");
     }));
   group.command("retry-start <thread-id>").description("Explicitly retry a rejected cloud start with its saved prompt").option("--json", "Print JSON").action(action(async (threadId: string, options: JsonOutputOptions) => {
-    await createCliBbSdk(getUrl()).cloudroom.retryStart(threadId);
+    await createCliRoomSdk(getUrl()).cloudroom.retryStart(threadId);
     if (!outputJson(options, { ok: true })) console.log("Cloud start retried with the original request ID.");
   }));
+  group.command("clear-disk <thread-id>").description("Free a full Cloud disk: deletes package caches and Git-ignored node_modules, dist, .next and other build folders. Code, .env files and chats stay").option("--json", "Print JSON").action(action(async (threadId: string, options: JsonOutputOptions) => {
+    const result = await createCliRoomSdk(getUrl()).cloudroom.clearDisk(threadId);
+    if (!outputJson(options, result)) console.log(`Cleared ${(result.freedBytes / 1e9).toFixed(1)} GB of caches and builds.`);
+  }));
   group.command("thread-workspace <thread-id>").description("Show a cloud thread's current checkout and branch").option("--json", "Print JSON").action(action(async (threadId: string, options: JsonOutputOptions) => {
-    const workspace = await createCliBbSdk(getUrl()).cloudroom.threadWorkspace(threadId);
+    const workspace = await createCliRoomSdk(getUrl()).cloudroom.threadWorkspace(threadId);
     if (!outputJson(options, workspace)) console.log(workspace ? `${workspace.path}\n${workspace.branch ?? workspace.head ?? "No Git repository"}` : "Cloud session is not ready.");
   }));
 }

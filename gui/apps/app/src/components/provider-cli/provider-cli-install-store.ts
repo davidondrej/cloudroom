@@ -231,7 +231,7 @@ function runInstall(job: ProviderCliInstallJob): void {
 
   void sdk.hosts
     .installProviderCli({ hostId, provider, actionKind: action.kind })
-    .then((events) => {
+    .then(async (events) => {
       for (const event of events) {
         if (event.provider !== provider) {
           continue;
@@ -265,8 +265,9 @@ function runInstall(job: ProviderCliInstallJob): void {
 
       if (completedEvent?.success) {
         if (queryClient !== null) {
-          void invalidateHostProviderCliStatus({ queryClient, hostId });
           void invalidateSystemExecutionOptions({ queryClient, hostId });
+          // Stay running until the status refetch lands, so the row never flashes "not installed".
+          await invalidateHostProviderCliStatus({ queryClient, hostId });
         }
         return;
       }

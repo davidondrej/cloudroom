@@ -2,7 +2,7 @@ import {
   createDesktopBrowsersArea,
   type ExperimentalDesktopBrowsersArea,
 } from "./areas/desktop-browsers.js";
-import type { BbSdkContext, BbSdkTransport } from "./transport.js";
+import type { RoomSdkContext, RoomSdkTransport } from "./transport.js";
 import { createCloudroomArea, type CloudroomArea } from "./areas/cloudroom.js";
 import {
   createEnvironmentsArea,
@@ -14,8 +14,8 @@ import { createHostsArea, type HostsArea } from "./areas/hosts.js";
 import { createProjectsArea, type ProjectsArea } from "./areas/projects.js";
 import { createProvidersArea, type ProvidersArea } from "./areas/providers.js";
 import { createPluginsArea, type PluginsArea } from "./areas/plugins.js";
-import { createBbRealtimeClient } from "./realtime-client.js";
-import type { BbRealtime } from "./realtime-types.js";
+import { createRoomRealtimeClient } from "./realtime-client.js";
+import type { RoomRealtime } from "./realtime-types.js";
 import { createStatusArea, type StatusArea } from "./areas/status.js";
 import { createSkillsArea, type SkillsArea } from "./areas/skills.js";
 import { createThemeArea, type ThemeArea } from "./areas/theme.js";
@@ -30,16 +30,16 @@ import {
 export type * from "./public-types.js";
 export { createBuiltinPlanCommandTextInput } from "@cloudroom/domain";
 
-export interface CreateBbSdkArgs {
-  context?: BbSdkContext;
-  transport: BbSdkTransport;
+export interface CreateRoomSdkArgs {
+  context?: RoomSdkContext;
+  transport: RoomSdkTransport;
 }
 
-export interface CreateBbSdkWithGuideArgs extends CreateBbSdkArgs {
+export interface CreateRoomSdkWithGuideArgs extends CreateRoomSdkArgs {
   guide: GuideArea;
 }
 
-export interface BbSdkAreas extends BbRealtime {
+export interface RoomSdkAreas extends RoomRealtime {
   cloudroom: CloudroomArea;
   experimental_desktopBrowsers: ExperimentalDesktopBrowsersArea;
   environments: EnvironmentsArea;
@@ -57,20 +57,20 @@ export interface BbSdkAreas extends BbRealtime {
   threads: ThreadsArea;
 }
 
-export interface BbSdk extends BbSdkAreas {
+export interface RoomSdk extends RoomSdkAreas {
   guide: GuideArea;
 }
 
-export function createBbSdk(args: CreateBbSdkWithGuideArgs): BbSdk;
-export function createBbSdk(args: CreateBbSdkArgs): BbSdkAreas;
-export function createBbSdk(
-  args: CreateBbSdkArgs | CreateBbSdkWithGuideArgs,
-): BbSdkAreas | BbSdk {
+export function createRoomSdk(args: CreateRoomSdkWithGuideArgs): RoomSdk;
+export function createRoomSdk(args: CreateRoomSdkArgs): RoomSdkAreas;
+export function createRoomSdk(
+  args: CreateRoomSdkArgs | CreateRoomSdkWithGuideArgs,
+): RoomSdkAreas | RoomSdk {
   const sdkContext = { transport: args.transport };
-  const realtime = createBbRealtimeClient({
+  const realtime = createRoomRealtimeClient({
     transport: args.transport,
   });
-  const areas: BbSdkAreas = {
+  const areas: RoomSdkAreas = {
     cloudroom: createCloudroomArea(sdkContext),
     experimental_desktopBrowsers: createDesktopBrowsersArea(sdkContext),
     environments: createEnvironmentsArea(sdkContext),

@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { definePluginApp, experimental_Icon as Icon, Markdown, useBbNavigate, useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
+import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { STATE_CHANNEL, type OrgMessage, type orgRpcContract, type OrgState, type SharedThread } from "./contract.js";
+import { Board } from "./board.js";
 import { button, errorText, primary, SettingsTab } from "./settings.js";
 
 // Organizations v1 (docs/scopes/organizations.md): the Organization page (Settings, like the website's /org, and
-// teammates' Threads), the lock button, and the invite popup.
+// teammates' Threads, or the Board where the team board is on), the lock button, and the invite popup.
+type Opened = Pick<SharedThread, "owner" | "ownerName" | "thread" | "title" | "repo">;
 type View = { state: OrgState | null; error: string | null };
 const when = (at: string) => new Date(at).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 
@@ -23,40 +26,42 @@ function OrgPanel() {
   const [view, setView] = useOrg();
   const [tab, setTab] = useState<"settings" | "threads">("settings");
   const [threads, setThreads] = useState<SharedThread[] | null>(null);
-  const [open, setOpen] = useState<SharedThread | null>(null);
+  const [open, setOpen] = useState<Opened | null>(null);
   const [messages, setMessages] = useState<OrgMessage[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
-  const org = view?.state?.org ?? null;
+  const org = view?.state?.org ?? null, board = Boolean(org?.board);
   const loadList = useCallback(() => {
     setProblem(null);
     void rpc.call("list", {}).then(({ threads: list }) => setThreads(list), (failure) => setProblem(errorText(failure)));
   }, [rpc]);
-  useEffect(() => { if (org) loadList(); }, [org?.name, loadList]);
-  const pick = (next: "settings" | "threads") => { setTab(next); setOpen(null); setProblem(null); if (next === "threads") loadList(); };
-  const show = (thread: SharedThread) => {
+  useEffect(() => { if (org && !board) loadList(); }, [org?.name, board, loadList]);
+  const pick = (next: "settings" | "threads") => { setTab(next); setOpen(null); setProblem(null); if (next === "threads" && !board) loadList(); };
+  const show = (thread: Opened) => {
     setOpen(thread); setMessages(null); setProblem(null);
     void rpc.call("view", { owner: thread.owner, thread: thread.thread }).then(({ messages: list }) => setMessages(list), (failure) => setProblem(errorText(failure)));
   };
-  const takeOver = async (thread: SharedThread) => {
+  // Take over moves the thread to you; fork copies it and leaves the owner's thread running.
+  const continueThread = async (thread: Opened, how: "takeover" | "fork") => {
     setBusy(true); setProblem(null);
     try {
-      const { threadId } = await rpc.call("takeover", { owner: thread.owner, thread: thread.thread });
+      const { threadId } = await rpc.call(how, { owner: thread.owner, thread: thread.thread });
       setOpen(null);
-      loadList();
+      if (!board) loadList();
       navigate.toThread(threadId);
     } catch (failure) { setProblem(errorText(failure)); }
     finally { setBusy(false); }
   };
+  const takeOver = (thread: Opened) => continueThread(thread, "takeover");
   const answer = async (orgId: string, accept: boolean) => {
     setBusy(true);
     try { setView(await rpc.call("invite", { orgId, accept })); } catch (failure) { setProblem(errorText(failure)); } finally { setBusy(false); }
   };
-  const tabs = [["settings", "Settings", "Settings"], ["threads", "Threads", "MessageSquare"]] as const;
+  const tabs = [["settings", "Settings", "Settings"], ["threads", board ? "Board" : "Threads", board ? "Columns2" : "MessageSquare"]] as const;
 
   return (
     <div className="h-full min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-4xl px-6 py-6">
+      <div className={`mx-auto w-full px-6 py-6 ${board && tab === "threads" && !open ? "max-w-6xl" : "max-w-4xl"}`}>
         <p className="text-[11px] font-medium uppercase tracking-[0.2em] text-muted-foreground">Organization</p>
         <h1 className="mt-1 truncate text-2xl font-semibold text-foreground">{org?.name ?? "Work as a team."}</h1>
         {!org && <p className="mt-1 text-sm text-muted-foreground">Share agent instructions, see each other's Cloud threads, and take them over.</p>}
@@ -65,7 +70,7 @@ function OrgPanel() {
             {tabs.map(([id, label, icon]) => (
               <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => pick(id)}
                 className={`-mb-px inline-flex items-center gap-2 border-b-2 pb-2.5 text-sm ${tab === id ? "border-primary font-medium text-foreground" : "border-transparent text-muted-foreground hover:text-foreground"}`}>
-                <Icon name={icon} className="size-3.5" />{label}{id === "threads" && threads !== null && <span className="text-muted-foreground">{threads.length}</span>}
+                <Icon name={icon} className="size-3.5" />{label}{id === "threads" && !board && threads !== null && <span className="text-muted-foreground">{threads.length}</span>}
               </button>
             ))}
           </div>
@@ -88,7 +93,10 @@ function OrgPanel() {
             </>
           )}
           {org && tab === "settings" && <SettingsTab />}
-          {org && tab === "threads" && !open && (
+          {org && tab === "threads" && !open && board && (
+            <Board actions={{ read: show, fork: (card) => void continueThread(card, "fork"), takeOver: (card) => void takeOver(card), busy }} />
+          )}
+          {org && tab === "threads" && !open && !board && (
             <>
               {threads === null && !problem && <p className="text-xs text-muted-foreground">Loading…</p>}
               {threads?.length === 0 && <p className="text-xs text-muted-foreground">Nothing shared yet. Jev shares teammates' new Cloud threads in your organization's repos, based on each person's sharing rule.</p>}
@@ -115,11 +123,14 @@ function OrgPanel() {
             <>
               <div className="flex items-center justify-between gap-3">
                 <button type="button" className={button} onClick={() => setOpen(null)}>Back</button>
-                <button type="button" className={primary} disabled={busy} onClick={() => void takeOver(open)}>{busy ? "Taking over…" : "Take over"}</button>
+                <span className="flex gap-2">
+                  {board && <button type="button" className={button} disabled={busy} onClick={() => void continueThread(open, "fork")}>Fork</button>}
+                  <button type="button" className={primary} disabled={busy} onClick={() => void takeOver(open)}>{busy ? "Working…" : "Take over"}</button>
+                </span>
               </div>
               <div>
                 <div className="text-sm font-medium text-foreground">{open.title}</div>
-                <div className="text-xs text-muted-foreground">{open.ownerName}'s thread · {open.repo}. Read-only: take it over to continue it in your own Cloud thread.</div>
+                <div className="text-xs text-muted-foreground">{open.ownerName}'s thread · {open.repo}. Read-only: {board ? "fork it, or take it over," : "take it over"} to continue it in your own Cloud thread.</div>
               </div>
               {messages === null && !problem && <p className="text-xs text-muted-foreground">Loading…</p>}
               {messages?.map((item, index) => (
@@ -166,13 +177,18 @@ function InvitePopup() {
   const [view, setView] = useOrg();
   const [busy, setBusy] = useState(false);
   const invite = view?.state?.invites[0];
-  if (!invite) return null;
+  // The corner module (docs/scopes/corner-cards.md) places it: an invite comes before every other card there.
+  const corner = useCorner("invite", invite?.orgId ?? null);
+  if (!invite || !corner) return null;
   const answer = async (accept: boolean) => {
     setBusy(true);
-    try { setView(await rpc.call("invite", { orgId: invite.orgId, accept })); } finally { setBusy(false); }
+    try {
+      setView(await rpc.call("invite", { orgId: invite.orgId, accept }));
+      corner.answer(accept ? "opened" : "closed");
+    } finally { setBusy(false); }
   };
   return (
-    <div className="fixed right-4 top-14 z-50 w-80 space-y-3 rounded-xl border border-border bg-surface-raised p-4 shadow-lg">
+    <div style={corner.style} className={`${corner.className} w-80 space-y-3 rounded-xl border border-border bg-surface-raised-solid p-4 shadow-lg`}>
       <p className="text-sm">You're invited to join <b>{invite.name}</b> on Cloudroom. Your team shares agent instructions and Cloud threads.</p>
       <div className="flex justify-end gap-2">
         <button type="button" className={button} disabled={busy} onClick={() => void answer(false)}>Decline</button>

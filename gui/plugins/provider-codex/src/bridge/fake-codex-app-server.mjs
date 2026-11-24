@@ -155,7 +155,9 @@ const modelListFailOnceMarkerPath = script?.modelListFailOnceMarkerPath ?? null;
  * child the bridge spawns from one script. The real app-server keeps archive
  * state on disk (the rollout moves to an archived dir), so an archive seen by
  * one child must refuse a resume in the next — the bridge kills a thread's
- * child on archive and resumes on a fresh one.
+ * child on archive and resumes on a fresh one. A `stale:<id>` entry is a
+ * rollout Codex's state DB still marks archived although the file is active:
+ * resume refuses it, unarchive finds nothing, and archive clears it (#1808).
  */
 const archiveStatePath = script?.archiveStatePath ?? null;
 /**
@@ -164,6 +166,12 @@ const archiveStatePath = script?.archiveStatePath ?? null;
  * window between a rollout file's creation and its first record.
  */
 let renameEmptyRolloutFailuresLeft = script?.renameEmptyRolloutFailures ?? 0;
+/**
+ * `resumeActiveWriterFailures`: how many `thread/resume` calls fail with the
+ * real app-server's "already has an active writer" error, as when another
+ * Codex app still holds the thread.
+ */
+let resumeActiveWriterFailuresLeft = script?.resumeActiveWriterFailures ?? 0;
 const archivedThreadIds = new Set();
 /**
  * `processLogPath`: one line per child lifecycle step (`spawn:<pid>:<ppid>`,
@@ -173,7 +181,18 @@ const archivedThreadIds = new Set();
  */
 const processLogPath = script?.processLogPath ?? null;
 const stallThreadStart = script?.stallThreadStart ?? false;
+/**
+ * `steerFindsEndedTurn`: `turn/steer` fails like the real app-server once the
+ * turn ended. Codex refuses steers before its end-of-turn steps send
+ * `turn/completed`, which this sends 100 ms later (#986).
+ */
+const steerFindsEndedTurn = script?.steerFindsEndedTurn ?? false;
 const sigtermDelayMs = script?.sigtermDelayMs ?? 0;
+/**
+ * `goalStatePath`: a JSON file of Goals by thread id, shared by every fake
+ * child like the real app-server's database. `thread/fork` does not copy them.
+ */
+const goalStatePath = script?.goalStatePath ?? null;
 
 function logProcessStep(step) {
   if (processLogPath === null) {
@@ -332,10 +351,25 @@ async function handleRequest(message) {
     case "initialize":
       respond(id, {});
       return;
+    case "configRequirements/read":
+      // "hang" never answers, like a stuck app-server; absent is unknown method.
+      if (script?.configRequirements === "hang") return;
+      if (script?.configRequirements !== undefined) {
+        respond(id, { requirements: script.configRequirements });
+        return;
+      }
+      respondError(id, -32601, `Unknown method "${method}"`);
+      return;
     case "config/read":
-      respond(id, { config: { features: { hooks: true } } });
+      respond(id, {
+        config: {
+          model: script?.configModel ?? null,
+          features: { hooks: true },
+        },
+      });
       return;
     case "account/rateLimits/read":
+      if (script?.rateLimits === "hang") return;
       respond(id, { rateLimits: {} });
       return;
     case "model/list":
@@ -378,12 +412,22 @@ async function handleRequest(message) {
       // an `archived-` provider-thread-id prefix to trigger it.
       if (
         String(params.threadId).startsWith("archived-") ||
-        isThreadArchived(params.threadId)
+        isThreadArchived(params.threadId) ||
+        isThreadArchived(`stale:${params.threadId}`)
       ) {
         respondError(
           id,
           -32603,
           `session ${params.threadId} is archived; unarchive it and retry`,
+        );
+        return;
+      }
+      if (resumeActiveWriterFailuresLeft > 0) {
+        resumeActiveWriterFailuresLeft -= 1;
+        respondError(
+          id,
+          -32600,
+          `thread ${params.threadId} already has an active writer`,
         );
         return;
       }
@@ -493,9 +537,24 @@ async function handleRequest(message) {
       respond(id, {});
       return;
     }
-    case "turn/steer":
-      respond(id, {});
+    case "turn/steer": {
+      if (!steerFindsEndedTurn) {
+        respond(id, {});
+        return;
+      }
+      const endedTurnId = openTurnIdsByThreadId.get(params.threadId);
+      openTurnIdsByThreadId.delete(params.threadId);
+      respondError(id, -32600, "no active turn to steer");
+      if (endedTurnId !== undefined) {
+        setTimeout(() => {
+          notify("turn/completed", {
+            threadId: params.threadId,
+            turn: { id: endedTurnId, status: "completed" },
+          });
+        }, 100);
+      }
       return;
+    }
     case "turn/interrupt": {
       const openTurnId = openTurnIdsByThreadId.get(params.threadId);
       if (openTurnId !== undefined) {
@@ -508,6 +567,9 @@ async function handleRequest(message) {
       respond(id, {});
       return;
     }
+    case "thread/backgroundTerminals/clean":
+      respond(id, {});
+      return;
     case "thread/archive":
       // The real app-server moves the rollout into its archived dir, so a
       // second archive finds no live rollout; the reverse holds for unarchive.
@@ -519,6 +581,7 @@ async function handleRequest(message) {
         );
         return;
       }
+      setThreadArchived(`stale:${params.threadId}`, false);
       setThreadArchived(params.threadId, true);
       respond(id, {});
       return;
@@ -550,6 +613,25 @@ async function handleRequest(message) {
     case "thread/goal/clear":
       respond(id, {});
       return;
+    case "thread/goal/get":
+    case "thread/goal/set": {
+      const goals = goalStatePath
+        ? JSON.parse(readFileSync(goalStatePath, "utf8"))
+        : {};
+      if (method === "thread/goal/set" && goalStatePath) {
+        const goal = {
+          tokensUsed: 0,
+          timeUsedSeconds: 0,
+          ...goals[params.threadId],
+          ...params,
+        };
+        goals[params.threadId] = goal;
+        writeFileSync(goalStatePath, JSON.stringify(goals));
+        notify("thread/goal/updated", { threadId: params.threadId, goal });
+      }
+      respond(id, { goal: goals[params.threadId] ?? null });
+      return;
+    }
     default:
       respondError(id, -32601, `Unknown method "${method}"`);
   }

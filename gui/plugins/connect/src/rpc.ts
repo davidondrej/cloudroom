@@ -60,6 +60,7 @@ const macSchema: z.ZodType<Mac> = z
   })
   .strict();
 
+const hasPhoneSchema = z.object({ phone: z.boolean() }).strict();
 const remoteInstructionsSchema = z.object({ enabled: z.boolean() }).strict();
 const remoteInstructionsInputSchema = z.object({ enabled: z.boolean().optional() }).strict();
 
@@ -93,6 +94,8 @@ export const connectRpcContract = defineRpcContract({
   },
   /** Every Mac signed in to this Cloudroom account, and which ones this Mac runs threads on. */
   macs: { input: z.null(), output: z.object({ macs: z.array(macSchema) }).strict() },
+  /** Whether a phone is signed in to this Cloudroom account. The server asks it for the Get started checklist. */
+  hasPhone: { input: z.null(), output: hasPhoneSchema },
   /** Another of your Macs installs Cloudroom's machine helper here, so it can run threads on this Mac. */
   runSetupJob: { input: setupJobInputSchema, output: z.object({ jobId: z.string() }).strict() },
   setupJobStatus: {
@@ -152,6 +155,9 @@ export function createRpcHandlers(args: {
     async macs() {
       await phone.check();
       return { macs: phone.signedIn ? await listMacs() : [] };
+    },
+    async hasPhone() {
+      return hasPhoneSchema.parse(await phone.call("/api/phones"));
     },
     async runSetupJob(args) {
       return setupJobs.start(args.command, args.stdin);

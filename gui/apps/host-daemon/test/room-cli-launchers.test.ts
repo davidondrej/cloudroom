@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ROOM_CLI_CMD,
   ROOM_CLI_HASHBANG,
+  ROOM_CLI_PS1,
   // @ts-expect-error -- plain ESM build script
 } from "../scripts/bundle-manifest.mjs";
 
@@ -38,7 +39,7 @@ function fakeProgram(path: string, name: string) {
 }
 
 // The Windows app's layout, as Git Bash sees it: <app>/resources/app.asar.unpacked/.../dist/room-cli.
-function runShim(withApp: boolean) {
+function runShim(withApp: boolean, withCygpath = false, bare = false) {
   const root = mkdtempSync(join(tmpdir(), "room-cli-shim-"));
   roots.push(root);
   const dist = join(
@@ -58,7 +59,19 @@ function runShim(withApp: boolean) {
   const bin = join(root, "bin");
   mkdirSync(bin);
   fakeProgram(join(bin, "node"), "node");
+  if (withCygpath) {
+    // Stands in for Git Bash's cygpath -m, which turns /c/... into C:/...
+    writeFileSync(join(dist, "room-cli.win"), "");
+    writeFileSync(join(bin, "cygpath"), '#!/bin/sh\necho "$2.win"\n');
+    chmodSync(join(bin, "cygpath"), 0o755);
+  }
   if (!shell) throw new Error("no sh");
+  if (bare)
+    // Like Git's usr/bin/bash.exe started directly: no /usr/bin on PATH, room-cli found by name.
+    return execFileSync(shell.command, ["-c", "room-cli thread list"], {
+      encoding: "utf8",
+      env: { ...shell.env, MSYS_NO_PATHCONV: "1", PATH: `${dist};${bin}` },
+    });
   return execFileSync(
     shell.command,
     [join(dist, "room-cli"), "thread", "list", "--title", "fix(parser)"],
@@ -84,6 +97,24 @@ describe("room-cli launchers", () => {
     },
   );
 
+  it.skipIf(!shell)(
+    "hands the app cygpath's Windows path, which MSYS_NO_PATHCONV=1 leaves unconverted",
+    () => {
+      expect(runShim(true, true)).toMatch(
+        /^app RUN_AS_NODE=1 .*room-cli\.win thread list/,
+      );
+    },
+  );
+
+  it.runIf(process.platform === "win32" && shell)(
+    "finds /usr/bin/cygpath when Git's shell has no /usr/bin on PATH",
+    () => {
+      expect(runShim(true, false, true)).toMatch(
+        /^app RUN_AS_NODE=1 [A-Za-z]:\/.*room-cli thread list/,
+      );
+    },
+  );
+
   it.skipIf(!shell)("falls back to node outside an installed app", () => {
     expect(runShim(false)).toMatch(/^node RUN_AS_NODE= .*room-cli thread list/);
   });
@@ -98,4 +129,51 @@ describe("room-cli launchers", () => {
       lines.every((line: string) => !line.includes("%*") || !/[()]/.test(line)),
     ).toBe(true);
   });
+
+  it.each([
+    [
+      "room-cli.cmd, which waits for the GUI exe",
+      "elseif ($env:ROOM_CLI_ARGV.Length -le 8000) { $app = Join-Path $PSScriptRoot 'room-cli.cmd'; $cli = @() }",
+    ],
+    [
+      "the direct launch for arguments too long for cmd.exe",
+      "    $env:ELECTRON_RUN_AS_NODE = '1'",
+    ],
+  ])("runs Cloudroom.exe from PowerShell through %s", (_, line) => {
+    expect(ROOM_CLI_PS1).toContain(line);
+  });
+
+  it.runIf(process.platform === "win32")(
+    "passes PowerShell arguments to the CLI verbatim, without cmd.exe",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "room-cli-ps1-"));
+      roots.push(dir);
+      writeFileSync(join(dir, "room-cli.ps1"), ROOM_CLI_PS1);
+      writeFileSync(
+        join(dir, "room-cli"),
+        'let s = ""; process.stdin.on("data", (c) => (s += c)).on("end", () => console.log(JSON.stringify([JSON.parse(process.env.ROOM_CLI_ARGV), s])))',
+      );
+      const args = [
+        'x "y & echo INJECTED"',
+        "",
+        "C:\\my dir\\",
+        '"quoted words"',
+        "50% <x> a|b",
+      ];
+      const out = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          `'piped' | & '${join(dir, "room-cli.ps1")}' ${args.map((arg) => `'${arg.replaceAll("'", "''")}'`).join(" ")}`,
+        ],
+        { encoding: "utf8" },
+      );
+      const [argv, stdin] = JSON.parse(out);
+      expect(argv).toEqual(args);
+      expect(stdin.trimEnd()).toBe("piped");
+    },
+  );
 });

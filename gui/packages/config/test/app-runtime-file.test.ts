@@ -1,11 +1,12 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  claimBbAppRuntimeFile,
-  clearOwnBbAppRuntimeFile,
-  readBbAppRuntimeFile,
+  claimRoomAppRuntimeFile,
+  clearOwnRoomAppRuntimeFile,
+  readRoomAppRuntimeFile,
 } from "../src/app-runtime-file.js";
 import {
   parseElapsedSeconds,
@@ -45,36 +46,36 @@ afterEach(async () => {
 describe("claimBbAppRuntimeFile", () => {
   it("refuses to overwrite a record whose launcher still runs", async () => {
     const dataDir = await createDataDir();
-    await claimBbAppRuntimeFile({
+    await claimRoomAppRuntimeFile({
       ...recordFor(dataDir, 1_111),
       isRunning: () => true,
     });
 
     await expect(
-      claimBbAppRuntimeFile({
+      claimRoomAppRuntimeFile({
         ...recordFor(dataDir, 2_222),
         isRunning: () => true,
       }),
     ).resolves.toBe(false);
-    await expect(readBbAppRuntimeFile(dataDir)).resolves.toMatchObject({
+    await expect(readRoomAppRuntimeFile(dataDir)).resolves.toMatchObject({
       pid: 1_111,
     });
   });
 
   it("replaces a record whose launcher is gone", async () => {
     const dataDir = await createDataDir();
-    await claimBbAppRuntimeFile({
+    await claimRoomAppRuntimeFile({
       ...recordFor(dataDir, 1_111),
       isRunning: () => true,
     });
 
     await expect(
-      claimBbAppRuntimeFile({
+      claimRoomAppRuntimeFile({
         ...recordFor(dataDir, 2_222),
         isRunning: () => false,
       }),
     ).resolves.toBe(true);
-    await expect(readBbAppRuntimeFile(dataDir)).resolves.toMatchObject({
+    await expect(readRoomAppRuntimeFile(dataDir)).resolves.toMatchObject({
       pid: 2_222,
     });
   });
@@ -83,28 +84,28 @@ describe("claimBbAppRuntimeFile", () => {
 describe("clearOwnBbAppRuntimeFile", () => {
   it("leaves a record that belongs to another launcher", async () => {
     const dataDir = await createDataDir();
-    await claimBbAppRuntimeFile({
+    await claimRoomAppRuntimeFile({
       ...recordFor(dataDir, 1_111),
       isRunning: () => true,
     });
 
     await expect(
-      clearOwnBbAppRuntimeFile({ dataDir, pid: 2_222 }),
+      clearOwnRoomAppRuntimeFile({ dataDir, pid: 2_222 }),
     ).resolves.toBe(false);
-    await expect(readBbAppRuntimeFile(dataDir)).resolves.not.toBeNull();
+    await expect(readRoomAppRuntimeFile(dataDir)).resolves.not.toBeNull();
   });
 
   it("removes its own record", async () => {
     const dataDir = await createDataDir();
-    await claimBbAppRuntimeFile({
+    await claimRoomAppRuntimeFile({
       ...recordFor(dataDir, 1_111),
       isRunning: () => true,
     });
 
     await expect(
-      clearOwnBbAppRuntimeFile({ dataDir, pid: 1_111 }),
+      clearOwnRoomAppRuntimeFile({ dataDir, pid: 1_111 }),
     ).resolves.toBe(true);
-    await expect(readBbAppRuntimeFile(dataDir)).resolves.toBeNull();
+    await expect(readRoomAppRuntimeFile(dataDir)).resolves.toBeNull();
   });
 });
 
@@ -177,4 +178,27 @@ describe("stopVerifiedProcess", () => {
 
     expect(result).toMatchObject({ kind: "unverified", reason: "start-time" });
   });
+
+  it("verifies and stops a real process with this platform's tools", async () => {
+    const child = spawn(
+      process.execPath,
+      ["-e", "setInterval(() => {}, 1000)", "verified-stop-marker"],
+      { stdio: "ignore" },
+    );
+    const pid = child.pid ?? 0;
+    try {
+      const result = await stopVerifiedProcess({
+        killTimeoutMs: 5_000,
+        pid,
+        signal: "SIGTERM",
+        startedAt: new Date().toISOString(),
+        timeoutMs: 5_000,
+        verifyTokens: ["verified-stop-marker"],
+      });
+
+      expect(result).toEqual({ kind: "stopped", usedKill: false });
+    } finally {
+      child.kill("SIGKILL");
+    }
+  }, 60_000);
 });

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -137,5 +138,23 @@ describe("withGitRefMutationLock across processes", () => {
     await expect(
       withGitRefMutationLock(commonDir, async () => "took over"),
     ).resolves.toBe("took over");
+
+    // A live owner keeps the lock; one whose process ended loses it at once (#1689).
+    const ended = spawnSync(process.execPath, ["-e", ""]).pid;
+    for (const [pid, entered] of [
+      [process.pid, false],
+      [ended, true],
+    ] as const) {
+      await fs.mkdir(lockPath);
+      await fs.writeFile(
+        path.join(lockPath, "owner"),
+        `${pid}\n${os.hostname()}\n`,
+      );
+      const run = withGitRefMutationLock(commonDir, async () => true, {
+        timeoutMs: 500,
+      });
+      await expect(run.catch(() => false)).resolves.toBe(entered);
+      await fs.rm(lockPath, { recursive: true, force: true });
+    }
   });
 });

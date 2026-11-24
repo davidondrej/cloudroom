@@ -9,6 +9,7 @@ import {
 import type { CommandRegistrar } from "../helpers/command-output-harness.js";
 import * as fixtures from "../helpers/command-output-fixtures.js";
 import { registerStatusCommand } from "../../commands/status.js";
+import { BbRequestTimeoutError } from "@cloudroom/sdk";
 
 describe("room-cli status command output", () => {
   setupCommandOutputTestEnvironment();
@@ -63,6 +64,106 @@ describe("room-cli status command output", () => {
     );
   });
 
+  it("room-cli status keeps the environment when provider names are denied", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "thread-1");
+    stubServerApi({
+      "v1.threads.:id.$get": async () =>
+        fixtures.makeThread({
+          id: "thread-1",
+          projectId: "proj-1",
+          providerId: "codex",
+          environmentId: "env-1",
+        }),
+      "v1.environments.:id.$get": async () =>
+        fixtures.makeEnvironment({
+          id: "env-1",
+          projectId: "proj-1",
+          hostId: "host-1",
+          environmentProviderId: "git-worktree",
+        }),
+      "v1.system.environment-providers.$get": async () => {
+        throw new Error("HTTP 401: Caller proof required");
+      },
+    });
+
+    await runCommand(["status"], register);
+
+    expect(collectLogLines(vi.mocked(console.log))).toContain(
+      "  Environment: git-worktree (env-1)",
+    );
+  });
+
+  it("room-cli status marks archived threads and children", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "parent-1");
+    const thread = (id: string, archivedAt: number | null) =>
+      fixtures.makeThread({
+        id,
+        projectId: "proj-1",
+        providerId: "codex",
+        status: "idle",
+        title: id,
+        archivedAt,
+      });
+    stubServerApi({
+      "v1.threads.:id.$get": async () => thread("parent-1", 1_700_000_000_000),
+      "v1.threads.$get": async () => [
+        thread("live-1", null),
+        thread("gone-1", 1_700_000_000_000),
+      ],
+    });
+
+    await runCommand(["status", "--json"], register);
+    await runCommand(["status"], register);
+
+    const [json, ...text] = collectLogPayloads(vi.mocked(console.log));
+    const payload = JSON.parse(json);
+    expect(payload.thread.archivedAt).toBe(1_700_000_000_000);
+    expect(payload.childThreads).toEqual([
+      { id: "live-1", status: "idle", title: "live-1", archivedAt: null },
+      {
+        id: "gone-1",
+        status: "idle",
+        title: "gone-1",
+        archivedAt: 1_700_000_000_000,
+      },
+    ]);
+    expect(text).toEqual(
+      expect.arrayContaining([
+        "  Status: idle (archived)",
+        '  live-1  idle  "live-1"',
+        '  gone-1  idle (archived)  "gone-1"',
+      ]),
+    );
+  });
+
+  it("room-cli status says why Cloud children are pending, best effort (#1273)", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "parent-1");
+    const child = (id: string, executionTarget: "cloud" | "local") =>
+      fixtures.makeThread({ id, projectId: "proj-1", providerId: "codex", status: "pending", title: id, executionTarget });
+    stubServerApi({
+      "v1.threads.:id.$get": async () => fixtures.makeThread({ id: "parent-1", projectId: "proj-1", providerId: "codex", status: "idle" }),
+      "v1.threads.$get": async () => [child("stuck", "cloud"), child("healthy", "cloud"), child("slow", "cloud"), child("local", "local")],
+    });
+    const asked: string[] = [];
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      const id = String(input).split("/").pop()!;
+      asked.push(id);
+      if (id === "slow") throw new BbRequestTimeoutError(5_000);
+      const answer = id === "stuck" ? { model: "m", reasoning: "low", error: null, reconnecting: true } : { model: "m", reasoning: "low", error: null, reconnecting: false };
+      return new Response(JSON.stringify(answer), { headers: { "Content-Type": "application/json" } });
+    });
+
+    await runCommand(["status", "--json"], register);
+    await runCommand(["status"], register);
+
+    const [json, ...text] = collectLogPayloads(vi.mocked(console.log));
+    expect(JSON.parse(json).childThreads.map((row: { id: string; cloud?: unknown }) => [row.id, row.cloud ?? null])).toEqual([
+      ["stuck", { error: null, reconnecting: true }], ["healthy", null], ["slow", null], ["local", null],
+    ]);
+    expect(text).toContain("    Cloud: Cloudroom can't reach this thread's cloud right now and retries by itself");
+    expect(asked).not.toContain("local");
+  });
+
   it("room-cli status prints pinned state for pinned thread context", async () => {
     vi.stubEnv("ROOM_PROJECT_ID", "proj-1");
     vi.stubEnv("ROOM_THREAD_ID", "thread-pinned-1");
@@ -92,38 +193,38 @@ describe("room-cli status command output", () => {
 });
 
 function stubServer(plugins: Array<{ id: string; status: string }>): void {
-  vi.mocked(fetch).mockImplementation(async (input) => {
-    const url = String(input instanceof Request ? input.url : input);
-    const body = url.endsWith("/api/v1/system/config")
-      ? { dataDir: "/data/bb" }
-      : {
-          plugins: plugins.map(({ id, status }) => ({
-            id,
-            status,
-            statusDetail: null,
-            source: `path:/plugins/${id}`,
-            rootDir: `/plugins/${id}`,
-            version: "1.0.0",
-            provenance: "direct",
-            publisherLabel: null,
-            isOrphanedBuiltin: false,
-            sourceDisplay: `path · /plugins/${id}`,
-            updateState: {},
-            enabled: true,
-            description: null,
-            name: null,
-            icon: null,
-            iconUrl: null,
-            handlerStats: { count: 0, totalMs: 0, maxMs: 0, errorCount: 0 },
-            services: [],
-            schedules: [],
-            cliCommand: null,
-            hasSettings: false,
-            app: { hasApp: false, bundle: null },
-            logoUrl: null,
-            logoDarkUrl: null,
-          })),
-        };
+  stubServerApi({
+    "v1.system.config.$get": async () => ({ dataDir: "/data/bb" }),
+  });
+  vi.mocked(fetch).mockImplementation(async () => {
+    const body = {
+      plugins: plugins.map(({ id, status }) => ({
+        id,
+        status,
+        statusDetail: null,
+        source: `path:/plugins/${id}`,
+        rootDir: `/plugins/${id}`,
+        version: "1.0.0",
+        provenance: "direct",
+        publisherLabel: null,
+        isOrphanedBuiltin: false,
+        sourceDisplay: `path · /plugins/${id}`,
+        updateState: {},
+        enabled: true,
+        description: null,
+        name: null,
+        icon: null,
+        iconUrl: null,
+        handlerStats: { count: 0, totalMs: 0, maxMs: 0, errorCount: 0 },
+        services: [],
+        schedules: [],
+        cliCommand: null,
+        hasSettings: false,
+        app: { hasApp: false, bundle: null },
+        logoUrl: null,
+        logoDarkUrl: null,
+      })),
+    };
     return new Response(JSON.stringify(body), {
       headers: { "Content-Type": "application/json" },
     });

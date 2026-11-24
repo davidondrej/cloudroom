@@ -32,6 +32,7 @@ const BASE_NOW = 1_800_000_000_000;
 const HOUR = 60 * 60_000;
 const PASS_FINISHED = "Provider model catalog prewarm pass finished";
 const ALWAYS_VISIBLE_PROVIDER_IDS = [
+  "acp-antigravity",
   "acp-cursor",
   "claude-code",
   "codex",
@@ -283,7 +284,12 @@ describe("provider model catalog prewarm", () => {
 
       await withPrewarm(harness, async () => {
         await waitForPasses(logLines, 1);
-        expect(prewarmed()).toEqual(["catalog-probe", "claude-code", "pi"]);
+        expect(prewarmed()).toEqual([
+          "acp-antigravity",
+          "catalog-probe",
+          "claude-code",
+          "pi",
+        ]);
 
         clock.now += HOUR;
         probe.dispose();
@@ -291,6 +297,7 @@ describe("provider model catalog prewarm", () => {
         harness.hub.notifySystem(["provider-registrations-changed"]);
         await waitForPasses(logLines, 2);
         expect(prewarmed()).toEqual([
+          "acp-antigravity",
           "catalog-probe",
           "catalog-probe",
           "claude-code",

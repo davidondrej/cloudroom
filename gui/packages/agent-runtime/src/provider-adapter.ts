@@ -20,6 +20,8 @@ export interface CreateBridgeAdapterOptions {
   bridgeBundleDir?: string;
   bridgeNodeEnv?: Record<string, string>;
   bridgeNodeExecutablePath?: string;
+  /** The bridge's temp folder, which the runtime removes after it exits. */
+  bridgeTempDir?: string;
 }
 
 export type ProviderExecutionContext = {
@@ -54,6 +56,7 @@ export type AdapterCommand =
       type: "thread/start";
       threadId: string;
       cwd: string;
+      replacesProviderThreadId?: string;
       options: ProviderExecutionContext;
       dynamicTools?: DynamicTool[];
       disallowedTools?: readonly string[];
@@ -75,6 +78,7 @@ export type AdapterCommand =
       cwd: string;
       sourceProviderThreadId: string;
       sourceProviderCheckpointId?: string;
+      replacesProviderThreadId?: string;
       options: ProviderExecutionContext;
       dynamicTools?: DynamicTool[];
       disallowedTools?: readonly string[];
@@ -102,6 +106,7 @@ export type AdapterCommand =
       threadId: string;
       providerThreadId: string;
       activeTurnId: string | null;
+      keepSession?: boolean;
     }
   | {
       type: "thread/discard";

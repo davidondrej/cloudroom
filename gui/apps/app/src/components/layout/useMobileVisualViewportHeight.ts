@@ -18,6 +18,17 @@ export function shouldRestoreIOSViewportOnKeyboardDismissal({
   return isAppleWebKit && isIOSDevice;
 }
 
+export function isFirefoxAndroid({
+  maxTouchPoints,
+  userAgent,
+}: Pick<Navigator, "maxTouchPoints" | "userAgent">): boolean {
+  if (!/\bFirefox\//u.test(userAgent)) return false;
+  return (
+    /\bAndroid\b/u.test(userAgent) ||
+    (/\bX11; Linux\b/u.test(userAgent) && maxTouchPoints > 0)
+  );
+}
+
 export const SHELL_SAFE_AREA_BOTTOM_PROPERTY = "--bb-safe-area-bottom";
 
 export const KEYBOARD_OPEN_MIN_SHRINK_PX = 80;

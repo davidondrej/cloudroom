@@ -1,22 +1,22 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { rmSync } from "node:fs";
+import { homedir } from "node:os";
 import type { HostDaemonOnlineRpcResult } from "@cloudroom/host-daemon-contract";
 import {
   normalizeWindowsEnv,
   preparePortablePtyCommand,
 } from "@cloudroom/process-utils";
 import {
+  createBrowserOpener,
   readClaudeToken,
   readOpenedUrl,
   screenText,
-  writeBrowserOpener,
 } from "@cloudroom/process-utils/claude-token";
 import { spawn as spawnPty, type IPty } from "node-pty";
 import type { HostDaemonLogger } from "../logger.js";
 import { ensureNodePtySpawnHelperExecutable } from "../terminals/terminal-manager.js";
 import {
   CommandDispatchError,
+  type CommandDispatchOptions,
   type CommandOf,
 } from "../command-dispatch-support.js";
 
@@ -62,10 +62,10 @@ function stop(runId: string): void {
   rmSync(run.dir, { recursive: true, force: true });
 }
 
-function start(runId: string, binary: string): Run {
+function start(runId: string, binary: string, dataDir: string): Run {
   const windows = process.platform === "win32";
-  const dir = mkdtempSync(join(tmpdir(), "cloudroom-claude-"));
-  const browser = writeBrowserOpener(dir, windows);
+  // Claude runs the opener outside any sandbox, so it lives in the data folder.
+  const { dir, browser } = createBrowserOpener(dataDir, windows);
   const cwd = homedir();
   const env = normalizeWindowsEnv({ ...process.env, BROWSER: browser });
   const launch = preparePortablePtyCommand({
@@ -131,6 +131,7 @@ function read(run: Run | undefined): Result {
 
 export async function claudeSetupToken(
   command: CommandOf<"claude.setup_token">,
+  options: Pick<CommandDispatchOptions, "dataDir">,
 ): Promise<Result> {
   if (command.action === "read") return read(runs.get(command.runId));
   stop(command.runId);
@@ -141,5 +142,5 @@ export async function claudeSetupToken(
       "claude.setup_token start needs the Claude Code binary",
     );
   }
-  return read(start(command.runId, command.binary));
+  return read(start(command.runId, command.binary, options.dataDir));
 }

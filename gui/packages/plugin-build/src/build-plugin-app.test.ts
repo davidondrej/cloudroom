@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { build } from "esbuild";
 import {
   buildPluginApp,
-  isSharedUiIconRelativeImport,
+  sharedUiRelativeShim,
   runtimeShimPlugin,
   RUNTIME_SLOT_BY_SPECIFIER,
 } from "./build-plugin-app.js";
@@ -138,7 +138,7 @@ describe("plugin app runtime shim", () => {
     }
   });
 
-  it("shims shared-ui's relative ./icon import but bundles a plugin's own icon module", async () => {
+  it("shims shared-ui's relative icon and dimming imports but bundles a plugin's own icon module", async () => {
     const dir = await mkdtemp(join(tmpdir(), "bb-plugin-icon-rel-"));
     tempDirs.push(dir);
     const sharedUiDir = join(dir, "node_modules", "@cloudroom", "shared-ui");
@@ -154,7 +154,9 @@ describe("plugin app runtime shim", () => {
       [join(sharedUiDir, "src", "components", "ui", "icon.tsx")]:
         `export function Icon() { return "shared-ui-hugeicons-map"; }\n`,
       [join(sharedUiDir, "src", "components", "ui", "empty-state.tsx")]:
-        `import { Icon } from "./icon";\nexport function EmptyState() { return Icon; }\n`,
+        `import { Icon } from "./icon";\nimport { useBrowserDimmingModal } from "../../hooks/useBrowserDimmingModal";\nexport function EmptyState() { return [Icon, useBrowserDimmingModal]; }\n`,
+      [join(sharedUiDir, "src", "hooks", "useBrowserDimmingModal.ts")]:
+        `export function useBrowserDimmingModal() { return "shared-ui-dimming-noop"; }\n`,
       [join(dir, "components", "ui", "icon.tsx")]:
         `export function Icon() { return "plugin-owned-icon-map"; }\n`,
       [join(dir, "components", "ui", "button.tsx")]:
@@ -179,33 +181,35 @@ describe("plugin app runtime shim", () => {
     const js = result.outputFiles[0]?.text ?? "";
     expect(js).not.toContain("shared-ui-hugeicons-map");
     expect(js).toMatch(/runtime\d*\.sharedUiIcon\b/);
+    expect(js).not.toContain("shared-ui-dimming-noop");
+    expect(js).toMatch(/runtime\d*\.browserDimming\b/);
     expect(js).toContain("plugin-owned-icon-map");
   });
 
-  it("recognizes only shared-ui's own icon module as a relative import", () => {
+  it("routes only shared-ui's own icon and browser-dimming modules", () => {
     const sharedUiComponent =
       "/repo/packages/shared-ui/src/components/ui/empty-state.tsx";
-    expect(isSharedUiIconRelativeImport("./icon", sharedUiComponent)).toBe(
-      true,
-    );
-    expect(isSharedUiIconRelativeImport("./icon.js", sharedUiComponent)).toBe(
-      true,
-    );
+    const icon = "@cloudroom/shared-ui/icon";
+    expect(sharedUiRelativeShim("./icon", sharedUiComponent)).toBe(icon);
+    expect(sharedUiRelativeShim("./icon.js", sharedUiComponent)).toBe(icon);
     expect(
-      isSharedUiIconRelativeImport(
+      sharedUiRelativeShim(
         "../components/ui/icon",
         "/repo/packages/shared-ui/src/hooks/use-thing.ts",
       ),
-    ).toBe(true);
-    expect(isSharedUiIconRelativeImport("./button", sharedUiComponent)).toBe(
-      false,
+    ).toBe(icon);
+    expect(
+      sharedUiRelativeShim(
+        "../../hooks/useBrowserDimmingModal",
+        "/repo/packages/shared-ui/src/components/ui/dialog.tsx",
+      ),
+    ).toBe("@cloudroom/shared-ui/browser-dimming");
+    expect(sharedUiRelativeShim("./button", sharedUiComponent)).toBe(
+      undefined,
     );
     expect(
-      isSharedUiIconRelativeImport(
-        "./icon",
-        "/plugins/acme/components/ui/button.tsx",
-      ),
-    ).toBe(false);
+      sharedUiRelativeShim("./icon", "/plugins/acme/components/ui/button.tsx"),
+    ).toBe(undefined);
   });
 
   it("scopes Tailwind utilities while preserving imported CSS unscoped", async () => {

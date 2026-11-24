@@ -386,6 +386,7 @@ export const threadEventItemSchema = z.discriminatedUnion("type", [
     .strict(),
   z.object({
     type: z.literal("agentMessage"),
+    providerCheckpointId: z.string().min(1).optional(),
     id: z.string(),
     text: z.string(),
     ...itemPresentationField,
@@ -472,6 +473,50 @@ function itemTextDeltaEventSchema<TType extends string>(type: TType) {
     delta: z.string(),
     parentToolCallId: z.string().optional(),
   });
+}
+
+/**
+ * Shell variables whose values `provider.env-resolved` may show. Every other
+ * shell value is masked: it can hold a synced secret such as GH_TOKEN (#1938).
+ */
+const SHOWN_SHELL_ENV_NAMES = new Set([
+  "FNM_MULTISHELL_PATH",
+  "HOME",
+  "LANG",
+  "PATH",
+  "ROOM_ENVIRONMENT_ID",
+  "ROOM_PROJECT_ID",
+  "ROOM_THREAD_ID",
+  "ROOM_THREAD_STORAGE",
+  "SHELL",
+  "TMPDIR",
+  "USER",
+]);
+
+export function diagnosticShellEnvValue(
+  name: string,
+  value: unknown,
+): string | { masked: true } {
+  // toUpperCase: Windows names are case-insensitive (`Path`).
+  return typeof value === "string" &&
+    SHOWN_SHELL_ENV_NAMES.has(name.toUpperCase())
+    ? value
+    : { masked: true };
+}
+
+/** Masks shell values in a stored `provider.env-resolved` payload; older rows kept them raw. */
+export function maskStoredShellEnvValues<T>(type: string, data: T): T {
+  if (type !== "provider.env-resolved") return data;
+  const entries = (data as { entries?: unknown } | null)?.entries;
+  if (!Array.isArray(entries)) return data;
+  return {
+    ...data,
+    entries: entries.map((entry: Record<string, unknown> | null) =>
+      entry?.source === "shell" && typeof entry.name === "string"
+        ? { ...entry, value: diagnosticShellEnvValue(entry.name, entry.value) }
+        : entry,
+    ),
+  };
 }
 
 const unscopedProviderEventSchema = z.discriminatedUnion("type", [

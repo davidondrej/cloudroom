@@ -3,15 +3,17 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { codexExtensionKinds } from "./src/extension-kinds.js";
 import { CODEX_NATIVE_ROOTS_DECLARATION } from "./src/native-roots.js";
 
-export default function plugin(bb: BbPluginApi) {
-  registerUsageSource(bb);
-  bb.experimental_aiServices.register({
+export default function plugin(room: BbPluginApi) {
+  registerUsageSource(room);
+  // The provider skill is only useful in this provider's own threads.
+  room.agents.configure(({ provider }) => ({ tools: [], skills: provider.id === "codex" ? ["codex-provider"] : [] }));
+  room.experimental_aiServices.register({
     id: "codex",
     displayName: "Codex (ChatGPT account or API key)",
     kinds: ["inference", "voice"],
   });
 
-  bb.settings.define({
+  room.settings.define({
     memoryEnabled: {
       type: "boolean",
       label: "Codex memory",
@@ -28,7 +30,7 @@ export default function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.providers.register({
+  room.providers.register({
     id: "codex",
     displayName: "Codex",
     icon: "./icons/codex.svg",
@@ -47,6 +49,7 @@ export default function plugin(bb: BbPluginApi) {
       supportsNativeUserQuestion: false,
       fork: "checkpoint",
       supportsManualCompaction: true,
+      resumesInNewFolder: true,
       supportsThreadArchive: true,
       supportsThreadRename: true,
       permissionModes: ["accept-edits", "auto", "full"],
@@ -67,6 +70,7 @@ export default function plugin(bb: BbPluginApi) {
     serviceTiers: [
       { id: "default", label: "Default" },
       { id: "fast", label: "Fast" },
+      { id: "ultrafast", label: "Ultra Fast" },
     ],
     composerActions: ["plan", "goal"],
     deriveProviderOptions(context) {

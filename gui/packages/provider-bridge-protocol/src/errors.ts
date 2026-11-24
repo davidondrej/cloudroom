@@ -18,6 +18,10 @@ export const providerRecoveryHintSchema = z.object({
 export type ProviderRecoveryHint = z.infer<typeof providerRecoveryHintSchema>;
 
 export const bridgeErrorDataSchema = z
-  .object({ recovery: providerRecoveryHintSchema.optional() })
+  .object({
+    recovery: providerRecoveryHintSchema.optional(),
+    /** The failure's own code (`cli_missing`), so the host daemon can report what failed, not just that it did. */
+    reason: z.string().optional(),
+  })
   .passthrough();
 export type BridgeErrorData = z.infer<typeof bridgeErrorDataSchema>;

@@ -1,5 +1,5 @@
 import { useCallback, useContext, useMemo, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import type {
   ThreadChatMessageAction,
   ThreadChatProps,
@@ -206,6 +206,7 @@ function PluginThreadChatBody({
       hasMultipleMachines,
       host: environmentHost,
       machineProviders,
+      isWorktree: environment.isWorktree,
     });
     return (
       <ThreadEnvironmentSummary

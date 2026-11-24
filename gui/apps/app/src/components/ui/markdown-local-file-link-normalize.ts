@@ -26,6 +26,11 @@ interface InlineLinkPayloadParts {
   suffix: string;
 }
 
+interface InlineLinkDestinationEnds {
+  markdown: (number | null)[];
+  windows: (number | null)[];
+}
+
 type MarkdownFenceCharacter = "`" | "~";
 
 const MARKDOWN_FENCE_PATTERN = /^( {0,3})(`{3,}|~{3,})/u;
@@ -128,50 +133,37 @@ function findCodeSpanEnd(value: string, openingIndex: number): number | null {
   return closingIndex === -1 ? null : closingIndex + markerLength;
 }
 
-function isEscapedMarkdownCharacter(value: string, index: number): boolean {
+function buildOpeningLabelBracketPrefixes(value: string): boolean[] {
+  const prefixes = Array<boolean>(value.length + 1).fill(false);
+  let hasOpeningLabelBracket = false;
   let backslashCount = 0;
 
-  for (
-    let cursor = index - 1;
-    cursor >= 0 && value[cursor] === "\\";
-    cursor -= 1
-  ) {
-    backslashCount += 1;
-  }
-
-  return backslashCount % 2 === 1;
-}
-
-function hasUnescapedOpeningLabelBracket(
-  value: string,
-  closingBracketIndex: number,
-): boolean {
-  for (let index = closingBracketIndex - 1; index >= 0; index -= 1) {
-    if (value[index] !== "[") {
-      continue;
+  for (let index = 0; index < value.length; index += 1) {
+    prefixes[index] = hasOpeningLabelBracket;
+    const character = value[index];
+    if (character === "[") {
+      hasOpeningLabelBracket = backslashCount % 2 === 0;
     }
-
-    return !isEscapedMarkdownCharacter(value, index);
+    backslashCount = character === "\\" ? backslashCount + 1 : 0;
   }
 
-  return false;
+  prefixes[value.length] = hasOpeningLabelBracket;
+  return prefixes;
 }
 
-function findInlineLinkDestinationEnd(
+function buildInlineLinkDestinationEnds(
   value: string,
-  destinationStartIndex: number,
-): number | null {
-  let nestedParentheses = 0;
-  const destinationStart = value.slice(destinationStartIndex);
-  const backslashIsPathSeparator = isWindowsDriveLocalFilePath(
-    destinationStart.slice(findMarkdownWhitespaceEnd(destinationStart)),
-  );
+  backslashIsPathSeparator: boolean,
+): (number | null)[] {
+  const destinationEnds = Array<number | null>(value.length).fill(null);
+  const openingParentheses: number[] = [];
 
-  for (let index = destinationStartIndex; index < value.length; index += 1) {
+  for (let index = 0; index < value.length; index += 1) {
     const character = value[index];
 
     if (character === "\n" || character === "\r") {
-      return null;
+      openingParentheses.length = 0;
+      continue;
     }
 
     if (
@@ -184,22 +176,19 @@ function findInlineLinkDestinationEnd(
     }
 
     if (character === "(") {
-      nestedParentheses += 1;
+      openingParentheses.push(index);
       continue;
     }
 
-    if (character !== ")") {
-      continue;
+    if (character === ")") {
+      const openingIndex = openingParentheses.pop();
+      if (openingIndex !== undefined) {
+        destinationEnds[openingIndex] = index;
+      }
     }
-
-    if (nestedParentheses === 0) {
-      return index;
-    }
-
-    nestedParentheses -= 1;
   }
 
-  return null;
+  return destinationEnds;
 }
 
 function isMarkdownWhitespace(value: string | undefined): boolean {
@@ -408,13 +397,15 @@ function buildAngleBracketWindowsLinkRepair(
 function buildLocalFileMarkdownLinkRepair(
   value: string,
   closingBracketIndex: number,
+  destinationEnds: InlineLinkDestinationEnds,
+  openingLabelBracketPrefixes: boolean[],
 ): LocalFileMarkdownLinkRepair | null {
   if (
     value.slice(
       closingBracketIndex,
       closingBracketIndex + MARKDOWN_LINK_DESTINATION_OPEN.length,
     ) !== MARKDOWN_LINK_DESTINATION_OPEN ||
-    !hasUnescapedOpeningLabelBracket(value, closingBracketIndex)
+    !openingLabelBracketPrefixes[closingBracketIndex]
   ) {
     return null;
   }
@@ -425,10 +416,14 @@ function buildLocalFileMarkdownLinkRepair(
     return buildAngleBracketWindowsLinkRepair(value, destinationStartIndex);
   }
 
-  const destinationEndIndex = findInlineLinkDestinationEnd(
-    value,
-    destinationStartIndex,
+  const destinationStart = value.slice(destinationStartIndex);
+  const backslashIsPathSeparator = isWindowsDriveLocalFilePath(
+    destinationStart.slice(findMarkdownWhitespaceEnd(destinationStart)),
   );
+  const destinationEndIndex =
+    (backslashIsPathSeparator
+      ? destinationEnds.windows
+      : destinationEnds.markdown)[destinationStartIndex - 1] ?? null;
   if (destinationEndIndex === null) {
     return null;
   }
@@ -482,6 +477,11 @@ function normalizeLocalFileMarkdownLinksInLine(line: string): string {
   let output = "";
   let lastCopiedIndex = 0;
   let index = 0;
+  const destinationEnds = {
+    markdown: buildInlineLinkDestinationEnds(line, false),
+    windows: buildInlineLinkDestinationEnds(line, true),
+  };
+  const openingLabelBracketPrefixes = buildOpeningLabelBracketPrefixes(line);
 
   while (index < line.length) {
     if (line[index] === "`") {
@@ -490,7 +490,12 @@ function normalizeLocalFileMarkdownLinksInLine(line: string): string {
       continue;
     }
 
-    const repair = buildLocalFileMarkdownLinkRepair(line, index);
+    const repair = buildLocalFileMarkdownLinkRepair(
+      line,
+      index,
+      destinationEnds,
+      openingLabelBracketPrefixes,
+    );
     if (!repair) {
       index += 1;
       continue;

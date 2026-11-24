@@ -1,5 +1,5 @@
 //! A transfer is staged before one durable activation makes it executable.
-use super::{Error, Manager, Receipt, Result};
+use super::{Error, Manager, Receipt, Result, SessionState};
 use crate::{runtime, workspace};
 use axum::body::{Body, Bytes};
 use serde::{Deserialize, Serialize};
@@ -74,6 +74,11 @@ pub struct Manifest {
     pub strip_ai_co_authors: Option<bool>,
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// The app's IDs for the thread and its project, exported to the agent's shells (#199).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub workspace: String,
     pub workspace_name: String,
     pub files: Vec<Entry>,
@@ -156,6 +161,11 @@ fn validate(manifest: &Manifest) -> Result<()> {
             .system_prompt
             .as_ref()
             .is_some_and(|p| p.trim().is_empty() || p.len() > 32768 || p.contains('\0'))
+        || manifest
+            .thread_id
+            .as_deref()
+            .is_some_and(|t| !super::relay::thread_id(t))
+        || manifest.project_id.as_deref().is_some_and(|p| !valid_id(p))
         || manifest.queued.iter().any(|prompt| {
             prompt.input()["text"]
                 .as_str()
@@ -210,7 +220,7 @@ fn validate(manifest: &Manifest) -> Result<()> {
 fn native_in_use(local: &super::Local, native_id: &str) -> bool {
     local.sessions.values().any(|s| {
         s.native_id.as_deref() == Some(native_id)
-            && s.state != "closed"
+            && s.state != SessionState::Closed
             && s.close_request.is_none()
     })
 }
@@ -273,7 +283,10 @@ impl Manager {
                     None
                 } else if s.queue_paused {
                     Some("paused_before_output")
-                } else if matches!(s.state.as_str(), "closed" | "process_lost" | "failed") {
+                } else if matches!(
+                    s.state,
+                    SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
+                ) {
                     Some("cloud_process_unavailable")
                 } else if s.ready && s.current_request.is_none() && s.queue.is_empty() {
                     Some("no_cloud_output")
@@ -332,12 +345,19 @@ impl Manager {
         if let Err(error) = self.harness_ready(check.harness).await {
             return fail("login_required", error.message(), None);
         }
-        if check.service_tier.as_deref() == Some("fast") && !check.harness.fast() {
-            let error = format!("Cloud {harness} has no Fast mode; turn Fast off, then Teleport");
+        if let Some(tier @ ("fast" | "ultrafast")) = check.service_tier.as_deref()
+            && !check.harness.tier(tier)
+        {
+            let name = if tier == "fast" { "Fast" } else { "Ultra Fast" };
+            let error =
+                format!("Cloud {harness} has no {name} mode; turn {name} off, then Teleport");
             return fail("setting_unavailable", error, None);
         }
         let reasoning = check.reasoning.as_deref();
-        if matches!(check.harness, runtime::Kind::Codex | runtime::Kind::Claude) {
+        if matches!(
+            check.harness,
+            runtime::Kind::Codex | runtime::Kind::Claude | runtime::Kind::Antigravity
+        ) {
             let models = match self.model_catalog(check.harness).await {
                 Ok(models) => models,
                 Err(error) => return fail("models_unavailable", error.message(), None),
@@ -389,10 +409,12 @@ impl Manager {
             Err(Error::NotFound) => {}
             Err(error) => return Err(error),
         }
-        if self.is_stopping() || !self.recording_available() {
-            return Err(Error::Storage(
-                "service is stopping or the session journal is not writable".into(),
-            ));
+        // The common journal error, so its 503 carries the recovery hint (Error::message, #211).
+        if !self.recording_available() {
+            return Err(Error::Storage(super::JOURNAL_UNWRITABLE.into()));
+        }
+        if self.is_stopping() {
+            return Err(Error::Storage("service is stopping".into()));
         }
         if self.local.lock().unwrap().draining {
             return Err(Error::Conflict("service is draining"));
@@ -454,7 +476,7 @@ impl Manager {
                 }
             }
             if let Some(tier) = input["service_tier"].as_str()
-                && (tier != "default" && !(tier == "fast" && manifest.harness.fast()))
+                && !manifest.harness.tier(tier)
             {
                 return Err(Error::Conflict("invalid service tier"));
             }
@@ -506,10 +528,11 @@ impl Manager {
         if transfer.cancelled {
             return Err(Error::Conflict("transfer cancelled"));
         }
-        if self.storage.blocks() || !self.recording_available() {
-            return Err(Error::Storage(
-                "disk protection is blocking writes or the session journal is not writable".into(),
-            ));
+        if !self.recording_available() {
+            return Err(Error::Storage(super::JOURNAL_UNWRITABLE.into()));
+        }
+        if self.storage.blocks() {
+            return Err(Error::Storage("disk protection is blocking writes".into()));
         }
         let mut entry = transfer
             .manifest
@@ -659,7 +682,7 @@ impl Manager {
             if session.receipts.contains_key(&request) {
                 return Ok(());
             }
-            if session.close_request.is_some() || session.state == "closed" {
+            if session.close_request.is_some() || session.state == SessionState::Closed {
                 return Err(Error::Conflict("cloud session is closed"));
             }
             let receipt = Receipt {
@@ -808,10 +831,31 @@ impl Manager {
         } else {
             self.teleport_prompts(&transfer).await?
         };
+        // Read the arrived chat to its end once, off Core's workers, so its start copies nothing. If that fails, the
+        // start copies it as before and reports the problem there.
+        let cursor = {
+            let profile = self.config.harnesses[&manifest.harness].clone();
+            let saved = runtime::Resume {
+                id: manifest.native_id.clone(),
+                path: native_path.into(),
+                cursor: Value::Null,
+                model: Some(manifest.model.clone()),
+                provider: manifest.provider.clone(),
+                reasoning: manifest.reasoning.clone(),
+            };
+            let (harness, policy) = (manifest.harness, self.config.storage.clone());
+            tokio::task::spawn_blocking(move || {
+                runtime::end_cursor(&profile, harness, &saved, policy.as_ref())
+            })
+            .await
+            .ok()
+            .and_then(|cursor| cursor.ok())
+            .filter(|cursor| !cursor.is_null())
+        };
         let receipt = Receipt {
             request_id: id.into(),
             command: "start".into(),
-            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt}),
+            input: json!({"harness":manifest.harness,"reasoning":manifest.reasoning,"teleport":id,"fork":manifest.fork,"command_guard_enabled":manifest.command_guard_enabled,"strip_ai_co_authors":manifest.strip_ai_co_authors,"system_prompt":manifest.system_prompt,"thread_id":manifest.thread_id,"project_id":manifest.project_id}),
             state: "completed".into(),
             model: Some(manifest.model.clone()),
             provider: manifest.provider.clone(),
@@ -831,7 +875,11 @@ impl Manager {
                 ));
             }
             // This single fsynced record includes all queued work and the ownership decision.
-            local.append(&session_id, "teleport", json!({"receipt":receipt,"prompts":prompts,"native_id":manifest.native_id,"native_path":native_path}), None)?;
+            let mut record = json!({"receipt":receipt,"prompts":prompts,"native_id":manifest.native_id,"native_path":native_path});
+            if let Some(cursor) = cursor {
+                record["native_cursor"] = cursor;
+            }
+            local.append(&session_id, "teleport", record, None)?;
             self.schedule_resume(&mut local, &session_id, false)?;
         }
         self.teleport_files_ready(&transfer)?;
@@ -858,7 +906,7 @@ impl Manager {
             )
             .await?;
         let handoff = format!(
-            "[Teleport handoff]\n{}\n\nCloud workspace: {}\nThe local executor and its children are stopped. You are the only continuing parent. Complete their combined work. Old Mac paths, GUI tools and local-only instructions are not usable here. Use your current cloud tools. Never repeat an uncertain tool action blindly. Project dependencies are yours to resolve within existing permissions.\nFull file index: {}. Child context files are already available. Project files and attachments are uploading separately and might never arrive if the laptop disconnects. The index lists expected destinations, not proof of arrival: check whether each needed file exists. Work on whatever you can, and wait only when an essential file is missing. Different cloud originals are never overwritten; incoming versions remain at the indexed paths. An upload-completion follow-up will let you continue any blocked work.\n",
+            "[Teleport handoff]\n{}\n\nCloud workspace: {}\nThe local executor and its children are stopped. You are the only continuing parent. Complete their combined work. Old Mac paths, GUI tools and local-only instructions are not usable here. Use your current cloud tools. Never repeat an uncertain tool action blindly. Project dependencies are yours to resolve within existing permissions.\nFull file index: {}. Child context files are already available. Indexed files and attachments are uploading separately and might never arrive if the laptop disconnects. The index lists expected destinations, not proof of arrival: check whether each needed file exists. Work on whatever you can, and wait only when an essential one is missing. The project copy itself is different: run `room-cli files wait` before touching project files; it returns at once if no copy is running. Different cloud originals are never overwritten; incoming versions remain at the indexed paths. An upload-completion follow-up will let you continue any blocked work.\n",
             manifest.handoff,
             transfer.workspace.path.display(),
             index["path"].as_str().unwrap_or_default()

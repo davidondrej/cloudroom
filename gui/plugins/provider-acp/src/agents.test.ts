@@ -90,6 +90,7 @@ describe("parseCustomAcpAgents", () => {
           },
           nativeSkillRoots: { user: [".amp/skills"], project: [".amp"] },
           permissionCli: { full: ["--dangerous"] },
+          permissionEnv: { full: { AMP_MODE: "yolo" } },
         },
       ],
       reservedProviderIds: reserved,
@@ -106,6 +107,7 @@ describe("parseCustomAcpAgents", () => {
       user: [".amp/skills"],
       project: [".amp"],
     });
+    expect(launch.permissionEnv).toEqual({ full: { AMP_MODE: "yolo" } });
   });
 
   it.each([
@@ -125,6 +127,7 @@ describe("parseCustomAcpAgents", () => {
       },
     ],
     ["an unknown skill-root shape", { nativeSkillRoots: { argFlag: "-s" } }],
+    ["a permission env without a mode", { permissionEnv: {} }],
   ])("rejects %s", (_label, extra) => {
     const parsed = parseCustomAcpAgents({
       entries: [{ id: "amp", displayName: "Amp", command: "amp", ...extra }],
@@ -200,6 +203,15 @@ describe("acpProviderDeclaration", () => {
     }
   });
 
+  it("starts fx in ask mode for Manual and in full access only for Full", () => {
+    const fx = KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-fx");
+    expect(fx?.launch.env).not.toHaveProperty("FX_PERMISSION_MODE");
+    expect(fx?.launch.permissionEnv).toEqual({
+      full: { FX_PERMISSION_MODE: "full-access" },
+      workspaceWrite: { FX_PERMISSION_MODE: "ask" },
+    });
+  });
+
   it("groups every agent under the acp family instead of an id prefix", () => {
     for (const agent of KNOWN_ACP_AGENTS) {
       expect(acpProviderDeclaration(agent).family).toBe("acp");
@@ -225,13 +237,14 @@ describe("acpProviderDeclaration", () => {
         "grok-4.6",
         "gpt-5.6-sol",
         "claude-opus-5-5",
+        "claude-fable-5-2",
         "claude-fable-5",
         "composer-2.5",
       ],
       reasoningProbePriorityModelIds: ["grok-4.6", "grok-4.5"],
       acpLaunchSpec: {
         command: "cursor-agent",
-        args: ["acp"],
+        args: ["--disable-project-configs", "acp"],
         modelCli: {
           listArgs: ["--list-models"],
           primaryModels: [],
@@ -244,12 +257,22 @@ describe("acpProviderDeclaration", () => {
     expect(byId.get("acp-opencode")?.experimental_bridgeOptions).toMatchObject({
       acpDialect: "opencode",
     });
+    expect(byId.get("acp-kimi")?.experimental_bridgeOptions).toMatchObject({
+      acpDialect: "kimi",
+    });
     expect(
       byId.get("acp-opencode")?.capabilities.supportsManualCompaction,
     ).toBe(true);
     expect(byId.get("acp-cursor")?.capabilities.supportsManualCompaction).toBe(
       false,
     );
+    expect(byId.get("acp-opencode")?.capabilities.permissionModes).toEqual([
+      "full",
+    ]);
+    expect(byId.get("acp-cursor")?.capabilities.permissionModes).toEqual([
+      "accept-edits",
+      "full",
+    ]);
   });
 
   it("keeps each agent's own reasoning ladder and installed-only visibility", () => {
@@ -262,6 +285,8 @@ describe("acpProviderDeclaration", () => {
       "high",
     ]);
     expect(grok.experimental_visibility).toBe("installed");
+    expect(grok.strings?.signInCommand).toBe("grok login");
+    expect(grok.experimental_modelDiscoveryRestart).toBe(true);
 
     const cursor = acpProviderDeclaration(
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-cursor")!,
@@ -274,8 +299,24 @@ describe("acpProviderDeclaration", () => {
       "max",
     ]);
     expect(cursor.experimental_visibility).toBeUndefined();
+    expect(cursor.strings?.signInCommand).toBe("cursor-agent login");
+    expect(cursor.experimental_modelDiscoveryRestart).toBe(true);
     expect(cursor.maintenance?.usage).toBe(true);
     expect(cursor.maintenance?.installation).toBe(true);
+
+    // An opencode.json edit shows only after `--restart` (#1236).
+    const opencode = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-opencode")!,
+    );
+    expect(opencode.experimental_modelDiscoveryRestart).toBe(true);
+    // A project's opencode.json can hide providers, so it lists per project; so does its fork Kilo.
+    expect(opencode.models).toEqual({ scope: "workspace" });
+    expect(
+      acpProviderDeclaration(
+        KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-kilo")!,
+      ).models,
+    ).toEqual({ scope: "workspace" });
+    expect(cursor.models).toEqual({ scope: "host" });
   });
 
   it("gives a configured agent honest copy when it names no sign-in command", () => {

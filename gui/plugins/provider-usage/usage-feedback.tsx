@@ -32,29 +32,29 @@ export function offlineUsageMessage(
 export function UsageFeedback({
   message,
   loading = false,
-  className,
+  compact = false,
 }: {
   message: string;
   loading?: boolean;
-  className?: string;
+  compact?: boolean;
 }) {
   return (
     <div
       role="status"
       className={cn(
-        "flex min-w-0 items-start text-xs text-muted-foreground",
-        !loading && "gap-2 rounded-md bg-muted/60 px-2.5 py-2",
-        className,
+        "flex min-w-0 text-muted-foreground",
+        compact ? "items-center gap-1.5 text-[10px]" : "items-start text-xs",
+        !loading && !compact && "gap-2 rounded-md bg-muted/60 px-2.5 py-2",
       )}
     >
       {loading ? null : (
         <Icon
           name="Info"
           aria-hidden="true"
-          className="mt-0.5 size-3.5 shrink-0"
+          className={cn("shrink-0", compact ? "size-3" : "mt-0.5 size-3.5")}
         />
       )}
-      <span className="min-w-0 flex-1">{message}</span>
+      <span className="min-w-0 flex-1">{compact ? "Refresh failed · Showing saved usage" : message}</span>
     </div>
   );
 }

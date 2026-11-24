@@ -21,6 +21,7 @@ import type {
   PromptInput,
   ThreadEvent,
   StoredThreadEventDataForType,
+  SystemThreadInterruptedEventData,
   SystemThreadInterruptedReason,
   ThreadEventItemType,
   ThreadEventScope,
@@ -37,6 +38,7 @@ import {
   clientTurnRequestIdSchema,
   getThreadEventScopeTurnId,
   parseStoredThreadEvent,
+  systemThreadInterruptedEventDataSchema,
   systemThreadInterruptedReasonSchema,
   threadEventTypeValues,
 } from "@cloudroom/domain";
@@ -124,6 +126,9 @@ const isNotNestedTurnUsageEvent = sql`NOT EXISTS (
     AND nested_turn_started.type = 'turn/started'
     AND nested_turn_started.parent_tool_call_id IS NOT NULL
 )`;
+
+/** Harnesses report a compaction as an event or, like Codex, as a finished item. */
+const isContextCompaction = sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`;
 
 const isNotSupersededBackgroundTaskProgress = sql`NOT (
   ${events.type} = 'item/backgroundTask/progress'
@@ -1315,6 +1320,9 @@ export interface GetLatestThreadOutputEventRowArgs {
   threadId: string;
   /** Only look inside this turn; omitted means the whole thread. */
   turnId?: string;
+  /** Also match an empty assistant message after a tool step, so a turn that ended on one has no output (#1670).
+   *  One right after a nonempty reply doesn't hide that reply (#1834). */
+  includeEmpty?: boolean;
 }
 
 export interface GetLatestThreadSystemErrorEventRowArgs {
@@ -1346,6 +1354,8 @@ export interface PruneTokenUsageEventsBeforeSequenceArgs {
 }
 
 export interface PruneResolvedItemDeltasArgs {
+  /** Rows deleted at most. Defaults to one full batch. */
+  limit?: number;
   threadId: string;
 }
 
@@ -1964,6 +1974,28 @@ export interface StoredThreadEventDataRow {
   type: ThreadEventType;
 }
 
+/** A thread's newest turn starts since `since`; steers and retries left out. */
+export function listRecentNewTurnRequestRows(
+  db: DbQueryConnection,
+  args: { threadId: string; since: number; limit: number },
+): StoredEventRow[] {
+  return db
+    .select(storedEventRowFields)
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "client/turn/requested"),
+        gte(events.createdAt, args.since),
+        sql`json_extract(${events.data}, '$.target.kind') IN ('new-turn', 'thread-start')`,
+        sql`json_extract(${events.data}, '$.retryOfRequestId') IS NULL`,
+      ),
+    )
+    .orderBy(desc(events.sequence))
+    .limit(args.limit)
+    .all();
+}
+
 /**
  * The newest row of any of `types`, optionally restricted to what came after a
  * sequence.
@@ -2118,6 +2150,70 @@ export function getLatestThreadInterruptedReason(
     return null;
   }
   return systemThreadInterruptedReasonSchema.parse(row.reason);
+}
+
+/**
+ * The stop that ended a root turn that completed `interrupted` (#1159); the
+ * last root turn when no turnId is given. Stops carry no turn ID, so this
+ * answers only when ownership is certain: no other root turn overlaps this
+ * one (none still open when it started, none started before it ended), and exactly one stop was recorded between its start and the next
+ * root turn's. Null otherwise, or when the stored data is invalid.
+ */
+export function getRootTurnInterruption(
+  db: DbQueryConnection,
+  args: { threadId: string; turnId?: string },
+): SystemThreadInterruptedEventData | null {
+  const ofThread = (type: ThreadEventType) =>
+    and(eq(events.threadId, args.threadId), eq(events.type, type));
+  const rootStart = (where: SQL | undefined, latest: boolean) =>
+    db
+      .select({ sequence: events.sequence, turnId: events.turnId })
+      .from(events)
+      .where(and(ofThread("turn/started"), isRootTurnStartedEventData, where))
+      .orderBy(latest ? desc(events.sequence) : events.sequence)
+      .limit(1)
+      .get();
+  const firstCompletion = (turnId: string) =>
+    db
+      .select({ sequence: events.sequence, status: sql<string | null>`json_extract(${events.data}, '$.status')` })
+      .from(events)
+      .where(and(ofThread("turn/completed"), eq(events.turnId, turnId)))
+      .orderBy(events.sequence)
+      .limit(1)
+      .get();
+  const started = rootStart(args.turnId === undefined ? undefined : eq(events.turnId, args.turnId), true);
+  if (!started?.turnId) return null;
+  const completed = firstCompletion(started.turnId);
+  if (completed?.status !== "interrupted") return null;
+  const next = rootStart(gt(events.sequence, started.sequence), false);
+  if (next && next.sequence < completed.sequence) return null;
+  const earlierEnd = alias(events, "earlier_turn_end");
+  const openEarlier = rootStart(
+    and(
+      lt(events.sequence, started.sequence),
+      notExists(
+        db
+          .select({ sequence: earlierEnd.sequence })
+          .from(earlierEnd)
+          .where(and(eq(earlierEnd.threadId, events.threadId), eq(earlierEnd.type, "turn/completed"), eq(earlierEnd.turnId, events.turnId), lt(earlierEnd.sequence, started.sequence))),
+      ),
+    ),
+    true,
+  );
+  if (openEarlier) return null;
+  const stops = db
+    .select({ data: events.data })
+    .from(events)
+    .where(and(ofThread("system/thread/interrupted"), gt(events.sequence, started.sequence), next ? lt(events.sequence, next.sequence) : undefined))
+    .limit(2)
+    .all();
+  if (stops.length !== 1) return null;
+  try {
+    const parsed = systemThreadInterruptedEventDataSchema.safeParse(JSON.parse(stops[0]!.data));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
 export function listStoredTurnStartedRowsByTurnIdsUpToSequence(
@@ -3271,10 +3367,34 @@ export function countContextCompactions(
           gte(events.sequence, args.sequenceStart),
           sql`${events.parentToolCallId} IS NULL`,
           isNotNestedTurnUsageEvent,
-          sql`(${events.type} = 'thread/compacted' OR (${events.type} = 'item/completed' AND ${events.itemKind} = 'contextCompaction'))`,
+          isContextCompaction,
         ),
       )
       .get()?.count ?? 0
+  );
+}
+
+/** The newest point where the agent lost its earlier messages: a compaction or a clear. 0 when there is none. */
+export function latestContextResetSequence(
+  db: DbQueryConnection,
+  threadId: string,
+): number {
+  const compacted =
+    db
+      .select({ sequence: max(events.sequence) })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          sql`${events.parentToolCallId} IS NULL`,
+          isNotNestedTurnUsageEvent,
+          sql`(${isContextCompaction} OR ${events.type} = 'thread/context/cleared')`,
+        ),
+      )
+      .get()?.sequence ?? 0;
+  return Math.max(
+    compacted,
+    getLatestCompletedThreadContextClearSequence(db, { threadId }) ?? 0,
   );
 }
 
@@ -3295,7 +3415,27 @@ export function getLatestThreadOutputEventRow(
         OR (
           ${events.type} = 'item/completed'
           AND ${events.itemKind} = 'agentMessage'
-          AND COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''
+          AND (
+            COALESCE(json_extract(${events.data}, '$.item.text'), '') <> ''
+            ${
+              args.includeEmpty === true
+                ? sql`OR COALESCE((
+              SELECT previous.item_kind = 'agentMessage'
+              FROM events previous INDEXED BY events_thread_turn_type_item_sequence_idx
+              WHERE previous.thread_id = ${events.threadId}
+                AND previous.turn_id IS ${events.turnId}
+                AND previous.type = 'item/completed'
+                AND previous.sequence < ${events.sequence}
+                AND (
+                  previous.item_kind NOT IN ('agentMessage', 'reasoning')
+                  OR COALESCE(json_extract(previous.data, '$.item.text'), '') <> ''
+                )
+              ORDER BY previous.sequence DESC
+              LIMIT 1
+            ), 0) = 0`
+                : sql``
+            }
+          )
         )
       )`,
       )
@@ -3470,6 +3610,22 @@ export function getLastStoredProviderThreadId(
   return latestProviderRow.providerThreadId;
 }
 
+export function threadHasProviderSession(
+  db: DbQueryConnection,
+  threadId: string,
+): boolean {
+  return (
+    db
+      .select({ id: events.id })
+      .from(events)
+      .where(
+        and(eq(events.threadId, threadId), isNotNull(events.providerThreadId)),
+      )
+      .limit(1)
+      .get() !== undefined
+  );
+}
+
 export function listThreadTurnInterruptionEventStates(
   db: DbQueryConnection,
   args: ListThreadTurnInterruptionEventStatesArgs,
@@ -3603,10 +3759,11 @@ export function listThreadIdsWithLatestHostDaemonRestartInterruption(
 export function getLastStoredTurnRequestEvent(
   db: DbQueryConnection,
   threadId: string,
-): StoredTurnRequestEventRow | null {
+): (StoredTurnRequestEventRow & { createdAt: number }) | null {
   return (
     db
       .select({
+        createdAt: events.createdAt,
         data: events.data,
         sequence: events.sequence,
         threadId: events.threadId,
@@ -3627,6 +3784,62 @@ export function getLastStoredTurnRequestEvent(
       .limit(1)
       .get() ?? null
   );
+}
+
+export function isErrorQueueReleaseHeld(
+  db: DbQueryConnection,
+  args: { graceMs: number; now: number; threadId: string },
+): boolean {
+  const failure = db
+    .select({ createdAt: events.createdAt })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} IN ('turn/completed', 'system/error')`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  if (failure && args.now - failure.createdAt < args.graceMs) return true;
+  const settled = db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'turn/completed'
+      AND json_extract(${events.data}, '$.status') IN ('completed', 'interrupted')
+      AND EXISTS (
+        SELECT 1 FROM events AS settled_start
+        WHERE settled_start.thread_id = ${events.threadId}
+          AND settled_start.turn_id = ${events.turnId}
+          AND settled_start.type = 'turn/started'
+          AND settled_start.parent_tool_call_id IS NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(1)
+    .get();
+  const runs = db
+    .select({
+      // Queue drains and system notices are automatic; only other runs re-arm.
+      automatic: sql<number>`COALESCE(json_extract(${events.data}, '$.queueDelivered'), 0) = 1
+        OR json_extract(${events.data}, '$.initiator') = 'system'`,
+    })
+    .from(events)
+    .where(
+      sql`${events.threadId} = ${args.threadId}
+      AND ${events.type} = 'client/turn/requested'
+      AND ${events.sequence} > ${settled?.sequence ?? 0}
+      AND COALESCE(json_extract(${events.data}, '$.target.kind'), 'new-turn') != 'steer'
+      AND NOT (
+        json_extract(${events.data}, '$.target.kind') = 'auto'
+        AND json_extract(${events.data}, '$.target.expectedTurnId') IS NOT NULL
+      )`,
+    )
+    .orderBy(sql`${events.sequence} DESC`)
+    .limit(2)
+    .all();
+  return runs.length === 2 && runs[0]?.automatic === 1;
 }
 
 export function pruneThreadEventsBeforeSequence(
@@ -3807,7 +4020,7 @@ export function pruneResolvedItemDeltas(
               AND earlier_delta.parent_tool_call_id IS candidate.parent_tool_call_id
               AND earlier_delta.sequence < candidate.sequence
           )
-          LIMIT ${RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
+          LIMIT ${args.limit ?? RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
         )`,
   );
 

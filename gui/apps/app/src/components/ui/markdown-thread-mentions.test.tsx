@@ -4,7 +4,7 @@ import type { Root, RootContent } from "mdast";
 import { StrictMode, type ReactNode } from "react";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import type { PromptTextMention } from "@cloudroom/domain";
 import type { ThreadResponse } from "@cloudroom/server-contract";
 import type { TimelineTitleLink } from "@cloudroom/thread-view";

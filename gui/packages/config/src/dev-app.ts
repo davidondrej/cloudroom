@@ -5,9 +5,9 @@ import {
   type EnvLoaderArgs,
 } from "./env.js";
 import {
-  BB_DEV_APP_HOST_ENV,
-  BB_DEV_APP_PORT_ENV,
-  DEFAULT_BB_DEV_APP_HOST,
+  ROOM_DEV_APP_HOST_ENV,
+  ROOM_DEV_APP_PORT_ENV,
+  DEFAULT_ROOM_DEV_APP_HOST,
 } from "./env-vars.js";
 import { assignIfDefined } from "./objects.js";
 
@@ -25,14 +25,14 @@ export function loadDevAppConfig(
   const config: DevAppConfig = {
     BB_DEV_APP_HOST: readEnvVarWithDefault({
       context: loader.context,
-      defaultValue: DEFAULT_BB_DEV_APP_HOST,
-      definition: BB_DEV_APP_HOST_ENV,
+      defaultValue: DEFAULT_ROOM_DEV_APP_HOST,
+      definition: ROOM_DEV_APP_HOST_ENV,
       env: loader.env,
     }),
   };
   const appPort = readOptionalEnvVar({
     context: loader.context,
-    definition: BB_DEV_APP_PORT_ENV,
+    definition: ROOM_DEV_APP_PORT_ENV,
     env: loader.env,
   });
 

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   getCompactPanelPresentation,
   resolveConversationCollapseControl,
-} from "./panelToggleControlState";
+} from "@/components/right-panel/shell/panel-tokens";
 
 describe("resolveConversationCollapseControl", () => {
   it("collapses the conversation when it is shown", () => {

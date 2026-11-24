@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Provider, createStore } from "jotai";
 import { collapsedThreadIdsAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SystemEnvironmentProvider } from "@cloudroom/server-contract";
 import { systemEnvironmentProvidersQueryKey } from "@/hooks/queries/environment-provider-queries";

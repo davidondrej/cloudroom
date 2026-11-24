@@ -14,6 +14,7 @@ import {
 } from "./interactive-request-registry.js";
 import { startEventLoopStallMonitor } from "./event-loop-stall-monitor.js";
 import { startHostDaemonHealthMonitor } from "./host-daemon-health-monitor.js";
+import { startMemoryGuard } from "./memory-guard.js";
 import { startLocalApiServer, type LocalApiServer } from "./local-api.js";
 import type { HostDaemonLocalApiConfig } from "./local-api-config.js";
 import type { HostDaemonLogger } from "./logger.js";
@@ -43,7 +44,12 @@ import {
   type CreateReconnectingWebSocket,
 } from "./server-connection.js";
 import { runtimeErrorLogFields, summarizeError } from "./error-utils.js";
+import { saveChatImages } from "./chat-images.js";
 import { ensureThreadStorageRoot } from "./thread-storage-root.js";
+import {
+  CHAT_FILE_COPIES_DIR_NAME,
+  ensureDataPrivateDir,
+} from "@cloudroom/process-utils";
 import type { AgentRuntime, AgentRuntimeOptions } from "@cloudroom/agent-runtime";
 import { createProtocolSelfUpdater } from "./protocol-self-update.js";
 import {
@@ -216,6 +222,16 @@ export async function createHostDaemonApp(
     options.runtimeShellEnv ?? {},
   );
   const threadStorageRootPath = await ensureThreadStorageRoot(options.dataDir);
+  // Before any sandbox starts: on Linux, Claude's sandbox hides only the private paths that exist when it starts.
+  // Copies go only in a folder made here, so without it none are kept until the daemon restarts.
+  try {
+    ensureDataPrivateDir(options.dataDir, CHAT_FILE_COPIES_DIR_NAME);
+  } catch (error) {
+    options.logger.warn(
+      runtimeErrorLogFields(error),
+      "Chat file copies folder could not be made, so chat images get no copies",
+    );
+  }
   const dataDirSkillsRootPath = await ensureUserSkillsRootPath(homedir());
   await cleanupInjectedSkillStagingDirs({
     dataDir: options.dataDir,
@@ -510,6 +526,22 @@ export async function createHostDaemonApp(
     applyMachineEnvironment: (shell) =>
       machineEnvironment.shellEnvironment(shell),
     onEvent: ({ environmentId, event }) => {
+      if (
+        event.type === "item/completed" &&
+        event.item.type === "agentMessage"
+      ) {
+        void saveChatImages({
+          dataDir: options.dataDir,
+          text: event.item.text,
+          threadId: event.threadId,
+          threadStorageRootPath,
+        }).catch((error: unknown) => {
+          options.logger.warn(
+            { threadId: event.threadId, ...runtimeErrorLogFields(error) },
+            "Chat images could not be saved",
+          );
+        });
+      }
       try {
         eventSink.emit({
           threadId: event.threadId,
@@ -613,16 +645,23 @@ export async function createHostDaemonApp(
     },
     onProcessExit: (info) => {
       const threadIds = info.threads.map((thread) => thread.threadId);
-      if (!info.expected && info.stderr) {
+      if (!info.expected) {
         options.logger.warn(
           {
             providerId: info.providerId,
+            bridgePid: info.pid,
             threadIds,
+            activeThreadIds: info.threads
+              .filter(
+                (thread) =>
+                  thread.activeTurnId !== null || thread.pendingTurnStart,
+              )
+              .map((thread) => thread.threadId),
             code: info.code,
             signal: info.signal,
             stderr: info.stderr,
           },
-          "Unexpected provider process exited with stderr",
+          "Provider process exited unexpectedly",
         );
       }
       if (threadIds.length === 0) {
@@ -714,6 +753,7 @@ export async function createHostDaemonApp(
   });
   const terminalManager = new TerminalManager({
     logger: options.logger,
+    refreshShellEnv: refreshRuntimeShellEnv,
     runtimeManager,
     sendMessage: (message) => sendServerMessage(message),
   });
@@ -901,6 +941,11 @@ export async function createHostDaemonApp(
   const eventLoopStallMonitor = startEventLoopStallMonitor({
     logger: options.logger,
   });
+  const memoryGuard = startMemoryGuard({
+    logger: options.logger,
+    serverUrl: () => runtimeManager.getShellEnv().ROOM_SERVER_URL,
+    reportThread: (args) => serverClient.reportThreadMemoryLimit(args),
+  });
   const hostDaemonHealthMonitor = startHostDaemonHealthMonitor({
     logger: options.logger,
     getWatchCounts: () => ({
@@ -926,6 +971,7 @@ export async function createHostDaemonApp(
       idleProviderSessionReaper.stop();
       eventLoopStallMonitor.stop();
       hostDaemonHealthMonitor.stop();
+      memoryGuard.stop();
       await pluginHostManager.shutdown();
       await options.closeMachineAuthProxy?.();
       await localApi?.close();

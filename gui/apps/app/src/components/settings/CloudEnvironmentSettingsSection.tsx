@@ -1,3 +1,4 @@
+import { useGitlabConnection } from "@/hooks/useGitlabConnection";
 import { COMPUTER, COMPUTER_TITLE } from "@cloudroom/domain";
 import { useEffect, useRef, useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -16,6 +17,9 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { MAC_MCP_KEY, useMcpSignIn } from "@/components/CloudMcpSignIn";
 import { useThisComputer } from "@/hooks/useHostDaemon";
+import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
+import { getPluginConfigurationRoutePath, getPluginDetailRoutePath } from "@/lib/route-paths";
+import { Link } from "react-router";
 
 const ENVIRONMENT_KEY = ["cloudroom-environment"];
 const SKILLS_KEY = ["cloudroom-cloud-skills"];
@@ -63,7 +67,8 @@ export function CloudEnvironmentSettingsSection() {
       ) : (
         <>
           <CopyLoginsCard />
-          <GithubCard />
+          <GithubCard synced={data.repoSync.filter((row) => row.on).length} />
+          <GitlabCard />
           <SkillsCard />
           <McpCard inCloud={data.mcp} onSaved={saved} />
           <VariablesCard environment={data} busy={update.isPending} onChange={(change) => update.mutateAsync(change)} onImported={saved} />
@@ -80,13 +85,68 @@ export function CloudEnvironmentSettingsSection() {
   );
 }
 
-export function Card({ icon, title, description, action, children }: { icon: string; title: string; description?: string; action?: ReactNode; children?: ReactNode }) {
+function GitlabCard() {
+  const { state, change, busy, error, open } = useGitlabConnection();
+  if (!state?.available && !state?.login) return null;
+  return (
+    <Card
+      icon={<img src="/gitlab.svg" className="size-4" alt="" />}
+      title="GitLab"
+      description="Cloud threads use this account for GitLab.com. Local threads use your computer’s Git credentials."
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-3 text-xs">
+        <span>
+          {state.waiting
+            ? "Finish connecting on GitLab.com."
+            : state.login
+              ? "@" +
+                state.login +
+                (state.expired ? " · Connection expired" : " · Connected")
+              : "Not connected"}
+        </span>
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant={state.login || state.waiting ? "outline" : "default"}
+            disabled={busy}
+            onClick={() => (state.waiting ? open() : change("start"))}
+          >
+            {state.waiting
+              ? "Open GitLab"
+              : state.expired
+                ? "Reconnect GitLab"
+                : state.login
+                  ? "Switch account"
+                  : "Connect GitLab"}
+          </Button>
+          {(state.login || state.waiting) && (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => change(state.waiting ? "cancel" : "disconnect")}
+            >
+              {state.waiting ? "Cancel" : "Disconnect"}
+            </Button>
+          )}
+        </div>
+        {error && (
+          <p role="alert" className="w-full text-destructive-text">
+            {error}
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+export function Card({ icon, title, description, action, children }: { icon: ReactNode; title: string; description?: string; action?: ReactNode; children?: ReactNode }) {
   return (
     <section className="overflow-hidden rounded-lg bg-surface-recessed">
       <div className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
           <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border bg-surface-recessed text-subtle-foreground">
-            <Icon name={icon} className="size-4" />
+            {typeof icon === "string" ? <Icon name={icon} className="size-4" /> : icon}
           </span>
           <div className="min-w-0">
             <h3 className="text-sm font-medium text-foreground">{title}</h3>
@@ -116,8 +176,9 @@ function CopyLoginsCard() {
   );
 }
 
-/** The GitHub account cloud agents clone and push as. Separate from how the user signs in to Cloudroom. */
-function GithubCard() {
+/** The GitHub account cloud agents clone and push as. Separate from how the user signs in to Cloudroom. `synced` counts
+ *  RepoSync's repos that are on: they keep syncing with the plugin off, so this card always says so. */
+function GithubCard({ synced }: { synced: number }) {
   const queryClient = useQueryClient();
   const requestId = useRef<string | null>(null);
   const status = useQuery({
@@ -129,13 +190,18 @@ function GithubCard() {
   const state = status.data?.state;
   const connected = state === "connected";
   const account = useQuery({ queryKey: ["cloudroom-github-account"], queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal), enabled: connected, retry: false });
-  // A switch or reconnect may land on another account.
-  useEffect(() => { if (connected) void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-account"] }); }, [connected, queryClient]);
+  // A switch or reconnect may land on another account, or on other repos.
+  useEffect(() => {
+    if (!connected) return;
+    void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-account"] });
+    void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-repos"] });
+  }, [connected, queryClient]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
+  // With `repos`, cloud agents get only the repos the user then picks on GitHub (#2084).
   const connect = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (repos: boolean) => {
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current);
+      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
       if (result.state === "waiting" && result.verification_url && new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
     },
     onSettled: refresh,
@@ -144,13 +210,23 @@ function GithubCard() {
   const disconnect = useMutation({ mutationFn: () => sdk.cloudroom.disconnectGithub(), onSettled: refresh });
   const code = state === "waiting" ? status.data?.user_code : null;
   const url = state === "waiting" ? status.data?.verification_url : null;
+  const openGithub = (page: string | null | undefined) => { if (page && new URL(page).origin === "https://github.com") openUrlInExternalBrowser(page); };
+  // After the code is approved, GitHub's page for picking repos opens by itself, once: GitHub's own page only says "all set".
+  const hadCode = useRef(false);
+  useEffect(() => {
+    if (code) hadCode.current = true;
+    else if (url && hadCode.current) { hadCode.current = false; if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); }
+  }, [code, url]);
+  // The account says which kind of login is connected. Until it loads, a switch could start the wrong kind.
+  const loading = connected && account.isLoading;
   const copyAndOpen = async (value: string) => {
     await copyToClipboardWithToast(value, { successMessage: "Code copied. Paste it on github.com." });
-    if (url && new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url);
+    openGithub(url);
   };
   const busy = connect.isPending || disconnect.isPending;
   const user = account.data;
-  const problem = errorText(status.error ?? connect.error ?? disconnect.error) ?? (state === "error" || state === "expired" ? status.data?.message : null);
+  // A failed switch leaves the older login connected, and still says what failed.
+  const problem = errorText(status.error ?? connect.error ?? disconnect.error) ?? (state === "error" || state === "expired" || connected ? status.data?.message : null);
 
   return (
     <Card icon="Github" title="GitHub" description="Every cloud thread clones, pushes, and opens PRs as this account.">
@@ -162,6 +238,12 @@ function GithubCard() {
             <Button size="sm" variant="outline" onClick={() => void copyAndOpen(code)}><Icon name="Copy" className="size-3.5" />Copy & open GitHub</Button>
             <Button size="sm" variant="ghost" className="text-subtle-foreground" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel</Button>
           </div>
+        ) : url ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="min-w-0 flex-1 text-xs text-subtle-foreground">GitHub is connected. Now pick the repos cloud agents may use. This card updates by itself.</p>
+            <Button size="sm" variant="outline" onClick={() => openGithub(url)}><Icon name="Github" className="size-3.5" />Pick repos on GitHub</Button>
+            <Button size="sm" variant="ghost" className="text-subtle-foreground" disabled={cancel.isPending} onClick={() => cancel.mutate()}>Cancel</Button>
+          </div>
         ) : (
           <div className="flex items-center justify-between gap-3">
             {connected ? (
@@ -171,7 +253,7 @@ function GithubCard() {
                   <p className="truncate text-sm text-foreground">
                     {user ? <>@{user.login}{user.name && <span className="ml-1.5 text-xs text-subtle-foreground">{user.name}</span>}</> : "GitHub"}
                   </p>
-                  <p className="text-xs text-subtle-foreground">Connected</p>
+                  <p className="text-xs text-subtle-foreground">{!user ? "Connected" : user.reposUrl ? "Connected · only the repos you chose on GitHub" : "Connected · every repo this account can reach"}</p>
                 </div>
               </div>
             ) : (
@@ -179,7 +261,10 @@ function GithubCard() {
             )}
             {!status.isPending && !status.isError && (
               <div className="flex shrink-0 gap-2">
-                <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy} onClick={() => connect.mutate()}>
+                {connected && user?.reposUrl
+                  ? <Button size="sm" variant="outline" onClick={() => openGithub(user.reposUrl)}>Change repos</Button>
+                  : <Button size="sm" variant={connected ? "outline" : "ghost"} className={connected ? undefined : "text-subtle-foreground"} disabled={busy || loading} onClick={() => connect.mutate(true)}>{connected ? "Limit to specific repos" : "Only specific repos"}</Button>}
+                <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy || loading} onClick={() => connect.mutate(Boolean(user?.reposUrl))}>
                   {connected ? "Switch account" : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
                 </Button>
                 {connected && <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy} onClick={() => disconnect.mutate()}>Disconnect</Button>}
@@ -189,7 +274,22 @@ function GithubCard() {
         )}
         {problem && <p role="alert" className="text-xs text-destructive-text">{problem}</p>}
       </div>
+      <RepoSyncLine synced={synced} />
     </Card>
+  );
+}
+
+/** Where RepoSync is found: its tab when the plugin is on, else its plugin page to turn it on (docs/scopes/repo-sync.md). */
+function RepoSyncLine({ synced }: { synced: number }) {
+  const plugins = usePluginList({ enabled: true });
+  const on = plugins.data?.plugins.some((plugin) => plugin.id === "repo-sync" && plugin.enabled) ?? false;
+  return (
+    <div className="flex items-center justify-between gap-3 border-t border-border bg-surface-recessed/40 px-4 py-2 text-xs text-subtle-foreground">
+      <span>{synced ? <><span className="text-foreground">RepoSync</span> pushes {synced} {synced === 1 ? "repo" : "repos"} to GitHub automatically</> : "Push cloud work to GitHub automatically with RepoSync"}</span>
+      <Link to={on ? getPluginConfigurationRoutePath({ pluginId: "repo-sync" }) : getPluginDetailRoutePath({ pluginId: "repo-sync" })} className="shrink-0 text-foreground underline-offset-2 hover:underline">
+        {on ? "Open RepoSync" : "Turn on"}
+      </Link>
+    </div>
   );
 }
 
@@ -235,12 +335,17 @@ function VariablesCard({
     setValue(line.slice(at + 1).trim().replace(/^(["'])(.*)\1$/, "$2"));
   };
   return (
-    <Card icon="Lock" title="API keys" description="Agents get these as environment variables. Values are hidden after saving.">
+    <Card icon="Lock" title="API keys" description="Cloud threads get all of these as environment variables. Each Cloud loop gets only the ones picked for it. Values are hidden after saving.">
       {environment.variables.length > 0 && (
         <ul className="divide-y divide-border border-t border-border">
           {environment.variables.map((variable) => (
             <li key={variable.name} className="group flex items-center gap-3 px-4 py-2">
               <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">{variable.name}</code>
+              {environment.loops?.[variable.name] ? (
+                <span title="Cloud loops that picked this key" className="rounded-full border border-border px-1.5 text-2xs text-subtle-foreground">
+                  {environment.loops[variable.name]} {environment.loops[variable.name] === 1 ? "loop" : "loops"}
+                </span>
+              ) : null}
               <span className="rounded-full border border-primary/30 px-1.5 text-2xs text-primary-text">in cloud</span>
               <span className="font-mono text-xs tracking-wider text-subtle-foreground" aria-label="Hidden value">
                 ••••••••{variable.hint}
@@ -439,9 +544,9 @@ function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: Clou
   const signIn = useMcpSignIn();
   const change = useMutation({ mutationFn: (change: { names: string[]; cloud: boolean }) => sdk.cloudroom.setCloudMcp(change), onSuccess: onSaved });
   const found = mac.data?.servers ?? [];
-  // A server removed from this Mac stays listed while it is in the cloud, so it can be removed there too.
+  // A server removed from this Mac, or now Mac only, stays a button while it is in the cloud, so it can be removed there too.
   const servers = [...found, ...inCloud.filter((name) => !found.some((server) => server.name === name)).map((name) => ({ name, macOnly: false }))]
-    .map((server) => ({ ...server, cloud: inCloud.includes(server.name) }))
+    .map((server) => ({ ...server, cloud: inCloud.includes(server.name), macOnly: server.macOnly && !inCloud.includes(server.name) }))
     .sort((a, b) => Number(a.macOnly) - Number(b.macOnly) || a.name.localeCompare(b.name));
   const usable = servers.filter((server) => !server.macOnly);
   const needSignIn = servers.filter((server) => server.cloud && "signIn" in server && server.signIn === "needed");

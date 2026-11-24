@@ -607,6 +607,70 @@ describe("Codex ChatGPT client", () => {
     });
   });
 
+  const unsupportedValueBody = (param: string) =>
+    JSON.stringify({
+      error: {
+        message: "Unsupported value: 'none' is not supported.",
+        type: "invalid_request_error",
+        param,
+        code: "unsupported_value",
+      },
+    });
+
+  it.each([
+    {
+      name: "model rejects none",
+      body: unsupportedValueBody("reasoning.effort"),
+      timeoutMs: 10000,
+      requestedEfforts: ["none", "low"],
+    },
+    {
+      name: "other unsupported param",
+      body: unsupportedValueBody("text.format"),
+      timeoutMs: 10000,
+      requestedEfforts: ["none"],
+    },
+    {
+      name: "oversized error body",
+      body: "x".repeat(10 * 1024),
+      timeoutMs: 30,
+      requestedEfforts: ["none"],
+    },
+  ])(
+    "retries at low effort only when the model rejects none ($name)",
+    async ({ body, timeoutMs, requestedEfforts }) => {
+      const homeDir = await makeTempHome();
+      await writeCodexApiKeyAuth({ homeDir, apiKey: "sk-codex-api-key" });
+      const fetchMock = setupFetchMock();
+      fetchMock
+        .mockResolvedValueOnce(new Response(body, { status: 400 }))
+        .mockResolvedValueOnce(
+          sseResponse([
+            { type: "response.output_text.delta", delta: '{"title":"T"}' },
+          ]),
+        );
+
+      const result = completeCodexInference({
+        serviceId: "codex",
+        model: "gpt-6.1-sol",
+        reasoningEffort: "none",
+        prompt: "Return a title",
+        outputSchema: { type: "object" },
+        timeoutMs,
+      });
+
+      await (requestedEfforts.length === 2
+        ? expect(result).resolves.toMatchObject({ value: { title: "T" } })
+        : expect(result).rejects.toThrow("HTTP 400"));
+      expect(
+        fetchMock.mock.calls.map(
+          ([, init]) => JSON.parse(textBodyFromInit(init)).reasoning.effort,
+        ),
+      ).toEqual(requestedEfforts);
+    },
+    1000,
+  );
+
   it("caps oversized Codex error response bodies", async () => {
     const homeDir = await makeTempHome();
     await writeCodexApiKeyAuth({
@@ -690,6 +754,57 @@ describe("Codex ChatGPT client", () => {
     const retryHeaders = headersFromInit(retryInit);
     expect(retryHeaders.get("cookie")).toBe("__cf_bm=cloudflare-cookie");
     expect(retryHeaders.get("authorization")).toBe(`Bearer ${accessToken}`);
+  });
+
+  it("pulls audio bytes from audioUrl resolved against ROOM_SERVER_URL", async () => {
+    const homeDir = await makeTempHome();
+    vi.stubEnv("ROOM_SERVER_URL", "http://127.0.0.1:4321");
+    const accessToken = createAccessToken({
+      accountId: "account-123",
+      expSeconds: Math.floor(Date.now() / 1000) + 3600,
+    });
+    await writeCodexAuth({
+      homeDir,
+      accessToken,
+      refreshToken: "refresh-token",
+    });
+    const fetchMock = setupFetchMock();
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(Buffer.from("pulled-audio-bytes"), {
+          status: 200,
+          headers: { "content-type": "audio/webm" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ text: "from pull url" }), {
+          status: 200,
+        }),
+      );
+
+    const result = await transcribeCodexVoice({
+      serviceId: "codex",
+      model: "gpt-4o-mini-transcribe",
+      audioUrl: "/internal/voice-audio/abc",
+      mimeType: "audio/webm",
+      filename: "long.webm",
+      prompt: null,
+      timeoutMs: 30000,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      model: "gpt-4o-mini-transcribe",
+      text: "from pull url",
+    });
+    const [pullUrl] = requiredFetchCall(fetchMock, 0);
+    expect(String(pullUrl)).toBe(
+      "http://127.0.0.1:4321/internal/voice-audio/abc",
+    );
+    const [, transcribeInit] = requiredFetchCall(fetchMock, 1);
+    const body = transcribeInit?.body as FormData;
+    const uploaded = body.get("file") as File;
+    expect(await uploaded.text()).toBe("pulled-audio-bytes");
   });
 
   it("classifies a persistent Cloudflare challenge as transient without leaking the challenge page", async () => {

@@ -15,7 +15,7 @@ export class PhoneRelay {
   private checking: Promise<void> | null = null;
 
   constructor(
-    private readonly bb: Pick<BbPluginApi, "sdk" | "storage" | "log">,
+    private readonly room: Pick<BbPluginApi, "sdk" | "storage" | "log">,
     private readonly tunnel: ConnectTunnel,
     private readonly onChange: () => void,
   ) {}
@@ -39,7 +39,7 @@ export class PhoneRelay {
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        if (message !== this.error) this.bb.log.warn(`Cloudroom Connect registration failed: ${message}`);
+        if (message !== this.error) this.room.log.warn(`Cloudroom Connect registration failed: ${message}`);
         this.error = message;
       })
       .finally(() => {
@@ -55,7 +55,7 @@ export class PhoneRelay {
 
   private async reconcile(force: boolean): Promise<void> {
     await this.retirePending();
-    const { accountId, blocked } = await this.bb.sdk.cloudroom.connectAccount();
+    const { accountId, blocked } = await this.room.sdk.cloudroom.connectAccount();
     this.signedIn = accountId !== null;
     if (accountId === null) {
       const signedOut = this.tunnel.getCredential();
@@ -63,15 +63,15 @@ export class PhoneRelay {
       if (blocked) throw new Error(blocked);
       return;
     }
-    const registeredFor = await this.bb.storage.kv.get<string>(ACCOUNT_KV_KEY);
+    const registeredFor = await this.room.storage.kv.get<string>(ACCOUNT_KV_KEY);
     if (!force && registeredFor === accountId && this.tunnel.getCredential() !== null) {
       return;
     }
     // Another account's key goes first, so that account's phones lose this Mac even if registering fails.
     const previous = registeredFor !== accountId ? this.tunnel.getCredential() : null;
     if (previous !== null) await this.retire(previous);
-    const registration = await this.bb.sdk.cloudroom.connectRegister();
-    await this.bb.storage.kv.set(ACCOUNT_KV_KEY, registration.accountId);
+    const registration = await this.room.sdk.cloudroom.connectRegister();
+    await this.room.storage.kv.set(ACCOUNT_KV_KEY, registration.accountId);
     await this.tunnel.useCredential({
       serverUrl: registration.serverUrl,
       handle: registration.handle,
@@ -81,21 +81,21 @@ export class PhoneRelay {
 
   /** Retires the key on the relay too, so no saved copy can still reach the account's other Macs. */
   private async retire(credential: NonNullable<ReturnType<ConnectTunnel["getCredential"]>>): Promise<void> {
-    await this.bb.storage.kv.set(RETIRE_KV_KEY, credential);
+    await this.room.storage.kv.set(RETIRE_KV_KEY, credential);
     await this.tunnel.forget();
     await this.retirePending();
   }
 
   /** Offline, the key stays saved and the next check retries; only network errors and relay outages keep it. */
   private async retirePending(): Promise<void> {
-    const saved = connectCredentialSchema.safeParse(await this.bb.storage.kv.get<unknown>(RETIRE_KV_KEY));
+    const saved = connectCredentialSchema.safeParse(await this.room.storage.kv.get<unknown>(RETIRE_KV_KEY));
     if (!saved.success) return;
     const response = await fetch(new URL("/api/unregister", deriveConnectBaseUrl(saved.data.serverUrl)), {
       method: "POST",
       headers: { authorization: `Bearer ${saved.data.credential}` },
       signal: AbortSignal.timeout(10_000),
     }).catch(() => null);
-    if (response !== null && response.status < 500) await this.bb.storage.kv.delete(RETIRE_KV_KEY);
+    if (response !== null && response.status < 500) await this.room.storage.kv.delete(RETIRE_KV_KEY);
   }
 
   async call(path: string, body?: unknown): Promise<unknown> {

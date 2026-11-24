@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { omitNpmScriptPolicyEnv } from "@cloudroom/process-utils";
+import toolchainLock from "../toolchain/package-lock.json" with { type: "json" };
+import toolchainPackage from "../toolchain/package.json" with { type: "json" };
 import { resolvePluginNpmCli } from "./npm-cli.js";
 
 const run = promisify(execFile);
@@ -20,12 +22,16 @@ export const NODE_ESM_REQUIRE_BANNER = [
   "var __dirname = __pathDirname(__filename);",
 ].join("\n");
 
-export const PLUGIN_TOOLCHAIN_PINS = {
-  esbuild: "0.28.1",
-  "@tailwindcss/node": "4.3.0",
-  "@tailwindcss/oxide": "4.3.0",
-  tailwindcss: "4.3.0",
-} as const;
+// Fetched toolchains install exactly what toolchain/package-lock.json locks (#2158), so every transitive version
+// passes the 48-hour rule and CVE watch sees it. The lock has integrity hashes but no `resolved` URLs, so npm
+// fetches from the user's registry and scoped registries. Bump: edit toolchain/package.json, then in toolchain/ run
+// `node ../node_modules/npm/bin/npm-cli.js install --package-lock-only --ignore-scripts --min-release-age=2 --omit-lockfile-registry-resolved`
+// (the repo-pinned npm 11; npm 10 silently ignores --min-release-age).
+export const PLUGIN_TOOLCHAIN_PINS = toolchainPackage.dependencies;
+const LOCK_HASH = createHash("sha256")
+  .update(JSON.stringify(toolchainLock))
+  .digest("hex")
+  .slice(0, 12);
 
 export interface PluginBuildToolchain {
   esbuild: string;
@@ -43,7 +49,7 @@ function pinKey(): string {
 
 export function toolchainCacheDir(baseDir: string): string {
   const key = Object.values(PLUGIN_TOOLCHAIN_PINS).join("-");
-  return join(baseDir, `toolchain-${key}`);
+  return join(baseDir, `toolchain-${key}-${LOCK_HASH}`);
 }
 
 function packageDir(require: NodeRequire, name: string): string | null {
@@ -158,22 +164,22 @@ export async function resolvePluginBuildToolchain(
     await mkdir(staging, { recursive: true });
     await writeFile(
       join(staging, "package.json"),
-      `${JSON.stringify({ name: "bb-plugin-toolchain", private: true, version: "0.0.0" }, null, 2)}\n`,
+      `${JSON.stringify(toolchainPackage, null, 2)}\n`,
+    );
+    await writeFile(
+      join(staging, "package-lock.json"),
+      `${JSON.stringify(toolchainLock, null, 2)}\n`,
     );
     await run(
       process.execPath,
       [
         resolvePluginNpmCli(),
-        "install",
+        "ci",
         "--prefix",
         staging,
         "--ignore-scripts",
         "--no-audit",
         "--no-fund",
-        "--no-package-lock",
-        ...Object.entries(PLUGIN_TOOLCHAIN_PINS).map(
-          ([name, version]) => `${name}@${version}`,
-        ),
       ],
       {
         maxBuffer: 1024 * 1024 * 16,

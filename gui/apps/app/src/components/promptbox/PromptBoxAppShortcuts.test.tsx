@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act, cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultAppSettings, type AppShortcut } from "@cloudroom/domain";
 import { EMPTY_ORDERED_MENTION_SUGGESTIONS } from "@cloudroom/client-core";
@@ -85,8 +85,8 @@ vi.mock("@/hooks/queries/system-queries", () => ({
   }),
 }));
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => null,
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => null,
 }));
 
 vi.mock("@/lib/plugin-sdk-hooks", async (importOriginal) => ({

@@ -183,8 +183,8 @@ vi.mock("@cloudroom/shared-ui/button", async (importOriginal) => {
   };
 });
 
-vi.mock("@/lib/bb-desktop", () => ({
-  getBbDesktopInfo: () => (testState.isDesktop ? {} : null),
+vi.mock("@/lib/room-desktop", () => ({
+  getRoomDesktopInfo: () => (testState.isDesktop ? {} : null),
 }));
 
 afterEach(() => {

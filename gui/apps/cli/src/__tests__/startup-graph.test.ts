@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { CORE_COMMAND_GROUPS } from "../command-groups.js";
-import { expectedCliVersion } from "./bb-app-version.js";
+import { expectedCliVersion } from "./app-version.js";
 
 const execFileAsync = promisify(execFile);
 const cliRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");

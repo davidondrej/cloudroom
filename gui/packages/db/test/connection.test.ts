@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -162,4 +162,25 @@ describe("createConnection", () => {
       rmSync(directory, { force: true, recursive: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the database and its WAL files owner-only (#2537)",
+    () => {
+      const directory = mkdtempSync(join(tmpdir(), "bb-db-mode-"));
+      const path = join(directory, "bb.db");
+      const files = [path, `${path}-wal`, `${path}-shm`];
+      const modes = () => files.map((file) => statSync(file).mode & 0o777);
+      try {
+        const db = createConnection(path);
+        db.$client.exec("CREATE TABLE t (v TEXT)");
+        expect(modes()).toEqual([0o600, 0o600, 0o600]);
+        for (const file of files) chmodSync(file, 0o644);
+        createConnection(path).$client.close();
+        expect(modes()).toEqual([0o600, 0o600, 0o600]);
+        db.$client.close();
+      } finally {
+        rmSync(directory, { force: true, recursive: true });
+      }
+    },
+  );
 });

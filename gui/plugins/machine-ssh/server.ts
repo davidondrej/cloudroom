@@ -22,8 +22,8 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export default async function machineSshPlugin(bb: BbPluginApi): Promise<void> {
-  bb.experimental_machines.register({
+export default async function machineSshPlugin(room: BbPluginApi): Promise<void> {
+  room.experimental_machines.register({
     id: "ssh",
     displayName: "SSH",
     description:
@@ -57,7 +57,7 @@ export default async function machineSshPlugin(bb: BbPluginApi): Promise<void> {
         }
         const resource = { target };
         await context.checkpoint(resource);
-        await bb.experimental_machines.bootstrap({
+        await room.experimental_machines.bootstrap({
           key: context.key,
           executor,
           report: context.report,

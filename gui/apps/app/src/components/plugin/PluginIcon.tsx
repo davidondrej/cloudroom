@@ -7,6 +7,26 @@ export function pluginIconName(icon: string | null): IconName {
   return icon ?? "Zap";
 }
 
+export function PluginActionIcon({
+  pluginId,
+  icon,
+  className,
+}: {
+  pluginId: string | null;
+  icon: string | null;
+  className?: string;
+}) {
+  return pluginId === null ? (
+    <Icon
+      name={pluginIconName(icon)}
+      className={cn("size-4 shrink-0", className)}
+      aria-hidden="true"
+    />
+  ) : (
+    <PluginIcon pluginId={pluginId} icon={icon} className={className} />
+  );
+}
+
 export function PluginCompactIconMask({
   url,
   className,

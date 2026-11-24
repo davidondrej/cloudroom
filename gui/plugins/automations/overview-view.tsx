@@ -43,6 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@cloudroom/shared-ui/dropdown-menu";
 import {
+  formatModelName,
   formatAutomationTrigger,
   isCloudWebhook,
   formatOverviewScheduleMetadata,
@@ -55,6 +56,9 @@ import {
   PERSONAL_PROJECT_ID,
 } from "./lib/format-schedule.js";
 import { AutomationMetadataItem } from "./metadata.js";
+import { failurePause, type FailurePause } from "./lib/paused.js";
+import { cloudLoginTitle } from "@cloudroom/domain/cloud-login";
+import { loginOf, reconnect, useReconnectState } from "./paused-notice.js";
 import {
   LoopTemplatesView,
   type LoopTemplatesState,
@@ -75,6 +79,7 @@ import {
   type LoopDialogContext,
   type RunTick,
 } from "./loop-dialog.js";
+import { JEV_PROVIDER_ID, JevLabel } from "./jev-loop.js";
 import {
   LoopReviewView,
   OFFSCREEN_ROW_CLASSES,
@@ -225,26 +230,18 @@ function LoopPriorityMenu({
   );
 }
 
-function formatModelName(model: string): string {
-  const [, base = model, context] = /^(.+?)(?:\[(\w+)\])?$/u.exec(model) ?? [];
-  const name = (base.split("/").at(-1) ?? base)
-    .replace(/^claude-/u, "")
-    .split("-")
-    .map((part) =>
-      part === "gpt" ? "GPT" : part.charAt(0).toUpperCase() + part.slice(1),
-    )
-    .join(" ")
-    .replace(/(\d) (?=\d)/gu, "$1.")
-    .replace(/^GPT /u, "GPT-");
-  return context === undefined ? name : `${name} (${context.toUpperCase()})`;
-}
-
 function automationAgents(
   automation: AutomationResponse,
   scriptAgents: readonly AutomationAgentSummary[] | undefined,
 ): readonly AutomationAgentSummary[] {
   const { execution } = automation;
   if (execution.mode === "script") return scriptAgents ?? [];
+  if (execution.agents)
+    return execution.agents.map((agent) => ({
+      providerId: agent.providerId,
+      model: agent.model,
+      reasoningLevel: agent.reasoningLevel ?? null,
+    }));
   return [
     {
       providerId: execution.providerId,
@@ -266,6 +263,7 @@ function AutomationAgentLine({
   compact?: boolean;
   quiet?: boolean;
 }) {
+  if (agents[0]?.providerId === JEV_PROVIDER_ID) return <JevLabel />;
   if (agents.length === 0) {
     return (
       <span className="flex min-w-0 items-center gap-1.5">
@@ -829,6 +827,7 @@ function LoopCard({
   actions,
   toggle,
   onOpen,
+  paused,
 }: {
   name: string;
   cloud: boolean;
@@ -844,7 +843,20 @@ function LoopCard({
   actions?: ReactNode;
   toggle: ReactNode;
   onOpen: () => void;
+  /** Its own failures paused it: the card shows only its name, why, and the one button that fixes it. */
+  paused?: FailurePause & { onResume: () => void };
 }) {
+  if (paused) {
+    return (
+      <PausedLoopCard
+        name={name}
+        cloud={cloud}
+        paused={paused}
+        actions={actions}
+        onOpen={onOpen}
+      />
+    );
+  }
   return (
     <div
       data-loop-card=""
@@ -912,6 +924,75 @@ function LoopCard({
   );
 }
 
+/** A paused loop: name, why it stopped, and one button. A loop Cloud refused for an agent's login gets Reconnect, which
+ *  fixes every loop waiting on it; Resume can't. No agent, schedule, runs, or retry time (David, 2026-11-09). */
+function PausedLoopCard({
+  name,
+  cloud,
+  paused,
+  actions,
+  onOpen,
+}: {
+  name: string;
+  cloud: boolean;
+  paused: FailurePause & { onResume: () => void };
+  actions?: ReactNode;
+  onOpen: () => void;
+}) {
+  const login = loginOf({ kind: cloud ? "cloud" : "local", reason: paused.reason });
+  const { waiting, code, error } = useReconnectState(login);
+  // The line under the name: a device code to enter, why the last Reconnect failed, or why the loop paused.
+  const line = waiting && code ? `Enter code ${code} on OpenAI's page` : error ?? (login ? cloudLoginTitle(login) : paused.reason);
+  const button =
+    "relative flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15 disabled:opacity-60";
+  return (
+    <div
+      data-loop-card=""
+      className="group/card relative flex min-w-0 flex-col rounded-xl border border-destructive/35 bg-surface-raised px-3.5 pt-3 pb-3 transition-colors hover:border-destructive/55"
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={onOpen}
+          className="min-w-0 flex-1 cursor-pointer text-left text-[14px] font-semibold leading-[1.35] tracking-[-0.005em] text-foreground after:absolute after:inset-0 after:rounded-xl focus-visible:outline-none focus-visible:after:ring-1 focus-visible:after:ring-ring"
+        >
+          <span className="block truncate">{name}</span>
+        </button>
+        {actions ? (
+          <span className="relative flex shrink-0 items-center opacity-0 transition-opacity group-focus-within/card:opacity-100 group-hover/card:opacity-100">
+            {actions}
+          </span>
+        ) : null}
+      </div>
+      <div className="mt-2.5 flex min-w-0 items-center gap-2.5">
+        <p
+          className={cn("min-w-0 flex-1 truncate text-[12.5px] font-medium", waiting && code ? "text-foreground" : "text-destructive-text")}
+          title={error ?? paused.reason}
+        >
+          {line}
+        </p>
+        {login ? (
+          <button type="button" disabled={waiting} onClick={() => reconnect(login)} className={button}>
+            {waiting ? (
+              <>
+                <Icon name="Spinner" className="size-3 animate-spin" aria-hidden />
+                Waiting for sign-in
+              </>
+            ) : (
+              "Reconnect"
+            )}
+          </button>
+        ) : (
+          <button type="button" onClick={paused.onResume} className={button}>
+            <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
+            Resume
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function OverviewRow({
   automation,
   scriptAgents,
@@ -922,6 +1003,7 @@ export function OverviewRow({
   repo,
   runs = [],
   report = null,
+  paused,
   onNavigate,
   onEnabledChange,
 }: {
@@ -934,6 +1016,7 @@ export function OverviewRow({
   repo?: ReactNode;
   runs?: readonly RunTick[];
   report?: string | null;
+  paused?: FailurePause | null;
   onNavigate: (route: AutomationDetailRoute) => void;
   onEnabledChange: (
     enabled: boolean,
@@ -949,11 +1032,22 @@ export function OverviewRow({
     lastRunStatus: automation.lastRunStatus,
   });
   const lifecycleLocked = !oneShotLifecycleAllowsToggle(oneShotLifecycle);
+  const setEnabled = (enabled: boolean) => {
+    setTogglePending(true);
+    void onEnabledChange(enabled, route).finally(() =>
+      setTogglePending(false),
+    );
+  };
 
   return (
     <LoopCard
       name={automation.name}
       cloud={false}
+      paused={
+        paused
+          ? { ...paused, onResume: () => setEnabled(true) }
+          : undefined
+      }
       agent={
         <AutomationAgentLine
           agents={automationAgents(automation, scriptAgents)}
@@ -990,12 +1084,7 @@ export function OverviewRow({
               : undefined
           }
           label={`${automation.enabled ? "Disable" : "Enable"} ${automation.name}`}
-          onCheckedChange={(enabled) => {
-            setTogglePending(true);
-            void onEnabledChange(enabled, route).finally(() =>
-              setTogglePending(false),
-            );
-          }}
+          onCheckedChange={setEnabled}
         />
       }
     />
@@ -1011,6 +1100,7 @@ export function CloudAutomationRow({
   repo,
   runs = [],
   report = null,
+  paused,
   actions,
 }: {
   automation: CloudAutomation;
@@ -1021,6 +1111,7 @@ export function CloudAutomationRow({
   repo?: ReactNode;
   runs?: readonly RunTick[];
   report?: string | null;
+  paused?: FailurePause | null;
   actions: CloudAutomationActions;
 }) {
   const nextRunAt =
@@ -1029,15 +1120,22 @@ export function CloudAutomationRow({
     <LoopCard
       name={automation.name}
       cloud
+      paused={
+        paused
+          ? { ...paused, onResume: () => actions.onEnabledChange(automation, true) }
+          : undefined
+      }
       agent={
         <AutomationAgentLine
-          agents={[
-            automation.agent ?? {
-              providerId: null,
-              model: null,
-              reasoningLevel: null,
-            },
-          ]}
+          agents={
+            automation.agents ?? [
+              automation.agent ?? {
+                providerId: null,
+                model: null,
+                reasoningLevel: null,
+              },
+            ]
+          }
           providers={providers}
           compact
           quiet
@@ -1070,7 +1168,7 @@ export function CloudAutomationRow({
       }
       nextRun={
         !automation.enabled
-          ? "Paused"
+          ? "Off"
           : nextRunAt === null
             ? isCloudWebhook(automation)
               ? "Waits for a webhook"
@@ -1496,7 +1594,11 @@ export function AutomationOverviewView({
     const project = templates?.projects?.find((item) => item.id === projectId);
     const github = project?.github ?? null;
     return {
-      label: github?.split("/")[1] ?? project?.name ?? fallback ?? "Other",
+      label:
+        github?.split("/")[1] ??
+        project?.name ??
+        fallback ??
+        (projectId === PERSONAL_PROJECT_ID ? "Personal" : "Other"),
       github,
     };
   };
@@ -1535,6 +1637,27 @@ export function AutomationOverviewView({
         }
       : {}),
   });
+  // Loops their own failures paused leave Off for the Paused group above P1, with the same rule as the sidebar label.
+  const localPause = (automation: OverviewEntry["automation"]) =>
+    "problem" in automation
+      ? null
+      : failurePause(
+          {
+            enabled: automation.enabled,
+            lastError: automation.lastError,
+            at: automation.updatedAt,
+          },
+          now,
+        );
+  const cloudPause = (automation: CloudAutomation) =>
+    failurePause(
+      {
+        enabled: automation.enabled,
+        lastError: automation.last_error,
+        at: Date.parse(automation.last_run_at ?? ""),
+      },
+      now,
+    );
   const repos = new Map<LoopScope, LoopMenuItem<LoopScope>>();
   let offCount = 0;
   const countRepo = (
@@ -1557,11 +1680,13 @@ export function AutomationOverviewView({
     });
   };
   for (const entry of entries ?? []) {
-    if (isActiveEntry(entry)) countRepo(entry.project.id, entry.project.name);
+    if (isActiveEntry(entry) || localPause(entry.automation))
+      countRepo(entry.project.id, entry.project.name);
     else offCount += 1;
   }
   for (const automation of cloudRows) {
-    if (automation.enabled) countRepo(automation.project_id);
+    if (automation.enabled || cloudPause(automation))
+      countRepo(automation.project_id);
     else offCount += 1;
   }
   const repoItems = [...repos.values()].sort(
@@ -1642,6 +1767,7 @@ export function AutomationOverviewView({
           needsYou={needsYou.get(automation.id) ?? 0}
           runs={history.get(automation.id)}
           report={reports.get(automation.id) ?? null}
+          paused={localPause(automation)}
           repo={repoTag(project.id, project.name)}
           leading={
             <LoopPriorityMenu
@@ -1693,6 +1819,7 @@ export function AutomationOverviewView({
           needsYou={needsYou.get(cloudKey(automation)) ?? 0}
           runs={history.get(cloudKey(automation))}
           report={reports.get(cloudKey(automation)) ?? null}
+          paused={cloudPause(automation)}
           repo={repoTag(automation.project_id)}
           leading={
             <LoopPriorityMenu
@@ -1709,7 +1836,7 @@ export function AutomationOverviewView({
       ) : null,
     });
     const grid = (items: readonly ListItem[]) => (
-      <div className="grid grid-cols-1 gap-2.5 @2xl:grid-cols-2">
+      <div className="grid grid-cols-1 gap-2.5 @xl:grid-cols-2">
         {items.map((item) => item.node)}
       </div>
     );
@@ -1717,10 +1844,12 @@ export function AutomationOverviewView({
     if (activeScope === "off") {
       const offRest = [
         ...visibleEntries
-          .filter((entry) => !isActiveEntry(entry))
+          .filter(
+            (entry) => !isActiveEntry(entry) && !localPause(entry.automation),
+          )
           .map(localItem),
         ...visibleCloud
-          .filter((automation) => !automation.enabled)
+          .filter((automation) => !automation.enabled && !cloudPause(automation))
           .map(cloudItem),
       ];
       const offItems =
@@ -1729,8 +1858,8 @@ export function AutomationOverviewView({
         offItems.length === 0 ? (
           <div className="rounded-lg border border-dashed border-border px-4 py-3 text-xs text-muted-foreground">
             {normalizedQuery === ""
-              ? "No paused loops."
-              : `No paused loops match "${query}".`}
+              ? "No loops are off."
+              : `No loops that are off match "${query}".`}
           </div>
         ) : (
           <section aria-label="Off" className="-mt-6">
@@ -1746,6 +1875,20 @@ export function AutomationOverviewView({
       const activeEntries = visibleEntries.filter(
         (entry) => isActiveEntry(entry) && inScope(entry.project.id),
       );
+      const pausedItems = [
+        ...visibleEntries
+          .filter(
+            (entry) =>
+              localPause(entry.automation) !== null && inScope(entry.project.id),
+          )
+          .map(localItem),
+        ...visibleCloud
+          .filter(
+            (automation) =>
+              cloudPause(automation) !== null && inScope(automation.project_id),
+          )
+          .map(cloudItem),
+      ];
       const problems = activeEntries.filter(
         (entry) => "problem" in entry.automation,
       );
@@ -1846,6 +1989,16 @@ export function AutomationOverviewView({
             now={now}
             onReview={review ? () => onModeChange("review") : undefined}
           />
+          {pausedItems.length > 0 ? (
+            <section aria-label="Paused" className="mt-2">
+              <LoopGroupDivider
+                label="Paused"
+                count={pausedItems.length}
+                className="text-destructive-text"
+              />
+              {grid(pausedItems)}
+            </section>
+          ) : null}
           {problems.length > 0 ? (
             <div className="mt-6 divide-y divide-foreground/10">
               {problems.map(renderEntry)}
@@ -2035,6 +2188,7 @@ export function AutomationOverviewView({
       )}
       {openCloud && cloud ? (
         <CloudLoopDialog
+          key={openCloud.id}
           automation={openCloud}
           context={dialogContext(cloudKey(openCloud), openCloud.project_id, () =>
             setOpenCloudId(null),

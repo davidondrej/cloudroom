@@ -18,6 +18,9 @@ if args == ['--version']:
 path = Path(args[args.index('--session') + 1])
 model = args[args.index('--model') + 1]
 provider = args[args.index('--provider') + 1]
+# Like Pi 1.2.0: an unlisted `provider/x` becomes custom model `x` (#952).
+if model.startswith(provider + '/'):
+    model = model[len(provider) + 1:]
 helper = Path(args[args.index('-e') + 1])
 if not path.read_text():
     path.write_text(json.dumps({'type':'session','version':3,'id':str(uuid.uuid4()),'cwd':str(Path.cwd())})+'\n')
@@ -56,7 +59,7 @@ try:
     for line in sys.stdin:
         v = json.loads(line); kind = v['type']; ident = v.get('id'); data = None
         if kind == 'get_state':
-            data = {'sessionId':native,'sessionFile':str(path),'model':{'id':model,'provider':provider},'thinkingLevel':thinking,'isStreaming':running,'isCompacting':compacting,'pendingMessageCount':int(native_queue)}
+            data = {'sessionId':native,'sessionFile':str(path),'model':{'id':model,'provider':provider,**({'input':['text']} if model == 'text-only' else {})},'thinkingLevel':thinking,'isStreaming':running,'isCompacting':compacting,'pendingMessageCount':int(native_queue)}
         elif kind == 'get_available_thinking_levels':
             data = {'levels':['off','medium','high']}
         elif kind == 'set_thinking_level':

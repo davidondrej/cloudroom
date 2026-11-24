@@ -1,6 +1,6 @@
 # Run Cloudroom on Ubuntu 24.04
 
-This developer alpha runs Codex or Pi through an HTTP API. No Cloudroom account or GUI is required. Start with Codex below; [Pi configuration](harnesses.md#configure) uses the same service and API.
+Cloudroom Core runs Codex or Pi through an HTTP API. No Cloudroom account or GUI is required. Start with Codex below; [Pi configuration](harnesses.md#configure) uses the same service and API.
 
 Use a **fresh VM for one trusted user**, with sudo access, systemd, cgroup v2, and space for your repositories and tools. Disk warnings start at 5 GB available; there is no fixed agent allowance or additional reserve. The installer does not configure quotas or change `/etc/fstab`. Containers and other Linux distributions are outside this guide.
 
@@ -104,9 +104,13 @@ The service unit already sets `CLOUDROOM_STORAGE_POLICY=/etc/cloudroom/storage.j
 sudo chown cloudroom:cloudroom /etc/cloudroom/core.env
 sudo chmod 600 /etc/cloudroom/core.env
 sudo python3 install/configure.py --storage-only /etc/cloudroom
+sudo install -m 755 install/previews.py /usr/local/lib/cloudroom/previews.py
+sudo python3 /usr/local/lib/cloudroom/previews.py --tunnel /var/lib/cloudroom/history
 sudo systemctl daemon-reload
 sudo systemctl enable --now cloudroom.service
 ```
+
+`previews.py --tunnel` sets up Mac access, secret requests, and previews. It adds no account beyond the two above and doesn't change SSH.
 
 Do not bypass failed protection setup with `CLOUDROOM_UNPROTECTED_TEST_MODE`. See [disk setup and existing-VM upgrades](storage.md#provisioning).
 
@@ -176,7 +180,24 @@ Never use `tailscale funnel` for Core: it opens the API to the whole internet.
 
 ## Connect the desktop app
 
-In the [Cloudroom app](https://www.cloudroom.dev/download) (v83 or newer), open **Settings → Cloudroom account → Connect your own Core**. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
+In the [Cloudroom app](https://github.com/davidondrej/cloudroom/releases/latest), open **Settings → Cloudroom account → Connect your own Core** (v83 or newer). From v154, first-run setup also offers **Use my own Core** at the top right. Enter the HTTPS URL and the token from `sudo grep ^CLOUDROOM_TOKEN= /etc/cloudroom/core.env`; the whole `CLOUDROOM_TOKEN=…` line works too. No Cloudroom account is needed. Cloud threads then run on this machine and share its files.
+
+## Your own server vs Cloudroom Cloud
+
+**Works on your own server:**
+
+- Codex and Pi, set up in `core.env`. Claude Code, Cursor, OpenCode, Hermes, Devin, Droid, Kimi Code, fx, OpenClaw, and Agent Zero's `a0` bridge turn on once they are installed and signed in under the agent account.
+- Cloud threads from the desktop app, with Mac access, web previews, secret requests, and synced skills and logins.
+- Saved history, kept on this machine.
+
+**Cloudroom Cloud only:**
+
+- GPUs, Cloud loops, and computer use. Local loops still work.
+- Settings → Cloud environment (API keys, repos, setup script). Install your tools on the server yourself.
+- Phone access while your Mac is off.
+- One isolated sandbox per thread. Here, every thread shares one machine, so use it for one trusted user.
+
+**History:** to back it up, run `sudo systemctl stop cloudroom`, copy `CLOUDROOM_STATE_DIR` (default `/var/lib/cloudroom/history`), then start it again. Moving history from Cloudroom Cloud to your server isn't supported yet.
 
 ## Upgrade
 
@@ -190,7 +211,9 @@ sudo python3 core-$v/install/update.py upgrade "$PWD/core-$v"
 sudo cat /var/lib/cloudroom-update/state.json
 ```
 
-The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+The script waits until agents are idle, backs up the old core, swaps it, checks every session, and rolls back on failure. A large history can take many minutes to load; the script keeps waiting while Core is busy loading it, for up to 2 hours. Your settings, logins, and history stay. `"result": "updated"` means done; `waiting` means agents were busy, so run it again later. It never downgrades.
+
+Upgrades don't add accounts or change SSH when `CLOUDROOM_STORE=self-hosted`. Mac access, secret requests, and previews run over Core's own port. A server already on SSH previews keeps them untouched.
 
 ## If something fails
 
@@ -204,7 +227,7 @@ A failed readiness check usually means the journal or disk protection needs atte
 
 ## Machines without systemd
 
-Run `install/sandbox-start.sh` as root, detached, on every boot. It parses (never sources) `image.env` and `/etc/cloudroom/core.env`, creates the agents' cgroup, runs Core as `cloudroom` with only the capabilities it needs, and restarts it after a crash. Containers without cgroups run Core in [container mode](storage.md#containers). A second start is a no-op. The log is `/var/log/cloudroom/core.log`. With `"agent_sudo": true` in `storage.json`, agents keep sudo on that machine. Before a stop, `POST /v1/drain {"hold":true}` refuses new work and reports whether anything still runs; `{"hold":false}` reopens it.
+Run `install/sandbox-start.sh` as root, detached, on every boot. It parses (never sources) `image.env` and `/etc/cloudroom/core.env`, creates the agents' cgroup, runs Core as `cloudroom` with only the capabilities it needs, and restarts it after a crash. Containers without cgroups run Core in [container mode](storage.md#containers). A second start is a no-op. The log is `/var/log/cloudroom/core.log`. With `"agent_sudo": true` in `storage.json`, agents keep sudo on that machine. Before a stop, `POST /v1/drain {"hold":true}` refuses new work and reports whether anything still runs, plus the thread's lifetime prompt counts (`work`: `prompts`, `failed`) for the website's sleep event; `{"hold":false}` reopens it.
 
 ## Cloud folders
 
@@ -216,7 +239,7 @@ The capability is `direct_workspaces: true`. Archive import, preparation, and ac
 
 ## Skills and login sync
 
-Run `python3 src/sync/client.py configure LOCAL_SYNC_DIR --connection PRIVATE_CONNECTION_JSON` on the Mac. The private JSON contains the existing core `url`, `token`, and optional `gateToken`; use mode 0600. This installs an independent LaunchAgent for skills, supported settings, and Codex login only. Python 3.11+ is needed for Codex TOML settings. `status` reports state; `stop` removes the job. Other systems can configure with `--no-start`, then supervise `run` themselves.
+Run `python3 src/sync/client.py configure LOCAL_SYNC_DIR --connection PRIVATE_CONNECTION_JSON` on the Mac or Linux. The private JSON contains the existing core `url`, `token`, and optional `gateToken`; use mode 0600. This installs an independent background job for skills, supported settings, and Codex login only: a LaunchAgent on macOS, a systemd user service on Linux. Python 3.11+ is needed for Codex TOML settings. `status` reports state; `stop` removes the job. Other systems, such as Windows, can configure with `--no-start`, then supervise `run` themselves. Do not start your own `run` for a folder that the app or `configure` already started; setup then fails with "Another sync helper is still running".
 
 Project files, unpublished Git changes, and project `.env` files no longer sync. Use Git or explicit message attachments. Conflicting skill/settings changes are preserved; offline changes catch up. `POST /v1/sync` handles device registration/status, file operations remain under `/v1/sync/{id}`, and `GET /v1/settings` is read-only.
 

@@ -13,7 +13,8 @@ export interface ThreadGitStatusDisplay {
     | "Behind"
     | "Diverged"
     | "Dirty"
-    | "Untracked";
+    | "Untracked"
+    | "Parked";
   summary: string;
 }
 
@@ -23,6 +24,7 @@ interface GetGitStatusDisplayOptions {
   showBranchComparison?: boolean;
   workspaceUnavailable?: WorkspaceResolutionFailure;
   workspaceDeleted?: boolean;
+  workspaceParked?: boolean;
 }
 
 function formatComparisonSummary(
@@ -85,6 +87,11 @@ export function getGitStatusDisplay(
   options?: GetGitStatusDisplayOptions,
 ): ThreadGitStatusDisplay {
   if (!status) {
+    if (options?.workspaceParked)
+      return plainDisplay(
+        "Parked",
+        "Parked to save disk. Returns on your next message.",
+      );
     const lifecycleErrorDescription =
       options?.error === undefined
         ? null

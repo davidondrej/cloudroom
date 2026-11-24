@@ -2,7 +2,11 @@ import { Command } from "commander";
 import type { AvailableModel } from "@cloudroom/domain";
 import type { SystemProviderInfo } from "@cloudroom/server-contract";
 import { action } from "../action.js";
-import { createCliBbSdk } from "../client.js";
+import { createCliRoomSdk } from "../client.js";
+import {
+  resolveContextProjectId,
+  resolveExplicitIdFlag,
+} from "../context-env.js";
 import { columnWidths, printBorderlessTable } from "../table.js";
 import { outputJson } from "./helpers.js";
 import { resolveMachineEnvironmentRouting } from "./machine.js";
@@ -20,6 +24,7 @@ interface ProviderModelsCommandOptions {
   host?: string;
   json?: boolean;
   machine?: string;
+  project?: string;
   selectedModel?: string;
   restart?: boolean;
 }
@@ -58,7 +63,7 @@ export function registerProviderCommands(
     .action(
       action(async (opts: ProviderListCommandOptions) => {
         const serverUrl = getUrl();
-        const sdk = createCliBbSdk(serverUrl);
+        const sdk = createCliRoomSdk(serverUrl);
         const routing = await resolveMachineEnvironmentRouting(opts, serverUrl);
         const providers = opts.installable
           ? await sdk.providers.installable(routing)
@@ -80,6 +85,10 @@ export function registerProviderCommands(
     .description("List available models for a provider")
     .option("--json", "Print machine-readable JSON output")
     .option(
+      "--project <id>",
+      "List the models a new thread in this project gets (default: this thread's project)",
+    )
+    .option(
       "--restart",
       "Restart this provider's model discovery without stopping threads",
     )
@@ -94,23 +103,45 @@ export function registerProviderCommands(
           opts: ProviderModelsCommandOptions,
         ) => {
           const serverUrl = getUrl();
-          const sdk = createCliBbSdk(serverUrl);
+          const sdk = createCliRoomSdk(serverUrl);
           if (opts.restart && !providerId)
             throw new Error("--restart requires a provider ID");
           const routing = await resolveMachineEnvironmentRouting(
             opts,
             serverUrl,
           );
-          const executionOptions =
-            opts.restart && providerId
-              ? await sdk.providers.restartModelDiscovery({
+          // A project's opencode.json or Pi config can hide models: list where its threads start (#1236).
+          const explicitProjectId = resolveExplicitIdFlag({
+            flagName: "--project",
+            value: opts.project,
+          });
+          const contextProjectId =
+            explicitProjectId === undefined
+              ? resolveContextProjectId()
+              : undefined;
+          const load = (projectId: string | undefined) => {
+            const project = projectId === undefined ? {} : { projectId };
+            return opts.restart && providerId
+              ? sdk.providers.restartModelDiscovery({
                   ...routing,
+                  ...project,
                   providerId,
                 })
-              : await sdk.providers.models({
+              : sdk.providers.models({
                   ...routing,
+                  ...project,
                   ...(providerId ? { providerId } : {}),
                 });
+          };
+          // A thread whose project folder moved lists nothing there: show the machine's list.
+          const executionOptions =
+            contextProjectId === undefined
+              ? await load(explicitProjectId)
+              : await load(contextProjectId).then(
+                  (result) =>
+                    result.models.length > 0 ? result : load(undefined),
+                  () => load(undefined),
+                );
           // The server falls back to the first provider for an unknown ID,
           // which printed Codex's models for a typo (feedback #479).
           if (
@@ -134,7 +165,21 @@ export function registerProviderCommands(
           });
           if (outputJson(opts, models)) return;
           if (models.length === 0) {
-            console.log("No models available");
+            const error = executionOptions.modelLoadError;
+            const entry = executionOptions.providers.find(
+              (candidate) => candidate.id === providerId,
+            );
+            // A broken install needs a reinstall, not a sign-in (#907).
+            const broken = executionOptions.providers.find(
+              (candidate) => candidate.id === error?.providerId,
+            );
+            const hint =
+              error?.code === "missing_executable"
+                ? `${broken?.displayName ?? error.providerId} can't start: its CLI, or a file it needs, is missing. Reinstall it${broken?.strings?.installUrl ? ` (${broken.strings.installUrl})` : ""}.`
+                : entry?.strings?.signInHint;
+            console.log(
+              hint ? `No models available. ${hint}` : "No models available",
+            );
             return;
           }
           printModelTable(models, providerId);
@@ -169,7 +214,7 @@ export function registerProviderCommands(
     .description("Show a removed agent again and let its login copy again")
     .action(
       action(async (providerId: string) => {
-        await createCliBbSdk(getUrl()).cloudroom.restoreAgent(providerId);
+        await createCliRoomSdk(getUrl()).cloudroom.restoreAgent(providerId);
         console.log(`${providerId} restored`);
       }),
     );
@@ -180,7 +225,7 @@ async function disconnectAgent(
   providerId: string,
   remove: boolean,
 ): Promise<void> {
-  await createCliBbSdk(serverUrl).cloudroom.disconnectAgent(providerId, { remove });
+  await createCliRoomSdk(serverUrl).cloudroom.disconnectAgent(providerId, { remove });
 }
 
 function includeSelectedOnlyModel(

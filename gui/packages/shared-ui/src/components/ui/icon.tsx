@@ -5,7 +5,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
+import { HugeiconsIcon, type IconSvgElement } from "./hugeicons-icon";
 import {
   Alert02Icon,
   AlertCircleIcon,

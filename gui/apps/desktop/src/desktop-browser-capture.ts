@@ -85,9 +85,32 @@ export async function captureDesktopBrowserPage(
     ownsAttachment = false;
     restoreBackgroundThrottling();
   };
+  const cdpCapture = async (format: {
+    format: "png" | "jpeg";
+    quality?: number;
+  }) =>
+    nativeImage.createFromBuffer(
+      Buffer.from(
+        screenshotSchema.parse(
+          await captureDesktopBrowserCdpScreenshot(contents, {
+            ...format,
+            captureBeyondViewport: false,
+          }),
+        ).data,
+        "base64",
+      ),
+    );
   try {
     return await Promise.race([
       (async () => {
+        // A controller is attached, so the page may have just changed: capturePage can return
+        // the last composited frame, while Page.captureScreenshot renders a fresh one (#1310).
+        const controlled = debuggerApi.isAttached();
+        if (controlled) {
+          // PNG keeps the final JPEG encode in captureTab the only lossy step.
+          const image = await cdpCapture({ format: "png" }).catch(() => null);
+          if (image !== null && !image.isEmpty()) return image;
+        }
         try {
           const image = await contents.capturePage(undefined, {
             stayHidden: true,
@@ -115,16 +138,7 @@ export async function captureDesktopBrowserPage(
             if (!active || !ownsAttachment || contents.isDestroyed())
               throw new Error("Native browser capture was interrupted");
           }
-          const result = screenshotSchema.parse(
-            await captureDesktopBrowserCdpScreenshot(contents, {
-              format: "jpeg",
-              quality: 80,
-              captureBeyondViewport: false,
-            }),
-          );
-          return nativeImage.createFromBuffer(
-            Buffer.from(result.data, "base64"),
-          );
+          return await cdpCapture({ format: "jpeg", quality: 80 });
         }
       })(),
       new Promise<never>((_resolve, reject) => {

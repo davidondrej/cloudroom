@@ -1,5 +1,5 @@
 import type { ComponentType } from "react";
-import type { IconSvgElement } from "@hugeicons/react";
+import type { IconSvgElement } from "./hugeicons-icon";
 
 export const EXTENDED_ICON_NAMES = [
   "AiBrain01",
@@ -18,6 +18,7 @@ export const EXTENDED_ICON_NAMES = [
   "ArrowTurnDown",
   "ArrowTurnForward",
   "ArrowUpRight",
+  "Battery",
   "Beaker",
   "BellDot",
   "Browser",
@@ -75,6 +76,7 @@ export const EXTENDED_ICON_NAMES = [
   "GitPullRequestClosed",
   "GitPullRequestDraft",
   "Globe",
+  "HardDrive",
   "GridView",
   "Image",
   "Laptop",
@@ -86,6 +88,8 @@ export const EXTENDED_ICON_NAMES = [
   "Lock",
   "LogOut",
   "Mail",
+  "Memory",
+  "Cpu",
   "MailOpen",
   "Maximize2",
   "Mic",
@@ -119,6 +123,7 @@ export const EXTENDED_ICON_NAMES = [
   "TimeSchedule",
   "UserRound",
   "ZoomIn",
+  "WifiOff",
   "ZoomOut",
 ] as const;
 

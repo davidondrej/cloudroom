@@ -2,13 +2,14 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
-  BB_PROD_HOST_DAEMON_PORT,
+  ROOM_PROD_HOST_DAEMON_PORT,
   resolvePortFromEnv,
   resolveRuntimeDataDir,
   resolveRuntimeMode,
-  type BbRuntimeMode,
+  type RoomRuntimeMode,
 } from "@cloudroom/config/runtime";
 import { loadServerUrlValue } from "@cloudroom/config/server-url";
+import { createCallerProofFetch } from "@cloudroom/config/caller-proof";
 import {
   HOST_AUTH_FILE_NAME,
   HOST_ID_FILE_NAME,
@@ -34,7 +35,7 @@ interface CreateAutoJoinRequestArgs {
 }
 
 interface ResolveHostDaemonPortArgs {
-  mode: BbRuntimeMode;
+  mode: RoomRuntimeMode;
   requiresExplicitPort: boolean;
 }
 
@@ -52,13 +53,13 @@ function resolveHostDaemonPort(args: ResolveHostDaemonPortArgs): number {
     defaultPort:
       args.mode === "dev"
         ? resolveDevHostDaemonPort()
-        : BB_PROD_HOST_DAEMON_PORT,
+        : ROOM_PROD_HOST_DAEMON_PORT,
     env: process.env,
     name: "BB_HOST_DAEMON_PORT",
   });
 }
 
-function ensureDevOverridePair(mode: BbRuntimeMode): void {
+function ensureDevOverridePair(mode: RoomRuntimeMode): void {
   if (mode !== "dev") {
     return;
   }
@@ -73,7 +74,7 @@ function ensureDevOverridePair(mode: BbRuntimeMode): void {
 }
 
 export function resolveHostDaemonRuntimeEnvironment(
-  mode: BbRuntimeMode,
+  mode: RoomRuntimeMode,
 ): HostDaemonRuntimeEnvironment {
   ensureDevOverridePair(mode);
   const usesDefaultDevExtraHost =
@@ -109,7 +110,7 @@ export function resolveHostDaemonRuntimeEnvironment(
 }
 
 export function resolveHostDaemonProcessCommand(
-  mode: BbRuntimeMode,
+  mode: RoomRuntimeMode,
 ): HostDaemonProcessCommand {
   if (mode === "dev") {
     return {
@@ -169,7 +170,8 @@ export async function maybeAddAutoJoinEnv(
   const requestedHostId =
     env.BB_HOST_ID?.trim() || (await readPersistedHostId(env.BB_DATA_DIR));
 
-  const response = await fetch(
+  // The server only enrolls a caller that proves it runs outside a sandbox.
+  const response = await createCallerProofFetch(fetch)(
     `${env.BB_SERVER_URL}/internal/hosts/enroll-key`,
     {
       body: JSON.stringify(createAutoJoinRequest({ requestedHostId })),

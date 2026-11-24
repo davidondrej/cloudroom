@@ -1,6 +1,6 @@
 import { CliSkillsSettingsSectionContent } from "@/components/settings/CliSkillsSettingsSection";
 import { useEffect, useRef, useState } from "react";
-import { Route, Routes, useNavigate } from "react-router-dom";
+import { Route, Routes, useNavigate } from "react-router";
 import {
   defaultAppTheme,
   defaultExperiments,
@@ -211,8 +211,6 @@ function GeneralSettingsStory({
         rewriteLocalhostLinks={state.rewriteLocalhostLinks}
         richTextEditing={state.richTextEditing}
         steerActiveThreadOnEnter={state.steerActiveThreadOnEnter}
-        worktreeRetention="30d"
-        onWorktreeRetentionChange={() => {}}
       />
       <CliSkillsSettingsSectionContent
         hasConnectedMachine={false}

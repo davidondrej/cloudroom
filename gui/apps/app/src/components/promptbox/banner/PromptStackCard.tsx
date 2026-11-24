@@ -19,6 +19,8 @@ const BASE_CHROME = cn(
 );
 
 export const PROMPT_STACK_TRACK_CLASS = "grid-cols-[minmax(0,1fr)]";
+/** A card that sits right on the chat input. `order-last` moves it there from wherever the stack renders it, so its place can change without rebuilding it. */
+export const PROMPT_STACK_ON_INPUT_CLASS = "relative z-10 order-last -mb-5 rounded-b-none border-b-0 pb-3";
 
 export interface PromptStackCardProps {
   children: ReactNode;

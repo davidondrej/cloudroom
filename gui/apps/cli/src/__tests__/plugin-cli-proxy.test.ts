@@ -3,8 +3,13 @@ import type { AddressInfo } from "node:net";
 import { Writable } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Agent, getGlobalDispatcher, setGlobalDispatcher } from "undici";
+import {
+  CALLER_PROOF_REQUIRED_CODE,
+  CALLER_PROOF_REQUIRED_MESSAGE,
+} from "@cloudroom/config/caller-proof";
 import { RESERVED_BB_CLI_COMMANDS } from "@cloudroom/domain/plugin-cli";
 
+import { CLI_READ_TIMEOUT_MS } from "../client.js";
 import {
   CORE_COMMAND_GROUPS,
   pluginProxyCandidate,
@@ -75,6 +80,28 @@ describe("fetchPluginCliContributions", () => {
       fetchPluginCliContributions("http://localhost"),
     ).resolves.toEqual({
       outcome: "invalid",
+      detail: "did not return the plugin command list (HTTP 404)",
+    });
+
+    // A refused discovery says why, instead of "unknown command" (#1494).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: CALLER_PROOF_REQUIRED_CODE,
+              message: CALLER_PROOF_REQUIRED_MESSAGE,
+            }),
+            { status: 401 },
+          ),
+      ),
+    );
+    await expect(
+      fetchPluginCliContributions("http://localhost"),
+    ).resolves.toEqual({
+      outcome: "invalid",
+      detail: `did not return the plugin command list (HTTP 401 ${CALLER_PROOF_REQUIRED_CODE}): ${CALLER_PROOF_REQUIRED_MESSAGE}`,
     });
   });
 
@@ -190,7 +217,10 @@ describe("fetchPluginCliContributions retries", () => {
 
     await expect(
       fetchPluginCliContributions("http://localhost", 2000, { sleep }),
-    ).resolves.toEqual({ outcome: "invalid" });
+    ).resolves.toEqual({
+      outcome: "invalid",
+      detail: "sent a malformed plugin command list",
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(slept).toEqual([]);
   });
@@ -203,10 +233,11 @@ describe("fetchPluginCliContributions retries", () => {
     const result = await fetchPluginCliContributions("http://localhost", 2000, {
       sleep,
     });
+    // The last try waits as long as a core read (#1533).
     expect(result).toMatchObject({
       outcome: "unreachable",
       attempts: 3,
-      lastTimeoutMs: 4000,
+      lastTimeoutMs: CLI_READ_TIMEOUT_MS,
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(slept).toEqual([150, 500]);
@@ -430,6 +461,18 @@ describe("findPluginCliCommand", () => {
     expect(findPluginCliCommand(contributions, "linear")?.pluginId).toBe(
       "linear",
     );
+  });
+
+  it.each([
+    ["loop", "loop"],
+    ["loop", "automation"],
+    ["automation", "loop"],
+    ["automation", "automation"],
+  ])("routes %s to a server contributing %s", (typed, contributed) => {
+    const entries = [
+      { pluginId: "automations", name: contributed, summary: "", commands: [] },
+    ];
+    expect(findPluginCliCommand(entries, typed)?.pluginId).toBe("automations");
   });
 });
 
@@ -673,6 +716,43 @@ describe("runPluginCliCommand", () => {
     ).rejects.toThrow("write interrupted");
     expect(stream.listenerCount("error")).toBe(0);
     expect(stream.listenerCount("close")).toBe(0);
+  });
+
+  it("prints the API's refusal message and code, not a bare HTTP status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              code: CALLER_PROOF_REQUIRED_CODE,
+              message: CALLER_PROOF_REQUIRED_MESSAGE,
+            }),
+            { status: 401 },
+          ),
+      ),
+    );
+    const writes: Array<{ channel: string; value: string }> = [];
+    const output = (channel: string) =>
+      new Writable({
+        write(chunk, _encoding, callback) {
+          writes.push({ channel, value: chunk.toString() });
+          callback();
+        },
+      });
+
+    await expect(
+      runPluginCliCommand("http://localhost", "loops", ["report"], {
+        stdout: output("stdout"),
+        stderr: output("stderr"),
+      }),
+    ).resolves.toBe(1);
+    expect(writes).toEqual([
+      {
+        channel: "stderr",
+        value: `${CALLER_PROOF_REQUIRED_MESSAGE} (HTTP 401 ${CALLER_PROOF_REQUIRED_CODE})\n`,
+      },
+    ]);
   });
 
   it("materializes an arbitrary stdin flag only in the proxied request", async () => {

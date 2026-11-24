@@ -24,3 +24,19 @@ export function isLoopbackHostname(value: string): boolean {
   const normalized = normalizeHostname(value);
   return normalized === "localhost" || isLoopbackAddress(normalized);
 }
+
+/** An https URL, or one on this machine (RFC 6761 `*.localhost` included). Credentials sent anywhere else would travel unencrypted (#2194). */
+export function isSecureOrLoopbackUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase().replace(/\.$/u, "");
+    return (
+      parsed.protocol === "https:" ||
+      host === "localhost" ||
+      host.endsWith(".localhost") ||
+      isLoopbackHostname(host)
+    );
+  } catch {
+    return false;
+  }
+}

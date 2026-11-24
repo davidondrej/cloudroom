@@ -2,7 +2,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -340,6 +343,20 @@ it("recovers from one transient model mismatch by respawning", async () => {
   );
 }, 90_000);
 
+it("parallel starts survive Pi's shared startup lock (#2154)", async () => {
+  vi.stubEnv("FAKE_PI_LOCK_DIR", join(harness.workspaceDir, "agent.lock"));
+  const responses = await Promise.all(
+    ["a", "b", "c"].map((id) => harness.startThread(`thr_r2_lock_${id}`)),
+  );
+  for (const response of responses) {
+    expect(response.result).toMatchObject({
+      providerThreadId: expect.stringMatching(/^pi_/u),
+    });
+  }
+  expect(harness.readProcessLog().spawned.length).toBeGreaterThan(3);
+  expect(harness.messages.some((m) => m.method === "error")).toBe(false);
+}, 90_000);
+
 it("a child whose extension never reports ready is a construction error, not a hung tool call", async () => {
   vi.stubEnv("FAKE_PI_NO_SESSION_START", "1");
   vi.stubEnv("BB_PI_BRIDGE_READINESS_TIMEOUT_MS", "1500");
@@ -398,13 +415,14 @@ it("reports a bash call's cwd as the thread's working directory, never an empty 
   expect(JSON.stringify(harness.deltasOf(threadId))).not.toContain('"cwd":""');
 }, 90_000);
 
-it("a resumed thread reports the session header's cwd, not the cwd bb asked for", async () => {
+it("a thread resumed in a new folder runs there, not in the session header's old one (#2072)", async () => {
   const headerDir = mkdtempSync(join(tmpdir(), "bb-pi-header-cwd-"));
   try {
     const sessionDir = join(harness.workspaceDir, "sessions");
     mkdirSync(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "thr-resume-cwd.jsonl");
     writeFileSync(
-      join(sessionDir, "thr-resume-cwd.jsonl"),
+      sessionFile,
       `${JSON.stringify({ type: "session", version: 3, id: "sess-1", timestamp: "2026-01-01T00:00:00.000Z", cwd: headerDir })}\n`,
     );
     const threadId = "thr-resume-cwd";
@@ -416,6 +434,12 @@ it("a resumed thread reports the session header's cwd, not the cwd bb asked for"
       options: FULL_PERMISSION_OPTIONS,
     });
     expect(resumed.result).toMatchObject({ providerThreadId: threadId });
+    // Real pi runs its tools in the header's cwd, so the old folder still
+    // existing must not keep the thread writing there.
+    const header = JSON.parse(
+      readFileSync(sessionFile, "utf8").split("\n", 1)[0]!,
+    );
+    expect(header).toMatchObject({ id: "sess-1", cwd: harness.workspaceDir });
     turnStart(threadId, '/tool bash {"command":"pwd"}', "creq_rsm2345678");
     await harness.waitForDelta(threadId, (d) => d.kind === "item.close");
     const opened = harness
@@ -424,7 +448,7 @@ it("a resumed thread reports the session header's cwd, not the cwd bb asked for"
     expect(opened?.item).toMatchObject({
       type: "command",
       command: "pwd",
-      cwd: headerDir,
+      cwd: harness.workspaceDir,
     });
   } finally {
     rmSync(headerDir, { recursive: true, force: true });
@@ -440,9 +464,11 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   mkdirSync(sessionDir, { recursive: true });
   const ghostCwd = join(harness.workspaceDir, "worktree-removed");
   expect(existsSync(ghostCwd)).toBe(false);
+  const sessionFile = join(sessionDir, "thr-resume-missing-cwd.jsonl");
   writeFileSync(
-    join(sessionDir, "thr-resume-missing-cwd.jsonl"),
+    sessionFile,
     `${JSON.stringify({ type: "session", version: 3, id: "sess-missing-cwd", timestamp: "2026-01-01T00:00:00.000Z", cwd: ghostCwd })}\n`,
+    { mode: 0o600 },
   );
 
   const threadId = "thr-resume-missing-cwd";
@@ -455,6 +481,14 @@ it("resumes at bb's requested cwd when the session header's cwd was removed", as
   });
   expect(resumed.error, JSON.stringify(resumed)).toBeUndefined();
   expect(resumed.result).toMatchObject({ providerThreadId: threadId });
+  // Real pi exits when the header's cwd is gone, so the bridge repoints it.
+  const header = JSON.parse(readFileSync(sessionFile, "utf8").split("\n", 1)[0]!);
+  expect(header).toMatchObject({ id: "sess-missing-cwd", cwd: harness.workspaceDir });
+  // The transcript stays private, and no temp file is left behind.
+  if (process.platform !== "win32") {
+    expect(statSync(sessionFile).mode & 0o777).toBe(0o600);
+  }
+  expect(readdirSync(sessionDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 
   turnStart(threadId, '/tool bash {"command":"pwd"}', "creq_rsm2345678");
   await harness.waitForDelta(threadId, (d) => d.kind === "item.close");

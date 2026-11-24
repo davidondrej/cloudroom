@@ -1,8 +1,13 @@
+import { useAtomValue } from "jotai";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
-import { listSidebarNavigationThreads } from "@/hooks/cache-owners/query-cache";
+import { pendingArchiveIdsAtom } from "@/hooks/cache-owners/thread-archive-cache";
+import {
+  listSidebarNavigationThreads,
+  mapSidebarNavigationThreads,
+} from "@/hooks/cache-owners/query-cache";
 import { apiClient } from "@/lib/api-server";
 import { request, requestOptions } from "@/lib/api";
 import {
@@ -28,6 +33,16 @@ function fetchSidebarNavigation(
 }
 
 export function useSidebarNavigation(options?: QueryOptions) {
+  const hidden = useAtomValue(pendingArchiveIdsAtom);
+  const visibleNavigation = useCallback(
+    (data: SidebarBootstrapResponse) =>
+      hidden.size
+        ? mapSidebarNavigationThreads(data, (rows) =>
+            rows.filter((row) => !hidden.has(row.id)),
+          )
+        : data,
+    [hidden],
+  );
   const enabled = options?.enabled ?? true;
   useEnvironmentListRealtimeSubscription({ enabled });
   useHostListRealtimeSubscription({ enabled });
@@ -42,6 +57,7 @@ export function useSidebarNavigation(options?: QueryOptions) {
       return response;
     },
     enabled,
+    select: visibleNavigation,
     ...REALTIME_OWNED_STATIC_CACHE_QUERY_POLICY,
     placeholderData: () => readCachedSidebarBootstrap() ?? undefined,
   });

@@ -1,13 +1,21 @@
 import {
   archiveThread,
+  deleteQueuedThreadMessage,
   getThread,
+  listQueuedThreadMessages,
   listUnarchivedAssignedChildThreads,
   type DbNotifier,
   type DbTransaction,
   unarchiveThread,
   updateThread,
 } from "@cloudroom/db";
-import type { PromptInput, SystemMessageSubject, Thread } from "@cloudroom/domain";
+import type {
+  PromptInput,
+  QueuedMessageSystemNotice,
+  SystemMessageKind,
+  SystemMessageSubject,
+  Thread,
+} from "@cloudroom/domain";
 import { renderTemplate } from "@cloudroom/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
@@ -34,7 +42,7 @@ type ThreadOwnershipTemplateId =
   | "systemMessageThreadOwnershipRemoved";
 
 interface QueueParentSystemMessageBestEffortArgs {
-  childThreadId: string;
+  childThread: ThreadLabelSource;
   input: PromptInput[];
   parentThreadId: string;
   reason: "assigned" | "removed";
@@ -63,26 +71,67 @@ interface ThreadOwnershipTransactionDeps {
 
 const THREAD_OWNERSHIP_MENTION_SLOT = "__BB_THREAD_OWNERSHIP_MENTION__";
 
+/** A queued ownership notice about this child, unless the user edited it. */
+function ownershipNoticeAbout(
+  row: { content: string; systemNotice: string | null },
+  childThread: ThreadLabelSource,
+): SystemMessageKind | null {
+  if (row.systemNotice === null) return null;
+  const notice = JSON.parse(row.systemNotice) as QueuedMessageSystemNotice;
+  const templateId =
+    notice.kind === "ownership-assigned"
+      ? "systemMessageThreadOwnershipAssigned"
+      : notice.kind === "ownership-removed"
+        ? "systemMessageThreadOwnershipRemoved"
+        : null;
+  if (
+    templateId === null ||
+    notice.subject?.kind !== "thread" ||
+    notice.subject.threadId !== childThread.id
+  ) {
+    return null;
+  }
+  // An edited notice holds the user's text, so it is never cancelled.
+  const queued = buildThreadOwnershipSystemInput(templateId, {
+    ...childThread,
+    title: notice.subject.threadName,
+  });
+  return row.content === JSON.stringify(queued) ? notice.kind : null;
+}
+
 async function queueParentSystemMessageBestEffort(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueParentSystemMessageBestEffortArgs,
 ): Promise<void> {
   try {
+    const kind = systemMessageKindForTemplate(args.templateId);
+    // A notice about this child still queued for the parent is a change it
+    // hasn't heard yet. This change undoes or repeats it, so neither wakes the
+    // parent: the next notice it gets matches the relationship (#2281).
+    const queued = listQueuedThreadMessages(deps.db, args.parentThreadId)
+      .filter((row) => ownershipNoticeAbout(row, args.childThread))
+      .at(-1);
+    if (queued) {
+      if (ownershipNoticeAbout(queued, args.childThread) !== kind) {
+        deleteQueuedThreadMessage(deps.db, deps.hub, queued.id);
+      }
+      return;
+    }
     const subject: SystemMessageSubject = {
       kind: "thread",
-      threadId: args.childThreadId,
+      threadId: args.childThread.id,
       threadName: args.threadName,
     };
     await queueParentSystemMessage(deps, {
       input: args.input,
       parentThreadId: args.parentThreadId,
-      systemMessageKind: systemMessageKindForTemplate(args.templateId),
+      systemMessageKind: kind,
       systemMessageSubject: subject,
     });
   } catch (error) {
     deps.logger.error(
       {
-        childThreadId: args.childThreadId,
+        childThreadId: args.childThread.id,
         parentThreadId: args.parentThreadId,
         reason: args.reason,
         err: error,
@@ -126,7 +175,7 @@ export async function handleThreadOwnershipChange(
 
   if (args.updatedThread.parentThreadId) {
     await queueParentSystemMessageBestEffort(deps, {
-      childThreadId: args.updatedThread.id,
+      childThread: args.updatedThread,
       parentThreadId: args.updatedThread.parentThreadId,
       input: buildThreadOwnershipSystemInput(
         "systemMessageThreadOwnershipAssigned",
@@ -139,7 +188,7 @@ export async function handleThreadOwnershipChange(
   }
   if (args.previousThread.parentThreadId) {
     await queueParentSystemMessageBestEffort(deps, {
-      childThreadId: args.updatedThread.id,
+      childThread: args.updatedThread,
       parentThreadId: args.previousThread.parentThreadId,
       input: buildThreadOwnershipSystemInput(
         "systemMessageThreadOwnershipRemoved",

@@ -32,11 +32,12 @@ import {
 import {
   buildPluginApp,
   buildPluginHost,
+  HOST_ZOD_SPECIFIER,
   isIgnoredPluginDevPath,
 } from "@cloudroom/plugin-build";
 import { PluginHostArtifactRegistry } from "./plugin-host-artifact-registry.js";
 import { getPluginBuildToolchain } from "./build-toolchain.js";
-import { createNodeBbSdk, type BbSdk } from "@cloudroom/sdk";
+import { createNodeRoomSdk, type BbSdk } from "@cloudroom/sdk";
 import { experimental_aiServicesHostContract } from "@get-bb/plugin-sdk/ai-services";
 import {
   getInstalledPlugin,
@@ -100,7 +101,10 @@ import type {
   PluginWireLookup,
   ServiceRuntime,
 } from "./plugin-service-internal.js";
-import { createPluginRpcCallerRegistry } from "./plugin-rpc-caller.js";
+import {
+  createPluginRpcCallerRegistry,
+  pluginSdkFetch,
+} from "./plugin-rpc-caller.js";
 import { createKeyedLock } from "../lib/async-deduper.js";
 import { runEventLoopWork } from "../system/event-loop-work.js";
 
@@ -136,6 +140,18 @@ const pluginSdkAlias: Record<string, string> | undefined = existsSync(
 )
   ? pluginSdkAliasFor(pluginSdkRuntimePath)
   : undefined;
+const pluginSdkRuntimeUrl =
+  pluginSdkAlias === undefined ? null : pathToFileURL(pluginSdkRuntimePath).href;
+
+// Built-in plugins import zod as HOST_ZOD_SPECIFIER; all of them get this one
+// copy. A server run from source has no built file and uses its own zod.
+const hostZodRuntimePath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "zod-runtime.js",
+);
+const hostZodRuntimeUrl = existsSync(hostZodRuntimePath)
+  ? pathToFileURL(hostZodRuntimePath).href
+  : null;
 
 interface MutableRoot {
   id: number;
@@ -148,21 +164,38 @@ let nextMutableRootId = 1;
 let nextMutableRootEpoch = 1;
 let mutableRootHooks: { deregister: () => void } | null = null;
 
+function mutableRootFor(url: string): MutableRoot | undefined {
+  let match: MutableRoot | undefined;
+  let matchedLength = 0;
+  for (const [rootUrl, root] of mutableRoots) {
+    if (rootUrl.length <= matchedLength || !url.startsWith(rootUrl)) continue;
+    match = root;
+    matchedLength = rootUrl.length;
+  }
+  return match;
+}
+
 function registerMutableRootHooks(): void {
   if (mutableRootHooks !== null) return;
   mutableRootHooks = registerHooks({
     resolve(specifier, context, nextResolve) {
+      if (specifier === HOST_ZOD_SPECIFIER) {
+        return hostZodRuntimeUrl !== null
+          ? { url: hostZodRuntimeUrl, shortCircuit: true }
+          : nextResolve("zod", { ...context, parentURL: import.meta.url });
+      }
+      if (
+        pluginSdkRuntimeUrl !== null &&
+        (specifier === PLUGIN_SDK_SPECIFIER ||
+          specifier === LEGACY_PLUGIN_SDK_SPECIFIER) &&
+        mutableRootFor(context.parentURL ?? "") !== undefined
+      ) {
+        return { url: pluginSdkRuntimeUrl, shortCircuit: true };
+      }
       const resolved = nextResolve(specifier, context);
       if (mutableRoots.size === 0) return resolved;
       if (!resolved.url.startsWith("file:")) return resolved;
-      let match: MutableRoot | undefined;
-      let matchedLength = 0;
-      for (const [rootUrl, root] of mutableRoots) {
-        if (rootUrl.length <= matchedLength) continue;
-        if (!resolved.url.startsWith(rootUrl)) continue;
-        match = root;
-        matchedLength = rootUrl.length;
-      }
+      const match = mutableRootFor(resolved.url);
       if (match === undefined) return resolved;
       const parent = MUTABLE_ROOT_MARKER.exec(context.parentURL ?? "");
       const epoch =
@@ -369,6 +402,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   >();
   let boundSdk: BbSdk | undefined;
   let boundLoopbackBaseUrl: string | undefined;
+  let boundCallerToken: string | undefined;
 
   function publishStatus(
     id: string,
@@ -1490,6 +1524,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       },
       getAppUrl: deps.getAppUrl ?? (() => null),
       getLoopbackBaseUrl: () => boundLoopbackBaseUrl,
+      getCallerToken: () => boundCallerToken,
       ...(row.id === "accounts" && { claudeSetupToken: deps.claudeSetupToken }),
       rpcCaller: rpcCallers.issue(row.id),
       publishSignal: (channel, payload) => {
@@ -1669,13 +1704,21 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
       ownedRootUrls.add(mutableRootUrl(mutableRootDir(row.rootDir)));
     }
     try {
-      const jiti = createJiti(import.meta.url, {
-        moduleCache: false,
-        ...(pluginSdkAlias === undefined ? {} : { alias: pluginSdkAlias }),
-      });
-      const mod = (await jiti.import(
-        await resolveServerEntry(row, manifest),
-      )) as {
+      const entry = await resolveServerEntry(row, manifest);
+      const loadsNatively =
+        rollbackGeneration !== undefined &&
+        isPackagedBuiltinEntry({
+          kind: sourceKind(row.source),
+          manifest,
+          rootDir: row.rootDir,
+          artifact: "server",
+        });
+      const mod = (await (loadsNatively
+        ? import(pathToFileURL(entry).href)
+        : createJiti(import.meta.url, {
+            moduleCache: false,
+            ...(pluginSdkAlias === undefined ? {} : { alias: pluginSdkAlias }),
+          }).import(entry))) as {
         default?: unknown;
       };
       const factory = mod.default;
@@ -1904,9 +1947,14 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
     return { outcome: "found", value };
   }
 
-  function bindSdk(args: { baseUrl: string }): void {
-    boundSdk = createNodeBbSdk({ baseUrl: args.baseUrl });
+  function bindSdk(args: { baseUrl: string; callerToken?: string }): void {
+    boundSdk = createNodeRoomSdk({
+      baseUrl: args.baseUrl,
+      callerToken: args.callerToken,
+      fetch: pluginSdkFetch,
+    });
     boundLoopbackBaseUrl = args.baseUrl;
+    boundCallerToken = args.callerToken;
   }
 
   return {

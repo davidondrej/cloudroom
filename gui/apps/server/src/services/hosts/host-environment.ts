@@ -9,6 +9,7 @@ import {
 } from "../machines/git-credentials.js";
 import { readPrimaryHostIdFromDataDir } from "./primary-host.js";
 import { cloudClaudeEnvironment } from "../cloudroom/sandboxes.js";
+import { resolvePluginProviderEnv } from "../plugins/plugin-agent-contributions.js";
 
 type HostEnvironmentContext = { hostId: string; projectId: string | null };
 
@@ -60,6 +61,26 @@ export function cloudClaudeLoginEnvironment(
   )
     return [];
   return cloudClaudeEnvironment();
+}
+
+/**
+ * The login Cloudroom hands a provider's CLI: a signed-out Mac's cloud Claude login, or the account the user picked
+ * (the Accounts plugin), which wins. Threads get it on every turn. Helper calls (naming, purpose) pass no thread.
+ */
+export async function providerLoginEnvironment(
+  deps: { config: Pick<AppDeps["config"], "dataDir"> },
+  context: {
+    hostId: string;
+    providerId: string;
+    threadId?: string;
+    projectId?: string;
+  },
+): Promise<HostDaemonContributedEnvEntry[]> {
+  const { providerId, ...pluginContext } = context;
+  return mergeHostAndProviderEnvironment(
+    cloudClaudeLoginEnvironment(deps, context),
+    await resolvePluginProviderEnv({ providerId, context: pluginContext }),
+  );
 }
 
 export function mergeHostAndProviderEnvironment(

@@ -85,7 +85,7 @@ it("normalizes structured plans and windows while retaining custom provider labe
   expect(normalizeUsageMeasurement(raw)).toMatchObject({
     accountKey: null,
     usage: {
-      planLabel: "Max (20x)",
+      planLabel: "Ultra",
       windows: [
         { label: "Weekly limit" },
         { label: "Weekly · Fable" },

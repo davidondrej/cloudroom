@@ -1,4 +1,5 @@
 #!/usr/bin/env node
-import { runBbCli, runLauncherEntry } from "../launcher.js";
+import { runRoomCli } from "../host.js";
+import { runLauncherEntry } from "../start.js";
 
-runLauncherEntry(runBbCli);
+runLauncherEntry(runRoomCli);

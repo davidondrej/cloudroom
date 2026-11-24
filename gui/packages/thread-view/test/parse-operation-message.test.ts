@@ -7,11 +7,12 @@ import type {
   ThreadEventRow,
 } from "@cloudroom/domain";
 import {
-  finalizeOperationMessage,
-  interruptOperationMessage,
-  parseOperationMessage,
-} from "../src/parse-operation-message.js";
-import type { EventProjectionOperationMessage } from "../src/event-projection-types.js";
+  finalizeOperationRow,
+  interruptOperationRow,
+  parseOperationEvent,
+  type ProvisioningState,
+} from "../src/messages.js";
+import type { TimelineSystemRow } from "@cloudroom/server-contract";
 import {
   createTimelineEventFactory,
   decodeThreadEventRow,
@@ -26,19 +27,21 @@ function factory() {
 
 function operationTitleFor(row: ThreadEventRow, threadName: string): string {
   const { event, meta } = decodeThreadEventRow(row);
-  const message = parseOperationMessage(event, meta, { threadName });
-  if (message === null || message.kind !== "operation") {
-    throw new Error(`expected operation message, got ${message?.kind ?? null}`);
+  const parsed = parseOperationEvent(event, meta, { threadName });
+  if (parsed === null || parsed.kind !== "operation") {
+    throw new Error(`expected operation row, got ${parsed?.kind ?? null}`);
   }
-  return message.title;
+  return parsed.row.title;
 }
 
 function provisioningTitle(
   status: SystemThreadProvisioningStatus,
   threadName: string,
 ): string {
-  const row = factory().threadProvisioning({ status, entries: [] });
-  return operationTitleFor(row, threadName);
+  return operationTitleFor(
+    factory().threadProvisioning({ status, entries: [] }),
+    threadName,
+  );
 }
 
 function interruptedTitle(
@@ -46,8 +49,10 @@ function interruptedTitle(
   threadName: string,
   cause?: "host-connection-lost",
 ): string {
-  const row = factory().systemThreadInterrupted({ reason, cause });
-  return operationTitleFor(row, threadName);
+  return operationTitleFor(
+    factory().systemThreadInterrupted({ reason, cause }),
+    threadName,
+  );
 }
 
 function ownershipTitle(
@@ -75,11 +80,23 @@ function ownershipTitle(
   return operationTitleFor(row, threadName);
 }
 
-describe("parseOperationMessage operation titles", () => {
-  it.each(["storage_warning", "storage_pause", "storage_recovered"])("hides the %s notice from the chat; the composer card shows it", (operation) => {
-    const { event, meta } = decodeThreadEventRow(factory().systemOperation({ operation, status: "completed", message: "Cloud storage notice." }));
-    expect(parseOperationMessage(event, meta, { threadName: THREAD_NAME })).toBeNull();
-  });
+describe("parseOperationEvent operation titles", () => {
+  it.each(["storage_warning", "storage_pause", "storage_recovered"])(
+    "hides the %s notice from the chat; the composer card shows it",
+    (operation) => {
+      const { event, meta } = decodeThreadEventRow(
+        factory().systemOperation({
+          operation,
+          status: "completed",
+          message: "Cloud storage notice.",
+        }),
+      );
+      expect(
+        parseOperationEvent(event, meta, { threadName: THREAD_NAME }),
+      ).toBeNull();
+    },
+  );
+
   it("renders provider environment provenance without revealing masked values", () => {
     const event: ThreadEvent = {
       type: "provider.env-resolved",
@@ -93,60 +110,66 @@ describe("parseOperationMessage operation titles", () => {
           value: { masked: true },
           reason: "Authenticate provider traffic",
         },
+        // Stored before #1938: raw shell values in history.
+        { name: "GH_TOKEN", source: "shell", value: "fake-stored-token" },
+        { name: "PATH", source: "shell", value: "/usr/bin" },
       ],
     };
-    const message = parseOperationMessage(
+    const parsed = parseOperationEvent(
       event,
-      {
-        id: "event-provider-env",
-        seq: 1,
-        createdAt: 1,
-      },
+      { id: "event-provider-env", seq: 1, createdAt: 1 },
       { includeDiagnosticOperations: true, threadName: "" },
     );
 
     expect(
-      parseOperationMessage(event, { id: "hidden", seq: 1, createdAt: 1 }),
+      parseOperationEvent(
+        event,
+        { id: "hidden", seq: 1, createdAt: 1 },
+        { threadName: "" },
+      ),
     ).toBeNull();
-    expect(message).toMatchObject({
+    expect(parsed).toMatchObject({
       kind: "operation",
-      title: "Provider environment resolved",
-      detail:
-        "PLUGIN_TOKEN=•••••• (auth-proxy) — Authenticate provider traffic",
+      row: {
+        title: "Provider environment resolved",
+        detail: [
+          "PLUGIN_TOKEN=•••••• (auth-proxy) — Authenticate provider traffic",
+          "GH_TOKEN=•••••• (shell)",
+          "PATH=/usr/bin (shell)",
+        ].join("\n"),
+      },
     });
   });
 
   describe("provider-unhandled", () => {
     it("uses the projected provider display name for dynamic providers", () => {
-      const row = factory().providerUnhandled({
-        providerId: "acp-my-agent",
-      });
-      const { event, meta } = decodeThreadEventRow(row);
-      const message = parseOperationMessage(event, meta, {
+      const { event, meta } = decodeThreadEventRow(
+        factory().providerUnhandled({ providerId: "acp-my-agent" }),
+      );
+      const parsed = parseOperationEvent(event, meta, {
         includeDiagnosticOperations: true,
         providerDisplayName: "My Agent",
         threadName: THREAD_NAME,
       });
 
-      expect(message).toMatchObject({
+      expect(parsed).toMatchObject({
         kind: "operation",
-        title: "Unhandled My Agent event",
+        row: { title: "Unhandled My Agent event" },
       });
     });
 
     it("falls back to the provider id when no display name is projected", () => {
-      const row = factory().providerUnhandled({
-        providerId: "acp-my-agent",
-      });
-      const { event, meta } = decodeThreadEventRow(row);
-      const message = parseOperationMessage(event, meta, {
+      const { event, meta } = decodeThreadEventRow(
+        factory().providerUnhandled({ providerId: "acp-my-agent" }),
+      );
+      const parsed = parseOperationEvent(event, meta, {
         includeDiagnosticOperations: true,
         threadName: THREAD_NAME,
       });
 
-      expect(message).toMatchObject({
+      expect(parsed).toMatchObject({
         kind: "operation",
-        title: "Unhandled acp-my-agent event",
+        row: { title: "Unhandled acp-my-agent event" },
       });
     });
   });
@@ -192,22 +215,25 @@ describe("parseOperationMessage operation titles", () => {
   });
 
   it("renders a context clear as a concise completed boundary", () => {
-    const row = factory().systemOperation({
-      operation: "context_clear",
-      status: "completed",
-      message:
-        "New prompts won’t include messages above. Thread history and workspace are unchanged.",
-    });
-    const { event, meta } = decodeThreadEventRow(row);
+    const { event, meta } = decodeThreadEventRow(
+      factory().systemOperation({
+        operation: "context_clear",
+        status: "completed",
+        message:
+          "New prompts won’t include messages above. Thread history and workspace are unchanged.",
+      }),
+    );
 
     expect(
-      parseOperationMessage(event, meta, { threadName: THREAD_NAME }),
+      parseOperationEvent(event, meta, { threadName: THREAD_NAME }),
     ).toMatchObject({
       kind: "operation",
-      title: "Context cleared",
-      detail:
-        "New prompts won’t include messages above. Thread history and workspace are unchanged.",
-      status: "completed",
+      row: {
+        title: "Context cleared",
+        detail:
+          "New prompts won’t include messages above. Thread history and workspace are unchanged.",
+        status: "completed",
+      },
     });
   });
 
@@ -216,20 +242,14 @@ describe("parseOperationMessage operation titles", () => {
       expect(
         ownershipTitle(
           "assign",
-          {
-            nextParentThreadTitle: "Release manager",
-            previousParentThreadTitle: null,
-          },
+          { nextParentThreadTitle: "Release manager", previousParentThreadTitle: null },
           THREAD_NAME,
         ),
       ).toBe("Fix auth bug assigned to Release manager");
       expect(
         ownershipTitle(
           "release",
-          {
-            nextParentThreadTitle: null,
-            previousParentThreadTitle: "Release manager",
-          },
+          { nextParentThreadTitle: null, previousParentThreadTitle: "Release manager" },
           THREAD_NAME,
         ),
       ).toBe("Fix auth bug released from Release manager");
@@ -257,34 +277,32 @@ describe("parseOperationMessage operation titles", () => {
   });
 
   describe("post-hoc overrides stay scoped to the current thread", () => {
-    function pendingProvisioning(): EventProjectionOperationMessage {
-      const row = factory().threadProvisioning({
-        status: "active",
-        entries: [],
-      });
-      const { event, meta } = decodeThreadEventRow(row);
-      const message = parseOperationMessage(event, meta, {
-        threadName: THREAD_NAME,
-      });
-      if (message === null || message.kind !== "operation") {
-        throw new Error("expected operation message");
+    function pendingProvisioning(): {
+      row: Extract<TimelineSystemRow, { systemKind: "operation" }>;
+      provMap: Map<TimelineSystemRow, ProvisioningState>;
+    } {
+      const { event, meta } = decodeThreadEventRow(
+        factory().threadProvisioning({ status: "active", entries: [] }),
+      );
+      const parsed = parseOperationEvent(event, meta, { threadName: THREAD_NAME });
+      if (parsed === null || parsed.kind !== "operation") {
+        throw new Error("expected operation");
       }
-      return message;
+      const provMap = new Map<TimelineSystemRow, ProvisioningState>();
+      if (parsed.provisioning) provMap.set(parsed.row, parsed.provisioning);
+      return { row: parsed.row, provMap };
     }
 
-    it("interruptOperationMessage does not add the current thread name", () => {
-      const message = pendingProvisioning();
-      interruptOperationMessage(message);
-      expect(message.title).toBe("Provisioning thread interrupted");
+    it("interruptOperationRow does not add the current thread name", () => {
+      const { row, provMap } = pendingProvisioning();
+      interruptOperationRow(row, provMap);
+      expect(row.title).toBe("Provisioning thread interrupted");
     });
 
-    it("finalizeOperationMessage on error does not add the current thread name", () => {
-      const message = pendingProvisioning();
-      finalizeOperationMessage(message, {
-        threadStatus: "error",
-        threadName: THREAD_NAME,
-      });
-      expect(message.title).toBe("Provisioning thread failed");
+    it("finalizeOperationRow on error does not add the current thread name", () => {
+      const { row, provMap } = pendingProvisioning();
+      finalizeOperationRow(row, "error", provMap);
+      expect(row.title).toBe("Provisioning thread failed");
     });
   });
 });

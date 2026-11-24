@@ -82,8 +82,26 @@ export function useHostCloneDefaultPath(
   });
 }
 
-export function useHostDirectory(hostId: string | null, path: string | null) {
+/** Folders anywhere under the host's home whose names match `search`. An empty search warms the host's index. */
+export function useHostFolderSearch(hostId: string | null, search: string) {
   return useQuery<HostDirectoryListing>({
+    queryKey: ["host-folder-search", hostId, search],
+    queryFn: ({ signal }) =>
+      sdk.hosts.directory({ hostId: hostId as string, search, signal }),
+    enabled: hostId != null,
+    placeholderData: keepPreviousData,
+    staleTime: search ? 30_000 : 5 * 60_000,
+    retry: false,
+  });
+}
+
+export function useHostDirectory(
+  hostId: string | null,
+  path: string | null,
+  options?: { retry?: false },
+) {
+  return useQuery<HostDirectoryListing>({
+    ...options,
     queryKey: hostDirectoryQueryKey(hostId, path),
     queryFn: ({ signal }) =>
       sdk.hosts.directory({

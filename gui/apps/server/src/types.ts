@@ -1,11 +1,12 @@
-import type { CustomProviderModel } from "@cloudroom/config/bb-app-managed-config";
+import type { CallerProofIssuer } from "@cloudroom/config/caller-proof";
+import type { CustomProviderModel } from "@cloudroom/config/app-managed-config";
 import type { DbConnection } from "@cloudroom/db";
 import type { FeatureFlags, ProviderNativeSkillRoots } from "@cloudroom/domain";
 import type { Logger } from "@cloudroom/logger";
 import type { PendingInteractionLifecycle } from "./services/interactions/pending-interactions.js";
 import type { MachineAuthService } from "./services/machine-auth.js";
 import type { AppVersionService } from "./services/system/app-version.js";
-import type { BbAppManagedConfigReloader } from "./services/system/bb-app-managed-config.js";
+import type { RoomAppManagedConfigReloader } from "./services/system/app-managed-config.js";
 import type { TelemetryService } from "./services/system/telemetry.js";
 import type { TerminalSessionLifecycle } from "./services/terminals/terminal-session-lifecycle.js";
 import type { LifecycleDedupers } from "./lifecycle-dedupers.js";
@@ -28,6 +29,8 @@ export interface ServerRuntimeConfig {
   dataDir: string;
   featureFlags: FeatureFlags;
   hostDaemonPort: number;
+  /** The desktop app's public key for human clicks (ADR 0260). Unset when the app didn't start this server. */
+  humanClickPublicKey?: string;
   inheritedSkillsRootPaths: string[];
   inferenceFallbackModel: string;
   inferenceModel: string;
@@ -36,6 +39,8 @@ export interface ServerRuntimeConfig {
   openAiApiKey: string;
   serverPort: number;
   sharedSkillRoots: ProviderNativeSkillRoots;
+  /** False when opted out via BB_TELEMETRY=false, CLOUDROOM_TELEMETRY=false, or DO_NOT_TRACK=1. */
+  telemetryAllowed?: boolean;
   transcriptionModel: string;
   /** Cloudroom's own user skills folder, `~/.cloudroom/skills`. */
   userSkillsRootPath: string;
@@ -66,7 +71,8 @@ export interface AppDeps {
 
 export interface ServerAppDeps extends AppDeps {
   appVersion: AppVersionService;
-  bbAppManagedConfig: BbAppManagedConfigReloader;
+  bbAppManagedConfig: RoomAppManagedConfigReloader;
+  callerProofs: CallerProofIssuer;
 }
 
 export type WorkSessionDeps = Pick<

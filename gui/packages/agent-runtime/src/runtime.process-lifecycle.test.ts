@@ -1,11 +1,14 @@
 import {
   existsSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { once } from "node:events";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ThreadEvent } from "@cloudroom/domain";
@@ -34,9 +37,27 @@ import {
 import { promptTextInput } from "./test/prompt-input.js";
 import type { AgentRuntimeBridgeLaunch, AgentRuntimeOptions } from "./types.js";
 
+// Set: the next stop acts as a Windows one whose `taskkill /T` ended the tree.
+const windowsStop = vi.hoisted(() => ({ active: false }));
+vi.mock("@cloudroom/process-utils", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@cloudroom/process-utils")>();
+  return {
+    ...actual,
+    stopProcessGroupLeaderFirst: async (
+      args: Parameters<typeof actual.stopProcessGroupLeaderFirst>[0],
+    ) => {
+      if (!windowsStop.active) return actual.stopProcessGroupLeaderFirst(args);
+      args.child.kill("SIGKILL");
+      await once(args.child, "exit");
+      return { treeTermination: "confirmed" as const };
+    },
+  };
+});
+
 interface CreateProviderProcessManagerArgs {
   adapterProcessEnv?: Record<string, string>;
-  createAdapter?: () => BridgeProtocolAdapter;
+  createAdapter?: typeof createProviderForId;
   env?: Record<string, string>;
   handleStdoutLine?: (line: string, childPid: number | undefined) => void;
   onStderr?: NonNullable<AgentRuntimeOptions["onStderr"]>;
@@ -200,6 +221,56 @@ describe("createAgentRuntime process lifecycle", () => {
       expect.objectContaining({ providerId: "fake", code: 0, expected: false }),
     );
     await runtime.shutdown();
+  });
+
+  it("removes a bridge's temp folder only after a Windows stop ended its tree (#1578)", async () => {
+    const provider = {
+      ...MANAGER_PROVIDER,
+      bridgeLaunch: createScriptedEchoLaunch(),
+    };
+    const onProcessExit = vi.fn();
+    const manager = createProviderProcessManager({
+      createAdapter: createProviderForId,
+      onProcessExit,
+      workspacePath: tmpDir,
+    });
+    const folders = () =>
+      readdirSync(
+        join(realpathSync(provider.bridgeLaunch.dataDir), ".cloudroom-tmp"),
+      );
+    await manager.ensureProvider(provider);
+    const posixFolder = folders();
+    expect(posixFolder).toHaveLength(1);
+    // POSIX keeps the bridge's own cleanup only, which a frozen bridge
+    // (SIGSTOP, then the stop's SIGKILL) never runs.
+    manager.requireProviderProcess(provider).child.kill("SIGSTOP");
+    await manager.shutdownProvider({ ...provider, timeoutMs: 100 });
+    expect(folders()).toEqual(posixFolder);
+
+    // Windows: TerminateProcess skips the bridge's cleanup; the runtime's runs.
+    await manager.ensureProvider(provider);
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    windowsStop.active = true;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      await manager.shutdownProvider(provider);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      windowsStop.active = false;
+    }
+    expect(folders()).toEqual(posixFolder);
+
+    // A bridge that died on its own may have left children that still use it.
+    await manager.ensureProvider(provider);
+    onProcessExit.mockClear();
+    manager.requireProviderProcess(provider).child.kill("SIGKILL");
+    await waitForRuntimeState({
+      label: "the killed bridge's exit",
+      predicate: () => onProcessExit.mock.calls.length === 1,
+    });
+    expect(folders()).toHaveLength(2);
+    await manager.shutdown();
+    rmSync(provider.bridgeLaunch.dataDir, { recursive: true, force: true });
   });
 
   it("retires a threadless bridge process superseded by a new artifact hash", async () => {
@@ -948,6 +1019,51 @@ describe("createAgentRuntime process lifecycle", () => {
       expect(
         processLog.read().filter((line) => line.startsWith("exit:")),
       ).toHaveLength(1);
+    } finally {
+      await runtime.shutdown();
+    }
+  });
+
+  it("frees only the targeted thread's idle session", async () => {
+    const events: ThreadEvent[] = [];
+    const { runtime } = createCodexRuntime({ events });
+    try {
+      for (const [threadId, clientRequestId] of [
+        ["t1", "creq_2222222263"],
+        ["t2", "creq_2222222264"],
+      ] as const) {
+        await runtime.startThread({
+          environmentId: "env-1",
+          threadId,
+          projectId: "p1",
+          providerId: "codex",
+          options: fullRuntimeOptions,
+        });
+        await runtime.runTurn({
+          clientRequestId,
+          threadId,
+          input: [promptTextInput({ text: `idle ${threadId}` })],
+          options: fullRuntimeOptions,
+        });
+        await waitForThreadAgentMessageText({
+          events,
+          providerId: "codex",
+          runtime,
+          text: `idle ${threadId}`,
+          threadId,
+        });
+      }
+
+      const result = await runtime.reapIdleProviderSessions({
+        idleForMs: 0,
+        nowMs: Date.now(),
+        threadId: "t1",
+      });
+      expect(result.reapedSessions.map((session) => session.threadId)).toEqual([
+        "t1",
+      ]);
+      expect(runtime.hasThread("t1")).toBe(false);
+      expect(runtime.hasThread("t2")).toBe(true);
     } finally {
       await runtime.shutdown();
     }

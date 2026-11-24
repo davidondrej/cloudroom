@@ -1,6 +1,11 @@
-import { COMPUTER } from "@cloudroom/domain";
+import { COMPUTER, getHostPathComparisonKey } from "@cloudroom/domain";
 import { serverAccess } from "../services/machines/server-access.js";
-import { getNonDestroyedHost, updateHost } from "@cloudroom/db";
+import {
+  getNonDestroyedHost,
+  listProjectSourcesByHost,
+  listPublicProjects,
+  updateHost,
+} from "@cloudroom/db";
 import {
   publicApiRoutes,
   typedRoutes,
@@ -14,6 +19,7 @@ import {
   runProviderCliInstall,
 } from "../services/system/provider-installations.js";
 import type { PluginService } from "../services/plugins/plugin-service.js";
+import { observeProviderUpdates } from "../services/system/provider-auto-update.js";
 import { COMMAND_TIMEOUT_MS } from "../constants.js";
 import { ApiError } from "../errors.js";
 import { reportCliInstall } from "../services/cloudroom/setup-telemetry.js";
@@ -290,9 +296,10 @@ export function registerHostRoutes(
       command: {
         type: "host.browse_directory",
         ...(query.path ? { path: query.path } : {}),
+        ...(query.search !== undefined ? { search: query.search } : {}),
       },
     });
-    return context.json(result);
+    return context.json(withProjectIds(deps, hostId, result));
   });
 
   get(routes.cloneDefaultPath, async (context, query) => {
@@ -346,8 +353,11 @@ export function registerHostRoutes(
 
   get(routes.providerCliStatus, async (context) => {
     const hostId = context.req.param("id");
-    assertUsableHostId(deps, { hostId });
+    const host = requireNonDestroyedHostWithStatus(deps, hostId);
     const result = await getProviderInstallations(deps, { hostId });
+    if (host.type === "persistent" && host.lifecycle.phase === "active" && host.status === "connected") {
+      observeProviderUpdates(deps, hostId, result);
+    }
     return context.json(result);
   });
 
@@ -381,4 +391,25 @@ export function registerHostRoutes(
       },
     });
   });
+}
+
+/** Marks the folders that a visible project already uses, so the picker selects that project instead of adding a copy. */
+function withProjectIds<
+  T extends { directory: string; entries: { path: string }[] },
+>(deps: AppDeps, hostId: string, listing: T): T & { projectId?: string } {
+  const visible = new Set(listPublicProjects(deps.db).map((project) => project.id));
+  const byPath = new Map(
+    listProjectSourcesByHost(deps.db, hostId)
+      .filter((source) => visible.has(source.projectId))
+      .map((source) => [getHostPathComparisonKey(source.path), source.projectId]),
+  );
+  const projectId = byPath.get(getHostPathComparisonKey(listing.directory));
+  return {
+    ...listing,
+    ...(projectId ? { projectId } : {}),
+    entries: listing.entries.map((entry) => {
+      const projectId = byPath.get(getHostPathComparisonKey(entry.path));
+      return projectId ? { ...entry, projectId } : entry;
+    }),
+  };
 }

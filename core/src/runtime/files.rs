@@ -24,12 +24,45 @@ pub(super) fn checkpoint(
     if offset != previous["offset"].as_u64().unwrap_or(0) {
         return Err(io::Error::other("native record offset mismatch"));
     }
-    let length = native
-        .ok_or_else(|| io::Error::other("missing native record"))?
-        .len() as u64;
+    let length = match native {
+        Some(line) => line.len() as u64,
+        None if data["omitted"] == true => data["length"]
+            .as_u64()
+            .ok_or_else(|| io::Error::other("missing omitted line length"))?,
+        None => return Err(io::Error::other("missing native record")),
+    };
     Ok(
         serde_json::json!({"offset":offset.checked_add(length).ok_or_else(||io::Error::other("native offset overflow"))?}),
     )
+}
+
+/// A session-file line over MAX_LINE, such as a full-size image a harness viewed: its place, never its bytes. Core
+/// only needs a line's length to move the cursor, so keeping it would only stop capture and every resume (#375).
+pub(super) fn omitted(offset: u64, length: u64) -> super::Event {
+    super::Event::Record {
+        kind: "native_record",
+        data: serde_json::json!({"offset":offset,"length":length,"omitted":true}),
+        native: None,
+    }
+}
+
+/// Reads past the rest of a line without keeping it: its length with the newline, or None while it is still being
+/// written.
+pub(super) fn skip_line(reader: &mut impl io::BufRead) -> io::Result<Option<u64>> {
+    let mut length = 0;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok(None);
+        }
+        if let Some(end) = buffer.iter().position(|b| *b == b'\n') {
+            reader.consume(end + 1);
+            return Ok(Some(length + end as u64 + 1));
+        }
+        let n = buffer.len();
+        reader.consume(n);
+        length += n as u64;
+    }
 }
 
 pub(super) fn images(

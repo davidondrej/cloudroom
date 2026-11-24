@@ -124,16 +124,21 @@ function mergeEventTypes(
 }
 
 interface MergeThreadChangeMetadataArgs {
+  archivedChanged: boolean;
   current: ThreadChangeMetadata | undefined;
   next: ThreadChangeMetadata;
   statusChanged: boolean;
 }
 
 function mergeThreadChangeMetadata({
+  archivedChanged,
   current,
   next,
   statusChanged,
 }: MergeThreadChangeMetadataArgs): ThreadChangeMetadata {
+  const archived = archivedChanged
+    ? next.archived
+    : (next.archived ?? current?.archived);
   const eventTypes = mergeEventTypes(current?.eventTypes, next.eventTypes);
   const backgroundActivityChanged =
     next.backgroundActivityChanged ?? current?.backgroundActivityChanged;
@@ -144,6 +149,9 @@ function mergeThreadChangeMetadata({
     ? next.statusChange
     : (next.statusChange ?? current?.statusChange);
   const metadata: ThreadChangeMetadata = {};
+  if (archived !== undefined) {
+    metadata.archived = archived;
+  }
   if (eventTypes) {
     metadata.eventTypes = eventTypes;
   }
@@ -199,6 +207,7 @@ function flushThreadInvalidations(
   for (const changeKind of state.globalChangeKinds) {
     executeRealtimeDirtyHandlers({
       context: {
+        archived: undefined,
         backgroundActivityChanged: undefined,
         eventTypes: undefined,
         flushOnce,
@@ -217,6 +226,7 @@ function flushThreadInvalidations(
     for (const changeKind of changeKinds) {
       executeRealtimeDirtyHandlers({
         context: {
+          archived: metadata?.archived,
           backgroundActivityChanged: metadata?.backgroundActivityChanged,
           eventTypes: metadata?.eventTypes,
           flushOnce,
@@ -249,6 +259,7 @@ function applyImmediateThreadChanges({
 }: ApplyImmediateThreadChangesArgs): void {
   const merged = metadata
     ? mergeThreadChangeMetadata({
+        archivedChanged: changes.includes("archived-changed"),
         current: undefined,
         next: metadata,
         statusChanged: changes.includes("status-changed"),
@@ -258,6 +269,7 @@ function applyImmediateThreadChanges({
   for (const changeKind of changes) {
     executeRealtimeDirtyHandlers({
       context: {
+        archived: merged?.archived,
         backgroundActivityChanged: merged?.backgroundActivityChanged,
         eventTypes: merged?.eventTypes,
         flushOnce,
@@ -286,11 +298,13 @@ function recordThreadChange(
       state,
       threadId: message.id,
     });
+    const archivedChanged = message.changes.includes("archived-changed");
     const statusChanged = message.changes.includes("status-changed");
-    if (message.metadata || statusChanged) {
+    if (message.metadata || archivedChanged || statusChanged) {
       state.metadataByThreadId.set(
         message.id,
         mergeThreadChangeMetadata({
+          archivedChanged,
           current: state.metadataByThreadId.get(message.id),
           next: message.metadata ?? {},
           statusChanged,

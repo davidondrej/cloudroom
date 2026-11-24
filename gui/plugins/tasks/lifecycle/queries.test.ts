@@ -28,11 +28,11 @@ function fixture(taskCount: number, mappingCount: number) {
       },
     },
   });
-  const bb = {
+  const room = {
     ...host.bb,
     storage: { ...host.bb.storage, database: () => db },
   };
-  const store = createStore(bb);
+  const store = createStore(room);
   const project = store.tasks.createProject({
     name: "Query counts",
     prefix: "QUERY",
@@ -52,7 +52,7 @@ function fixture(taskCount: number, mappingCount: number) {
   );
   return {
     ...host,
-    bb,
+    bb: room,
     db,
     store,
     tasks,
@@ -86,11 +86,18 @@ describe("lifecycle SQL scope", () => {
     [200, 200],
     [501, 501],
   ])(
-    "uses one lookup per unrelated event with %i tasks and %i mappings",
+    "uses one query per status check and unrelated event with %i tasks and %i mappings",
     async (tasks, mappings) => {
       const f = fixture(tasks, mappings);
       try {
+        f.queries.length = 0;
         await registerLifecycle(f.bb, f.store);
+        expect(f.queries).toHaveLength(1);
+        f.queries.length = 0;
+        const service = f.harness.runService("thread-status-reconcile");
+        service.controller.abort();
+        await service.done;
+        expect(f.queries).toHaveLength(1);
         f.queries.length = 0;
         await emitAllEvents(f, "thr_unrelated");
         console.log(

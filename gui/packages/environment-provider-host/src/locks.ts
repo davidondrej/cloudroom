@@ -21,10 +21,11 @@ export async function withWorktreeMetadataLock<T>(
   commonDir: string,
   work: ProcessLocalQueuedLockWork<T>,
   signal?: AbortSignal,
+  heldByChildProcess = false,
 ): Promise<T> {
   const resolvedCommonDir = path.resolve(commonDir);
   return withProcessLocalQueuedLocks({
-    locks: [{ key: resolvedCommonDir }],
+    locks: [{ key: resolvedCommonDir, heldByChildProcess }],
     signal,
     work,
   });
@@ -39,6 +40,7 @@ export async function runGitWithWorktreeMetadataLock(
     commonDir,
     () => runGit(args, options),
     options.signal,
+    true,
   );
 }
 

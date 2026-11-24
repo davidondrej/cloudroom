@@ -43,7 +43,7 @@ function useResolvablePluginIds(): ReadonlySet<string> | null {
 
 function PluginApiMapPage({ subPath }: { subPath: string }) {
   const resolvable = useResolvablePluginIds();
-  const bbNavigate = useBbNavigate();
+  const roomNavigate = useBbNavigate();
   const pluginPageHref = useCallback(
     (displayName: string) => {
       const id = firstPartyPluginId(displayName);
@@ -54,12 +54,12 @@ function PluginApiMapPage({ subPath }: { subPath: string }) {
   );
   const onSlideChange = useCallback(
     (slideId: string) => {
-      bbNavigate.toPluginPanel("plugin-api", {
+      roomNavigate.toPluginPanel("plugin-api", {
         subPath: slideId,
         replace: true,
       });
     },
-    [bbNavigate],
+    [roomNavigate],
   );
   return (
     <div

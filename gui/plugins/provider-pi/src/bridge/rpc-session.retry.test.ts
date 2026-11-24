@@ -1,5 +1,8 @@
 import { expect, it, vi } from "vitest";
-import { runPiTransientAuthConstruction } from "./rpc-session.js";
+import {
+  isPiLockContention,
+  runPiTransientAuthConstruction,
+} from "./rpc-session.js";
 
 it("exhausts the initial construction and eight transient-auth retries deterministically", async () => {
   const errors = Array.from(
@@ -25,4 +28,26 @@ it("exhausts the initial construction and eight transient-auth retries determini
   expect(attempt).toHaveBeenCalledTimes(9);
   expect(discardFailedAttempt).toHaveBeenCalledTimes(8);
   expect(waitBeforeRetry).toHaveBeenCalledTimes(8);
+});
+
+it("never spawns again for a session closed during the retry wait", async () => {
+  let closed = false;
+  const error = new Error("locked");
+  const attempt = vi.fn(async () => ({ ok: false as const, error }));
+  await expect(
+    runPiTransientAuthConstruction({
+      attempt,
+      discardFailedAttempt: () => undefined,
+      isClosed: () => closed,
+      waitBeforeRetry: async () => {
+        closed = true;
+      },
+    }),
+  ).rejects.toBe(error);
+  expect(attempt).toHaveBeenCalledTimes(1);
+});
+
+it("sees Pi's lock crash through colored stderr", () => {
+  expect(isPiLockContention("{\n  code: \u001b[32m'ELOCKED'\u001b[39m\n}")).toBe(true);
+  expect(isPiLockContention("Error: EACCES")).toBe(false);
 });

@@ -3,8 +3,8 @@ import { turnScope } from "@cloudroom/domain";
 import {
   buildAcceptedClientRequestById,
   type AcceptedClientRequestContext,
-  type ThreadEventWithMetaLike,
-} from "../src/accepted-client-request-context.js";
+  type ThreadEventWithMeta,
+} from "../src/events.js";
 
 interface InputAcceptedEventArgs {
   clientRequestId: string;
@@ -20,7 +20,7 @@ function inputAcceptedEvent({
   eventId,
   sequence,
   turnId,
-}: InputAcceptedEventArgs): ThreadEventWithMetaLike {
+}: InputAcceptedEventArgs): ThreadEventWithMeta {
   return {
     event: {
       type: "turn/input/accepted",
@@ -44,9 +44,7 @@ describe("accepted client request context", () => {
       rejectedClientRequestEvents: [],
     };
 
-    const acceptedRequests = buildAcceptedClientRequestById({
-      context,
-      events: [
+    const acceptedRequests = buildAcceptedClientRequestById(context, [
         inputAcceptedEvent({
           clientRequestId: "creq_1234567890",
           createdAt: 100,
@@ -61,8 +59,7 @@ describe("accepted client request context", () => {
           sequence: 2,
           turnId: "turn-2",
         }),
-      ],
-    });
+      ]);
 
     expect(acceptedRequests.get("creq_1234567890")).toMatchObject({
       meta: {
@@ -86,9 +83,7 @@ describe("accepted client request context", () => {
       rejectedClientRequestEvents: [],
     };
 
-    const acceptedRequests = buildAcceptedClientRequestById({
-      context,
-      events: [
+    const acceptedRequests = buildAcceptedClientRequestById(context, [
         inputAcceptedEvent({
           clientRequestId: "creq_1234567890",
           createdAt: 100,
@@ -96,8 +91,7 @@ describe("accepted client request context", () => {
           sequence: 1,
           turnId: "turn-1",
         }),
-      ],
-    });
+      ]);
 
     expect(acceptedRequests.size).toBe(1);
     expect(acceptedRequests.get("creq_1234567890")).toMatchObject({

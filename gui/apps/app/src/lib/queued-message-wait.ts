@@ -37,6 +37,7 @@ export function isQueuedMessageSendNowAllowed(
     case "time":
     case "plugin":
     case "thread-busy":
+    case "repeated-message":
       return true;
   }
 }
@@ -74,6 +75,8 @@ export function queuedMessageWaitIcon(args: {
       return "CloudOff";
     case "interaction":
       return "CircleQuestion";
+    case "repeated-message":
+      return "AlertCircle";
     case "plugin":
       return null;
   }
@@ -140,6 +143,8 @@ export function describeQueuedMessageWait(
       return `Waiting for ${args.waitingOn.hostName} to be ready`;
     case "interaction":
       return "Waiting for your reply";
+    case "repeated-message":
+      return "Held: same message sent many times in a row";
     case "plugin":
       return `Held by ${args.pluginDisplayName ?? args.waitingOn.pluginId} · ${args.waitingOn.reason}`;
   }

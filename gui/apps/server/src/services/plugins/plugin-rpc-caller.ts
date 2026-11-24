@@ -1,9 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
-  createNodeBbSdk,
+  createNodeRoomSdk,
   createRequestTimeoutFetch,
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
   type BbSdk,
+  type FetchImplementation,
 } from "@cloudroom/sdk";
 import type { ExperimentalPluginRpcCaller } from "@get-bb/plugin-sdk";
 
@@ -51,19 +52,62 @@ export function createPluginRpcCallerRegistry(): PluginRpcCallerRegistry {
   };
 }
 
+const PLUGIN_SDK_CALLS_AT_ONCE = 16;
+// A call this old (a long poll, or one whose handler calls a plugin that
+// calls back in) stops holding its slot, so waiting calls can't deadlock.
+const LONG_PLUGIN_SDK_CALL_MS = 1_000;
+let countedPluginSdkCalls = 0;
+const waitingPluginSdkCalls: Array<() => void> = [];
+const requestTimeoutFetch = createRequestTimeoutFetch({
+  timeoutMs: DEFAULT_BB_REQUEST_TIMEOUT_MS,
+});
+
+function admitWaitingPluginSdkCalls(): void {
+  while (countedPluginSdkCalls < PLUGIN_SDK_CALLS_AT_ONCE) {
+    const admit = waitingPluginSdkCalls.shift();
+    if (admit === undefined) return;
+    countedPluginSdkCalls += 1;
+    admit();
+  }
+}
+
+// Plugins call this server over loopback, one socket per call in flight. A
+// plugin reading every thread at once opened ~1,000 sockets to the server,
+// filled its listen queue, and locked the CLI and app out (#1032).
+export const pluginSdkFetch: FetchImplementation = async (input, init) => {
+  if (countedPluginSdkCalls < PLUGIN_SDK_CALLS_AT_ONCE) {
+    countedPluginSdkCalls += 1;
+  } else {
+    await new Promise<void>((resolve) => waitingPluginSdkCalls.push(resolve));
+  }
+  let counted = true;
+  const release = () => {
+    if (!counted) return;
+    counted = false;
+    countedPluginSdkCalls -= 1;
+    admitWaitingPluginSdkCalls();
+  };
+  const timer = setTimeout(release, LONG_PLUGIN_SDK_CALL_MS);
+  try {
+    return await requestTimeoutFetch(input, init);
+  } finally {
+    clearTimeout(timer);
+    release();
+  }
+};
+
 export function createPluginRpcCallerSdk(args: {
   baseUrl: string;
+  callerToken?: string;
   token: string;
 }): BbSdk {
-  const timeoutFetch = createRequestTimeoutFetch({
-    timeoutMs: DEFAULT_BB_REQUEST_TIMEOUT_MS,
-  });
-  return createNodeBbSdk({
+  return createNodeRoomSdk({
     baseUrl: args.baseUrl,
+    callerToken: args.callerToken,
     fetch: (input, init) => {
       const headers = new Headers(init?.headers);
       headers.set(PLUGIN_RPC_CALLER_HEADER, args.token);
-      return timeoutFetch(input, { ...init, headers });
+      return pluginSdkFetch(input, { ...init, headers });
     },
   });
 }

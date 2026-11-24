@@ -1,6 +1,10 @@
 {
   "name": "bb-plugin-custom-instructions",
   "version": "0.1.0",
+  "author": {
+    "name": "BB",
+    "url": "https://github.com/get-bb/bb"
+  },
   "private": true,
   "type": "module",
   "description": "Add persistent custom instructions to agent tasks on this Cloudroom host.",
@@ -20,7 +24,7 @@
   ],
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "bun check",
     "prepare:bundled": "bb-plugin-build prepare-bundled"
   },
   "dependencies": {
@@ -31,7 +35,6 @@
     "@get-bb/plugin-sdk": "workspace:*",
     "@types/node": "^22.0.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

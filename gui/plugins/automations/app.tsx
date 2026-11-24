@@ -44,7 +44,9 @@ import {
   type LoopReviewState,
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
-import { mountPausedLoops } from "./paused-notice";
+import { loopsChanged, PausedLoopsLabel, usePlanLoopsChanged } from "./paused-notice";
+import { ScanCard } from "./scan-card";
+import { failurePause } from "./lib/paused.js";
 import type { LoopTemplate } from "./templates";
 import type {
   LoopTarget,
@@ -63,6 +65,7 @@ import {
 } from "@cloudroom/shared-ui/dialog";
 import { ResourceListState } from "@cloudroom/shared-ui/resource-list";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import type { TemplateUsage } from "./src/usage.js";
 
 const PANEL_PATH = "automations";
 type OverviewEntry = AutomationsOverviewResponse["automations"][number];
@@ -72,7 +75,8 @@ const lastLoaded: {
   review: ReviewResponse | null;
   plan: string | null | undefined;
   projects: TemplateProject[] | null;
-} = { entries: null, review: null, plan: undefined, projects: null };
+  usage: TemplateUsage | undefined;
+} = { entries: null, review: null, plan: undefined, projects: null, usage: undefined };
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -379,7 +383,11 @@ function useMutations() {
     | "automations_run"
     | "automations_delete";
   const call = useCallback(
-    (method: MutationMethod, route: DetailRoute) => rpc.call(method, route),
+    async (method: MutationMethod, route: DetailRoute) => {
+      const result = await rpc.call(method, route);
+      if (method !== "automations_run") loopsChanged();
+      return result;
+    },
     [rpc],
   );
   return {
@@ -456,6 +464,26 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
   const { providers } = useProviders();
   const [projects, setProjects] = useState(lastLoaded.projects);
   const [plan, setPlan] = useState(lastLoaded.plan);
+  const [usage, setUsage] = useState(lastLoaded.usage);
+  const paid = plan !== undefined && plan !== "free";
+  // A plan bought while this page is open: the pop-up after the purchase says so, and the paywall goes away.
+  const [planAsked, setPlanAsked] = useState(0);
+  usePlanLoopsChanged(() => setPlanAsked((count) => count + 1));
+  // Free never sees the templates, so it never pays for the estimate.
+  useEffect(() => {
+    if (!paid) return;
+    let cancelled = false;
+    rpc.call("templates_usage", null).then(
+      (result) => {
+        lastLoaded.usage = result;
+        if (!cancelled) setUsage(result);
+      },
+      () => {},
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, paid]);
   useEffect(() => {
     let cancelled = false;
     rpc.call("account_plan", null).then(
@@ -468,7 +496,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     return () => {
       cancelled = true;
     };
-  }, [rpc]);
+  }, [rpc, planAsked]);
   useEffect(() => {
     let cancelled = false;
     sdk.projects.list().then(
@@ -512,7 +540,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
             projectId,
           });
           const agent = ownAgent || defaults === null ? template : defaults;
-          if (target === "cloud") {
+          if (target === "cloud" && !template.localOnly) {
             await rpc.call("cloud_template_add", {
               projectId,
               name: template.name,
@@ -523,6 +551,9 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
               model: agent.model,
               reasoningLevel: agent.reasoningLevel,
               priority: template.priority,
+              ...(template.secrets !== undefined
+                ? { secrets: [...template.secrets] }
+                : {}),
             });
             return;
           }
@@ -538,7 +569,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
               providerId: agent.providerId,
               model: agent.model,
               reasoningLevel: agent.reasoningLevel,
-              permissionMode: defaults?.permissionMode ?? "auto",
+              permissionMode: defaults?.permissionMode ?? "full",
               environment: { type: "project-default" },
             },
           });
@@ -569,6 +600,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     onAdd,
     locked: plan === undefined ? null : plan === "free",
     onUpgrade,
+    usage,
   };
 }
 
@@ -696,6 +728,16 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
           ...(execution.serviceTier ? { serviceTier: execution.serviceTier } : {}),
         }
       : null,
+    ...(agent && execution.agents
+      ? {
+          agents: execution.agents.map((each) => ({
+            providerId: each.providerId,
+            model: each.model,
+            reasoningLevel: each.reasoningLevel ?? "medium",
+            ...(each.serviceTier ? { serviceTier: each.serviceTier } : {}),
+          })),
+        }
+      : {}),
     agentEditable: true,
     ...(agent
       ? { agentRouting: providerModelRouting(execution.environment) }
@@ -707,7 +749,16 @@ function localLoop(automation: AutomationResponse): LoopDialogLoop {
             : automationEnvironmentLabel(execution)
         } · ${PERMISSION_LABELS[execution.permissionMode] ?? execution.permissionMode}`
       : "Local · script",
+    secrets: { fixed: `Everything on this ${COMPUTER}` },
     ...(agent ? { usageKey: { automationId: automation.id } } : {}),
+    paused: failurePause(
+      {
+        enabled: automation.enabled,
+        lastError: automation.lastError,
+        at: automation.updatedAt,
+      },
+      Date.now(),
+    ),
   };
 }
 
@@ -756,6 +807,15 @@ function LocalLoopDialog({
       agent.reasoningLevel = changes.agent.reasoningLevel;
       agent.serviceTier = changes.agent.serviceTier ?? null;
     }
+    if (changes.agents !== undefined)
+      agent.agents = changes.agents.map((each) => ({
+        providerId: each.providerId,
+        model: each.model,
+        ...(each.reasoningLevel ? { reasoningLevel: each.reasoningLevel } : {}),
+        ...(each.serviceTier && each.serviceTier !== "default"
+          ? { serviceTier: each.serviceTier }
+          : {}),
+      }));
     try {
       await rpc.call("automations_update", {
         ...route,
@@ -914,7 +974,8 @@ function AutomationsPageFrame({
   children: ReactNode;
 }) {
   return (
-    <div className="h-full min-h-0 flex-1 overflow-y-auto">
+    // The Loops page renders at 90% on desktop, a step less zoomed in than the rest of the app.
+    <div className="h-full min-h-0 flex-1 overflow-y-auto md:[zoom:0.9]">
       <div
         className={cn(
           "mx-auto box-border min-h-full w-full max-w-5xl px-4 pb-4 pt-3 md:px-10 md:pt-4",
@@ -977,7 +1038,7 @@ export default definePluginApp((app) => {
     icon: "Repeat",
     path: PANEL_PATH,
     component: AutomationsPanel,
+    experimental_sidebarLabel: PausedLoopsLabel,
   });
-  // A card on every screen when a loop's own failures paused it (ADR 0338).
-  app.contentScripts.register({ id: "paused-loops", mount: mountPausedLoops });
+  app.slots.experimental_appOverlay({ id: "scan-card", component: ScanCard });
 });

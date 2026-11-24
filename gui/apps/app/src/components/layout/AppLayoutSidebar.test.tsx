@@ -58,20 +58,6 @@ vi.mock("@/components/settings/SettingsSidebar", async () => {
   };
 });
 
-vi.mock("@/components/tools/ResourceSidebar", async () => {
-  const { Sidebar } = await vi.importActual<
-    typeof import("@/components/ui/sidebar")
-  >("@/components/ui/sidebar");
-  return {
-    ResourceSidebar: ({ mobileHosted }: { mobileHosted?: boolean }) =>
-      mobileHosted ? (
-        <div data-testid="skills-sidebar-body">Skills sidebar</div>
-      ) : (
-        <Sidebar>Skills sidebar</Sidebar>
-      ),
-  };
-});
-
 const MOBILE_TOGGLE_SETTLE_MS = 220;
 
 function settleMobileToggle() {
@@ -120,9 +106,6 @@ function SidebarModeHarness({
       <button type="button" onClick={() => navigate("settings")}>
         Navigate to settings
       </button>
-      <button type="button" onClick={() => navigate("skills")}>
-        Navigate to skills
-      </button>
       <button type="button" onClick={() => navigate("app")}>
         Navigate back to app
       </button>
@@ -135,7 +118,6 @@ function SidebarModeHarness({
         isResizing={false}
         appRoutePath="/"
         settingsRoutePath="/settings"
-        toolsBackRoutePath="/"
       />
       <SidebarTrigger />
     </>
@@ -190,26 +172,18 @@ describe("AppLayoutSidebar mobile mode transitions", () => {
     settleMobileToggle();
     expect(getMobilePanel().dataset.state).toBe("open");
 
-    fireEvent.click(screen.getByRole("button", { name: "Navigate to skills" }));
-    settleMobileToggle();
-    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
-    expect(screen.getByTestId("skills-sidebar-body")).toBeTruthy();
-    expect(getAppSidebarBody().hidden).toBe(true);
-
-    fireEvent.click(screen.getByRole("button", { name: "Toggle Sidebar" }));
-    settleMobileToggle();
     fireEvent.click(
       screen.getByRole("button", { name: "Navigate back to app" }),
     );
 
-    expect(screen.getByTestId("skills-sidebar-body")).toBeTruthy();
+    expect(screen.getByTestId("settings-sidebar-body")).toBeTruthy();
     expect(getAppSidebarBody().hidden).toBe(true);
     expect(getShelfRevealTranslate()).toBe("0px");
 
     settleMobileToggle();
 
     expect(getMobilePanel()).toBe(panel);
-    expect(screen.queryByTestId("skills-sidebar-body")).toBeNull();
+    expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
     expect(getAppSidebarBody().hidden).toBe(false);
     expect(mountCounts.appSidebar).toBe(1);
   });
@@ -261,14 +235,10 @@ describe("AppLayoutSidebar mobile mode transitions", () => {
     expect(screen.queryByText("App sidebar")).toBeNull();
     expect(screen.queryByTestId("settings-sidebar-body")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Navigate to skills" }));
-    expect(screen.getByText("Skills sidebar")).toBeTruthy();
-    expect(screen.queryByText("Settings sidebar")).toBeNull();
-
     fireEvent.click(
       screen.getByRole("button", { name: "Navigate back to app" }),
     );
     expect(screen.getByText("App sidebar")).toBeTruthy();
-    expect(screen.queryByText("Skills sidebar")).toBeNull();
+    expect(screen.queryByText("Settings sidebar")).toBeNull();
   });
 });

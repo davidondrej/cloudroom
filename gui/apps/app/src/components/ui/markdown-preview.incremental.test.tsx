@@ -2,7 +2,7 @@
 
 import { act, cleanup, render, waitFor, within } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import {
   afterEach,
   beforeAll,

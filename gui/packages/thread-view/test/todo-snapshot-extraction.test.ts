@@ -1,8 +1,8 @@
 import { jsonObjectSchema, turnScope } from "@cloudroom/domain";
 import type { Thread, ThreadEventPlanStep } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
-import { extractThreadTimelinePendingTodos } from "../src/todo-snapshot-extraction.js";
-import type { ThreadEventWithMeta } from "../src/build-event-projection.js";
+import { extractThreadTimelinePendingTodos } from "../src/extractors.js";
+import type { ThreadEventWithMeta } from "../src/index.js";
 
 const ACTIVE: Thread["status"] = "active";
 

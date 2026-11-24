@@ -78,16 +78,15 @@ Skills (.bb/skills/):
 
 Cloudroom guide plugin:
 
-  The enabled-by-default Cloudroom guide plugin owns the Cloudroom introduction and the
-  cloudroom, plugin-authoring, and skill-creator skills. Settings → Installed
-  plugins → Cloudroom guide exposes introduction, a master skills switch, and one
-  switch per skill. All default to true. Use:
+  The enabled-by-default Cloudroom guide plugin owns the room-cli,
+  plugin-authoring, and skill-creator skills. Settings → Prompts → Cloudroom
+  guide exposes a master skills switch and one switch per skill. All default to
+  true. Use:
 
-    room-cli plugin config bb-guide set introduction false
-    room-cli plugin config bb-guide set skills false
-    room-cli plugin config bb-guide set bbCli false
-    room-cli plugin config bb-guide set pluginAuthoring false
-    room-cli plugin config bb-guide set skillCreator false
+    room-cli plugin config cloudroom-guide set skills false
+    room-cli plugin config cloudroom-guide set roomCli false
+    room-cli plugin config cloudroom-guide set pluginAuthoring false
+    room-cli plugin config cloudroom-guide set skillCreator false
 
   Changes apply when agent configuration is next assembled. They do not erase
   existing conversation text or disable independently installed copies.

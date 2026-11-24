@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { threadPaneActionSchema } from "@cloudroom/server-contract";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import {
   resolveContextThreadId,
   resolveExplicitIdFlag,
@@ -56,7 +56,7 @@ export function registerPaneCommand(
         ) => {
           const paneAction = threadPaneActionSchema.parse(actionInput);
           const target = resolveThreadPaneTarget(id);
-          const result = await createCliBbSdk(getUrl()).threads.paneAction({
+          const result = await createCliRoomSdk(getUrl()).threads.paneAction({
             action: paneAction,
             threadId: target.id,
           });

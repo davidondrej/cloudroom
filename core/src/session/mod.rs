@@ -1,5 +1,5 @@
 mod children;
-pub use children::{ForkFrom, Spawn};
+pub use children::{ForkFrom, ForkOptions, Spawn};
 mod outbox;
 pub mod teleport;
 pub use outbox::Journal;
@@ -8,11 +8,17 @@ pub mod automation;
 mod catalog;
 mod guard;
 pub(crate) mod history;
-mod prompt;
+pub mod info;
+pub(crate) mod prompt;
 pub(crate) mod relay;
 pub mod report;
 mod sleep;
+pub mod snippets;
 mod state;
+pub mod team;
+mod tokens;
+pub use state::SessionState;
+pub(crate) use tokens::Tokens;
 pub mod thread;
 
 use crate::{
@@ -46,6 +52,22 @@ pub struct Record {
     pub native: Option<String>,
 }
 
+/// Apps refuse a stream frame over 16 MiB, and the stream resends the same record forever (#581).
+const MAX_CLIENT_RECORD: usize = 8 << 20;
+
+impl Record {
+    fn for_client(mut self) -> Result<Self> {
+        let bytes = serde_json::to_vec(&self).map_err(io::Error::other)?.len();
+        if bytes > MAX_CLIENT_RECORD {
+            // The record keeps its place and drops its body. A kind apps don't know, so none parses the missing body.
+            self.kind = "oversized".into();
+            self.data = json!({ "oversized_bytes": bytes });
+            self.native = None;
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub request_id: String,
@@ -62,14 +84,32 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 
-/// A start's provider, command guard, co-author stripping, system prompt and parent thread in another sandbox.
+/// A start's provider, command guard, co-author stripping, system prompt, parent thread in another sandbox, and the
+/// app's thread and project IDs.
 type StartOptions = (
     Option<String>,
     Option<bool>,
     Option<bool>,
     Option<String>,
     Option<String>,
+    (Option<String>, Option<String>),
 );
+
+/// A child start the website drives (ADR 20261104-015709): the request it
+/// repeats until the child's first prompt is in, the child's thread ID once known, and how it ended.
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct ChildStart {
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub body: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub at_ms: u64,
+}
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -83,7 +123,7 @@ pub struct Session {
     pub native_id: Option<String>,
     pub native_path: Option<std::path::PathBuf>,
     pub native_offset: u64,
-    pub state: String,
+    pub state: SessionState,
     pub current_request: Option<String>,
     pub current_turn: Option<String>,
     pub startup_error: Option<String>,
@@ -113,12 +153,48 @@ pub struct Session {
     // Archived by `room-cli thread archive`; `thread list` hides it unless asked.
     #[serde(default)]
     pub archived: bool,
+    // Pinned by `room-cli thread pin` or `thread spawn --pin`; lets late-joining apps pin a shared child once.
+    #[serde(default)]
+    pub pinned: bool,
+    // The turn this thread archived itself in: archived, it still reports that one (relay.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_turn: Option<String>,
     // Turns already reported to the parent in another sandbox (relay.rs).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub reported: std::collections::BTreeSet<String>,
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_states: BTreeMap<String, String>,
+    // The reports an archived child could still send, by thread ID: its turns not reported yet when it took this
+    // parent's archive (relay.rs, #1000).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub late_reports: BTreeMap<String, std::collections::BTreeSet<String>>,
+    // When this parent archived each of them, while it still knows them as archived (relay.rs, #1430).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_archived_at: BTreeMap<String, u64>,
+    // Children this session asked the website to start in sandboxes of their own, by request ID (relay.rs).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub child_starts: BTreeMap<String, ChildStart>,
+    // The children those starts named, by thread ID: their reports and messages come to this session (relay.rs).
+    // Never trimmed, since a child can report long after its start.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub started: std::collections::BTreeSet<String>,
+    /// The session's latest title, its start's or a `title` record's, for `GET /v1/sessions` (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The newest prompt, steer or edit an app sent (`app_<install>_…` request IDs) and its record's sequence: the
+    /// computer where the user last used the thread (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_app_prompt: Option<Value>,
+    /// This session's own changes still owed to the website, oldest first (relay.rs `watch_thread_reports`, #237).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thread_reports: Vec<Value>,
+    /// The session an agent switch is starting from this one. Until it lands, this one takes no new work (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuing: Option<String>,
+    /// For a session that continues another (agent switch, project move): `from`, and the `history` file it got (#237).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued: Option<Value>,
     pub reasoning: Option<String>,
     pub workspace: Option<crate::workspace::Workspace>,
     #[serde(skip)]
@@ -145,6 +221,10 @@ pub struct Session {
     // The latest turn stopped on a subscription usage limit.
     #[serde(skip)]
     usage_limited: bool,
+    // The user switched accounts while this turn ran on the old login: if the limit stops it, it continues on the
+    // new one at once (ADR 20261107-082836).
+    #[serde(skip)]
+    switched_mid_turn: bool,
     // When that limit resets, if the harness said; a website loop resumes the thread then (accounts.rs).
     #[serde(skip)]
     usage_resets_ms: Option<u64>,
@@ -180,6 +260,25 @@ pub struct Session {
     // A child's latest completed replies by request, so a queued turn cannot hide them from its parent.
     #[serde(skip)]
     replies: Vec<(String, String)>,
+    // The running totals of the last `usage` reading (tokens.rs).
+    #[serde(skip)]
+    tokens: tokens::Tokens,
+    // Those totals when the running turn began, so a loop run reports only what its own turn used. None when unknown:
+    // after a restart, or when a copied-in history's totals were not counted yet.
+    #[serde(skip)]
+    turn_tokens: Option<tokens::Tokens>,
+    // The effort a turn was sent to the harness with, by request: `thread show` reports it while that turn runs, even
+    // after the thread's effort changes (#2028). Memory only: after a restart it says the prompt's or the thread's.
+    #[serde(skip)]
+    turn_reasoning: Option<(String, Option<String>)>,
+    // A copied-in history (teleport, move, rewind): Codex and Pi bring back its old totals, so the next reading only
+    // sets the base.
+    #[serde(skip)]
+    tokens_restored: bool,
+    // Teleport to Local holds the session (its request ID, until when in ms), so no other client changes it (#237).
+    // Memory only: a restart lifts it, and the teleporting app renews it every 2 minutes.
+    #[serde(skip)]
+    frozen: Option<(String, u64)>,
 }
 
 impl Session {
@@ -187,18 +286,26 @@ impl Session {
         if self.storage_paused {
             return "waiting";
         }
-        match self.state.as_str() {
-            "starting" | "resuming" => "queued",
-            "starting_turn" | "running" | "interrupting" | "closing" => "working",
-            "idle" => match self.last_prompt_state.as_deref() {
+        match self.state {
+            SessionState::Starting | SessionState::Resuming => "queued",
+            SessionState::StartingTurn
+            | SessionState::Running
+            | SessionState::Interrupting
+            | SessionState::Closing => "working",
+            SessionState::Idle => match self.last_prompt_state.as_deref() {
                 Some("failed") => "failed",
                 Some("unknown" | "unknown_after_restart") => "unknown",
                 _ => "waiting",
             },
-            "closed" => "stopped",
-            "sleeping" => "sleeping",
-            "failed" | "process_lost" => "failed",
-            _ => "unknown",
+            SessionState::Closed => "stopped",
+            SessionState::Sleeping => "sleeping",
+            SessionState::Failed | SessionState::ProcessLost => "failed",
+            SessionState::Pending
+            | SessionState::WaitingForFiles
+            | SessionState::Suspended
+            | SessionState::Rewinding
+            | SessionState::SavedHistoryOnly
+            | SessionState::Other(_) => "unknown",
         }
     }
 
@@ -226,6 +333,34 @@ impl Session {
             .map(str::to_owned)
     }
 
+    /// The app's project ID from the start. A shared child or side chat inherits it, but not the thread ID (#199).
+    fn project_id(&self) -> Option<&str> {
+        self.receipts
+            .values()
+            .find(|r| r.command == "start")
+            .and_then(|r| r.input["project_id"].as_str())
+    }
+
+    /// The app's thread ID from the start, which an agent switch or project move keeps (#199).
+    fn thread_id(&self) -> Option<&str> {
+        self.receipts
+            .values()
+            .find(|r| r.command == "start")
+            .and_then(|r| r.input["thread_id"].as_str())
+    }
+
+    /// `ROOM_THREAD_ID` and `ROOM_PROJECT_ID` for the agent's shells, from the app's IDs at start (#199).
+    fn room_env(&self) -> runtime::RoomEnv {
+        let start = self.receipts.values().find(|r| r.command == "start");
+        [
+            ("ROOM_THREAD_ID", "thread_id"),
+            ("ROOM_PROJECT_ID", "project_id"),
+        ]
+        .into_iter()
+        .filter_map(|(name, key)| Some((name, start?.input[key].as_str()?.to_owned())))
+        .collect()
+    }
+
     /// The app's thread this session reports its turns to, when that parent runs in another sandbox (relay.rs).
     fn parent_thread(&self) -> Option<&str> {
         self.receipts
@@ -250,14 +385,20 @@ impl Session {
             && self.native_path.is_some()
             && self.close_request.is_none()
             && !matches!(
-                self.state.as_str(),
-                "closed" | "process_lost" | "failed" | "resuming" | "rewinding"
+                self.state,
+                SessionState::Closed
+                    | SessionState::ProcessLost
+                    | SessionState::Failed
+                    | SessionState::Resuming
+                    | SessionState::Rewinding
             )
     }
 
     fn waiting_start(&self) -> Option<String> {
-        if !matches!(self.state.as_str(), "pending" | "waiting_for_files")
-            || self.close_request.is_some()
+        if !matches!(
+            self.state,
+            SessionState::Pending | SessionState::WaitingForFiles
+        ) || self.close_request.is_some()
             || self.native_id.is_some()
             || self.harness_pid.is_some()
         {
@@ -266,6 +407,25 @@ impl Session {
         self.receipts
             .values()
             .find(|r| r.command == "start" && r.state == "accepted")
+            .map(|r| r.request_id.clone())
+    }
+
+    /// The start of an agent that failed before it existed: no native conversation, no turn, no process. Starting it
+    /// again repeats nothing, so a parent's tell or the user's resume may (#2036).
+    fn failed_start(&self) -> Option<String> {
+        if self.state != SessionState::Failed
+            || self.native_id.is_some()
+            || self.has_dispatched
+            || self.handle.is_some()
+            || self.harness_pid.is_some()
+            || self.current_request.is_some()
+            || self.close_request.is_some()
+        {
+            return None;
+        }
+        self.receipts
+            .values()
+            .find(|r| r.command == "start" && r.state == "failed")
             .map(|r| r.request_id.clone())
     }
 
@@ -281,6 +441,12 @@ impl Session {
 pub enum Error {
     NotFound,
     Conflict(&'static str),
+    /// A 409 whose text names its cause, such as the saved reason a new agent didn't start (#1802).
+    Refused(String),
+    /// A 409 for a session whose agent failed to start before any turn ran (`code: "never_started"`).
+    NeverStarted(String),
+    /// A refused effort, with the levels the model takes (`invalid_reasoning_effort`).
+    Effort(String),
     /// Carries the underlying cause so API clients can see why storage failed.
     Storage(String),
 }
@@ -290,6 +456,16 @@ impl Error {
         match self {
             Self::NotFound => "session not found".into(),
             Self::Conflict(message) => (*message).into(),
+            Self::Refused(message) | Self::NeverStarted(message) => message.clone(),
+            Self::Effort(message) => format!("invalid reasoning effort: {message}"),
+            // A locked journal or a write that found no space: the only way in is `vm run` (#211).
+            Self::Storage(detail)
+                if detail == JOURNAL_UNWRITABLE || detail.contains("os error 28") =>
+            {
+                format!(
+                    "storage unavailable ({detail}). Disk full? Free a few GB with `room-cli vm run --thread <thread id> '<command>'`"
+                )
+            }
             Self::Storage(detail) => format!("storage unavailable ({detail})"),
         }
     }
@@ -314,11 +490,20 @@ struct Local {
     // Status snapshots must not clone the potentially large replay index.
     sequences: BTreeMap<String, Vec<u64>>,
     changed: watch::Sender<u64>,
+    // Whether the last upload succeeded: true until one fails.
     database_available: bool,
+    // The newest record that needs an upload. A parent report's ack doesn't: it rides with the next one (#1410).
+    loud: u64,
+    // A turn report waits for an upload: due at the uploader's next check, but never inside a failure's backoff.
+    report_waits: bool,
     // Set by a drain before the sandbox stops; refuses new work until released.
     draining: bool,
     // The journal position of the latest replay snapshot (or failed attempt).
     snapshot_at: u64,
+    // The shared browser, paused by the idle sleeper while nothing may use it (#610).
+    browser: sleep::Browser,
+    // The agent account that owns that browser; None when agents run as Core's own account.
+    browser_owner: Option<u32>,
 }
 
 pub struct Manager {
@@ -329,6 +514,7 @@ pub struct Manager {
     pub(crate) storage: Arc<Guard>,
     pub(crate) workspaces: crate::workspace::Workspaces,
     pub(crate) sync: crate::sync::Sync,
+    pub(crate) repo_sync: crate::workspace::repo_sync::RepoSync,
     pub(crate) previews: Arc<crate::preview::Previews>,
     pub(crate) terminals: runtime::terminal::Terminals,
     pub(crate) mac: crate::mac::Mac,
@@ -336,6 +522,8 @@ pub struct Manager {
     codex_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     claude_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     cursor_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
+    opencode_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
+    antigravity_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
     codex_auth: runtime::auth::CodexAuth,
     claude_auth: Arc<runtime::claude_auth::ClaudeAuth>,
     claude_login: runtime::claude_login::ClaudeLogin,
@@ -356,9 +544,22 @@ pub struct Manager {
     report_retry: Mutex<(u64, u64)>,
 }
 
+/// Why a turn the last Core run left open ended: its exit status from the supervisor, else nothing guessed.
+fn restart_reason(status: Option<&str>) -> String {
+    let how = match status.and_then(|s| s.parse::<u32>().ok()) {
+        Some(n @ 129..=192) => format!(" after signal {}", n - 128),
+        Some(n @ 1..=128) => format!(" after exit status {n}"),
+        _ => String::new(),
+    };
+    format!("Cloudroom restarted{how} while this ran; its result is unknown.")
+}
+
 impl Manager {
     pub fn open(config: Config) -> io::Result<Arc<Self>> {
         let mut local = Local::open(&config.state_dir)?;
+        local.browser_owner = config.storage.as_ref().map(|p| p.agent_uid);
+        // A turn still open here was cut off by an exit without cleanup. The supervisor passes that exit (#1763).
+        let restarted = restart_reason(std::env::var("CLOUDROOM_PREVIOUS_EXIT").ok().as_deref());
         // Resume conversations, not uncertain actions. An interrupted resume attempt
         // is left failed instead of creating a service-restart recovery loop.
         for session in local.sessions.values().cloned().collect::<Vec<_>>() {
@@ -373,9 +574,20 @@ impl Manager {
             if session.waiting_start().is_some() {
                 continue;
             }
+            // A wake that a crash cut off runs once more while messages wait for it, so a queued tell isn't lost
+            // (#1927). It claims the one recovery: a wake that keeps crashing Core fails them, as before. Never for an
+            // archived thread or a pending close: those fail them, as before.
+            let retry = session.state == SessionState::Resuming
+                && !session.archived
+                && session.close_request.is_none()
+                && session.has_dispatched
+                && session.native_path.is_some()
+                && !session.recovery_attempted
+                && !session.queue.is_empty();
             let eligible = session.can_resume()
+                || retry
                 || session.startup_error.as_deref() == Some("startup_timeout")
-                || (session.state == "resuming"
+                || (session.state == SessionState::Resuming
                     && !session.has_dispatched
                     && session.native_path.is_some());
             for mut receipt in session.receipts.values().cloned() {
@@ -388,13 +600,33 @@ impl Manager {
                 }
                 let queued =
                     receipt.command == "prompt" && session.queue.contains(&receipt.request_id);
+                // A sleep still waiting (an Accounts switch's, held by background jobs) is done: the restart stopped
+                // the agent. Never an error on an idle thread (#1985).
+                let slept = receipt.command == "sleep";
                 if !eligible || !queued {
                     receipt.state = if queued {
                         "failed"
+                    } else if slept {
+                        "completed"
                     } else {
                         "unknown_after_restart"
                     }
                     .into();
+                    // Top-level threads only, never a self-started turn: a child's errors reach its parent's notices.
+                    if !queued
+                        && !slept
+                        && receipt.command != "auto"
+                        && session.parent_session.is_none()
+                    {
+                        // A turn paused for a full disk says so, or its parent never learns why (#309).
+                        receipt.error.get_or_insert_with(|| {
+                            if session.storage_paused {
+                                format!("{restarted} It was paused because the disk was full.")
+                            } else {
+                                restarted.clone()
+                            }
+                        });
+                    }
                     local.append(
                         &session.session_id,
                         "receipt",
@@ -404,15 +636,17 @@ impl Manager {
                 }
             }
             if !matches!(
-                session.state.as_str(),
-                "closed" | "process_lost" | "failed" | "sleeping"
+                session.state,
+                SessionState::Closed
+                    | SessionState::ProcessLost
+                    | SessionState::Failed
+                    | SessionState::Sleeping
             ) {
-                local.append(
-                    &session.session_id,
-                    "state",
-                    json!({"state":if eligible { "suspended" } else { "process_lost" }}),
-                    None,
-                )?;
+                let mut state = json!({"state":if eligible { SessionState::Suspended } else { SessionState::ProcessLost }});
+                if retry {
+                    state["recovery"] = json!(true);
+                }
+                local.append(&session.session_id, "state", state, None)?;
             }
         }
         // Native recovery runs helpers (Cursor capture) inside the agent cgroup, so prepare it first.
@@ -433,17 +667,19 @@ impl Manager {
                     },
                 )
             {
+                let reason = format!("native history missing, changed or unreadable: {error}");
                 local.append(
                     &session.session_id,
                     "native_history_unavailable",
-                    json!({"reason":format!("native history missing, changed or unreadable: {error}")}),
+                    json!({"reason":reason}),
                     None,
                 )?;
                 if session.can_resume() {
+                    // The reason goes with the state too: apps show a lost session's reason, not this record.
                     local.append(
                         &session.session_id,
                         "state",
-                        json!({"state":"process_lost"}),
+                        json!({"state":SessionState::ProcessLost,"reason":format!("The agent's saved conversation could not be reopened, so this thread can't continue ({reason}).")}),
                         None,
                     )?;
                     local
@@ -455,13 +691,16 @@ impl Manager {
         local.save_snapshot();
         let workspaces = crate::workspace::Workspaces::open(&config)?;
         let sync = crate::sync::Sync::open(&config)?;
+        let repo_sync = crate::workspace::repo_sync::RepoSync::new(&config);
         let previews = crate::preview::Previews::open(&config)?;
         let history = history::History::new(&config)?;
         let plan = accounts::PlanState::load(&config.state_dir);
         let local = Arc::new(Mutex::new(local));
-        let registry = local.clone();
+        let (registry, served) = (local.clone(), previews.clone());
         let observability = Observability::start(&config, history.api.clone(), move || {
-            registry.lock().unwrap().agent_counts()
+            let mut counts = registry.lock().unwrap().agent_counts();
+            counts.preview_at = served.last_activity();
+            counts
         });
         Ok(Arc::new(Self {
             config,
@@ -471,6 +710,7 @@ impl Manager {
             storage,
             workspaces,
             sync,
+            repo_sync,
             teleports: teleport::Transfers::default(),
             previews,
             terminals: Default::default(),
@@ -479,6 +719,8 @@ impl Manager {
             codex_models: tokio::sync::Mutex::new(None),
             claude_models: tokio::sync::Mutex::new(None),
             cursor_models: tokio::sync::Mutex::new(None),
+            opencode_models: tokio::sync::Mutex::new(None),
+            antigravity_models: tokio::sync::Mutex::new(None),
             codex_auth: runtime::auth::CodexAuth::default(),
             claude_auth: Arc::new(runtime::claude_auth::ClaudeAuth::default()),
             claude_login: runtime::claude_login::ClaudeLogin::default(),
@@ -539,6 +781,73 @@ impl Manager {
         }
     }
 
+    /// Teleport to Local holds session `id` for `request` (#237): until `release`, a close, or FREEZE_MS without a
+    /// renewal, every other client's change gets MOVING. The same request renews it; another is refused.
+    pub fn freeze(&self, id: &str, request: &str, release: bool) -> Result<Value> {
+        let mut local = self.local.lock().unwrap();
+        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+        let now = now_ms();
+        if session
+            .frozen
+            .as_ref()
+            .is_some_and(|(held, until)| *until > now && held != request)
+        {
+            return Err(Error::Conflict(MOVING));
+        }
+        if release {
+            session.frozen = None;
+            return Ok(json!({"frozen":false}));
+        }
+        if session.continuing.is_some() {
+            return Err(Error::Conflict(SWITCHING));
+        }
+        session.frozen = Some((request.to_owned(), now + FREEZE_MS));
+        Ok(json!({"frozen":true,"until_ms":now + FREEZE_MS}))
+    }
+
+    /// Whether `request` still holds the session: Teleport's close checks it, so a lapsed freeze never ends a turn
+    /// another client started meanwhile.
+    pub fn holds(&self, id: &str, request: &str) -> bool {
+        let local = self.local.lock().unwrap();
+        local
+            .sessions
+            .get(id)
+            .and_then(|s| s.frozen.as_ref())
+            .is_some_and(|(held, until)| held == request && *until > now_ms())
+    }
+
+    /// The user renames session `id` in an app (#237). Never reported: the app sends a thread's own rename to the website.
+    pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
+        if !self.local.lock().unwrap().sessions.contains_key(id) {
+            return Err(Error::NotFound);
+        }
+        Ok(self.note(id, "title", json!({"title":title,"user":true}))?)
+    }
+
+    /// The user archives or restores session `id` in an app (#237): a thread sharing another's sandbox, which has no
+    /// website row, or a thread its agent archived while a child kept the sandbox, restored before the website heard.
+    pub fn set_archived(&self, id: &str, archived: bool) -> Result<()> {
+        if !self.local.lock().unwrap().sessions.contains_key(id) {
+            return Err(Error::NotFound);
+        }
+        // A restore gets its own record kind: apps before #237 archive the thread on any `archive` record.
+        let (kind, data) = if archived {
+            ("archive", json!({"archived":true,"user":true}))
+        } else {
+            ("unarchive", json!({"user":true}))
+        };
+        Ok(self.note(id, kind, data)?)
+    }
+
+    /// Names this Core's start for the website: every wake starts Core with a new token (#237, web `coreThread`).
+    pub(crate) fn wake_id(&self) -> String {
+        let digest = ring::digest::digest(&ring::digest::SHA256, self.config.token.as_bytes());
+        digest.as_ref()[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
     /// Appends a record that no harness produced, such as a secret request.
     pub(crate) fn note(&self, session: &str, kind: &str, data: Value) -> io::Result<()> {
         self.local
@@ -573,14 +882,17 @@ impl Manager {
 
     pub async fn records(&self, session: &str, after: u64) -> Result<Vec<Record>> {
         {
-            let local = self.local.lock().unwrap();
+            let mut guard = self.local.lock().unwrap();
+            let local = &mut *guard;
             if let Some(sequences) = local.sequences.get(session) {
                 return sequences[sequences.partition_point(|id| *id <= after)..]
                     .iter()
                     .take(256)
                     .map(|sequence| {
-                        Ok(serde_json::from_slice(&local.journal.read(*sequence)?)
-                            .map_err(io::Error::other)?)
+                        let record: Record =
+                            serde_json::from_slice(&local.journal.read(*sequence)?)
+                                .map_err(io::Error::other)?;
+                        record.for_client()
                     })
                     .collect();
             }
@@ -588,7 +900,10 @@ impl Manager {
         self.history
             .read(session, after)
             .await
-            .map_err(|e| Error::Storage(format!("saved history: {e}")))
+            .map_err(|e| Error::Storage(format!("saved history: {e}")))?
+            .into_iter()
+            .map(Record::for_client)
+            .collect()
     }
 
     pub async fn session(&self, id: &str) -> Result<Session> {
@@ -605,8 +920,8 @@ impl Manager {
 
     pub fn recovery_check(&self, session: &Session) -> Value {
         let (status, message) = if session.close_request.is_some()
-            || session.state == "closed"
-            || session.state == "saved_history_only"
+            || session.state == SessionState::Closed
+            || session.state == SessionState::SavedHistoryOnly
         {
             (
                 "unavailable",
@@ -648,23 +963,29 @@ impl Manager {
         json!({"status":status,"message":message})
     }
 
+    /// A request's content, as retries compare it. `plan_only` is guard metadata Core may add itself (an inherited
+    /// resume), and `ended` when its turn ended (#217), not the request's content. The thread and project IDs aren't
+    /// either: a retry may add or drop them as the sender learns what Core knows (#199).
+    fn content(input: &Value) -> Value {
+        let mut input = input.clone();
+        if let Some(fields) = input.as_object_mut() {
+            for key in ["plan_only", "ended", "thread_id", "project_id", "waiting"] {
+                fields.remove(key);
+            }
+        }
+        input
+    }
+
     fn retry(
         session: &Session,
         request: &str,
         command: &str,
         input: &Value,
     ) -> Result<Option<Receipt>> {
-        // `plan_only` is guard metadata Core may add itself (an inherited resume), not the request's content.
-        let content = |input: &Value| {
-            let mut input = input.clone();
-            if let Some(fields) = input.as_object_mut() {
-                fields.remove("plan_only");
-            }
-            input
-        };
         match session.receipts.get(request) {
             Some(receipt)
-                if receipt.command != command || content(&receipt.input) != content(input) =>
+                if receipt.command != command
+                    || Self::content(&receipt.input) != Self::content(input) =>
             {
                 Err(Error::Conflict("request_id already has different content"))
             }
@@ -682,13 +1003,17 @@ impl Manager {
         }
         let busy = self.local.lock().unwrap().sessions.values().any(|s| {
             s.harness == runtime::Kind::Claude
-                && (s.handle.is_some() || matches!(s.state.as_str(), "starting" | "resuming"))
+                && (s.handle.is_some()
+                    || matches!(s.state, SessionState::Starting | SessionState::Resuming))
         });
         Ok(runtime::claude_version::ensure(self.config.clone(), version, busy).await)
     }
 
     /// Account checks shared by new sessions and Teleport's preflight.
     async fn harness_ready(self: &Arc<Self>, kind: runtime::Kind) -> Result<()> {
+        if kind == runtime::Kind::Antigravity && runtime::antigravity::needs_login(&self.config) {
+            return Err(Error::Conflict(runtime::antigravity::SIGN_IN));
+        }
         if kind == runtime::Kind::Claude {
             match self
                 .claude_auth
@@ -701,7 +1026,24 @@ impl Manager {
                         "connect Claude Code before starting cloud work",
                     ));
                 }
-                Err(_) => return Err(Error::Conflict("Claude account could not be verified")),
+                // Why, in our own words: never the CLI's output (#1222). Same prefix, so the code stays.
+                Err(reason) => {
+                    return Err(Error::Conflict(match reason {
+                        "check_timeout" => {
+                            "Claude account could not be verified: the login check timed out"
+                        }
+                        "check_failed" => {
+                            "Claude account could not be verified: the Claude CLI could not run"
+                        }
+                        "check_bad_exit" => {
+                            "Claude account could not be verified: the Claude CLI exited with an error"
+                        }
+                        "check_bad_response" => {
+                            "Claude account could not be verified: the Claude CLI gave an unreadable answer"
+                        }
+                        _ => "Claude account could not be verified",
+                    }));
+                }
             }
         }
         if kind == runtime::Kind::Cursor {
@@ -714,10 +1056,34 @@ impl Manager {
             }
         }
         if kind == runtime::Kind::Codex {
-            match self.codex_auth_status().await.state {
+            let status = self.codex_auth_status().await;
+            // Which login state failed, and the fix (#1017). Same prefix, so the code and matchers stay.
+            match status.state {
                 "connected" => {}
-                "missing" | "waiting" | "expired" | "error" => {
-                    return Err(Error::Conflict("connect Codex before starting cloud work"));
+                "missing" if status.message == Some(runtime::auth::LOGIN_REJECTED) => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: OpenAI rejected this sandbox's Codex login. Sign in to Codex again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "missing" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: this sandbox has no Codex login. Sign in to Codex in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "waiting" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here is not finished. Finish it or sign in again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "expired" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here expired before it was finished. Sign in again in Cloudroom's Agents settings, then retry",
+                    ));
+                }
+                "error" => {
+                    return Err(Error::Conflict(
+                        "connect Codex before starting cloud work: a Codex sign-in here failed, or its saved login is invalid. Sign in again in Cloudroom's Agents settings, then retry",
+                    ));
                 }
                 "limited" => return Err(Error::Conflict("Codex usage limit reached")),
                 _ => return Err(Error::Conflict("Codex account could not be verified")),
@@ -742,7 +1108,11 @@ impl Manager {
             runtime::Kind::OpenCode => runtime::OPENCODE_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Hermes => runtime::HERMES_REASONING_LEVELS.contains(&reasoning),
             runtime::Kind::Devin => runtime::DEVIN_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Droid => runtime::DROID_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Kimi => runtime::KIMI_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::Antigravity => runtime::antigravity::LEVELS.contains(&reasoning),
             runtime::Kind::OpenClaw => runtime::OPENCLAW_REASONING_LEVELS.contains(&reasoning),
+            runtime::Kind::AgentZero => runtime::AGENT_ZERO_REASONING_LEVELS.contains(&reasoning),
         };
         if !supported {
             return Err(Error::Conflict("invalid reasoning effort"));
@@ -757,7 +1127,14 @@ impl Manager {
         model: Option<String>,
         reasoning: Option<String>,
         (workspace, workspace_name): (Option<String>, Option<String>),
-        (provider, command_guard_enabled, strip_ai_co_authors, system_prompt, parent_thread): StartOptions,
+        (
+            provider,
+            command_guard_enabled,
+            strip_ai_co_authors,
+            system_prompt,
+            parent_thread,
+            (thread_id, project_id),
+        ): StartOptions,
     ) -> Result<(String, Receipt)> {
         let id = format!("cr_{request}");
         let kind = harness
@@ -789,6 +1166,17 @@ impl Manager {
                 return Err(Error::Conflict("invalid parent_thread"));
             }
             input["parent_thread"] = json!(parent);
+        }
+        if let Some(thread) = &thread_id {
+            if !relay::thread_id(thread) {
+                return Err(Error::Conflict("invalid thread_id"));
+            }
+            input["thread_id"] = json!(thread);
+        }
+        if let Some(project) = &project_id {
+            crate::workspace::valid_id(project)
+                .map_err(|_| Error::Conflict("invalid project_id"))?;
+            input["project_id"] = json!(project);
         }
         if let Some(model) = &model {
             input["model"] = json!(model);
@@ -857,7 +1245,7 @@ impl Manager {
             }
             let receipt =
                 receipt.ok_or(Error::Conflict("saved session has no matching receipt"))?;
-            if receipt.input != input {
+            if Self::content(&receipt.input) != Self::content(&input) {
                 return Err(Error::Conflict("request_id already has different content"));
             }
             return Ok((id, receipt));
@@ -925,6 +1313,620 @@ impl Manager {
         Ok((id, receipt))
     }
 
+    /// Starts `cr_<request>` as the continuation of session `from`: an agent switch or a project move, from any of the
+    /// user's computers (#237). One exclusive transition: `from` is held (SWITCHING) before its history is copied, the
+    /// new session gets that history and the old start's settings, and `from` closes only once the website took the
+    /// new one. True while the website hasn't answered yet: Core keeps trying, and the thread's list shows the outcome.
+    pub async fn continue_session(
+        self: &Arc<Self>,
+        request: String,
+        from: String,
+        (harness, model, reasoning, provider): (
+            Option<runtime::Kind>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+        (workspace, workspace_name): (Option<String>, Option<String>),
+        (thread_id, project_id): (Option<String>, Option<String>),
+    ) -> Result<(String, Receipt, bool)> {
+        let id = format!("cr_{request}");
+        let existing = self
+            .local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&id)
+            .and_then(|s| s.receipts.get(&request).cloned());
+        if let Some(receipt) = existing {
+            return self.continue_again(from, id, receipt).await;
+        }
+        let (old, options) = {
+            let mut local = self.local.lock().unwrap();
+            let s = local.sessions.get(&from).ok_or(Error::NotFound)?;
+            if s.parent_session.is_some() {
+                return Err(Error::Conflict(
+                    "a thread sharing its parent's sandbox keeps its agent",
+                ));
+            }
+            if s.continuing.is_some() {
+                return Err(Error::Conflict(SWITCHING));
+            }
+            if s.frozen
+                .as_ref()
+                .is_some_and(|(_, until)| *until > now_ms())
+            {
+                return Err(Error::Conflict(MOVING));
+            }
+            if s.busy() || !s.queue.is_empty() || s.close_request.is_some() {
+                return Err(Error::Conflict(
+                    "wait until the agent and its queued messages finish, then switch",
+                ));
+            }
+            if local
+                .sessions
+                .values()
+                .any(|c| c.parent_session.as_deref() == Some(&from) && c.busy())
+            {
+                return Err(Error::Conflict(
+                    "wait until this thread's child agents finish, then switch",
+                ));
+            }
+            // The thread keeps its IDs unless the app names them. A project move into another folder keeps only the
+            // thread's, so the agent never gets the old project's ID (#199).
+            let moved = workspace
+                .as_ref()
+                .is_some_and(|w| s.workspace.as_ref().is_none_or(|old| old.id != *w));
+            let options = (
+                provider,
+                Some(s.command_guard_enabled()),
+                Some(s.strip_ai_co_authors()),
+                s.system_prompt(),
+                s.parent_thread().map(str::to_owned),
+                (
+                    thread_id.or_else(|| s.thread_id().map(str::to_owned)),
+                    project_id.or_else(|| s.project_id().filter(|_| !moved).map(str::to_owned)),
+                ),
+            );
+            let old = (
+                s.harness,
+                s.model.clone(),
+                s.reasoning.clone(),
+                s.workspace.clone(),
+                s.last_app_prompt.clone(),
+                s.continued.clone(),
+            );
+            local.append(&from, "continuing", json!({"session":id}), None)?;
+            (old, options)
+        };
+        let (old_harness, old_model, old_reasoning, old_workspace, last_app_prompt, earlier) = old;
+        let harness = harness.unwrap_or(old_harness);
+        let model = model.or_else(|| (harness == old_harness).then_some(old_model).flatten());
+        // Same folder as before, unless a project move names another (the app's rule before #237).
+        let workspace = workspace.or_else(|| match &old_workspace {
+            Some(w) if w.id != "legacy" => Some(w.id.clone()),
+            Some(w) if w.path != self.config.repository => Some(crate::workspace::ROOT.to_owned()),
+            _ => None,
+        });
+        let release = |manager: &Self| {
+            let _ = manager.note(&from, "continuing", json!({"session":null}));
+        };
+        let history = self.history_markdown(&from, earlier.as_ref()).await;
+        let started = self
+            .start(
+                request.clone(),
+                Some(harness),
+                model,
+                reasoning.or(old_reasoning),
+                (workspace, workspace_name),
+                options,
+            )
+            .await;
+        let (id, receipt) = match started {
+            Ok(started) => started,
+            Err(error) => {
+                release(self);
+                return Err(error);
+            }
+        };
+        // Its history goes into its own folder, where its agent reads it; a note on its first prompt points there.
+        // Without it the new agent would start blank, so the switch stops instead.
+        let path = match (&receipt.workspace, history.as_ref()) {
+            (Some(folder), Some((full, _))) => {
+                let written = self
+                    .workspaces
+                    .attach(
+                        folder,
+                        &request,
+                        HISTORY_FILE,
+                        "file",
+                        axum::body::Body::from(full.clone()),
+                        &self.storage,
+                    )
+                    .await
+                    .ok()
+                    .and_then(|written| written["path"].as_str().map(str::to_owned));
+                if written.is_none() {
+                    self.settle_continue(&from, &id, false);
+                    return Err(Error::Conflict(
+                        "the conversation couldn't be copied to the new agent, so this thread wasn't changed",
+                    ));
+                }
+                written
+            }
+            _ => None,
+        };
+        // Core keeps its own copy for this session's next switch: the file above is the agent's to change.
+        if let Some((full, _)) = &history {
+            prompt::save_history(&self.config.state_dir, &id, full);
+        }
+        let continued = json!({"from":from,"history":path,"last_app_prompt":last_app_prompt});
+        self.note(&id, "continued", continued)?;
+        if let (Some(path), Some((_, tail))) = (&path, &history) {
+            let what = if harness == old_harness {
+                "This conversation moved to another project folder, in a new session.".to_owned()
+            } else {
+                format!(
+                    "This conversation started with another agent ({}). You are now continuing it as {}.",
+                    json!(old_harness),
+                    json!(harness)
+                )
+            };
+            prompt::add_session_note(
+                &self.config.state_dir,
+                &id,
+                &format!(
+                    "<cloudroom_custom_instructions>\n[Cloudroom] {what} The full conversation so far is in {path}: user messages and agent replies, without tool output. Read it before you reply, treat it as your own history, check the workspace for the current state, and don't redo finished work.\n\nThe latest messages:\n\n{tail}\n</cloudroom_custom_instructions>"
+                ),
+            );
+        }
+        let pending = self.land_continue(from, id.clone()).await?;
+        Ok((id, receipt, pending))
+    }
+
+    /// The same switch asked for again, say after a lost answer (#237). One still being set up is waited for, then
+    /// finished; a finished one says how it ended.
+    async fn continue_again(
+        self: &Arc<Self>,
+        from: String,
+        id: String,
+        receipt: Receipt,
+    ) -> Result<(String, Receipt, bool)> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (holding, continued, state) = {
+                let local = self.local.lock().unwrap();
+                let s = local.sessions.get(&id);
+                (
+                    local
+                        .sessions
+                        .get(&from)
+                        .is_some_and(|s| s.continuing.as_deref() == Some(&id)),
+                    s.and_then(|s| s.continued.clone()),
+                    s.map(|s| s.state.clone()),
+                )
+            };
+            match continued {
+                Some(c) if c["from"].as_str() != Some(from.as_str()) => {
+                    return Err(Error::Conflict("request_id already has different content"));
+                }
+                Some(_) if holding => {
+                    return Ok((id.clone(), receipt, self.land_continue(from, id).await?));
+                }
+                Some(_) if matches!(state, Some(SessionState::Closing | SessionState::Closed)) => {
+                    return Err(Error::Conflict(
+                        "this switch didn't happen, so this thread wasn't changed",
+                    ));
+                }
+                Some(_) => return Ok((id, receipt, false)),
+                None if !holding => {
+                    return Err(Error::Conflict("request_id already has different content"));
+                }
+                None if Instant::now() > deadline => return Err(Error::Conflict(SWITCHING)),
+                None => tokio::time::sleep(Duration::from_millis(250)).await,
+            }
+        }
+    }
+
+    /// Waits until the new agent started, then hands the website the new session (#237). An agent that doesn't start
+    /// ends the switch, and the old session takes work again. True while the website hasn't answered yet.
+    async fn land_continue(self: &Arc<Self>, from: String, id: String) -> Result<bool> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let state = self
+                .local
+                .lock()
+                .unwrap()
+                .sessions
+                .get(&id)
+                .map(|s| s.state.clone());
+            let failure = match state {
+                Some(SessionState::Idle) => break,
+                Some(SessionState::Failed | SessionState::ProcessLost | SessionState::Closed)
+                | None => {
+                    let failure =
+                        "the new agent couldn't start in Cloud, so this thread wasn't changed";
+                    match self.start_failure(&id) {
+                        Some(why) => Error::Refused(format!("{failure}: {why}")),
+                        None => Error::Conflict(failure),
+                    }
+                }
+                _ if Instant::now() > deadline => Error::Conflict(
+                    "the new agent didn't start within a minute, so this thread wasn't changed",
+                ),
+                _ => {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    continue;
+                }
+            };
+            self.settle_continue(&from, &id, false);
+            return Err(failure);
+        }
+        let pending = self
+            .finish_continue(from.clone(), id.clone(), CONTINUE_WAIT)
+            .await?;
+        if pending {
+            self.keep_finishing(from, id);
+        }
+        Ok(pending)
+    }
+
+    /// Why a session didn't start, as its start receipt saved it (launch): one line, capped, as the website's #1821.
+    fn start_failure(&self, id: &str) -> Option<String> {
+        let local = self.local.lock().unwrap();
+        let receipts = &local.sessions.get(id)?.receipts;
+        let start = receipts
+            .values()
+            .find(|r| r.command == "start" && r.state == "failed")?;
+        let parts = start
+            .error
+            .as_deref()?
+            .split(char::is_control)
+            .map(str::trim);
+        let why = parts
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        (!why.is_empty()).then(|| why.chars().take(1000).collect())
+    }
+
+    /// Why a session's agent failed to start before any turn ran, without wrapper prefixes.
+    pub(crate) fn failed_start_reason(&self, id: &str) -> Option<String> {
+        let failed = (self.local.lock().unwrap().sessions.get(id)).is_some_and(|s| {
+            s.state == SessionState::Failed && !s.has_dispatched && s.close_request.is_none()
+        });
+        let why = failed.then(|| self.start_failure(id)).flatten()?;
+        Some(
+            why.rsplit_once("Cause: ")
+                .map_or(&why[..], |(_, cause)| cause)
+                .to_owned(),
+        )
+    }
+
+    /// Hands the website the new session, then closes the old one (#237). The website applies it once, and a retry
+    /// whose answer got lost is a success too. Core closes the new session only when the website certainly didn't
+    /// take it (409: the thread is on a third session). Without an answer it keeps trying after `wait`: true then.
+    async fn finish_continue(
+        self: &Arc<Self>,
+        from: String,
+        id: String,
+        wait: Duration,
+    ) -> Result<bool> {
+        let Some(api) = self.history.api.clone() else {
+            self.settle_continue(&from, &id, true);
+            return Ok(false);
+        };
+        let body = {
+            let local = self.local.lock().unwrap();
+            let s = local.sessions.get(&id).ok_or(Error::NotFound)?;
+            let request: String = format!("continue_{}", id.trim_start_matches("cr_"))
+                .chars()
+                .take(64)
+                .collect();
+            // Followers get the new agent's settings from the row: Pi's model with its provider, and the effort.
+            let model = match (&s.provider, &s.model) {
+                (Some(provider), Some(model)) if s.harness == runtime::Kind::Pi => {
+                    Some(format!("{provider}/{model}"))
+                }
+                _ => s.model.clone(),
+            };
+            json!({"request_id":request,"session":from,"wake":self.wake_id(),"continue":{"session":id,"harness":s.harness,"model":model,"reasoning":s.reasoning}})
+        };
+        let started = Instant::now();
+        let mut pause = Duration::from_secs(2);
+        loop {
+            match api.post("thread", &body).await {
+                Ok(_) => {
+                    self.settle_continue(&from, &id, true);
+                    return Ok(false);
+                }
+                Err(history::ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => {
+                    self.settle_continue(&from, &id, false);
+                    return Err(Error::Conflict(
+                        "this thread moved to another session meanwhile, so it wasn't switched",
+                    ));
+                }
+                Err(_) if started.elapsed() < wait && !self.is_stopping() => {
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(Duration::from_secs(60));
+                }
+                Err(_) => return Ok(true),
+            }
+        }
+    }
+
+    /// Keeps handing the website a switch it hasn't answered yet, until it does (#237).
+    fn keep_finishing(self: &Arc<Self>, from: String, id: String) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            while !manager.is_stopping()
+                && manager
+                    .finish_continue(from.clone(), id.clone(), Duration::from_secs(600))
+                    .await
+                    .unwrap_or(false)
+            {}
+        });
+    }
+
+    /// Ends a switch: the website `taken` the new session (the old one closes and its plan-limit resume loop goes),
+    /// or not (the new one closes). Either way the old session takes work again.
+    fn settle_continue(self: &Arc<Self>, from: &str, id: &str, taken: bool) {
+        {
+            let mut local = self.local.lock().unwrap();
+            if !local
+                .sessions
+                .get(from)
+                .is_some_and(|s| s.continuing.as_deref() == Some(id))
+            {
+                return;
+            }
+            let _ = local.append(from, "continuing", json!({"session":null}), None);
+            if taken && let Some(s) = local.sessions.get_mut(from) {
+                s.resume_spent.extend(s.resume_loop.take());
+            }
+        }
+        if taken {
+            let _ = self.command(from, random_request(), "close", json!({}));
+        } else {
+            self.close_when_started(id.to_owned());
+        }
+    }
+
+    /// Closes a new session a switch gave up on, once it can be: Core refuses a close while a session starts (#237).
+    fn close_when_started(self: &Arc<Self>, id: String) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while Instant::now() < deadline && !manager.is_stopping() {
+                // Read first: the lock must be free again before the close takes it.
+                let state = manager
+                    .local
+                    .lock()
+                    .unwrap()
+                    .sessions
+                    .get(&id)
+                    .map(|s| s.state.clone());
+                let closed = match state {
+                    None
+                    | Some(
+                        SessionState::Closing
+                        | SessionState::Closed
+                        | SessionState::Failed
+                        | SessionState::ProcessLost,
+                    ) => true,
+                    Some(
+                        SessionState::Pending | SessionState::Starting | SessionState::Resuming,
+                    ) => false,
+                    Some(_) => manager
+                        .command(&id, random_request(), "close", json!({}))
+                        .is_ok(),
+                };
+                if closed {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        });
+    }
+
+    /// Switches a restart cut off go on (#237): one whose new session never started is released.
+    fn resume_continues(self: &Arc<Self>, local: &Local) {
+        for s in local.sessions.values() {
+            let Some(id) = s.continuing.clone() else {
+                continue;
+            };
+            let (manager, from) = (self.clone(), s.session_id.clone());
+            // Core hands the website a switch only once its new agent started, so one whose new session started (its
+            // start receipt completed) and was set up may be the website's already: only the website's answer decides.
+            // Any other never reached the website, and the switch didn't happen.
+            let ready = local.sessions.get(&id).is_some_and(|c| {
+                c.continued.is_some()
+                    && c.receipts
+                        .values()
+                        .any(|r| r.command == "start" && r.state == "completed")
+            });
+            if ready {
+                manager.keep_finishing(from, id);
+            } else {
+                tokio::spawn(async move { manager.settle_continue(&from, &id, false) });
+            }
+        }
+    }
+
+    /// The conversation so far as Markdown, from Core's own records, in the order it ran (#237): each turn's prompt in
+    /// its latest edit, then its reply text (Codex's reply pieces name no request, so they go to the turn running when
+    /// they came), steers where they landed, no tool output, and nothing a rewind replaced. Cancelled or failed prompts
+    /// never ran, so they never show. The history an earlier switch handed `from` comes first. Newest kept within
+    /// HISTORY_CHARS, plus the latest few within TAIL_CHARS for the note. None for a session that never had a message.
+    async fn history_markdown(
+        &self,
+        from: &str,
+        earlier: Option<&Value>,
+    ) -> Option<(String, String)> {
+        let (prompts, receipts) = {
+            let local = self.local.lock().unwrap();
+            let s = local.sessions.get(from)?;
+            (s.prompts.clone(), s.receipts.clone())
+        };
+        let text_of = |request: &str| {
+            let input = prompts
+                .get(request)
+                .map(|p| &p.input)
+                .or_else(|| receipts.get(request).map(|r| &r.input));
+            visible_text(input.and_then(|i| i["text"].as_str()).unwrap_or_default())
+        };
+        // (who, turn, text): a turn is the request whose turn it was, so a rewind cuts whole turns.
+        let mut entries: Vec<(&str, String, String)> = Vec::new();
+        let (mut after, mut active, mut item) = (0, String::new(), String::new());
+        let (mut started, mut checkpoints) = (
+            std::collections::HashSet::new(),
+            std::collections::HashMap::new(),
+        );
+        while let Ok(records) = self.records(from, after).await {
+            let Some(last) = records.last() else { break };
+            after = last.sequence;
+            for r in &records {
+                let request = r.data["request_id"].as_str().unwrap_or_default();
+                match r.kind.as_str() {
+                    "state"
+                        if !request.is_empty()
+                            && matches!(
+                                r.data["state"].as_str(),
+                                Some("starting_turn" | "running")
+                            ) =>
+                    {
+                        active = request.to_owned();
+                        let text = text_of(request);
+                        if started.insert(active.clone())
+                            && prompts.contains_key(request)
+                            && !text.is_empty()
+                        {
+                            entries.push(("You", active.clone(), text));
+                        }
+                    }
+                    "receipt"
+                        if r.data["command"] == "steer"
+                            && r.data["state"] == "accepted"
+                            && started.insert(request.to_owned()) =>
+                    {
+                        let text =
+                            visible_text(r.data["input"]["text"].as_str().unwrap_or_default());
+                        if !text.is_empty() {
+                            entries.push(("You", active.clone(), text));
+                        }
+                    }
+                    "checkpoint" => {
+                        if let Some(id) = r.data["id"].as_str() {
+                            checkpoints.insert(id.to_owned(), request.to_owned());
+                        }
+                    }
+                    "rewind" => {
+                        // `before`: that turn and every later one were replaced; `last_turn_id`: the ones after it.
+                        let Some(rewind) = receipts.get(request) else {
+                            continue;
+                        };
+                        let (turn, keep) = match rewind.input["before"].as_str() {
+                            Some(turn) => (turn, false),
+                            None => (
+                                rewind.input["last_turn_id"].as_str().unwrap_or_default(),
+                                true,
+                            ),
+                        };
+                        if let Some(cut) = checkpoints.get(turn) {
+                            let at = if keep {
+                                entries
+                                    .iter()
+                                    .rposition(|(_, turn, _)| turn == cut)
+                                    .map(|i| i + 1)
+                            } else {
+                                entries.iter().position(|(_, turn, _)| turn == cut)
+                            };
+                            entries.truncate(at.unwrap_or(entries.len()));
+                        }
+                    }
+                    "text_delta" => {
+                        let Some(delta) = r.data["delta"].as_str() else {
+                            continue;
+                        };
+                        let turn = if request.is_empty() {
+                            active.clone()
+                        } else {
+                            request.to_owned()
+                        };
+                        let id = r.data["item_id"].as_str().unwrap_or_default();
+                        match entries.last_mut() {
+                            Some(("Agent", last, text)) if *last == turn => {
+                                if id != item {
+                                    text.push_str("\n\n");
+                                }
+                                text.push_str(delta);
+                            }
+                            _ => entries.push(("Agent", turn, delta.to_owned())),
+                        }
+                        item = id.to_owned();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The earlier history's own messages, so the bounds below apply to each, not to the whole file.
+        // From Core's own copy (prompt::save_history), never the file in the agent's folder.
+        let before: Vec<String> = earlier
+            .and_then(|_| prompt::saved_history(&self.config.state_dir, from))
+            .map(|text| {
+                text.trim_start_matches("# Conversation so far")
+                    .trim()
+                    .split("\n\n## ")
+                    .filter(|b| !b.trim().is_empty())
+                    .map(|b| {
+                        if b.starts_with("## ") {
+                            b.to_owned()
+                        } else {
+                            format!("## {b}")
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if entries.is_empty() && before.is_empty() {
+            return None;
+        }
+        let blocks: Vec<String> = before
+            .into_iter()
+            .chain(
+                entries
+                    .iter()
+                    .map(|(who, _, text)| format!("## {who}\n\n{}", text.trim())),
+            )
+            .collect();
+        // Newest first until the limit; a single block longer than what's left keeps its end.
+        let fit = |limit: usize| {
+            let (mut kept, mut size) = (Vec::new(), 0);
+            for block in blocks.iter().rev() {
+                if size + block.len() <= limit {
+                    size += block.len() + 2;
+                    kept.push(block.clone());
+                    continue;
+                }
+                if kept.is_empty() {
+                    let room = limit.saturating_sub(5);
+                    let mut cut = block.len() - room.min(block.len());
+                    while !block.is_char_boundary(cut) {
+                        cut += 1;
+                    }
+                    kept.push(format!("…{}", &block[cut..]));
+                }
+                break;
+            }
+            kept.reverse();
+            kept.join("\n\n")
+        };
+        Some((
+            format!("# Conversation so far\n\n{}\n", fit(HISTORY_CHARS)),
+            fit(TAIL_CHARS),
+        ))
+    }
+
     async fn launch(self: Arc<Self>, id: String, request: String) {
         let started = Instant::now();
         let Ok(_startup) = self.startups.acquire().await else {
@@ -974,15 +1976,16 @@ impl Manager {
                 let (kind, reasoning) = (session.harness, session.reasoning.clone());
                 let command_guard_enabled = session.command_guard_enabled();
                 let strip_ai_co_authors = session.strip_ai_co_authors();
-                let system_prompt = session.system_prompt();
+                let system_prompt = crate::workspace::repo_sync::RepoSync::prompt(&config.repository, session.system_prompt());
+                let room_env = session.room_env();
                 failure_reason = "The side chat's source conversation could not be copied";
                 fork = children::fork_history(&local, &id, &request)?;
                 failure_reason = "Harness initialization failed; inspect native history and protected local harness diagnostics for this session";
                 // Claim before spawning: a crash after this point must not repeat uncertain execution.
-                local.append(&id, "state", json!({"state":"starting"}), None)?;
+                local.append(&id, "state", json!({"state":SessionState::Starting}), None)?;
                 let (handle, events) = match &fork {
-                    Some(fork) => runtime::Handle::spawn_fork(&config, kind, fork, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
-                    None => runtime::Handle::spawn_guarded(&config, kind, None, command_guard_enabled, strip_ai_co_authors, system_prompt)?,
+                    Some(fork) => runtime::Handle::spawn_fork(&config, kind, fork, command_guard_enabled, strip_ai_co_authors, system_prompt, room_env)?,
+                    None => runtime::Handle::spawn_guarded(&config, kind, None, command_guard_enabled, strip_ai_co_authors, system_prompt, room_env)?,
                 };
                 let handle = handle.with_reasoning(reasoning);
                 let pid = handle.pid();
@@ -1003,7 +2006,7 @@ impl Manager {
             }
             local.sessions.get_mut(&id).unwrap().ready = true;
             local.sessions.get_mut(&id).unwrap().awaken();
-            local.append(&id, "state", json!({"state":"idle"}), None)?;
+            local.append(&id, "state", json!({"state":SessionState::Idle}), None)?;
             local
                 .finish_receipt(&id, &request, "completed")
                 .map_err(|_| io::Error::other("cannot record startup"))?;
@@ -1035,7 +2038,7 @@ impl Manager {
             let _ = local.append(
                 &id,
                 "state",
-                json!({"state":"failed","reason":reason}),
+                json!({"state":SessionState::Failed,"reason":reason}),
                 None,
             );
             // The receipts keep the cause too, so a parent's report says why (ADR 0123); the state goes
@@ -1074,6 +2077,96 @@ impl Manager {
         command: &str,
         input: Value,
     ) -> Result<Receipt> {
+        self.command_held(id, request, command, input, false)
+    }
+
+    /// `room-cli thread compact`: compacts now, or once the agent is free (its turn ends, or it wakes). `then` is
+    /// sent when compaction ends, first in line, saying how it went (`end_compaction`), so the agent keeps going.
+    pub(crate) fn compact_then(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        then: Option<&str>,
+    ) -> Result<Receipt> {
+        let input = match then.filter(|text| !text.trim().is_empty()) {
+            Some(text) => json!({"then":text}),
+            None => json!({}),
+        };
+        self.command(id, request, "compact", input)
+    }
+
+    /// Ends a compaction. Its follow-up (`then`) goes first in the queue with how it went, unless a stop ended it.
+    fn end_compaction(
+        &self,
+        local: &mut Local,
+        id: &str,
+        request: &str,
+        state: &str,
+        reason: Option<String>,
+    ) -> Result<()> {
+        local.finish_receipt_with(id, request, state, reason.clone())?;
+        let compact = &local.sessions[id].receipts[request];
+        let follow = format!("{request}_then");
+        let Some(then) = compact.input["then"].as_str() else {
+            return Ok(());
+        };
+        if state == "interrupted" || local.sessions[id].receipts.contains_key(&follow) {
+            return Ok(());
+        }
+        let outcome = match (state, reason) {
+            ("completed", _) => "Your context was compacted.".to_owned(),
+            (_, Some(reason)) => {
+                format!("Context compaction failed: {reason}. Your context is unchanged.")
+            }
+            _ => "Context compaction failed. Your context is unchanged.".to_owned(),
+        };
+        let mut input = json!({"text":format!("{outcome}\n\n{then}"),"first":true});
+        if compact.input["plan_only"] == true {
+            input["plan_only"] = json!(true);
+        }
+        let receipt = Receipt {
+            request_id: follow,
+            command: "prompt".into(),
+            input,
+            state: "accepted".into(),
+            model: None,
+            provider: None,
+            workspace: None,
+            error: None,
+        };
+        local.append(
+            id,
+            "receipt",
+            serde_json::to_value(&receipt).map_err(io::Error::other)?,
+            None,
+        )?;
+        Ok(())
+    }
+
+    /// `held`: a related thread's message, which may join a queue that a landing Stop already paused. It waits there
+    /// for the user, as in Local threads (docs/scopes/queue.md, #982).
+    pub(crate) fn command_held(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        command: &str,
+        input: Value,
+        held: bool,
+    ) -> Result<Receipt> {
+        self.command_from(id, request, command, input, held, None)
+    }
+
+    /// `thread tell`'s commands: `sender` must still reach `id` when the command is accepted, under the same lock,
+    /// since a session continued from a lost one loses its children if that one resumes meanwhile (#1296).
+    pub(crate) fn command_from(
+        self: &Arc<Self>,
+        id: &str,
+        request: String,
+        command: &str,
+        input: Value,
+        held: bool,
+        sender: Option<&str>,
+    ) -> Result<Receipt> {
         enum Next {
             None,
             Deliver(runtime::Handle, String),
@@ -1084,6 +2177,7 @@ impl Manager {
             Rewind(runtime::Handle, Value, String),
             Close(Option<runtime::Handle>),
             Resume,
+            Start(String),
         }
         let (receipt, next) = {
             let mut local = self.local.lock().unwrap();
@@ -1091,11 +2185,30 @@ impl Manager {
             if let Some(receipt) = Self::retry(session, &request, command, &input)? {
                 return Ok(receipt);
             }
+            // A tell's resume needs its sender above the target (#1629), checked as it is accepted.
+            let reach = sender.map(|sender| children::may_tell(&local, sender, id));
+            if reach.is_some_and(|r| r.is_none() || (command == "resume" && r == Some(false))) {
+                return Err(Error::Conflict(children::NOT_IN_TREE));
+            }
             if !local.journal.writable() {
                 return Err(Error::Storage(JOURNAL_UNWRITABLE.into()));
             }
             if self.is_stopping() {
                 return Err(Error::Conflict("service is stopping"));
+            }
+            // An agent switch holds the old session, and Teleport to Local freezes it: no client changes it meanwhile
+            // (#237). Stopping, sleeping and closing still work.
+            if !matches!(command, "stop" | "sleep" | "close" | "interrupt") {
+                if session.continuing.is_some() {
+                    return Err(Error::Conflict(SWITCHING));
+                }
+                if session
+                    .frozen
+                    .as_ref()
+                    .is_some_and(|(_, until)| *until > now_ms())
+                {
+                    return Err(Error::Conflict(MOVING));
+                }
             }
             // A resume prompt runs only from the current limit's own loop, while that limit still stops the thread:
             // a retired loop's run, or one sent after the user moved on or stopped it, is refused (accounts.rs).
@@ -1114,16 +2227,19 @@ impl Manager {
                 }
             }
             if command == "sleep" {
-                return self.request_sleep(&mut local, id, request);
+                return self.request_sleep(&mut local, id, request, input);
             }
             if local.draining && !matches!(command, "interrupt" | "close" | "stop" | "cancel") {
                 return Err(Error::Conflict("service is draining"));
             }
             // The app retries this answer until the harness is back.
-            if matches!(command, "compact" | "rewind" | "goal")
-                && matches!(session.state.as_str(), "sleeping" | "resuming")
+            if matches!(command, "rewind" | "goal")
+                && matches!(
+                    session.state,
+                    SessionState::Sleeping | SessionState::Resuming
+                )
             {
-                if session.state == "sleeping" {
+                if session.state == SessionState::Sleeping {
                     self.schedule_resume(&mut local, id, false)?;
                 }
                 return Err(Error::Conflict(
@@ -1134,12 +2250,13 @@ impl Manager {
             if session.rewind_request.is_some() {
                 return Err(Error::Conflict("wait for the pending rewind"));
             }
+            let held = held && command == "prompt" && session.queue_paused;
             if session.close_request.is_some()
-                || (command != "close" && session.interrupt_pending())
+                || (command != "close" && session.interrupt_pending() && !held)
             {
                 return Err(Error::Conflict("wait for the pending close or interrupt"));
             }
-            if command == "close" && session.state == "starting" {
+            if command == "close" && session.state == SessionState::Starting {
                 return Err(Error::Conflict("session is still starting"));
             }
             if !matches!(
@@ -1157,34 +2274,67 @@ impl Manager {
                     | "goal"
                     | "rewind"
                     | "attach"
+                    | "model"
             ) {
                 return Err(Error::Conflict("unsupported command"));
             }
             let handle = session.handle.clone();
-            let retry_startup = command == "resume"
-                && session.state == "process_lost"
-                && session.startup_error.is_some()
+            // An explicit resume restarts a lost agent from its intact saved chat: a failed startup, or a crash
+            // after its one automatic recovery (#154).
+            let retry_lost = command == "resume"
+                && session.state == SessionState::ProcessLost
                 && session.current_request.is_none()
                 && handle.is_none()
                 && session.harness_pid.is_none();
-            if retry_startup && self.recovery_check(session)["status"] != "ready" {
+            if retry_lost && self.recovery_check(session)["status"] != "ready" {
                 return Err(Error::Conflict(
                     "saved conversation is unavailable; inspect session recovery before retrying",
                 ));
             }
-            if matches!(session.state.as_str(), "closed" | "process_lost" | "failed")
-                && !retry_startup
+            // It also starts again an agent whose start failed before it existed, with the same start (#2036).
+            let retry_start = (command == "resume")
+                .then(|| session.failed_start())
+                .flatten();
+            if command == "model"
+                && input["idle_only"] == true
+                && (session.current_request.is_some()
+                    || session.compacting
+                    || !matches!(
+                        session.state,
+                        SessionState::Idle
+                            | SessionState::Failed
+                            | SessionState::ProcessLost
+                            | SessionState::Sleeping
+                            | SessionState::Suspended
+                    ))
             {
                 return Err(Error::Conflict(
-                    "process unavailable; history does not restore execution",
+                    "wait for the active turn to finish before switching models",
                 ));
+            }
+            // A model pick needs no agent, so it can rescue one that lost its agent to its model.
+            if matches!(
+                session.state,
+                SessionState::Closed | SessionState::ProcessLost | SessionState::Failed
+            ) && !retry_lost
+                && retry_start.is_none()
+                && !(command == "model" && session.state != SessionState::Closed)
+            {
+                return Err(Error::Conflict(GONE));
             }
             // A prompt starts its native turn immediately only when the harness is
             // idle with nothing queued; otherwise it is accepted and queued in order.
-            if command == "prompt" && self.storage.blocks() {
+            // At the lowest pause line only freed space resumes work, so a prompt to an agent paused there waits in
+            // its queue instead of being refused again and again (#606).
+            let waits = self.storage.stuck() && session.storage_paused && handle.is_some();
+            if command == "prompt" && self.storage.blocks() && !waits {
                 return Err(Error::Conflict("storage unsafe; new execution is blocked"));
             }
-            if command == "interrupt" && session.storage_paused {
+            // A stop on a measured full disk wakes only its agent, until it settles (guard.rs, #606).
+            if command == "interrupt"
+                && session.storage_paused
+                && self.storage.snapshot().reason != "disk_capacity"
+            {
                 return Err(Error::Conflict(
                     "workload is paused for storage; close it or wait for recovery",
                 ));
@@ -1239,17 +2389,29 @@ impl Manager {
             }
             if command == "compact" {
                 if session.compacting {
-                    return Err(Error::Conflict("compaction is already running"));
+                    return Err(Error::Conflict("compaction is already running or waiting"));
                 }
-                if session.current_request.is_some()
-                    || !matches!(session.state.as_str(), "idle" | "failed")
-                {
+                let asleep = matches!(
+                    session.state,
+                    SessionState::Sleeping | SessionState::Resuming
+                );
+                // During a turn (say, the agent compacting itself) or asleep, it waits until the agent is free
+                // (`advance`).
+                let waiting = session.current_request.is_some() || asleep;
+                if !waiting && !matches!(session.state, SessionState::Idle | SessionState::Failed) {
                     return Err(Error::Conflict(
-                        "context can only be compacted while the thread is idle",
+                        "context can only be compacted while the thread is idle, working or asleep",
                     ));
                 }
-                if !session.ready || handle.is_none() {
+                if !waiting && (!session.ready || handle.is_none()) {
                     return Err(Error::Conflict("harness is not ready for compaction"));
+                }
+                if waiting {
+                    input["waiting"] = json!(true);
+                }
+                // Asked for in a loop run that must not spend extra credits, its follow-up stays guarded (ADR 0292).
+                if session.current_request.is_some() && session.guarded_turn {
+                    input["plan_only"] = json!(true);
                 }
             }
             if command == "goal" && (!session.ready || handle.is_none()) {
@@ -1263,8 +2425,11 @@ impl Manager {
                         && (child.current_request.is_some()
                             || !child.queue.is_empty()
                             || matches!(
-                                child.state.as_str(),
-                                "pending" | "starting" | "resuming" | "waiting_for_files"
+                                child.state,
+                                SessionState::Pending
+                                    | SessionState::Starting
+                                    | SessionState::Resuming
+                                    | SessionState::WaitingForFiles
                             ))
                 }) {
                     return Err(Error::Conflict(
@@ -1301,7 +2466,7 @@ impl Manager {
                     ));
                 }
                 if session.current_request.is_some()
-                    || !matches!(session.state.as_str(), "idle" | "failed")
+                    || !matches!(session.state, SessionState::Idle | SessionState::Failed)
                 {
                     return Err(Error::Conflict(
                         "wait for the active turn to finish before editing a sent message",
@@ -1312,8 +2477,9 @@ impl Manager {
                 }
             }
             let deliver_now = command == "prompt"
+                && !self.storage.blocks()
                 && session.ready
-                && session.state == "idle"
+                && session.state == SessionState::Idle
                 && !session.queue_paused
                 && !session.compacting
                 && session.queue.is_empty();
@@ -1344,6 +2510,9 @@ impl Manager {
                 serde_json::to_value(&receipt).map_err(io::Error::other)?,
                 None,
             )?;
+            if command == "resume" {
+                local.drop_pending_sleep(id)?;
+            }
             let next = match command {
                 "prompt" if deliver_now => {
                     self.begin_turn(&mut local, id, &request)?;
@@ -1353,13 +2522,19 @@ impl Manager {
                     self.wake(&mut local, id)?;
                     Next::None
                 }
-                "edit" | "cancel" | "reorder" | "attach" => {
+                "edit" | "cancel" | "reorder" | "attach" | "model" => {
                     local.finish_receipt(id, &request, "completed")?;
                     Next::None
                 }
-                "resume" if retry_startup => {
+                "resume" if retry_lost => {
                     self.schedule_resume(&mut local, id, false)?;
                     Next::None
+                }
+                // Pending takes prompts, which wait for the agent; its start's outcome settles them.
+                "resume" if retry_start.is_some() => {
+                    local.finish_receipt(id, &request, "completed")?;
+                    local.append(id, "state", json!({"state":SessionState::Pending}), None)?;
+                    Next::Start(retry_start.expect("checked failed start"))
                 }
                 "resume" => {
                     local.finish_receipt(id, &request, "completed")?;
@@ -1377,8 +2552,14 @@ impl Manager {
                         .to_owned(),
                     request.clone(),
                 ),
+                "compact" if input["waiting"] == true => {
+                    if local.sessions[id].state == SessionState::Sleeping {
+                        self.schedule_resume(&mut local, id, false)?;
+                    }
+                    Next::None
+                }
                 "compact" => {
-                    local.append(id, "state", json!({"state":"running"}), None)?;
+                    local.append(id, "state", json!({"state":SessionState::Running}), None)?;
                     Next::Compact(handle.expect("validated compact harness"), request.clone())
                 }
                 "goal" => Next::Goal(
@@ -1393,11 +2574,11 @@ impl Manager {
                 ),
                 "close" => {
                     let session = &local.sessions[id];
-                    let data = json!({"state":"closing","request_id":session.current_request,"turn_id":session.current_turn});
+                    let data = json!({"state":SessionState::Closing,"request_id":session.current_request,"turn_id":session.current_turn});
                     local.append(id, "state", data, None)?;
                     local.fail_pending(id)?;
                     if handle.is_none() {
-                        local.append(id, "state", json!({"state":"closed"}), None)?;
+                        local.append(id, "state", json!({"state":SessionState::Closed}), None)?;
                         local.finish_receipt(id, &request, "completed")?;
                     }
                     Next::Close(handle)
@@ -1412,6 +2593,10 @@ impl Manager {
         match next {
             Next::None => {}
             Next::Resume => self.advance(&mut self.local.lock().unwrap(), id, false),
+            Next::Start(start) => {
+                let (manager, id) = (self.clone(), id.to_owned());
+                tokio::spawn(async move { manager.launch(id, start).await });
+            }
             Next::Close(handle) => {
                 if let Some(handle) = handle {
                     handle.request_shutdown();
@@ -1494,12 +2679,16 @@ impl Manager {
         Ok(())
     }
 
-    /// Record the start of a queued or immediate turn; dequeues the request.
+    /// Record the start of a queued or immediate turn; dequeues the request. A paused browser resumes first (#610).
     fn begin_turn(&self, local: &mut Local, id: &str, request: &str) -> io::Result<()> {
+        local.browser_turn();
+        if let Some(session) = local.sessions.get_mut(id) {
+            session.turn_tokens = (!session.tokens_restored).then_some(session.tokens);
+        }
         local.append(
             id,
             "state",
-            json!({"state":"starting_turn","request_id":request}),
+            json!({"state":SessionState::StartingTurn,"request_id":request}),
             None,
         )?;
         Ok(())
@@ -1510,14 +2699,23 @@ impl Manager {
     fn deliver(self: Arc<Self>, id: String, request: String, handle: runtime::Handle) {
         tokio::spawn(async move {
             let (input, reasoning) = {
-                let local = self.local.lock().unwrap();
-                let session = &local.sessions[&id];
+                let mut local = self.local.lock().unwrap();
+                let session = local.sessions.get_mut(&id).unwrap();
                 let input = prompt::latest(&session.prompts, &session.receipts, &request)
                     .cloned()
                     .unwrap_or_else(|| json!({"text":""}));
                 let reasoning = prompt::reasoning(&input).or_else(|| session.reasoning.clone());
+                session.turn_reasoning = Some((request.clone(), reasoning.clone()));
+                // Every turn runs the session's model, whoever sent it: Claude switches first (`set_model`).
+                let mut input = input;
+                if let (runtime::Kind::Claude, Some(model)) = (session.harness, &session.model) {
+                    input["model"] = json!(model);
+                }
                 (input, reasoning)
             };
+            let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
+            // A switched session's first prompt carries the note on its history, whoever sends it (#237).
+            let (input, handed) = prompt::with_session_note(&self.config.state_dir, &id, input);
             // The stored handle keeps the launch level. This copy is only for the turn being started.
             let handle = handle.with_reasoning(reasoning);
             let result = async {
@@ -1525,6 +2723,12 @@ impl Manager {
                 handle.send_prompt(&request, &input).await
             }
             .await;
+            if let (Err(_), Some(note)) = (&result, &notice) {
+                prompt::put_back_notice(&self.config.state_dir, note);
+            }
+            if let (Err(_), Some(note)) = (&result, &handed) {
+                prompt::add_session_note(&self.config.state_dir, &id, note);
+            }
             let state = match &result {
                 Ok(_) => "delivered",
                 Err(e) if e.kind() == io::ErrorKind::InvalidInput => "failed",
@@ -1625,22 +2829,14 @@ impl Manager {
             {
                 return;
             }
-            if let Err(error) = &result
-                && let Some(receipt) = local
-                    .sessions
-                    .get_mut(&id)
-                    .and_then(|session| session.receipts.get_mut(&request))
-                && !matches!(
-                    receipt.state.as_str(),
-                    "completed" | "failed" | "interrupted"
-                )
-            {
-                receipt.error = Some(error.to_string());
+            let reason = result.as_ref().err().map(ToString::to_string);
+            if state == "delivered" {
+                let _ = local.finish_receipt(&id, &request, state);
+                return;
             }
-            let _ = local.finish_receipt(&id, &request, state);
-            if state == "failed" {
-                self.advance(&mut local, &id, false);
-            }
+            // Refused or lost, the agent moves on: its follow-up says so (`end_compaction`).
+            let _ = self.end_compaction(&mut local, &id, &request, state, reason);
+            self.advance(&mut local, &id, false);
         });
     }
 
@@ -1755,7 +2951,10 @@ impl Manager {
     /// out a pending interrupt, or return to idle. `turn_ended` bypasses the active
     /// turn guard when the just-finished turn is the reason for advancing.
     fn advance(self: &Arc<Self>, local: &mut Local, id: &str, turn_ended: bool) {
-        if local.sessions[id].state == "sleeping" {
+        if turn_ended && let Some(workspace) = &local.sessions[id].workspace {
+            self.repo_sync.nudge(&workspace.path);
+        }
+        if local.sessions[id].state == SessionState::Sleeping {
             let _ = self.wake(local, id);
             return;
         }
@@ -1771,20 +2970,77 @@ impl Manager {
             return; // a turn is still active; wait for its completion
         }
         if session.interrupt_pending() {
-            let _ = local.append(id, "state", json!({"state":"interrupting"}), None);
+            let _ = local.append(
+                id,
+                "state",
+                json!({"state":SessionState::Interrupting}),
+                None,
+            );
             return;
         }
+        // Agent Zero refuses the next prompt after a cancel and its commands outlive it: once its Stop settles, the
+        // freeing that Stop asked for (`stop_frees`) runs first, so queued work wakes a fresh bridge (ADR 20261116-153548).
+        if session.harness == runtime::Kind::AgentZero
+            && session.sleep_pending()
+            && session.can_resume()
+        {
+            self.release(local, id);
+            return;
+        }
+        // A waiting compaction runs now, before queued messages. A stop cancels it, and so does a loop run's guard
+        // once extra credits pay (ADR 0292).
+        let waiting = (session.compact_request.clone()).filter(|request| {
+            session
+                .receipts
+                .get(request)
+                .is_some_and(|r| r.state == "accepted" && r.input["waiting"] == true)
+        });
+        if let Some(request) = waiting {
+            let guarded = session.receipts[&request].input["plan_only"] == true;
+            let paused = self.storage.blocks() || session.storage_paused || session.queue_paused;
+            if paused || session.handle.is_none() || (guarded && self.on_credits(session.harness)) {
+                let _ = self.end_compaction(local, id, &request, "interrupted", None);
+            } else {
+                let handle = session.handle.clone().unwrap();
+                let _ = local.finish_receipt(id, &request, "running");
+                let _ = local.append(id, "state", json!({"state":SessionState::Running}), None);
+                self.clone().compact(id.to_owned(), request, handle);
+                return;
+            }
+        }
+        let session = &local.sessions[id];
         if self.storage.blocks()
             || session.storage_paused
             || session.queue_paused
             || session.compacting
         {
             let state = if session.compacting {
-                "running"
+                SessionState::Running
             } else {
-                "idle"
+                SessionState::Idle
             };
+            // A stopped queue is the user's call: nothing continues on its own after it.
+            if session.queue_paused {
+                local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
+            }
             let _ = local.append(id, "state", json!({"state":state}), None);
+            return;
+        }
+        // A plan limit stopped this turn on a login the user has since replaced: a switch mid-turn, or one a
+        // background job kept the agent awake through. It restarts on the new login now, ending that job, before
+        // queued work fails on the old login too. Queued work then runs first, in place of "keep working".
+        let replaced = session.switched_mid_turn
+            || (turn_ended
+                && (session.handle.as_ref()).is_some_and(|h| h.login_changed(&self.config)));
+        if replaced && session.usage_limited && session.can_resume() {
+            let queued = session.has_work();
+            local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
+            let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
+            if queued {
+                self.release(local, id);
+            } else {
+                self.continue_sessions(local, vec![id.to_owned()]);
+            }
             return;
         }
         // A queued `plan_only` loop run is checked again right before it starts (ADR 0292).
@@ -1812,31 +3068,73 @@ impl Manager {
             self.clone().deliver(id.to_owned(), next, handle);
             return;
         }
-        let _ = local.append(id, "state", json!({"state":"idle"}), None);
+        let _ = local.append(id, "state", json!({"state":SessionState::Idle}), None);
+        // Kept through queued turns that still worked on the old login; dropped once the session settles.
+        local.sessions.get_mut(id).unwrap().switched_mid_turn = false;
     }
 
-    fn snapshot_usage(self: Arc<Self>, id: String, handle: runtime::Handle) {
+    /// Reads the harness's usage and saves it. `run` is a loop run whose turn just ended: the website then gets what
+    /// that turn used, for the loops' usage estimates (ADR 20261111-222523). Sent once; a lost one only leaves that run
+    /// out of the estimates.
+    fn snapshot_usage(
+        self: Arc<Self>,
+        id: String,
+        handle: runtime::Handle,
+        run: Option<tokens::Run>,
+    ) {
         tokio::spawn(async move {
             let Ok(Some(usage)) = handle.usage().await else {
                 return;
             };
-            let mut local = self.local.lock().unwrap();
-            if !local.sessions.get(&id).is_some_and(|session| {
-                session
-                    .handle
-                    .as_ref()
-                    .is_some_and(|current| current.same_process(&handle))
-            }) {
-                return;
+            let report = {
+                let mut local = self.local.lock().unwrap();
+                if !local.sessions.get(&id).is_some_and(|session| {
+                    session
+                        .handle
+                        .as_ref()
+                        .is_some_and(|current| current.same_process(&handle))
+                }) {
+                    return;
+                }
+                if usage["sessionId"]
+                    .as_str()
+                    .is_some_and(|native| local.sessions[&id].native_id.as_deref() != Some(native))
+                {
+                    return;
+                }
+                self.append_usage(&mut local, &id, usage);
+                let session = &local.sessions[&id];
+                run.and_then(|run| {
+                    let spent = run.spent(session.tokens)?;
+                    Some(spent.report(&run, &id, session.harness, session.model.as_deref()))
+                })
+            };
+            if let (Some(report), Some(api)) = (report, &self.history.api) {
+                let _ = api.post("automation", &report).await;
             }
-            if usage["sessionId"]
-                .as_str()
-                .is_some_and(|native| local.sessions[&id].native_id.as_deref() != Some(native))
-            {
-                return;
-            }
-            let _ = local.append(&id, "usage", usage, None);
         });
+    }
+
+    /// Saves a `usage` reading and records the tokens spent since the last one (`tokens` diagnostics).
+    fn append_usage(&self, local: &mut Local, id: &str, usage: Value) {
+        let spent = local
+            .sessions
+            .get(id)
+            .filter(|session| !session.tokens_restored)
+            .and_then(|session| {
+                let spent = tokens::Tokens::of(&usage, session.harness)?.since(session.tokens);
+                (spent != tokens::Tokens::default()).then(|| Signal::Tokens {
+                    harness: session.harness,
+                    model: session.model.clone(),
+                    child: session.parent_session.is_some(),
+                    tokens: spent,
+                })
+            });
+        if local.append(id, "usage", usage, None).is_ok()
+            && let Some(spent) = spent
+        {
+            self.observability.record(spent);
+        }
     }
 
     /// Forward native events into the record path, shutting the harness if recording fails.
@@ -1887,8 +3185,8 @@ impl Manager {
             if local.sessions[&id].restores_awake(now) {
                 self.schedule_resume(&mut local, &id, false)
                     .map_err(|_| io::Error::other("cannot save recovery state"))?;
-            } else if local.sessions[&id].state != "sleeping" {
-                local.append(&id, "state", json!({"state":"sleeping"}), None)?;
+            } else if local.sessions[&id].state != SessionState::Sleeping {
+                local.append(&id, "state", json!({"state":SessionState::Sleeping}), None)?;
             }
         }
         for session in local.sessions.values() {
@@ -1901,6 +3199,9 @@ impl Manager {
         }
         self.watch_children(&local);
         self.watch_reports(&local);
+        self.watch_thread_reports(&local);
+        self.resume_continues(&local);
+        self.watch_child_starts(&local);
         Ok(())
     }
 
@@ -1916,7 +3217,7 @@ impl Manager {
         local.append(
             id,
             "state",
-            json!({"state":"resuming","recovery":recovery}),
+            json!({"state":SessionState::Resuming,"recovery":recovery}),
             None,
         )?;
         let (manager, id) = (self.clone(), id.to_owned());
@@ -1938,7 +3239,12 @@ impl Manager {
                         return Ok(());
                     }
                     if self.is_stopping() {
-                        local.append(&id, "state", json!({"state":"suspended"}), None)?;
+                        local.append(
+                            &id,
+                            "state",
+                            json!({"state":SessionState::Suspended}),
+                            None,
+                        )?;
                         return Ok(());
                     }
                 }
@@ -1955,7 +3261,7 @@ impl Manager {
             {
                 runtime::wait_for_exit(pid).await?;
             }
-            let (handle, events, native) = {
+            let (handle, events, native, fresh) = {
                 let mut local = self.local.lock().unwrap();
                 let session = &local.sessions[&id];
                 if session.close_request.is_some() || self.is_stopping() {
@@ -1974,21 +3280,43 @@ impl Manager {
                     .harnesses
                     .get(&kind)
                     .ok_or_else(|| io::Error::other("harness not configured"))?;
-                // Capture any final orphan writes after ownership reconciliation.
-                runtime::recover_records(
-                    profile,
-                    kind,
-                    &saved,
-                    self.config.storage.as_ref(),
-                    |event| {
-                        if let runtime::Event::Record { kind, data, native } = event {
-                            local.append(&id, kind, data, native)?;
-                        }
-                        Ok(())
-                    },
-                )?;
-                saved.cursor = local.sessions[&id].native_cursor.clone();
+                // An agent that never ran a turn has no saved chat: Codex writes it on the first turn. One that slept
+                // before then (a switch or project move, then 30 idle minutes) starts again fresh, losing nothing;
+                // its first prompt still carries the switch's history note.
+                let fresh = !session.has_dispatched
+                    && runtime::check_resume_history(
+                        kind,
+                        profile,
+                        &saved,
+                        self.config.storage.as_ref(),
+                    )
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
+                let reasoning = saved.reasoning.clone();
                 let mut config = self.config.clone();
+                if fresh {
+                    let profile = config.harnesses.get_mut(&kind).expect("checked harness");
+                    if let Some(model) = &saved.model {
+                        profile.model = model.clone();
+                    }
+                    if let Some(provider) = &saved.provider {
+                        profile.provider = Some(provider.clone());
+                    }
+                } else {
+                    // Capture any final orphan writes after ownership reconciliation.
+                    runtime::recover_records(
+                        profile,
+                        kind,
+                        &saved,
+                        self.config.storage.as_ref(),
+                        |event| {
+                            if let runtime::Event::Record { kind, data, native } = event {
+                                local.append(&id, kind, data, native)?;
+                            }
+                            Ok(())
+                        },
+                    )?;
+                }
+                saved.cursor = local.sessions[&id].native_cursor.clone();
                 config.repository = local.sessions[&id]
                     .workspace
                     .as_ref()
@@ -1998,17 +3326,27 @@ impl Manager {
                 let (handle, events) = runtime::Handle::spawn_guarded(
                     &config,
                     kind,
-                    Some(saved),
+                    (!fresh).then_some(saved),
                     local.sessions[&id].command_guard_enabled(),
                     local.sessions[&id].strip_ai_co_authors(),
-                    local.sessions[&id].system_prompt(),
+                    crate::workspace::repo_sync::RepoSync::prompt(
+                        &config.repository,
+                        local.sessions[&id].system_prompt(),
+                    ),
+                    local.sessions[&id].room_env(),
                 )?;
+                let handle = if fresh {
+                    handle.with_reasoning(reasoning)
+                } else {
+                    handle
+                };
                 local.sessions.get_mut(&id).unwrap().handle = Some(handle.clone());
                 local.append(&id, "harness", json!({"pid":handle.pid()}), None)?;
-                (handle, events, native)
+                (handle, events, native, fresh)
             };
             self.watch_events(id.clone(), handle.clone(), events);
-            handle.start_session().await?;
+            let started = handle.start_session().await?;
+            let native = if fresh { started } else { native };
             let mut local = self.local.lock().unwrap();
             self.remember_launch_reasoning(&mut local, &id, &handle)?;
             if local.sessions[&id].close_request.is_some() || self.is_stopping() {
@@ -2025,7 +3363,7 @@ impl Manager {
                 handle.native_identity(&native)?,
                 None,
             )?;
-            local.append(&id, "state", json!({"state":"idle"}), None)?;
+            local.append(&id, "state", json!({"state":SessionState::Idle}), None)?;
             let retries: Vec<_> = local.sessions[&id]
                 .receipts
                 .values()
@@ -2081,7 +3419,7 @@ impl Manager {
                 let _ = local.append(
                     &id,
                     "state",
-                    json!({"state":"process_lost","reason":lost,"startup_error":code}),
+                    json!({"state":SessionState::ProcessLost,"reason":lost,"startup_error":code}),
                     None,
                 );
                 if code != "startup_timeout" {
@@ -2162,20 +3500,42 @@ impl Manager {
                 native,
             } => {
                 let usage = data.get("usage").cloned().filter(|value| !value.is_null());
+                // An agent still on a login the user has replaced reports that old account, not the saved one.
+                let old_login = || {
+                    (local.sessions[id].handle.as_ref())
+                        .is_some_and(|h| h.login_changed(&self.config))
+                };
                 // Plan limits and credits (ADR 0292). `plan_ok` only ends holds; it is not history.
                 if kind == "plan_ok" {
-                    if let Some(harness) = data["harness"].as_str() {
+                    if let Some(harness) = data["harness"].as_str().filter(|_| !old_login()) {
                         self.clear_plan(harness, false);
                     }
                     return Ok(());
                 }
                 let current = local.sessions[id].current_request.clone();
+                // A loop run its provider refused moves to the other provider on the website (ADR 20261119-091500).
+                // It is not history.
+                if kind == "refused" {
+                    if let Some(request) = current.filter(|request| tokens::loop_run(request)) {
+                        let report = json!({"action":"refused","request":request,"session":id,"harness":data["harness"]});
+                        let this = self.clone();
+                        tokio::spawn(async move {
+                            if let Some(api) = &this.history.api {
+                                let _ = api.post("automation", &report).await;
+                            }
+                        });
+                    }
+                    return Ok(());
+                }
                 // The running turn's guard; the harness's own continuation turns keep the guard of the turn they follow.
                 let plan_only = current.is_some() && local.sessions[id].guarded_turn;
                 if kind == "usage_limited" && plan_only {
                     data["plan_only"] = json!(true);
                 }
-                if matches!(kind, "usage_limited" | "plan_credits") && data["model_only"] != true {
+                if matches!(kind, "usage_limited" | "plan_credits")
+                    && data["model_only"] != true
+                    && !old_login()
+                {
                     self.report_limit(&data, kind == "plan_credits");
                 }
                 // A loop run that must not spend extra credits stops at their first sign (ADR 0292).
@@ -2190,8 +3550,11 @@ impl Manager {
                 }
                 local.append(id, kind, data, native)?;
                 if let Some(usage) = usage {
-                    let _ = local.append(id, "usage", usage, None);
+                    self.append_usage(&mut local, id, usage);
                 }
+            }
+            runtime::Event::Background { running } => {
+                local.sessions.get_mut(id).unwrap().background_bash(running);
             }
             runtime::Event::Compacted { status } => {
                 if let Some(request) = local.sessions[id].compact_request.clone() {
@@ -2210,8 +3573,9 @@ impl Manager {
                             .unwrap()
                             .error = Some("Context compaction failed; see native history".into());
                     }
-                    local.finish_receipt(id, &request, status)?;
-                    self.clone().snapshot_usage(id.to_owned(), handle.clone());
+                    self.end_compaction(&mut local, id, &request, status, None)?;
+                    self.clone()
+                        .snapshot_usage(id.to_owned(), handle.clone(), None);
                     self.advance(&mut local, id, false);
                 }
             }
@@ -2232,7 +3596,8 @@ impl Manager {
                     let receipt = Receipt {
                         request_id: request.clone(),
                         command: "auto".into(),
-                        input: json!({}),
+                        // Its end reaches a parent (#217); older `auto` receipts lack this, so they never do.
+                        input: json!({"report":true}),
                         state: "running".into(),
                         model: None,
                         provider: None,
@@ -2258,9 +3623,9 @@ impl Manager {
                     return Ok(());
                 }
                 let state = if session.close_request.is_some() {
-                    "closing"
+                    SessionState::Closing
                 } else {
-                    "running"
+                    SessionState::Running
                 };
                 let data = json!({"state":state,"request_id":request,"turn_id":native_turn});
                 local.append(id, "state", data, None)?;
@@ -2269,6 +3634,7 @@ impl Manager {
                 request,
                 status,
                 mut error,
+                text,
             } => {
                 // Only a loop that will fire may promise a resume time.
                 if local.sessions[id].limit_resumes >= accounts::MAX_RESUMES {
@@ -2290,20 +3656,49 @@ impl Manager {
                     if let Some(checkpoint) = checkpoint {
                         let _ = local.append(id, "checkpoint", checkpoint, None);
                     }
-                    self.clone().snapshot_usage(id.to_owned(), handle.clone());
+                    // A loop run reports what its own turn used. Not when unsure: its start's totals are unknown, or a
+                    // queued prompt starts at once and its tokens could blur with this turn's.
+                    let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                    let run = session
+                        .turn_tokens
+                        .take()
+                        .filter(|_| tokens::loop_run(&request) && session.queue.is_empty())
+                        .map(|base| tokens::Run {
+                            request: request.clone(),
+                            base,
+                            completed: status == "completed",
+                        });
+                    self.clone()
+                        .snapshot_usage(id.to_owned(), handle.clone(), run);
                     if let Some(request) = local.sessions[id].current_request.clone() {
-                        local.finish_receipt_with(id, &request, &status, error)?;
-                        let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                        let session = local.sessions.get(id).ok_or(Error::NotFound)?;
                         if status == "completed"
                             && (session.parent_session.is_some()
                                 || session.parent_thread().is_some())
                         {
-                            let text = handle.seen_text().chars().take(32768).collect();
-                            session.replies.push((request, text));
-                            session
-                                .replies
-                                .drain(..session.replies.len().saturating_sub(8));
+                            // Saved before the turn completes, so `thread output` and the parent's notice still have
+                            // it once the child sleeps or Core restarts (#339). An empty one never pushes out a reply
+                            // still owed to the parent (#217).
+                            let replied = !text.trim().is_empty();
+                            if replied {
+                                children::save_reply(&self.config.state_dir, id, &request, &text);
+                                local.append(
+                                    id,
+                                    "child_reply",
+                                    json!({"request_id":request,"text":children::capped_reply(&text)}),
+                                    None,
+                                )?;
+                            }
+                            // A self-started turn's receipt keeps whether it replied, so its report never depends on
+                            // the few replies kept (#217).
+                            let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
+                            if let Some(r) = session.receipts.get_mut(&request)
+                                && r.command == "auto"
+                            {
+                                r.input["replied"] = json!(replied);
+                            }
                         }
+                        local.finish_receipt_with(id, &request, &status, error)?;
                     }
                     self.advance(&mut local, id, true);
                 }
@@ -2336,6 +3731,15 @@ impl Manager {
                     expected,
                     details,
                 );
+                // An unconfirmed steer dies with its agent: its late answer is dropped (`same_process`). Settling it
+                // lets a child notice it carried fall back to the queue, even across a rewind (#1579).
+                let steers: Vec<_> = (local.sessions[id].receipts.values())
+                    .filter(|r| r.command == "steer" && r.state == "accepted")
+                    .map(|r| r.request_id.clone())
+                    .collect();
+                for request in steers {
+                    local.finish_receipt(id, &request, "unknown_after_restart")?;
+                }
                 if expected && cleaned_up && local.sessions[id].rewind_request.is_some() {
                     let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
                     session.handle = None;
@@ -2349,7 +3753,7 @@ impl Manager {
                 }
                 let session = local.sessions.get_mut(id).ok_or(Error::NotFound)?;
                 session.releasing = false;
-                let restoring = session.state == "resuming"
+                let restoring = session.state == SessionState::Resuming
                     && session.native_id.is_some()
                     && session.native_path.is_some();
                 let resumable = cleaned_up
@@ -2364,7 +3768,7 @@ impl Manager {
                 let failed = session
                     .failure
                     .clone()
-                    .filter(|_| session.state == "failed");
+                    .filter(|_| session.state == SessionState::Failed);
                 session.handle = None;
                 session.ready = false;
                 let request = session.current_request.clone();
@@ -2406,19 +3810,25 @@ impl Manager {
                 for request in interrupts {
                     local.finish_receipt(id, &request, "unknown_after_restart")?;
                 }
+                // A compaction running, or waiting for this turn, ends with the agent, so it never holds the queue.
+                if let Some(request) = local.sessions[id].compact_request.clone() {
+                    let reason = Some("the agent stopped".to_owned());
+                    self.end_compaction(&mut local, id, &request, "unknown_after_restart", reason)?;
+                }
                 if cleaned_up {
                     local.append(id, "harness", json!({"pid":null}), None)?;
                 }
                 let state = if expected && close.is_some() {
-                    "closed"
+                    SessionState::Closed
                 } else if resumable && (self.is_stopping() || recover) {
-                    "suspended"
+                    SessionState::Suspended
                 } else if failed.is_some() {
-                    "failed"
+                    SessionState::Failed
                 } else {
-                    "process_lost"
+                    SessionState::ProcessLost
                 };
-                let lost_or_failed = matches!(state, "process_lost" | "failed");
+                let lost_or_failed =
+                    matches!(state, SessionState::ProcessLost | SessionState::Failed);
                 local.append(
                     id,
                     "state",
@@ -2432,7 +3842,7 @@ impl Manager {
                         if expected { "completed" } else { "unknown" },
                     )?;
                 }
-                if state != "suspended" && !preserve_queue {
+                if state != SessionState::Suspended && !preserve_queue {
                     local.fail_pending_because(id, Some(&lost))?;
                 }
                 local.sessions.get_mut(id).unwrap().credits_stop = None;
@@ -2456,11 +3866,11 @@ impl Manager {
             let waiting: Vec<_> = local
                 .sessions
                 .values()
-                .filter(|s| s.state == "resuming" && s.handle.is_none())
+                .filter(|s| s.state == SessionState::Resuming && s.handle.is_none())
                 .map(|s| s.session_id.clone())
                 .collect();
             for id in waiting {
-                let _ = local.append(&id, "state", json!({"state":"suspended"}), None);
+                let _ = local.append(&id, "state", json!({"state":SessionState::Suspended}), None);
             }
             // Before the harness cleanup, which may outlast the deadline. Its few records replay next start.
             local.save_snapshot();
@@ -2485,7 +3895,7 @@ impl Manager {
             }
             runtime::shutdown().await;
             // The harnesses' last records, then diagnostics. A drain already saved the rest; systemd waits 10 s.
-            self.flush_history(Duration::from_secs(2)).await;
+            self.flush_history(Duration::from_secs(2), false).await;
             self.observability.shutdown().await;
         };
         if tokio::time::timeout(runtime::SHUTDOWN_GRACE + Duration::from_secs(4), cleanup)
@@ -2498,6 +3908,50 @@ impl Manager {
 }
 
 /// Last lines of harness stderr, shown under unexpected exits so the cause is visible in chat (ADR 0123).
+/// What other clients get while Teleport to Local or an agent switch holds a session (#237).
+pub const MOVING: &str = "This thread is moving to a computer. Send it again when that's done.";
+pub const SWITCHING: &str = "This thread is switching agents. Send it again in a moment.";
+/// Core's refusal of work for an agent that isn't running and can't be restarted from its saved chat.
+pub(crate) const GONE: &str = "process unavailable; history does not restore execution";
+/// A switch waits this long for the website before it answers "pending" and keeps trying (#237).
+const CONTINUE_WAIT: Duration = Duration::from_secs(60);
+/// How long a Teleport's freeze holds without a renewal (#237).
+const FREEZE_MS: u64 = 5 * 60_000;
+const HISTORY_FILE: &str = "conversation-history.md";
+const HISTORY_CHARS: usize = 4_000_000;
+const TAIL_CHARS: usize = 8_000;
+
+/// A prompt's text as the user wrote it: Cloudroom's own instructions in it are left out.
+fn visible_text(text: &str) -> String {
+    let (mut out, mut rest) = (String::new(), text);
+    while let Some(start) = rest.find("<cloudroom_custom_instructions>") {
+        out.push_str(&rest[..start]);
+        rest = rest[start..]
+            .find("</cloudroom_custom_instructions>")
+            .map_or("", |end| {
+                &rest[start + end + "</cloudroom_custom_instructions>".len()..]
+            });
+    }
+    out.push_str(rest);
+    out.trim().to_owned()
+}
+
+fn random_request() -> String {
+    format!(
+        "core_{}",
+        thread::random_key().unwrap_or_else(|_| now_ms().to_string())
+    )
+}
+
+/// A prompt the user sent from an app (`app_…`, or an older app's UUID) or the phone, not Core's own (notices,
+/// teleports, children's tasks) or a loop's (#237).
+pub(crate) fn user_request(id: &str) -> bool {
+    id.starts_with("app_")
+        || (id.len() == 36
+            && id.as_bytes()[8] == b'-'
+            && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-'))
+}
+
 fn stderr_tail(bytes: &[u8]) -> String {
     let text = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(2000)..]);
     let lines: Vec<&str> = text
@@ -2507,17 +3961,25 @@ fn stderr_tail(bytes: &[u8]) -> String {
     lines[lines.len().saturating_sub(20)..].join("\n")
 }
 
-/// Whether the kernel killed a process in this sandbox for lack of memory since the last check: cgroup v2's
-/// `memory.events`, which counts kills from this sandbox's own limit and the whole machine's alike.
+/// Processes the kernel killed in this sandbox for lack of memory: cgroup v2's `memory.events`, which counts kills
+/// from this sandbox's own limit and the whole machine's alike. A container's is at the root; a VM's root has none,
+/// so there Core's own cgroup's counts, which holds every agent and tool it starts (#1619).
+fn oom_kills() -> Option<u64> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
+    let own = own.trim().strip_prefix("0::").unwrap_or_default();
+    ["", own].into_iter().find_map(|group| {
+        let events =
+            std::fs::read_to_string(format!("/sys/fs/cgroup{group}/memory.events")).ok()?;
+        let count = events
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "));
+        count?.trim().parse().ok()
+    })
+}
+
+/// Whether the kernel killed a process in this sandbox for lack of memory since the last check.
 fn oom_kills_grew() -> bool {
     static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let count = std::fs::read_to_string("/sys/fs/cgroup/memory.events")
-        .ok()
-        .and_then(|text| {
-            text.lines()
-                .find_map(|line| line.strip_prefix("oom_kill "))
-                .and_then(|value| value.trim().parse::<u64>().ok())
-        })
-        .unwrap_or(0);
+    let count = oom_kills().unwrap_or(0);
     SEEN.swap(count, Ordering::Relaxed) < count
 }

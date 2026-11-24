@@ -5,6 +5,7 @@ import { z } from "zod";
 export const claudeLoginInput = z
   .object({
     action: z.enum(["status", "login", "cancel", "complete"]).default("status"),
+    force: z.boolean().optional(),
     requestId: z
       .string()
       .regex(/^[a-zA-Z0-9_-]{1,64}$/)
@@ -45,7 +46,8 @@ export const claudeLoginRpcContract = defineRpcContract({
       hostId: z.string().min(1).optional(),
       environmentId: z.string().min(1).optional(),
     }),
-    output: claudeLoginStatus,
+    // The machine Claude signs in on, so the app can tell whether it is the one its browser runs on.
+    output: claudeLoginStatus.extend({ host_id: z.string() }),
   },
 });
 export type ClaudeLoginInput = z.infer<typeof claudeLoginInput>;

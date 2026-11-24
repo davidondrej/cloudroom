@@ -23,6 +23,13 @@ const ELECTRON_STARTUP_TIMEOUT_MS = 15_000;
 const ELECTRON_EXIT_TIMEOUT_MS = 5_000;
 const ELECTRON_POST_READY_SETTLE_MS = 300;
 
+// The app logs this when a window shows during a test (BB_DESKTOP_HIDE_WINDOWS).
+function expectNoWindowShown(output: string[]): void {
+  expect(output.join(""), "A test window showed on screen").not.toContain(
+    "TEST_WINDOW_SHOWN",
+  );
+}
+
 interface DesktopSmokeServer {
   close(): Promise<void>;
   port: number;
@@ -335,7 +342,7 @@ describe("desktop build", () => {
       "utf8",
     );
     const bridgeSource = await readFile(
-      resolve(desktopPackageRoot, "dist", "bb-app-bridge.mjs"),
+      resolve(desktopPackageRoot, "dist", "launcher-bridge.mjs"),
       "utf8",
     );
 
@@ -353,7 +360,7 @@ describe("desktop build", () => {
       "main.js.map",
       "preload.cjs.map",
       "log-viewer-preload.cjs.map",
-      "bb-app-bridge.mjs.map",
+      "launcher-bridge.mjs.map",
     ]) {
       await expect(
         access(resolve(desktopPackageRoot, "dist", mapPath)),
@@ -425,7 +432,7 @@ describe("desktop build", () => {
         })}`,
       ).toBeNull();
 
-      for (const scenario of ["custom", "connect", "fatal"]) {
+      for (const scenario of ["custom", "fatal"]) {
         const retryProfile = join(smokeRoot, `retry-${scenario}`);
         await mkdir(retryProfile);
         let reportReady: (result: PreloadReadyResult) => void = () => {};
@@ -468,10 +475,12 @@ describe("desktop build", () => {
             timeoutMs: ELECTRON_STARTUP_TIMEOUT_MS,
           });
           expect(result).toEqual({ ok: true, reason: "" });
+          expectNoWindowShown(retryStderr);
         } finally {
           await stopElectron(retry);
         }
       }
+      expectNoWindowShown(stderr);
     } finally {
       await stopElectron(child);
       await smokeServer.close();

@@ -598,6 +598,7 @@ export async function getPullRequestForCurrentBranch(
       }),
       timeout: GH_PR_VIEW_TIMEOUT_MS,
       maxBuffer: GH_PR_VIEW_MAX_BUFFER_BYTES,
+      windowsHide: true,
     }));
   } catch (error) {
     return classifyPullRequestViewError(error);
@@ -633,6 +634,7 @@ export async function runPullRequestActionForCurrentBranch(
       }),
       timeout: GH_PR_ACTION_TIMEOUT_MS,
       maxBuffer: GH_PR_ACTION_MAX_BUFFER_BYTES,
+      windowsHide: true,
     });
   } catch (error) {
     throw createGitHostCommandFailedError(ghArgs, error);

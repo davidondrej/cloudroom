@@ -6,10 +6,15 @@ import {
 } from "@cloudroom/domain";
 import type { EnvironmentArgs } from "@cloudroom/server-contract";
 import { action } from "../../action.js";
-import { createCliBbSdk } from "../../client.js";
+import { createCliRoomSdk } from "../../client.js";
 import { resolveExplicitIdFlag } from "../../context-env.js";
 import { resolveLocalHostId } from "../../daemon.js";
-import { collectOption, outputJson, prependErrorContext } from "../helpers.js";
+import {
+  addPromptFileOption,
+  collectOption,
+  outputJson,
+  prependErrorContext,
+} from "../helpers.js";
 import {
   buildPromptInputs,
   parsePermissionMode,
@@ -65,7 +70,7 @@ function buildForkInput(
 }
 
 async function resolveForkSourceHostId(
-  sdk: ReturnType<typeof createCliBbSdk>,
+  sdk: ReturnType<typeof createCliRoomSdk>,
   sourceThreadId: string,
 ): Promise<string> {
   const sourceThread = await sdk.threads.get({ threadId: sourceThreadId });
@@ -95,14 +100,16 @@ export function registerForkCommand(
   parent: Command,
   getUrl: () => string,
 ): void {
-  parent
-    .command("fork <source-thread-id>")
-    .description("Fork a thread at its tip or a source event sequence")
-    .option("--prompt <prompt>", "Optional first prompt; omit for an idle fork")
+  addPromptFileOption(
+    parent
+      .command("fork <source-thread-id>")
+      .description("Fork a thread at its tip or a source event sequence")
+      .option("--prompt <prompt>", "Optional first prompt; omit for an idle fork"),
+  )
     .option("--title <title>", "Thread title")
     .option(
       "--source-seq-end <seq>",
-      "Fork after the source turn containing this event sequence",
+      "Fork at a saved Claude message or a finished turn",
     )
     .option(
       "--machine <target>",
@@ -180,7 +187,7 @@ export function registerForkCommand(
           let thread: Thread;
           let environment: EnvironmentArgs | undefined;
           try {
-            const sdk = createCliBbSdk(getUrl());
+            const sdk = createCliRoomSdk(getUrl());
             const input =
               requestedInput === undefined
                 ? undefined

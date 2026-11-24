@@ -1,0 +1,624 @@
+#!/usr/bin/env bash
+# DeepAPI CLI for AI agents (macOS/Linux). Needs only bash and curl.
+#   deepapi search [--max N] [--json] "query" ["query" ...]   parallel web searches
+#   deepapi scrape [--max-chars N] [--json] URL [URL ...]     parallel page reads
+#   deepapi research [--mode raw|clean] [--max-cost USD] [--json] "question"
+#   deepapi pdf [--max-pages N] [--max-chars N] [--json] URL
+#   deepapi reddit [--max N] [--subreddit SUB] [--json] "query"
+#   deepapi github [--type repositories|code|issues|pulls] [--max N] [--json] "query"
+#   deepapi twitter [--sort latest|top] [--max N] [--json] "query"
+#   deepapi youtube [--max N] [--json] "query" | transcript [--json] URL
+#   deepapi balance [--json]                                  remaining credit balance
+#   deepapi requests [REQUEST_ID] [--json]                    list or recover a request
+#   deepapi help [ENDPOINT_OR_SLUG]                           CLI help or live schema
+#   deepapi call [--no-poll] METHOD /v1/path ['{"json":"body"}'] raw JSON or download
+# Auto-polls async endpoints and prints request IDs to stderr while waiting.
+# Exit 0 when every item succeeded, 1 otherwise, 2 on usage errors.
+#
+# Installed to ~/.deepapi/deepapi (on PATH) by update-skill.sh (run by install.sh).
+set -u
+# Bash 5.2+ treats \ and & in ${var//pat/rep} replacements specially;
+# json_string relies on the classic behavior. No-op on older bash.
+shopt -u patsub_replacement 2>/dev/null || true
+
+CLI_VERSION=3
+if [ -z "${DEEPAPI_API_KEY:-}" ] && [ -f "$HOME/.deepapi/env" ]; then
+  . "$HOME/.deepapi/env"
+fi
+BASE_URL="${DEEPAPI_API_BASE_URL:-https://deepapi.co}"
+BASE_URL="${BASE_URL%/}"
+SKILL_VERSION=$(head -n 1 "$HOME/.agents/skills/deepapi/VERSION.txt" 2>/dev/null || true)
+POLL_LIMIT_SECS=600
+WANT_JSON=0
+
+help_text() {
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+usage() {
+  help_text >&2
+  exit 2
+}
+
+die() {
+  printf 'deepapi: %s\n' "$*" >&2
+  exit 2
+}
+
+require_client() {
+  if [ -z "${DEEPAPI_API_KEY:-}" ]; then
+    if [ -n "${ROOM_THREAD_ID:-}${ROOM_PROJECT_ID:-}" ]; then
+      die "DEEPAPI_API_KEY is missing (DeepAPI is off in Cloudroom Settings -> General; use your built-in tools)"
+    fi
+    die "DEEPAPI_API_KEY is missing. Run the setup prompt from https://deepapi.co/docs"
+  fi
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+}
+
+new_key() {
+  if command -v uuidgen >/dev/null 2>&1; then
+    uuidgen
+  elif [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+  else
+    printf '%s-%s-%s%s\n' "$(date +%s)" "$$" "$RANDOM" "$RANDOM"
+  fi
+}
+
+# JSON string literal for $1: drop control bytes, escape the rest.
+json_string() {
+  local s
+  s=$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  s=${s//$'\t'/\\t}
+  s=${s//$'\n'/\\n}
+  s=${s//$'\r'/\\r}
+  printf '"%s"' "$s"
+}
+
+# URL-encode $1 for query parameter values (RFC 3986 unreserved kept verbatim).
+url_encode() {
+  local s=$1 out="" i c
+  for ((i = 0; i < ${#s}; i++)); do
+    c=${s:i:1}
+    case "$c" in
+      [a-zA-Z0-9._~/-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# request METHOD PATH BODY ACCEPT [extra curl args...]: one call with the
+# standard headers. Only /v1 paths, so the key can never leave BASE_URL; the
+# body goes through stdin, so a body starting with @ is never read as a file.
+check_path() {
+  case "$1" in
+    /v1|/v1/*|/v1\?*) ;;
+    *) die "path must start with /v1: $1" ;;
+  esac
+  case "$1" in
+    *[[:space:][:cntrl:]]*) die "path must not contain spaces or control characters" ;;
+  esac
+}
+
+request() {
+  local method=$1 path=$2 body=${3:-} accept=$4
+  shift 4
+  check_path "$path"
+  local args=(-sS --max-time 300 -X "$method" "$BASE_URL$path"
+    -H "Authorization: Bearer $DEEPAPI_API_KEY"
+    -H "Accept: $accept"
+    -H "X-DeepAPI-Client: cli/$CLI_VERSION")
+  [ -z "$SKILL_VERSION" ] || args+=(-H "X-DeepAPI-Skill-Version: $SKILL_VERSION")
+  if [ "$method" = "GET" ] || [ "$method" = "DELETE" ]; then
+    if [ -n "$body" ]; then
+      printf '%s' "$body" | curl "${args[@]}" "$@" \
+        -H "Content-Type: application/json" --data-binary @-
+    else
+      curl "${args[@]}" "$@"
+    fi
+  else
+    [ -n "$body" ] || body="{}"
+    printf '%s' "$body" | curl "${args[@]}" "$@" \
+      -H "Content-Type: application/json" \
+      -H "Idempotency-Key: cli-$(new_key)" \
+      --data-binary @-
+  fi
+}
+
+# Value of key=value in a [deepapi] header line, or nothing.
+header_value() {
+  local line=" $2 " value
+  value=${line##* $1=}
+  [ "$value" != "$line" ] || return 0
+  printf '%s' "${value%% *}"
+}
+
+# First top-level JSON string value for key $1 in text $2.
+json_str_field() {
+  printf '%s' "$2" | grep -o "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" | head -n 1 \
+    | sed 's/.*:[[:space:]]*"\([^"]*\)"$/\1/'
+}
+
+# network_failure CURL_ERROR: keep the [deepapi] header on line 1.
+network_failure() {
+  printf '[deepapi] status=failed code=network_error\nerror: could not reach %s (%s)\n' \
+    "$BASE_URL" "$(printf '%s' "$1" | tr '\n' ' ' | sed 's/ *$//')"
+}
+
+# run_text METHOD PATH [BODY]: execute request with Accept: text/plain (or
+# application/json when WANT_JSON=1), emit request ID to stderr if polling,
+# and follow GET poll links until terminal. Returns 0 on succeeded, 1 otherwise.
+run_request() {
+  local method=$1 path=$2 body=${3:-}
+  if [ "$WANT_JSON" = "1" ]; then
+    call_endpoint 1 "$method" "$path" "$body"
+    return $?
+  fi
+  local out header poll after req_id announced=0 started=$SECONDS
+  out=$(request "$method" "$path" "$body" text/plain 2>&1) || { network_failure "$out"; return 1; }
+  while :; do
+    header=${out%%$'\n'*}
+    case "$header" in
+      "[deepapi] status=running"*" poll="*|"[deepapi] status=succeeded"*" poll="*) ;;
+      *) break ;;
+    esac
+    if [ "$announced" = "0" ]; then
+      req_id=$(header_value request "$header")
+      [ -z "$req_id" ] || printf '[deepapi] running request=%s\n' "$req_id" >&2
+      announced=1
+    fi
+    if [ $((SECONDS - started)) -ge "$POLL_LIMIT_SECS" ]; then
+      printf '%s\nnote: not finished after %ss; poll the link above to continue\n' "$out" "$POLL_LIMIT_SECS"
+      return 1
+    fi
+    poll=$(header_value poll "$header")
+    after=$(header_value after "$header")
+    case "$after" in ""|*[!0-9]*) after=5 ;; esac
+    [ "$after" -le 30 ] || after=30
+    sleep "$after"
+    out=$(request GET "$poll" "" text/plain 2>&1) || { network_failure "$out"; return 1; }
+  done
+  printf '%s\n' "$out"
+  case "$header" in
+    "[deepapi] status=succeeded"*|"[deepapi] status=dry_run"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# fan_out LABEL PATH BUILDER ITEMS...: run every item in parallel, print
+# results in input order. BUILDER turns one item into a JSON body.
+fan_out() {
+  local label=$1 path=$2 builder=$3 dir i=0 status=0 item
+  shift 3
+  require_client
+  dir=$(mktemp -d "${TMPDIR:-/tmp}/deepapi.XXXXXX") || die "could not create a temp directory"
+  for item in "$@"; do
+    (
+      run_request POST "$path" "$("$builder" "$item")" > "$dir/$i"
+      printf '%s' "$?" > "$dir/$i.rc"
+    ) &
+    i=$((i + 1))
+  done
+  wait
+  i=0
+  for item in "$@"; do
+    if [ "$WANT_JSON" = "0" ]; then
+      printf '=== %s: %s ===\n' "$label" "$item"
+    fi
+    cat "$dir/$i"
+    [ "$(cat "$dir/$i.rc" 2>/dev/null)" = "0" ] || status=1
+    i=$((i + 1))
+    [ "$WANT_JSON" = "1" ] || [ "$i" -eq "$#" ] || printf '\n'
+  done
+  rm -rf "$dir"
+  return "$status"
+}
+
+VALID_VALUE=""
+validate_pos_int() {
+  case "$2" in
+    ""|*[!0-9]*) die "$1 needs a whole number of 1 or more" ;;
+  esac
+  [ "$((10#$2))" -ge 1 ] || die "$1 needs a whole number of 1 or more"
+  VALID_VALUE=$((10#$2))
+}
+
+validate_usd() {
+  case "$2" in
+    ""|*[!0-9.]*) die "$1 needs a positive USD amount like 0.50" ;;
+  esac
+  printf '%s' "$2" | grep -Eq '^[0-9]+(\.[0-9]{1,6})?$' || die "$1 needs a positive USD amount like 0.50"
+  VALID_VALUE=$2
+}
+
+# parse_items FLAG ARGS...: FLAG (as "FLAG N" or "FLAG=N") and --json may appear
+# anywhere; everything else becomes ITEMS. Unknown options stop before any
+# paid call; items that start with - go after --.
+FLAG_VALUE=""
+ITEMS=()
+parse_items() {
+  local flag=$1
+  shift
+  FLAG_VALUE=""
+  ITEMS=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --) shift; [ "$#" -eq 0 ] || ITEMS+=("$@"); break ;;
+      "$flag") [ "$#" -ge 2 ] || die "$flag needs a number"; validate_pos_int "$flag" "$2"; FLAG_VALUE=$VALID_VALUE; shift 2 ;;
+      "$flag="*) validate_pos_int "$flag" "${1#*=}"; FLAG_VALUE=$VALID_VALUE; shift ;;
+      -*) die "unknown option: $1 (put items that start with - after --)" ;;
+      *) ITEMS+=("$1"); shift ;;
+    esac
+  done
+  [ "${#ITEMS[@]}" -gt 0 ] || usage
+}
+
+search_body() {
+  printf '{"query":%s%s}' "$(json_string "$1")" "${FLAG_VALUE:+,\"maxResults\":$FLAG_VALUE}"
+}
+
+scrape_body() {
+  printf '{"urls":[%s],"contentFormat":"markdown"%s}' "$(json_string "$1")" "${FLAG_VALUE:+,\"maxChars\":$FLAG_VALUE}"
+}
+
+# Extract GET poll path from a JSON envelope when "next" has method GET and a
+# /v1/requests/... path. Empty string when no polling action exists.
+json_poll_path() {
+  local flat next_block method path
+  flat=$(printf '%s' "$1" | tr '\n\r' '  ')
+  next_block=$(printf '%s' "$flat" | grep -o '"next"[[:space:]]*:[[:space:]]*{[^}]*}' | head -n 1 || true)
+  [ -n "$next_block" ] || return 0
+  method=$(json_str_field method "$next_block")
+  [ "$method" = "GET" ] || return 0
+  path=$(json_str_field path "$next_block")
+  case "$path" in
+    /v1/requests/*) printf '%s' "$path" ;;
+  esac
+}
+
+json_poll_after() {
+  local flat next_block after
+  flat=$(printf '%s' "$1" | tr '\n\r' '  ')
+  next_block=$(printf '%s' "$flat" | grep -o '"next"[[:space:]]*:[[:space:]]*{[^}]*}' | head -n 1 || true)
+  after=$(printf '%s' "$next_block" | grep -o '"afterSecs"[[:space:]]*:[[:space:]]*[0-9]*' | head -n 1 | sed 's/.*:[[:space:]]*//' || true)
+  case "$after" in ""|*[!0-9]*) after=5 ;; esac
+  [ "$after" -le 30 ] || after=30
+  printf '%s' "$after"
+}
+
+# Keep download bytes out of shell variables, which cannot hold NUL bytes.
+# Arg 1: AUTO_POLL (1 or 0), Arg 2: METHOD, Arg 3: PATH, Arg 4: optional BODY.
+CALL_RESPONSE_FILE=""
+call_endpoint() {
+  local auto_poll=$1 method path body metadata status_and_type http_code media_type
+  local started=$SECONDS announced=0 content poll_path after req_id rc=1
+  method=$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')
+  path=$3
+  body=${4:-}
+  check_path "$path"
+  require_client
+  CALL_RESPONSE_FILE=$(mktemp "${TMPDIR:-/tmp}/deepapi.XXXXXX") || die "could not create a temp file"
+  trap 'rm -f "${CALL_RESPONSE_FILE:-}"' EXIT
+  while :; do
+    metadata=$(request "$method" "$path" "$body" application/json \
+      --dump-header - -o "$CALL_RESPONSE_FILE" -w '%{http_code} %{content_type}') || {
+      printf 'deepapi: request failed: could not reach %s\n' "$BASE_URL" >&2
+      rm -f "$CALL_RESPONSE_FILE"
+      CALL_RESPONSE_FILE=""
+      return 1
+    }
+    status_and_type=${metadata##*$'\n'}
+    http_code=${status_and_type%% *}
+    media_type=${status_and_type#* }
+    if [ "$auto_poll" = "1" ] \
+      && ! grep -Eiq '^content-disposition:[[:blank:]]*attachment([;[:space:]]|$)' <<< "$metadata" \
+      && printf '%s' "${media_type%%;*}" | grep -Eiq '^application/(json|.*\+json)$'; then
+      content=$(cat "$CALL_RESPONSE_FILE")
+      poll_path=$(json_poll_path "$content")
+      if [ -n "$poll_path" ]; then
+        if [ "$announced" = "0" ]; then
+          req_id=$(json_str_field requestId "$content")
+          [ -z "$req_id" ] || printf '[deepapi] running request=%s\n' "$req_id" >&2
+          announced=1
+        fi
+        if [ $((SECONDS - started)) -ge "$POLL_LIMIT_SECS" ]; then
+          break
+        fi
+        after=$(json_poll_after "$content")
+        sleep "$after"
+        method="GET"
+        path="$poll_path"
+        body=""
+        continue
+      fi
+    fi
+    break
+  done
+  if cat "$CALL_RESPONSE_FILE"; then
+    if printf '%s' "${media_type%%;*}" | grep -Eiq '^application/(json|.*\+json)$'; then
+      if ! grep -Eiq '^content-disposition:[[:blank:]]*attachment([;[:space:]]|$)' <<< "$metadata"; then
+        printf '\n'
+      fi
+    fi
+    case "$http_code" in
+      [123]??) rc=0 ;;
+      *) rc=1 ;;
+    esac
+  fi
+  rm -f "$CALL_RESPONSE_FILE"
+  CALL_RESPONSE_FILE=""
+  return "$rc"
+}
+
+run_research() {
+  local mode="" max_cost="" query="" body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --mode) [ "$#" -ge 2 ] || die "--mode needs raw or clean"; mode=$2; shift 2 ;;
+      --mode=*) mode=${1#*=}; shift ;;
+      --max-cost) [ "$#" -ge 2 ] || die "--max-cost needs a USD amount"; validate_usd --max-cost "$2"; max_cost=$VALID_VALUE; shift 2 ;;
+      --max-cost=*) validate_usd --max-cost "${1#*=}"; max_cost=$VALID_VALUE; shift ;;
+      --) shift; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$query" ] || die "research accepts one question"; query=$1; shift ;;
+    esac
+  done
+  [ -n "$query" ] || [ "$#" -eq 0 ] || query="$*"
+  [ -n "$query" ] || usage
+  if [ -n "$mode" ] && [ "$mode" != "raw" ] && [ "$mode" != "clean" ]; then
+    die "--mode must be raw or clean"
+  fi
+  require_client
+  body=$(printf '{"query":%s%s%s}' \
+    "$(json_string "$query")" \
+    "${mode:+,\"mode\":$(json_string "$mode")}" \
+    "${max_cost:+,\"maxCostUsd\":$(json_string "$max_cost")}")
+  run_request POST /v1/research/deep "$body"
+}
+
+run_pdf() {
+  local max_pages="" max_chars="" url="" body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --max-pages) [ "$#" -ge 2 ] || die "--max-pages needs a number"; validate_pos_int --max-pages "$2"; max_pages=$VALID_VALUE; shift 2 ;;
+      --max-pages=*) validate_pos_int --max-pages "${1#*=}"; max_pages=$VALID_VALUE; shift ;;
+      --max-chars) [ "$#" -ge 2 ] || die "--max-chars needs a number"; validate_pos_int --max-chars "$2"; max_chars=$VALID_VALUE; shift 2 ;;
+      --max-chars=*) validate_pos_int --max-chars "${1#*=}"; max_chars=$VALID_VALUE; shift ;;
+      --) shift; [ "$#" -eq 0 ] || url=$1; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$url" ] || die "pdf accepts one URL"; url=$1; shift ;;
+    esac
+  done
+  [ -n "$url" ] || usage
+  require_client
+  body=$(printf '{"url":%s%s%s}' \
+    "$(json_string "$url")" \
+    "${max_pages:+,\"maxPages\":$max_pages}" \
+    "${max_chars:+,\"maxChars\":$max_chars}")
+  run_request POST /v1/scrape/pdf "$body"
+}
+
+run_reddit() {
+  local max_items="" subreddit="" query="" body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --max) [ "$#" -ge 2 ] || die "--max needs a number"; validate_pos_int --max "$2"; max_items=$VALID_VALUE; shift 2 ;;
+      --max=*) validate_pos_int --max "${1#*=}"; max_items=$VALID_VALUE; shift ;;
+      --subreddit) [ "$#" -ge 2 ] || die "--subreddit needs a name"; subreddit=$2; shift 2 ;;
+      --subreddit=*) subreddit=${1#*=}; shift ;;
+      --) shift; [ "$#" -eq 0 ] || query=$1; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$query" ] || die "reddit accepts one query"; query=$1; shift ;;
+    esac
+  done
+  [ -n "$query" ] || usage
+  require_client
+  body=$(printf '{"query":%s%s%s}' \
+    "$(json_string "$query")" \
+    "${subreddit:+,\"subreddit\":$(json_string "$subreddit")}" \
+    "${max_items:+,\"maxItems\":$max_items}")
+  run_request POST /v1/scrape/reddit/search "$body"
+}
+
+run_github() {
+  local gtype="repositories" max_items="" query="" body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --type) [ "$#" -ge 2 ] || die "--type needs repositories, code, issues, or pulls"; gtype=$2; shift 2 ;;
+      --type=*) gtype=${1#*=}; shift ;;
+      --max) [ "$#" -ge 2 ] || die "--max needs a number"; validate_pos_int --max "$2"; max_items=$VALID_VALUE; shift 2 ;;
+      --max=*) validate_pos_int --max "${1#*=}"; max_items=$VALID_VALUE; shift ;;
+      --) shift; [ "$#" -eq 0 ] || query=$1; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$query" ] || die "github accepts one query"; query=$1; shift ;;
+    esac
+  done
+  [ -n "$query" ] || usage
+  case "$gtype" in
+    repositories|code|issues|pulls) ;;
+    *) die "--type must be repositories, code, issues, or pulls" ;;
+  esac
+  require_client
+  body=$(printf '{"type":%s,"query":%s%s}' \
+    "$(json_string "$gtype")" \
+    "$(json_string "$query")" \
+    "${max_items:+,\"maxItems\":$max_items}")
+  run_request POST /v1/scrape/github/search "$body"
+}
+
+run_twitter() {
+  local sort="" max_items="" query="" body
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --sort) [ "$#" -ge 2 ] || die "--sort needs latest or top"; sort=$2; shift 2 ;;
+      --sort=*) sort=${1#*=}; shift ;;
+      --max) [ "$#" -ge 2 ] || die "--max needs a number"; validate_pos_int --max "$2"; max_items=$VALID_VALUE; shift 2 ;;
+      --max=*) validate_pos_int --max "${1#*=}"; max_items=$VALID_VALUE; shift ;;
+      --) shift; [ "$#" -eq 0 ] || query=$1; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$query" ] || die "twitter accepts one query"; query=$1; shift ;;
+    esac
+  done
+  [ -n "$query" ] || usage
+  if [ -n "$sort" ] && [ "$sort" != "latest" ] && [ "$sort" != "top" ]; then
+    die "--sort must be latest or top"
+  fi
+  require_client
+  body=$(printf '{"query":%s%s%s}' \
+    "$(json_string "$query")" \
+    "${sort:+,\"sort\":$(json_string "$sort")}" \
+    "${max_items:+,\"maxItems\":$max_items}")
+  run_request POST /v1/scrape/twitter/search "$body"
+}
+
+run_youtube() {
+  local sub="search" max_items="" target="" body
+  if [ "${1:-}" = "transcript" ]; then
+    sub="transcript"
+    shift
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      --max) [ "$#" -ge 2 ] || die "--max needs a number"; validate_pos_int --max "$2"; max_items=$VALID_VALUE; shift 2 ;;
+      --max=*) validate_pos_int --max "${1#*=}"; max_items=$VALID_VALUE; shift ;;
+      --) shift; [ "$#" -eq 0 ] || target=$1; break ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$target" ] || die "youtube accepts one query or URL"; target=$1; shift ;;
+    esac
+  done
+  [ -n "$target" ] || usage
+  require_client
+  if [ "$sub" = "transcript" ]; then
+    body=$(printf '{"url":%s}' "$(json_string "$target")")
+    run_request POST /v1/scrape/youtube/transcript "$body"
+  else
+    body=$(printf '{"query":%s%s}' "$(json_string "$target")" "${max_items:+,\"maxItems\":$max_items}")
+    run_request POST /v1/scrape/youtube/search "$body"
+  fi
+}
+
+run_balance() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  require_client
+  run_request GET /v1/balance
+}
+
+run_requests() {
+  local req_id=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -h|--help) help_text; exit 0 ;;
+      --json) WANT_JSON=1; shift ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$req_id" ] || die "requests accepts at most one request ID"; req_id=$1; shift ;;
+    esac
+  done
+  require_client
+  if [ -n "$req_id" ]; then
+    run_request GET "/v1/requests/$(url_encode "$req_id")"
+  else
+    run_request GET /v1/requests
+  fi
+}
+
+run_help() {
+  local topic=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --json) WANT_JSON=1; shift ;;
+      -h|--help) help_text; exit 0 ;;
+      -*) die "unknown option: $1" ;;
+      *) [ -z "$topic" ] || die "help accepts at most one endpoint or slug"; topic=$1; shift ;;
+    esac
+  done
+  if [ -z "$topic" ]; then
+    help_text
+    exit 0
+  fi
+  require_client
+  if [ "$topic" = "all" ] || [ "$topic" = "endpoints" ]; then
+    run_request GET /v1/capabilities
+  else
+    run_request GET "/v1/capabilities?capability=$(url_encode "$topic")"
+  fi
+}
+
+case "${1:-}" in
+  "") usage ;;
+  -h|--help) help_text; exit 0 ;;
+esac
+COMMAND=$1
+shift
+case "$COMMAND" in
+  help)
+    run_help "$@"
+    ;;
+  search)
+    parse_items --max "$@"
+    fan_out search /v1/search/web search_body "${ITEMS[@]}"
+    ;;
+  scrape)
+    parse_items --max-chars "$@"
+    fan_out scrape /v1/scrape/website scrape_body "${ITEMS[@]}"
+    ;;
+  research)
+    run_research "$@"
+    ;;
+  pdf)
+    run_pdf "$@"
+    ;;
+  reddit)
+    run_reddit "$@"
+    ;;
+  github)
+    run_github "$@"
+    ;;
+  twitter)
+    run_twitter "$@"
+    ;;
+  youtube)
+    run_youtube "$@"
+    ;;
+  balance)
+    run_balance "$@"
+    ;;
+  requests)
+    run_requests "$@"
+    ;;
+  call)
+    AUTO_POLL=1
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -h|--help) help_text; exit 0 ;;
+        --no-poll) AUTO_POLL=0; shift ;;
+        *) break ;;
+      esac
+    done
+    [ "$#" -ge 2 ] && [ "$#" -le 3 ] || usage
+    call_endpoint "$AUTO_POLL" "$@"
+    ;;
+  *) usage ;;
+esac

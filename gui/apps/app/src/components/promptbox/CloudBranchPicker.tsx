@@ -1,25 +1,27 @@
 import { useDeferredValue, useState } from "react";
 import { StartBranchPicker } from "@cloudroom/shared-ui/branch-picker-primitives";
-import { useGithubBranches } from "@/hooks/queries/cloudroom-queries";
+import { useCloudProjectBranches } from "@/hooks/queries/cloudroom-queries";
 import { useProjectSourceBranches } from "@/hooks/queries/project-queries";
 
 interface CloudBranchPickerProps {
+  gitlab?: boolean;
   projectId: string;
-  /** The Mac whose checkout lists the GitHub branches. */
+  /** The Mac whose checkout lists remote branches. */
   hostId: string | null;
-  /** The project has no folder on that Mac (ADR 0181), so GitHub lists the branches instead. */
-  fromGithub: boolean;
+  /** The project has no folder on that Mac (ADR 0181), so the repository host lists its branches instead. */
+  fromRemote: boolean;
   /** null starts from the repository's default branch. */
   value: string | null;
   onChange: (branch: string | null) => void;
   disabled?: boolean;
 }
 
-/** Cloud threads clone from GitHub, so only branches on GitHub can be picked (docs/scopes/sandboxes.md). */
+/** Cloud threads start from a branch on the project’s remote (docs/scopes/sandboxes.md). */
 export function CloudBranchPicker({
+  gitlab = false,
   projectId,
   hostId,
-  fromGithub,
+  fromRemote,
   value,
   onChange,
   disabled = false,
@@ -29,16 +31,16 @@ export function CloudBranchPicker({
   const branches = useProjectSourceBranches(projectId, hostId, {
     query: deferredQuery,
     selectedBranch: "",
-    enabled: !fromGithub,
+    enabled: !fromRemote,
   });
-  const github = useGithubBranches(projectId, fromGithub);
-  const defaultBranch = fromGithub
-    ? (github.data?.defaultBranch ?? null)
+  const remote = useCloudProjectBranches(projectId, fromRemote);
+  const defaultBranch = fromRemote
+    ? (remote.data?.defaultBranch ?? null)
     : (branches.data?.originDefaultBranch?.replace(/^origin\//, "") ??
       branches.data?.defaultBranch ??
       null);
-  const githubBranches = fromGithub
-    ? (github.data?.branches ?? []).filter((branch) =>
+  const remoteBranches = fromRemote
+    ? (remote.data?.branches ?? []).filter((branch) =>
         branch.toLowerCase().includes(deferredQuery),
       )
     : (branches.data?.remoteBranches ?? [])
@@ -47,26 +49,26 @@ export function CloudBranchPicker({
         .filter((branch) => branch !== "HEAD");
   const selected = value ?? defaultBranch;
   const unreadable =
-    fromGithub && !github.isFetching && !github.data?.branches.length;
+    fromRemote && !remote.isFetching && !remote.data?.branches.length;
 
   return (
     <StartBranchPicker
       prefix="Branch from:"
       label={selected ?? "Default branch"}
-      sections={[{ label: "On GitHub", icon: "Globe", branches: githubBranches }]}
+      sections={[{ label: gitlab ? "On GitLab" : "On GitHub", icon: "Globe", branches: remoteBranches }]}
       selected={selected}
       badges={defaultBranch ? { [defaultBranch]: "default" } : undefined}
       note={
         unreadable
-          ? "Couldn't read this repo's branches from GitHub. The default branch still works."
-          : "Not on GitHub? Push it first, or use Teleport."
+          ? (gitlab && remote.error?.message) || "Couldn’t read the remote branches. You can still use the default branch."
+          : "Push a local branch to see it here."
       }
-      isLoading={fromGithub ? github.isFetching : branches.isFetching}
+      isLoading={fromRemote ? remote.isFetching : branches.isFetching}
       disabled={disabled}
       onSelect={(branch) => onChange(branch === defaultBranch ? null : branch)}
       onOpen={() => {
-        if (!fromGithub) void branches.refreshFromRemote().catch(() => undefined);
-        else if (github.isStale && !github.isFetching) void github.refetch();
+        if (!fromRemote) void branches.refreshFromRemote().catch(() => undefined);
+        else if (remote.isStale && !remote.isFetching) void remote.refetch();
       }}
       onQueryChange={setQuery}
     />

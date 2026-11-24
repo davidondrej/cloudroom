@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install forwarding-only SSH access. Run as the VM operator; never prints private keys."""
+"""Install Mac access and previews. Hosted VMs get forwarding-only SSH. Self-hosted servers use --tunnel or --tools-only: no new account and no SSH changes. Run as the VM operator; never prints private keys."""
 import argparse
 import json
 import os
@@ -116,10 +116,55 @@ Match all
     print('Preview SSH access configured. The desktop supplies its own public key through the core API.')
 
 
+def self_hosted(state, binary, tunnel):
+    """Self-hosted servers only. Never adds an account or touches SSH. configure() stays the hosted path, so hosted VMs can't be affected."""
+    if os.geteuid() != 0:
+        raise ValueError('Run as the provisioning administrator')
+    if not all(re.fullmatch(r'/[a-zA-Z0-9_./-]+', str(p)) for p in (state, binary)):
+        raise ValueError('Use absolute installation paths without shell characters')
+    service, agent = (pwd.getpwnam(name) for name in ('cloudroom', 'cloudroom-agent'))
+    for path in (state, binary):
+        for parent in (path, *path.parents):
+            info = parent.lstat()
+            if parent.is_symlink() or info.st_uid == agent.pw_uid or info.st_mode & 0o022:
+                raise ValueError('Installation paths must be protected from agent writes')
+    if tunnel:
+        directory, runtime = state / 'previews', Path('/run/cloudroom')
+        if directory.is_symlink() or runtime.is_symlink():
+            raise ValueError('Invalid preview directory')
+        directory.mkdir(mode=0o700, exist_ok=True)
+        os.chown(directory, service.pw_uid, service.pw_gid); directory.chmod(0o700)
+        setup_path = directory / 'setup.json'
+        setup = json.loads(setup_path.read_text()) if setup_path.exists() else {'host': None}
+        if setup_path.exists() and not setup.get('tunnel'):
+            raise ValueError('This server already uses SSH previews')
+        setup.update(socket='/run/cloudroom/preview.sock', agent_uid=agent.pw_uid, tunnel=True)
+        atomic(setup_path, json.dumps(setup), uid=service.pw_uid, gid=service.pw_gid)
+        runtime.mkdir(mode=0o711, exist_ok=True)
+        os.chown(runtime, service.pw_uid, service.pw_gid); runtime.chmod(0o711)
+    # The agent tools from configure(), through runuser: an older server may have no sudo.
+    for name, flag in [('cloud-preview', '--preview-skill'), ('cloud-mac', '--mac-skill'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
+        skill = subprocess.check_output([str(binary), flag], text=True)
+        for base in ['.agents', '.codex', '.pi/agent', '.claude']:
+            command = ['runuser', '-u', agent.pw_name, '--', 'python3', '-c',
+                       'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); f=p/"SKILL.md"; data=sys.stdin.read(); f.write_text(data) if not f.exists() else None',
+                       str(Path(agent.pw_dir) / base / 'skills' / name)]
+            subprocess.run(command, input=skill, text=True, check=True)
+    for link in [Path('/usr/local/bin/cloudroom'), Path('/usr/local/bin/room-cli')]:
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to(binary)
+    print('Tunnel previews configured.' if tunnel else 'Agent tools updated.', 'No account or SSH changes.')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('state', type=Path)
     parser.add_argument('--binary', type=Path, default=Path('/usr/local/lib/cloudroom/cloudroom'))
     parser.add_argument('--no-reload', action='store_true', help='Only for an isolated SSH test server that will be started separately')
+    parser.add_argument('--tunnel', action='store_true', help='Self-hosted: use Core\'s own port, with no new account and no SSH changes')
+    parser.add_argument('--tools-only', action='store_true', help='Self-hosted on SSH previews: update the agent tools and leave SSH alone')
     args = parser.parse_args()
-    configure(args.state.resolve(), args.binary.resolve(), not args.no_reload)
+    if args.tunnel or args.tools_only:
+        self_hosted(args.state.resolve(), args.binary.resolve(), args.tunnel)
+    else:
+        configure(args.state.resolve(), args.binary.resolve(), not args.no_reload)

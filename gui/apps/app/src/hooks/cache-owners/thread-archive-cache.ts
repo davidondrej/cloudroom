@@ -1,3 +1,5 @@
+import { isThreadRunning } from "@cloudroom/client-core";
+import { atom } from "jotai";
 import type { QueryClient } from "@tanstack/react-query";
 import type { ThreadListEntry, ThreadWithRuntime } from "@cloudroom/domain";
 import { threadQueryKey, threadsQueryKey } from "../queries/query-keys";
@@ -10,6 +12,15 @@ import {
   getCachedThreadLists,
   iterateThreadListCacheEntries,
 } from "./thread-list-cache-data";
+
+// Each action owns its family, so settling a child cannot reveal it while its parent is pending.
+export const pendingArchiveFamiliesAtom = atom<readonly ReadonlySet<string>[]>(
+  [],
+);
+export const pendingArchiveIdsAtom = atom(
+  (get) =>
+    new Set(get(pendingArchiveFamiliesAtom).flatMap((family) => [...family])),
+);
 
 type CachedLiveThreadMatcher = (thread: ThreadListEntry) => boolean;
 
@@ -28,7 +39,7 @@ interface CachedThreadSnapshotsArgs {
   threadIds: readonly string[];
 }
 
-interface OptimisticallyArchiveThreadsArgs {
+interface ApplyArchivedThreadIdsArgs {
   queryClient: QueryClient;
   threadIds: readonly string[];
 }
@@ -60,37 +71,50 @@ export function getCachedLiveThreadIdsMatching({
   return Array.from(threadIds);
 }
 
-export function getCachedLiveThreadDescendants(
+/** A status event can reach the sidebar before detail or a paged list. On a timestamp tie, keep the warning. */
+export function newestThread<
+  T extends Pick<ThreadListEntry, "status" | "updatedAt">,
+>(current: T, copy?: T): T {
+  return copy &&
+    (copy.updatedAt > current.updatedAt ||
+      (copy.updatedAt === current.updatedAt && isThreadRunning(copy)))
+    ? copy
+    : current;
+}
+
+export function getCachedArchiveTree(
   queryClient: QueryClient,
   rootThreadId: string,
-): ThreadListEntry[] {
-  const childrenByParentId = new Map<string, Map<string, ThreadListEntry>>();
-  const addThread = (thread: ThreadListEntry) => {
-    if (thread.archivedAt !== null || thread.parentThreadId === null) return;
-    const children = childrenByParentId.get(thread.parentThreadId) ?? new Map();
-    children.set(thread.id, thread);
-    childrenByParentId.set(thread.parentThreadId, children);
-  };
+) {
+  const latest = new Map<string, ThreadListEntry>();
+  const add = (thread: ThreadListEntry) =>
+    latest.set(thread.id, newestThread(thread, latest.get(thread.id)));
   for (const { data } of getCachedThreadLists(queryClient, {
     queryKey: threadsQueryKey(),
   })) {
-    for (const thread of iterateThreadListCacheEntries(data)) addThread(thread);
+    for (const thread of iterateThreadListCacheEntries(data)) add(thread);
   }
-  for (const thread of getCachedSidebarNavigationThreads(queryClient)) {
-    addThread(thread);
+  for (const thread of getCachedSidebarNavigationThreads(queryClient))
+    add(thread);
+  const childrenByParentId = new Map<string, ThreadListEntry[]>();
+  for (const thread of latest.values()) {
+    if (thread.archivedAt !== null || thread.parentThreadId === null) continue;
+    const children = childrenByParentId.get(thread.parentThreadId);
+    if (children) children.push(thread);
+    else childrenByParentId.set(thread.parentThreadId, [thread]);
   }
   const descendants: ThreadListEntry[] = [];
   const visited = new Set([rootThreadId]);
   const pending = [rootThreadId];
   for (let parentId = pending.pop(); parentId; parentId = pending.pop()) {
-    for (const child of childrenByParentId.get(parentId)?.values() ?? []) {
+    for (const child of childrenByParentId.get(parentId) ?? []) {
       if (visited.has(child.id)) continue;
       visited.add(child.id);
       descendants.push(child);
       pending.push(child.id);
     }
   }
-  return descendants;
+  return { root: latest.get(rootThreadId), descendants };
 }
 
 export function getCachedThreadSnapshots({
@@ -105,10 +129,10 @@ export function getCachedThreadSnapshots({
   }));
 }
 
-export function optimisticallyArchiveThreads({
+export function applyArchivedThreadIds({
   queryClient,
   threadIds,
-}: OptimisticallyArchiveThreadsArgs): void {
+}: ApplyArchivedThreadIdsArgs): void {
   const archivedAt = Date.now();
   for (const threadId of threadIds) {
     queryClient.setQueryData<ThreadWithRuntime>(
@@ -121,6 +145,11 @@ export function optimisticallyArchiveThreads({
       },
     );
   }
+  const archivedIds = new Set(threadIds);
+  removeLiveThreadsFromCachedLists({
+    queryClient,
+    matchesThread: (thread) => archivedIds.has(thread.id),
+  });
 }
 
 export function removeLiveThreadsFromCachedLists({

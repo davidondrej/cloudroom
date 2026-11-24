@@ -4,6 +4,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  rmSync,
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -277,6 +278,8 @@ it("start_after_release_selects_fresh_pi_session", async () => {
   expect(released.result).toMatchObject({ ok: true });
   await expectEveryChildGone(1);
   await expectScratchFilesGone();
+  // An OS temp cleaner can delete the long-lived bridge's files (#1202).
+  rmSync(experimental_scratchDirForTests(), { recursive: true, force: true });
 
   const { SessionManager } = await import("@earendil-works/pi-coding-agent");
   const session = SessionManager.open(
@@ -536,11 +539,13 @@ it("closing the catalog waits for its child to exit", async () => {
   expect(log.spawned.some(isAlive)).toBe(false);
 }, 90_000);
 
-it("a child that ignores EOF and SIGTERM is SIGKILLed", async () => {
+it("a child that ignores EOF and SIGTERM is SIGKILLed, and its release answers once it is gone (#2072)", async () => {
   vi.stubEnv("FAKE_PI_HANG_ON_CLOSE", "1");
   await startThread("thr_lc_kill");
   const { spawned } = harness.readProcessLog();
   const pid = spawned[0]!;
+  // A move swaps the transcript once the release is answered, so it is never
+  // answered while the old pi may still write.
   const stop = await harness.request((nextId += 1), "thread/stop", {
     threadId: "thr_lc_kill",
     providerThreadId: providerThreadIdFor("thr_lc_kill"),
@@ -548,10 +553,5 @@ it("a child that ignores EOF and SIGTERM is SIGKILLed", async () => {
     activeTurnId: null,
   });
   expect(stop.result).toMatchObject({ ok: true });
-  expect(isAlive(pid)).toBe(true);
-  const deadline = Date.now() + 15_000;
-  while (isAlive(pid) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
   expect(isAlive(pid)).toBe(false);
 }, 90_000);

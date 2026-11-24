@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import {
   ContextMenuItem,
@@ -15,7 +15,8 @@ type ActionMenuSurface = "context" | "dropdown";
 interface ActionMenuItemProps {
   children: ReactNode;
   variant?: "default" | "destructive";
-  icon: IconName;
+  /** A host icon name, or a ready-made icon (a plugin's). */
+  icon: IconName | ReactElement;
   disabled?: boolean;
   onSelect?: (event: Event) => void;
   surface: ActionMenuSurface;
@@ -35,7 +36,11 @@ export function ActionMenuItem({
 }: ActionMenuItemProps) {
   const content = (
     <>
-      <Icon name={icon} aria-hidden="true" />
+      {typeof icon === "string" ? (
+        <Icon name={icon} aria-hidden="true" />
+      ) : (
+        icon
+      )}
       {children}
     </>
   );

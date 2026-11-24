@@ -11,7 +11,7 @@ Providers are agent backends (e.g., codex, claude-code). Each supports different
 
   room-cli provider list [--machine <id-or-name> | --environment <id>]
                                           List available providers
-  room-cli provider models [providerId] [--machine <id-or-name> | --environment <id>] [--restart]
+  room-cli provider models [providerId] [--machine <id-or-name> | --environment <id>] [--project <id>] [--restart]
                                           List models for a provider
   room-cli provider disconnect <claude-code|codex>
                                           Sign it out on this computer and in Cloud, and remove added accounts
@@ -32,26 +32,27 @@ the explicitly requested provider or Codex, then resolves the model marked
 default by that provider on the target machine (falling back to the first
 catalog model when none is marked).
 
-`room-cli provider models acp-cursor --restart` (or `codex`/`pi --restart`) restarts
-that provider's model-discovery process and reloads its models. It preserves
-conversation threads, credentials, and project files. Use it when model loading
-fails, or when the model list looks stale after a CLI upgrade or a Pi
-`models.json` edit; it does not
+`room-cli provider models acp-cursor --restart` (or any `acp-*` provider, `codex`,
+`pi`) restarts that provider's model-discovery process and reloads its models. It
+preserves conversation threads, credentials, and project files. Use it when model
+loading fails, or when the model list looks stale after a CLI upgrade, a Pi
+`models.json` edit, or an `opencode.json` provider change; it does not
 repair login or installation problems. Other providers must explicitly support
-this action.
+this action. OpenCode and Kilo Code list models per project, since a project's
+`opencode.json` can hide providers. `provider models` lists the calling thread's
+project; pass `--project <id>` for another project, or `--environment <id>`.
 
 Model lists answer from the machine's last stored list while a background
 refresh runs, so a list can be hours old. A provider whose refresh keeps
 failing or timing out keeps answering from its last stored list.
 
-Provider-native memory can be controlled on the separate Settings → Providers
-→ Codex and Settings → Providers → Claude Code pages. Codex memory controls
+Provider-native memory can be controlled on the separate Settings → Agents
+→ Codex and Settings → Agents → Claude Code pages. Codex memory controls
 both recall (`memories.use_memories`) and future generation
 (`memories.generate_memories`). Claude Code memory controls native auto-memory
 reads and writes (`autoMemoryEnabled`). Both preferences default on and apply
 when a provider thread is started, resumed, or forked; they do not interrupt
-an active turn. These settings are separate from Cloudroom's optional Memory plugin,
-an official plugin bundled with the app.
+an active turn.
 
 Provider-native subagents can also be disabled on those provider pages. For
 Codex, cloudroom turns off the native multi-agent feature and caps V2 sessions at the
@@ -141,8 +142,8 @@ entry with a warning. The entry then appears in room-cli provider models output 
 in the model picker, but the provider must still accept the id: claude-code
 and codex accept unlisted ids, while an ACP agent can reject an id it does
 not know at session start. OpenCode rejects unlisted ids, so add an OpenCode
-model to the OpenCode config instead. Edit the JSON and run bb-app config
-refresh; there is no set/unset CLI surface. The streamerMode
+model to the OpenCode config instead. Edit the JSON and restart the app;
+there is no set/unset CLI surface. The streamerMode
 General setting hides every entry from these lists; see the customization
 chapter.
 

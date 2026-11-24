@@ -4,7 +4,6 @@ import type {
 } from "@cloudroom/server-contract";
 import { machineServerAccessBlockedReason } from "../src/components/machines/machine-server-access";
 import type { MachineAccessState } from "../src/components/settings/MachineAccessSettings";
-import modalLogoUrl from "../../../plugins/environment-modal-sandbox/modal-logo.svg";
 
 const noop = () => {};
 const noopAsync = async () => {};
@@ -112,8 +111,8 @@ export const MODAL_MACHINE_PROVIDER = machineProvider({
   displayName: "Modal Sandbox",
   description: "Create a sandbox in your Modal account.",
   pluginId: "environment-modal-sandbox",
-  icon: "./modal-logo.svg",
-  logoUrl: modalLogoUrl,
+  icon: "Box",
+  logoUrl: null,
   supportsSuspend: true,
 });
 

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SKILL_ROOT = fileURLToPath(
   new URL(
-    "../../../../../plugins/bb-guide/skills/plugin-authoring/",
+    "../../../../../plugins/cloudroom-guide/skills/plugin-authoring/",
     import.meta.url,
   ),
 );
@@ -32,7 +32,7 @@ const pluginSdkEntry = join(
   "src",
   "index.ts",
 );
-const tsc = join(repoRoot, "node_modules", ".bin", "tsc");
+const tsc = join(repoRoot, "node_modules", ".bin", "tsc6");
 
 interface SdkReference {
   path: string;

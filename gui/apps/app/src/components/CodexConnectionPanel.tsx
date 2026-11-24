@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
 import { PersistentResponsiveDrawerShell } from "@cloudroom/shared-ui/responsive-overlay";
+import { useInstallPercent } from "@/components/ClaudeConnection";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { BbHttpError, sdk } from "@/lib/sdk";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
@@ -15,6 +16,11 @@ export function openCodexConnection(threadId?: string) {
 export function openCursorConnection(threadId?: string) {
   window.dispatchEvent(new CustomEvent("cloudroom:connect-cursor", { detail: threadId ?? null }));
 }
+/** Signs in for a child that failed on its login, then continues by itself: retries a child that never started
+ *  (`child`), or asks the parent to run the task again. */
+export function openChildSignIn(provider: "codex" | "cursor", target: { child: string } | { parent: string; label: string }) {
+  window.dispatchEvent(new CustomEvent(provider === "cursor" ? "cloudroom:connect-cursor" : eventName, { detail: target }));
+}
 export function openTeleportLogin(error: unknown, providerId: string): boolean {
   if (!(error instanceof BbHttpError) || error.code !== "teleport_login_required") return false;
   if (providerId === "acp-cursor") openCursorConnection();
@@ -22,11 +28,11 @@ export function openTeleportLogin(error: unknown, providerId: string): boolean {
   else return false;
   return true;
 }
-export function useCloudLogin(provider: "codex" | "cursor") {
+export function useCloudLogin(provider: "codex" | "cursor", enabled = true) {
   const account = useCloudroomAccount();
   return useQuery({
     queryKey: [`cloudroom-${provider}-auth`, account.data?.account?.id],
-    enabled: account.data?.ready === true,
+    enabled: enabled && account.data?.ready === true,
     queryFn: ({ signal }) => provider === "cursor" ? sdk.cloudroom.cursorAuth(signal) : sdk.cloudroom.codexAuth(signal),
     retry: false,
     staleTime: 60_000,
@@ -45,6 +51,8 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
   const descriptionId = useId();
   const [open, setOpen] = useState(false);
   const [threadId, setThreadId] = useState<string | null>(null);
+  const [parent, setParent] = useState<{ parent: string; label: string } | null>(null);
+  const [autoContinue, setAutoContinue] = useState(false);
   const [copied, setCopied] = useState(false);
   const [signedIn, setSignedIn] = useState(false);
   const requestId = useRef<string | null>(null);
@@ -60,7 +68,11 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
   });
   useEffect(() => {
     const show = (event: Event) => {
-      setThreadId((event as CustomEvent<string | null>).detail);
+      const detail = (event as CustomEvent<string | { child: string } | { parent: string; label: string } | null>).detail;
+      const target = typeof detail === "object" ? detail : null;
+      setThreadId(typeof detail === "string" ? detail : target && "child" in target ? target.child : null);
+      setParent(target && "parent" in target ? target : null);
+      setAutoContinue(target !== null);
       setOpen(true);
       setCopied(false);
       setSignedIn(false);
@@ -72,8 +84,10 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
     mutationFn: async (kind: "login" | "cancel" | "continue" | "key") => {
       if (kind === "continue") {
         if (threadId) await sdk.cloudroom.retryStart(threadId);
+        if (parent) await sdk.threads.send({ threadId: parent.parent, mode: "auto", input: [{ type: "text", text: `I signed in to ${name} again. Run ${parent.label} again, same harness and settings.`, mentions: [] }] });
         setOpen(false);
         setThreadId(null);
+        setParent(null);
         await queryClient.invalidateQueries({ queryKey: ["cloudroom-thread"] });
         return;
       }
@@ -94,8 +108,18 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
     onSettled: () => queryClient.invalidateQueries({ queryKey }),
   });
   const state = auth.data?.state;
+  // Sign-in installs a missing Codex first, and says so (ADR 20261111-123959).
+  const installing = useInstallPercent(cursor ? null : auth.data?.installing_since);
+  // A sign-in started from a child's login fix row continues the task by itself, once.
+  const resumed = useRef(false);
+  useEffect(() => { if (open) resumed.current = false; }, [open]);
+  useEffect(() => {
+    if (!autoContinue || !signedIn || state !== "connected" || resumed.current) return;
+    resumed.current = true;
+    action.mutate("continue");
+  }, [autoContinue, signedIn, state, action]);
   const rejected = !cursor && Boolean(threadId) && !signedIn && state === "connected";
-  const close = () => { setApiKey(""); setOpen(false); };
+  const close = () => { setApiKey(""); setAutoContinue(false); setOpen(false); };
   if (!accountId || !account.data?.ready) return null;
   return <PersistentResponsiveDrawerShell
     open={open} onOpenChange={value => { if (!value) close(); }} labelledBy={titleId} describedBy={descriptionId}
@@ -114,14 +138,14 @@ function ConnectionPanel({ provider }: { provider: "codex" | "cursor" }) {
         <Button variant="outline" disabled={action.isPending} onClick={() => action.mutate("continue")}>Try again</Button>
       </> : state === "connected" ? <>
         <p role="status">Connected{auth.data?.email ? ` · ${auth.data.email}` : ""}</p>
-        <Button className="w-full" disabled={action.isPending} onClick={() => action.mutate("continue")}>{threadId ? "Continue to task" : "Done"}</Button>
+        <Button className="w-full" disabled={action.isPending} onClick={() => action.mutate("continue")}>{threadId || parent ? "Continue to task" : "Done"}</Button>
       </> : state === "waiting" ? <>
-        <p role="status" className="text-sm">{cursor ? "Open Cursor’s sign-in page. Credentials will be saved on your cloud VM." : auth.data?.user_code ? "Enter this code on OpenAI’s sign-in page." : "Finish signing in to ChatGPT in your browser."}</p>
+        <p role="status" className="text-sm">{cursor ? "Open Cursor’s sign-in page. Credentials will be saved on your cloud VM." : installing !== null ? "Installing Codex first. Your browser opens next." : auth.data?.user_code ? "Enter this code on OpenAI’s sign-in page." : "Finish signing in to ChatGPT in your browser."}</p>
         {!cursor && auth.data?.user_code && <div className="flex items-center justify-between gap-3 border p-3">
           <code className="text-lg tracking-wider">{auth.data?.user_code}</code>
           <Button variant="outline" size="sm" onClick={() => void copyToClipboardWithToast(auth.data?.user_code ?? "", { successMessage: null, errorMessage: "Copy failed. Select the code and copy it manually." }).then(setCopied)}>{copied ? "Copied" : "Copy code"}</Button>
         </div>}
-        <Button className="w-full" disabled={!auth.data?.verification_url} onClick={() => { if (auth.data?.verification_url) openUrlInExternalBrowser(auth.data.verification_url); }}>Open sign-in page</Button>
+        <Button className="w-full tabular-nums" disabled={!auth.data?.verification_url} onClick={() => { if (auth.data?.verification_url) openUrlInExternalBrowser(auth.data.verification_url); }}>{installing !== null ? `Installing Codex ${installing}%` : "Open sign-in page"}</Button>
         <p className="text-sm text-muted-foreground">Waiting for sign-in. This panel updates automatically.</p>
         <Button variant="outline" disabled={action.isPending} onClick={() => action.mutate("cancel")}>Cancel sign-in</Button>
       </> : <>

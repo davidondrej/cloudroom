@@ -50,7 +50,7 @@ function createTunnelFixture() {
       },
     },
   });
-  const pluginBb = fakeHost.bb;
+  const pluginRoom = fakeHost.bb;
   const credential = {
     serverUrl: "https://sawyer.cloudroom.run",
     handle: "sawyer",
@@ -64,11 +64,11 @@ function createTunnelFixture() {
       set: async () => {},
       delete: async () => {},
     },
-    hosts: pluginBb.hosts,
-    hostResolver: new ShareHostResolver(() => pluginBb.sdk),
+    hosts: pluginRoom.hosts,
+    hostResolver: new ShareHostResolver(() => pluginRoom.sdk),
     getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
     getCredential: () => credential,
-    log: pluginBb.log,
+    log: pluginRoom.log,
   });
   const tunnel = new ConnectTunnel({
     store: {
@@ -79,7 +79,8 @@ function createTunnelFixture() {
     shares,
     onCredentialRejected: () => {},
     getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
-    log: pluginBb.log,
+    getLoopbackHeaders: () => ({}),
+    log: pluginRoom.log,
     onStatusChange,
   });
   return {

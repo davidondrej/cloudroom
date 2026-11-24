@@ -1,19 +1,29 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  stripGitUrlCredentials,
+  stripTextGitUrlCredentials,
+} from "@cloudroom/domain";
+import {
   createPluginArtifact,
   deletePluginArtifact,
   deleteInstalledPlugin,
   getInstalledPluginRegistration,
   getInstalledPlugin,
+  getPluginMarketplace,
   listPluginArtifacts,
   listPluginArtifactsAtOrUnderPath,
   listPluginArtifactsUnderPath,
   listPluginKvKeys,
+  setInstalledPluginLastFailure,
   setPluginKvValue,
   upsertInstalledPlugin,
+  upsertPluginMarketplace,
   type DbConnection,
 } from "../../src/index.js";
-import type { UpsertInstalledPluginInput } from "../../src/data/plugins.js";
+import {
+  stripPluginGitUrlCredentials,
+  type UpsertInstalledPluginInput,
+} from "../../src/data/plugins.js";
 import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 describe("normalized plugin persistence", () => {
@@ -168,6 +178,104 @@ describe("normalized plugin persistence", () => {
       sourceGitRequestedRef: "main",
       sourceGitRefKind: "branch",
     });
+  });
+
+  it.each([
+    ["https://user:TOKEN@host/r.git", "https://host/r.git"],
+    ["https://TOKEN@github.com/o/r", "https://github.com/o/r"],
+    ["http:///alice:TOKEN@host/repo.git", "http:///host/repo.git"],
+    ["http:/alice@host:repo.git", "http:/alice@host:repo.git"],
+    ["HTTPS://u:p@ss@host:8443/r", "HTTPS://host:8443/r"],
+    ["https://do\\main\\u:TOKEN@host/r", "https://host/r"],
+    ["ftps://u:TOKEN@host/r", "ftps://host/r"],
+    ["git:https://u:TOKEN@host/r@main", "git:https://host/r@main"],
+    ["ssh://git:pw@host:2222/r", "ssh://git@host:2222/r"],
+    ["ssh://git@host/r", "ssh://git@host/r"],
+    ["git@github.com:o/r.git", "git@github.com:o/r.git"],
+    ["git:team@repo.git", "git:team@repo.git"],
+    ["/srv/repo@main", "/srv/repo@main"],
+    ["file:///srv@storage/team/repo.git", "file:///srv@storage/team/repo.git"],
+  ])("strips Git URL credentials: %s", (value, expected) => {
+    expect(stripGitUrlCredentials(value)).toBe(expected);
+  });
+
+  it("strips Git URL credentials in text (#2190)", () => {
+    expect(
+      stripTextGitUrlCredentials(
+        "fatal: could not read Password for 'https://TOKEN@host': no; see ssh://git@h/r",
+      ),
+    ).toBe(
+      "fatal: could not read Password for 'https://host': no; see ssh://git@h/r",
+    );
+    expect(
+      stripTextGitUrlCredentials("unable to access 'http:///alice:TOKEN@h/r/'"),
+    ).toBe("unable to access 'http:///h/r/'");
+    expect(
+      stripTextGitUrlCredentials("git clone https://alice:FAKE,TOKEN@host/repo failed"),
+    ).toBe("git clone https://host/repo failed");
+    expect(
+      stripPluginGitUrlCredentials("git:alice:TOKEN@github.com/org/repo@main"),
+    ).toBe("git:github.com/org/repo@main");
+  });
+
+  it("strips credentials from Git URLs saved before #1935", () => {
+    const url = 'https://user:pa"s s@github.com/acme/repo';
+    upsertInstalledPlugin(db, {
+      id: "legacy",
+      source: `git:${url}@main`,
+      provenance: { kind: "direct" },
+      sourceIntent: {
+        kind: "git",
+        url,
+        subdirectory: null,
+        selector: { kind: "ref", ref: "main", refKind: "branch" },
+      },
+      exactResolution: { kind: "git", commit: "abcdef1234567" },
+      updateState: {
+        lastCheckAt: null,
+        availableCompatibleVersion: null,
+        newestIncompatibleVersion: null,
+        statusDetail: "git ls-remote 'https://user:pa\"ss@github.com/acme/repo' failed",
+      },
+      activeArtifactId: null,
+      rootDir: "/cache/repo",
+      version: "1.0.0",
+      enabled: true,
+    });
+    setInstalledPluginLastFailure(db, "legacy", {
+      version: "1.1.0",
+      detail: "git clone 'https://x:ghp_FAKE123@github.com/acme/repo' failed",
+      at: 1,
+    });
+    for (const row of [
+      getInstalledPlugin(db, "legacy"),
+      getInstalledPluginRegistration(db, "legacy"),
+    ]) {
+      expect(row).toMatchObject({
+        source: "git:https://github.com/acme/repo@main",
+        sourceGitUrl: "https://github.com/acme/repo",
+        updateStatusDetail:
+          "git ls-remote 'https://github.com/acme/repo' failed",
+        lastFailureDetail: "git clone 'https://github.com/acme/repo' failed",
+      });
+    }
+    upsertPluginMarketplace(db, {
+      name: "legacy",
+      sourceKind: "git",
+      manifestUrl: url,
+      sourceGitRef: "main",
+      sourceGitCommit: null,
+      manifestJson: "{}",
+      statsJson: null,
+      etag: null,
+      lastModified: null,
+      lastSuccessfulRefreshAt: null,
+      lastAttemptedRefreshAt: null,
+      lastError: null,
+    });
+    expect(getPluginMarketplace(db, "legacy")?.manifestUrl).toBe(
+      "https://github.com/acme/repo",
+    );
   });
 
   it("retains artifact records when a plugin registration is removed", () => {

@@ -113,6 +113,11 @@ export const CORE_COMMAND_GROUPS: readonly CommandGroup[] = [
     (m) => (program, deps) => m.registerFileCommands(program, deps.getUrl),
   ),
   group(
+    "files",
+    () => import("./commands/file.js"),
+    (m) => (program) => m.registerFilesCommand(program),
+  ),
+  group(
     "theme",
     () => import("./commands/theme.js"),
     (m) => (program, deps) => m.registerThemeCommands(program, deps.getUrl),
@@ -152,6 +157,17 @@ export function selectCommandGroups(
   if (firstArg === "--version" || firstArg === "-V") return [];
   const match = CORE_COMMAND_GROUPS.find((entry) => entry.name === firstArg);
   return match === undefined ? CORE_COMMAND_GROUPS : [match];
+}
+
+/** True for `room-cli`, `room-cli --help`, `room-cli -h` and `room-cli help`. */
+export function isTopLevelHelp(args: readonly string[]): boolean {
+  if (args.length === 0) return true;
+  return args.length === 1 && ["--help", "-h", "help"].includes(args[0]!);
+}
+
+/** True for the arguments of `room-cli PLUGIN --help` and `room-cli PLUGIN -h`. */
+export function isCommandHelp(args: readonly string[]): boolean {
+  return args.length === 1 && (args[0] === "--help" || args[0] === "-h");
 }
 
 export function pluginProxyCandidate(
