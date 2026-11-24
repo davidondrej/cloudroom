@@ -174,7 +174,7 @@ export class CloudChildren {
         if (error instanceof CloudroomError && !error.retryable && error.status !== null && !signIn) throw new ApiError(400, "cloudroom_parent_unsaved", publicError(error));
         throw new ApiError(503, "cloudroom_parent_unsaved", `Couldn't save the new parent to Cloud: ${(signIn ? "Sign in to Cloudroom to use cloud sandboxes" : publicError(error)).replace(/\.?$/, ".")} Try again.`);
       }
-      try { await apply(); }
+      try { await apply(); await this.rt.sync.parentChangedHere(threadId); }
       finally { await this.saveLabel(threadId, "parent").catch((error: unknown) => this.rt.host.warn("Cloud thread label not saved", error, { threadId })); }
     });
   }

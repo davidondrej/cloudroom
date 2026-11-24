@@ -220,11 +220,11 @@ export function createProject(
   return { project, source: toProjectSource(source) };
 }
 
-/** A project known only by its Git remote. Each machine clones it the first time a thread there needs it. */
+/** A remote project identity with no local checkout. A known Git remote can be cloned when needed. */
 export function createRemoteProject(
   db: DbConnection,
   notifier: DbNotifier,
-  input: { name: string; gitRemoteUrl: string; githubRepoId?: number },
+  input: { name: string; gitRemoteUrl?: string; githubRepoId?: number },
 ) {
   const project = db.transaction((tx) => insertProjectRow(tx, input));
   notifier.notifyProject(project.id, ["project-created"]);

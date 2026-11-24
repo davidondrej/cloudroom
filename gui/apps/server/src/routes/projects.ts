@@ -13,6 +13,7 @@ import {
   listProjectSourcesByProjectIds,
   listThreadSections,
   listThreadsWithPendingInteractionStateForProjects,
+  listThreadsWithPendingInteractionState,
   moveCheckoutEnvironments,
   reorderProject,
   updateProject,
@@ -52,6 +53,7 @@ import {
   isWindowsHostPath,
   isWindowsNetworkOrDevicePath,
   PROMPT_HISTORY_ENTRY_LIMIT,
+  isRunningThread,
   stripGitUrlCredentials,
   UNSUPPORTED_WINDOWS_NETWORK_PROJECT_PATH_MESSAGE,
 } from "@cloudroom/domain";
@@ -314,7 +316,18 @@ function buildSidebarBootstrapResponse(deps: AppDeps) {
       "Personal project response was not built",
     );
   }
+  const projectIds = new Set([
+    ...listPublicProjects(deps.db, "all").map((project) => project.id),
+    personalProject.id,
+  ]);
+  const runningThreads = toThreadListEntryResponses(deps, {
+    threads: listThreadsWithPendingInteractionState(deps.db, {
+      archived: false,
+      includeHidden: true,
+    }).filter((thread) => projectIds.has(thread.projectId)),
+  }).filter(isRunningThread);
   return {
+    runningThreads,
     sections: listThreadSections(deps.db),
     projects: buildProjectsWithThreadsResponseFromRows(
       deps,

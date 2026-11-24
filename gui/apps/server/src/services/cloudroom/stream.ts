@@ -15,6 +15,7 @@ import {
   STREAM_BATCH_MS,
   type EarlierSession,
 } from "./events.js";
+import { observeCloudSnapshot } from "./inventory.js";
 import { codexOutage } from "./openai-status.js";
 import { connectionFailure, connectionOrReplayFailed, continuedFrom, young } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
@@ -282,6 +283,9 @@ export class CloudStream {
     const empty = !shared && saved.cursor === 0 && !this.rt.host.hasShownEvents(saved.threadId) && await this.rt.sandboxes.followsThreads().catch(() => false);
     if (state().actFrom === null || empty) {
       const snapshot = await client.session(saved.sessionId!, signal);
+      if (signal.aborted) return;
+      observeCloudSnapshot(this.rt.host.db, saved.threadId, snapshot);
+      this.rt.notify(saved.threadId);
       if (state().actFrom === null) {
         this.rt.threadStates.set(saved.threadId, { ...state(), actFrom: snapshot.last_sequence, home: tagOf(snapshot.last_app_prompt?.request_id) ?? state().home });
         if (!shared) void this.children.listChildren(saved, client, snapshot.continued?.from).catch((error: unknown) => this.rt.host.warn("Cloud child threads could not be listed", error, { threadId: saved.threadId }));
@@ -293,6 +297,7 @@ export class CloudStream {
     this.rt.setConnectionIssue(saved.threadId, "stream");
     if (saved.error?.startsWith(connectionOrReplayFailed) && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
       const snapshot = await client.session(saved.sessionId!, signal);
+      if (!signal.aborted) observeCloudSnapshot(this.rt.host.db, saved.threadId, snapshot);
       if (!signal.aborted && snapshot.last_sequence === saved.cursor && binding(this.rt.host.db, saved.threadId)?.error === saved.error && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
         saveBinding(this.rt.host.db, saved.threadId, { error: null });
         this.rt.notify(saved.threadId);
@@ -420,7 +425,7 @@ export class CloudStream {
       else if (data.state === "running") this.rt.state(saved.threadId).outOfMemory = false;
     }
     if (record.kind === "storage_warning" || record.kind === "storage_pause") this.noteDisk(saved.threadId, client, record.data);
-    this.rt.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
+    this.rt.notify(saved.threadId, eventTypes, ["state", "receipt", "native_identity", "model_fallback", "reasoning", "launch_reasoning", "storage_warning", "storage_pause", "storage_recovered"].includes(record.kind));
     return nextHandled;
   }
 

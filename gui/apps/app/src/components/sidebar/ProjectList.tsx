@@ -1,3 +1,4 @@
+import { RunningThreads } from "./RunningThreads";
 import {
   memo,
   useCallback,
@@ -1869,6 +1870,10 @@ function ProjectListComponent({
       }}
     >
       <ProjectListShell>
+        <RunningThreads
+          threads={sidebarNavigation?.runningThreads ?? []}
+          onSelect={onProjectSelect}
+        />
         <ActiveSidebarModeSections
           mode={organizationMode}
           renderGrouped={(groupedMode) => (
