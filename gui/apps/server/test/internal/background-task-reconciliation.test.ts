@@ -8,18 +8,26 @@ import {
   setThreadExecutionOverride,
 } from "@cloudroom/db";
 import {
+  groupHostDaemonEvents,
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonServerWsMessageSchema,
 } from "@cloudroom/host-daemon-contract";
 import { threadScope, turnScope } from "@cloudroom/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settleDanglingBackgroundTasks } from "../../src/services/threads/background-task-reconciliation.js";
-import { handleDaemonSocketClosed } from "../../src/internal/session-owner-side-effects.js";
+import { runStartupRecoverySweep } from "../../src/services/system/periodic-sweeps.js";
+import {
+  handleDaemonSocketClosed,
+  startRunningTurnDeadlinesAfterRestart,
+} from "../../src/internal/session-owner-side-effects.js";
 import {
   DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
   DAEMON_DISCONNECT_GRACE_MS,
 } from "../../src/constants.js";
-import { internalAuthHeaders } from "../helpers/commands.js";
+import {
+  createTestDaemonEventEnvelope,
+  internalAuthHeaders,
+} from "../helpers/commands.js";
 import {
   seedEnvironment,
   seedHost,
@@ -536,37 +544,162 @@ describe("active thread disconnect reconciliation triggers", () => {
     vi.useRealTimers();
   });
 
-  it("does not interrupt active turns when the same daemon instance reconnects with the thread active", async () => {
+  // After a tunnel flap the daemon can wait its full 30 s reconnect backoff,
+  // so each case reconnects 31 s after the drop (#1956).
+  async function reopenSameInstance(
+    harness: TestAppHarness,
+    args: { hostId: string; hostName: string; activeThreadIds: string[] },
+  ): Promise<string> {
+    await vi.advanceTimersByTimeAsync(31_000);
+    const response = await harness.app.request("/internal/session/open", {
+      method: "POST",
+      headers: internalAuthHeaders(harness, { hostId: args.hostId }),
+      body: JSON.stringify({
+        hostId: args.hostId,
+        instanceId: "instance-1",
+        hostName: args.hostName,
+        hasMachineCredential: false,
+        platform: "darwin",
+        dataDir: "/tmp/host-daemon-active-same-instance",
+        localApiPort: null,
+        protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+        activeThreads: args.activeThreadIds.map((threadId) => ({ threadId })),
+      }),
+    });
+    expect(response.status).toBe(201);
+    return ((await response.json()) as { sessionId: string }).sessionId;
+  }
+
+  function listTypesAfterTurnStart(harness: TestAppHarness, threadId: string) {
+    return listEvents(harness.deps.db, { threadId })
+      .filter((row) => row.type !== "turn/started")
+      .map((row) => row.type);
+  }
+
+  it("keeps a running turn when the same daemon's socket comes back within the grace", async () => {
     await withTestHarness(async (harness) => {
       const { host, session, thread } = seedActiveTurnThread(harness);
 
+      vi.useFakeTimers();
       handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
-
-      const response = await harness.app.request("/internal/session/open", {
-        method: "POST",
-        headers: internalAuthHeaders(harness, {
-          hostId: host.id,
-        }),
-        body: JSON.stringify({
-          hostId: host.id,
-          instanceId: "instance-1",
-          hostName: host.name,
-          hasMachineCredential: false,
-          platform: "darwin",
-          dataDir: "/tmp/host-daemon-active-same-instance",
-          localApiPort: null,
-          protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
-          activeThreads: [{ threadId: thread.id }],
-        }),
+      const sessionId = await reopenSameInstance(harness, {
+        hostId: host.id,
+        hostName: host.name,
+        activeThreadIds: [thread.id],
       });
+      harness.deps.hub.registerDaemon(
+        sessionId,
+        host.id,
+        createMockHubSocket(),
+      );
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS);
 
-      expect(response.status).toBe(201);
       expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
-      expect(
-        listEvents(harness.deps.db, { threadId: thread.id })
-          .filter((row) => row.type !== "turn/started")
-          .map((row) => row.type),
-      ).toEqual([]);
+      expect(listTypesAfterTurnStart(harness, thread.id)).toEqual([]);
+    });
+  });
+
+  it("interrupts by the deadline when the session reopens but its socket never arrives", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedActiveTurnThread(harness);
+
+      vi.useFakeTimers();
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await reopenSameInstance(harness, {
+        hostId: host.id,
+        hostName: host.name,
+        activeThreadIds: [thread.id],
+      });
+      await vi.advanceTimersByTimeAsync(
+        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 31_000 - 1,
+      );
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("error");
+      expect(listTypesAfterTurnStart(harness, thread.id)).toEqual([
+        "turn/completed",
+        "system/error",
+        "system/thread/interrupted",
+      ]);
+    });
+  });
+
+  it("starts the deadline when a reopen replaces the socket before its close callback runs", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedActiveTurnThread(harness);
+      harness.deps.hub.registerDaemon(
+        session.id,
+        host.id,
+        createMockHubSocket(),
+      );
+
+      vi.useFakeTimers();
+      await reopenSameInstance(harness, {
+        hostId: host.id,
+        hostName: host.name,
+        activeThreadIds: [thread.id],
+      });
+      // The old socket's close callback arrives after the replacement.
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await vi.advanceTimersByTimeAsync(
+        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 1,
+      );
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("error");
+    });
+  });
+
+  it("re-arms the running-turn deadline when an HTTP-only reopen revives an interrupted turn", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedActiveTurnThread(harness);
+
+      vi.useFakeTimers();
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("error");
+
+      // The daemon still runs the turn, but its new socket never arrives.
+      await reopenSameInstance(harness, {
+        hostId: host.id,
+        hostName: host.name,
+        activeThreadIds: [thread.id],
+      });
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("error");
+    });
+  });
+
+  it("leaves the restart re-arm to the listener, not the startup sweep", async () => {
+    await withTestHarness(async (harness) => {
+      const { session, thread } = seedActiveTurnThread(harness);
+      harness.deps.hub.unregisterDaemon(session.id);
+
+      vi.useFakeTimers();
+      await runStartupRecoverySweep(harness.deps);
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+    });
+  });
+
+  it("starts the running-turn deadline again after a server restart", async () => {
+    await withTestHarness(async (harness) => {
+      // A restarted server: a running turn, no daemon socket and no timers.
+      const { session, thread } = seedActiveTurnThread(harness);
+      harness.deps.hub.unregisterDaemon(session.id);
+
+      vi.useFakeTimers();
+      startRunningTurnDeadlinesAfterRestart(harness.deps);
+      await vi.advanceTimersByTimeAsync(
+        DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 1,
+      );
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(getThread(harness.deps.db, thread.id)?.status).toBe("error");
     });
   });
 
@@ -626,6 +759,78 @@ describe("active thread disconnect reconciliation triggers", () => {
       });
     },
   );
+
+  it.each([
+    ["a started turn", true],
+    ["a turn the daemon had not started yet", false],
+  ])("tells a running child's parent once for %s, through a restart, a revive, a second deadline and a late report", async (_label, started) => {
+    await withTestHarness(async (harness) => {
+      const { host, session, environment, project, thread: parent } =
+        seedThreadFixture(harness, {});
+      setThreadExecutionOverride(harness.deps.db, { threadId: parent.id, modelOverride: "gpt-5" });
+      const child = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        parentThreadId: parent.id,
+        status: "active",
+      });
+      if (started) {
+        seedTurnStarted(harness.deps, { environmentId: environment.id, threadId: child.id, turnId: "turn-1" });
+      }
+      const open = async (activeThreads: { threadId: string }[]) => {
+        const response = await harness.app.request("/internal/session/open", {
+          method: "POST",
+          headers: internalAuthHeaders(harness, { hostId: host.id }),
+          body: JSON.stringify({
+            hostId: host.id, instanceId: "instance-restarted", hostName: host.name, hasMachineCredential: false,
+            platform: "darwin", dataDir: "/tmp/host-daemon-child-failure", localApiPort: null,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION, activeThreads,
+          }),
+        });
+        return ((await response.json()) as { sessionId: string }).sessionId;
+      };
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+      handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+      await open([]); // A new daemon: the turn fails.
+      await vi.advanceTimersByTimeAsync(3_000);
+      const sessionId = await open([{ threadId: child.id }]); // HTTP-only revive.
+      expect(getThread(harness.deps.db, child.id)?.status).toBe("active");
+      await vi.advanceTimersByTimeAsync(DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS + 3_000);
+      expect(getThread(harness.deps.db, child.id)?.status).toBe("error");
+      await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId,
+          eventGroups: groupHostDaemonEvents([
+            ...(started
+              ? []
+              : [
+                  createTestDaemonEventEnvelope({
+                    event: {
+                      type: "turn/started", threadId: child.id, providerThreadId: "claude-session-1",
+                      scope: turnScope("turn-1"),
+                    },
+                  }),
+                ]),
+            createTestDaemonEventEnvelope({
+              event: {
+                type: "turn/completed", threadId: child.id, providerThreadId: "claude-session-1",
+                scope: turnScope("turn-1"), status: "interrupted",
+              },
+            }),
+          ]),
+        }),
+      });
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(
+        listQueuedThreadMessages(harness.deps.db, parent.id).filter((row) =>
+          row.content.includes(child.id),
+        ),
+      ).toHaveLength(1);
+    });
+  });
 
   it("records a lost host connection after the live event window elapses without a reconnect", async () => {
     await withTestHarness(async (harness) => {

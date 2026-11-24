@@ -43,7 +43,7 @@ interface MachineProviderInstallOptions extends MachineListCommandOptions {
 const MACHINE_LIFECYCLE_TIMEOUT_MS = 15 * 60_000;
 const MACHINE_LIFECYCLE_POLL_MS = 500;
 // Longer than the website's 5 s VPS health probe, so an unresponsive VPS still lists, as offline.
-const VPS_HINT_TIMEOUT_MS = 10_000;
+export const VPS_HINT_TIMEOUT_MS = 10_000;
 
 async function waitForMachineLifecycle(args: {
   host: Host;
@@ -252,6 +252,23 @@ function vpsStatus(vps: CloudVps): string {
   if (!vps.health) return "offline";
   if (vps.busy) return `busy: ${vps.busy}`;
   return `online, ${vps.health.running} ${vps.health.running === 1 ? "agent" : "agents"} running`;
+}
+
+/** `cloud status`'s line for the VPS: its whole disk, which all its threads share, and why a busy one takes no new
+ *  threads (#1512). The limits are the website's `busyReason` (web/lib/providers/vps.ts). */
+export function vpsDiskLine(vps: CloudVps): string {
+  const GB = 1024 ** 3;
+  const disk = vps.health?.disk;
+  const used = disk
+    ? `, ${Math.round(disk.used / GB)} of ${Math.round(disk.total / GB)} GB disk used`
+    : "";
+  const then = vps.fallback
+    ? "start in Cloud instead"
+    : `fail until it has room, or until "Use Cloud when it's busy" is on in Settings → Machines`;
+  const busy = vps.busy
+    ? ` Over 95% CPU, 85% memory or 90% disk, it takes no new threads: they ${then}.`
+    : "";
+  return `VPS: ${vps.name ?? "your VPS"} (${vpsStatus(vps)})${used}.${busy}`;
 }
 
 export function registerMachineCommands(

@@ -15,7 +15,7 @@ import {
 } from "@/lib/plugin-slots";
 import { resetAllCrashedPluginSlotsForTest } from "@/components/plugin/PluginSlotMount";
 import { resetDeprecatedAliasWarningsForTests } from "@/lib/plugin-sdk-deprecated-aliases";
-import { parseGitDiffFiles } from "@/components/git-diff/git-diff-parsing";
+import { parseGitDiffFiles } from "@/components/diff/patch-utils";
 import { PluginDiff } from "@/components/plugin/PluginDiff";
 import {
   BUILT_IN_REPLACEMENT_PROVIDER,

@@ -1,4 +1,3 @@
-import { AbortError } from "p-retry";
 import { describe, expect, it, vi } from "vitest";
 import type { PendingInteractionCreate } from "@cloudroom/domain";
 import { HOST_ARTIFACT_MAX_BYTES } from "@cloudroom/host-daemon-contract/protocol";
@@ -140,7 +139,9 @@ describe("createServerClient", () => {
         threadId: "thread-1",
         path: "network-tab.har",
       }),
-    ).rejects.toBeInstanceOf(AbortError);
+    ).rejects.toThrow(
+      "Refusing to fetch project attachment over insecure server URL",
+    );
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
@@ -161,7 +162,9 @@ describe("createServerClient", () => {
         threadId: "thread-1",
         path: "network-tab.har",
       }),
-    ).rejects.toBeInstanceOf(AbortError);
+    ).rejects.toThrow(
+      "Refusing to fetch project attachment over insecure server URL",
+    );
     expect(fetchFn).not.toHaveBeenCalled();
   });
 

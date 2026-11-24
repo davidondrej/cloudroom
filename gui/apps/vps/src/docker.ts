@@ -5,6 +5,9 @@ import { readFile, statfs } from "node:fs/promises";
 
 const SOCKET = process.env.DOCKER_SOCKET ?? "/var/run/docker.sock";
 const LABEL = "cloudroom.sandbox";
+/** The only images this service ever removes: old versions of the sandbox image (`VPS_IMAGE` in web/lib/providers/vps.ts). */
+const SANDBOX_REPOSITORY = "ghcr.io/cloudroom-dev/sandbox";
+const IMAGE_ID = /^sha256:[a-f0-9]{64}$/;
 /** Core's port inside every sandbox, published on the host's loopback only. */
 const CORE_PORT = "9840/tcp";
 const PORTS = { first: 20_000, last: 29_999 };
@@ -110,13 +113,23 @@ export function create(name: string, image: string): Promise<{ created: boolean 
   return next;
 }
 
+type Image = { Id: string; Created: number; RepoTags: string[] | null };
+const repositoryOf = (image: string) => image.replace(/:[^/:]+$/, "");
+async function localImages(repository: string): Promise<Image[]> {
+  const filters = encodeURIComponent(
+    JSON.stringify({ reference: [repository] }),
+  );
+  return json<Image[]>(
+    await ok(api("GET", `/images/json?filters=${filters}`), "Images"),
+  );
+}
+
 async function usableImage(image: string): Promise<string> {
   if ((await api("GET", `/images/${encodeURIComponent(image)}/json`)).status === 200) return image;
   const pulling = pull(image);
-  const repository = image.replace(/:[^/:]+$/, "");
-  const filters = encodeURIComponent(JSON.stringify({ reference: [repository] }));
-  const local = json<{ Id: string; Created: number; RepoTags: string[] | null }[]>(await ok(api("GET", `/images/json?filters=${filters}`), "Images"));
-  const newest = local.sort((a, b) => b.Created - a.Created)[0];
+  const newest = (await localImages(repositoryOf(image))).sort(
+    (a, b) => b.Created - a.Created,
+  )[0];
   if (newest) {
     pulling.catch((error: unknown) => console.error(JSON.stringify({ pull_failed: String(error) })));
     return newest.RepoTags?.[0] ?? newest.Id;
@@ -136,10 +149,55 @@ export function pull(image: string): Promise<void> {
       // The pull streams progress as JSON lines; an error arrives as a line, not a status code.
       const failed = result.body.toString().split("\n").find((line) => line.includes('"error"'));
       if (failed) throw new Error(`Pull failed: ${failed.slice(0, 500)}`);
+      void prune(image).catch((error: unknown) =>
+        console.error(JSON.stringify({ prune_failed: String(error) })),
+      );
     })
     .finally(() => pulls.delete(image));
   pulls.set(image, pending);
   return pending;
+}
+
+/** Removes old Cloudroom sandbox images, several GB each (#1581): after a new one arrives, and on start, when the
+ *  newest is the one the installer just pulled. Keeps `image` (else the newest), the newest other one as a fallback,
+ *  any being pulled, and any a container uses, running or stopped. Never forced, so Docker also refuses an image in
+ *  use. Other images, containers, and volumes are never touched. */
+export async function prune(image?: string): Promise<void> {
+  if (image && repositoryOf(image) !== SANDBOX_REPOSITORY) return;
+  const local = (await localImages(SANDBOX_REPOSITORY)).sort(
+    (a, b) => b.Created - a.Created,
+  );
+  const current = image
+    ? local.find((each) => each.RepoTags?.includes(image))
+    : local[0];
+  if (!current) return;
+  const used = json<{ Image: string; ImageID: string }[]>(
+    await ok(api("GET", "/containers/json?all=1"), "List"),
+  );
+  const [, ...old] = local.filter((each) => each !== current);
+  for (const each of old) {
+    const tags = each.RepoTags ?? [];
+    if (
+      !IMAGE_ID.test(each.Id) ||
+      !tags.length ||
+      tags.some(
+        (tag) => !tag.startsWith(`${SANDBOX_REPOSITORY}:`) || pulls.has(tag),
+      )
+    )
+      continue;
+    if (
+      used.some(
+        (container) =>
+          container.ImageID === each.Id || tags.includes(container.Image),
+      )
+    )
+      continue;
+    await ok(api("DELETE", `/images/${each.Id}`), "Remove image").then(
+      () => console.log(JSON.stringify({ image_removed: tags })),
+      (error: unknown) =>
+        console.error(JSON.stringify({ image_remove_failed: String(error) })),
+    );
+  }
 }
 
 /** Starts the sandbox if needed and returns the host port its Core listens on. */

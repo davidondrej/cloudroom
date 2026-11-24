@@ -100,6 +100,10 @@ export async function limitedThreads(
       await save();
     },
     account: (threadId: string) => stopped[threadId]?.account,
+    /** Local threads a limit of this agent stopped: a switch continues them all. */
+    waiting: (provider: Provider) =>
+      Object.values(stopped).filter((entry) => entry.provider === provider)
+        .length,
     /** `to` is now the account in use: every thread another account's limit stopped continues on it. */
     async switched(provider: Provider, to: string) {
       const waiting = Object.keys(stopped).filter(

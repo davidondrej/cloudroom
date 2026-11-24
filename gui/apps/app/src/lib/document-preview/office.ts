@@ -568,9 +568,22 @@ function drawingParagraphs(
     .filter((paragraph) => paragraph.text);
 }
 
+/**
+ * Word or PowerPoint small enough to draw as pages: the page renderers unpack
+ * every part, so hold them to the text view's limits.
+ */
+export function fitsPageView(bytes: Uint8Array): boolean {
+  const entries = listZip(bytes);
+  const unpacked = entries.reduce((total, entry) => total + entry.size, 0);
+  const slides = entries.filter((entry) =>
+    /^ppt\/slides\/slide\d+\.xml$/u.test(entry.name),
+  ).length;
+  return unpacked <= MAX_UNPACKED_BYTES && slides <= MAX_SLIDES;
+}
+
 export async function convertPresentation(
   bytes: Uint8Array,
-): Promise<{ markdown: string; slides: number }> {
+): Promise<{ markdown: string; slides: number; slidePaths: string[] }> {
   const pkg = openOfficePackage(bytes);
   const presentationPath = await pkg.mainPart("ppt/presentation.xml");
   const presentation = await pkg.xml(presentationPath);
@@ -652,5 +665,9 @@ export async function convertPresentation(
     sections.push(joinBlocks([{ text: heading, list: false }, ...blocks]));
   }
   if (slidePaths.length === 0) throw new Error("No slides.");
-  return { markdown: sections.join("\n\n"), slides: slidePaths.length };
+  return {
+    markdown: sections.join("\n\n"),
+    slides: slidePaths.length,
+    slidePaths,
+  };
 }

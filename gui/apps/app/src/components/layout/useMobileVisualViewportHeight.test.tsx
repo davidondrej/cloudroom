@@ -3,7 +3,7 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompactSecondaryPanelShelf } from "@/components/secondary-panel/CompactSecondaryPanelShelf";
+import { CompactSecondaryPanelShelf } from "@/components/right-panel/shell/mobile-drawer";
 import {
   KEYBOARD_OPEN_MIN_SHRINK_PX,
   SHELL_SAFE_AREA_BOTTOM_PROPERTY,

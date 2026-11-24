@@ -302,10 +302,13 @@ test("routes commands, preserves caller request IDs, and never treats acceptance
   ]);
 });
 
-test("posts edit, cancel, steer, compact, and rewind commands", async (t) => {
+test("posts edit, cancel, steer, compact, rewind, and freeze commands", async (t) => {
   const bodies: object[] = [];
   const service = await fixture((req, res, body) => {
     bodies.push({ url: req.url, ...body });
+    // Core answers a freeze with 200, not a command's 202 (#1554).
+    if (req.url?.endsWith("/freeze"))
+      return sendJson(res, { frozen: true }, 200);
     sendJson(res, {
       session_id: "s1",
       receipt: { request_id: body.request_id, command: String(req.url).split("/").pop(), input: body, state: "accepted" },
@@ -318,12 +321,14 @@ test("posts edit, cancel, steer, compact, and rewind commands", async (t) => {
   await service.client.steer("s1", "s1-steer", "p1", "turn left");
   await service.client.compact("s1", "k1");
   await service.client.rewind("s1", "r1", "turn-1");
+  await service.client.freeze("s1", "f1");
   assert.deepEqual(service.requests, [
     "POST /v1/sessions/s1/edit",
     "POST /v1/sessions/s1/cancel",
     "POST /v1/sessions/s1/steer",
     "POST /v1/sessions/s1/compact",
     "POST /v1/sessions/s1/rewind",
+    "POST /v1/sessions/s1/freeze",
   ]);
   assert.equal((bodies[0] as { expected_revision?: number }).expected_revision, 1);
   assert.equal((bodies[2] as { text?: string }).text, "turn left");
@@ -608,14 +613,18 @@ test("times out a stalled command without resubmitting", async (t) => {
 });
 
 test("a VM command answer cut off after HTTP 200 is a retryable dropped connection, not a rejection", async (t) => {
-  const service = await fixture((_req, res) => {
+  const bodies: unknown[] = [];
+  const service = await fixture((_req, res, body) => {
+    bodies.push(body);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.write('{"code":0,"stdout":"');
     setTimeout(() => res.socket?.destroy(), 20);
   });
   t.after(() => service.close());
-  await assert.rejects(service.client.runOnVm({ command: "true", stdin: "" }), (error: unknown) =>
+  await assert.rejects(service.client.runOnVm({ command: "true", stdin: "", keep: true }), (error: unknown) =>
     error instanceof CloudroomConnectionError && error.retryable && /answer was cut off/.test(error.message));
+  // `keep` goes in the query: older Cores refuse unknown body fields, and would fail every clone (#1970).
+  assert.deepEqual([service.requests, bodies], [["POST /v1/vm/run?keep=true"], [{ command: "true", stdin: "" }]]);
 });
 
 test("reads core status without exposing private fields as client configuration", async (t) => {

@@ -6,7 +6,7 @@ import {
   type PluginNewThreadPanelActionSlot,
   type PluginThreadPanelActionSlot,
 } from "@/lib/plugin-slots";
-import type { PluginPanelFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import type { PluginPanelFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import {
   parsePersistedPluginPanelParams,
   serializePluginPanelParams,

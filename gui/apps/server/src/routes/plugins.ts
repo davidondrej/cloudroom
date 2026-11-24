@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { brotliCompress, constants as zlibConstants, gzip } from "node:zlib";
 import type { Context, Hono } from "hono";
-import type { createNodeWebSocket } from "@hono/node-ws";
+import type { createNodeWebSocket } from "../node-websocket.js";
 import type { WSContext, WSMessageReceive, WSEvents } from "hono/ws";
 import type {
   ExperimentalPluginWebSocket,
@@ -334,6 +334,9 @@ export function registerPluginRoutes(
   );
   const upgradePluginWebSocket = upgradeWebSocket?.(async (context) => {
     const id = context.req.param("id");
+    if (id === undefined) {
+      throw new ApiError(404, "unknown_plugin", "missing plugin id");
+    }
     const subPath = pluginHttpSubPath(context, id);
     const lookup = plugins.getWebSocketRoute(id, subPath);
     if (lookup.outcome === "unknown-plugin") {
@@ -442,6 +445,14 @@ export function registerPluginRoutes(
   });
 
   app.post("/plugins/:id/cli", async (context) => {
+    if (
+      getGateAuthKind(context) === "machine" &&
+      BUNDLED_PLUGINS.some(
+        (plugin) => plugin.pluginId === context.req.param("id") && plugin.refuseMachineCli,
+      )
+    ) {
+      return context.json({ ok: false, error: "This plugin command requires the account owner." }, 403);
+    }
     const authProblem = localAuthProblem(context, deps);
     if (authProblem) {
       return context.json(

@@ -1,16 +1,16 @@
-import { openSecondaryPanelTabInState } from "@cloudroom/client-core";
+import { openSecondaryPanelTabInState } from "@/components/right-panel/store/tab-ops";
 import { describe, expect, it } from "vitest";
 import {
   createEmptyFixedPanelTabsState,
   createHostFilePreviewFixedPanelTab,
   createTerminalFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   buildTerminalSyncedSecondaryFileTabs,
   getRetainedTerminalTabId,
   pruneTerminalTabsForSessions,
   syncTerminalTabsInFixedPanelState,
-} from "./terminalPanelTabs";
+} from "@/components/right-panel/store/tab-ops";
 import { makeTerminalSession as terminalSession } from "@/test/fixtures/terminal-sessions";
 
 interface TabIdentity {

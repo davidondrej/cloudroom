@@ -306,27 +306,26 @@ function mapSidebarNavigationProjectThreads(
   };
 }
 
+export function mapSidebarNavigationThreads(
+  navigation: SidebarBootstrapResponse,
+  mapper: SidebarNavigationThreadMapper,
+): SidebarBootstrapResponse {
+  return {
+    ...navigation,
+    projects: navigation.projects.map((project) =>
+      mapSidebarNavigationProjectThreads(project, mapper),
+    ),
+    personalProject: mapSidebarNavigationProjectThreads(navigation.personalProject, mapper),
+  };
+}
+
 export function applyToCachedSidebarNavigationThreads({
   mapper,
   queryClient,
 }: ApplyToCachedSidebarNavigationThreadsArgs): void {
   queryClient.setQueryData<SidebarBootstrapResponse>(
     sidebarNavigationQueryKey(),
-    (currentNavigation) => {
-      if (!currentNavigation) {
-        return currentNavigation;
-      }
-      return {
-        sections: currentNavigation.sections,
-        projects: currentNavigation.projects.map((project) =>
-          mapSidebarNavigationProjectThreads(project, mapper),
-        ),
-        personalProject: mapSidebarNavigationProjectThreads(
-          currentNavigation.personalProject,
-          mapper,
-        ),
-      };
-    },
+    (current) => current && mapSidebarNavigationThreads(current, mapper),
   );
 }
 

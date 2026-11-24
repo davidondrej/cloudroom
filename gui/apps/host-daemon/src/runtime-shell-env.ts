@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { existsSync, constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import { basename, delimiter, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,7 @@ interface PrepareRuntimeShellEnvOptions {
   /** Cloudroom's own agent tools, such as the browser-harness shim. */
   toolsDirectory?: string;
   powershellExecutionPolicy?: string | null;
+  platform?: NodeJS.Platform;
 }
 
 interface ResolveUserShellEnvOptions {
@@ -366,6 +367,8 @@ function parseUserShellEnv(stdout: string): Record<string, string> | null {
 // login shell (API keys, tool config) reaches provider processes, the same as
 // when the user runs those CLIs in their terminal.
 const NON_PROVIDER_SHELL_ENV_KEYS = new Set([
+  // The AppImage runtime's own name; zsh would run every command under it (#1640).
+  "ARGV0",
   "NODE_ENV",
   "NODE_OPTIONS",
   "OLDPWD",
@@ -722,5 +725,17 @@ export function prepareRuntimeShellEnv(
     shellEnv[POWERSHELL_EXECUTION_POLICY_VARIABLE] =
       options.powershellExecutionPolicy;
   }
+  const windows = (options.platform ?? process.platform) === "win32";
+  // PowerShell can't run the extensionless ROOM_CLI; this launcher can (#1052).
+  const roomCliCmd = `${roomExecutablePath}.cmd`;
+  if (windows && existsSync(roomCliCmd)) {
+    shellEnv.ROOM_CLI_CMD = roomCliCmd;
+  }
+  // The app's own Python, for skill scripts: Windows' `python3` is often the Store alias (#2358).
+  const python = resolve(
+    options.bbExecutableDirectory,
+    "../../server/dist/assets/python/python.exe",
+  );
+  if (windows && existsSync(python)) shellEnv.ROOM_PYTHON = python;
   return shellEnv;
 }

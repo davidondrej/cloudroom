@@ -15,11 +15,11 @@ import {
   resolveWorktreeAttemptRoot,
   resolveWorktreeTargetPath,
 } from "./host/paths.js";
+import { refreshRemoteBase, type BackgroundWork } from "./host/base-refresh.js";
 import {
   buildSpareWorktree,
   claimSpareWorktree,
   removeUnusedSpares,
-  settleSpareBuilds,
 } from "./host/spare.js";
 import {
   createWorktree,
@@ -58,10 +58,15 @@ async function worktreePathsForPathKey(args: {
 
 /** `spares: false` builds every worktree from scratch, which keeps tests free of background work. */
 export function createWorktreeHostEntry({ spares = true } = {}) {
+  // Work that outlives its call: a stopping worker waits for it, so a fetch
+  // stopped by the shutdown still removes its lock.
+  const backgroundWork = new Set<Promise<unknown>>();
   return experimental_defineHostEntry({
     contract: worktreeHostContract,
     experimental_signals: worktreeHostSignals,
-    dispose: settleSpareBuilds,
+    dispose: async () => {
+      await Promise.all(backgroundWork);
+    },
     handlers: {
       async create(input, context) {
         const targetPath =
@@ -95,6 +100,30 @@ export function createWorktreeHostEntry({ spares = true } = {}) {
           const worktreesRoot = resolveWorktreesRoot(
             context.experimental_paths.dataDir,
           );
+          const onProgress = createHostProgress({
+            operationId: input.operationId,
+            emit: (payload) =>
+              context.experimental_emitSignal("progress", payload),
+          });
+          // For work that outlives this call: it keeps the worker alive and
+          // a copy of the call's environment.
+          const background: BackgroundWork = {
+            env: experimental_sanitizeInheritedChildProcessEnv({
+              env: process.env,
+            }),
+            signal: context.lifecycle.signal,
+            keep(work) {
+              backgroundWork.add(work);
+              void work.then(() => backgroundWork.delete(work));
+              try {
+                const lease = context.experimental_retainWorker();
+                const release = () => lease.dispose().catch(() => undefined);
+                void work.then(release, release);
+              } catch {
+                // The worker is stopping, which aborts the work too.
+              }
+            },
+          };
           const sparePath = spares
             ? resolveSpareWorktreePath({
                 dataDir: context.experimental_paths.dataDir,
@@ -105,6 +134,14 @@ export function createWorktreeHostEntry({ spares = true } = {}) {
             sourcePath: input.sourcePath,
             targetPath,
             completionPath: completionPathForWorktree(targetPath),
+            refreshBase: (baseBranch) =>
+              refreshRemoteBase({
+                sourcePath: input.sourcePath,
+                baseBranch,
+                background,
+                onProgress,
+                signal: context.signal,
+              }),
             claimSpare:
               sparePath === undefined
                 ? undefined
@@ -121,11 +158,7 @@ export function createWorktreeHostEntry({ spares = true } = {}) {
             branchName: input.branchName,
             baseBranch,
             branchMode: input.branchMode,
-            onProgress: createHostProgress({
-              operationId: input.operationId,
-              emit: (payload) =>
-                context.experimental_emitSignal("progress", payload),
-            }),
+            onProgress,
             signal: context.signal,
           });
           // A fork starts from a snapshot of uncommitted work, which the
@@ -133,22 +166,20 @@ export function createWorktreeHostEntry({ spares = true } = {}) {
           if (
             sparePath !== undefined &&
             created.startPoint !== undefined &&
-            input.diffBase === undefined
+            input.diffBase === undefined &&
+            !context.signal.aborted
           ) {
-            // The build outlives this call, so it keeps the worker and a
-            // copy of the call's environment.
-            const lease = context.experimental_retainWorker();
-            void buildSpareWorktree({
-              sourcePath: input.sourcePath,
-              sparePath,
-              startPoint: created.startPoint,
-              worktreePath: created.path,
-              worktreesRoot,
-              env: experimental_sanitizeInheritedChildProcessEnv({
-                env: process.env,
+            background.keep(
+              buildSpareWorktree({
+                sourcePath: input.sourcePath,
+                sparePath,
+                startPoint: created.startPoint,
+                worktreePath: created.path,
+                worktreesRoot,
+                env: background.env,
+                signal: background.signal,
               }),
-              signal: context.lifecycle.signal,
-            }).finally(() => lease.dispose());
+            );
           }
           const diffBase = input.diffBase
             ? await resolveWorktreeBaseBranch(input.sourcePath, input.diffBase)

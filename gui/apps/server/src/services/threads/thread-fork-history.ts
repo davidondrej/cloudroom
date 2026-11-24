@@ -1,5 +1,6 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lt, lte, or, sql } from "drizzle-orm";
 import {
+  appendStoredThreadEventsInTransaction,
   copyStoredThreadEventsInTransaction,
   createEventId,
   events,
@@ -15,6 +16,7 @@ import {
   THREAD_HARNESS_SWITCH_OPERATION,
   THREAD_IMPORT_OPERATION,
   threadScope,
+  turnScope,
   type PromptInput,
   type Thread,
   type ThreadEvent,
@@ -33,6 +35,7 @@ import {
   threadForkDescriptorSchema,
   type ThreadForkDescriptor,
 } from "./thread-startup-store.js";
+import { messagesFromRows } from "./thread-transcript.js";
 
 export type ThreadForkHistory =
   | { kind: "thread"; sourceThreadId: string; endSequence: number }
@@ -99,10 +102,47 @@ function resolveCheckpointForkDescriptor(args: {
   };
 }
 
+/** The provider session column is intentionally empty on inherited rows: Claude gives
+ * the copied transcript new UUIDs. Only an original, completed root message can vouch for its ID. */
+export function messageForkPoint(db: AppDeps["db"], source: Thread, sequence: number | undefined) {
+  if (source.providerId !== "claude-code" || sequence === undefined) return null;
+  const [row] = listStoredEventRows(db, {
+    threadId: source.id, afterSequence: sequence - 1, beforeSequence: sequence + 1, types: ["item/completed"],
+  });
+  if (!row?.providerThreadId || !row.turnId || row.itemKind !== "agentMessage" || row.parentToolCallId) return null;
+  const event = parseStoredEvent(row);
+  if (event.type !== "item/completed" || event.item.type !== "agentMessage" || !event.item.providerCheckpointId) return null;
+  const root = findLastRootStoredTurnStarted(db, { threadId: source.id, atOrBeforeSequence: sequence });
+  if (root?.turnId !== row.turnId) return null;
+  return { sourceProviderThreadId: row.providerThreadId, sourceProviderCheckpointId: event.item.providerCheckpointId };
+}
+
+/** Turn-only readers may use a finished turn for its last reply. A progress message
+ * followed by more work would silently give the fork more than the user selected. */
+export function checkTurnForkCutoff(
+  db: AppDeps["db"], threadId: string, turnId: string, selected: number, completed: number,
+): void {
+  if (selected >= completed) return;
+  const inTurn = and(eq(events.threadId, threadId), eq(events.turnId, turnId));
+  const message = db.select({ id: events.id }).from(events).where(and(
+    inTurn, eq(events.sequence, selected), eq(events.type, "item/completed"), eq(events.itemKind, "agentMessage"),
+  )).get();
+  if (!message) return;
+  const later = db.select({ id: events.id }).from(events).where(and(
+    inTurn, gt(events.sequence, selected), lt(events.sequence, completed),
+    inArray(events.type, ["item/started", "item/completed", "turn/input/accepted", "item/backgroundTask/completed"]),
+  )).limit(1).get();
+  if (later) forkPointUnavailable("This message has no saved fork point. Choose a finished reply.");
+}
+
 function resolveAnchoredForkPoint(
   deps: Pick<AppDeps, "db" | "providerRegistry">,
   args: { sourceSeqEnd: number; sourceThread: Thread },
 ): ThreadForkPoint {
+  const message = messageForkPoint(deps.db, args.sourceThread, args.sourceSeqEnd);
+  if (message && deps.providerRegistry.supportsSessionRewind(args.sourceThread.providerId)) {
+    return { descriptor: message, history: threadHistory(args.sourceThread.id, args.sourceSeqEnd) };
+  }
   const anchor = findLastRootStoredTurnStarted(deps.db, {
     atOrBeforeSequence: args.sourceSeqEnd,
     threadId: args.sourceThread.id,
@@ -121,6 +161,7 @@ function resolveAnchoredForkPoint(
       `Cannot fork at sequence ${args.sourceSeqEnd}: the turn containing it has not completed`,
     );
   }
+  checkTurnForkCutoff(deps.db, args.sourceThread.id, anchor.turnId, args.sourceSeqEnd, completion.sequence);
   if (completion.event.providerThreadId === null) {
     forkPointUnavailable(
       `Cannot fork at sequence ${args.sourceSeqEnd}: the turn containing it has no provider session`,
@@ -215,6 +256,23 @@ export function resolveThreadForkPoint(
   return descriptor === null ? tip : { ...tip, descriptor };
 }
 
+/** A Local source's own session at that point, or null when its harness can't clone it there. The fork then copies
+ *  the chat as text, so every harness can fork (ADR 20261121-141157). Waits for harnesses to register, so a fork right
+ *  after launch doesn't miss a native one. */
+export async function nativeForkPoint(
+  deps: Pick<AppDeps, "db" | "providerRegistry">,
+  args: { sourceSeqEnd: number | undefined; sourceThread: Thread },
+): Promise<ThreadForkPoint | null> {
+  await deps.providerRegistry.whenRegistrationsSettled();
+  if (!deps.providerRegistry.supportsFork(args.sourceThread.providerId)) return null;
+  try {
+    return resolveThreadForkPoint(deps, args);
+  } catch (error) {
+    if (error instanceof ApiError && error.body.code === "fork_source_session_unavailable") return null;
+    throw error;
+  }
+}
+
 /**
  * The events that carry the conversation a fork inherits. Everything else the
  * source recorded is either the source's own bookkeeping (identity,
@@ -243,13 +301,17 @@ function parseAcceptedClientRequestId(row: StoredEventRow): string {
 
 export function selectInheritedHistoryRows(
   rows: StoredEventRow[],
+  partialTurnId?: string,
 ): StoredEventRow[] {
-  const completedTurnIds = new Set<string>();
+  const completedTurnIds = new Set<string>(partialTurnId ? [partialTurnId] : []);
   const acceptedClientRequestIds = new Set<string>();
   for (const row of rows) {
     if (row.type === "turn/completed" && row.turnId !== null) {
       completedTurnIds.add(row.turnId);
-    } else if (row.type === "turn/input/accepted") {
+    }
+  }
+  for (const row of rows) {
+    if (row.type === "turn/input/accepted" && row.turnId && completedTurnIds.has(row.turnId)) {
       acceptedClientRequestIds.add(parseAcceptedClientRequestId(row));
     }
   }
@@ -269,17 +331,38 @@ export function selectInheritedHistoryRows(
 function listForkHistoryRows(
   deps: Pick<AppDeps, "db">,
   history: ThreadForkHistory,
-): StoredEventRow[] {
+) {
   if (history.kind === "rows") {
-    return history.rows;
+    return { rows: history.rows, partial: undefined };
   }
-  return selectInheritedHistoryRows(
-    listStoredEventRows(deps.db, {
-      beforeSequence: history.endSequence + 1,
-      threadId: history.sourceThreadId,
-      types: INHERITED_EVENT_TYPES,
-    }),
-  );
+  const rows = listStoredEventRows(deps.db, {
+    beforeSequence: history.endSequence + 1,
+    threadId: history.sourceThreadId,
+    types: INHERITED_EVENT_TYPES,
+  });
+  const partial = partialForkReply(rows, history.endSequence);
+  return { rows: selectInheritedHistoryRows(rows, partial?.turnId ?? undefined), partial };
+}
+
+function partialForkReply(rows: StoredEventRow[], endSequence: number) {
+  const last = rows.at(-1);
+  return last?.sequence === endSequence && last.type === "item/completed" && last.itemKind === "agentMessage"
+    ? last : undefined;
+}
+
+export function textForkMessages(deps: Pick<AppDeps, "db">, threadId: string, endSequence: number, after: number) {
+  // Keep the same accepted prompts as the visible fork, without loading tool output into the model seed.
+  const rows = deps.db.select().from(events).where(and(
+    eq(events.threadId, threadId), lte(events.sequence, endSequence), isNull(events.parentToolCallId),
+    or(
+      inArray(events.type, ["client/turn/requested", "turn/input/accepted", "turn/completed"]),
+      and(eq(events.type, "item/completed"), or(eq(events.itemKind, "agentMessage"), isNull(events.itemKind))),
+    ),
+  )).orderBy(events.sequence).all();
+  const partial = partialForkReply(rows, endSequence);
+  const history = selectInheritedHistoryRows(rows, partial?.turnId ?? undefined);
+  return messagesFromRows(history.filter(row => row.sequence > after &&
+    (row.type === "client/turn/requested" || row.type === "item/completed")));
 }
 
 export function copyForkSourceHistory(
@@ -289,24 +372,39 @@ export function copyForkSourceHistory(
     history: ThreadForkHistory;
   },
 ): void {
-  const rows = listForkHistoryRows(deps, args.history).map((row) => ({
+  const { rows: sourceRows, partial } = listForkHistoryRows(deps, args.history);
+  const rows = sourceRows.map((row) => ({
     ...row,
     providerThreadId: null,
   }));
   if (rows.length === 0) {
     return;
   }
+  const eventTypes = new Set(rows.map((row) => row.type));
   deps.db.transaction(
-    (tx) =>
+    (tx) => {
       copyStoredThreadEventsInTransaction(tx, {
         rows,
         targetEnvironmentId: args.fork.environmentId,
         targetThreadId: args.fork.id,
-      }),
+      });
+      if (partial?.turnId) {
+        // The copied prefix is finished in the child, even while its source continues.
+        appendStoredThreadEventsInTransaction(tx, [{
+          threadId: args.fork.id,
+          environmentId: args.fork.environmentId,
+          createdAt: partial.createdAt,
+          scope: turnScope(partial.turnId),
+          type: "turn/completed",
+          data: { status: "completed", providerThreadId: null },
+        }]);
+        eventTypes.add("turn/completed");
+      }
+    },
     { behavior: "immediate" },
   );
   deps.hub.notifyThread(args.fork.id, ["events-appended"], {
-    eventTypes: [...new Set(rows.map((row) => row.type))],
+    eventTypes: [...eventTypes],
   });
 }
 
@@ -338,6 +436,7 @@ export function recordTextImport(
   deps: Pick<AppDeps, "db">,
   thread: Pick<Thread, "environmentId" | "id">,
   seed: PromptInput[],
+  carried?: true,
 ): void {
   deps.db.transaction(
     (tx) =>
@@ -351,7 +450,7 @@ export function recordTextImport(
           operationId: createEventId(),
           status: "completed",
           message: "Imported as text.",
-          metadata: { seed },
+          metadata: { seed, ...(carried ? { carried } : {}) },
         },
       }),
     { behavior: "immediate" },

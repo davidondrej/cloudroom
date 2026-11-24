@@ -7,6 +7,7 @@ import type {
   WorkspaceOpenTargetCapabilities,
   WorkspaceOpenTargetId,
 } from "@cloudroom/host-daemon-contract";
+import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 import {
   execPortableFile,
   sanitizeInheritedChildProcessEnv,
@@ -190,6 +191,12 @@ export function isWsl(runtime: WorkspaceOpenTargetRuntime): boolean {
 export async function requireOpenablePath(
   targetPath: string,
 ): Promise<ExistingPath> {
+  if (
+    process.platform === "win32" &&
+    isWindowsNetworkOrDevicePath(targetPath)
+  ) {
+    fail("path_not_openable", `Network paths can't be opened: ${targetPath}`);
+  }
   const stat = await fs.stat(targetPath).catch(() => null);
   if (!stat) {
     fail("path_not_found", `Open target path does not exist: ${targetPath}`);

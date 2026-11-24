@@ -20,6 +20,7 @@ interface CodexNotificationRawEvent {
 
 interface CodexMcpStartupStatusRawEvent {
   kind: "mcp-startup-status";
+  status: string | undefined;
 }
 
 interface CodexRemoteControlStatusRawEvent {
@@ -222,6 +223,9 @@ function parseCodexRawEvent(event: JsonRpcMessage): CodexRawEvent {
   if (event.method === "mcpServer/startupStatus/updated") {
     return {
       kind: "mcp-startup-status",
+      status: isRecord(event.params)
+        ? getStringProperty(event.params, "status")
+        : undefined,
     };
   }
 
@@ -260,7 +264,10 @@ function describeParsedCodexRawEvent(
 ): ProviderRawEventDescription {
   switch (event.kind) {
     case "mcp-startup-status":
-      return { kind: "mcpServer/startupStatus/updated", coverage: "noise" };
+      return {
+        kind: "mcpServer/startupStatus/updated",
+        coverage: event.status === "failed" ? "normalized" : "noise",
+      };
 
     case "remote-control-status":
       return { kind: "remoteControl/status/changed", coverage: "noise" };

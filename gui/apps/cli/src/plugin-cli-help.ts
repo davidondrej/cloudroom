@@ -20,11 +20,15 @@ export async function addPluginCommandsToHelp(
   program: Command,
   baseUrl: string,
 ): Promise<string> {
-  const result = await fetchPluginCliContributions(baseUrl, HELP_TIMEOUT_MS);
+  const result = await fetchPluginCliContributions(baseUrl, HELP_TIMEOUT_MS, {
+    lastWindowMs: 2 * HELP_TIMEOUT_MS,
+  });
   if (result.outcome === "unreachable") {
     return `\n\nPlugin commands (loop, secret, gpu, ...) are not listed: Cloudroom is not reachable at ${baseUrl}.`;
   }
-  if (result.outcome === "invalid") return "";
+  if (result.outcome === "invalid") {
+    return `\n\nPlugin commands (loop, secret, gpu, ...) are not listed: Cloudroom at ${baseUrl} ${result.detail}`;
+  }
   const known = new Set(program.commands.map((command) => command.name()));
   for (const entry of result.contributions) {
     if (known.has(entry.name)) continue;

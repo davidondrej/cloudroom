@@ -6,7 +6,8 @@ import {
   useState,
 } from "react";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router";
+import { isSettingsRoutePath } from "@/hooks/useAppSettingsRouteMemory";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import {
@@ -15,6 +16,7 @@ import {
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
 import { InviteSidebarRow } from "@/components/InviteOffer";
+import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
 import { useSettingsNavState } from "./settings-nav";
@@ -30,6 +32,9 @@ import {
   useReportSettingsSearchMiss,
 } from "./settings-search";
 
+// Last tab per group, so returning to a group reopens it. Resets on restart.
+const lastTabByGroup = new Map<string, string>();
+
 const RESULTS_ID = "settings-search-results";
 const optionId = (index: number) => `settings-search-option-${index}`;
 
@@ -43,7 +48,7 @@ interface SettingsSidebarProps {
 type SettingsSidebarNavigation = Pick<
   SettingsNavState,
   "activePluginId" | "activeSection" | "pluginEntries" | "sections"
->;
+> & { deepapiShown?: boolean };
 
 interface SettingsSidebarContentProps extends SettingsSidebarProps {
   account?: ReactNode;
@@ -63,6 +68,7 @@ export function SettingsSidebarContent({
   testIdPrefix = "settings",
 }: SettingsSidebarContentProps) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const closeOnMobile = useCloseMobileSidebar();
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -71,6 +77,12 @@ export function SettingsSidebarContent({
     navigation.activeSection,
     navigation.activePluginId,
   );
+  const activeTab = getSettingsGroupLinks(activeGroup, navigation).find(
+    (link) => link.active,
+  );
+  // The mobile drawer keeps this sidebar mounted briefly after leaving Settings.
+  if (activeTab && isSettingsRoutePath(pathname))
+    lastTabByGroup.set(activeGroup.id, activeTab.key);
   const searching = query.trim() !== "";
   const pluginSearchEntries = usePluginSettingsSearchEntries(
     navigation.pluginEntries.map((entry) => entry.id),
@@ -105,7 +117,9 @@ export function SettingsSidebarContent({
   }, []);
   const rows = SETTINGS_NAV_GROUPS.flatMap((group) => {
     const links = getSettingsGroupLinks(group, navigation);
-    return links.length > 0 ? [{ group, to: links[0]!.to }] : [];
+    const saved = lastTabByGroup.get(group.id);
+    const target = links.find((link) => link.key === saved) ?? links[0];
+    return target ? [{ group, to: target.to }] : [];
   });
 
   const footer = <div className="space-y-2">{account}</div>;
@@ -234,21 +248,17 @@ export function SettingsSidebar({
   mobileHosted,
 }: SettingsSidebarProps) {
   const navigation = useSettingsNavState();
+  // Same rule as DeepapiSettingsSection, so search never lists a section the page hides.
+  const deepapiShown = useCloudroomAccount().data?.deepapi?.enabled !== undefined;
 
   return (
     <SettingsSidebarContent
-      account={
-        <SettingsAccountMenu
-          usagePage={navigation.pluginEntries.some(
-            ({ id }) => id === "provider-usage",
-          )}
-        />
-      }
+      account={<SettingsAccountMenu />}
       invite={<InviteSidebarRow />}
       appRoutePath={appRoutePath}
       isResizing={isResizing}
       mobileHosted={mobileHosted}
-      navigation={navigation}
+      navigation={{ ...navigation, deepapiShown }}
       onResizeMouseDown={onResizeMouseDown}
     />
   );

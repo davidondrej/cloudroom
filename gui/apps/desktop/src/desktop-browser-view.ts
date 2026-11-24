@@ -1,11 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { isAbsolute, join, relative } from "node:path";
 import { captureDesktopBrowserPage } from "./desktop-browser-capture.js";
 import {
+  BaseWindow,
   BrowserWindow,
   Menu,
   WebContentsView,
   session,
   type BrowserWindowConstructorOptions,
+  type FilesystemPermissionRequest,
   type Session,
   type WebContents,
   type WebPreferences,
@@ -135,6 +140,7 @@ function guardMainFrameNavigation(
 }
 
 const ROOM_BROWSER_PARTITION = "persist:bb-browser";
+const AUTOMATION_PARTITION_PREFIX = "bb-browser-automation-";
 
 const ERR_ABORTED = -3;
 
@@ -210,6 +216,7 @@ export interface DesktopBrowserHostWindow {
   contentView: DesktopBrowserHostContentView;
   getContentBounds(): DesktopBrowserHostContentBounds;
   isDestroyed(): boolean;
+  isMinimized?(): boolean;
   webContents: DesktopBrowserHostWebContents;
 }
 
@@ -222,6 +229,8 @@ export interface CreateDesktopBrowserViewManagerArgs {
   ) => DesktopBrowserShortcut | null;
   focusHostWebContents: (hostWebContentsId: number) => void;
   partition?: string;
+  /** Electron's sessionData path; when set, automation partitions left by earlier runs are deleted. */
+  sessionDataPath?: string;
 }
 
 interface HostScopedRequestArgs<TRequest> {
@@ -380,6 +389,71 @@ export function isAllowedBrowserPermission(permission: string): boolean {
   return permission === "clipboard-sanitized-write";
 }
 
+function readableFilePath(
+  permission: string,
+  details: Partial<FilesystemPermissionRequest>,
+): string | null {
+  return permission === "fileSystem" &&
+    details.fileAccessType === "readable" &&
+    details.filePath
+    ? details.filePath
+    : null;
+}
+
+function webOrigin(url: string | undefined): string | null {
+  if (url === undefined || !URL.canParse(url)) return null;
+  const origin = new URL(url).origin;
+  return origin === "null" ? null : origin;
+}
+
+/**
+ * Permission handlers for one browser session (#2367). A page may read a folder, and anything
+ * inside it, only if the user picked it in the native dialog during this app run, on that origin.
+ * Saved handles (IndexedDB) from an earlier run and dropped folders stay denied until the user
+ * picks the folder again. Writes are always denied.
+ */
+export function createBrowserPermissionHandlers() {
+  // Electron 44 calls the request handler for a file handle only right after a picker pick.
+  // Every later use, including a saved handle's, only asks the check handler.
+  const pickedFolders = new Map<string, Set<string>>();
+  return {
+    request: (
+      _webContents: unknown,
+      permission: string,
+      callback: (granted: boolean) => void,
+      details: Partial<FilesystemPermissionRequest>,
+    ): void => {
+      const folder = readableFilePath(permission, details);
+      const origin = folder === null ? null : webOrigin(details.requestingUrl);
+      if (folder === null || origin === null) {
+        callback(isAllowedBrowserPermission(permission));
+        return;
+      }
+      pickedFolders.set(
+        origin,
+        (pickedFolders.get(origin) ?? new Set()).add(folder),
+      );
+      callback(true);
+    },
+    check: (
+      _webContents: unknown,
+      permission: string,
+      requestingOrigin: string,
+      details: Partial<FilesystemPermissionRequest>,
+    ): boolean => {
+      const path = readableFilePath(permission, details);
+      if (path === null) return isAllowedBrowserPermission(permission);
+      const folders = pickedFolders.get(webOrigin(requestingOrigin) ?? "");
+      return [...(folders ?? [])].some((folder) => {
+        const inside = relative(folder, path);
+        return (
+          inside === "" || !(inside.startsWith("..") || isAbsolute(inside))
+        );
+      });
+    },
+  };
+}
+
 export function createDesktopBrowserViewManager(
   args: CreateDesktopBrowserViewManagerArgs,
 ): DesktopBrowserViewManager {
@@ -389,6 +463,24 @@ export function createDesktopBrowserViewManager(
   const popupWindows = new Set<BrowserWindow>();
   const resizingHostIds = new Set<number>();
   const hardenedSessions = new Map<string, Session>();
+  // Automation profile ids are random per created tab and never stored, so a partition can't be
+  // reopened once its last tab closes or the app restarts. Listed before this run makes any (#1672).
+  if (args.sessionDataPath !== undefined) {
+    const root = join(args.sessionDataPath, "Partitions");
+    let stale: string[] = [];
+    try {
+      stale = readdirSync(root).filter((name) =>
+        name.startsWith(AUTOMATION_PARTITION_PREFIX),
+      );
+    } catch {}
+    void (async () => {
+      for (const name of stale) {
+        await rm(join(root, name), { recursive: true, force: true }).catch(
+          () => {},
+        );
+      }
+    })();
+  }
 
   function notifyAutomationTabs(): void {
     for (const listener of automationTabListeners) {
@@ -493,9 +585,10 @@ export function createDesktopBrowserViewManager(
   }
 
   function partitionForProfile(profile: DesktopBrowserTabProfile): string {
+    // 16 hex chars: Windows IndexedDB fails past 260-char paths, and long preview hostnames already use most of them (#1843).
     return profile.kind === "personal"
       ? partition
-      : `persist:bb-browser-automation-${createHash("sha256").update(profile.id).digest("hex")}`;
+      : `persist:${AUTOMATION_PARTITION_PREFIX}${createHash("sha256").update(profile.id).digest("hex").slice(0, 16)}`;
   }
 
   function ensureHardenedSession(tabPartition: string): Session {
@@ -504,15 +597,19 @@ export function createDesktopBrowserViewManager(
       return existing;
     }
     const browserSession = session.fromPartition(tabPartition);
-    browserSession.setPermissionRequestHandler((_wc, permission, callback) => {
-      callback(isAllowedBrowserPermission(permission));
-    });
-    browserSession.setPermissionCheckHandler((_wc, permission) =>
-      isAllowedBrowserPermission(permission),
-    );
+    const permissions = createBrowserPermissionHandlers();
+    browserSession.setPermissionRequestHandler(permissions.request);
+    browserSession.setPermissionCheckHandler(permissions.check);
     browserSession.on("will-download", (event) => {
       event.preventDefault();
     });
+    // Chromium-blocked folders (Home, Downloads, ~/Library, %LOCALAPPDATA%) wait for this answer; without it the picker hangs.
+    browserSession.on(
+      "file-system-access-restricted",
+      (_event, _details, callback) => {
+        callback("deny");
+      },
+    );
     hardenedSessions.set(tabPartition, browserSession);
     return browserSession;
   }
@@ -814,7 +911,31 @@ export function createDesktopBrowserViewManager(
       activeFindRequestId: null,
     };
     wireWebContents(args.hostWindow, args.tabId, entry);
-    args.hostWindow.contentView.addChildView(view);
+    let stage: BaseWindow | null = null;
+    if (process.platform === "win32" && args.hostWindow.isMinimized?.()) {
+      // Windows never paints a view first added to a minimized window, so every screenshot
+      // of it times out (#1771). Showing it once in a never-shown window fixes that for good.
+      try {
+        stage = new BaseWindow({ show: false });
+        stage.contentView.addChildView(view);
+        view.setBounds({
+          x: 0,
+          y: 0,
+          width: Math.max(1, args.desiredBounds.width),
+          height: Math.max(1, args.desiredBounds.height),
+        });
+        view.setVisible(true);
+        view.setVisible(false);
+      } catch {}
+    }
+    try {
+      args.hostWindow.contentView.addChildView(view);
+    } catch (error) {
+      if (!view.webContents.isDestroyed()) view.webContents.close();
+      throw error;
+    } finally {
+      stage?.destroy();
+    }
     entries.set(browserViewKey(args.hostWindow, args.tabId), entry);
     return entry;
   }
@@ -842,6 +963,20 @@ export function createDesktopBrowserViewManager(
     entry.popupWindows.clear();
     if (!entry.webContents.isDestroyed()) {
       entry.webContents.close();
+    }
+    const browserSession = hardenedSessions.get(entry.partition);
+    if (
+      entry.profile.kind === "automation" &&
+      browserSession !== undefined &&
+      ![...entries.values()].some(
+        (other) => other.partition === entry.partition,
+      )
+    ) {
+      // Its last tab is gone, so nothing can reopen it: free its disk now (#1672).
+      void Promise.all([
+        browserSession.clearCache(),
+        browserSession.clearStorageData(),
+      ]).catch(() => {});
     }
     notifyAutomationTabs();
   }

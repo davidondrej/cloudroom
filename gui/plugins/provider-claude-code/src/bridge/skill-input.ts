@@ -16,7 +16,9 @@ import type { SdkSessionOptions } from "./sdk-session.js";
 const MAX_INPUT_BYTES = 16 * 1024 * 1024;
 const NATIVE_FIELDS =
   /(?:^|\n)\s*["']?(?:allowed-tools|disallowed-tools|model|effort|context|agent|background|hooks|shell|arguments|user-invocable)["']?\s*:/u;
-const NATIVE_BODY = /!`|\$\{CLAUDE_/u;
+// Claude Code's own shell syntax (a ```! block, or !`command` at a line start or after a space), and its variables.
+// A plain `Hi!` is not one: it once refused /slack mid-message.
+const NATIVE_BODY = /```!\s*\n?[\s\S]*?\n?```|(?<=^|\s)!`[^`]+`|\$\{CLAUDE_/mu;
 
 type Skill = { name: string; origin: "user" | "project" | "builtin" };
 type Root = {

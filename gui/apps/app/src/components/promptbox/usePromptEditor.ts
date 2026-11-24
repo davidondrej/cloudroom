@@ -1,4 +1,5 @@
 // Owns the rich-text editor: creates it, keeps it in step with the `value` prop, and moves focus and the caret.
+import { listenForComposerRange } from "./editor/composer-text-range";
 import type { PromptTextMention } from "@cloudroom/domain";
 import { TextSelection, type Transaction } from "@tiptap/pm/state";
 import { useEditor, type Editor } from "@tiptap/react";
@@ -308,6 +309,7 @@ export function usePromptEditor(
       immediatelyRender: false,
       editorProps: {
         attributes: {
+          "data-cloudroom-composer": "",
           "aria-label": placeholder,
           "data-placeholder": placeholder,
           ...(options.hasModifierSubmit
@@ -442,13 +444,15 @@ export function usePromptEditor(
     [richText],
   );
 
+  useEffect(() => editor ? listenForComposerRange(editor) : undefined, [editor]);
+
   useEffect(() => {
     doc.ref.current = editor;
   }, [doc, editor]);
 
   useEffect(() => {
     if (!editor || editor.isDestroyed) return;
-    if (editor.isEditable !== editable) editor.setEditable(editable);
+    if (editor.isEditable !== editable) editor.setEditable(editable, false);
     editor.view.dom.tabIndex = editable ? 0 : -1;
     if (editable) editor.view.dom.removeAttribute("aria-readonly");
     else editor.view.dom.setAttribute("aria-readonly", "true");

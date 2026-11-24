@@ -41,6 +41,14 @@ vi.mock("../../client.js", async () => {
   return { CLI_READ_TIMEOUT_MS, cliFetch, createCliRoomSdk };
 });
 
+// Keep the exit code observable as the mocked process.exit throw below.
+vi.mock("../../plugin-cli-proxy.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../plugin-cli-proxy.js")>()),
+  exitWhenIdle: async (code: number) => {
+    process.exit(code);
+  },
+}));
+
 vi.mock("node:readline/promises", () => ({
   createInterface: vi.fn(() => ({
     question: readlineState.question,

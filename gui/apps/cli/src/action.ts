@@ -24,13 +24,11 @@ export function action<TArgs extends CommandActionArgs>(
       if (isProcessExitError(err)) {
         throw err;
       }
-      if (err instanceof CliExitError) {
-        console.error(`Error: ${err.message}`);
-        process.exit(err.exitCode);
-        return;
-      }
-      console.error(`Error: ${getErrorMessage(err)}`);
-      process.exit(1);
+      const exitError = err instanceof CliExitError ? err : undefined;
+      console.error(`Error: ${exitError?.message ?? getErrorMessage(err)}`);
+      // A forced exit after a request can abort Node on Windows (#1815, #828).
+      const { exitWhenIdle } = await import("./plugin-cli-proxy.js");
+      await exitWhenIdle(exitError?.exitCode ?? 1, true);
     }
   };
 }

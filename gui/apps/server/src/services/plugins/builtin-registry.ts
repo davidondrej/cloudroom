@@ -8,6 +8,7 @@ export interface BundledPluginDefinition {
   autoInstall: boolean;
   defaultEnabled: boolean;
   alwaysEnabled?: boolean;
+  refuseMachineCli?: boolean;
   relayRefusedRpcs?: Readonly<Record<string, "machine" | "all">>;
 }
 
@@ -37,7 +38,7 @@ export const RENAMED_BUILTIN_PLUGINS = [
 export const WINDOWS_HIDDEN_PLUGIN_NAMES: readonly string[] =
   process.platform === "win32" ? ["computer-use"] : [];
 
-export const BUILTIN_PLUGINS = [
+const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
   {
     name: "cloudroom-guide",
     pluginId: "cloudroom-guide",
@@ -96,6 +97,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "plugin-api-tester",
     defaultEnabled: false,
   },
+  // RepoSync (docs/scopes/repo-sync.md): off until the user turns it on.
+  {
+    name: "repo-sync",
+    pluginId: "repo-sync",
+    defaultEnabled: false,
+  },
   {
     name: "inline-vis",
     pluginId: "inline-vis",
@@ -126,6 +133,12 @@ export const BUILTIN_PLUGINS = [
     pluginId: "provider-pi",
     defaultEnabled: true,
   },
+  // Off until the user turns it on (David, 2026-11-18, docs/scopes/cloudroom-agent.md).
+  {
+    name: "provider-cloudroom-agent",
+    pluginId: "provider-cloudroom-agent",
+    defaultEnabled: false,
+  },
   {
     name: "provider-usage",
     pluginId: "provider-usage",
@@ -135,6 +148,12 @@ export const BUILTIN_PLUGINS = [
     name: "organization",
     pluginId: "organization",
     defaultEnabled: false,
+  },
+  // Shared projects (docs/scopes/shared-projects.md): on for everyone, so "Share project" is in every project's menu.
+  {
+    name: "shared-projects",
+    pluginId: "shared-projects",
+    defaultEnabled: true,
   },
   {
     name: "time-in-cloudroom",
@@ -202,6 +221,13 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: true,
   },
   {
+    name: "snippets",
+    pluginId: "snippets",
+    defaultEnabled: true,
+    relayRefusedRpcs: { view: "machine", run: "machine" },
+    refuseMachineCli: true,
+  },
+  {
     name: "scheduled-send",
     pluginId: "scheduled-send",
     defaultEnabled: true,
@@ -216,7 +242,15 @@ export const BUILTIN_PLUGINS = [
     pluginId: "workflows",
     defaultEnabled: false,
   },
-]
+  // Off while the team uses it internally (docs/scopes/director.md).
+  {
+    name: "director",
+    pluginId: "director",
+    defaultEnabled: false,
+  },
+];
+
+export const BUILTIN_PLUGINS = builtinDefinitions
   .filter((plugin) => !WINDOWS_HIDDEN_PLUGIN_NAMES.includes(plugin.name))
   .map((plugin): BundledPluginDefinition => ({
     ...plugin,

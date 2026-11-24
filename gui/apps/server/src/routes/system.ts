@@ -58,6 +58,10 @@ import {
   transcribeVoiceInput,
 } from "../services/ai/voice-transcription.js";
 import {
+  getVoiceTranscriptionJob,
+  startVoiceTranscriptionJob,
+} from "../services/ai/voice-transcription-jobs.js";
+import {
   listInstallableProviderInfos,
   listSystemProviderInfos,
   resolveSystemExecutionOptions,
@@ -244,6 +248,8 @@ export function registerSystemRoutes(
     return {
       ...settings,
       showUnhandledProviderEvents: settings.showDiagnosticEvents,
+      // Retired; older apps and CLIs still require it when they read settings.
+      providerOrder: [] as string[],
     };
   }
   get(routes.machineEnvironment, async (context) =>
@@ -265,7 +271,11 @@ export function registerSystemRoutes(
   });
 
   put(routes.generalSettings, (context, payload) => {
-    const { showUnhandledProviderEvents, ...settings } = payload;
+    const {
+      showUnhandledProviderEvents,
+      providerOrder: _retiredProviderOrder,
+      ...settings
+    } = payload;
     const current = getAppSettings(deps.db);
     const diagnosticValue =
       "showDiagnosticEvents" in settings
@@ -281,6 +291,7 @@ export function registerSystemRoutes(
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
       hiddenProviderIds: settings.hiddenProviderIds ?? current.hiddenProviderIds,
+      customProviderOrder: settings.customProviderOrder ?? current.customProviderOrder,
       showDiagnosticEvents:
         diagnosticValue === undefined ||
         (showUnhandledProviderEvents !== undefined &&
@@ -291,6 +302,11 @@ export function registerSystemRoutes(
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
     deps.hub.notifySystem(["config-changed"]);
+    if (current.providerAutoUpdate.some((id) => !updatedSettings.providerAutoUpdate.includes(id))) {
+      for (const hostId of deps.hub.listConnectedHostIds()) {
+        deps.hub.notifyHost(hostId, ["provider-cli-status-changed"]);
+      }
+    }
     if (
       updatedSettings.providerAutoUpdate.some(
         (provider) => !current.providerAutoUpdate.includes(provider),
@@ -614,23 +630,41 @@ export function registerSystemRoutes(
     context.json(await restartSystemModelDiscovery(deps, body)),
   );
 
-  post(routes.voiceTranscription, async (context) => {
+  async function readVoiceForm(context: {
+    req: { formData(): Promise<FormData> };
+  }): Promise<{ file: File; prompt?: string; clientId?: string }> {
     const formData = await context.req.formData();
     const file = formData.get("file");
     if (!(file instanceof File)) {
       throw new ApiError(400, "invalid_request", "Audio file is required");
     }
+    const rawPrompt = formData.get("prompt");
+    const rawClientId = formData.get("clientId");
+    return {
+      file,
+      prompt: typeof rawPrompt === "string" ? rawPrompt : undefined,
+      clientId: typeof rawClientId === "string" ? rawClientId : undefined,
+    };
+  }
+
+  post(routes.voiceTranscription, async (context) => {
+    const form = await readVoiceForm(context);
     return context.json({
       text: await transcribeVoiceInput(deps, {
-        file,
-        prompt:
-          typeof formData.get("prompt") === "string"
-            ? String(formData.get("prompt"))
-            : undefined,
+        ...form,
         relayed: getGateAuthKind(context) !== null,
       }),
     });
   });
+
+  post(routes.startVoiceTranscriptionJob, async (context) => {
+    const form = await readVoiceForm(context);
+    return context.json(startVoiceTranscriptionJob(deps, form), 202);
+  });
+
+  get(routes.voiceTranscriptionJob, (context) =>
+    context.json(getVoiceTranscriptionJob(deps, context.req.param("id"))),
+  );
 
   get(routes.version, async (context, query) =>
     context.json(

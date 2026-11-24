@@ -113,6 +113,7 @@ function getEnvironmentWorkspaceLabel({
 }: EnvironmentWorkspaceLabelArgs): string {
   if (display.lifecycle === "provisioning") return "Provisioning";
   if (display.lifecycle === "destroyed") return "Destroyed";
+  if (display.lifecycle === "parked") return "Parked";
   if (environmentName !== null) return environmentName;
   return (
     localCloudroomPresentation(providerLookup)?.label ??
@@ -142,6 +143,14 @@ export function getEnvironmentWorkspaceSummaryDisplay({
     return {
       label: "Destroyed",
       compactLabel: "Destroyed",
+      icon: getEnvironmentLabelIconName(providerLookup),
+      providerName: getEnvironmentProviderDisplayName(providerLookup),
+    };
+  }
+  if (display.lifecycle === "parked") {
+    return {
+      label: "Parked to save disk. Returns on your next message.",
+      compactLabel: "Parked",
       icon: getEnvironmentLabelIconName(providerLookup),
       providerName: getEnvironmentProviderDisplayName(providerLookup),
     };

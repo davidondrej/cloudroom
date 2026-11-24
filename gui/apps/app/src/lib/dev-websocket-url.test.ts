@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildDevWebSocketUrl } from "./dev-websocket-url";
+import {
+  buildBrowserWebSocketUrl,
+  buildDevWebSocketUrl,
+} from "./dev-websocket-url";
 
 function installWindowLocation(url: string): void {
   const location = new URL(url);
@@ -74,5 +77,13 @@ describe("buildDevWebSocketUrl", () => {
     installWindowLocation("https://app.example.test/threads/thr_1");
 
     expect(buildDevWebSocketUrl({ path: "/ws" })).toBeUndefined();
+  });
+
+  it("keeps fallback URLs on the browser origin for URL-significant paths", () => {
+    installWindowLocation("http://dev.example.test:15802/threads/thr_1");
+
+    expect(buildBrowserWebSocketUrl("@a")).toBe(
+      "ws://dev.example.test:15802/@a",
+    );
   });
 });

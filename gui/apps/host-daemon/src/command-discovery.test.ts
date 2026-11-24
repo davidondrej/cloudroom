@@ -21,6 +21,7 @@ import type { HostProviderCommand } from "@cloudroom/host-daemon-contract";
 import {
   type CommandScanRoot,
   discoverProviderCommands,
+  MAX_SCAN_ENTRY_COUNT,
 } from "./command-discovery.js";
 import { resolveDeclaredScanRoots } from "./command-handlers/list-commands.js";
 
@@ -387,7 +388,7 @@ describe("discoverProviderCommands over declared roots", () => {
   it("enforces the entry-count cap", async () => {
     const fixture = await makeWorkspaceFixture();
     const commandsRoot = path.join(fixture.cwd, ".agent", "commands");
-    const fileCount = 1_050;
+    const fileCount = MAX_SCAN_ENTRY_COUNT + 50;
     await Promise.all(
       Array.from({ length: fileCount }, (_, index) =>
         writeFileEnsuringDir(
@@ -399,7 +400,7 @@ describe("discoverProviderCommands over declared roots", () => {
 
     const commands = await discover(fixture, fixture.cwd);
 
-    expect(commands.length).toBe(1_000);
+    expect(commands.length).toBe(MAX_SCAN_ENTRY_COUNT);
   });
 
   it("does not follow symlinked command files or directories", async () => {
@@ -434,7 +435,7 @@ describe("discoverProviderCommands over declared roots", () => {
     const fullRoot = path.join(fixture.cwd, "full-root");
     const secondRoot = path.join(fixture.cwd, "second-root");
     await Promise.all(
-      Array.from({ length: 1_000 }, (_, index) =>
+      Array.from({ length: MAX_SCAN_ENTRY_COUNT }, (_, index) =>
         writeFileEnsuringDir(path.join(fullRoot, `entry-${index}.txt`), ""),
       ),
     );

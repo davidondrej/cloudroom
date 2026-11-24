@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router";
 import {
   ResourceInfiniteScrollSentinel,
   useResourceInfiniteItems,
@@ -24,6 +24,7 @@ import {
 import { BrowsePluginsTab } from "@/components/plugin/management/BrowsePluginsTab";
 import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import { InstalledPluginsTab } from "@/components/plugin/management/InstalledPluginsTab";
+import { hiddenPlugin } from "@/components/plugin/management/plugin-browse-discovery";
 import {
   PluginSafeModeBanner,
   PluginSafeModeButton,
@@ -90,6 +91,7 @@ export function PluginsOverview({
     () =>
       plugins
         .filter((plugin) => {
+          if (hiddenPlugin(plugin.id, plugin)) return false;
           if (
             activeTypeFilters.length > 0 &&
             !activeTypeFilters.includes(pluginPublisherFilterId(plugin))

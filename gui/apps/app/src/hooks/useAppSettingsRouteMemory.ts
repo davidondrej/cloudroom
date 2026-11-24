@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { matchPath, useLocation } from "react-router-dom";
+import { matchPath, useLocation } from "react-router";
 import {
   getRootComposeRoutePath,
   SETTINGS_ROUTE_PATH,
@@ -19,7 +19,7 @@ function getLocationRoutePath(location: {
   return `${location.pathname}${location.search}${location.hash}`;
 }
 
-function isSettingsRoutePath(pathname: string): boolean {
+export function isSettingsRoutePath(pathname: string): boolean {
   return (
     matchPath(`${SETTINGS_ROUTE_PATH}/*`, pathname) !== null ||
     matchPath(LEGACY_PROJECT_SETTINGS_ROUTE_PATH, pathname) !== null

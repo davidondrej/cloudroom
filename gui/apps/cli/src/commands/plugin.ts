@@ -1040,7 +1040,10 @@ export function registerPluginCommands(
       "--tag-prefix <prefix>",
       "Resolve a git: semver range over <prefix>vX.Y.Z tags (monorepo tagging)",
     )
-    .option("--yes", "Skip the confirmation prompt")
+    .option(
+      "--yes",
+      "Skip this prompt. With the desktop app, a person still approves the install in the app",
+    )
     .option("--json", "Output JSON")
     .action(
       action(
@@ -1193,7 +1196,10 @@ export function registerPluginCommands(
     .command("update [id]")
     .description("Update one plugin, or all plugins with --all")
     .option("--all", "Update every plugin with a compatible update")
-    .option("--yes", "Skip confirmation prompts")
+    .option(
+      "--yes",
+      "Skip these prompts. With the desktop app, a person still approves each update in the app",
+    )
     .action(
       action(
         async (

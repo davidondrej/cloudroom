@@ -57,7 +57,10 @@ import {
   type ClaudeCodeSkillRoot,
 } from "../session-params.js";
 import { SdkSession, type SdkSessionOptions } from "./sdk-session.js";
-import { createClaudeCodeBridgeModelListMemo } from "./model-list.js";
+import {
+  claudeModelCliVersionError,
+  createClaudeCodeBridgeModelListMemo,
+} from "./model-list.js";
 import {
   claudeThreadForkParamsSchema,
   claudeThreadResumeParamsSchema,
@@ -210,6 +213,8 @@ interface ThreadSession {
   pendingInteractiveRequests: Map<string | number, PendingInteractiveRequest>;
   permissionEscalationByAgentId: Map<string, PermissionEscalation | null>;
   permissionEscalationByPromptId: Map<string, PermissionEscalation | null>;
+  /** Steers Claude hasn't started, by prompt ID: visible text, and whether Claude said it queued it (#2137). */
+  unstartedSteers: Map<string, { preview: string; queued: boolean }>;
   permissionEscalationBySubagentParentToolUseId: Map<
     string,
     PermissionEscalation | null
@@ -368,6 +373,11 @@ function requireSkillPluginsRoot(): string {
 
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
 const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
+/** Same text as `UNDELIVERED_MESSAGE_WARNING` in @cloudroom/domain (the bridge test checks). */
+const UNDELIVERED_MESSAGE_WARNING =
+  "May not have been delivered: the agent stopped before reading it";
+/** How long a new turn waits on its MCP check before Claude gets the prompt. */
+const MCP_CHECK_WAIT_MS = 10_000;
 const THREAD_STOPPED_MESSAGE =
   "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
@@ -385,7 +395,7 @@ const threadAttachments = new Map<string, ThreadAttachment>();
 const closingSessions = new Map<string, Promise<void>>();
 /** Threads with a Stop on its way: the one new turn that gets here first ends at once. */
 const stopRequestedThreadIds = new Set<string>();
-const unconfirmedSessionStops = new Map<string, Set<SdkSession>>();
+const unconfirmedSessionStops = new Map<string, Set<ThreadSession>>();
 const toolCallTracker = createPendingToolCallTracker({ sendToolCall: send });
 const { forwardToolCall, handleToolCallResponse } = toolCallTracker;
 
@@ -556,11 +566,12 @@ async function closeThreadSession(args: {
           args.gracefulTimeoutMs,
         ).catch((error: unknown) => {
           if (process.platform === "win32") {
-            holdUnconfirmedSessionStop(args.threadId, threadSession.session);
+            holdUnconfirmedSessionStop(args.threadId, threadSession);
             warnSessionStopFailed(args.threadId, error);
           }
           throw error;
         });
+        sendEndedTasks(args.threadId, threadSession);
       }
       await retryUnconfirmedSessionStops(args.threadId);
     })
@@ -587,11 +598,22 @@ async function closeThreadSession(args: {
 
 function holdUnconfirmedSessionStop(
   threadId: string,
-  session: SdkSession,
+  threadSession: ThreadSession,
 ): void {
   const sessions = unconfirmedSessionStops.get(threadId) ?? new Set();
-  sessions.add(session);
+  sessions.add(threadSession);
   unconfirmedSessionStops.set(threadId, sessions);
+}
+
+/**
+ * A stopped Claude's background commands, agents, and workflows ended with
+ * it. The next Claude can't see them, so nothing else would end them (#2228).
+ */
+function sendEndedTasks(threadId: string, threadSession: ThreadSession): void {
+  sendThreadDeltas(
+    threadId,
+    threadSession.translator.buildEndedTaskDeltas(threadId),
+  );
 }
 
 /** Stops this thread's earlier Claudes again until each stop is confirmed. */
@@ -599,9 +621,10 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
   const sessions = unconfirmedSessionStops.get(threadId);
   if (!sessions) return;
   const results = await Promise.allSettled(
-    Array.from(sessions, async (session) => {
-      await session.stop();
-      sessions.delete(session);
+    Array.from(sessions, async (held) => {
+      await held.session.stop();
+      sessions.delete(held);
+      sendEndedTasks(threadId, held);
     }),
   );
   if (sessions.size === 0) unconfirmedSessionStops.delete(threadId);
@@ -609,7 +632,7 @@ async function retryUnconfirmedSessionStops(threadId: string): Promise<void> {
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
   if (!failure) return;
-  if ([...sessions].some((session) => session.isRunning())) {
+  if ([...sessions].some((held) => held.session.isRunning())) {
     throw new Error(
       "An earlier Claude process for this thread is still running, and Cloudroom is stopping it. Try again in a moment.",
     );
@@ -663,16 +686,53 @@ function pushPromptInput(
   threadSession: ThreadSession,
   input: string,
   permissionEscalation: PermissionEscalation | null,
+  steerPreview?: string,
 ): Promise<void> {
   const promptId = randomUUID();
   threadSession.permissionEscalationByPromptId.set(
     promptId,
     permissionEscalation,
   );
+  if (steerPreview !== undefined) {
+    threadSession.unstartedSteers.set(promptId, { preview: steerPreview, queued: false });
+  }
   return threadSession.session.pushInput(input, promptId).catch((error) => {
     threadSession.permissionEscalationByPromptId.delete(promptId);
+    threadSession.unstartedSteers.delete(promptId);
     throw error;
   });
+}
+
+/** The steer's text as the timeline shows it: no skill expansion, nothing agent-only. */
+function visibleSteerPreview(input: unknown): string {
+  const text = (Array.isArray(input) ? input : [])
+    .flatMap((raw: unknown) => {
+      const item = promptInputItemSchema.safeParse(raw).data;
+      const agentOnly = (raw as { visibility?: unknown }).visibility === "agent-only";
+      return item?.type === "text" && !agentOnly ? [item.text] : [];
+    })
+    .join("\n");
+  return text.length > 500 ? `${text.slice(0, 500)}…` : text;
+}
+
+/**
+ * At a Stop, each steer Claude said it queued and hasn't started is marked:
+ * Claude may drop it with the turn. Changes nothing Claude does. The server
+ * keeps the mark only for a Stop someone chose (#2137).
+ */
+function warnUnstartedSteers(threadId: string, threadSession: ThreadSession): void {
+  const queued = [...threadSession.unstartedSteers.values()].filter((steer) => steer.queued);
+  threadSession.unstartedSteers.clear();
+  sendThreadDeltas(
+    threadId,
+    queued.map((steer) => ({
+      kind: "provider.warning" as const,
+      category: "general" as const,
+      summary: UNDELIVERED_MESSAGE_WARNING,
+      ...(steer.preview ? { details: steer.preview } : {}),
+      vouchedTurn: true,
+    })),
+  );
 }
 
 async function applyLiveSessionSettings(
@@ -1075,6 +1135,7 @@ function createThreadSession(attachment: ThreadAttachment): ThreadSession {
     pendingInteractiveRequests: new Map(),
     permissionEscalationByAgentId: new Map(),
     permissionEscalationByPromptId: new Map(),
+    unstartedSteers: new Map(),
     permissionEscalationBySubagentParentToolUseId: new Map(),
     permissionEscalationByToolUseId: new Map(),
   };
@@ -1319,6 +1380,10 @@ function buildSessionTrackingHooks(
   };
 }
 
+/** The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
+ *  20261117-113618). Never on commits. Cloud uses the same line: `PR_FOOTER` in core/src/runtime/claude.rs. */
+const PR_FOOTER = "Built with [Cloudroom](https://cloudroom.dev)";
+
 function buildTrackedSessionOptions(
   params: SessionConstructionParams,
   env: NodeJS.ProcessEnv,
@@ -1335,7 +1400,7 @@ function buildTrackedSessionOptions(
   if (params.stripAiCoAuthorsEnabled !== false) {
     sessionOptions.settings = {
       ...(typeof sessionOptions.settings === "object" ? sessionOptions.settings : {}),
-      attribution: { commit: "", pr: "" },
+      attribution: { commit: "", pr: PR_FOOTER },
     };
   }
   if (params.commandGuardEnabled !== false) {
@@ -1369,7 +1434,7 @@ function replaceThreadSession(args: ReplaceThreadSessionArgs): ThreadSession {
     threadSession: args.threadSession,
   });
   if (process.platform === "win32") {
-    holdUnconfirmedSessionStop(args.threadId, args.threadSession.session);
+    holdUnconfirmedSessionStop(args.threadId, args.threadSession);
     void args.threadSession.session.stop().catch((error: unknown) => {
       warnSessionStopFailed(args.threadId, error);
     });
@@ -1502,6 +1567,13 @@ function createOnSdkMessage(
       threadId: args.threadIdRef.current,
     });
     if (!threadSession) return;
+    const lifecycle = message as { type?: string; command_uuid?: unknown; state?: unknown };
+    const steer =
+      lifecycle.type === "command_lifecycle" && typeof lifecycle.command_uuid === "string"
+        ? threadSession.unstartedSteers.get(lifecycle.command_uuid)
+        : undefined;
+    if (steer && lifecycle.state === "queued") steer.queued = true;
+    else if (steer) threadSession.unstartedSteers.delete(lifecycle.command_uuid as string);
     if (message.type === "result") {
       threadSession.turnRunning = false;
     } else if (
@@ -1689,12 +1761,16 @@ async function closeClaudeThreadSession(
 
 function buildSessionEnv(
   envOverrides: Record<string, string>,
+  providerSubagentsEnabled: boolean,
 ): NodeJS.ProcessEnv {
   const sessionEnv: NodeJS.ProcessEnv = {
     ...withoutBridgeRuntimeEnv(process.env),
     ...envOverrides,
     CLAUDE_CODE_ENTRYPOINT: "cli",
   };
+  // Claude can swap WebFetch for a `web-fetch` subagent, which the disabled-
+  // subagents hook denies; keep the direct WebFetch tool instead (#1489).
+  if (!providerSubagentsEnabled) sessionEnv.CLAUDE_CODE_WEB_FETCH_AGENT ??= "0";
   delete sessionEnv.CLAUDE_AGENT_SDK_CLIENT_APP;
   return withoutBlankAccountEnv(sessionEnv);
 }
@@ -1754,7 +1830,10 @@ function applyTurnEnvironment(
     ...attachment.sessionConstructionConfig,
     config,
   };
-  attachment.sessionOptions.env = buildSessionEnv(envOverrides);
+  attachment.sessionOptions.env = buildSessionEnv(
+    envOverrides,
+    attachment.liveSettings.providerSubagentsEnabled,
+  );
   if (attachment.residentSession) {
     attachment.residentSession.restartBeforeNextTurn = {
       reason: accountOnly
@@ -2379,7 +2458,10 @@ function attachThreadSession(
   resume: boolean,
 ): void {
   const threadIdRef = { current: params.threadId };
-  const env = buildSessionEnv(readConfigEnvOverrides(params.config));
+  const env = buildSessionEnv(
+    readConfigEnvOverrides(params.config),
+    params.providerSubagentsEnabled ?? true,
+  );
   const sessionOptions = buildTrackedSessionOptions(params, env, threadIdRef);
   if (!resume) {
     sessionOptions.sessionId = providerThreadId;
@@ -2571,6 +2653,14 @@ async function runTurnInput(
     );
     return;
   }
+  const cliTooOld = await claudeModelCliVersionError(
+    params.model ?? threadSession.attachment.liveSettings.model,
+    threadSession.attachment.sessionOptions.pathToClaudeCodeExecutable,
+  );
+  if (cliTooOld !== null) {
+    sendError(id, -32000, cliTooOld);
+    return;
+  }
   // A Stop can be on its way while this turn is still being set up, which
   // takes seconds while Claude starts. The turn then ends here, as interrupted,
   // before Claude ever takes it.
@@ -2606,11 +2696,19 @@ async function runTurnInput(
     if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
     if (intent === "new-turn") {
-      await threadSession.session.reconnectMcpServers().catch((error) => {
-        logBridgeError(
-          `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      });
+      // Best effort. Claude still starting, or stuck, must not hold the turn
+      // past the host's wait for turn/start (#1574).
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        threadSession.session.reconnectMcpServers().catch((error) => {
+          logBridgeError(
+            `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, MCP_CHECK_WAIT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
     }
     return text;
   });
@@ -2643,6 +2741,7 @@ async function runTurnInput(
       threadSession,
       promptText,
       params.permissionEscalation,
+      intent === "steer" ? visibleSteerPreview(params.input) : undefined,
     );
     threadSession.turnRunning = true;
     emitCanonicalTurnInputAccepted(threadSession, acceptance, params.threadId);
@@ -2718,6 +2817,10 @@ async function handleThreadStop(
 ): Promise<void> {
   stopRequestedThreadIds.delete(params.threadId);
   const threadSession = threadAttachments.get(params.threadId)?.residentSession;
+  // Before the turn settles, so the parent's notice can count them.
+  if (params.intent === "interrupt" && threadSession && !threadSession.closing) {
+    warnUnstartedSteers(params.threadId, threadSession);
+  }
   if (
     threadSession == null ||
     threadSession.closing ||

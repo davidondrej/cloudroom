@@ -80,3 +80,36 @@ it("reports a refused manual compaction as skipped, after the compaction_end del
     "turn.boundary:completed",
   ]);
 }, 30_000);
+
+it.each([
+  ["/overflow-fail", "failed"],
+  ["/overflow-retry", "completed"],
+])(
+  "settles %s after Pi's overflow compaction as %s",
+  async (text, status) => {
+    await harness.startThread(THREAD_ID);
+    await harness.request(3, "turn/start", {
+      threadId: THREAD_ID,
+      providerThreadId: THREAD_ID,
+      clientRequestId: "creq_vrfwabcdeg",
+      input: [{ type: "text", text }],
+      options: FULL_PERMISSION_OPTIONS,
+    });
+    const settlements = () =>
+      harness
+        .deltasOf(THREAD_ID)
+        .filter((d) => d.kind === "turn.boundary" || d.settlesTurn === true);
+    await harness.waitFor(() => settlements().length >= 2, "run and prompt");
+
+    expect(settlements().map((d) => d.status ?? "failed")).toEqual([
+      status,
+      status,
+    ]);
+    if (status === "failed") {
+      expect(settlements()[0]).toMatchObject({
+        detail: expect.stringContaining("Context overflow recovery failed"),
+      });
+    }
+  },
+  30_000,
+);

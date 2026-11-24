@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   ResourceCollectionViewport,
@@ -40,8 +40,13 @@ import {
 import { pluginRowSignal } from "./plugin-status";
 import { CatalogEntryIconChip, PluginLogoChip } from "./plugin-ui";
 
+/** Plugins Cloudroom makes itself (docs/scopes/cloudroom-agent.md): its logo in color, and a "By Cloudroom" badge. */
+const BY_CLOUDROOM = new Set(["provider-cloudroom-agent"]);
+import { PluginsFeatured } from "./PluginsFeatured";
+
+// As wide as the Skills page: the featured bento needs the room.
 export const PLUGINS_LIST_BAND_CLASSES =
-  "mx-auto w-full max-w-3xl px-4 md:px-5";
+  "mx-auto w-full max-w-5xl px-4 md:px-5";
 export const PLUGINS_LIST_SCROLL_CONTENT_CLASS = "[&>div]:block!";
 
 type OpenPlugin = (pluginId: string, trigger: HTMLButtonElement) => void;
@@ -150,6 +155,14 @@ export function BrowsePluginsTab({
             The plugin catalog is not available. Showing installed plugins.
           </p>
         ) : null}
+        {filter === "all" && query === "" ? (
+          <PluginsFeatured
+            rows={rows}
+            groups={groups}
+            onInstall={onInstall}
+            onOpenPlugin={onOpenPlugin}
+          />
+        ) : null}
         {content}
       </div>
     </ResourceCollectionViewport>
@@ -234,7 +247,11 @@ export function PluginRowGroups({
     <>
       <div className="space-y-5" data-testid="plugin-list">
         {groups.map((group) => (
-          <section key={group.key} aria-label={group.label}>
+          <section
+            key={group.key}
+            aria-label={group.label}
+            className="scroll-mt-3"
+          >
             <h2 className="px-3 pb-1.5 text-2xs font-semibold uppercase tracking-wider text-muted-foreground">
               {group.label}
             </h2>
@@ -312,6 +329,11 @@ function PluginRow({
           className="block max-w-full truncate rounded-sm text-left text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
           {row.title}
+          {BY_CLOUDROOM.has(row.pluginId) ? (
+            <span className="ml-2 rounded-full bg-primary/15 px-1.5 py-0.5 align-middle text-2xs font-medium text-primary">
+              By Cloudroom
+            </span>
+          ) : null}
         </button>
         {row.description === "" ? null : (
           <p className="truncate text-xs text-muted-foreground">
@@ -353,7 +375,14 @@ function PluginRowIcon({
   const signal = row.plugin === null ? null : pluginRowSignal(row.plugin);
   return (
     <span className="relative shrink-0">
-      {row.entry !== null ? (
+      {BY_CLOUDROOM.has(row.pluginId) ? (
+        <img
+          src="/icon-192.png?v=room"
+          alt=""
+          aria-hidden="true"
+          className="size-8 rounded-[22%] object-cover"
+        />
+      ) : row.entry !== null ? (
         <CatalogEntryIconChip
           entry={row.entry}
           className="size-8"

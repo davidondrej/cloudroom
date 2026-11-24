@@ -32,7 +32,9 @@ everything outside the protocol: argv, the plugin-scoped `dataDir`/`tempDir`
 above, the bounded stdin framing, and the signals. Nothing less trusted than
 Cloudroom can write to `tempDir`: it is in `<dataDir>/.cloudroom-tmp`, never
 the OS temp folder, which other accounts (Linux's `/tmp`), Read-only Mac
-commands and agent sandboxes can write. A bridge that started
+commands and agent sandboxes can write. The runtime makes `tempDir`. On
+Windows, where a stop skips the bridge's own cleanup, it removes it once
+`taskkill /T` ended the bridge and its children. A bridge that started
 itself could not be imported by a test, and could not share an artifact with a
 host RPC entry. First-party bridges use exactly this path —
 `plugins/provider-codex/src/bridge/bridge.ts` is the largest worked example,
@@ -451,6 +453,10 @@ it:
    hung thread. After a much longer bound the runtime stops the thread, then
    fails the run (`provider_turn_start_failed`). A bridge `error`
    notification fails a pending start at once. `thread retry` resends it.
+   A started turn with no event for 10 minutes, and no running command, tool
+   call, pending request, or background work, gets one `provider_turn_silent`
+   warning per silence; the turn stays open (#977). `willRetry` errors count
+   as silence, and the warning names how many came and the last (#1853).
 5. `thread/stop` semantics follow its `intent`: `interrupt` settles the
    active turn as interrupted (the bridge emits the settling deltas —
    `turn.boundary { interrupted }` plus explicit closes for provider-owned
@@ -533,7 +539,10 @@ carries the whole item, so refusing it would lose real content.
 4. Fork: absent `sourceProviderCheckpointId` means fork at the tip. A
    `fork: "tip"` bridge rejects checkpoint forks with
    `FORK_CHECKPOINT_UNSUPPORTED` rather than cloning history the bb timeline
-   does not show.
+   does not show. A Codex message edit's `thread/fork`, or its
+   `thread/start` when the first message is edited, also names
+   `replacesProviderThreadId`, the thread's current session, whose Goal it
+   keeps.
 5. Open work is what the timeline says it is. A `backgroundTask` item and a
    `delegation` item that are still pending are live provider work, and the
    runtime will not reap the session while one is open. Model a native

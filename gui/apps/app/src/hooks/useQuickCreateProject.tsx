@@ -5,7 +5,7 @@ import {
   useMemo,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { deriveProjectNameFromPath, type Host } from "@cloudroom/domain";
 import type { HostPlatform } from "@cloudroom/host-daemon-contract";
 import { useCreateProject } from "@/hooks/mutations/project-mutations";

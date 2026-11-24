@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
+import { usesTextFork } from "../src/provider-fork.js";
 import { providerInfoSchema } from "../src/provider-types.js";
+
+describe("usesTextFork", () => {
+  it("clones a session only when the same harness can clone it there", () => {
+    // Local: native when the session can be cloned at that point.
+    expect(usesTextFork("acp-opencode", undefined, undefined, undefined, false, true)).toBe(false);
+    expect(usesTextFork("acp-antigravity", undefined, undefined, undefined, false, false)).toBe(true);
+    // Cloud: Claude Code or Codex on the same model, and only with a session to clone.
+    expect(usesTextFork("claude-code", "opus", "claude-code", "opus", true, true)).toBe(false);
+    expect(usesTextFork("claude-code", "opus", "claude-code", "opus", true, false)).toBe(true);
+    expect(usesTextFork("claude-code", "opus", "claude-code", "fable", true, true)).toBe(true);
+    expect(usesTextFork("acp-opencode", undefined, undefined, undefined, true, true)).toBe(true);
+    // Another harness always gets text.
+    expect(usesTextFork("claude-code", undefined, "codex", undefined, false, true)).toBe(true);
+  });
+});
 
 describe("provider info schema", () => {
   const baseProviderInfo = {

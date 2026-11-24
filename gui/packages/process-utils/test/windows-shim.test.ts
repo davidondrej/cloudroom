@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, relative, resolve } from "node:path";
 import { afterAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const originalPlatform = process.platform;
@@ -48,7 +48,7 @@ afterAll(() => {
   });
 });
 
-it("runs a JS-target shim as node plus its script, preferring the node.exe beside it", () => {
+it("runs a JS-target shim as node plus its script: the node.exe beside it, else PATH's, never the cwd's", () => {
   const npm = dir({ "pi.cmd": PI_CMD });
   const script = join(
     npm,
@@ -59,16 +59,21 @@ it("runs a JS-target shim as node plus its script, preferring the node.exe besid
     "bundle",
     "cli.js",
   );
+  // Never a bare `node`, which Windows looks up in the project folder first: PATH's node.exe, else ENOENT.
+  const project = dir({ "node.exe": "" });
+  const nodejs = dir({ "node.exe": "" });
   expect(
-    resolveWindowsShim({
-      command: "pi",
-      args: ["--version"],
-      env: { PATH: npm },
-    }),
-  ).toEqual({
-    command: "node",
-    args: [script, "--version"],
+    resolveWindowsShim({ command: "pi", args: ["--version"], cwd: project, env: { PATH: `${npm};.;${nodejs}` } }),
+  ).toEqual({ command: join(nodejs, "node.exe"), args: [script, "--version"] });
+  expect(resolveWindowsShim({ command: "pi", args: [], cwd: project, env: { PATH: npm } })).toEqual({
+    command: join(npm, "node.exe"),
+    args: [script],
   });
+  // An env without PATH searches the parent's PATH, as Windows does.
+  vi.stubEnv("PATH", nodejs);
+  expect(resolveWindowsShim({ command: join(npm, "pi.cmd"), args: [], cwd: project, env: {} }).command).toBe(
+    join(nodejs, "node.exe"),
+  );
   writeFileSync(join(npm, "node.exe"), "");
   expect(
     resolveWindowsShim({ command: "pi", args: [], env: { Path: `"${npm}"` } }),
@@ -76,6 +81,17 @@ it("runs a JS-target shim as node plus its script, preferring the node.exe besid
     command: join(npm, "node.exe"),
     args: [script],
   });
+});
+
+// `\dir` and `C:dir` resolve against the working folder's drive, so they never count; a POSIX host can't express them.
+it.runIf(originalPlatform === "win32")("skips PATH folders that aren't fully qualified", () => {
+  const npm = dir({ "pi.cmd": PI_CMD });
+  const nodejs = dir({ "node.exe": "" });
+  const rooted = nodejs.slice(2);
+  const driveRelative = `${nodejs.slice(0, 2)}${relative(resolve(nodejs.slice(0, 2)), nodejs)}`;
+  expect(
+    resolveWindowsShim({ command: join(npm, "pi.cmd"), args: [], cwd: root, env: { PATH: `${rooted};${driveRelative}` } }).command,
+  ).toBe(join(npm, "node.exe"));
 });
 
 it("runs an exe-target shim's exe directly", () => {
@@ -207,11 +223,21 @@ it("skips npm's claude.cmd when it runs the unfinished Claude stub (#1148)", () 
   ).toBe(join(native, "claude.exe"));
 });
 
-it("finds Grok in %USERPROFILE%\\.grok\\bin when it is not on PATH (#1256)", () => {
+it("finds Grok (#1256) and Cursor's .cmd shim (#1709) in their own folders off PATH", () => {
   const home = dir({});
   mkdirSync(join(home, ".grok", "bin"), { recursive: true });
   writeFileSync(join(home, ".grok", "bin", "grok.exe"), "", { mode: 0o755 });
   expect(
     findCliExecutable("grok", { PATH: "", USERPROFILE: home, PATHEXT: ".exe" }),
   ).toBe(join(home, ".grok", "bin", "grok.exe"));
+  const cursor = join(home, "Local App", "cursor-agent");
+  mkdirSync(cursor, { recursive: true });
+  writeFileSync(join(cursor, "cursor-agent.cmd"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("cursor-agent", {
+      PATH: "",
+      LOCALAPPDATA: join(home, "Local App"),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(cursor, "cursor-agent.cmd"));
 });

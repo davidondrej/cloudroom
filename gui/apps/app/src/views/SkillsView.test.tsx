@@ -15,7 +15,7 @@ import {
   Routes,
   useLocation,
   useNavigate,
-} from "react-router-dom";
+} from "react-router";
 import { focusManager } from "@tanstack/react-query";
 import type { ProviderInfo } from "@cloudroom/domain";
 import type { SkillSummary } from "@cloudroom/server-contract";

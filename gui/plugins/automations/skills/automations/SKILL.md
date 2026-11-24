@@ -12,6 +12,8 @@ script Run a stored server-side script and capture stdout/stderr/exit.
 
 Use the top-level `room-cli loop` command; `room-cli automation` is the same command. The CLI routes it to this plugin.
 
+A timer or reminder for the current thread needs one line: `room-cli wake <when> "<prompt>"`. It re-prompts this thread once, on its own agent; `<when>` is a delay (`5m`, `2h`, `1d`) or a time, and it fires within about a minute of then. It makes a one-time loop, so `list`, `update`, and `delete` work on it; a week after it ran with no error, it leaves the list. A thread a loop started can wake itself too, with up to 5 wakes waiting.
+
 Pass `--project` explicitly for every automation command. Inside a thread, automations are stamped origin `agent` and record the creating thread automatically. Automation-spawned threads cannot create automations.
 
 Personal supports automations with `--project proj_personal`. Use `room-cli project list --include-personal --json` to include it in discovery; an empty default project list does not mean Personal is unavailable.
@@ -30,11 +32,24 @@ room-cli loop create --cloud --thread <cloudThreadId> --same-thread --name "..."
 room-cli loop list --cloud [--thread <cloudThreadId>]
 ```
 
+One loop can take turns between agents: repeat `--agent provider,model[,level]` (2-8 times) instead of `--provider`/`--model`/`--reasoning`, on `create` or `update`, Local or Cloud. Each run gets the next agent; one that can't run is skipped for the next.
+
 `list --project <id>` also shows that project's Cloud loops; `list --cloud` shows them for every project.
 
 Webhooks (ADR 0262): `--webhook` instead of `--cron`/`--at`/`--in` makes a loop that runs when its secret URL gets a POST, Local or Cloud. Create prints the URL once (the website keeps only its hash); `room-cli loop hook <id>` replaces it. Each run gets the requests that arrived since the last one, batched, inside `<webhook_events>` as data; a script-mode Local loop reads them from the file in `ROOM_LOOP_EVENTS`. Cloud runs start within seconds; this computer checks for Local ones about once a minute, and they wait on the website while it is off. A Local webhook loop an agent creates starts paused, and only a person can turn it on in the Loops panel, since anyone with the URL can prompt an agent on this computer. Cloud webhook loops take no script yet, and `run` doesn't apply: send a POST to test one. Give the user the URL and tell them to keep it secret.
 
 `show`, `update`, `pause`, `resume`, `run`, `hook`, and `delete` take a cloud automation's ID (a UUID) without `--project`. A re-prompt run is a message in its thread; a fresh-thread run is its own thread, which the app shows when it next checks in. A missed run fires once; a run waits until the previous one ends; three failed runs in a row pause it. Inside a Cloud thread, `room-cli loop create` takes no `--cloud` or `--thread`: it reads that thread's project settings, and the loop then belongs to the project.
+
+Jev loops (Cloud, paid plans): a loop that runs no agent. Use one when each item needs only a yes/no, a pick, or a level: sorting an inbox, labeling issues, filtering alerts. Jev is a fast decision model: it answers in under a second for a fraction of a cent, but it cannot write or use tools.
+
+```bash
+room-cli loop create --cloud --project <id> --name "..." --cron "<expr>" --timezone <tz> --script-file collect.sh --jev questions.json --act-file act.sh [--secrets KEY,...]
+```
+
+- `collect.sh` prints the items, one per line, each a small JSON object (`{"id": "1", "title": "..."}`). Print only items not handled yet, and nothing to skip the run. Up to 50 items a run.
+- `questions.json` is what Jev answers for each item: `{"is_video_idea": {"type": "noul", "instructions": "Is \`title\` an idea for a video, not a task?"}}`. Types: `noul` (is it true; optional `criteria` `{"true": ..., "false": ...}`), `choice` (`criteria` `{"option": "what it means"}`, 2 to 255, with an `other`), `score` (`criteria` an array of 2 to 10 levels, low to high). One narrow judgment per question; name the item's fields in backticks; write the instructions literally.
+- `act.sh` gets a JSON file path as `$1`: `[{"item": {...}, "answers": {"is_video_idea": {"type": "noul", "noul": 0.94}}}]`. A choice answers `choice` and `probabilities`; a score answers `score` (a level number, low is 0) and `probabilities`. Pick thresholds in code and act only when Jev is sure. Each line it prints is saved as an action of the run. Any exit code but 0 fails the run.
+- Each script has 60 seconds and the Cloud environment's keys (`--secrets` picks which). A failed run runs both again, so both must be safe to run twice. Test both scripts by hand before creating the loop.
 
 Choosing a mode:
 
@@ -72,7 +87,7 @@ room-cli loop create --template <id> --project <id> [--local]
 room-cli loop settings [--stop-at-limit on|off] [--fallback on|off]
 ```
 
-Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. A fresh-thread Cloud loop gets only the API keys picked with `--secrets KEY,.env|none|all` (`.env` is the project's .env files): pick only what its prompt and script need. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit, and whether a fresh-thread loop at a Claude or Codex limit runs on the other one with the model of the same level (both on by default).
+Priority is P1 (essential) to P4 (niche); `--priority` works on `create` and `update`, Local and Cloud, and loops start at P3. A fresh-thread Cloud loop gets only the API keys picked with `--secrets KEY,.env|none|all` (`.env` is the project's .env files): pick only what its prompt and script need. Any picked list, even `.env` or `none`, blocks `room-cli mac` in its runs, so a job that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop. Templates need a paid plan. A template makes a Cloud loop unless `--local`, and fills in its name, prompt, schedule, agent (the project's default when its own isn't set up), and priority; any flag you pass wins. A Cloud one runs from the project's newest Cloud thread, else a new one. `runs <cloudLoopId>` lists what each Cloud run reported. `settings` reads or sets whether Cloud loops wait at their agent's plan limit, and whether a fresh-thread loop at a Claude or Codex limit runs on the other one with the model of the same level (both on by default).
 
 For partial updates, mode replacement, execution targets, or damaged records,
 read [references/updates.md](references/updates.md). Every command supports `--json`.

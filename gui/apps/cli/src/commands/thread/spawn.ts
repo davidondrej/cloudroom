@@ -12,6 +12,7 @@ import {
 } from "@cloudroom/domain";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import {
+  BbHttpError,
   BbRequestTimeoutError,
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
 } from "@cloudroom/sdk/node";
@@ -65,6 +66,7 @@ interface ThreadSpawnCommandOptions {
   model?: string;
   reasoningLevel?: string;
   title?: string;
+  pin?: boolean;
   serviceTier?: string;
   permissionMode?: string;
   plan?: boolean;
@@ -381,6 +383,7 @@ export function registerSpawnCommand(
       "Reasoning level: low, medium, high, xhigh, max (provider-dependent)",
     )
     .option("--title <title>", "Thread title")
+    .option("--pin", "Pin the new thread in the sidebar")
     .option("--service-tier <tier>", "Service tier: fast or default")
     .option("--permission-mode <mode>", PERMISSION_MODE_HELP)
     .option("--plan", PLAN_HELP)
@@ -414,7 +417,7 @@ export function registerSpawnCommand(
     .option("--source-thread <id>", "Source thread for a fork")
     .option(
       "--source-seq-end <seq>",
-      "Fork after the source turn containing this event sequence",
+      "Fork at a saved Claude message or a finished turn",
     )
     .action(
       action(async (opts: ThreadSpawnCommandOptions) => {
@@ -594,9 +597,9 @@ export function registerSpawnCommand(
         const launcherThreadId = resolveContextThreadId();
         // Sent on every spawn, so an unanswered one can be retried without a duplicate.
         const requestId = opts.requestId ?? randomUUID();
+        const sdk = createCliRoomSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
         let thread: Thread;
         try {
-          const sdk = createCliRoomSdk(getUrl(), DEFAULT_BB_REQUEST_TIMEOUT_MS);
           const model = opts.model && (await preferCallerModel(sdk, opts.model));
           const input = await uploadClientAttachmentInputs({
             input: buildPromptInputs({
@@ -644,9 +647,10 @@ export function registerSpawnCommand(
               thread = await sdk.threads.spawn(spawnArgs);
               break;
             } catch (error) {
-              // Only a timeout or a dropped connection leaves the outcome unknown.
+              // Only a timeout, a dropped connection or a lost answer leaves the outcome unknown.
               const timedOut = error instanceof BbRequestTimeoutError;
-              const unknown = timedOut || error instanceof TypeError;
+              const unknown =
+                timedOut || error instanceof TypeError || lostAnswer(error);
               const reason = timedOut
                 ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
                 : getErrorMessage(error);
@@ -679,6 +683,17 @@ export function registerSpawnCommand(
           throw prependErrorContext("Failed to create thread", err);
         }
 
+        if (opts.pin) {
+          try {
+            thread = await sdk.threads.pin({ threadId: thread.id });
+          } catch (err: unknown) {
+            console.error(
+              `Warning: thread ${thread.id} was created, but pinning failed: ${getErrorMessage(err)}`,
+            );
+            process.exitCode = 1;
+          }
+        }
+
         if (outputJson(opts, thread)) return;
         console.log(`Thread spawned: ${thread.id}`);
         if (sendAt !== undefined) {
@@ -697,6 +712,14 @@ export function registerSpawnCommand(
         printThread(thread);
       }),
     );
+}
+
+/** A gateway timeout, or a 502 with no Cloudroom error code (a proxy's, like Connect's relay): the spawn may have run (#2448). */
+function lostAnswer(error: unknown): boolean {
+  return (
+    error instanceof BbHttpError &&
+    (error.status === 504 || (error.status === 502 && error.code === null))
+  );
 }
 
 function printThread(thread: Thread): void {

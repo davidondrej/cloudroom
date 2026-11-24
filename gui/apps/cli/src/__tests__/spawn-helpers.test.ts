@@ -292,6 +292,15 @@ describe("parseThreadWaitTimeoutSeconds", () => {
       "non-negative number",
     );
   });
+
+  it.each(["1abc", "1.2.3", "1e", "", " "])(
+    "throws for malformed numeric input %j",
+    (value) => {
+      expect(() => parseThreadWaitTimeoutSeconds(value)).toThrow(
+        "non-negative number",
+      );
+    },
+  );
 });
 
 describe("parseThreadWaitPollIntervalMs", () => {
@@ -306,6 +315,15 @@ describe("parseThreadWaitPollIntervalMs", () => {
       "positive integer",
     );
   });
+
+  it.each(["1abc", "1.5", "1.2.3", "1e", "", " "])(
+    "throws for malformed integer input %j",
+    (value) => {
+      expect(() => parseThreadWaitPollIntervalMs(value)).toThrow(
+        "positive integer",
+      );
+    },
+  );
 });
 
 describe("parseServiceTier", () => {

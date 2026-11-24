@@ -5,12 +5,12 @@
   "title": "aspect-ratio",
   "description": "BB ui \"aspect-ratio\" — vendored from the BB app's own source (version-matched to this BB release).",
   "dependencies": [
-    "@radix-ui/react-aspect-ratio"
+    "@radix-ui/react-slot"
   ],
   "files": [
     {
       "path": "registry/components/ui/aspect-ratio.tsx",
-      "content": "import * as AspectRatioPrimitive from \"@radix-ui/react-aspect-ratio\";\n\nconst AspectRatio = AspectRatioPrimitive.Root;\n\nexport { AspectRatio };\n",
+      "content": "import * as React from \"react\";\nimport { Slot } from \"@radix-ui/react-slot\";\n\n// Same DOM and props as Radix AspectRatio: a full-width wrapper sized by the\n// padding-bottom trick, and an absolutely filled inner box for the content.\nconst AspectRatio = React.forwardRef<\n  HTMLDivElement,\n  React.ComponentPropsWithoutRef<\"div\"> & {\n    ratio?: number;\n    asChild?: boolean;\n  }\n>(({ ratio = 1, asChild = false, style, ...props }, ref) => {\n  const Comp = asChild ? Slot : \"div\";\n\n  return (\n    <div\n      style={{\n        position: \"relative\",\n        width: \"100%\",\n        paddingBottom: `${100 / ratio}%`,\n      }}\n      data-radix-aspect-ratio-wrapper=\"\"\n    >\n      <Comp\n        {...props}\n        ref={ref}\n        style={{\n          ...style,\n          position: \"absolute\",\n          top: 0,\n          right: 0,\n          bottom: 0,\n          left: 0,\n        }}\n      />\n    </div>\n  );\n});\nAspectRatio.displayName = \"AspectRatio\";\n\nexport { AspectRatio };\n",
       "type": "registry:ui",
       "target": "components/ui/aspect-ratio.tsx"
     }

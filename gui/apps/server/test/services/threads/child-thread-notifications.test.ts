@@ -80,6 +80,46 @@ describe("child thread notifications", () => {
     expect(message).not.toContain("Deploy script failed on preflight.");
   });
 
+  it("names a queued retry's time in UTC, as provider-retry status does (#2148)", () => {
+    const sendAt = Date.UTC(2026, 10, 21, 12, 5, 30);
+    const message = renderBatchMessage({
+      items: [
+        {
+          activeWorkflowCount: 0,
+          childThread: testThread({ id: "thr_child", title: null }),
+          queuedRetry: { sendAt },
+          terminalOutput: null,
+          turnStatus: "failed",
+        },
+      ],
+    });
+
+    expect(message).toMatch(
+      /Cloudroom will retry this turn automatically at \d+ \w+ \d\d:\d\d local, 2026-11-21T12:05:30\.000Z\. /u,
+    );
+  });
+
+  it("keeps a retry time outside Date's range from dropping the batch (#2148)", () => {
+    const failed = (id: string, sendAt: number) => ({
+      activeWorkflowCount: 0,
+      childThread: testThread({ id, title: null }),
+      queuedRetry: { sendAt },
+      terminalOutput: null,
+      turnStatus: "failed" as const,
+    });
+    const message = renderBatchMessage({
+      items: [
+        failed("thr_bad", 9e15),
+        failed("thr_ok", Date.UTC(2026, 10, 21, 12, 5, 30)),
+      ],
+    });
+
+    expect(message).toContain(
+      "Cloudroom will retry thr_bad automatically at Invalid Date Invalid Date. ",
+    );
+    expect(message).toContain("2026-11-21T12:05:30.000Z");
+  });
+
   it("omits output and preserves manual-stop safety guidance for a single interrupted outcome", () => {
     const message = renderBatchMessage({
       items: [

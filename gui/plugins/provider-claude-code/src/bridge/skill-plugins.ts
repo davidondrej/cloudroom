@@ -6,6 +6,7 @@ import {
   readlinkSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -82,8 +83,11 @@ export function ensureClaudeSkillPlugin(args: {
     current = null;
   }
   if (current !== args.root.path) {
-    rmSync(skillsLink, { recursive: true, force: true });
-    symlinkSync(args.root.path, skillsLink, "dir");
+    // Unlink an old link so removal never reaches the skills it points to.
+    if (current) unlinkSync(skillsLink);
+    else rmSync(skillsLink, { recursive: true, force: true });
+    // Windows needs admin or Developer Mode for a "dir" symlink, not a junction. Other platforms ignore the type.
+    symlinkSync(args.root.path, skillsLink, "junction");
   }
   return pluginPath;
 }

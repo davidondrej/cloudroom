@@ -8,6 +8,7 @@ import {
 } from "../machines/provider-orchestration.js";
 import {
   isThreadQueueAutoSendPaused,
+  listHiddenSourceThreads,
   listLiveThreadsInEnvironment,
   listNonDeletedChildThreads,
   listQueuedThreadMessages,
@@ -24,6 +25,7 @@ import {
   pruneThreadEventHistoryBestEffort,
   resetActiveThreadEventPruningState,
 } from "../system/event-pruning.js";
+import { revokeThreadDesktopBrowserControl } from "../desktop-browsers.js";
 import { emitPluginThreadArchived } from "../plugins/plugin-thread-events.js";
 import {
   dispatchSettledArchivedThreadProviderArchiveCommand,
@@ -67,6 +69,7 @@ interface ArchiveThreadAndChildrenArgs {
   liveThreadIds?: readonly string[];
   /** The website already has the parent archived (an agent's own archive, #237): only its children go out. */
   websiteHasRoot?: boolean;
+  checkOwner?: (owner: string | null | undefined) => void;
 }
 
 interface ArchiveThreadAndChildrenResult {
@@ -108,12 +111,14 @@ function archiveThreadWithLifecycleEffects(
     return null;
   }
   teleports(deps).abandon(archivedThread.id);
+  // Archived threads give up browser control; the release closes pages the lease opened (#1383).
+  void revokeThreadDesktopBrowserControl(deps, archivedThread.id, true);
 
   deps.terminalSessions.closeArchivedThreadTerminals({
     threadId: archivedThread.id,
   });
   if (isCloudThread(archivedThread)) {
-    if (args.fromWebsite) cloudroom(deps).detach(archivedThread.id);
+    if (args.fromWebsite) cloudroom(deps).archived(archivedThread.id);
     else cloudroom(deps).archive(archivedThread.id);
     // The stream stops here, so a turn still running never reaches the prune at its end.
     pruneThreadEventHistoryBestEffort(deps, {
@@ -238,6 +243,39 @@ export function listThreadWithDescendants<T extends Pick<Thread, "id">>(
   return threads;
 }
 
+/** An archive takes a thread's whole tree within moments; one archived on its own, long before or after, isn't part of it. */
+const ARCHIVED_TOGETHER_MS = 10 * 60_000;
+
+/** The archived threads and side chats under `root` that were archived with it (within 10 minutes), parents first. */
+export function listThreadsArchivedWith(
+  deps: Pick<AppDeps, "db">,
+  root: Pick<Thread, "id" | "archivedAt">,
+): ThreadRow[] {
+  const archivedAt = root.archivedAt;
+  if (archivedAt === null) return [];
+  const found: ThreadRow[] = [];
+  const seen = new Set([root.id]);
+  const pending = [root.id];
+  for (let id = pending.shift(); id !== undefined; id = pending.shift()) {
+    const under = [
+      ...listNonDeletedChildThreads(deps.db, { parentThreadId: id }),
+      ...listHiddenSourceThreads(deps.db, { sourceThreadId: id }),
+    ];
+    for (const thread of under) {
+      if (
+        seen.has(thread.id) ||
+        thread.archivedAt === null ||
+        Math.abs(thread.archivedAt - archivedAt) > ARCHIVED_TOGETHER_MS
+      )
+        continue;
+      seen.add(thread.id);
+      found.push(thread);
+      pending.push(thread.id);
+    }
+  }
+  return found;
+}
+
 /** A Cloud thread another computer or Core archived: this thread only, no cascade, and nothing goes back (#237). */
 export function archiveFromWebsite(deps: AppDeps, thread: Thread): void {
   archiveThreadWithLifecycleEffects(deps, { environment: null, thread, fromWebsite: true });
@@ -246,15 +284,21 @@ export function archiveFromWebsite(deps: AppDeps, thread: Thread): void {
 export function archiveThreadAndChildren(
   deps: AppDeps,
   args: ArchiveThreadAndChildrenArgs,
+  family = listThreadWithDescendants(deps, args.parentThread),
 ): ArchiveThreadAndChildrenResult {
   const kept = args.includeLive
     ? new Set<string>()
     : listKeptLiveThreads(deps, args.parentThread, new Set(args.liveThreadIds));
   const archivedThreadIds: string[] = [];
 
-  for (const thread of listThreadWithDescendants(deps, args.parentThread)) {
-    // A kept thread keeps its side chats too.
-    if (thread.archivedAt !== null || kept.has(thread.id) || kept.has(thread.sourceThreadId ?? "")) continue;
+  // A kept thread keeps its side chats too. Check every target before the first write.
+  const targets = family.filter(thread => thread.archivedAt === null && !kept.has(thread.id) && !kept.has(thread.sourceThreadId ?? ""));
+  if (args.checkOwner) {
+    for (const thread of targets) {
+      if (isCloudThread(thread)) args.checkOwner(binding(deps.db, thread.id)?.accountId);
+    }
+  }
+  for (const thread of targets) {
     const environment = resolveArchiveThreadEnvironment(deps, { thread });
     const result = archiveThreadWithLifecycleEffects(deps, {
       environment,
@@ -312,6 +356,6 @@ function isLiveThread(
       listQueuedThreadMessages(deps.db, thread.id).some((message) => message.failureReason === null)) ||
     (!binding(deps.db, thread.id)?.queuePaused &&
       queuedPrompts(deps.db, thread.id).length > 0) ||
-    commands(deps.db, thread.id).some((command) => command.state === "sending")
+    commands(deps.db, thread.id, "sending").some((command) => command.command !== "unarchive_session")
   );
 }

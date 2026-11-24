@@ -9,7 +9,7 @@ import {
 } from "@testing-library/react";
 import type { Host, ProjectExecutionDefaults } from "@cloudroom/domain";
 import { makeHost } from "@cloudroom/test-helpers/domain-fixtures";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";

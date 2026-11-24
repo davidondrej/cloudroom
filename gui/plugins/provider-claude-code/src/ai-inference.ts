@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import os from "node:os";
 import type {
   ExperimentalAiInferenceCompleteInput,
@@ -6,8 +5,11 @@ import type {
   ExperimentalAiServiceErrorCode,
 } from "@get-bb/plugin-sdk/ai-services";
 import { withoutBlankAccountEnv } from "./bridge/bridge.js";
-import { claudeExecutable } from "./bridge/provider-maintenance.js";
-import { withoutBridgeRuntimeEnv } from "@get-bb/plugin-sdk/provider-bridge";
+import { spawnClaude } from "./bridge/provider-maintenance.js";
+import {
+  experimental_killPortableProcess,
+  withoutBridgeRuntimeEnv,
+} from "@get-bb/plugin-sdk/provider-bridge";
 
 type InferenceValue = Extract<
   ExperimentalAiInferenceCompleteOutput,
@@ -81,8 +83,7 @@ export function completeClaudeInference(
     delete env.CLAUDECODE;
     delete env.CLAUDE_AGENT_SDK_CLIENT_APP;
     const schema = JSON.stringify(input.outputSchema);
-    const child = spawn(
-      claudeExecutable(),
+    const child = spawnClaude(
       [
         "-p",
         "--model",
@@ -119,12 +120,13 @@ export function completeClaudeInference(
               `Answer with only a JSON object that matches this JSON schema. No other text, no code fence.\n${schema}`,
             ]),
       ],
-      { cwd: input.folder ?? os.homedir(), env, stdio: "pipe" },
+      { cwd: input.folder ?? os.homedir(), env },
     );
     let stdout = "";
     let stderr = "";
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      // On Windows this ends the whole tree, not just an npm shim's wrapper.
+      void experimental_killPortableProcess(child, "SIGKILL");
       resolve(
         failure(
           "timeout",

@@ -709,7 +709,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="parent, collapsed — child needs input"
-        hint="trailing slot shows the grey question icon when a hidden child is blocked on the user"
+        hint="the row turns soft yellow with a 'Needs you' chip when a hidden child is blocked on the user"
       >
         <SidebarStage>
           <StoryThreadRow
@@ -727,7 +727,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="parent, collapsed — needs input + working"
-        hint="input needed wins priority over working: the trailing slot shows the grey question icon, not the spinner"
+        hint="input needed wins priority over working: the 'Needs you' chip shows, not the spinner"
       >
         <SidebarStage>
           <StoryThreadRow
@@ -769,7 +769,7 @@ export function Overview() {
       </StoryRow>
       <StoryRow
         label="child, pending"
-        hint="far-right reserved slot shows the grey question icon"
+        hint="soft yellow row with a 'Needs you' chip on the right"
       >
         <SidebarStage>
           <StoryThreadRow

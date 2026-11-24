@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { BbRequestTimeoutError } from "@cloudroom/sdk/node";
 import * as fixtures from "../helpers/command-output-fixtures.js";
 import {
   setupCommandOutputTestEnvironment,
@@ -91,14 +92,14 @@ describe("room-cli thread tell command output", () => {
     },
   );
 
-  it("room-cli thread tell keeps the steered wording for servers that only report ok", async () => {
+  it("room-cli thread tell does not claim the agent accepted a sent message (#1536)", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });
 
     await runCommand(["thread", "tell", "thread-legacy", "hello"], register);
 
     expect(vi.mocked(console.log).mock.calls[0]?.[0]).toBe(
-      "Thread thread-legacy steered",
+      "Thread thread-legacy message sent; the agent has not confirmed it yet. If it fails, `room-cli thread show thread-legacy` shows status error and why.",
     );
   });
 
@@ -129,12 +130,30 @@ describe("room-cli thread tell command output", () => {
       "Error: Cloudroom did not confirm the message, so it may already have been sent (fetch failed). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again.",
     ],
     [
+      "may already have been sent when Cloudroom never answers (#1832)",
+      () => Promise.reject(new BbRequestTimeoutError(75_000)),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (no answer within 75 seconds; it may be busy). Check `room-cli thread log thread-x` and `room-cli thread queue list thread-x` before sending it again. The server may still be handling it, so an empty log and queue don't prove it wasn't sent: wait a minute and check again before resending.",
+    ],
+    [
       "may already have been sent after a tunnel timeout (#1513)",
       async () =>
         new Response("cloudroom: timed out waiting for the tunnel client\n", {
           status: 504,
         }),
       "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 504: cloudroom: timed out waiting for the tunnel client).",
+    ],
+    [
+      "may already have been sent after a server error, with its error ID (#1341)",
+      async () =>
+        new Response(
+          JSON.stringify({
+            code: "internal_error",
+            message: "Internal server error",
+            errorId: "ab12cd34",
+          }),
+          { status: 500 },
+        ),
+      "Error: Cloudroom did not confirm the message, so it may already have been sent (HTTP 500: Internal server error, error ID ab12cd34). Check `room-cli thread log thread-x`",
     ],
   ])(
     "room-cli thread tell says a failed message %s",
@@ -177,6 +196,34 @@ describe("room-cli thread tell command output", () => {
     ).toMatchObject({ ok: false, unconfirmed: true, requestId });
     expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
       `--request-id ${requestId}`,
+    );
+  });
+
+  it("room-cli thread tell --json names the archived thread that refused it (#1276)", async () => {
+    const details = {
+      reason: "archived",
+      archivedAt: 1,
+      threadStatus: "idle",
+      threadId: "thread-x",
+    };
+    const message =
+      "Thread thread-x is archived (since 1970-01-01T00:00:00.001Z). Check the thread ID, or unarchive it first.";
+    stubTellApi({
+      "v1.threads.:id.send.$post": async () =>
+        new Response(
+          JSON.stringify({ code: "thread_not_writable", message, details }),
+          { status: 409 },
+        ),
+    });
+
+    await expect(
+      runCommand(["thread", "tell", "thread-x", "hi", "--json"], register),
+    ).rejects.toThrow("process.exit:1");
+    expect(
+      JSON.parse(String(vi.mocked(console.log).mock.calls[0]?.[0])),
+    ).toMatchObject({ ok: false, threadId: "thread-x", details });
+    expect(String(vi.mocked(console.error).mock.calls[0]?.[0])).toContain(
+      `HTTP 409: ${message}`,
     );
   });
 

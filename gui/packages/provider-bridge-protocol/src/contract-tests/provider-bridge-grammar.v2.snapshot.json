@@ -80,6 +80,7 @@
     },
     "item.textClose": {
       "kind": "required",
+      "providerCheckpointId": "optional",
       "key": "required",
       "channel": "required",
       "text": "optional",

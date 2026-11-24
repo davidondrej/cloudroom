@@ -6,20 +6,20 @@ import {
   createThreadInfoFixedPanelTab,
   type HostFilePreviewFixedPanelTab,
   type SecondaryFixedPanelTab,
-} from "@/lib/fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
 import {
   CompactHomePage,
   MOBILE_RECENTS_VISIBILITY_CLASS,
   MobileRecentsVisibilityStyle,
 } from "@/views/mobile-home-story-fixtures";
-import { CompactSecondaryPanelShelf } from "./CompactSecondaryPanelShelf";
+import { CompactSecondaryPanelShelf } from "@/components/right-panel/shell/mobile-drawer";
 import {
   ThreadSecondaryPanel,
   type SecondaryPanelRenderableTab,
-} from "./ThreadSecondaryPanel";
-import { ThreadMetadataContent } from "./ThreadMetadataContent";
-import { baseProps as baseMetadataProps } from "./ThreadMetadataContent.fixtures";
-import { FilePreview } from "./FilePreview";
+} from "@/components/right-panel/shell/panel-shell";
+import { ThreadMetadataContent } from "@/components/right-panel/tabs/thread-info";
+import { baseProps as baseMetadataProps } from "@/components/right-panel/tabs/thread-info.fixtures";
+import { FilePreview } from "@/components/right-panel/tabs/file-preview";
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar";
 import { threadListQueryKey } from "@/hooks/queries/query-keys";
 

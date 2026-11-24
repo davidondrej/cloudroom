@@ -5,6 +5,7 @@ import {
   isAppWindowMainFrame,
   isHttpOrigin,
   isSensitiveAppSender,
+  withDisabledFeature,
 } from "../src/desktop-app-window-policy.js";
 
 const APP_ORIGIN = "http://127.0.0.1:4317";
@@ -190,5 +191,21 @@ describe("isAllowedAppPermission", () => {
         mediaAudioOnly: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe("withDisabledFeature", () => {
+  const feature = "CalculateNativeWinOcclusion";
+
+  it("puts the feature first and keeps the other disabled features", () => {
+    expect(withDisabledFeature("", feature)).toBe(feature);
+    expect(withDisabledFeature("Foo,Bar", feature)).toBe(`${feature},Foo,Bar`);
+  });
+
+  it("drops earlier entries for the feature, so they can't win", () => {
+    expect(withDisabledFeature(`*${feature},Foo`, feature)).toBe(`${feature},Foo`);
+    expect(withDisabledFeature(`Foo,${feature}<Study,${feature}`, feature)).toBe(
+      `${feature},Foo`,
+    );
   });
 });

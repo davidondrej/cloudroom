@@ -70,9 +70,10 @@ Server-backed General settings
 Settings → General includes app-wide preferences stored server-side so every
 window and restart sees the same value. Keep Awake is instead owned by its
 builtin plugin: use its autosaving page under Settings → Installed plugins or run
-`room-cli keep-awake enable` or `room-cli keep-awake disable`. Choose every host with `room-cli
+`room-cli keep-awake level <off|working|always>`. Choose every host with `room-cli
 keep-awake hosts all`, or name individual host ids after `room-cli keep-awake hosts`.
-On macOS it prevents system idle sleep while Cloudroom is running; closing the lid or
+The default, `working`, prevents idle sleep while a Local thread runs and for 10
+minutes after; `always` also keeps the screen on while Cloudroom runs. Closing the lid or
 choosing Sleep still sleeps the Mac. On GNOME it uses
 `gnome-session-inhibit`, and the lid and Suspend still work. On other Linux
 desktops it uses `systemd-inhibit`.

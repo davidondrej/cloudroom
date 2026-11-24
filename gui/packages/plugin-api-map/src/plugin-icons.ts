@@ -25,7 +25,7 @@ import {
   WorkflowCircle03Icon,
   Activity03Icon,
 } from "@hugeicons/core-free-icons";
-import type { IconSvgElement } from "@hugeicons/react";
+import type { IconSvgElement } from "@cloudroom/shared-ui/hugeicons-icon";
 
 interface FirstPartyPlugin {
   id: string;

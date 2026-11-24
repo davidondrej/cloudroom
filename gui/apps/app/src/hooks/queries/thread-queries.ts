@@ -1,3 +1,5 @@
+import { useAtomValue } from "jotai";
+import { pendingArchiveIdsAtom } from "../cache-owners/thread-archive-cache";
 import { prependOlderTimelineRows } from "@cloudroom/client-core";
 import {
   useInfiniteQuery,
@@ -12,6 +14,7 @@ import { getMediaQuerySnapshot } from "@cloudroom/shared-ui/hooks/use-media-quer
 import type { PendingInteraction, ThreadListEntry } from "@cloudroom/domain";
 import type {
   PromptHistoryResponse,
+  ThreadCountResponse,
   ThreadQueuedMessageListResponse,
   ThreadListResponse,
   ThreadPendingInteractionsResponse,
@@ -26,7 +29,11 @@ import type {
   TimelineTurnSummaryDetailsResponse,
 } from "@cloudroom/server-contract";
 import { useDebouncedValue } from "../useDebouncedValue";
-import { applyTimelineDelta } from "@cloudroom/server-contract";
+import {
+  applyTimelineDelta,
+  THREAD_COUNT_ANY_PARENT,
+  THREAD_COUNT_ROOT_PARENT,
+} from "@cloudroom/server-contract";
 import type { ThreadListFilters } from "@cloudroom/client-core";
 import type { FilePreview } from "@cloudroom/client-core";
 import type { PathListOptions } from "@/lib/path-list-options";
@@ -65,6 +72,7 @@ import {
   RESUME_REFETCH_QUERY_POLICY,
 } from "./query-policies";
 import {
+  archivedThreadCountsQueryKey,
   archivedThreadsListQueryKey,
   disabledThreadListQueryKey,
   threadDetailBootstrapQueryKey,
@@ -176,6 +184,9 @@ interface UseThreadSearchArgs {
   active: boolean;
   limitPerGroup?: number;
   query: string;
+  /** The server applies both before it cuts the results to `limitPerGroup`. */
+  projectId?: string;
+  hasParent?: boolean;
 }
 
 export interface UseThreadSearchResult {
@@ -357,6 +368,37 @@ export function useArchivedThreads(
   });
 }
 
+/** How many archived threads match the filters, in total and per project: the list itself is paged. */
+export function useArchivedThreadCounts(
+  filters: UseArchivedThreadsFilters,
+  options?: QueryOptions,
+) {
+  const { projectId, kind = "all" } = filters;
+  return useQuery<ThreadCountResponse>({
+    queryKey: archivedThreadCountsQueryKey({
+      ...(projectId ? { projectId } : {}),
+      ...(kind !== "all" ? { kind } : {}),
+    }),
+    queryFn: ({ signal }) =>
+      sdk.threads.count({
+        archivedOnly: true,
+        groupBy: "project",
+        ...(projectId ? { projectId } : {}),
+        ...(kind === "all"
+          ? {}
+          : {
+              parentThreadId:
+                kind === "root"
+                  ? THREAD_COUNT_ROOT_PARENT
+                  : THREAD_COUNT_ANY_PARENT,
+            }),
+        signal,
+      }),
+    enabled: options?.enabled ?? true,
+    staleTime: THREAD_LIST_STALE_TIME_MS,
+  });
+}
+
 export function useThreads(filters: UseThreadsFilters, options?: QueryOptions) {
   const { projectId, ...rest } = filters;
   const enabled = (options?.enabled ?? true) && Boolean(projectId);
@@ -389,6 +431,11 @@ interface UseChildThreadsResult {
   isError: boolean;
   isFetching: boolean;
   isLoading: boolean;
+}
+
+function useVisibleThreadRows(rows: ThreadListResponse | undefined) {
+  const hidden = useAtomValue(pendingArchiveIdsAtom);
+  return useMemo(() => hidden.size ? rows?.filter(row => !hidden.has(row.id)) : rows, [hidden, rows]);
 }
 
 export function useChildThreads({
@@ -426,9 +473,10 @@ export function useChildThreads({
     staleTime: THREAD_LIST_STALE_TIME_MS,
   });
   const derivedChildren = enabled ? sidebarChildren : undefined;
+  const visible = useVisibleThreadRows(derivedChildren ?? fallbackQuery.data);
   if (derivedChildren !== undefined) {
     return {
-      data: derivedChildren,
+      data: visible,
       isError: false,
       isFetching: false,
       isLoading: false,
@@ -436,7 +484,7 @@ export function useChildThreads({
   }
   const waitingForBootstrap = enabled && isBootstrapPending;
   return {
-    data: fallbackQuery.data,
+    data: visible,
     isError: fallbackQuery.isError,
     isFetching: fallbackQuery.isFetching || waitingForBootstrap,
     isLoading: fallbackQuery.isLoading || waitingForBootstrap,
@@ -546,9 +594,10 @@ export function useThreadMentionCandidates({
   });
   const derivedCandidates = enabled ? sidebarCandidates : undefined;
 
+  const visible = useVisibleThreadRows(derivedCandidates ?? threadsQuery.data);
   if (derivedCandidates !== undefined) {
     return {
-      data: derivedCandidates,
+      data: visible,
       isError: false,
       isFetching: false,
       isLoading: false,
@@ -556,7 +605,7 @@ export function useThreadMentionCandidates({
   }
   const waitingForBootstrap = enabled && isBootstrapPending;
   return {
-    data: threadsQuery.data,
+    data: visible,
     isError: threadsQuery.isError,
     isFetching: threadsQuery.isFetching || waitingForBootstrap,
     isLoading: threadsQuery.isLoading || waitingForBootstrap,
@@ -567,6 +616,8 @@ export function useThreadSearch({
   active,
   limitPerGroup = THREAD_SEARCH_LIMIT_PER_GROUP,
   query,
+  projectId,
+  hasParent,
 }: UseThreadSearchArgs): UseThreadSearchResult {
   const debouncedRawQuery = useDebouncedValue(query, THREAD_SEARCH_DEBOUNCE_MS);
   const trimmedQuery = query.trim();
@@ -577,11 +628,20 @@ export function useThreadSearch({
     active && liveQueryIsSearchable && trimmedQuery !== debouncedQuery;
   const enabled = active && liveQueryIsSearchable && hasSearchableQuery;
   const threadSearchQuery = useQuery<ThreadSearchResponse>({
-    queryKey: threadSearchQueryKey({ limitPerGroup, query: debouncedQuery }),
+    queryKey: threadSearchQueryKey({
+      limitPerGroup,
+      query: debouncedQuery,
+      ...(projectId === undefined ? {} : { projectId }),
+      ...(hasParent === undefined ? {} : { hasParent }),
+    }),
     queryFn: ({ signal }) =>
       sdk.threads.search({
         limitPerGroup: String(limitPerGroup),
         query: debouncedQuery,
+        ...(projectId === undefined ? {} : { projectId }),
+        ...(hasParent === undefined
+          ? {}
+          : { hasParent: hasParent ? ("true" as const) : ("false" as const) }),
         signal,
       }),
     enabled,

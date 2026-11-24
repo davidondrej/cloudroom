@@ -1,3 +1,4 @@
+import { LOCAL_BASH_TASK_TYPE, backgroundTaskItemStatus } from "./background-task.js";
 import { threadEventSchema } from "./provider-event.js";
 import type { ThreadEventScope } from "./thread-event-scope.js";
 
@@ -24,7 +25,8 @@ export function cloudItemEvent(kind: string, data: Data, base: CloudEventBase, i
   if (!completed && kind !== "item_started" && kind !== "tool_snapshot") return null;
   const type = completed ? "item/completed" : "item/started";
   if (kind !== "tool_snapshot" && (data.item_type === "text" || data.item_type === "agentMessage")) {
-    return { ...base, type, item: { type: "agentMessage", id, text: text(data.text) } };
+    const checkpoint = completed && data.harness === "claude-code" && text(data.provider_checkpoint_id);
+    return { ...base, type, item: { type: "agentMessage", id, text: text(data.text), ...(checkpoint ? { providerCheckpointId: checkpoint } : {}) } };
   }
   if (kind !== "tool_snapshot" && (data.item_type === "thinking" || data.item_type === "reasoning")) {
     return { ...base, type, item: { type: "reasoning", id, summary: [], content: text(data.text) ? [text(data.text)] : [] } };
@@ -49,6 +51,40 @@ export function cloudItemEvent(kind: string, data: Data, base: CloudEventBase, i
     } };
   }
   return null;
+}
+
+/** Core states in which the agent's process, and every background command it ran, is gone. */
+export const CLOUD_AGENT_GONE_STATES: readonly string[] = ["failed", "process_lost", "closed", "sleeping", "suspended", "resuming"];
+/** A background command that started and has not ended: its description, and when it started (ms) if known. */
+export type CloudBackgroundCommand = { description: string; startedAt: number | null };
+
+/** A background command ending, with how long it ran when known. A command whose agent went away ends `stopped`. */
+export function cloudBackgroundCommandEnd(base: CloudEventBase, id: string, command: CloudBackgroundCommand, taskStatus: "completed" | "failed" | "stopped", at: number | null, extra: { durationMs?: unknown; summary?: unknown } = {}): Data {
+  const durationMs = typeof extra.durationMs === "number" ? extra.durationMs : at !== null && command.startedAt !== null ? at - command.startedAt : null;
+  return { ...base, type: "item/backgroundTask/completed", item: {
+    type: "backgroundTask", id, familyId: id.slice("task:".length), taskType: LOCAL_BASH_TASK_TYPE, description: command.description,
+    status: backgroundTaskItemStatus(taskStatus), taskStatus, skipTranscript: false,
+    ...(durationMs !== null && durationMs >= 0 ? { usage: { totalTokens: 0, toolUses: 0, durationMs } } : {}),
+    ...(text(extra.summary) ? { summary: text(extra.summary) } : {}),
+  } };
+}
+
+/** A Claude background command starting (`task_started`) or ending (`task_notification`), from Claude's own frame at
+ *  time `at`. The chat shows it as a bubble: Claude starts a turn by itself when it ends. `started` gives a command that
+ *  started and has not ended yet, else null, so an agent's or workflow's task, or a repeat, shows nothing. */
+export function cloudBackgroundCommandEvent(frame: Data, base: CloudEventBase, started: (id: string) => CloudBackgroundCommand | null, at: number | null): Data | null {
+  if (frame.type !== "system" || typeof frame.task_id !== "string") return null;
+  const id = `task:${frame.task_id}`;
+  if (frame.subtype === "task_started" && frame.task_type === LOCAL_BASH_TASK_TYPE) {
+    return { ...base, type: "item/backgroundTask/progress", item: {
+      type: "backgroundTask", id, familyId: frame.task_id, taskType: LOCAL_BASH_TASK_TYPE, description: text(frame.description),
+      status: "pending", taskStatus: "running", skipTranscript: false,
+    } };
+  }
+  const command = frame.subtype === "task_notification" ? started(id) : null;
+  if (command === null) return null;
+  const status = frame.status === "completed" || frame.status === "failed" ? frame.status : "stopped";
+  return cloudBackgroundCommandEnd(base, id, command, status, at, { durationMs: plain(frame.usage)?.duration_ms, summary: frame.summary });
 }
 
 const CODEX_DELTA = /^item\/(agentMessage\/delta|commandExecution\/outputDelta|fileChange\/outputDelta|reasoning\/(summaryTextDelta|textDelta)|plan\/delta)$/;

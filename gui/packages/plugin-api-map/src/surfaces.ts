@@ -153,6 +153,19 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
         experimental: true,
       },
       {
+        id: "project-action",
+        title: "Project menu actions",
+        summary:
+          "Adds an item to every project's actions menu in the sidebar. With this, a plugin can:",
+        bullets: [
+          "Open its own full page for the project the menu belongs to",
+          "Show a short badge next to the item, like NEW",
+          "Keep that page out of the sidebar's navigation",
+        ],
+        apiSymbols: ["ExperimentalProjectActionRegistration"],
+        experimental: true,
+      },
+      {
         id: "browser-toolbar",
         title: "Browser toolbar controls",
         summary:
@@ -443,6 +456,8 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "ExperimentalPluginProviderEnvHealthContext",
           "ExperimentalPluginProviderEnvHealth",
           "experimental_isClaudeNpmPlaceholder",
+          "experimental_privateDataPaths",
+          "experimental_createHostUsageSource",
         ],
         firstParty: [
           "ACP providers",
@@ -651,6 +666,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Register tools an agent calls the same way it calls Cloudroom's built-in tools",
           "Decide per thread which of its tools and skills are available",
           "Append instructions to a session's system prompt as that session starts",
+          "Match user instructions to the message’s harness and model with experimental_execution",
         ],
         apiSymbols: ["PluginAgents"],
         firstParty: [

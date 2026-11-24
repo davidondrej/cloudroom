@@ -3,9 +3,15 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { homedir } from "node:os";
-import { join, win32 } from "node:path";
-import { formatRoomAppConfigPath } from "@cloudroom/config/app-managed-config";
+import { basename, dirname, join, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  formatRoomAppConfigPath,
+  readRoomAppServerHeaders,
+} from "@cloudroom/config/app-managed-config";
+import { readMachineProxyUrl } from "@cloudroom/config/caller-proof";
 import { waitForProcessExit } from "@cloudroom/config/child-process-exit";
 import { mutateManagedJsonFile } from "@cloudroom/config/managed-json-file";
 import { validateOptionalUrl } from "@cloudroom/config/public-url";
@@ -70,6 +76,32 @@ export async function createJoinEnv(context: AppContext, env: NodeJS.ProcessEnv,
   return { ...env, BB_HOST_ENROLL_KEY: key.enrollKey, BB_HOST_ID: key.hostId };
 }
 
+/** A Cloudroom Connect address answers 404 at enrollment unless the caller has a machine relay key, which a join code never carries. install-machine.sh checks the same (#1057). A key given now or saved by an earlier join skips the check. */
+async function hidesEnrollment(
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  serverUrl: string,
+): Promise<boolean> {
+  if (
+    toOptionalString(env.BB_HOST_ENROLL_KEY) === undefined ||
+    toOptionalString(env.BB_CONNECT_MACHINE_CREDENTIAL) !== undefined ||
+    existsSync(join(dataDir, HOST_AUTH_FILE)) ||
+    (await readRoomAppServerHeaders(dataDir)) !== undefined
+  )
+    return false;
+  const enrollUrl = new URL(
+    "/internal/hosts/enroll",
+    validateOptionalUrl("BB_SERVER_URL", serverUrl),
+  );
+  const response = await fetch(enrollUrl, {
+    body: "{}",
+    headers: { "content-type": "application/json" },
+    method: "POST",
+    signal: AbortSignal.timeout(30_000),
+  }).catch(() => null);
+  return response?.status === 404;
+}
+
 export async function runHostDaemon(args: string[], flags: LauncherOptions, entrypointUrl: string): Promise<void> {
   if (args.length > 1 || (args.length === 1 && args[0] !== "join")) {
     throw new Error("bb-app host-daemon accepts no subcommand except join");
@@ -78,6 +110,26 @@ export async function runHostDaemon(args: string[], flags: LauncherOptions, entr
   const { context } = runtime;
   assertArtifacts(context, "host");
   const serverUrl = toOptionalString(runtime.env.BB_SERVER_URL) ?? context.serverUrl;
+  process.stdout.write(`\n  ${bold("Cloudroom host daemon")}\n\n`);
+  if (
+    args[0] === "join" &&
+    (await hidesEnrollment(context.dataDir, runtime.env, serverUrl))
+  ) {
+    endStep(
+      red("✗"),
+      `${serverUrl} does not accept join codes, so this machine was not joined.`,
+    );
+    log(
+      " ",
+      "Cloudroom Connect addresses only let in machines that have their own relay key.",
+    );
+    log(
+      " ",
+      "On your Cloudroom computer, run room-cli machine create --provider manual (or Settings → Machines → Add a machine), then run the command it prints here.",
+    );
+    process.exitCode = 1;
+    return;
+  }
   const env = createDaemonEnv(
     context,
     args[0] === "join" ? await createJoinEnv(context, runtime.env, serverUrl) : runtime.env,
@@ -85,7 +137,6 @@ export async function runHostDaemon(args: string[], flags: LauncherOptions, entr
   );
   const enrolled = existsSync(join(context.dataDir, HOST_AUTH_FILE));
 
-  process.stdout.write(`\n  ${bold("Cloudroom host daemon")}\n\n`);
   if (existsSync(context.daemonLockDir)) log(yellow("!"), `Daemon lock exists - waiting or reclaiming if stale: ${context.daemonLockDir}`);
   if (!enrolled && toOptionalString(env.BB_HOST_ENROLL_KEY) === undefined) {
     endStep(red("✗"), `Not enrolled - set BB_HOST_ENROLL_KEY to join ${serverUrl}`);
@@ -137,18 +188,51 @@ export function resolveBundledCliLaunch(args: { args: string[]; cliPath: string;
     : { command: args.cliPath, args: args.args };
 }
 
+/** install-machine.sh puts bb-app in <dataDir>/npm; that machine's daemon publishes its agent proxy there (#1564). */
+function installedMachineProxyUrl(): string | null {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const npmPrefix = resolve(packageRoot, "../../..");
+  const installed = basename(npmPrefix) === "npm" && packageRoot === join(npmPrefix, "lib", "node_modules", "bb-app");
+  return installed ? readMachineProxyUrl(dirname(npmPrefix)) : null;
+}
+
+/** Only a server that refuses the connection is replaced, so a running desktop app keeps its CLI. */
+async function refusesConnection(serverUrl: string): Promise<boolean> {
+  const url = URL.parse(serverUrl);
+  if (url === null) return true;
+  const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+  return new Promise((resolve) => {
+    const socket = connect({ host: url.hostname.replace(/^\[|\]$/gu, ""), port, timeout: 1_000 });
+    const done = (refused: boolean) => {
+      socket.destroy();
+      resolve(refused);
+    };
+    socket.once("connect", () => done(false)).once("timeout", () => done(false)).once("error", () => done(true));
+  });
+}
+
 /** The `room-cli` bin of an installed package: finds this machine's server, then runs the bundled CLI. */
 export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Promise<void> {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("BB_")));
+  const proxyUrl = env.ROOM_SERVER_URL === undefined && env.ROOM_DATA_DIR === undefined ? installedMachineProxyUrl() : null;
+  // The installer's plain-HTTP opt-in must reach `machine enroll` (#2194).
+  if (process.env.BB_ALLOW_INSECURE_SERVER_URL === "1") env.BB_ALLOW_INSECURE_SERVER_URL = "1";
   if (env.ROOM_DATA_DIR !== undefined) env.BB_DATA_DIR = env.ROOM_DATA_DIR;
   if (env.ROOM_HOST_DAEMON_PORT !== undefined) env.BB_HOST_DAEMON_PORT = env.ROOM_HOST_DAEMON_PORT;
   if (env.ROOM_SERVER_URL !== undefined) env.BB_SERVER_URL = env.ROOM_SERVER_URL;
   const runtime = await resolveRuntime({ entrypointUrl: import.meta.url, env, homeDir: homedir(), options: {}, mode: "remote" });
   const { context } = runtime;
   assertArtifacts(context, "host");
+  let serverUrl = runtime.env.ROOM_SERVER_URL ?? context.serverUrl;
+  if (proxyUrl !== null && (await refusesConnection(serverUrl))) serverUrl = proxyUrl;
+  // ROOM_CLI can lead back here, e.g. through ~/.local/bin/room-cli, so follow it at most once (#1929).
+  const override =
+    runtime.env.ROOM_CLI_REEXEC === "1"
+      ? undefined
+      : toOptionalString(runtime.env.ROOM_CLI);
   const launch = resolveBundledCliLaunch({
     args: cliArgs,
-    cliPath: toOptionalString(runtime.env.ROOM_CLI) ?? join(context.daemonBundleDir, "room-cli"),
+    cliPath: override ?? join(context.daemonBundleDir, "room-cli"),
     nodePath: process.execPath,
     platform: process.platform,
   });
@@ -157,10 +241,11 @@ export async function runRoomCli(cliArgs: string[] = process.argv.slice(2)): Pro
     stdio: "inherit",
     env: {
       ...runtime.env,
+      ...(override === undefined ? {} : { ROOM_CLI_REEXEC: "1" }),
       BB_APP_VERSION: context.appVersion,
       ROOM_HOST_DAEMON_PORT: runtime.env.ROOM_HOST_DAEMON_PORT ?? String(context.daemonPort),
       ROOM_DATA_DIR: runtime.env.ROOM_DATA_DIR ?? context.dataDir,
-      ROOM_SERVER_URL: runtime.env.ROOM_SERVER_URL ?? context.serverUrl,
+      ROOM_SERVER_URL: serverUrl,
       NODE_ENV: "production",
     },
   });

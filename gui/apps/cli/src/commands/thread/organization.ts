@@ -11,7 +11,7 @@ import {
   printBorderlessTable,
   truncateCell,
 } from "../../table.js";
-import { describeQueueWait } from "./actions.js";
+import { describeQueueWait, resolveSenderThreadId } from "./actions.js";
 import { formatQueueSendCountdown } from "./send-time.js";
 import { action } from "../../action.js";
 import { createCliRoomSdk } from "../../client.js";
@@ -270,7 +270,7 @@ export function registerOrganizationCommands(
   ] as const) {
     parent
       .command(`${name} [id]`)
-      .description(`Mark a thread ${name}`)
+      .description(`Mark a thread ${name} (prints no messages; use thread log)`)
       .option("--self", "Target the current thread (from ROOM_THREAD_ID)")
       .option("--json", "Print machine-readable JSON output")
       .action(
@@ -353,6 +353,7 @@ export function registerOrganizationCommands(
     .action(
       action(
         async (threadId: string, message: string, opts: QueueCreateOptions) => {
+          const senderThreadId = resolveSenderThreadId(threadId);
           const result = await createCliRoomSdk(
             getUrl(),
           ).threads.queuedMessages.create({
@@ -360,6 +361,7 @@ export function registerOrganizationCommands(
             input: [{ type: "text", text: message, mentions: [] }],
             ...(opts.model ? { model: opts.model } : {}),
             ...(opts.hard ? { hardQueue: true } : {}),
+            ...(senderThreadId !== undefined ? { senderThreadId } : {}),
           });
           if (outputJson(opts, result)) return;
           console.log(

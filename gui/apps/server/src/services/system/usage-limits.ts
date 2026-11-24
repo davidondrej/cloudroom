@@ -13,7 +13,6 @@ import {
   requirePrimaryHostId,
 } from "../hosts/primary-host.js";
 import { resolvePluginProviderEnvHealth } from "../plugins/plugin-agent-contributions.js";
-import { listSystemProviderInfos } from "./execution-options.js";
 import { resolveBridgeLaunchForProviderId } from "./provider-bridge-launch.js";
 import { mapProviderMaintenanceRequests } from "./provider-maintenance-concurrency.js";
 
@@ -23,12 +22,16 @@ export async function getProviderUsageLimits(
 ): Promise<ProviderUsageResponse> {
   const hostId = query.hostId ?? requirePrimaryHostId(deps);
   assertUsableHostId(deps, { hostId });
-  const providers = (
-    await listSystemProviderInfos(deps, { hostId, capability: "usage" })
-  ).filter(
-    (provider) =>
-      query.providerId === undefined || provider.id === query.providerId,
-  );
+  const registrations =
+    query.providerId !== undefined
+      ? (() => {
+          const registration = deps.providerRegistry.get(query.providerId);
+          return registration === null ? [] : [registration];
+        })()
+      : deps.providerRegistry.list();
+  const providers = registrations
+    .filter((registration) => registration.info.maintenance.usage)
+    .map((registration) => registration.info);
   const entries = await mapProviderMaintenanceRequests(
     providers,
     async (provider): Promise<[string, ProviderUsage] | null> => {

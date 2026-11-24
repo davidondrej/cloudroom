@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { OverflowFade } from "@/components/ui/overflow-fade.js";
 import {
   Sidebar,
@@ -29,6 +30,7 @@ import { useSidebarPreload } from "@/hooks/useCloudThreadWake";
 import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { usePaneContentSplitDrag } from "./usePaneContentSplitDrag";
 import { MacAccessChip } from "./MacAccessChip";
+import { ViewingMacBar } from "@/components/settings/YourComputers";
 import { CloudQueueChip, PlanCard } from "@/components/CloudQueue";
 import {
   EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS,
@@ -76,6 +78,11 @@ export function AppSidebar({
     label: "New thread",
   });
   const closeOnMobile = useCloseMobileSidebar();
+  const cardsRef = useCallback(
+    (element: HTMLDivElement | null) =>
+      setSidebarCards(element && { element, close: closeOnMobile }),
+    [closeOnMobile],
+  );
   const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
@@ -146,10 +153,10 @@ export function AppSidebar({
 
   const activateThreadShortcut = useCallback(
     (index: number): boolean => {
-      const target =
+      return openNavigationTarget(
         threadShortcutTargetsRef.current[index] ??
-        getSidebarThreadShortcutTargets(sidebarRef.current)[index];
-      return target?.element ? openNavigationTarget(target) : false;
+          getSidebarThreadShortcutTargets(sidebarRef.current)[index],
+      );
     },
     [openNavigationTarget],
   );
@@ -266,6 +273,7 @@ export function AppSidebar({
   const body = (
     <>
       <SidebarTopReserveRow testId="app-sidebar-top-reserve-row" />
+      <ViewingMacBar />
       <SidebarNavigationRegion
         compactCustomizeMode={isCompactCustomizeModeActive}
         onCompactCustomizeModeChange={setCompactCustomizeMode}
@@ -301,13 +309,16 @@ export function AppSidebar({
         <OverflowFade placement="above" tone="sidebar" size="sm" />
         <PluginSidebarFooterDisclosure
           item={pluginSidebarFooter.activeItem}
+          warmItem={pluginSidebarFooter.warmItem}
           onDismiss={pluginSidebarFooter.dismiss}
         />
+        <div ref={cardsRef} className="empty:hidden" />
         <PlanCard />
         <SidebarMenu className="flex-row flex-wrap-reverse items-center gap-1">
           <PluginSidebarFooterItems
             activeDisclosureKey={pluginSidebarFooter.activeKey}
             onDisclosureCommand={pluginSidebarFooter.handleCommand}
+            onDisclosureWarm={pluginSidebarFooter.handleWarm}
             onNavigate={closeOnMobile}
             builtInActions={[
               {
@@ -331,7 +342,7 @@ export function AppSidebar({
           />
           <SidebarUpdatesBadge onNavigate={closeOnMobile} />
           <CloudQueueChip />
-          <MacAccessChip />
+          <MacAccessChip hidden={isHiddenHostedBody} />
         </SidebarMenu>
       </SidebarFooter>
       <SidebarResizeHandle
@@ -354,13 +365,7 @@ export function AppSidebar({
           {body}
         </div>
       ) : (
-        <Sidebar
-          ref={sidebarRef}
-          // The footer popup spills past the sidebar; lift the sidebar above the thread composer while it is open.
-          className={pluginSidebarFooter.activeItem ? "md:z-40" : undefined}
-        >
-          {body}
-        </Sidebar>
+        <Sidebar ref={sidebarRef}>{body}</Sidebar>
       )}
     </SidebarThreadShortcutKeysContext.Provider>
   );

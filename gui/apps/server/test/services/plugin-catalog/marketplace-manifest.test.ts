@@ -583,6 +583,13 @@ describe("marketplace manifest schema", () => {
       expect(entrySourceDisplay(git)).toBe(
         "git:https://github.com/acme/plugins.git@v1.0.0#plugins/widgets",
       );
+      const url = "https://u:ghp_FAKE123@github.com/acme/plugins.git";
+      const login = firstEntry([
+        entry({ source: { git: { url, ref: "v1" } } }),
+      ]);
+      expect(resolvedEntrySource(login).source).toBe(
+        "git:https://github.com/acme/plugins.git@v1",
+      );
 
       const npm = firstEntry([
         entry({

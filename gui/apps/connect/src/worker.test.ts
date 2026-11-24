@@ -889,7 +889,8 @@ describe("Cloudroom Connect relay", () => {
       method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ user_id: "user-1" }),
     });
     expect((await signal("wrong")).status).toBe(401);
-    const signals = () => seen.filter((asked) => asked.path === "/api/v1/cloudroom/threads-changed" && asked.headers[RELAY_SIGNAL_HEADER] === "threads").length;
+    // The app refuses the signal without the JSON content type (415).
+    const signals = () => seen.filter((asked) => asked.path === "/api/v1/cloudroom/threads-changed" && asked.headers[RELAY_SIGNAL_HEADER] === "threads" && asked.headers["content-type"] === "application/json").length;
     const wait = () => new Promise((resolve) => setTimeout(resolve, 1_300));
     let before = signals();
     expect((await signal("signal-secret")).status).toBe(202);

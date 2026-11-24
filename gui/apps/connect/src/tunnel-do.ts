@@ -65,6 +65,7 @@ const HOP_HEADERS = new Set([
   TUNNEL_TARGET_HEADER,
   TUNNEL_SESSION_HEADER,
   TUNNEL_MACHINE_HEADER,
+  TUNNEL_VPS_HEADER,
 ]);
 
 function forwardableHeaders(headers: Headers): HeaderPair[] {
@@ -348,7 +349,8 @@ export class TunnelDO {
     this.signalPending = false;
     this.signalAt = Date.now();
     const url = new URL(`https://${tunnelInfo(tunnel).mac ?? "mac"}.${this.env.BASE_DOMAIN}${SIGNAL_PATH}`);
-    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads" } }), url, tunnel))
+    // The JSON content type is required: the app answers 415 to any other POST under /api/v1/cloudroom.
+    void Promise.resolve(this.relay(new Request(url, { method: "POST", headers: { [RELAY_SIGNAL_HEADER]: "threads", "content-type": "application/json" } }), url, tunnel))
       .then((response) => response.body?.cancel(), () => {});
   }
 
@@ -619,6 +621,7 @@ export class TunnelDO {
           frame.status === 205 ||
           frame.status === 304
         ) {
+          this.pendingHttp.delete(frame.streamId);
           entry.resolve(new Response(null, { status: frame.status, headers }));
           return;
         }

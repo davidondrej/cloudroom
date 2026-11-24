@@ -229,6 +229,18 @@ pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::R
                 )
             })?;
     if !images.is_empty() {
+        // Pi silently swaps images for a placeholder when its list says the model takes no images. A model the list
+        // lacks copies its provider's default, which may be text-only (#1580): say so instead.
+        let state = handle.call("get_state", json!({})).await?;
+        if state["model"]["input"]
+            .as_array()
+            .is_some_and(|input| !input.iter().any(|kind| kind == "image"))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "This Pi doesn't list the selected model as accepting images. Remove the images or pick another model",
+            ));
+        }
         params["images"] = json!(images);
     }
     handle.process.call("prompt", params, Some(request)).await?;

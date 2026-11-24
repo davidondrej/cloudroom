@@ -3,6 +3,7 @@ import type { Hono, MiddlewareHandler } from "hono";
 import type { AppDeps } from "../../types.js";
 import type { PluginService } from "../plugins/plugin-service.js";
 import { ApiError } from "../../errors.js";
+import { assertHumanClick } from "../../human-click.js";
 import { getThread, getThreadSectionById } from "@cloudroom/db";
 import { z } from "zod";
 import { threadGoalSetRequestSchema, updateThreadRequestSchema } from "@cloudroom/server-contract";
@@ -29,7 +30,7 @@ import { copyToMac, openOnMac, teleportingToLocal, teleportToLocal } from "./tel
 import { cloudEnvironmentRequestSchema, macCodexLogin, macMcpServers, macSkills, macVariables, sandboxThread, startMacCodexLogin, type CloudEnvironmentRequest } from "./sandboxes.js";
 import { CloudroomError } from "./client.js";
 import { projectLoopSettings } from "./project-loops.js";
-import { tokenUsageSince } from "./loop-usage.js";
+import { recentCloudRuns, tokenUsageSince, weightedRun, type CloudRun } from "./loop-usage.js";
 import { macClis } from "./clis.js";
 import { deepSearch } from "./deep-search.js";
 import { finishMcpSignIn, isRemoteMcp, startMcpSignIn } from "./mcp-login.js";
@@ -40,26 +41,33 @@ import { emitPluginThreadUnarchived } from "../plugins/plugin-thread-events.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
 import { reportBug } from "./bug-reports.js";
+import { threadCredits } from "./thread-credits.js";
 import { continueShare, shareClicked, shareThread, stopSharing, threadShare } from "./shares.js";
 import { connectAccount, registerConnect } from "./connect-relay.js";
 import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
-import { rewriteDraft } from "../ai/draft-rewrite.js";
-import { cardsLeft, popupState, recordChecklistHide, recordPopup } from "./popups.js";
+import { callTicket, cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
 import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
-import { addGithubRepo, githubBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
+import { addGitlabRepo, addGithubRepo, projectBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
+import { skillSuggestion, skillSuggestionEvent } from "../threads/skill-suggestion.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
 import { readWrapped } from "../system/wrapped.js";
 import { forgetCloudAccountSwitch, noteCloudAccountSwitch } from "./account-switches.js";
-import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, STARTER_PROMPTS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
+import { ACTIVATION_STEPS, CLOUD_CHOICE_ACTIONS, CLOUD_CHOICE_REASONS, CORNER_ANSWERS, CORNER_CARDS, POPUP_DETAILS, POPUPS, SETUP_ACTIONS, SETUP_AGENTS, SETUP_DETAILS, SETUP_STEPS, SHARE_CLICKS, UPGRADE_PROMPTS, WRAPPED_ACTIONS } from "../system/telemetry.js";
 
 const SAFE_SETTINGS_SEARCH = /^(?=.{2,40}$)\p{L}+(?: \p{L}+){0,3}$/u;
 // A Cloud loop run's request (auto_<loop>_<due>), the website's name for the run that starts its thread.
 const CLOUD_RUN = /^auto_[a-f0-9]{32}_[0-9]{1,16}$/;
+
+function gitlabRouteError(error: unknown): never {
+  if (!(error instanceof CloudroomError)) throw error;
+  const status = error.status ?? 503;
+  throw new ApiError(status as ConstructorParameters<typeof ApiError>[0], error.code ?? "gitlab_request", error.message);
+}
 
 export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: PluginService): void {
   cloudroom(deps).teleportRecovery = () => teleports(deps).recover();
@@ -75,7 +83,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     unarchive: (thread) => { const restored = unarchiveThreadKeepingOpenParent(deps, thread.id, true); if (restored) emitPluginThreadUnarchived(restored); },
     remove: (thread) => deleteThreadOnMac(deps, thread),
   };
-  cloudroom(deps).childTurnEnded = (child, turnStatus) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus });
+  cloudroom(deps).childTurnEnded = (child, turnStatus, failureReason) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus, failureReason });
   startClaudeVersionSync(deps, () => cloudroom(deps).teleportClient());
   startAutoDeleteSync(deps);
   const localOnly: MiddlewareHandler = async (context, next) => {
@@ -129,9 +137,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const thread = getThread(deps.db, context.req.param("id"));
     if (!thread) return context.json({ message: "Thread not found" }, 404);
     const cloud = listThreadWithDescendants(deps, thread).filter((item) => item.executionTarget === "cloud" && !item.archivedAt && !item.deletedAt);
-    // A few seconds at most: past that the dialog uses what it has, as when the read fails.
-    const limit = new Promise<string[]>((resolve) => setTimeout(() => resolve([]), 5_000).unref());
-    return context.json({ running: await Promise.race([cloudroom(deps).runningInCloud(cloud.map((item) => item.id)), limit]) });
+    const signal = AbortSignal.any([context.req.raw.signal, AbortSignal.timeout(5_000)]);
+    return context.json({ running: await cloudroom(deps).runningInCloud(cloud.map(item => item.id), signal) });
   });
   app.get("/api/v1/cloudroom/connect", async context => context.json(await connectAccount(deps)));
   app.post("/api/v1/cloudroom/connect", async context => {
@@ -152,13 +159,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ hostId: z.string().min(1) }).strict().parse(await context.req.json());
     return context.json(await importRoomThreads(deps, input.hostId));
   });
-  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps), conductorApp: conductorAppFound() }));
+  app.get("/api/v1/cloudroom/import/sessions", async context => context.json({ sessions: await listNativeSessions(deps, context.req.query("claudeConfigDir") || undefined), conductorApp: conductorAppFound() }));
   app.post("/api/v1/cloudroom/import/sessions", async context => {
     const input = z.object({
       hostId: z.string().min(1),
       sessions: z.array(z.object({ harness: z.enum(["claude-code", "codex", "pi", "acp-hermes-agent", "t3code", "conductor"]), id: z.string().min(1) }).strict()).min(1).max(2000),
+      claudeConfigDir: z.string().min(1).max(4096).optional(),
     }).strict().parse(await context.req.json());
-    return context.json(await importNativeSessions(deps, input.hostId, input.sessions));
+    return context.json(await importNativeSessions(deps, input.hostId, input.sessions, input.claudeConfigDir));
   });
   app.post("/api/v1/cloudroom/import/conductor-export", async context => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
@@ -195,11 +203,6 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.get("/api/v1/cloudroom/activation", async (context) => context.json(await activation(deps, plugins)));
   app.post("/api/v1/cloudroom/activation", async (context) => {
     const body = await context.req.json().catch(() => null);
-    const starter = z.object({ starter: z.enum(STARTER_PROMPTS) }).strict().safeParse(body);
-    if (starter.success) {
-      deps.telemetry.capture({ name: "starter_prompt", properties: starter.data });
-      return context.json({ ok: true });
-    }
     const parsed = z.object({ step: z.enum(ACTIVATION_STEPS), action: z.enum(["clicked", "hidden"]).default("clicked") }).strict().safeParse(body);
     if (!parsed.success) throw new ApiError(400, "invalid_activation_step", "Invalid checklist step.");
     deps.telemetry.capture({ name: "activation_step", properties: parsed.data });
@@ -233,15 +236,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
   });
-  app.post("/api/v1/cloudroom/draft-rewrite", async (context) => {
-    const input = z.object({
-      mode: z.enum(["options", "shorter"]),
-      draft: z.string().min(1).max(100_000),
-      selected: z.string().min(1).max(20_000),
-      avoid: z.array(z.string().max(20_000)).max(30).default([]),
-    }).strict().parse(await context.req.json());
-    return context.json({ options: await rewriteDraft(deps, input) });
+  // The cards at the top right (docs/scopes/corner-cards.md): claims a showing, or saves the user's answer.
+  app.post("/api/v1/cloudroom/corner", async (context) => {
+    const input = z.object({ card: z.enum(CORNER_CARDS), key: z.string().max(80), event: z.enum(["shown", ...CORNER_ANSWERS]), variant: z.string().regex(/^[a-z0-9_-]{1,24}$/).optional() })
+      .strict().parse(await context.req.json());
+    return context.json({ ok: await recordCorner(deps, input.card, input.key, input.event, input.variant) });
   });
+  // The call ticket at the top right (docs/scopes/calls.md#the-ticket-in-the-app): null when the account is owed none.
+  app.get("/api/v1/cloudroom/call-ticket", async (context) => context.json({ ticket: await callTicket(deps) }));
   app.get("/api/v1/cloudroom/star-prompt", async (context) => context.json(await starPrompt(deps)));
   app.post("/api/v1/cloudroom/star-prompt", async (context) => {
     z.object({}).strict().parse(await context.req.json());
@@ -293,12 +295,30 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     }
     return context.json({ ok: true });
   });
+  const viewedLimitCards = new Set<string>();
+  app.post("/api/v1/cloudroom/limit-card", async (context) => {
+    const parsed = z.object({
+      key: z.string().min(1).max(200),
+      provider: z.string().min(1).max(100),
+      execution: z.enum(["local", "cloud_sandbox"]),
+      can_switch_account: z.boolean(),
+      other_agents: z.number().int().min(0).max(100),
+    }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new ApiError(400, "invalid_limit_card", "Invalid limit card.");
+    const { key, ...properties } = parsed.data;
+    if (!viewedLimitCards.has(key)) {
+      if (viewedLimitCards.size >= 1_000) viewedLimitCards.clear();
+      viewedLimitCards.add(key);
+      deps.telemetry.capture({ name: "limit_card", properties });
+    }
+    return context.json({ ok: true });
+  });
   const sentCloudChoices = new Set<string>();
   app.post("/api/v1/cloudroom/cloud-choice", async (context) => {
     const parsed = z.object({ action: z.enum(CLOUD_CHOICE_ACTIONS), reason: z.enum(CLOUD_CHOICE_REASONS).nullable() }).strict().safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) throw new ApiError(400, "invalid_cloud_choice", "Invalid cloud choice.");
     const key = `${parsed.data.action}:${parsed.data.reason}`;
-    if (parsed.data.action === "picked_local" || !sentCloudChoices.has(key)) {
+    if (parsed.data.action === "picked_local" || parsed.data.action === "switched_agent" || !sentCloudChoices.has(key)) {
       sentCloudChoices.add(key);
       deps.telemetry.capture({ name: "cloud_choice", properties: parsed.data });
     }
@@ -310,6 +330,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
+  app.get("/api/v1/cloudroom/threads/:id/credits", async (context) => context.json(await threadCredits(deps, context.req.param("id"))));
   app.post("/api/v1/cloudroom/account/invites", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.invites("create"));
@@ -322,7 +343,10 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.post("/api/v1/cloudroom/account/mac-access", async (context) => {
     const input = z.union([z.object({ level: z.enum(macAccessLevels) }).strict(), z.object({ enabled: z.boolean() }).strict()]).parse(await context.req.json());
-    await setMacAccess(deps, "level" in input ? input.level : input.enabled ? "full" : "off");
+    const level = "level" in input ? input.level : input.enabled ? "full" : "off";
+    // Lowering Mac access is always fine. Raising it needs a click in the app or on a signed-in phone (ADR 0260).
+    if (macAccessLevels.indexOf(level) > macAccessLevels.indexOf(await macAccess(deps) ?? "off")) assertHumanClick(context);
+    await setMacAccess(deps, level);
     cloudroom(deps).applyMacAccess();
     return context.json({ ok: true });
   });
@@ -353,7 +377,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   // Cloud automations (ADR 0212): the website stores and runs them, so they keep running while this Mac is off.
   // A child Cloud thread shares its parent's sandbox, so the website gets the parent and the child's own session.
   app.post("/api/v1/cloudroom/account/automations", async (context) => {
-    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
+    const input = z.object({ action: z.enum(["list", "create", "update", "run", "runs", "history", "delete", "hook", "unhook", "events", "ack", "settings", "report", "reports", "averages"]), thread: z.string().min(1).max(64).optional(), project: z.string().min(1).max(64).optional() }).passthrough().parse(await context.req.json());
     let body: Record<string, unknown> = input;
     // A fresh-thread loop made from a project needs no thread: this Mac sends the project's settings (ADR 20261101-004659).
     // From a Local thread, with no Cloud thread to re-prompt, it is made from that thread's project.
@@ -375,22 +399,44 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       const session = binding(deps.db, thread.id)?.sessionId;
       body = { ...input, thread: root.id, ...(session ? { session } : {}) };
     }
-    return context.json(await cloudroom(deps).sandboxes.automations(body).catch((error: unknown) => {
+    const answer = await cloudroom(deps).sandboxes.automations(body).catch((error: unknown) => {
       const status = error instanceof CloudroomError ? error.status : null;
       throw new ApiError(status === 404 || status === 429 ? status : status ? 400 : 503, "cloud_automation", error instanceof Error ? error.message : String(error));
-    }));
+    });
+    // Usage estimates: what loops with these names usually use, weighted here like every other token count.
+    if (input.action === "averages") {
+      const averages = (answer as { averages?: (CloudRun & { name: string; runs: number; accounts: number })[] } | null)?.averages ?? [];
+      return context.json({ averages: averages.map((average) => ({ name: average.name, harness: average.harness, runs: average.runs, accounts: average.accounts, tokens: weightedRun(average) })) });
+    }
+    return context.json(answer);
   });
   // Loop usage estimates (docs/scopes/loops.md): tokens the Loops plugin's runs used, and all of the provider's.
   app.post("/api/v1/cloudroom/account/token-usage", async (context) => {
     const input = z.object({ providerId: z.string().min(1).max(100), threadIds: z.array(z.string().min(1).max(64)).max(500), threadsSince: z.number().int().nonnegative(), totalSince: z.number().int().nonnegative() }).parse(await context.req.json());
-    return context.json(tokenUsageSince(deps.db, input));
+    const sandboxes = cloudroom(deps).sandboxes, account = await sandboxes.account().catch(() => null);
+    const cloud = await recentCloudRuns(account && `${account.website} ${account.userId}`, () => sandboxes.automations({ action: "tokens", since: 0 }));
+    return context.json(tokenUsageSince(deps.db, input, cloud));
   });
+  app.post("/api/v1/cloudroom/account/snippets", async (context) => {
+    if (getGateAuthKind(context) !== null) return context.json({ message: "Use the Snippets plugin on this device." }, 403);
+    const body = z.record(z.string(), z.unknown()).parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.snippets(body) as Record<string, unknown>);
+  });
+
   // Organizations (docs/scopes/organizations.md): the Organization plugin's requests, passed to the website as this account.
   app.post("/api/v1/cloudroom/account/org", async (context) => {
     const body = z.object({ action: z.string().min(1).max(40) }).passthrough().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.org(body).catch((error: unknown) => {
       const status = error instanceof CloudroomError ? error.status : null;
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_org", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>);
+  });
+  // Shared projects (docs/scopes/shared-projects.md): the Shared projects plugin's requests, passed to the website as this account.
+  app.post("/api/v1/cloudroom/account/project-shares", async (context) => {
+    const body = z.object({ action: z.string().min(1).max(40) }).passthrough().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.projectShares(body).catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_project_shares", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>);
   });
   // GPUs (docs/scopes/gpus.md): the GPU plugin's `room-cli gpu` steps, passed to the website as this account. Never
@@ -403,7 +449,17 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_gpu", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>;
     if (body.thread && reply.approval) service.gpuApprovals.show(body.thread, reply.approval);
+    // A stop cancels a request that may still have its card open: close it now, not at the next minute's re-check.
+    else if (body.thread && body.argv[0] === "stop") void service.gpuApprovals.recheck(body.thread);
     return context.json(reply);
+  });
+  // Cloudroom Agent (docs/scopes/cloudroom-agent.md): its plugin asks for a token that can only buy inference, signed
+  // in as this account. The account's own sign-in never leaves this server.
+  app.post("/api/v1/cloudroom/account/inference", async (context) => {
+    return context.json(await cloudroom(deps).sandboxes.inference().catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 401 || status === 403 ? status : 503, "cloud_inference", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>);
   });
   // Import from this Mac: the list shows names only, and values go straight to the website.
   app.get("/api/v1/cloudroom/account/environment/mac", async (context) => context.json({ names: Object.keys(await macVariables()).sort() }));
@@ -489,6 +545,12 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await setCopyLogins(deps, input.enabled);
     return context.json({ ok: true });
   });
+  // Settings → General → DeepAPI: whether DeepAPI is paid from the account's Cloud Credits (ADR 20261115-235507).
+  app.post("/api/v1/cloudroom/account/deepapi", async (context) => {
+    const input = z.object({ enabled: z.boolean() }).strict().parse(await context.req.json());
+    await cloudroom(deps).sandboxes.copyDeepapiKey(input.enabled);
+    return context.json({ ok: true });
+  });
   app.post("/api/v1/cloudroom/vm/run", async (context) => {
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
@@ -501,7 +563,9 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
     const { requestId } = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan()), deps);
+    // The token is written only to the Cloudroom sign-in this started under (#1924).
+    const owner = await cloudroom(deps).loginOwner();
+    await connectClaude(requestId, async token => cloudroom(deps).claudeAuth("token", requestId, token, await claudePlan(), false, owner), deps);
     return context.json(await claudeStatus());
   });
   // The Accounts plugin names the accounts a switch moves between, for the line it leaves in limited threads.
@@ -533,6 +597,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     });
   }
   app.get("/api/v1/cloudroom/account/cursor", async context => context.json(await cloudroom(deps).cursorAuth()));
+  app.post("/api/v1/cloudroom/account/antigravity", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
+    const ticket = z.string().min(1).max(4096), requestId = z.string().uuid();
+    const input = z.discriminatedUnion("action", [
+      z.object({ action: z.literal("status") }).strict(),
+      z.object({ action: z.literal("refresh") }).strict(),
+      z.object({ action: z.literal("disconnect") }).strict(),
+      z.object({ action: z.literal("begin"), requestId }).strict(),
+      z.object({ action: z.literal("complete"), ticket, code: z.string().min(1).max(4096) }).strict(),
+      z.object({ action: z.literal("cancel"), ticket }).strict(),
+      z.object({ action: z.literal("key"), requestId, apiKey: z.string().min(1).max(4096) }).strict(),
+    ]).safeParse(await context.req.json().catch(() => null));
+    if (!input.success) throw new ApiError(400, "invalid_antigravity_auth", "Invalid Antigravity sign-in request.");
+    return context.json(await cloudroom(deps).antigravityLogin(input.data));
+  });
   for (const action of ["login", "cancel", "key"] as const) {
     app.post(`/api/v1/cloudroom/account/cursor/${action}`, async context => {
       const schema = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), ...(action === "key" ? { apiKey: z.string().min(1).max(4096).regex(/^[!-~]+$/) } : {}) }).strict();
@@ -597,6 +677,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
   app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
+  app.post("/api/v1/cloudroom/mac/logins", async context => { await cloudroom(deps).copyLoginsNow(); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/github", async context => context.json(await githubAuth(deps)));
   app.get("/api/v1/cloudroom/account/github/account", async context => context.json(await githubAccount(deps)));
   app.post("/api/v1/cloudroom/account/github/disconnect", async context => { await disconnectGithub(deps); return context.json({ ok: true }); });
@@ -630,6 +711,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     await promptSuggestionEvent(deps, input.threadId, input.action);
     return context.json({ ok: true });
   });
+  app.post("/api/v1/cloudroom/account/skill-suggestion", async context => {
+    const { threadId } = z.object({ threadId: z.string().min(1).max(200) }).strict().parse(await context.req.json());
+    return context.json({ suggestion: await skillSuggestion(deps, threadId) });
+  });
+  app.post("/api/v1/cloudroom/account/skill-suggestion/event", async context => {
+    const input = z.object({ threadId: z.string().min(1).max(200), action: z.enum(["shown", "accepted", "dismissed"]) }).strict().parse(await context.req.json());
+    await skillSuggestionEvent(deps, input.threadId, input.action);
+    return context.json({ ok: true });
+  });
   app.post("/api/v1/cloudroom/account/search-rank", async context => {
     const item = z.object({ id: z.string().min(1).max(200), title: z.string().max(500), text: z.string().max(2_000) }).strict();
     const input = z.object({ query: z.string().min(1).max(500), items: z.array(item).min(1).max(1_500) }).strict().parse(await context.req.json());
@@ -647,9 +737,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const { query } = z.object({ query: z.string().trim().min(1).max(500) }).strict().parse(await context.req.json());
     return context.json({ threads: await deepSearch(deps, query, context.req.raw.signal) });
   });
-  app.get("/api/v1/cloudroom/account/github-branches", async context => {
+  // Existing desktop SDKs call github-branches.
+  for (const path of ["github-branches", "project-branches"]) app.get("/api/v1/cloudroom/account/"+path, async context => {
     const projectId = z.string().min(1).parse(context.req.query("project"));
-    return context.json(await githubBranches(projectId, deps));
+    return context.json(await projectBranches(projectId, deps).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/gitlab", async context => {
+    const input = z.object({action:z.enum(["status","start","cancel","disconnect"])}).strict().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.gitlabConnection(input.action).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/gitlab/check", async context => {
+    const {repo}=z.object({repo:z.string().max(1024)}).strict().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.gitlabCheck(repo).catch(gitlabRouteError));
+  });
+  app.post("/api/v1/cloudroom/account/repo-suggestions/gitlab", async context => {
+    const {repo}=z.object({repo:z.string().max(1024)}).strict().parse(await context.req.json());
+    return context.json(await addGitlabRepo(deps, repo).catch(gitlabRouteError));
   });
   app.post("/api/v1/cloudroom/account/repo-suggestions/github", async context => {
     const input = z.object({ repo: z.string().regex(/^[\w.-]+\/[\w.-]+$/) }).strict().parse(await context.req.json());
@@ -657,8 +760,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   for (const action of ["login", "cancel"] as const) {
     app.post(`/api/v1/cloudroom/account/github/${action}`, async context => {
-      const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/) }).strict().parse(await context.req.json());
-      return context.json(await githubAuth(deps, action, input.requestId));
+      const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), repos: z.boolean().optional() }).strict().parse(await context.req.json());
+      return context.json(await githubAuth(deps, action, input.requestId, input.repos));
     });
   }
   app.post("/api/v1/cloudroom/account/sign-in", async (context) => context.json(await cloudroomAccount(deps).signIn(await context.req.json())));
@@ -669,6 +772,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).configure(await context.req.json());
+    // A browser sign-in still open would replace this Core with a hosted account if the user finished it.
+    cloudroomAccount(deps).cancel();
     return context.json(await cloudroom(deps).status());
   });
   app.get("/api/v1/cloudroom/threads/:id", async (context) => {
@@ -677,6 +782,11 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const thread = getThread(deps.db, id);
     if (!status || !thread) return context.json(null);
     return context.json(status);
+  });
+  app.get("/api/v1/cloudroom/threads/:id/delivery/:requestId", async (context) => {
+    const { id, requestId } = context.req.param();
+    context.header("Cache-Control", "no-store");
+    return context.json(await cloudroom(deps).messageDelivery(id, requestId));
   });
   app.get("/api/v1/cloudroom/threads/:id/workspace", async (context) => context.json(await cloudroom(deps).threadWorkspace(context.req.param("id"), context.req.raw.signal)));
   app.post("/api/v1/cloudroom/threads/:id/retry-start", async (context) => {
@@ -694,6 +804,12 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
     if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
     await cloudroom(deps).moveToCloud(context.req.param("id"));
+    return context.json({ ok: true });
+  });
+  app.post("/api/v1/cloudroom/threads/:id/from-copy", async (context) => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app or CLI." }, problem.status);
+    await cloudroom(deps).continueFromCopy(context.req.param("id"));
     return context.json({ ok: true });
   });
   app.post("/api/v1/cloudroom/threads/:id/retry-copy", async (context) => {
@@ -733,7 +849,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (context.req.method === "PATCH" && path === "") {
       const body = await context.req.json<unknown>();
       // A model or harness change switches the thread in place (ADR 0211); a new parent is saved to the website first.
-      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId", "resend"].includes(key))) {
+      // Visibility, like the section, is sidebar state on this computer only (#2210).
+      if (body && typeof body === "object" && !Array.isArray(body) && Object.keys(body).every((key) => ["title", "reasoningLevel", "model", "providerId", "parentThreadId", "sectionId", "visibility", "resend", "idleSessionOnly"].includes(key))) {
         const parentId = (body as { parentThreadId?: unknown }).parentThreadId;
         if (parentId === undefined || parentId === thread.parentThreadId || thread.deletedAt || (parentId !== null && typeof parentId !== "string") || !updateThreadRequestSchema.safeParse(body).success) return next();
         if (["model", "providerId", "reasoningLevel"].some((key) => key in body)) return context.json({ message: "Change a Cloud thread's parent on its own, then change its model.", code: "cloudroom_parent_alone" }, 400);

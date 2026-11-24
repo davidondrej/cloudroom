@@ -6,7 +6,7 @@ import {
   Routes,
   useNavigate,
   useParams,
-} from "react-router-dom";
+} from "react-router";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   act,
@@ -24,7 +24,7 @@ import type {
   PluginNewThreadPanelProps,
   PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk";
-import { createPluginPanelFixedPanelTab } from "@/lib/fixed-panel-tabs-state";
+import { createPluginPanelFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
@@ -74,7 +74,7 @@ import {
   usePluginPanelActions,
   type OpenPluginPanelArgs,
 } from "./PluginPanelActions";
-import { NewTabActions } from "@/components/secondary-panel/NewTabActions";
+import { NewTabActions } from "@/components/right-panel/tabs/new-tab";
 import { buildFileOpenerPanelTab } from "./file-opener-tabs";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import type { PromptDraftState } from "@cloudroom/client-core";

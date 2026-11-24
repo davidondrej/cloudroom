@@ -286,6 +286,8 @@ const threadStartCommandSchema = hostDaemonThreadTargetSchema
         sourceProviderCheckpointId: z.string().min(1).optional(),
       })
       .optional(),
+    /** A message edit replaces this native session and keeps its Goal (#857). */
+    replacesProviderThreadId: z.string().min(1).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -364,7 +366,8 @@ const threadTeleportCommandSchema = hostDaemonThreadWorkspaceTargetSchema.extend
   type: z.literal("thread.teleport"),
   transferId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
   action: z.enum(["capture", "read", "import"]),
-  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode"]) })).optional(),
+  // `optional`: an archived child that never started, left out when it saved no conversation (#1767).
+  sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode", "antigravity"]), optional: z.boolean().optional() })).optional(),
   file: z.string().optional(),
   attachments: z.array(z.string()).optional(),
   keepImages: z.boolean().optional(),
@@ -661,6 +664,8 @@ const environmentHookRunCommandSchema = z
     contributedEnv: z.array(hostDaemonContributedEnvEntrySchema).default([]),
     resumeOnly: z.boolean().default(false),
     operationId: z.string().min(1),
+    // Names the hooks saved at this environment's first setup: the only ones that run.
+    environmentId: z.string().min(1),
     path: z.string().min(1),
     kind: z.enum(["setup", "teardown"]),
     timeoutMs: z.number().int().positive().max(MAX_NODE_TIMER_DELAY_MS),
@@ -958,6 +963,9 @@ const unmanagedEnvironmentProvisionCommandSchema =
     .extend({
       path: z.string().min(1),
       setupScriptTimeoutMs: z.number().int().positive().nullable(),
+      // Lifecycle hooks are read from Git at the merge base of HEAD and this
+      // branch (the default branch when null), never from the folder's files.
+      hookBaseBranch: gitBranchNameSchema.nullable().optional(),
       contributedEnv: z.array(hostDaemonContributedEnvEntrySchema),
     })
     .strict();

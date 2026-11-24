@@ -9,6 +9,8 @@ room-cli plugin install .            # registers the directory in place (--yes t
 room-cli plugin dev                  # rebuild app/host bundles + reload on every save
 ```
 
+An install or update needs a person: the Cloudroom app asks the user to approve it, and the command waits up to 10 minutes for their click. Tell the user to look at the app.
+
 The manifest is `package.json`. This block is illustrative. The scaffold adds
 the current engine values and the entries for its generated surfaces.
 

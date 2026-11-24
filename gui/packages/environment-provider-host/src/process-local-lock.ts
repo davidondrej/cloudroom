@@ -1,6 +1,8 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 const DEFAULT_PROCESS_LOCAL_LOCK_TIMEOUT_MS = 5 * 60 * 1000;
@@ -239,6 +241,49 @@ const GIT_REF_FS_LOCK_STALE_MS = 10 * 60_000;
 const GIT_REF_FS_LOCK_POLL_MS = 100;
 const GIT_REF_FS_LOCK_DEFAULT_TIMEOUT_MS = 5 * 60_000;
 
+// Lines: PID, host, and a token that tells this owner from a later one with a
+// reused PID. Older apps wrote the PID alone.
+function isDeadLocalOwner(owner: string): boolean {
+  const [pid, host] = owner.split("\n");
+  const ownerPid = Number(pid);
+  if (
+    (host !== undefined && host !== "" && host !== os.hostname()) ||
+    !Number.isSafeInteger(ownerPid) ||
+    ownerPid <= 0
+  ) {
+    return false;
+  }
+  try {
+    process.kill(ownerPid, 0);
+    return false;
+  } catch (error) {
+    return error instanceof Error && "code" in error && error.code === "ESRCH";
+  }
+}
+
+// An app that quit mid-update leaves its lock behind (#1689). Renaming the
+// owner file lets one waiter claim it; a waiter that grabbed a newer owner's
+// file puts it back.
+async function reclaimDeadOwnerLock(lockPath: string): Promise<boolean> {
+  const ownerPath = path.join(lockPath, "owner");
+  const owner = await fs.readFile(ownerPath, "utf8").catch(() => null);
+  if (owner === null || !isDeadLocalOwner(owner)) {
+    return false;
+  }
+  const claimedPath = `${ownerPath}.${process.pid}`;
+  try {
+    await fs.rename(ownerPath, claimedPath);
+  } catch {
+    return false;
+  }
+  if ((await fs.readFile(claimedPath, "utf8").catch(() => null)) !== owner) {
+    await fs.rename(claimedPath, ownerPath).catch(() => undefined);
+    return false;
+  }
+  await fs.rm(lockPath, { recursive: true, force: true });
+  return true;
+}
+
 async function acquireGitRefFsLock(
   commonDir: string,
   options: { signal?: AbortSignal; timeoutMs?: number },
@@ -250,7 +295,10 @@ async function acquireGitRefFsLock(
     options.signal?.throwIfAborted();
     try {
       await fs.mkdir(lockPath);
-      await fs.writeFile(path.join(lockPath, "owner"), `${process.pid}\n`);
+      await fs.writeFile(
+        path.join(lockPath, "owner"),
+        `${process.pid}\n${os.hostname()}\n${randomUUID()}\n`,
+      );
       return async () => {
         await fs.rm(lockPath, { recursive: true, force: true });
       };
@@ -260,6 +308,9 @@ async function acquireGitRefFsLock(
       ) {
         throw error;
       }
+    }
+    if (await reclaimDeadOwnerLock(lockPath)) {
+      continue;
     }
     const held = await fs.stat(lockPath).catch(() => null);
     if (held !== null && Date.now() - held.mtimeMs > GIT_REF_FS_LOCK_STALE_MS) {

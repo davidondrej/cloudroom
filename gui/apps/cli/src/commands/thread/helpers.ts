@@ -22,7 +22,7 @@ export const THREAD_WAIT_EXIT_CODE_UNREACHABLE = 4;
 export const DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS =
   DEFAULT_THREAD_WAIT_TIMEOUT_MS / 1000;
 
-const SERVICE_TIERS: ServiceTier[] = ["fast", "default"];
+const SERVICE_TIERS: ServiceTier[] = ["fast", "ultrafast", "default"];
 export const PERMISSION_MODE_HELP =
   "Permission mode: accept-edits, auto, or full";
 export const PLAN_HELP =
@@ -165,8 +165,8 @@ export function parseThreadWaitTimeoutSeconds(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_TIMEOUT_SECONDS;
-  const parsed = Number.parseFloat(value);
-  if (!Number.isFinite(parsed) || parsed < 0) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isFinite(parsed) || parsed < 0) {
     throw new Error("Timeout must be a non-negative number of seconds.");
   }
   return parsed;
@@ -176,8 +176,8 @@ export function parseThreadWaitPollIntervalMs(
   value: string | undefined,
 ): number {
   if (value === undefined) return DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS;
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed) || parsed < 1) {
+  const parsed = Number(value);
+  if (value.trim() === "" || !Number.isInteger(parsed) || parsed < 1) {
     throw new Error(
       "Poll interval must be a positive integer number of milliseconds.",
     );
@@ -212,10 +212,13 @@ export function parsePermissionMode(
 }
 
 /** Why a Cloud thread's start or messages aren't going through yet, from the app's own delivery state (#1273). */
-export type CloudIssue = { error: string | null; reconnecting: boolean };
+/** `waiting`: the website's words while the sandbox's server restarts or is full; the thread continues by itself. */
+export type CloudIssue = { error: string | null; reconnecting: boolean; waiting?: string };
 /** Null unless something is wrong, so a healthy thread's JSON gains no key. */
-export const cloudIssue = (status: { error?: string | null; reconnecting?: boolean } | null): CloudIssue | null =>
-  status?.error || status?.reconnecting ? { error: status.error ?? null, reconnecting: status.reconnecting === true } : null;
-/** One line for a parent: the error, or that the app keeps reconnecting. Null when nothing is wrong. */
+export const cloudIssue = (status: { error?: string | null; reconnecting?: boolean; waiting?: string | null } | null): CloudIssue | null =>
+  status?.error || status?.reconnecting || status?.waiting
+    ? { error: status.error ?? null, reconnecting: status.reconnecting === true, ...(status.waiting ? { waiting: status.waiting } : {}) }
+    : null;
+/** One line for a parent: the error, the server it waits on, or that the app keeps reconnecting. Null when nothing is wrong. */
 export const cloudIssueText = (issue: CloudIssue | null): string | null =>
-  issue?.error ?? (issue?.reconnecting ? "Cloudroom can't reach this thread's cloud right now and retries by itself" : null);
+  issue?.error ?? issue?.waiting ?? (issue?.reconnecting ? "Cloudroom can't reach this thread's cloud right now and retries by itself" : null);

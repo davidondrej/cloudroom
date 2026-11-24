@@ -5,18 +5,18 @@ import {
   PluginComposerHostScopeProvider,
   usePluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
-import { SecondaryPanelLayout } from "@/components/secondary-panel/SecondaryPanelLayout";
-import { LazyThreadSecondaryPanel } from "@/components/secondary-panel/lazySecondaryPanelComponents";
+import { SecondaryPanelLayout } from "@/components/right-panel/shell/responsive-panel-host";
+import { LazyThreadSecondaryPanel } from "@/components/right-panel/shell/lazy-chunks";
 import {
   ThreadMetadataCard,
   ThreadMetadataContent,
   hasAnyThreadMetadata,
   type ThreadMetadataContentProps,
-} from "@/components/secondary-panel/ThreadMetadataContent";
+} from "@/components/right-panel/tabs/thread-info";
 import { DETAIL_GRID_CLASS } from "@/components/ui/detail-card.js";
 import { useThreads } from "@/hooks/queries/thread-queries";
 import { ThreadTimelinePane } from "./ThreadTimelinePane";
-import { getCompactPanelPresentation } from "@/components/secondary-panel/panelToggleControlState";
+import { getCompactPanelPresentation } from "@/components/right-panel/shell/panel-tokens";
 
 type ThreadTimelinePaneProps = Omit<
   ComponentProps<typeof ThreadTimelinePane>,

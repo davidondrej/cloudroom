@@ -1,4 +1,8 @@
-import { execFile } from "node:child_process";
+import {
+  type ChildProcessWithoutNullStreams,
+  execFile,
+  spawn,
+} from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -25,6 +29,7 @@ import {
   experimental_probeNpmGlobalPackage as probeNpmGlobalPackage,
   experimental_readCliVersion as readCliVersion,
   experimental_resolveExecutablePath as resolveExecutablePath,
+  experimental_spawnPortableProcess as spawnPortableProcess,
   experimental_versionFrom as versionFrom,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { z } from "zod";
@@ -86,6 +91,22 @@ export function claudeExecutable(): string {
   );
 }
 
+/** Starts the Claude CLI. On Windows an npm install puts `claude.cmd` on PATH, which plain `spawn` can't start (EINVAL). */
+export function spawnClaude(
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+): ChildProcessWithoutNullStreams {
+  return process.platform === "win32"
+    ? (spawnPortableProcess({
+        command: claudeExecutable(),
+        args,
+        ...options,
+        stdio: "pipe",
+        windowsHide: true,
+      }) as ChildProcessWithoutNullStreams)
+    : spawn(claudeExecutable(), args, { ...options, stdio: "pipe" });
+}
+
 // npm's unfinished stub isn't Claude Code: report it missing, so the
 // installer offers a working copy (#1148).
 async function resolveClaudePath(command: string): Promise<string | null> {
@@ -101,13 +122,27 @@ function claudeInstallerCommand(): ProviderInstallationCommand {
   });
 }
 
-// Windows' native installer leaves claude.exe off PATH, so sign in with the
-// path we found. The sign-in terminal runs PowerShell: `&` runs a quoted path,
-// and a `'` inside single quotes is doubled (C:\Users\O'Brien).
-function claudeLoginCommand(command: string): string {
-  return process.platform === "win32" && path.win32.isAbsolute(command)
-    ? `& '${command.replaceAll("'", "''")}' /login`
-    : "claude /login";
+// `auth login` signs in without opening a session, so the home folder the
+// terminal starts in never shows Claude's folder-trust prompt (#2270). Older or
+// unknown versions may lack it and would read it as a prompt, so keep `/login`.
+// Sign in with the path we found: Windows' native installer leaves claude.exe
+// off PATH, and a Mac's PATH can put an older copy first. The Windows sign-in
+// terminal runs PowerShell: `&` runs a quoted path, and a `'` inside single
+// quotes is doubled (C:\Users\O'Brien).
+function claudeLoginCommand(command: string, version: string | null): string {
+  const login =
+    version !== null &&
+    compareVersions(version, CLAUDE_MINIMUM_SUPPORTED_VERSION) >= 0
+      ? "auth login"
+      : "/login";
+  if (process.platform === "win32") {
+    return path.win32.isAbsolute(command)
+      ? `& '${command.replaceAll("'", "''")}' ${login}`
+      : `claude ${login}`;
+  }
+  return formatCommand(path.isAbsolute(command) ? command : "claude", [
+    ...login.split(" "),
+  ]);
 }
 
 function claudeDistTags(value: string | null): {
@@ -162,25 +197,53 @@ async function claudeNativeTags(): Promise<{
   return latest === null ? null : { latest, stable };
 }
 
-function claudeDoctor(value: string | null): {
+// Package managers whose installs Cloudroom leaves to the user (#54).
+const CLAUDE_MANUAL_MANAGERS = ["homebrew", "winget", "apt", "dnf", "apk"];
+
+function claudeDoctor(
+  value: string | null,
+  executablePath: string | null,
+  platform: NodeJS.Platform = process.platform,
+): {
   installMethod: "native" | "npm-global" | "package-manager" | "unknown" | null;
+  running: string | null;
   updateChannel: "latest" | "stable" | null;
 } {
   const running =
     value === null ? null : /^Running:\s+([^\s(]+)/mu.exec(value)?.[1];
+  // Claude Code 2.1.329 prints `Running: package-manager` and names the
+  // manager on its own `Package manager: winget` line (#1898).
+  const manager =
+    running === "package-manager"
+      ? /^Package manager:\s+(\S+)/mu.exec(value ?? "")?.[1]
+      : running === "unknown"
+        ? undefined
+        : running;
   const channel =
     value === null
       ? null
       : /^Auto-update channel:\s+(latest|stable)\s*$/mu.exec(value)?.[1];
+  // Claude Code's own winget check, for when doctor names no manager.
+  const winget =
+    platform === "win32" &&
+    /[/\\]Microsoft[/\\]WinGet[/\\](?:Packages|Links)[/\\]/iu.test(
+      executablePath ?? "",
+    );
   return {
     installMethod:
       running === "native" || running === "npm-global"
         ? running
-        : running !== null && running !== undefined
-          ? ["homebrew", "winget", "apt", "dnf", "apk"].includes(running)
+        : manager !== null && manager !== undefined
+          ? // 2.1.329 names APT and DNF installs `deb` and `rpm`.
+            [...CLAUDE_MANUAL_MANAGERS, "deb", "rpm"].includes(manager)
             ? "package-manager"
             : "unknown"
-          : null,
+          : winget
+            ? "package-manager"
+            : running !== null && running !== undefined
+              ? "unknown"
+              : null,
+    running: running ?? null,
     updateChannel:
       channel === "latest" || channel === "stable" ? channel : null,
   };
@@ -189,8 +252,9 @@ function claudeDoctor(value: string | null): {
 // Homebrew installs can't run `claude update`, so upgrade the cask that owns the real file.
 async function homebrewUpgradeCommand(
   executablePath: string | null,
+  platform: NodeJS.Platform,
 ): Promise<ProviderInstallationCommand | null> {
-  if (executablePath === null || process.platform === "win32") return null;
+  if (executablePath === null || platform === "win32") return null;
   const realPath = await fs.realpath(executablePath).catch(() => null);
   const match =
     realPath === null
@@ -203,6 +267,33 @@ async function homebrewUpgradeCommand(
   const args =
     kind === "Caskroom" ? ["upgrade", "--cask", name] : ["upgrade", name];
   return { command: brew, args, displayCommand: formatCommand("brew", args) };
+}
+
+/** The update Cloudroom can run; null when only the user's package manager can. */
+async function claudeUpdatePlan(
+  command: string,
+  doctorOutput: string | null,
+  executablePath: string | null,
+  platform: NodeJS.Platform = process.platform,
+) {
+  const doctor = claudeDoctor(doctorOutput, executablePath, platform);
+  const homebrew = await homebrewUpgradeCommand(executablePath, platform);
+  // Claude's own updater handles native, npm, and unknown installs. Other
+  // package managers (winget, apt, dnf, apk) need the user, often with sudo.
+  const update =
+    homebrew ??
+    (doctor.installMethod === "package-manager"
+      ? null
+      : {
+          command,
+          args: ["update"],
+          displayCommand: formatCommand(command, ["update"]),
+        });
+  // A too-old version blocks thread start exactly as before #1898: unless
+  // doctor's `Running:` line named one of these managers and brew wasn't found.
+  const blocksTooOld =
+    homebrew !== null || !CLAUDE_MANUAL_MANAGERS.includes(doctor.running ?? "");
+  return { doctor, homebrew, update, blocksTooOld };
 }
 
 /** The npm package folder while `command` is still the placeholder, else null. */
@@ -258,8 +349,11 @@ async function claudeInstallation(): Promise<{
   const installed =
     !placeholder && (resolvedExecutable !== null || versionOutput !== null);
   const currentVersion = versionFrom(versionOutput);
-  const doctor = claudeDoctor(doctorOutput);
-  const homebrew = await homebrewUpgradeCommand(resolvedExecutable);
+  const { doctor, homebrew, update, blocksTooOld } = await claudeUpdatePlan(
+    command,
+    doctorOutput,
+    resolvedExecutable,
+  );
   // A cask follows its own channel: claude-code is stable, claude-code@latest is latest.
   const updateChannel =
     homebrew === null
@@ -284,19 +378,8 @@ async function claudeInstallation(): Promise<{
     installed && currentVersion !== null && latestVersion !== null
       ? compareVersions(latestVersion, currentVersion) > 0
       : definitelyNeedsUnknownChannelUpdate;
-  // Claude's own updater handles native, npm, and unknown installs. Other
-  // package managers (winget, apt, dnf, apk) need the user, often with sudo.
-  const update =
-    homebrew ??
-    (doctor.installMethod === "package-manager"
-      ? null
-      : {
-          command,
-          args: ["update"],
-          displayCommand: formatCommand(command, ["update"]),
-        });
   const versionUnsupported =
-    update !== null &&
+    blocksTooOld &&
     currentVersion !== null &&
     compareVersions(currentVersion, CLAUDE_MINIMUM_SUPPORTED_VERSION) < 0 &&
     (latestVersion === null
@@ -505,7 +588,7 @@ function healthResult(
       minimumSupportedVersion: null,
       canInstall: true,
       canUpdate: status !== "not_installed",
-      loginCommand: claudeLoginCommand(command),
+      loginCommand: claudeLoginCommand(command, args.installedVersion ?? null),
     },
   };
 }
@@ -775,5 +858,7 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
 
 export const __testing = {
   buildProviderInstallationRun: buildClaudeProviderInstallationRun,
+  claudeInstallation,
+  claudeUpdatePlan,
   normalizeUsage,
 };

@@ -6,7 +6,7 @@
 //! `thread fork` asks the app the same way to fork this thread into a new Cloud thread; without an answer there is no
 //! fork. Only the user forks to their Mac, from the app.
 //! `spawn --top-level` asks the website to start a top-level thread instead, with no link back (ADR 0267).
-use super::{Manager, relay};
+use super::{Manager, SessionState, relay};
 use crate::preview::Peer;
 use axum::{
     Json, Router,
@@ -26,11 +26,13 @@ use tokio::sync::oneshot;
 
 const USAGE: &str = "room-cli thread show [CHILD_ID]
 room-cli thread update --self [--title TITLE] [--reasoning-level LEVEL]
+room-cli thread pin --self|CHILD_ID
 room-cli thread archive --self
 room-cli thread move --self --project PROJECT
 room-cli thread stop --self
-room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
-room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|fx|openclaw] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
+room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
+room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--pin] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
+room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived] [--include-hidden]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all]
@@ -39,9 +41,9 @@ room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, archives, moves or changes the effort of this cloud thread, or starts, checks, stops and archives its child threads. --top-level starts a top-level thread instead of a child, only when the user asks for one. `thread list --include-hidden` changes nothing here: it lists every child of this thread already.";
+const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one. `thread list --include-hidden` changes nothing here: it lists every child of this thread already.";
 /// `room-cli thread` commands only the app on the user's computer has.
-const LOCAL_ONLY: [&str; 28] = [
+const LOCAL_ONLY: [&str; 26] = [
     "count",
     "context",
     "open",
@@ -55,12 +57,10 @@ const LOCAL_ONLY: [&str; 28] = [
     "queue",
     "tabs",
     "unarchive",
-    "pin",
     "unpin",
     "delete",
     "edit-message",
     "retry",
-    "compact",
     "clear",
     "cancel-plan",
     "clear-goal",
@@ -71,28 +71,40 @@ const LOCAL_ONLY: [&str; 28] = [
     "interactions",
     "worktree",
 ];
+/// `thread read|unread` in a Cloud thread (#2242). The helper blocks the app's local API for plain commands below Full
+/// access, so both Mac commands need `--write`, as in helper/jobs.rs.
+fn mark_note(verb: &str) -> String {
+    format!(
+        "`room-cli thread {verb}` prints no messages: it only changes a thread's unread dot in the user's app. Run it only when the user asks: room-cli mac run --write '~/.local/bin/room-cli thread {verb} THREAD_ID'. To read a thread's messages: room-cli thread log CHILD_ID for your child threads, room-cli team read THREAD_ID for a teammate's, or room-cli mac run --write '~/.local/bin/room-cli thread log THREAD_ID' for another thread of the user's. With --write, Full Mac access runs it at once and Ask first asks the user; with Read-only, ask the user to run it on their Mac."
+    )
+}
+/// `thread compact`'s follow-up unless `--then` or `--no-then`. The Local CLI sends the same.
+const COMPACT_THEN: &str = "Keep going with your task. If it's done, say what we should do next.";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 /// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
 /// or for another thread, which doesn't (#177). The website words its own relayed tells the same.
 const CHILD_NOTES: [&str; 3] = [
     "Sent into the child's running turn. Cloudroom tells you when that turn finishes.",
-    "Could not confirm the child's running turn got it. Check thread output before sending it again.",
+    "Could not confirm the child's running turn got it. Check room-cli thread show and thread output. Send it again only if the child is idle and its reply shows it never got the task.",
     "Queued. Cloudroom tells you when the child finishes it.",
 ];
 const OTHER_NOTES: [&str; 3] = [
     "Sent into its running turn. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
-    "Could not confirm its running turn got it. Sending it again may deliver it twice.",
+    "Could not confirm its running turn got it. It may have, so don't send it again: it could arrive twice.",
     "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
 ];
 const PAUSED_NOTE: &str = "Queued, paused by a Stop. It sends when that thread is resumed.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
-const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's GitHub repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
+const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's Git repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
 /// How long `spawn --top-level` keeps retrying a start the website could not finish (say, a slow wake).
 const LAUNCH_RETRY: Duration = Duration::from_secs(240);
 /// How long a spawn waits for the website to name a child it starts in a sandbox of its own. It stays under Claude
 /// Code's 2-minute command limit; the start goes on after that (relay.rs).
 const SPAWN_WAIT: Duration = Duration::from_secs(75);
+/// How long `thread spawn` waits for Core's answer: longer than any start Core answers itself (SPAWN_WAIT after the
+/// website's 30 s), under Claude Code's 2-minute command limit. Then it says the start is uncertain (#1977).
+const SPAWN_ANSWER: Duration = Duration::from_secs(110);
 /// How long a fork waits for the app. It stays under Claude Code's 2-minute command limit, so the agent always
 /// sees the outcome instead of a killed command it might retry. The app ignores older requests (AGENT_FORK_WAIT).
 const FORK_WAIT: Duration = Duration::from_secs(90);
@@ -171,6 +183,9 @@ pub struct SpawnBody {
     /// Start a top-level thread instead of a child (ADR 0267).
     #[serde(default)]
     top_level: bool,
+    /// Pin the new thread in each Mac's sidebar once created (`room-cli thread spawn --pin`).
+    #[serde(default)]
+    pin: bool,
     service_tier: Option<String>,
 }
 
@@ -208,6 +223,14 @@ pub struct Effort {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct Compact {
+    /// The message sent once compaction ends; none with `--no-then`.
+    #[serde(default)]
+    then: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tell {
     text: String,
     /// `--mode queue`: wait for a running turn to end instead of joining it.
@@ -228,6 +251,7 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
     Router::new()
         .route("/title", post(rename))
         .route("/reasoning", post(set_reasoning))
+        .route("/pin", post(pin_self))
         .route("/archive", post(archive))
         .route("/move", post(move_project))
         .route("/children", get(list).post(spawn))
@@ -236,7 +260,10 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
         .route("/children/{id}", get(output))
         .route("/children/{id}/messages", post(tell))
         .route("/children/{id}/stop", post(stop_child))
+        .route("/children/{id}/pin", post(pin_child))
         .route("/children/{id}/archive", post(archive_child))
+        .route("/compact", post(compact_self))
+        .route("/children/{id}/compact", post(compact_child))
         .merge(super::info::agent_routes())
 }
 
@@ -321,6 +348,45 @@ async fn set_reasoning(
     )
 }
 
+/// Stable payload for a self-pin: `at` is stamped once so website retries never write a second timestamp.
+fn pin_data(m: &Manager) -> Value {
+    json!({"pinned": true, "at": crate::observability::now_ms(), "wake": m.wake_id()})
+}
+
+/// Pins this thread on the website so every Mac pins it once on sync, even if it was closed while this ran.
+async fn pin_self(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+) -> Result<Json<Value>, Failure> {
+    let session = caller(&m, peer, "thread")?;
+    record(&m, &session, "pin", pin_data(&m))
+}
+
+/// Pins a child thread (in its own sandbox through the website, or in this sandbox as a record), or this thread when
+/// given its own `thr_...` or Core session ID.
+async fn pin_child(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, Failure> {
+    let parent = caller(&m, peer, "thread pin")?;
+    let own = id == parent
+        || m.local
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&parent)
+            .is_some_and(|s| s.thread_id() == Some(id.as_str()));
+    if own {
+        return record(&m, &parent, "pin", pin_data(&m));
+    }
+    if relay::thread_id(&id) {
+        return relay::pin(&m, &parent, &id).await;
+    }
+    m.own_child(&parent, &id).map_err(session_failure)?;
+    record(&m, &id, "pin", json!({"pinned": true}))
+}
+
 /// The app archives the thread and its children, which also stops this session.
 async fn archive(
     State(m): State<Arc<Manager>>,
@@ -392,7 +458,10 @@ pub(super) fn retire(m: &Arc<Manager>, id: &str) -> Result<(), Failure> {
 pub(super) fn session_failure(error: super::Error) -> Failure {
     let status = match error {
         super::Error::NotFound => StatusCode::NOT_FOUND,
-        super::Error::Conflict(_) | super::Error::Effort(_) => StatusCode::CONFLICT,
+        super::Error::Conflict(_)
+        | super::Error::Refused(_)
+        | super::Error::NeverStarted(_)
+        | super::Error::Effort(_) => StatusCode::CONFLICT,
         super::Error::Storage(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     fail(status, &error.message())
@@ -448,6 +517,7 @@ async fn spawn(
         title: input.title.map(|t| t.trim().to_owned()),
         prompt: input.prompt,
         service_tier: input.service_tier,
+        pin: input.pin,
     };
     let (id, receipt) = m
         .spawn_child(&parent, &key, spawn)
@@ -473,7 +543,10 @@ async fn launch(
             "Run room-cli thread spawn --top-level from a Cloudroom cloud thread",
         ));
     };
-    let body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    let mut body = json!({"request_id":key,"session":session,"prompt":input.prompt,"title":input.title,"harness":input.provider,"model":input.model,"reasoning":input.reasoning,"service_tier":input.service_tier});
+    if input.pin {
+        body["pin"] = json!(true);
+    }
     let started = Instant::now();
     let task = tokio::spawn(async move {
         let mut wait = Duration::from_secs(10);
@@ -552,7 +625,10 @@ async fn own_child(
         if let Some(error) = refusal {
             return Err(fail(StatusCode::CONFLICT, &error.message()));
         }
-        let body = json!({"request_id":key,"session":parent,"prompt":input.prompt,"title":title,"harness":input.provider,"model":input.model,"reasoning":reasoning,"service_tier":input.service_tier});
+        let mut body = json!({"request_id":key,"session":parent,"prompt":input.prompt,"title":title,"harness":input.provider,"model":input.model,"reasoning":reasoning,"service_tier":input.service_tier});
+        if input.pin {
+            body["pin"] = json!(true);
+        }
         let _ = record(
             m,
             parent,
@@ -666,7 +742,7 @@ fn check_start(
     provider
         .map(|p| {
             crate::runtime::Kind::named(p).ok_or_else(|| {
-                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, fx or openclaw")
+                bad("Use --provider codex, claude-code, cursor, pi, opencode, hermes, devin, droid, kimi, antigravity, fx, openclaw or agent-zero")
             })
         })
         .transpose()
@@ -856,7 +932,9 @@ async fn list(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread list")?;
     let mut answer = m.children(&parent, None, query.include_archived).await;
-    relay::own_children(&m, &parent, query.include_archived, &mut answer).await;
+    // The list is for these children: it waits for the website's own 30-second limit.
+    let wait = Duration::MAX;
+    relay::own_children(&m, &parent, query.include_archived, &mut answer, wait).await;
     Ok(Json(answer))
 }
 
@@ -882,6 +960,21 @@ async fn working(
             .map(|(child, _)| child.clone()),
     );
     Ok(Json(json!({"working":working})))
+}
+
+/// Marks the children `thread wait` saw at work with `"waited": true` and returns how many. Nothing is left out.
+fn mark_waited(answer: &mut Value, waited: &[String]) -> usize {
+    let list = answer["children"].as_array_mut().into_iter().flatten();
+    let mut marked = 0;
+    for child in list.filter(|c| {
+        c["id"]
+            .as_str()
+            .is_some_and(|id| waited.iter().any(|w| w == id))
+    }) {
+        child["waited"] = json!(true);
+        marked += 1;
+    }
+    marked
 }
 
 #[derive(Deserialize)]
@@ -912,9 +1005,12 @@ async fn output(
             Err(super::history::ApiError::Status(404, _))
                 if starting(&m, &parent, true).contains(&id) =>
             {
-                Ok(
-                    json!({"id":id,"state":"starting","note":"Its sandbox is still starting. Its replies arrive as messages when its turns end."}),
-                )
+                let why = relay::waiting_start(&m, &parent, &id).map(|why| format!("{why} "));
+                let why = why.unwrap_or_default();
+                let note = format!(
+                    "Its sandbox is still starting. {why}Its replies arrive as messages when its turns end."
+                );
+                Ok(json!({"id":id,"state":"starting","note":note}))
             }
             // Its start was refused: no chat, or only what came before. The same story as `thread list` (#1058).
             Err(super::history::ApiError::Status(404, _)) if failed.is_some() => {
@@ -984,7 +1080,7 @@ async fn tell(
             None => return Err(fail(StatusCode::CONFLICT, NO_PARENT)),
         }
     } else {
-        id
+        super::children::local_parent(&m.local.lock().unwrap(), &sender, &id).unwrap_or(id)
     };
     if relay::thread_id(&id) || id == "parent" {
         let text = Some(input.text.as_str());
@@ -999,7 +1095,32 @@ async fn tell(
     let prompt = json!({"text":text});
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    if under {
+        revive(&m, &id, &request, Some(&sender));
+    }
     deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await
+}
+
+/// A tell from a thread that started this one first restarts its lost agent (a crash after its one automatic
+/// recovery) from its saved chat, as the app's message does (#154, #1629), or starts again one whose start failed
+/// before it existed (#2036). Never one stopped (its queue paused) or archived, and never for a tell already steered
+/// or queued. `resume` checks that no agent runs, the chat is intact or none was started, and, with `sender`, the
+/// tell's own ancestry, in the step that accepts it; a refusal leaves the tell refused as before.
+pub(super) fn revive(m: &Arc<Manager>, id: &str, request: &str, sender: Option<&str>) {
+    let local = m.local.lock().unwrap();
+    let lost = (local.sessions.get(id)).is_some_and(|s| {
+        (s.state == SessionState::ProcessLost || s.failed_start().is_some())
+            && !s.archived
+            && !s.queue_paused
+    });
+    drop(local);
+    let sent = [request.to_owned(), format!("{request}_steer")]
+        .iter()
+        .any(|r| m.receipt(id, r).is_some());
+    if lost && !sent {
+        let wake = format!("{request}_wake");
+        let _ = m.command_from(id, wake, "resume", json!({}), false, sender);
+    }
 }
 
 pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
@@ -1044,7 +1165,7 @@ pub(super) async fn deliver(
     }
     let receipt = m
         .command_from(id, request.to_owned(), "prompt", input, true, sender)
-        .map_err(session_failure)?;
+        .map_err(|error| never_started(m, id, error))?;
     let local = m.local.lock().unwrap();
     if local.sessions.get(id).is_some_and(|s| s.queue_paused) {
         return Ok(Json(
@@ -1052,6 +1173,21 @@ pub(super) async fn deliver(
         ));
     }
     Ok(Json(json!({"id":id,"state":receipt.state,"note":notes[2]})))
+}
+
+/// A tell refused because its agent never started (a stopped or archived one isn't started again) says why, with its
+/// own code: the website otherwise calls Core's refusals busy, and its sender retries in vain (#2036).
+fn never_started(m: &Manager, id: &str, error: super::Error) -> Failure {
+    match (&error, m.failed_start_reason(id)) {
+        (super::Error::Conflict(super::GONE), Some(why)) => {
+            let error = format!("its agent never started: {why}");
+            (
+                StatusCode::CONFLICT,
+                Json(json!({"error":error,"code":"never_started"})),
+            )
+        }
+        _ => session_failure(error),
+    }
 }
 
 /// A website call failed: its own refusal as is, or why it could not be reached.
@@ -1147,6 +1283,61 @@ async fn archive_child(
     )
 }
 
+/// `room-cli thread compact --self`: compacts this thread once its turn ends, then sends `then`.
+async fn compact_self(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Json(input): Json<Compact>,
+) -> Result<Json<Value>, Failure> {
+    let session = caller(&m, peer, "thread compact")?;
+    compact(&m, &session, input.then.as_deref())
+}
+
+/// `room-cli thread compact CHILD_ID`: a child in its own sandbox goes through the website, like `thread stop`.
+async fn compact_child(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Path(id): Path<String>,
+    Json(input): Json<Compact>,
+) -> Result<Json<Value>, Failure> {
+    let parent = caller(&m, peer, "thread compact")?;
+    if relay::thread_id(&id) {
+        return relay::compact(&m, &parent, &id, input.then.as_deref()).await;
+    }
+    m.own_child(&parent, &id).map_err(session_failure)?;
+    compact(&m, &id, input.then.as_deref())
+}
+
+fn compact(m: &Arc<Manager>, id: &str, then: Option<&str>) -> Result<Json<Value>, Failure> {
+    if then.is_some_and(|text| text.len() > super::MAX_PROMPT) {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Use a --then message of up to 262144 bytes",
+        ));
+    }
+    let request =
+        random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let receipt = m.compact_then(id, request, then).map_err(session_failure)?;
+    Ok(Json(
+        json!({"id":id,"state":receipt.state,"note":compact_note(&receipt)}),
+    ))
+}
+
+/// What `thread compact` tells the agent, here and through the relay.
+pub(super) fn compact_note(receipt: &super::Receipt) -> String {
+    let when = if receipt.input["waiting"] == true {
+        "Compacts once the agent is free (its running turn ends, or it wakes). If this is your own thread, end your turn now."
+    } else {
+        "Compacting now."
+    };
+    let then = if receipt.input["then"].is_string() {
+        " Then it gets the --then message, saying whether compaction worked."
+    } else {
+        ""
+    };
+    format!("{when}{then}")
+}
+
 /// Flag value after `name`, for `room-cli thread spawn`.
 fn flag<'a>(words: &[&'a str], name: &str) -> Option<&'a str> {
     words
@@ -1187,11 +1378,23 @@ const FORK_VALUES: [&str; 8] = [
 /// A flag that needs a value and has none, or has another option right after it: `--title --self`.
 fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
     let option = |word: &str| word.starts_with("--") && !word.contains(' ');
-    let takes_value =
-        |word: &str| SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode");
+    let takes_value = |word: &str| {
+        SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode" | "--then")
+    };
     (0..words.len())
         .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
         .map(|i| words[i])
+}
+
+/// A Core session ID: `cr_` and up to 80 ASCII letters, digits, underscores or hyphens, as the app checks them.
+fn session_id(id: &str) -> bool {
+    id.strip_prefix("cr_").is_some_and(|key| {
+        !key.is_empty()
+            && key.len() <= 80
+            && key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
+    })
 }
 
 /// A thread ID without the `@thread:` prefix agents write in chat. The Local CLI accepts both too.
@@ -1224,7 +1427,7 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
     if let Some(word) = unknown_word(
         words,
         &SPAWN_VALUES,
-        &["--shared-sandbox", "--parent-self", "--top-level"],
+        &["--shared-sandbox", "--parent-self", "--top-level", "--pin"],
     ) {
         eprintln!(
             "Unknown option {word}. Cloud threads take only the options in `room-cli thread --help`."
@@ -1260,14 +1463,22 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
         eprintln!("A top-level thread has no parent. Omit --parent-self.");
         return Ok(2);
     }
-    let mut body =
-        json!({"prompt":prompt,"shared":words.contains(&"--shared-sandbox"),"top_level":top});
-    // A top-level start can outlast the agent's command timeout, so its request ID comes first: rerunning the
-    // command with it continues that start instead of making a second thread.
-    if top && flag(words, "--request-id").is_none() {
-        let key = random_key()?;
+    let mut body = json!({
+        "prompt": prompt,
+        "shared": words.contains(&"--shared-sandbox"),
+        "top_level": top,
+        "pin": words.contains(&"--pin"),
+    });
+    // A top-level start or a child in a sandbox of its own can outlast the agent's command timeout, so its request ID
+    // comes first: rerunning the command with it continues that start instead of making a second thread (#1668).
+    if let Some(key) = first_key(words)? {
+        let what = if top {
+            "a top-level thread"
+        } else {
+            "a child in a sandbox of its own"
+        };
         eprintln!(
-            "Starting a top-level thread. If this command times out, rerun it with --request-id {key}; it never starts twice."
+            "Starting {what}. If this command times out or prints no ID, rerun it with --request-id {key}; it never starts twice."
         );
         body["request_id"] = json!(key);
     }
@@ -1283,9 +1494,30 @@ async fn spawn_cli(words: &[&str]) -> io::Result<i32> {
             body[key] = json!(value);
         }
     }
-    let answer = crate::mac::request(crate::mac::SOCKET, "POST", "/children", Some(body)).await?;
+    // Every start has its ID, so one Core answers too late for can be checked and continued, never doubled (#1977).
+    if body["request_id"].is_null() {
+        body["request_id"] = json!(random_key()?);
+    }
+    let key = body["request_id"].as_str().unwrap_or_default().to_owned();
+    let limit = Some(SPAWN_ANSWER);
+    let answer = crate::mac::request_within(crate::mac::SOCKET, "POST", "/children", Some(body), limit)
+        .await
+        .map_err(|error| match error.kind() {
+            io::ErrorKind::TimedOut => io::Error::other(format!(
+                "{error} The thread may have started: rerun this exact command with --request-id {key} to get its ID; it never starts twice."
+            )),
+            _ => error,
+        })?;
     println!("{answer}");
     Ok(0)
+}
+
+/// The request ID a spawn shows before it starts, unless the agent gave one or it shares this sandbox (a quick start).
+fn first_key(words: &[&str]) -> io::Result<Option<String>> {
+    if words.contains(&"--shared-sandbox") || flag(words, "--request-id").is_some() {
+        return Ok(None);
+    }
+    random_key().map(Some)
 }
 
 async fn fork_cli(words: &[&str]) -> io::Result<i32> {
@@ -1360,7 +1592,13 @@ fn plain<'a>(
 }
 
 async fn call(method: &str, path: &str, body: Option<Value>) -> io::Result<Value> {
-    crate::mac::request(crate::mac::SOCKET, method, path, body).await
+    // Reads never hang on a stalled Core (#1977); changes keep waiting for Core's own limits.
+    let limit = match (method, path) {
+        ("GET", "/thread" | "/working") => Some(crate::mac::QUICK),
+        ("GET", _) => Some(crate::mac::READ),
+        _ => None,
+    };
+    crate::mac::request_within(crate::mac::SOCKET, method, path, body, limit).await
 }
 
 /// The same `room-cli thread` commands Local threads use, with flags in any order (ADR 20261110-235800). `--json`
@@ -1418,7 +1656,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             };
             call("GET", path, None).await?
         }
-        // One blocking call instead of a wake-up per child. It prints the same list as `thread list`.
+        // One blocking call instead of a wake-up per child. It prints the same list as `thread list`, marked.
         "wait" => {
             if !matches!(own(&[], &["--children"]).as_deref(), Ok([])) {
                 eprintln!(
@@ -1429,25 +1667,51 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             let end = Instant::now() + CHILD_WAIT;
             // Children in sandboxes of their own that stopped without telling Core: it would count them forever.
             let mut gone: Vec<String> = Vec::new();
+            // Every child this wait saw at work, marked in the list it prints (#1752).
+            let mut waited: Vec<String> = Vec::new();
             let mut tick = 0;
+            // Each check may take what is left of the wait: a slow Core is ordinary (storage checks, restores), so
+            // only a Core that never answered in the whole wait is an error (#1977).
+            let check = |path: &'static str| {
+                let left = end.saturating_duration_since(Instant::now());
+                let limit = Some(left.max(crate::mac::QUICK));
+                crate::mac::request_within(crate::mac::SOCKET, "GET", path, None, limit)
+            };
+            // Children at work at the last answer.
+            let mut still = 0;
             let working = loop {
-                let answer = call("GET", "/working", None).await?;
+                let answer = match check("/working").await {
+                    Ok(answer) => answer,
+                    Err(error) if error.kind() == io::ErrorKind::TimedOut && tick > 0 => {
+                        break still;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let ids = answer["working"].as_array().into_iter().flatten();
                 let mut ids: Vec<&str> = ids.filter_map(Value::as_str).collect();
+                for id in &ids {
+                    if !waited.iter().any(|w| w == id) {
+                        waited.push(id.to_string());
+                    }
+                }
                 ids.retain(|id| !gone.iter().any(|g| g == id));
                 tick += 1;
                 // Every 20 seconds the website has the last word: its sandbox died, sleeps, or the user archived it.
                 if tick % 10 == 0 && ids.iter().any(|id| id.starts_with("thr_")) {
-                    let list = call("GET", "/children?include_archived=true", None).await?;
-                    let active = |id: &str| {
-                        let mut children = list["children"].as_array().into_iter().flatten();
-                        // One the website forgot is only what this thread last heard (#149): it has the last word.
-                        children.any(|c| {
-                            c["id"] == id && c["status"] == "active" && c["unlinked"] != true
-                        })
+                    let list = match check("/children?include_archived=true").await {
+                        Ok(list) => Some(list),
+                        Err(error) if error.kind() == io::ErrorKind::TimedOut => None,
+                        Err(error) => return Err(error),
                     };
-                    // A list without the website's part says nothing about them.
-                    if !list["note"].is_string() {
+                    // A list without the website's part, or none in time, says nothing about them.
+                    if let Some(list) = list.filter(|list| !list["note"].is_string()) {
+                        let active = |id: &str| {
+                            let mut children = list["children"].as_array().into_iter().flatten();
+                            // One the website forgot is only what this thread last heard (#149): it has the last word.
+                            children.any(|c| {
+                                c["id"] == id && c["status"] == "active" && c["unlinked"] != true
+                            })
+                        };
                         ids.retain(|id| {
                             let stopped = id.starts_with("thr_") && !active(id);
                             if stopped {
@@ -1460,9 +1724,19 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 if ids.is_empty() || Instant::now() >= end {
                     break ids.len();
                 }
+                still = ids.len();
                 tokio::time::sleep(Duration::from_secs(2)).await;
             };
             let mut answer = call("GET", "/children", None).await?;
+            // The list holds every open child, also idle ones from earlier sessions: say which it waited on.
+            let marked = mark_waited(&mut answer, &waited);
+            if marked > 0 {
+                let total = answer["children"].as_array().map_or(0, Vec::len);
+                answer["summary"] = json!(format!(
+                    "Waited on {marked} child threads (\"waited\": true); {} others were not seen working.",
+                    total - marked
+                ));
+            }
             if working > 0 {
                 answer["wait"] = json!(format!(
                     "{working} child threads are still working. Run the command again to keep waiting."
@@ -1471,8 +1745,9 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             println!("{answer}");
             return Ok(if working > 0 { 2 } else { 0 });
         }
-        // This thread, or one child as `thread list` shows it.
-        "show" => match own(&[], &["--self"]) {
+        // This thread, or one child as `thread list` shows it. Nothing here looks up a pull request, so the Local
+        // `--no-pr` is accepted and changes nothing, like `--json`.
+        "show" => match own(&[], &["--self", "--no-pr"]) {
             Ok(ids) if ids.is_empty() => call("GET", "/thread", None).await?["thread"].take(),
             Ok(ids) if ids.len() == 1 && !rest.contains(&"--self") => {
                 let mut list = call("GET", "/children?include_archived=true", None).await?;
@@ -1482,6 +1757,29 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     .flatten()
                     .find(|child| child["id"] == ids[0]);
                 let Some(child) = child else {
+                    // This thread's own ID, as `status` prints it (#1803).
+                    let thread = call("GET", "/thread", None).await?["thread"].take();
+                    if thread["id"] == ids[0] {
+                        println!("{thread}");
+                        return Ok(0);
+                    }
+                    // A child moved to the top level says so, as `output` does (#2271).
+                    // Only a well-formed session ID goes into the request, which waits 3 s at most; anything else,
+                    // a timeout or another error gets the old answer.
+                    let read = if session_id(ids[0]) {
+                        let path = format!("/children/{}", ids[0]);
+                        let limit = Some(std::time::Duration::from_secs(3));
+                        crate::mac::request_within(crate::mac::SOCKET, "GET", &path, None, limit)
+                            .await
+                    } else {
+                        Ok(Value::Null)
+                    };
+                    if let Err(error) = read
+                        && error.to_string() == super::children::MOVED_OUT
+                    {
+                        eprintln!("{}: {error}.", ids[0]);
+                        return Ok(1);
+                    }
                     eprintln!(
                         "{} is not a child thread of this thread. See room-cli thread list.",
                         ids[0]
@@ -1577,6 +1875,14 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             answer
         }
+        "pin" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
+            (_, Err(code)) => return Ok(code),
+            (true, Ok(ids)) if ids.is_empty() => call("POST", "/pin", None).await?,
+            (false, Ok(ids)) if ids.len() == 1 => {
+                call("POST", &format!("/children/{}/pin", ids[0]), None).await?
+            }
+            _ => return usage(),
+        },
         "archive" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
             (_, Err(code)) => return Ok(code),
             (true, Ok(ids)) if ids.is_empty() => call("POST", "/archive", None).await?,
@@ -1605,6 +1911,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             _ => return usage(),
         },
+        "compact" => {
+            let ids = match own(&["--then"], &["--self", "--no-then"]) {
+                Ok(ids) => ids,
+                Err(code) => return Ok(code),
+            };
+            let then = match (flag(rest, "--then"), rest.contains(&"--no-then")) {
+                (Some(_), true) => return usage(),
+                (then, false) => Some(then.unwrap_or(COMPACT_THEN)),
+                (None, true) => None,
+            };
+            let path = match (rest.contains(&"--self"), ids.as_slice()) {
+                (true, []) => "/compact".to_owned(),
+                (false, [id]) => format!("/children/{id}/compact"),
+                _ => return usage(),
+            };
+            call("POST", &path, Some(json!({"then":then}))).await?
+        }
         "stop" => match (rest.contains(&"--self"), own(&[], &["--self"])) {
             (_, Err(code)) => return Ok(code),
             (true, Ok(ids)) if ids.is_empty() => {
@@ -1615,6 +1938,11 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             _ => return usage(),
         },
+        // #2242: the generic redirect led an agent that wanted a thread's messages to mark it read on the Mac.
+        "read" | "unread" => {
+            eprintln!("{}", mark_note(command));
+            return Ok(2);
+        }
         other if LOCAL_ONLY.contains(&other) => {
             eprintln!("{}", super::info::on_computer(&format!("thread {other}")));
             return Ok(2);
@@ -1627,7 +1955,59 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{mention, missing_value, plain};
+    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain, session_id};
+    use serde_json::json;
+
+    // #2271: `thread show`'s moved-child check puts the ID in a request path, so only a whole session ID gets there.
+    #[test]
+    fn only_a_whole_session_id_reaches_the_moved_child_check() {
+        assert!(session_id("cr_child_ab12-CD_3"));
+        assert!(session_id(&format!("cr_{}", "a".repeat(80))));
+        for bad in [
+            "",
+            "cr_",
+            "kid",
+            "thr_abc",
+            "cr_a b",
+            "cr_a/../stop",
+            "cr_a?x=1",
+            "cr_a\r\nX: y",
+            "cr_é",
+        ] {
+            assert!(!session_id(bad), "{bad:?}");
+        }
+        assert!(!session_id(&format!("cr_{}", "a".repeat(81))));
+    }
+
+    // #2242: the Mac commands it prints must run as printed: the caller's verb, no shell pipe, and --write.
+    #[test]
+    fn a_mark_note_prints_runnable_mac_commands() {
+        for verb in ["read", "unread"] {
+            let note = mark_note(verb);
+            assert!(note.contains(&format!("room-cli thread {verb} THREAD_ID'")));
+            assert!(!note.contains('|'));
+            assert_eq!(
+                note.matches("mac run").count(),
+                note.matches("mac run --write '").count()
+            );
+        }
+    }
+
+    // #1668: an own-sandbox spawn printed nothing while it waited, and its request ID stayed inside Core, so a retry
+    // after the agent's command gave up started a second child. Its ID now comes first, like a top-level start's.
+    #[test]
+    fn a_slow_spawn_shows_its_request_id_first() {
+        for (words, shown) in [
+            (&["--prompt", "x"][..], true),
+            (&["--prompt", "x", "--top-level"], true),
+            (&["--prompt", "x", "--shared-sandbox"], false),
+            (&["--prompt", "x", "--request-id", "mine"], false),
+        ] {
+            let key = first_key(words).unwrap();
+            assert_eq!(key.is_some(), shown, "{words:?}");
+            assert!(key.is_none_or(|k| k.len() == 24), "{words:?}");
+        }
+    }
 
     #[test]
     fn flags_go_in_any_order_and_need_their_values() {
@@ -1656,5 +2036,25 @@ mod tests {
         assert_eq!(mention("@thread:cr_child_9"), "cr_child_9");
         assert_eq!(mention("@thread:thr_a b"), "@thread:thr_a b");
         assert_eq!(mention("thr_ab"), "thr_ab");
+    }
+
+    // #1752: `thread wait` prints every open child, also idle ones from the thread's earlier sessions, so it marks the
+    // ones it saw at work. Nothing is left out.
+    #[test]
+    fn thread_wait_marks_the_children_it_waited_on() {
+        let list = || json!({"children":[{"id":"cr_child_a"},{"id":"thr_old"},{"id":"thr_new"}]});
+        for (waited, marked) in [
+            (&["cr_child_a", "thr_new"][..], &[true, false, true][..]),
+            (&["thr_gone"], &[false, false, false]),
+            (&[], &[false, false, false]),
+        ] {
+            let mut answer = list();
+            let waited: Vec<String> = waited.iter().map(|w| w.to_string()).collect();
+            let count = marked.iter().filter(|m| **m).count();
+            assert_eq!(mark_waited(&mut answer, &waited), count);
+            let children = answer["children"].as_array().unwrap();
+            let shown: Vec<bool> = children.iter().map(|c| c["waited"] == true).collect();
+            assert_eq!((children.len(), &shown[..]), (3, marked));
+        }
     }
 }

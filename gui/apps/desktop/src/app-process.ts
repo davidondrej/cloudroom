@@ -393,6 +393,7 @@ export function startRoomAppProcess(args: StartRoomAppProcessArgs): RoomAppProce
       detached: args.runtime.kind === "appimage",
       env: target.env,
       stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
     });
   let childProcess = spawnLaunch(launch);
   if (launch !== directLaunch && childProcess.pid === undefined) {

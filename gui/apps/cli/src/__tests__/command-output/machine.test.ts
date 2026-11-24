@@ -13,6 +13,7 @@ import {
   registerMachineCommands,
   resolveMachineId,
 } from "../../commands/machine.js";
+import { registerCloudCommands } from "../../commands/cloudroom.js";
 
 const hosts: Host[] = [
   {
@@ -282,6 +283,31 @@ describe("room-cli machine command output", () => {
         ).toBe(true);
     },
   );
+
+  it("room-cli cloud status shows the VPS's disk and why it takes no new threads (#1512)", async () => {
+    const disk = { used: 91 * 1024 ** 3, total: 100 * 1024 ** 3 };
+    const vps = {
+      connected: true,
+      name: "srv1",
+      fallback: true,
+      busy: "disk 91%",
+      health: { running: 1, disk },
+    };
+    vi.mocked(globalThis.fetch).mockImplementation(async (url) =>
+      Response.json(
+        String(url).endsWith("/vps") ? vps : { ready: true, storage: null },
+      ),
+    );
+    const cloud: CommandRegistrar = (program) =>
+      registerCloudCommands(program, () => "http://server");
+    await runCommand(["cloud", "status"], cloud);
+    await runCommand(["cloud", "status", "--json"], cloud);
+    const [text, json] = collectLogPayloads(vi.mocked(console.log));
+    expect(text).toContain(
+      "VPS: srv1 (busy: disk 91%), 91 of 100 GB disk used. Over 95% CPU, 85% memory or 90% disk, it takes no new threads: they start in Cloud instead.",
+    );
+    expect(JSON.parse(json!)).toMatchObject({ storage: null, vps });
+  });
 
   it("room-cli machine retry-update resolves the machine and requests a retry", async () => {
     const retryUpdate = vi.fn(async () => ({ ok: true as const }));

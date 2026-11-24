@@ -1,12 +1,12 @@
-import { openSecondaryPanelTabInState } from "@cloudroom/client-core";
+import { openSecondaryPanelTabInState } from "@/components/right-panel/store/tab-ops";
 import type { ThreadTab } from "@cloudroom/server-contract";
 import { describe, expect, it } from "vitest";
 import {
   createEmptyFixedPanelTabsState,
   createTerminalFixedPanelTab,
   createThreadInfoFixedPanelTab,
-} from "./fixed-panel-tabs-state";
-import { createPluginPageFixedPanelTab } from "./fixed-panel-tabs-state";
+} from "@/components/right-panel/store/tab-model";
+import { createPluginPageFixedPanelTab } from "@/components/right-panel/store/tab-model";
 import {
   areThreadTabListsEquivalent,
   mergeThreadTabChanges,

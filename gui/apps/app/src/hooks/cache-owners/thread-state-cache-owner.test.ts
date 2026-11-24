@@ -10,6 +10,7 @@ import {
   makeSidebarBootstrapResponse,
 } from "@/test/fixtures/projects";
 import {
+  archivedThreadsListQueryKey,
   sidebarNavigationQueryKey,
   threadListQueryKey,
   threadQueryKey,
@@ -17,8 +18,11 @@ import {
 import {
   beginThreadReadStateTransaction,
   beginThreadMetadataTransaction,
+  beginUnarchiveThreadTransaction,
   rollbackThreadListMutationTransaction,
+  rollbackUnarchiveThreadTransaction,
   rollbackThreadReadStateTransaction,
+  type ThreadListMutationTransaction,
 } from "./thread-state-cache-owner";
 
 function makeThreadWithRuntime(
@@ -72,6 +76,41 @@ function makeSidebarNavigation(
 }
 
 describe("thread state cache owner", () => {
+  // Each failed restore puts back only its own row: restoring whole lists made the later failure drop the earlier row.
+  it.each([
+    { failFirst: "a", failLast: "b" },
+    { failFirst: "b", failLast: "a" },
+  ])(
+    "brings both rows back when two restores fail ($failFirst first)",
+    async ({ failFirst, failLast }) => {
+      const { queryClient } = createQueryClientTestHarness();
+      const queryKey = archivedThreadsListQueryKey({});
+      const rows = ["a", "b", "c"].map((id) =>
+        makeThreadListEntry({ id, archivedAt: 10 }),
+      );
+      queryClient.setQueryData(queryKey, { pages: [rows], pageParams: [0] });
+      const transactions: Record<string, ThreadListMutationTransaction> = {
+        a: await beginUnarchiveThreadTransaction({ queryClient, threadId: "a" }),
+        b: await beginUnarchiveThreadTransaction({ queryClient, threadId: "b" }),
+      };
+      const listed = () =>
+        queryClient
+          .getQueryData<{ pages: ThreadListEntry[][] }>(queryKey)
+          ?.pages.map((page) => page.map((thread) => thread.id));
+      expect(listed()).toEqual([["c"]]);
+
+      for (const threadId of [failFirst, failLast]) {
+        rollbackUnarchiveThreadTransaction({
+          queryClient,
+          threadId,
+          transaction: transactions[threadId],
+        });
+      }
+
+      expect(listed()).toEqual([["a", "b", "c"]]);
+    },
+  );
+
   it.each([
     {
       source: "sidebar",

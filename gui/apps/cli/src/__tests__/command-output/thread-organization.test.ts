@@ -78,6 +78,22 @@ describe("room-cli thread organization commands", () => {
     });
   });
 
+  it("queues a message from an agent thread under its sender", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "thr_sender");
+    const create = vi.fn(async () => ({ id: "queued-1" }));
+    stubServerApi({ "v1.threads.:id.queued-messages.$post": create });
+
+    await runCommand(["thread", "queue", "create", "thread-1", "hi"], register);
+
+    expect(create).toHaveBeenCalledWith({
+      param: { id: "thread-1" },
+      json: {
+        input: [{ type: "text", text: "hi", mentions: [] }],
+        senderThreadId: "thr_sender",
+      },
+    });
+  });
+
   it("shows agent and system senders in queued message rows", async () => {
     const list = vi.fn(async () => [
       queuedMessage({ id: "queued-user" }),

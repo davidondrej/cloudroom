@@ -7,14 +7,14 @@ import { join } from "node:path";
 import { and, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { Thread } from "@cloudroom/domain";
-import { cloudroomThreads, createRemoteProject, createThread, getProject, getThread, projects, setThreadExecutionOverride, threads, updateThread } from "@cloudroom/db";
+import { cloudroomThreads, createRemoteProject, createThread, getProject, getThread, pinThread, projects, setThreadExecutionOverride, threads, updateThread } from "@cloudroom/db";
 import { reasoningLevelSchema } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import { ELSEWHERE, type CloudThreadStates } from "./cloud-threads.js";
 import { isCloudProvider } from "./events.js";
-import { githubRepository } from "./project-copy.js";
+import { cloudRepository } from "./project-copy.js";
 import { SANDBOX_PREFIX, type SandboxDirectory, type ThreadChange } from "./sandboxes.js";
 import { binding, bindings, commands, coreInUse, saveBinding } from "./store.js";
 
@@ -26,6 +26,7 @@ export interface SyncHost {
   me(): Promise<string>;
   quietly<T>(threadId: string | null, apply: () => T): T;
   isHome(threadId: string): boolean;
+  restoredSince(threadId: string, at: number): boolean;
   detach(threadId: string): void;
   adopted(threadId: string, awake: boolean): void;
   resendLabel(threadId: string, change: string): void;
@@ -62,10 +63,14 @@ const syncSchema = z.object({
   deletedProjects: z.array(z.string()).default([]),
   /** The row's effort each thread last took (or saw, for one already here): only a change from it applies. */
   efforts: z.record(z.string(), z.string()).default({}),
+  /** The row's `pinned_at` each thread last applied: an agent pin applies once per timestamp, so a local unpin sticks. */
+  pins: z.record(z.string(), z.string()).default({}),
+  /** Upgraded installs already advanced `cursor` past pins older apps ignored; backfilled once when false. */
+  pinsSynced: z.boolean().default(false),
 });
 type SyncState = z.infer<typeof syncSchema>;
 
-const PAUSE_MS = 5_000, FRESH_MS = 10 * 60_000, DEFERRED_MAX = 2_000, LABEL_MS = 3_600_000, RETRY_MS = 30_000;
+const PAUSE_MS = 5_000, FRESH_MS = 10 * 60_000, DEFERRED_MAX = 2_000, LABEL_MS = 3_600_000, RETRY_MS = 30_000, BLIP_MS = 61_000;
 /** The week the website's awake answer names launches for (web `RUNS_WINDOW_MS`). */
 const LAUNCH_WINDOW_MS = 7 * 86_400_000;
 const repo = (url: string | null | undefined) => url?.toLowerCase().replace(/\.git$/, "").replace(/\/$/, "") ?? null;
@@ -84,9 +89,11 @@ export class CloudSync {
   private soon: ReturnType<typeof setTimeout> | null = null;
   private recheck: ReturnType<typeof setInterval> | null = null;
   private tunnel = false;
+  private stopped = false;
   private every = { up: 3_600_000, down: 600_000 };
   private repairs: string[] = [];
   private tag = "";
+  private pinBackfillUnsupported = false;
   constructor(private readonly deps: Pick<AppDeps, "db" | "hub" | "config"> & Partial<Pick<AppDeps, "logger">>, private readonly host: SyncHost) {}
 
   private loadedFor: string | null = null;
@@ -120,10 +127,12 @@ export class CloudSync {
   }
 
   start(): void {
+    this.stopped = false;
     this.schedule();
     void this.run();
   }
   stop(): void {
+    this.stopped = true;
     if (this.soon) clearTimeout(this.soon);
     if (this.recheck) clearInterval(this.recheck);
     this.soon = this.recheck = null;
@@ -155,7 +164,15 @@ export class CloudSync {
 
   private async once(): Promise<void> {
     const account = (await this.host.sandboxes.account().catch(() => null))?.userId;
-    if (!account || await this.host.sandboxes.followsThreads() !== true) return;
+    if (!account) return;
+    const follows = await this.host.sandboxes.followsThreads();
+    if (follows === null) {
+      this.deps.logger?.warn("Cloud threads not listed: the website didn't answer whether it lists them");
+      // Asked again once its 1-minute pause ends, not only at the next signal or the hourly recheck (#1655).
+      if (!this.stopped) this.soon ??= setTimeout(() => { this.soon = null; void this.run(); }, BLIP_MS);
+      this.soon?.unref?.();
+    }
+    if (follows !== true) return;
     this.tag = await this.host.me();
     const state = await this.state();
     if (!state) return;
@@ -166,6 +183,7 @@ export class CloudSync {
       else for (const change of unsent.changes) this.host.resendLabel(threadId, change);
     }
     for (let more = true; more;) {
+      this.asked = Date.now();
       const page = await this.host.sandboxes.threads(state.cursor), buffer = new NotificationBuffer(), first = state.first;
       // Another account signed in meanwhile: this page is the old account's.
       if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account || state !== await this.state()) return;
@@ -200,13 +218,67 @@ export class CloudSync {
       }
       state.cursor = page.next;
       more = page.more;
-      if (!more) state.first = false;
+      if (!more) {
+        if (state.first) state.pinsSynced = true;
+        state.first = false;
+      }
       await this.save();
     }
+    if (!state.first && !state.pinsSynced) await this.backfillPins(account, state);
     await this.cascadeMissed();
     void this.repair();
   }
 
+  /** Upgraded installs already advanced `cursor` past pins older apps ignored: fetch pinned rows once without moving
+   *  `cursor`, so sleeping threads pinned before the upgrade still pin on wake. */
+  private async backfillPins(account: string, state: SyncState): Promise<void> {
+    if (this.pinBackfillUnsupported) return;
+    let cursor: string | null = null;
+    try {
+      for (let more = true; more;) {
+        this.asked = Date.now();
+        const page = await this.host.sandboxes.threads(cursor, { pinnedOnly: true });
+        if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account || state !== await this.state()) return;
+        const buffer = new NotificationBuffer();
+        let failed = false;
+        this.host.quietly(null, () => {
+          for (const row of page.threads) {
+            try {
+              this.apply(row, state, buffer, false);
+            } catch (error) {
+              failed = true;
+              this.deps.logger?.warn({ threadId: row.thread, error: error instanceof Error ? error.message : String(error) }, "A pinned Cloud thread could not be backfilled");
+            }
+          }
+          buffer.flushInto(this.deps.hub);
+        });
+        if (failed) { await this.save(); return; }
+        cursor = page.next;
+        more = page.more;
+      }
+      state.pinsSynced = true;
+      await this.save();
+    } catch (error) {
+      const status = error && typeof error === "object" && "status" in error ? Number((error as { status?: unknown }).status) : 0;
+      if (status === 400) { this.pinBackfillUnsupported = true; return; }
+      this.deps.logger?.warn({ error: error instanceof Error ? error.message : String(error) }, "Cloud thread pins could not be backfilled");
+    }
+  }
+
+  /** Applies an agent pin once per timestamp. Marks seen only after SQLite commits, so a failed write retries. */
+  private applyPin(row: ThreadChange, state: SyncState, buffer: NotificationBuffer, threadId: string): Thread | null {
+    if (!row.pinned_at || row.pinned_at === state.pins[threadId]) return null;
+    let pinned: Thread | null = null;
+    if (row.state === "open" && !getThread(this.deps.db, threadId)?.archivedAt) {
+      const at = Date.parse(row.pinned_at);
+      pinned = pinThread(this.deps.db, buffer, { threadId, ...(Number.isFinite(at) ? { pinnedAt: at } : {}) });
+    }
+    state.pins[threadId] = row.pinned_at;
+    return pinned;
+  }
+
+  /** When the page being applied was asked for. */
+  private asked = 0;
   /** One row, by itself: adopt it, or bring this computer's copy in line. */
   private apply(row: ThreadChange, state: SyncState, buffer: NotificationBuffer, first: boolean): void {
     if (row.state === "deleted") state.deleted = state.deleted.filter((id) => id !== row.thread);
@@ -239,7 +311,9 @@ export class CloudSync {
       this.host.threadStates.set(thread.id, null);
       return;
     }
-    if (row.state === "archived") {
+    // The user restored it here and the website hadn't taken that when it read this row: the restore wins. Archiving
+    // it again closed the thread under the user, and the open row that followed left it closed.
+    if (row.state === "archived" && !this.host.restoredSince(thread.id, this.asked)) {
       if (!state.archived.includes(thread.id)) state.archived.push(thread.id);
       const pending = this.host.threadStates.get(thread.id);
       // An agent archived it on home: main's archive from the parent, so idle children go with it and working ones stay.
@@ -261,9 +335,11 @@ export class CloudSync {
         this.local?.unarchive(thread);
       } else if (first && asleep(row) && Date.parse(row.updated_at) < thread.archivedAt - FRESH_MS && !coreInUse(this.deps.db, saved.coreUrl)) this.repairs.push(thread.id);
     }
-    // A change made here that the website hasn't taken yet wins over the row.
+    // A change made here that the website hasn't taken yet wins over the row. The website shows an untitled thread's
+    // fallback (its first words), which is no title: taking it would stop the generated one.
     const unsent = state.labels[thread.id]?.changes ?? [];
-    if (row.title && row.title !== thread.title && !unsent.includes("title")) updateThread(this.deps.db, buffer, thread.id, { title: row.title });
+    const fallbackOnly = thread.title === null && row.title === thread.titleFallback;
+    if (row.title && row.title !== thread.title && !fallbackOnly && !unsent.includes("title")) updateThread(this.deps.db, buffer, thread.id, { title: row.title });
     const parent = unsent.includes("parent") ? undefined : this.parentOf(row, thread);
     if (parent !== undefined && parent !== thread.parentThreadId) updateThread(this.deps.db, buffer, thread.id, { parentThreadId: parent });
     const project = unsent.includes("project") ? null : this.project(row, state);
@@ -289,6 +365,8 @@ export class CloudSync {
         setThreadExecutionOverride(this.deps.db, { threadId: thread.id, reasoningLevelOverride: effort.data });
       }
     }
+    // An agent pin applies once per timestamp: a local unpin stays unpinned until an agent pins it again later.
+    this.applyPin(row, state, buffer, thread.id);
   }
 
   /** The parent the row asks for here: null for none or a closed one, undefined to keep the current one. A child the
@@ -298,6 +376,9 @@ export class CloudSync {
     const parent = getThread(this.deps.db, row.parent);
     // A closed parent still open here gets its own archive from the list (and its cascade) first: until then the child
     // stays under it, and main's archive then takes it or moves it to the top level, working or not.
+    // An archived child keeps (or gets back) its archived parent, so restoring the parent with its children finds it.
+    // The parent's own archive may have moved it to the top level already, when its row came first.
+    if (row.parent_state === "closed" && parent?.archivedAt && !parent.deletedAt && (row.state === "archived" || thread?.archivedAt)) return parent.id;
     if (row.parent_state === "closed") return thread && parent && !parent.archivedAt && !parent.deletedAt && thread.parentThreadId === parent.id ? undefined : null;
     if (!parent || parent.deletedAt) return undefined;
     const current = thread?.parentThreadId ? binding(this.deps.db, thread.parentThreadId) : null;
@@ -313,8 +394,8 @@ export class CloudSync {
     const same = getProject(this.deps.db, row.project);
     if (same) return same.deletedAt ? null : same.id;
     const all = this.deps.db.select().from(projects).where(isNull(projects.deletedAt)).all(), wanted = repo(row.repository);
-    const found = (wanted && all.find((project) => repo(githubRepository(project.gitRemoteUrl)) === wanted))
-      || all.find((project) => project.name === row.project_name && !githubRepository(project.gitRemoteUrl));
+    const found = (wanted && all.find((project) => repo(cloudRepository(project.gitRemoteUrl)) === wanted))
+      || all.find((project) => project.name === row.project_name && !cloudRepository(project.gitRemoteUrl));
     // A project is made only for a thread an app started: on a new computer's first sync, or from a row made or changed
     // since a computer with threads first listed (main's deletes left their rows open, with no record of the delete).
     // A loop run or launch shows only where its project is, as on main.
@@ -350,6 +431,7 @@ export class CloudSync {
       return thread;
     });
     if (!adopted) return;
+    const shown = this.applyPin(row, state, buffer, row.thread) ?? adopted;
     state.efforts[row.thread] = row.reasoning ?? "";
     // A thread made in the last 10 minutes is live: its records are acted on from the start, as on main. An older
     // one's, or one adopted archived (a Restore must not replay its archive), are shown only, from Core's
@@ -358,7 +440,7 @@ export class CloudSync {
     const child = row.session.startsWith("cr_sub_"), byId = (row.loop || row.session.startsWith("cr_launch_")) && projectId === row.project;
     this.host.threadStates.set(row.thread, { session: row.session, actFrom: row.state === "open" && Date.now() - Date.parse(row.created_at) < FRESH_MS ? 0 : null, home: child ? null : byId && this.tag ? this.tag : ELSEWHERE, from: child ? parent : null, adopted: true });
     this.host.adopted(row.thread, row.sandbox === "awake");
-    emitPluginThreadCreated(adopted);
+    emitPluginThreadCreated(shown);
     const waiting = state.deferred[row.thread];
     delete state.deferred[row.thread];
     for (const child of waiting ?? []) this.apply(child as ThreadChange, state, buffer, false);
@@ -450,6 +532,7 @@ export class CloudSync {
     state.archived = state.archived.filter((id) => id !== threadId);
     delete state.labels[threadId];
     delete state.efforts[threadId];
+    delete state.pins[threadId];
     await this.save();
   }
 

@@ -2,16 +2,17 @@ import { DiffLoadingSkeleton } from "@/components/code/code-loading-skeletons";
 import { useCallback, useMemo, useRef, type CSSProperties } from "react";
 import type { FileDiffOptions, SelectedLineRange } from "@pierre/diffs";
 import { FileDiff as DiffView } from "@pierre/diffs/react";
-import { usePierreLineSelectionActions } from "@/components/git-diff/PierreLineSelectionActions.js";
+import { usePierreLineSelectionActions } from "@/components/diff/line-selection";
 import { PierreWorkerPoolBoundary } from "@/lib/pierre-worker-pool-boundary";
 import { useRequirePierreWorkerPool } from "@/lib/pierre-worker-pool-gate";
 import { usePierreStrictModeRecoveryOptions } from "@/lib/pierre-strict-mode-recovery";
 import {
   buildFileDiffPatchText,
   buildDiffDomSelectionText,
+  buildDiffLineCopyText,
   buildDiffLineSelectionText,
-} from "@/components/git-diff/git-diff-patch-text";
-import { enrichGitDiffFileForContext } from "@/components/git-diff/git-diff-parsing";
+} from "@/components/diff/patch-utils";
+import { enrichGitDiffFileForContext } from "@/components/diff/patch-utils";
 import { useResolvedCodeThemePair } from "@/lib/code-theme";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -70,6 +71,15 @@ function RoomDiff({
       }),
     [resolvedFile, view],
   );
+  const buildCopyText = useCallback(
+    (range: SelectedLineRange) =>
+      buildDiffLineCopyText({
+        displayStyle: view,
+        fileDiff: resolvedFile,
+        range,
+      }),
+    [resolvedFile, view],
+  );
   const buildFallbackSelectionText = useCallback(
     ({
       containerElement,
@@ -81,6 +91,7 @@ function RoomDiff({
     [resolvedFile],
   );
   const lineSelectionActions = usePierreLineSelectionActions({
+    buildCopyText,
     buildFallbackSelectionText,
     buildSelectionText,
     containerRef,

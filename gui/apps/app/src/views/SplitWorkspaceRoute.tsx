@@ -1,6 +1,6 @@
 import { lazy, useMemo } from "react";
 import { disableGlobalCursorStyles } from "react-resizable-panels";
-import { matchPath, Navigate, useLocation } from "react-router-dom";
+import { matchPath, Navigate, useLocation } from "react-router";
 import { useAtomValue } from "jotai";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { holdsPluginDetailPane } from "@/lib/split-layout/openPaneContentInSplit";

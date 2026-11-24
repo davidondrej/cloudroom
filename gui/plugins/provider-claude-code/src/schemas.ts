@@ -48,7 +48,7 @@ export const toolResultBlockSchema = z.object({
   type: z.literal("tool_result"),
   tool_use_id: z.string(),
   tool_name: z.string().optional(),
-  content: z.unknown(),
+  content: z.unknown().optional(),
   is_error: z.boolean().optional(),
   tool_use_result: claudeToolUseResultSchema.nullish(),
 });

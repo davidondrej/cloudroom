@@ -20,6 +20,7 @@ import {
   type JsonValue,
   type RuntimePermissionPolicy,
   type ThreadEvent,
+  UNDELIVERED_MESSAGE_WARNING,
 } from "@cloudroom/domain";
 
 const { forkSessionMock, queryMock } = vi.hoisted(() => ({
@@ -896,10 +897,16 @@ describe("bridge", () => {
     );
 
     expect(options.cwd).toBe("/tmp/worktree");
+    // Claude's own timers are always blocked: `room-cli wake` and loops replace them.
     expect(options.disallowedTools).toEqual([
       "ExitPlanMode",
       "NotebookEdit",
       "Task",
+      "ScheduleWakeup",
+      "CronCreate",
+      "CronDelete",
+      "CronList",
+      "RemoteTrigger",
     ]);
     expect(options.systemPrompt).toBe("You are a manager.");
   });
@@ -925,6 +932,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: true,
       ultracode: true,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -949,6 +957,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: true,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -972,6 +981,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: false,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -994,6 +1004,7 @@ describe("bridge", () => {
       disableClaudeAiConnectors: true,
       enableWorkflows: false,
       ultracode: false,
+      skillOverrides: { loop: "off", schedule: "off" },
     });
   });
 
@@ -2518,6 +2529,64 @@ describe("bridge", () => {
     }
   });
 
+  it("marks at a Stop only the steers Claude queued and never started, with their visible text (#2137)", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    const queries: ControlledClaudeQuery[] = [];
+    queryMock.mockImplementation(() => {
+      const query = createControlledClaudeQuery();
+      queries.push(query);
+      return query;
+    });
+
+    try {
+      const threadId = "thread-undelivered-steer";
+      await startBridgeThread({ bridge, threadId });
+      const query = queries[0]!;
+      const call = getLatestQueryCall();
+      const steer = async (requestId: number, input: JsonValue[]) => {
+        bridge.sendRequest(requestId, "turn/steer", {
+          ...canonicalTurnParams({ threadId, expectedTurnId: "turn-1", input }),
+          clientRequestId: `creq_${"23456789ab".slice(0, 9)}${requestId}`,
+        });
+        const prompt = await readNextPrompt(call);
+        await bridge.waitForResponse(requestId);
+        return prompt.uuid!;
+      };
+      const lifecycle = (uuid: string, state: string) =>
+        query.emit({ type: "command_lifecycle", command_uuid: uuid, state, session_id: threadId } as unknown as SDKMessage);
+      const taken = await steer(2, [{ type: "text", text: "taken", mentions: [] }]);
+      const queued = await steer(3, [
+        { type: "text", text: "Also run the tests.", mentions: [] },
+        { type: "text", text: "agent-only context", mentions: [], visibility: "agent-only" },
+      ]);
+      await steer(4, [{ type: "text", text: "no frame yet", mentions: [] }]);
+      lifecycle(taken, "queued");
+      lifecycle(taken, "started");
+      lifecycle(queued, "queued");
+      await bridge.flushWork();
+
+      bridge.sendRequest(5, "thread/stop", {
+        threadId,
+        providerThreadId: threadId,
+        intent: "interrupt",
+        activeTurnId: null,
+      });
+      await bridge.flushWork();
+      query.finish();
+      await bridge.waitForResponse(5);
+
+      const warnings = assembleCapturedThreadEvents(bridge.messages, "claude-code").filter(
+        (event) => event.type === "provider/warning",
+      );
+      expect(warnings).toMatchObject([
+        { summary: UNDELIVERED_MESSAGE_WARNING, details: "Also run the tests." },
+      ]);
+    } finally {
+      queries.forEach((query) => query.finish());
+      bridge.restore();
+    }
+  });
+
   it("fails a /plan turn instead of running it in the old mode when the SDK refuses the switch", async () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
@@ -2951,6 +3020,7 @@ describe("bridge", () => {
           instructions: "test",
           providerOptions: {
             workflowsEnabled: false,
+            providerSubagentsEnabled: false,
           },
         },
       });
@@ -2958,6 +3028,7 @@ describe("bridge", () => {
 
       const queryOptions = getLatestQueryOptions();
       expect(queryOptions.env?.HOME).toBe("/Users/test-bb");
+      expect(queryOptions.env?.CLAUDE_CODE_WEB_FETCH_AGENT).toBe("0");
       expect(queryOptions.env?.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
       expect(queryOptions.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toBeUndefined();
       expect(queryOptions.settingSources).toEqual(["user", "project", "local"]);
@@ -3583,6 +3654,7 @@ describe("bridge", () => {
       if (!query || !hooks) {
         throw new Error("Expected live Claude query and hooks");
       }
+      expect(call.options.env?.CLAUDE_CODE_WEB_FETCH_AGENT).toBeUndefined();
 
       bridge.sendRequest(2, "turn/start", {
         threadId,
@@ -4400,6 +4472,9 @@ describe("bridge", () => {
     const close = vi
       .spyOn(SdkSession.prototype, "closeGracefully")
       .mockRejectedValueOnce(new Error(stopError));
+    // Only Windows holds a failed stop and retries it (#2228).
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
 
     try {
       const threadId = "thread-failed-stop";
@@ -4410,14 +4485,32 @@ describe("bridge", () => {
         threadId,
       });
       await bridge.waitForResponse(1);
+      queries[0]?.emit({
+        type: "system",
+        subtype: "task_started",
+        session_id: "provider-failed-stop",
+        task_id: "task-1",
+        task_type: "local_bash",
+        description: "npm run dev",
+      } as unknown as SDKMessage);
+      await bridge.flushWork();
+      const endedTasks = () =>
+        assembleCapturedThreadEvents(bridge.messages, "claude-code").flatMap(
+          (event) =>
+            event.type === "item/backgroundTask/completed"
+              ? [event.item.taskStatus]
+              : [],
+        );
+      // Stop on an idle thread releases Claude and its background commands.
       const stop = {
         threadId,
         providerThreadId: threadId,
-        intent: "interrupt",
+        intent: "release",
         activeTurnId: null,
       };
       bridge.sendRequest(2, "thread/stop", stop);
       expect((await bridge.waitForResponse(2)).error?.message).toBe(stopError);
+      expect(endedTasks()).toEqual([]);
 
       bridge.sendRequest(3, "turn/start", {
         threadId,
@@ -4442,12 +4535,15 @@ describe("bridge", () => {
         "After unarchive",
       );
       expect((await bridge.waitForResponse(3)).error).toBeUndefined();
+      // The retried stop confirmed the old Claude ended, and its command with it.
+      expect(endedTasks()).toEqual(["stopped"]);
 
       bridge.sendRequest(4, "thread/stop", stop);
       await bridge.flushWork();
       queries[1]?.finish();
       await bridge.waitForResponse(4);
     } finally {
+      Object.defineProperty(process, "platform", platform);
       close.mockRestore();
       bridge.restore();
     }
@@ -4524,6 +4620,14 @@ describe("bridge", () => {
         },
       ]);
 
+      // The new Claude, still starting or stuck, never answers its MCP check (#1574).
+      queryMock.mockImplementationOnce(() => {
+        const query = createControlledClaudeQuery();
+        query.mcpServerStatus.mockReturnValue(new Promise(() => {}));
+        queries.push(query);
+        return query;
+      });
+      vi.useFakeTimers();
       bridge.sendRequest(
         3,
         "turn/start",
@@ -4533,7 +4637,8 @@ describe("bridge", () => {
           input: [{ type: "text", text: "after reauthentication" }],
         }),
       );
-      await bridge.flushWork();
+      await vi.advanceTimersByTimeAsync(10_000);
+      vi.useRealTimers();
 
       expect(queries).toHaveLength(2);
       expect(queries[0]?.close).toHaveBeenCalledOnce();
@@ -4555,6 +4660,7 @@ describe("bridge", () => {
       queries[1]?.finish();
       await bridge.waitForResponse(4);
     } finally {
+      vi.useRealTimers();
       queries.forEach((query) => query.finish());
       bridge.restore();
     }

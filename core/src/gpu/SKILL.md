@@ -10,7 +10,7 @@ description: Rent a GPU box with `room-cli gpu` for training, large models, CUDA
 ## When to use it
 
 - Only for work that truly needs a GPU, or would take far too long on the CPU. GPUs are expensive.
-- Suggest it to the user first, with what you want to run and roughly how long. Then start it: the user approves in a card that shows the Cloud Credits.
+- Suggest it to the user first, with what you want to run and roughly how long. Then start it: the user approves in a card that shows the Cloud Credits. That approval covers this thread for 24 hours: a new session at the same or a lower price an hour starts without asking while its credits last.
 
 ## Workflow
 

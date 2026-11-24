@@ -143,6 +143,51 @@ describe("syncMcpSignIns with the macOS Keychain", () => {
     });
   });
 
+  it("copies the sign-ins that fit security -i, never through argv", async () => {
+    const [a, b] = [signIn("a", 1), signIn("b", 2)];
+    const big = signIn("f".repeat(3000), 9);
+    const signIns = { "big|x": big, a, b };
+    keychain.items.set(keychainService(main), hex({ mcpOAuth: signIns }));
+    // Saved through argv before #1917: expired copies over the line limit.
+    const old = { accessToken: "o".repeat(900), expiresAt: 1 };
+    const mine = { ...signIn("mine", 5), refreshToken: "mine-refresh" };
+    const before = { "big|x": old, a: old, b: old, mine };
+    const own = { claudeAiOauth: login, mcpOAuth: before };
+    keychain.items.set(keychainService(profile), hex(own));
+    const warn = vi.fn();
+
+    expect(await syncMcpSignIns(profile, warn)).toBe(true);
+    expect(await syncMcpSignIns(profile, warn)).toBe(false);
+    const saved = keychain.items.get(keychainService(profile))!;
+    expect(JSON.parse(Buffer.from(saved, "hex").toString())).toEqual({
+      claudeAiOauth: login,
+      mcpOAuth: { mine, a, b },
+    });
+    const argv = keychain.calls.map((call) => call.args);
+    expect(argv.filter(([cmd]) => cmd !== "find-generic-password")).toEqual([
+      ["-i"],
+    ]);
+    const refresh = Buffer.from(login.refreshToken).toString("hex");
+    expect(JSON.stringify(argv)).not.toContain(refresh);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]![0].message).toMatch(/^big: too large/);
+  });
+
+  it("keeps a working sign-in when its newer copy doesn't fit", async () => {
+    const big = signIn("f".repeat(3000), 9);
+    const a = signIn("a", 1);
+    keychain.items.set(keychainService(main), hex({ mcpOAuth: { "big|x": big, a } }));
+    const working = signIn("old", 5);
+    keychain.items.set(keychainService(profile), hex({ claudeAiOauth: login, mcpOAuth: { "big|x": working } }));
+
+    expect(await syncMcpSignIns(profile, vi.fn())).toBe(true);
+    const saved = keychain.items.get(keychainService(profile))!;
+    expect(JSON.parse(Buffer.from(saved, "hex").toString())).toEqual({
+      claudeAiOauth: login,
+      mcpOAuth: { "big|x": working, a },
+    });
+  });
+
   it("never writes when the profile's entry can't be read", async () => {
     keychain.items.set(keychainService(main), hex({ mcpOAuth: { figma: signIn("f", 9) } }));
     keychain.items.set(keychainService(profile), "not json");

@@ -869,6 +869,31 @@
 
 /* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
+/* A ```draft field: a blinking caret after the last letter says "you can type here". The real caret takes over on focus. */
+.draft-caret:not(:focus)::after {
+  content: "";
+  display: inline-block;
+  width: 1.5px;
+  height: 1.2em;
+  margin-left: 1px;
+  vertical-align: -0.22em;
+  background: var(--foreground);
+  pointer-events: none;
+  animation: draft-caret-blink 1.06s step-end infinite;
+}
+
+@keyframes draft-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .draft-caret:not(:focus)::after {
+    animation: none;
+  }
+}
+
 @keyframes bb-search-flash {
   from {
     background-color: color-mix(in oklch, var(--ring) 22%, transparent);
@@ -906,6 +931,10 @@
 }
 [data-window-blurred] .animate-shine-icon {
   animation-timing-function: steps(10) !important;
+}
+[data-window-blurred] .working-grid i::after,
+[data-window-blurred] .subagent-grid i::after {
+  animation-timing-function: steps(2) !important;
 }
 
 .bb-search-flash {
@@ -1161,6 +1190,33 @@
   border-radius: 0 !important;
 }
 
-::highlight(cloudroom-draft-note) {
-  background-color: color-mix(in oklab, var(--primary) 40%, transparent);
+/* Cloud icon color (Settings > Appearance > Cloud icon): Electric lime by
+ * default, or Crisp white (crisp dark ink in light mode). */
+:root[data-cloud-icon="crisp-white"] {
+  --cloud-icon: #111111;
+  --cloud-icon-sidebar: rgb(17 17 17 / 0.88);
+  --cloud-icon-stroke: 2;
+  --cloud-icon-sidebar-stroke: 1.9;
+}
+
+:root.dark[data-cloud-icon="crisp-white"] {
+  --cloud-icon: #ffffff;
+  --cloud-icon-sidebar: rgb(255 255 255 / 0.9);
+  --cloud-icon-stroke: 2;
+  --cloud-icon-sidebar-stroke: 1.9;
+}
+
+@layer utilities {
+  .cloud-icon {
+    color: var(--cloud-icon, var(--primary));
+  }
+  .cloud-icon path {
+    stroke-width: var(--cloud-icon-stroke, 1.9);
+  }
+  .cloud-icon-sidebar {
+    color: var(--cloud-icon-sidebar, var(--primary));
+  }
+  .cloud-icon-sidebar path {
+    stroke-width: var(--cloud-icon-sidebar-stroke, 1.9);
+  }
 }

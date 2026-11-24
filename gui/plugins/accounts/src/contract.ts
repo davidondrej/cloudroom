@@ -1,9 +1,14 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
-export const providerSchema = z.enum(["claude-code", "codex", "acp-cursor"]);
+export const providerSchema = z.enum([
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+]);
 export type Provider = z.infer<typeof providerSchema>;
-export const MAX_ACCOUNTS = 10;
+export const MAX_ACCOUNTS = 30;
 export const LOCAL = "local";
 export const ACCOUNTS_CHANGED = "accounts-changed";
 
@@ -13,8 +18,13 @@ export const usageWindowSchema = z.object({
   resetsAt: z.number().nullable(),
   // The model family ("fable") a row is for. Missing: the limit covers every model.
   model: z.string().nullish(),
+  // When a read last confirmed this bar. 0: saved before this was kept. Missing: not tracked (Codex).
+  checkedAt: z.number().nullish(),
 });
 export type UsageWindow = z.infer<typeof usageWindowSchema>;
+// Accounts not in use are read hourly, so a bar older than this wasn't confirmed by its last read. Usage only rises
+// until a reset, so an old bar is a floor: the page greys it out instead of hiding it.
+export const USAGE_STALE_MS = 90 * 60_000;
 
 export const accountViewSchema = z.object({
   id: z.string(),
@@ -30,10 +40,15 @@ export const accountViewSchema = z.object({
   needsSignIn: z.boolean(),
   // A Claude account added before full logins: it runs on its one-year token, without claude.ai connectors.
   limitedLogin: z.boolean(),
+  // Its login failed or was rejected: only a new sign-in fixes it. A passing error is not this.
+  signedOut: z.boolean(),
 });
 export type AccountView = z.infer<typeof accountViewSchema>;
 
 const target = z.object({ provider: providerSchema, id: z.string().min(1) });
+// Where an account was picked, for telemetry: Settings → Agents → Accounts, the usage box, or a plan-limit card.
+export const switchWhereSchema = z.enum(["settings", "usage_box", "limit_card"]);
+export type SwitchWhere = z.infer<typeof switchWhereSchema>;
 const ok = z.null();
 const poll = z.object({ sessionId: z.string() });
 const polled = z.object({
@@ -45,7 +60,7 @@ const polled = z.object({
 
 export const accountsRpcContract = defineRpcContract({
   "accounts.list": {
-    input: z.object({ provider: providerSchema }),
+    input: z.object({ provider: providerSchema, refresh: z.boolean().optional() }),
     output: z.array(accountViewSchema),
   },
   "accounts.use": {
@@ -54,6 +69,7 @@ export const accountsRpcContract = defineRpcContract({
     input: target.extend({
       cloud: z.boolean().optional(),
       threadId: z.string().min(1).optional(),
+      where: switchWhereSchema.optional(),
     }),
     output: ok,
   },
@@ -86,6 +102,16 @@ export const accountsRpcContract = defineRpcContract({
   },
   // Cursor accounts are added with a user API key from cursor.com/dashboard.
   "cursor.add": { input: z.object({ apiKey: z.string().max(4096) }), output: ok },
+  // Antigravity accounts sign in with Google: open the link, then paste the code Google shows.
+  "antigravity.start": {
+    input: z.null(),
+    output: z.object({ sessionId: z.string(), authorizeUrl: z.string() }),
+  },
+  "antigravity.complete": {
+    input: poll.extend({ code: z.string().max(4096) }),
+    output: ok,
+  },
+  "antigravity.cancel": { input: poll, output: ok },
   "claude.poll": { input: poll, output: polled },
   "codex.poll": { input: poll, output: polled },
 });

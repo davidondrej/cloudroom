@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -14,16 +14,21 @@ import {
   environments,
   getEnvironment,
   getThread,
+  listQuietOpenEnvironments,
   threads,
 } from "@cloudroom/db";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import {
+  parkQuietWorktree,
   requestEnvironmentRemoval,
   restoreParkedWorktree,
   sweepProviderEnvironment,
   sweepProviderLifecycles,
+  worktreeRebuiltNote,
+  worktreeRebuiltNoteSent,
 } from "../../src/services/environments/environment-engine.js";
+import { saveWorktreeWork } from "../../src/services/environments/worktree-work.js";
 import { setPluginEnvironmentProviderBridge } from "../../src/services/plugins/plugin-environment-provider-registry.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
 import { registerTestHostRpcCapture } from "../helpers/commands.js";
@@ -169,6 +174,10 @@ it("parks an archived thread's worktree and brings it back with its unfinished w
       path: tree,
       parkedAt: expect.any(Number),
     });
+    const parked = await h.app.request(
+      `/api/v1/environments/${environment.id}`,
+    );
+    expect((await parked.json()).lifecycle.phase).toBe("parked");
     await sweepProviderLifecycles(h.deps);
     expect(getEnvironment(h.db, environment.id)?.parkedAt).not.toBeNull();
 
@@ -339,3 +348,168 @@ it.each([
       });
     }),
 );
+
+const DAY_MS = 24 * 60 * 60_000;
+/** The worktrees `parkQuietWorktrees` would pick: open, and unused for a day. */
+const quietWorktrees = (h: TestAppHarness, hostId: string) =>
+  listQuietOpenEnvironments(h.db, {
+    hostId,
+    providerId: "git-worktree",
+    since: Date.now() - DAY_MS,
+    limit: 5,
+  });
+/** Makes the thread and its worktree look last used two days ago. */
+const lastUsed = (
+  h: TestAppHarness,
+  thread: { id: string },
+  environment: { id: string },
+  change: object = {},
+) => {
+  const updatedAt = Date.now() - 2 * DAY_MS;
+  h.db.update(threads).set({ updatedAt, ...change }).where(eq(threads.id, thread.id)).run();
+  h.db.update(environments).set({ updatedAt }).where(eq(environments.id, environment.id)).run();
+};
+
+it("parks an open thread's unused worktree and rebuilds it for the next message", () =>
+  withWorktree(async ({ h, repo, tree, host, environment, thread }) => {
+    writeFileSync(join(repo, ".gitignore"), "private/\n.env\n");
+    writeFileSync(join(tree, ".gitignore"), "private/\n.env\n");
+    writeFileSync(join(tree, ".env"), "SECRET=1");
+    lastUsed(h, thread, environment);
+    expect(quietWorktrees(h, host.id)).toEqual([environment.id]);
+
+    expect(
+      await parkQuietWorktree(h.deps, environment.id, Date.now() - DAY_MS),
+    ).toBe(true);
+    expect(existsSync(tree)).toBe(false);
+    expect(getEnvironment(h.db, environment.id)).toMatchObject({
+      status: "ready",
+      teardownStatus: null,
+      parkedAt: expect.any(Number),
+    });
+    expect(getThread(h.db, thread.id)?.archivedAt).toBeNull();
+    expect(quietWorktrees(h, host.id)).toEqual([]);
+    // Its open thread keeps the lifecycle sweep away: it stays parked.
+    await sweepProviderLifecycles(h.deps);
+    expect(getEnvironment(h.db, environment.id)?.parkedAt).not.toBeNull();
+    expect(worktreeRebuiltNote(environment.id)).toBeNull();
+    // The git panel says why the folder is gone.
+    const status = await h.app.request(`/api/v1/environments/${environment.id}/status`);
+    expect((await status.json()).failure.message).toContain("Parked");
+
+    await restoreParkedWorktree(h.deps, thread.id, environment.id);
+    expect(git(tree, "status", "--porcelain").split("\n").sort()).toEqual([
+      "",
+      " M .gitignore",
+      "?? draft.txt",
+    ]);
+    expect(readFileSync(join(tree, "private", "plan.md"), "utf8")).toBe("plan");
+    expect(readFileSync(join(tree, ".env"), "utf8")).toBe("SECRET=1");
+    expect(worktreeRebuiltNote(environment.id)?.visibility).toBe("agent-only");
+    worktreeRebuiltNoteSent(environment.id);
+    expect(worktreeRebuiltNote(environment.id)).toBeNull();
+    // The rebuild counts as a use: it isn't parked again right away.
+    expect(quietWorktrees(h, host.id)).toEqual([]);
+  }));
+
+it("never parks a worktree that was used since it was picked", () =>
+  withWorktree(async ({ h, tree, provider, host, environment, thread }) => {
+    lastUsed(h, thread, environment);
+    expect(quietWorktrees(h, host.id)).toEqual([environment.id]);
+    // A message, terminal, fork or Teleport passes here first.
+    await restoreParkedWorktree(h.deps, thread.id, environment.id);
+    expect(quietWorktrees(h, host.id)).toEqual([]);
+    expect(
+      await parkQuietWorktree(h.deps, environment.id, Date.now() - DAY_MS),
+    ).toBe(false);
+    expect(provider.removed).toEqual([]);
+    expect(existsSync(join(tree, "draft.txt"))).toBe(true);
+  }));
+
+it.each([
+  ["was used since", { updatedAt: Date.now() }, null],
+  ["is pinned", { pinnedAt: Date.now() }, null],
+  ["is working", { status: "active" }, null],
+  [
+    "has a process running in its folder",
+    {},
+    (tree: string) => {
+      const running = spawn("sleep", ["30"], { cwd: tree, stdio: "ignore" });
+      return () => void running.kill();
+    },
+  ],
+  [
+    "has a teardown script",
+    {},
+    (_tree: string, hooks: string) => {
+      mkdirSync(join(hooks, ".."), { recursive: true });
+      writeFileSync(hooks, JSON.stringify({ version: 1, teardown: "ZXhpdA==" }));
+      return () => rmSync(join(hooks, "..", ".."), { recursive: true });
+    },
+  ],
+])("leaves the worktree of an open thread that %s", (_label, change, use) =>
+  withWorktree(async ({ h, tree, provider, host, environment, thread }) => {
+    lastUsed(h, thread, environment, change);
+    // Where the test host's daemon would have saved this environment's hooks.
+    const stop = use?.(
+      tree,
+      `/tmp/bb-host-data/${host.id}/environment-hooks/${environment.id}.json`,
+    );
+    try {
+      // The database can't see a process or a script: those two are picked, then left.
+      expect(quietWorktrees(h, host.id)).toEqual(use ? [environment.id] : []);
+      expect(
+        await parkQuietWorktree(h.deps, environment.id, Date.now() - DAY_MS),
+      ).toBe(false);
+    } finally {
+      stop?.();
+    }
+    expect(provider.removed).toEqual([]);
+    expect(git(tree, "status", "--porcelain")).toBe("?? draft.txt\n");
+    expect(getEnvironment(h.db, environment.id)).toMatchObject({
+      status: "ready",
+      teardownStatus: null,
+      parkedAt: null,
+    });
+  }),
+);
+
+it("drops a quiet park that a restart cut off before it removed anything, and undoes its save", () =>
+  withWorktree(async ({ h, repo, tree, provider, environment }) => {
+    const head = git(tree, "rev-parse", "HEAD");
+    // The park saved the work, then the app quit before removing anything.
+    await saveWorktreeWork(tree, join(h.config.dataDir, "worktree-notes", environment.id), "x");
+    expect(git(tree, "status", "--porcelain")).toBe("");
+    h.db.update(environments).set({ teardownStatus: "running" }).where(eq(environments.id, environment.id)).run();
+    await sweepProviderLifecycles(h.deps);
+    expect(provider.removed).toEqual([]);
+    expect(git(tree, "rev-parse", "HEAD")).toBe(head);
+    expect(git(tree, "status", "--porcelain")).toBe("?? draft.txt\n");
+    expect(git(repo, "log", "-1", "--format=%s", "room/task")).toBe("base\n");
+    expect(getEnvironment(h.db, environment.id)).toMatchObject({
+      status: "ready",
+      teardownStatus: null,
+      parkedAt: null,
+    });
+  }));
+
+it("a message that meets a failed park has it finished, then gets its folder back", () =>
+  withWorktree(async ({ h, tree, provider, environment, thread }) => {
+    lastUsed(h, thread, environment);
+    provider.loseNextRemoveAck = true;
+    expect(
+      await parkQuietWorktree(h.deps, environment.id, Date.now() - DAY_MS),
+    ).toBe(false);
+    expect(existsSync(tree)).toBe(false);
+    expect(getEnvironment(h.db, environment.id)?.teardownStatus).toBe("failed");
+
+    // The message makes the retry due now, and the next sweep (every 10 s) runs it.
+    const restoring = restoreParkedWorktree(h.deps, thread.id, environment.id);
+    await sweepProviderLifecycles(h.deps);
+    await restoring;
+    expect(getEnvironment(h.db, environment.id)).toMatchObject({
+      teardownStatus: null,
+      parkedAt: null,
+    });
+    expect(git(tree, "status", "--porcelain")).toBe("?? draft.txt\n");
+  }));

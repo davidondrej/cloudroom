@@ -2,7 +2,7 @@
 
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { makeSystemConfig } from "@/test/fixtures/system-config";
 import { MachineAccessSettings } from "./MachineAccessSettings";
 

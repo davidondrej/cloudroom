@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router";
 import { COMPUTER, type Host } from "@cloudroom/domain";
 import type { SystemMachineProvider } from "@cloudroom/server-contract";
 import { RETRY_ACTION_ICON } from "@cloudroom/domain/update-state";

@@ -514,9 +514,15 @@ export const tasksRpcContract = defineRpcContract({
     input: z
       .object({
         projectId: idSchema.optional(),
-        statuses: z.array(taskStatusSchema).optional(),
-        priorities: z.array(taskPrioritySchema).optional(),
-        labelIds: z.array(idSchema).optional(),
+        statuses: z
+          .array(taskStatusSchema)
+          .max(TASK_STATUSES.length)
+          .optional(),
+        priorities: z
+          .array(taskPrioritySchema)
+          .max(TASK_PRIORITIES.length)
+          .optional(),
+        labelIds: z.array(idSchema).max(1000).optional(),
         activeOnly: z.boolean().default(false),
         parentTaskId: idSchema.nullable().optional(),
         search: z.string().optional(),

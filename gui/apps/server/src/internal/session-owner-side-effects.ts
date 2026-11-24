@@ -1,16 +1,19 @@
 import os from "node:os";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import {
   closeSession,
+  environments,
   hostDaemonSessions,
   listActiveHostThreads,
   listHostThreadIds,
+  threads,
   type HostDaemonSessionRow,
 } from "@cloudroom/db";
 import type { HostDaemonActiveThread } from "@cloudroom/host-daemon-contract";
 import {
   DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
   DAEMON_DISCONNECT_GRACE_MS,
+  DAEMON_SETUP_DISCONNECT_GRACE_MS,
 } from "../constants.js";
 import type {
   AppDeps,
@@ -38,25 +41,9 @@ const DAEMON_DISCONNECTED_ENVIRONMENT_PROVISIONING_REASON =
   "The connection to the host was lost while preparing the workspace. Retry provisioning to continue.";
 
 type HostSessionOpenedDeps = LoggedPendingInteractionWorkSessionDeps;
-type DaemonSocketClosedDeps = Pick<
-  AppDeps,
-  | "db"
-  | "hub"
-  | "logger"
-  | "pendingInteractions"
-  | "providerRegistry"
-  | "sharedPorts"
-  | "terminalSessions"
->;
-type DaemonDisconnectGraceDeps = Pick<
-  AppDeps,
-  | "db"
-  | "hub"
-  | "logger"
-  | "pendingInteractions"
-  | "providerRegistry"
-  | "terminalSessions"
->;
+type DaemonSocketClosedDeps = LoggedPendingInteractionWorkSessionDeps &
+  Pick<AppDeps, "sharedPorts">;
+type DaemonDisconnectGraceDeps = LoggedPendingInteractionWorkSessionDeps;
 
 /**
  * Background tasks settled while a host's daemon was away. A temporary
@@ -175,6 +162,10 @@ export async function handleHostSessionOpened(
     }
   }
 
+  if (!deps.hub.hasDaemonForHost(args.hostId)) {
+    startHostDisconnectDeadlines(deps, args.hostId);
+  }
+
   await reconcileDaemonReportedThreads(deps, {
     activeThreadIds: args.activeThreads.map((thread) => thread.threadId),
     hostId: args.hostId,
@@ -218,14 +209,64 @@ export function handleDaemonSocketClosed(
         hostId: session.hostId,
       }),
   );
-  deps.hub.scheduleDaemonActiveWorkDisconnect(
-    args.sessionId,
-    DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
-    () =>
-      completeDaemonActiveWorkDisconnectGrace(deps, {
-        hostId: session.hostId,
-      }),
+  startHostDisconnectDeadlines(deps, session.hostId);
+}
+
+type HostDisconnectDeadlineDeps = LoggedPendingInteractionWorkSessionDeps;
+
+// Starts (or keeps) the host's setup and running-turn deadlines. Only a
+// registered daemon socket cancels them, so they run from whichever comes
+// first: the socket's close or a session open that replaced it (#1956).
+function startHostDisconnectDeadlines(
+  deps: HostDisconnectDeadlineDeps,
+  hostId: string,
+): void {
+  deps.hub.scheduleHostDisconnectDeadline(
+    hostId,
+    "setup",
+    DAEMON_SETUP_DISCONNECT_GRACE_MS,
+    () => {
+      if (deps.hub.hasDaemonForHost(hostId)) return;
+      interruptEnvironmentProvisioningForHost(deps, {
+        hostId,
+        reason: DAEMON_DISCONNECTED_ENVIRONMENT_PROVISIONING_REASON,
+      });
+    },
   );
+  startRunningTurnDeadline(deps, hostId);
+}
+
+function startRunningTurnDeadline(
+  deps: HostDisconnectDeadlineDeps,
+  hostId: string,
+): void {
+  deps.hub.scheduleHostDisconnectDeadline(
+    hostId,
+    "work",
+    DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+    () => completeDaemonActiveWorkDisconnectGrace(deps, { hostId }),
+  );
+}
+
+/**
+ * A restart forgets running deadlines. Each host with running turns and no
+ * socket gets the full grace again from startup. Not from the stored close
+ * time: shutdown closes every socket too, so that time can be the shutdown.
+ */
+export function startRunningTurnDeadlinesAfterRestart(
+  deps: HostDisconnectDeadlineDeps,
+): void {
+  const hosts = deps.db
+    .selectDistinct({ hostId: environments.hostId })
+    .from(threads)
+    .innerJoin(environments, eq(threads.environmentId, environments.id))
+    .where(and(eq(threads.status, "active"), isNull(threads.deletedAt)))
+    .all();
+  for (const { hostId } of hosts) {
+    if (hostId !== null && !deps.hub.hasDaemonForHost(hostId)) {
+      startRunningTurnDeadline(deps, hostId);
+    }
+  }
 }
 
 export function handleHostRemoved(
@@ -287,10 +328,7 @@ function completeDaemonDisconnectGrace(
 }
 
 function completeDaemonActiveWorkDisconnectGrace(
-  deps: Pick<
-    AppDeps,
-    "db" | "hub" | "logger" | "pendingInteractions" | "providerRegistry"
-  >,
+  deps: LoggedPendingInteractionWorkSessionDeps,
   args: CompleteDaemonActiveWorkDisconnectGraceArgs,
 ): void {
   if (deps.hub.hasDaemonForHost(args.hostId)) {
@@ -303,10 +341,6 @@ function completeDaemonActiveWorkDisconnectGrace(
     cause: "host-connection-lost",
   });
   rememberLostBackgroundTasks(args.hostId, new Map(), interrupted);
-  interruptEnvironmentProvisioningForHost(deps, {
-    hostId: args.hostId,
-    reason: DAEMON_DISCONNECTED_ENVIRONMENT_PROVISIONING_REASON,
-  });
 }
 
 function notifyHostThreadRuntimeStatusChanged(

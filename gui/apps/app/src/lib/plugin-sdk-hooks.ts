@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { matchPath, useLocation, useNavigate } from "react-router-dom";
+import { matchPath, useLocation, useNavigate } from "react-router";
 import type { PromptTextMention } from "@cloudroom/domain";
 import type {
   BbContext,

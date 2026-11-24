@@ -17,7 +17,10 @@ type EnvironmentReadinessFields = Pick<Environment, "path" | "status">;
 
 type ThreadEnvironmentStatusFields = Pick<Environment, "status">;
 
-type ThreadWritableFields = Pick<Thread, "archivedAt" | "deletedAt" | "status">;
+type ThreadWritableFields = Pick<
+  Thread,
+  "archivedAt" | "deletedAt" | "id" | "status"
+>;
 
 type HostUnavailableStatus = 404 | 502;
 
@@ -94,6 +97,7 @@ function threadNotWritableDetails(
     reason,
     archivedAt: thread.archivedAt,
     threadStatus: thread.status,
+    threadId: thread.id,
   };
 }
 

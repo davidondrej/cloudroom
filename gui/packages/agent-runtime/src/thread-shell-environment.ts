@@ -1,4 +1,5 @@
 import { lstatSync, readlinkSync, symlinkSync } from "node:fs";
+import { diagnosticShellEnvValue } from "@cloudroom/domain";
 import type {
   AgentRuntimeContributedEnvEntry,
   AgentRuntimeShellEnvironment,
@@ -82,7 +83,11 @@ export function resolveThreadEnvironment(args: ResolveThreadEnvironmentArgs): {
   const envVars = buildThreadShellEnvironment(args);
   const droppedContributions: DroppedThreadEnvironmentContribution[] = [];
   const entries: ResolvedThreadEnvironmentEntry[] = Object.entries(envVars).map(
-    ([name, value]) => ({ name, source: "shell", value }),
+    ([name, value]) => ({
+      name,
+      source: "shell",
+      value: diagnosticShellEnvValue(name, value),
+    }),
   );
   for (const contribution of args.contributedEnv) {
     let value: string;

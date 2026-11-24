@@ -82,22 +82,26 @@ async function prepareWindowsPython() {
   console.log("Bundled Python 3.12.13 for Windows x64: checksums verified; licenses included.");
 }
 
-/** The Rust Mac helper (`cloudroom helper` in Core), behind the rust-helper switch in the server's previews.ts. */
-async function prepareHelper() {
+/** Core's binary: the Git panel's `cloudroom git` everywhere, and on macOS the Rust Mac helper (`cloudroom helper`). */
+export async function prepareCore() {
   const core = fileURLToPath(new URL("../../../../core/", import.meta.url));
   const rustup = join(homedir(), ".cargo/bin/cargo");
   const cargo = process.env.CARGO ?? (existsSync(rustup) ? rustup : "cargo");
   execFileSync(cargo, ["build", "--release", "--locked", "--manifest-path", join(core, "Cargo.toml")], { stdio: "inherit" });
-  const binary = join(root, "cloudroom-core/cloudroom");
+  const name = process.platform === "win32" ? "cloudroom.exe" : "cloudroom";
+  const binary = join(root, "cloudroom-core", name);
   await rm(join(root, "cloudroom-core"), { recursive: true, force: true });
-  await mkdir(join(root, "cloudroom-core"));
-  await cp(join(process.env.CARGO_TARGET_DIR ?? join(core, "target"), "release/cloudroom"), binary);
-  execFileSync("/usr/bin/strip", ["-x", binary]);
+  await mkdir(join(root, "cloudroom-core"), { recursive: true });
+  await cp(join(process.env.CARGO_TARGET_DIR ?? join(core, "target"), "release", name), binary);
+  if (process.platform === "darwin") execFileSync("/usr/bin/strip", ["-x", binary]);
   execFileSync(binary, ["--version"], { stdio: "inherit" });
 }
 
 export async function prepareRuntimes() {
-  if (process.platform === "win32" && process.arch === "x64") return prepareWindowsPython();
+  if (process.platform === "win32" && process.arch === "x64") {
+    await prepareWindowsPython();
+    return prepareCore();
+  }
   if (process.platform !== "darwin" || process.arch !== "arm64") {
     throw new Error("Bundled runtimes require an Apple Silicon macOS build host.");
   }
@@ -130,7 +134,7 @@ export async function prepareRuntimes() {
   await rm(staging, { recursive: true, force: true });
   execFileSync(join(root, "python/bin/python3"), ["-I", "-B", "-c", pythonCheck], { stdio: "inherit" });
   execFileSync(join(git, "bin/git"), ["--version"], { stdio: "inherit" });
-  await prepareHelper();
+  await prepareCore();
   console.log("Bundled Python 3.12.13 and Git 2.53.0: checksums verified; licenses and Git sources included.");
 }
 

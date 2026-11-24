@@ -19,8 +19,8 @@
     "drizzle"
   ],
   "scripts": {
-    "clean": "rimraf dist tsconfig.tsbuildinfo",
-    "typecheck": "tsc --noEmit",
+    "clean": "node ../../scripts/rm.mjs dist tsconfig.tsbuildinfo",
+    "typecheck": "bun check",
     "test": "vitest run --config vitest.config.ts",
     "db:generate": "drizzle-kit generate",
     "db:studio": "drizzle-kit studio"
@@ -29,15 +29,14 @@
     "@cloudroom/config": "workspace:*",
     "@cloudroom/domain": "workspace:*",
     "better-sqlite3": "12.10.0",
-    "drizzle-orm": "^0.38.0"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
-    "drizzle-kit": "^0.30.0",
+    "drizzle-kit": "^0.31.4",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
     "vitest": "^4.1.1"
   }
 }

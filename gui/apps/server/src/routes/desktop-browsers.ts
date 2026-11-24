@@ -72,7 +72,7 @@ export function registerDesktopBrowserRoutes(app: Hono, deps: AppDeps) {
     return c.json(await openDesktopBrowserConnection(deps, input));
   });
   post(routes.releaseControl, async (c, input) =>
-    c.json(await releaseDesktopBrowserControl(deps, input)),
+    c.json(await releaseDesktopBrowserControl(deps, input, true)),
   );
   post(routes.captureTab, async (c, input) => {
     c.header("Cache-Control", "no-store");

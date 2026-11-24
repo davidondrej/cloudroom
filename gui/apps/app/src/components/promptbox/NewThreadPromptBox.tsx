@@ -78,7 +78,12 @@ import {
   selectPrimaryHost,
   useHosts,
 } from "@/hooks/queries/host-queries";
-import { useSystemConfig } from "@/hooks/queries/system-queries";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  providerModelsRoute,
+  systemExecutionOptionsQueryOptions,
+  useSystemConfig,
+} from "@/hooks/queries/system-queries";
 import { useSystemMachineProviders } from "@/hooks/queries/machine-provider-queries";
 import { useHostDaemon } from "@/hooks/useHostDaemon";
 
@@ -349,6 +354,26 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
     () => promptBoxRef.current?.focus(),
     [promptBoxRef],
   );
+  const queryClient = useQueryClient();
+  const { environmentId, hostId, projectId } = execution.providerRouting ?? {};
+  // Shortcuts read the same cached list the model picker shows for that harness.
+  const loadModels = useCallback(
+    async (providerId: string) =>
+      (
+        await queryClient.fetchQuery(
+          systemExecutionOptionsQueryOptions({
+            ...providerModelsRoute(
+              queryClient,
+              { environmentId, hostId, projectId },
+              providerId,
+            ),
+            providerId,
+            writeLastKnown: false,
+          }),
+        )
+      ).models.map(({ model }) => model),
+    [environmentId, hostId, projectId, queryClient],
+  );
   const placeholder = placeholderOverride ?? NEW_THREAD_PROMPT_PLACEHOLDER;
   const placeholderHint =
     placeholderOverride === undefined && !isProjectlessPrompt
@@ -430,7 +455,7 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           execution.model.isLoading ||
           execution.model.loadFailed
             ? undefined
-            : promptModelShortcuts(execution)
+            : promptModelShortcuts(execution, { loadModels })
         }
         locationCommands={promptLocationCommands(
           modeConfig.environment,
@@ -462,7 +487,11 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
               <ProjectSelector
                 projects={project.projects}
                 value={project.value}
-                onChange={project.onChange}
+                onChange={(projectId) => {
+                  // A project picked by hand is on purpose, so the wrong-project hint stays off for this prompt.
+                  nudge.dismiss();
+                  project.onChange(projectId);
+                }}
                 allowNoProject={project.allowNoProject ?? false}
                 createProject={project.createProject}
                 disabled={project.disabled}

@@ -1,10 +1,10 @@
 // Every declared `__NAME__` build constant (`declare const`) must be filled in by a build script's `define`.
 // Renames can't see these: build scripts match them by text, so a renamed reader silently gets undefined.
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
-const files = execFileSync("git", ["ls-files", "*.ts", "*.tsx", "*.mts", "*.mjs", "*.js", "*.cjs"], { encoding: "utf8" })
-  .split("\n").filter((f) => f && !/(^|\/)(dist|node_modules)\/|\.(test|spec)\.|\/__tests__\//.test(f));
+const files = execFileSync("git", ["ls-files", "-z", "*.ts", "*.tsx", "*.mts", "*.mjs", "*.js", "*.cjs"], { encoding: "utf8" })
+  .split("\0").filter((f) => f && existsSync(f) && !/(^|\/)(dist|node_modules)\/|\.(test|spec)\.|\/__tests__\//.test(f));
 const declared = new Map();
 const defined = new Map();
 for (const file of files) {

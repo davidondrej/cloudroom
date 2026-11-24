@@ -15,7 +15,7 @@ import type {
   SystemConfigResponse,
   SystemMachineProvider,
 } from "@cloudroom/server-contract";
-import { MemoryRouter, useLocation } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";

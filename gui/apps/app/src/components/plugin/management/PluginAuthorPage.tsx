@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
   ResourceCollectionViewport,

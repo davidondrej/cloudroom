@@ -53,7 +53,15 @@ function createCommandGroupDeps(
   };
 }
 
+// Plugin commands load undici 7, which needs a global File (Node.js 20+). Older Node,
+// e.g. `node "$ROOM_CLI"`, threw and printed the minified bundle (#1800).
+const hasUndiciRuntime = typeof globalThis.File === "function";
+
 async function exitWhenIdle(code: number): Promise<void> {
+  if (!hasUndiciRuntime) {
+    process.exitCode = code;
+    return;
+  }
   await (await import("./plugin-cli-proxy.js")).exitWhenIdle(code);
 }
 
@@ -75,7 +83,13 @@ async function tryPluginCommandProxy(
     );
     return 1;
   }
-  if (result.outcome === "invalid") return;
+  if (result.outcome === "invalid") {
+    // Not "unknown command": the command may exist, but discovery failed (#1494).
+    console.error(
+      `Cannot run room-cli ${candidate}: Cloudroom at ${getUrl()} ${result.detail}`,
+    );
+    return 1;
+  }
   const match = proxy.findPluginCliCommand(result.contributions, candidate);
   if (match === undefined) {
     const disabledId = await proxy.findDisabledPluginForCommand(
@@ -93,15 +107,16 @@ async function tryPluginCommandProxy(
   }
   const argv = process.argv.slice(3);
   // `room-cli PLUGIN --help` always prints help: the plugin's own, or one built from its commands.
-  if (match.rendersHelp !== true && isCommandHelp(argv)) {
+  const snippet = match.pluginId === "snippets" ? proxy.snippetArguments(argv) : undefined;
+  if (match.rendersHelp !== true && (snippet ? snippet.help && !snippet.command : isCommandHelp(argv))) {
     const help = await import("./plugin-cli-help.js");
     process.exit(await help.printPluginCommandHelp(getUrl(), match));
   }
-  const command = match.commands.find((entry) => entry.name === argv[0]);
+  const command = match.commands.find((entry) => entry.name === (snippet?.command ?? argv[0]));
   if (
     command !== undefined &&
     match.rendersHelp !== true &&
-    argv.slice(1).some((arg) => arg === "--help" || arg === "-h")
+    (snippet?.help ?? argv.slice(1).some((arg) => arg === "--help" || arg === "-h"))
   ) {
     console.log(command.usage.replace(/^(bb|room|cloudroom) /, "room-cli "));
     return 0;
@@ -115,6 +130,8 @@ async function main(): Promise<void> {
   if (helpTarget !== undefined && !KNOWN_COMMAND_NAMES.has(helpTarget)) {
     process.argv.splice(2, 2, helpTarget, "--help");
   }
+  // `room-cli wake` is the Loops plugin's `room-cli loop wake`: a plugin has one top-level command.
+  if (process.argv[2] === "wake") process.argv.splice(2, 1, "loop", "wake");
   const firstArg = process.argv[2];
   const groups = selectCommandGroups(firstArg);
   if (groups.length === 0) {
@@ -177,6 +194,12 @@ Quick start:
 }
 
 main().catch(async (err) => {
-  console.error(err.message);
+  console.error(
+    !hasUndiciRuntime &&
+      err instanceof ReferenceError &&
+      /\bFile is not defined\b/u.test(err.message)
+      ? `room-cli: this command needs Node.js 22 or newer, but this is Node.js ${process.version}. Run room-cli itself, not with node, so it uses Cloudroom's own runtime.`
+      : err.message,
+  );
   await exitWhenIdle(1);
 });

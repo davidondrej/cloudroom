@@ -44,6 +44,8 @@ interface CreateWorktreeArgs {
   sourcePath: string;
   targetPath: string;
   completionPath: string;
+  /** Brings the remote base branch up to date. Defaults to waiting for a fetch. */
+  refreshBase?: ((baseBranch: string) => Promise<void>) | undefined;
   /** A faster way to get the checkout: moves a prebuilt one into place. Null when there is none. */
   claimSpare?:
     | ((startPoint: string) => Promise<GitCommandResult | null>)
@@ -400,7 +402,7 @@ function isMissingRemoteRef(error: unknown): boolean {
   );
 }
 
-async function resolveRemoteBaseBranch(
+export async function resolveRemoteBaseBranch(
   sourcePath: string,
   baseBranch: string,
   signal: AbortSignal | undefined,
@@ -427,19 +429,27 @@ async function resolveRemoteBaseBranch(
   };
 }
 
+/**
+ * "none" when the base is not a remote branch, "local" when only the local
+ * copy exists (#985), "fresh" when `skipIf` found it up to date.
+ */
 export async function fetchRemoteBaseBranch(args: {
   sourcePath: string;
   baseBranch: string;
   onProgress: ProgressCallback | undefined;
   signal: AbortSignal | undefined;
-}): Promise<void> {
+  /** For a fetch that outlives its host call, whose environment is gone by then. */
+  env?: NodeJS.ProcessEnv | undefined;
+  /** Checked once this fetch holds the ref lock: another fetch may have just finished. */
+  skipIf?: (() => Promise<boolean>) | undefined;
+}): Promise<"fetched" | "local" | "none" | "fresh"> {
   const remoteBase = await resolveRemoteBaseBranch(
     args.sourcePath,
     args.baseBranch,
     args.signal,
   );
   if (!remoteBase) {
-    return;
+    return "none";
   }
 
   const startedAt = Date.now();
@@ -457,17 +467,23 @@ export async function fetchRemoteBaseBranch(args: {
   try {
     throwIfProvisionAborted(args.signal);
     const commonDir = await getGitCommonDir(args.sourcePath, gitProcessOptions);
+    let skipped = false;
     const fetchBaseBranch = async (): Promise<void> => {
       try {
         await withGitRefMutationLock(
           commonDir,
-          () =>
-            runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
+          async () => {
+            if (await args.skipIf?.()) {
+              skipped = true;
+              return;
+            }
+            await runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
               cwd: args.sourcePath,
               ...gitProcessOptions,
-              env: { GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+              env: { ...args.env, GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
               timeoutMs: REMOTE_BASE_FETCH_TIMEOUT_MS,
-            }),
+            });
+          },
           args.signal !== undefined ? { signal: args.signal } : {},
         );
       } catch (error) {
@@ -519,6 +535,7 @@ export async function fetchRemoteBaseBranch(args: {
         );
       }
     }
+    if (skipped) return "fresh";
     emitStep({
       onProgress: args.onProgress,
       key: "git-fetch-completed",
@@ -527,6 +544,7 @@ export async function fetchRemoteBaseBranch(args: {
       startedAt,
       metadata: { durationMs: Date.now() - startedAt },
     });
+    return "fetched";
   } catch (error) {
     // An alias from a custom fetch refspec (a pull request ref) has no
     // refs/heads twin on the remote, so use the local copy (#985).
@@ -542,7 +560,7 @@ export async function fetchRemoteBaseBranch(args: {
         startedAt,
         metadata: { durationMs: Date.now() - startedAt },
       });
-      return;
+      return "local";
     }
     emitStep({
       onProgress: args.onProgress,
@@ -697,6 +715,38 @@ async function removeCreateTarget(args: CreateWorktreeArgs): Promise<void> {
   });
 }
 
+/**
+ * Git for Windows stops at 260-character paths unless core.longpaths is on,
+ * and managed worktrees sit deep in the data folder (#1806). Turn it on in the
+ * repository, so the agent's own Git works there too, unless it is set anywhere.
+ */
+export async function allowLongPaths(
+  sourcePath: string,
+  signal?: AbortSignal,
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform !== "win32") return;
+  const options = {
+    cwd: sourcePath,
+    ...signalOptions(signal),
+    allowFailure: true,
+  };
+  // Under the lock `worktree add` takes, which also writes this config file.
+  await withWorktreeMetadataLock(
+    await getGitCommonDir(sourcePath, signalOptions(signal)),
+    async () => {
+      // Exit 1: not set in any Git config.
+      if (
+        (await runGit(["config", "--get", "core.longpaths"], options))
+          .exitCode === 1
+      )
+        await runGit(["config", "--local", "core.longpaths", "true"], options);
+    },
+    signal,
+    true,
+  );
+}
+
 export async function createWorktree(
   args: CreateWorktreeArgs,
 ): Promise<{ path: string; startPoint?: string }> {
@@ -751,9 +801,6 @@ export async function createWorktree(
   });
 
   throwIfProvisionAborted(args.signal);
-  await ensureWorkspaceParentDirectory(args.targetPath);
-
-  throwIfProvisionAborted(args.signal);
   const reuseExistingBranch =
     args.branchMode === "reuse-existing" &&
     (await hasRef(args.sourcePath, `refs/heads/${args.branchName}`));
@@ -772,12 +819,13 @@ export async function createWorktree(
       );
     }
     throwIfProvisionAborted(args.signal);
-    await fetchRemoteBaseBranch({
-      sourcePath: args.sourcePath,
-      baseBranch,
-      onProgress: args.onProgress,
-      signal: args.signal,
-    });
+    await (args.refreshBase?.(baseBranch) ??
+      fetchRemoteBaseBranch({
+        sourcePath: args.sourcePath,
+        baseBranch,
+        onProgress: args.onProgress,
+        signal: args.signal,
+      }));
     startPoint = await resolveStartPoint({
       sourcePath: args.sourcePath,
       baseBranch,
@@ -794,6 +842,9 @@ export async function createWorktree(
     ];
   }
 
+  await allowLongPaths(args.sourcePath, args.signal);
+  // Only now: a failed fetch would leave this folder behind empty (#1689).
+  await ensureWorkspaceParentDirectory(args.targetPath);
   const worktreeStartedAt = Date.now();
   emitStep({
     onProgress: args.onProgress,
@@ -811,6 +862,8 @@ export async function createWorktree(
         ["-c", "checkout.workers=0", ...gitArgs],
         {
           cwd: args.sourcePath,
+          // The user's post-checkout hook runs, as in their own `git worktree add`.
+          hooks: true,
           ...(args.signal !== undefined ? { signal: args.signal } : {}),
         },
       ));

@@ -690,6 +690,22 @@ describe("public thread parenting routes", () => {
           originKind: "fork",
           sourceThreadId: child.id,
         });
+        // A side chat moved under another thread now belongs to it (#2136).
+        const movedSideChat = seedThread(harness.deps, {
+          ...defaults,
+          originKind: "fork",
+          visibility: "hidden",
+          sourceThreadId: child.id,
+        });
+        const moved = await harness.app.request(
+          `/api/v1/threads/${movedSideChat.id}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ parentThreadId: unrelated.id }),
+          },
+        );
+        expect(moved.status).toBe(200);
         const archived = [
           root,
           child,
@@ -732,7 +748,7 @@ describe("public thread parenting routes", () => {
             );
           }
         }
-        for (const thread of [unrelated, visibleFork]) {
+        for (const thread of [unrelated, visibleFork, movedSideChat]) {
           expect(getThread(harness.db, thread.id)?.archivedAt).toBeNull();
         }
       });

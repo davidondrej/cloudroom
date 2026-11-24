@@ -2,7 +2,7 @@
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter } from "react-router";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { AppNavigationHostProvider } from "@/lib/app-navigation-host";
 import { ExperimentalFileLink } from "./ExperimentalFileLink";

@@ -10,6 +10,8 @@ use std::{
     time::Duration,
 };
 use tokio::{process::Command, sync::mpsc};
+mod agent_zero;
+pub(crate) mod antigravity;
 pub(crate) mod auth;
 mod claude;
 pub(crate) mod claude_auth;
@@ -30,7 +32,7 @@ mod hermes;
 mod kimi;
 pub(crate) mod linux;
 mod openclaw;
-mod opencode;
+pub(crate) mod opencode;
 mod pi;
 pub(crate) mod pi_auth;
 mod process;
@@ -56,8 +58,11 @@ pub enum Kind {
     Devin,
     Droid,
     Kimi,
+    Antigravity,
     #[serde(rename = "openclaw")]
     OpenClaw,
+    #[serde(rename = "agent-zero")]
+    AgentZero,
 }
 impl Kind {
     /// A harness as Core or the app names it: `cursor` or `acp-cursor`, `hermes` or `acp-hermes-agent`.
@@ -69,12 +74,25 @@ impl Kind {
     pub fn fast(self) -> bool {
         matches!(self, Kind::Codex | Kind::Cursor)
     }
+    /// Whether a prompt may ask this harness for `tier`. Ultra Fast is Codex's own; a model
+    /// without it runs at standard speed.
+    pub fn tier(self, tier: &str) -> bool {
+        match tier {
+            "default" => true,
+            "fast" => self.fast(),
+            "ultrafast" => self == Kind::Codex,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Model {
     pub model: String,
     pub reasoning_levels: Vec<String>,
+    /// Speeds beside the standard one: `fast`, `ultrafast`. Codex only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<String>,
 }
 
 /// Effort levels the catalog allows for `model`, or `None` when the model is not offered.
@@ -141,6 +159,7 @@ pub const PI_REASONING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "
 pub fn pi_reasoning_accepted(level: &str) -> bool {
     level == "max" || PI_REASONING_LEVELS.contains(&level)
 }
+pub use agent_zero::REASONING_LEVELS as AGENT_ZERO_REASONING_LEVELS;
 pub use devin::REASONING_LEVELS as DEVIN_REASONING_LEVELS;
 pub use droid::REASONING_LEVELS as DROID_REASONING_LEVELS;
 pub use hermes::REASONING_LEVELS as HERMES_REASONING_LEVELS;
@@ -157,6 +176,7 @@ pub async fn prepare(
 ) -> io::Result<()> {
     match kind {
         Kind::OpenClaw => openclaw::prepare(config, storage).await,
+        Kind::Antigravity => antigravity::prepare(config, storage).await,
         _ => Ok(()),
     }
 }
@@ -226,7 +246,15 @@ pub async fn probe(
 }
 
 pub async fn models(config: &Config, kind: Kind) -> (io::Result<Vec<Model>>, Option<Event>) {
-    let (handle, mut events) = match Handle::spawn(config, kind, None) {
+    let (handle, mut events) = match Handle::spawn_inner(
+        config,
+        kind,
+        None,
+        (true, true),
+        (None, Vec::new()),
+        None,
+        true,
+    ) {
         Ok(spawned) => spawned,
         Err(error) => return (Err(error), None),
     };
@@ -267,6 +295,7 @@ pub struct Resume {
 pub struct Fork {
     pub source: Resume,
     pub before: Option<String>,
+    pub through: Option<String>,
     pub last_turn_id: Option<String>,
 }
 
@@ -297,6 +326,8 @@ pub enum Event {
         request: String,
         status: String,
         error: Option<String>,
+        /// The turn's latest reply text as it ended, before a turn right after it can replace it (#217).
+        text: String,
     },
     Compacted {
         status: String,
@@ -370,6 +401,7 @@ impl Progress {
             request,
             status: status.into(),
             error,
+            text: self.last_text.clone(),
         })
     }
 }
@@ -404,6 +436,9 @@ trait Adapter: Send {
         code == Some(0)
     }
 }
+
+/// `ROOM_THREAD_ID` and `ROOM_PROJECT_ID` for the agent's shells, the names Local uses (#199).
+pub type RoomEnv = Vec<(&'static str, String)>;
 
 /// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from commit messages and says so on stderr.
 /// With a session folder, it strips only real repositories (#811): the session's own (any worktree, submodule, or
@@ -462,6 +497,7 @@ pub struct Handle {
     command_guard_enabled: bool,
     strip_ai_co_authors: bool,
     system_prompt: Option<String>,
+    room_env: RoomEnv,
     controls: Arc<tokio::sync::Mutex<()>>,
     /// Claude's login when it started; it reads the login only then.
     login: Option<u64>,
@@ -474,7 +510,7 @@ impl Handle {
         kind: Kind,
         resume: Option<Resume>,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
-        Self::spawn_guarded(config, kind, resume, true, true, None)
+        Self::spawn_guarded(config, kind, resume, true, true, None, Vec::new())
     }
 
     pub fn spawn_guarded(
@@ -484,14 +520,16 @@ impl Handle {
         command_guard_enabled: bool,
         strip_ai_co_authors: bool,
         system_prompt: Option<String>,
+        room_env: RoomEnv,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         Self::spawn_inner(
             config,
             kind,
             resume,
             (command_guard_enabled, strip_ai_co_authors),
-            system_prompt,
+            (system_prompt, room_env),
             None,
+            false,
         )
     }
 
@@ -503,6 +541,7 @@ impl Handle {
         command_guard_enabled: bool,
         strip_ai_co_authors: bool,
         system_prompt: Option<String>,
+        room_env: RoomEnv,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         if kind != Kind::Claude {
             return Self::spawn_guarded(
@@ -512,6 +551,7 @@ impl Handle {
                 command_guard_enabled,
                 strip_ai_co_authors,
                 system_prompt,
+                room_env,
             );
         }
         let profile = config
@@ -520,9 +560,12 @@ impl Handle {
             .ok_or_else(|| io::Error::other("harness not configured"))?;
         let identity = config.storage.as_ref().map(|p| (p.agent_uid, p.agent_gid));
         // An empty checkpoint copies the whole conversation.
-        let at = match &fork.before {
-            Some(before) => claude::checkpoint_parent(profile, &fork.source, before, identity)?,
-            None => String::new(),
+        let at = match (&fork.through, &fork.before) {
+            (Some(id), _) => claude::fork_checkpoint(profile, &fork.source, id, identity, true)?,
+            (_, Some(before)) => {
+                claude::fork_checkpoint(profile, &fork.source, before, identity, false)?
+            }
+            _ => String::new(),
         };
         let resume = Some(fork.source.clone());
         Self::spawn_inner(
@@ -530,8 +573,9 @@ impl Handle {
             kind,
             resume,
             (command_guard_enabled, strip_ai_co_authors),
-            system_prompt,
+            (system_prompt, room_env),
             Some(&at),
+            false,
         )
     }
 
@@ -540,8 +584,9 @@ impl Handle {
         kind: Kind,
         resume: Option<Resume>,
         (command_guard_enabled, strip_ai_co_authors): (bool, bool),
-        system_prompt: Option<String>,
+        (system_prompt, room_env): (Option<String>, RoomEnv),
         fork: Option<&str>,
+        probe: bool,
     ) -> io::Result<(Self, mpsc::Receiver<Event>)> {
         let mut profile = config
             .harnesses
@@ -569,9 +614,9 @@ impl Handle {
                     &profile,
                     resume.as_ref(),
                     fork,
-                    command_guard_enabled,
-                    strip_ai_co_authors,
+                    (command_guard_enabled, strip_ai_co_authors),
                     system_prompt.as_deref(),
+                    probe,
                 )?;
                 let saved = resume.as_ref().filter(|_| fork.is_none());
                 (
@@ -651,9 +696,29 @@ impl Handle {
                 None,
                 None,
             ),
+            Kind::Antigravity => (
+                antigravity::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    &profile,
+                    resume.as_ref(),
+                    antigravity::AGY,
+                )),
+                None,
+                None,
+            ),
             Kind::Kimi => (
                 kimi::command(config, &profile)?,
                 Box::new(cursor::Protocol::new(&profile, resume.as_ref(), kimi::KIMI)),
+                None,
+                None,
+            ),
+            Kind::AgentZero => (
+                agent_zero::command(config, &profile)?,
+                Box::new(cursor::Protocol::new(
+                    &profile,
+                    resume.as_ref(),
+                    agent_zero::AGENT_ZERO,
+                )),
                 None,
                 None,
             ),
@@ -692,6 +757,13 @@ impl Handle {
         if strip_ai_co_authors {
             strip_ai_co_authors_env(&mut command, Some(&config.repository));
         }
+        // Without Core's own ID, one the user saved in their Cloud environment would name the wrong thread or project.
+        for name in ["ROOM_THREAD_ID", "ROOM_PROJECT_ID"] {
+            match room_env.iter().find(|(own, _)| *own == name) {
+                Some((_, value)) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
         let (process, events) = process::Process::spawn(config, command, adapter)?;
         let live_model = Arc::new(Mutex::new(profile.model.clone()));
         Ok((
@@ -710,6 +782,7 @@ impl Handle {
                 command_guard_enabled,
                 strip_ai_co_authors,
                 system_prompt,
+                room_env,
                 controls: Arc::new(tokio::sync::Mutex::new(())),
                 login,
                 mcp_login,
@@ -786,7 +859,9 @@ impl Handle {
                 | Kind::Devin
                 | Kind::Droid
                 | Kind::Kimi
+                | Kind::Antigravity
                 | Kind::OpenClaw
+                | Kind::AgentZero
         ) {
             return cursor::capabilities(self.kind);
         }
@@ -808,7 +883,9 @@ impl Handle {
             Kind::Devin => devin::start(&startup).await,
             Kind::Droid => droid::start(&startup).await,
             Kind::Kimi => kimi::start(&startup).await,
+            Kind::Antigravity => antigravity::start(&startup).await,
             Kind::OpenClaw => openclaw::start(&startup).await,
+            Kind::AgentZero => agent_zero::start(&startup).await,
         }
     }
     /// Starts a `spawn_fork` harness and returns the side chat's new native ID.
@@ -853,7 +930,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::send(self, request, input)
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::send(self, request, input)
                 .await
                 .map(|()| Vec::new()),
             Kind::Fx => fx::send(self, request, input).await.map(|()| Vec::new()),
@@ -877,7 +956,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::steer(self, request, text).await,
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::steer(self, request, text).await,
             Kind::Fx => fx::steer(self, request, text).await,
         }
     }
@@ -893,7 +974,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP compaction is not supported",
             )),
@@ -923,7 +1006,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "ACP rewind is not supported",
             )),
@@ -952,8 +1037,9 @@ impl Handle {
             self.kind,
             Some(saved),
             (self.command_guard_enabled, self.strip_ai_co_authors),
-            self.system_prompt.clone(),
+            (self.system_prompt.clone(), self.room_env.clone()),
             Some(&parent),
+            false,
         )
         .map(|(handle, events)| Some((handle.with_reasoning(self.reasoning.clone()), events)))
     }
@@ -1012,7 +1098,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Ok(None),
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => Ok(None),
         }
     }
     pub async fn interrupt(&self, request: &str) -> io::Result<()> {
@@ -1034,7 +1122,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => cursor::interrupt(self, state).await,
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => cursor::interrupt(self, state).await,
         }
     }
     pub async fn system_message(&self, text: &str) -> io::Result<()> {
@@ -1049,7 +1139,9 @@ impl Handle {
             | Kind::Devin
             | Kind::Droid
             | Kind::Kimi
-            | Kind::OpenClaw => Err(io::Error::new(
+            | Kind::Antigravity
+            | Kind::OpenClaw
+            | Kind::AgentZero => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "ACP context-only notices are unavailable",
             )),
@@ -1061,6 +1153,10 @@ impl Handle {
     /// The tool command that wrote the most to disk; see `linux::Workload::top_writer`.
     pub fn top_writer(&self) -> io::Result<Option<linux::Writer>> {
         self.process.top_writer()
+    }
+    /// Ends every tool command, never the harness; see `linux::Workload::stop_commands`.
+    pub fn stop_commands(&self) -> io::Result<()> {
+        self.process.stop_commands()
     }
     pub fn request_shutdown(&self) {
         self.process.request_shutdown();
@@ -1094,8 +1190,10 @@ pub fn check_resume_history(
         Kind::Hermes => return hermes::validate(profile, saved, identity),
         Kind::Devin => return devin::validate(profile, saved, identity),
         Kind::Droid => return droid::validate(profile, saved, identity),
+        Kind::Antigravity => return antigravity::validate(profile, saved, identity),
         Kind::Kimi => return kimi::validate(profile, saved, identity),
         Kind::OpenClaw => return openclaw::validate(profile, saved, identity),
+        Kind::AgentZero => return agent_zero::validate(profile, saved, identity),
         _ => {}
     }
     let file = files::open(
@@ -1138,9 +1236,15 @@ pub fn recover_records(
         }
         Kind::Devin => devin::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::Droid => droid::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
+        Kind::Antigravity => {
+            antigravity::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
         Kind::Kimi => kimi::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid))),
         Kind::OpenClaw => {
             openclaw::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
+        }
+        Kind::AgentZero => {
+            agent_zero::validate(profile, saved, policy.map(|p| (p.agent_uid, p.agent_gid)))
         }
         Kind::Codex => codex::recover(
             profile,
@@ -1211,7 +1315,9 @@ pub fn checkpoint(
         | Kind::Devin
         | Kind::Droid
         | Kind::Kimi
-        | Kind::OpenClaw => Err(io::Error::other("ACP stream has no native records")),
+        | Kind::Antigravity
+        | Kind::OpenClaw
+        | Kind::AgentZero => Err(io::Error::other("ACP stream has no native records")),
     }
 }
 

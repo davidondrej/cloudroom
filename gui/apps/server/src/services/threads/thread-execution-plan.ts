@@ -321,11 +321,14 @@ export async function resolveExistingThreadExecutionPlan(
     ],
     DEFAULT_REASONING_LEVEL,
   );
-  validateProviderReasoningLevel(
-    deps.providerRegistry,
-    thread.providerId,
-    reasoningLevel,
-  );
+  // Core checks a Cloud thread's level against its own catalog, which has levels the Mac's lacks ("none").
+  if (thread.executionTarget !== "cloud") {
+    validateProviderReasoningLevel(
+      deps.providerRegistry,
+      thread.providerId,
+      reasoningLevel,
+    );
+  }
 
   const supportsServiceTier =
     deps.providerRegistry.get(thread.providerId)?.info.capabilities
@@ -337,7 +340,8 @@ export async function resolveExistingThreadExecutionPlan(
           lastExecution?.serviceTier,
           projectExecution?.serviceTier,
         ]
-      : [args.input.serviceTier?.value],
+      : // No fast mode (Antigravity): an older client's Fast runs at the default speed instead of failing.
+        [],
     DEFAULT_SERVICE_TIER,
   );
 

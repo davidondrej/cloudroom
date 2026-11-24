@@ -195,14 +195,16 @@ Listing:
     --host <id>                            Count threads whose environment is on this machine
     --provider <id>                        Count threads running on this provider
     --project <id>                         Count threads in this project
-    --parent <id|none>                     Count one thread's children, or 'none' for threads with no parent
+    --parent <id|none|any>                 Count one thread's children, 'none' for threads with no parent, or 'any' for every child thread
+    --archived                             Count archived threads only
     --by <dimension>                       Group the count by host, provider, or project
 
   Counting happens in the database, so use it instead of listing threads and
   counting rows: `room-cli thread list` pages a bounded window and would miscount.
-  Archived, deleted, and hidden threads are excluded. Without --by the command
-  prints one number; with --by it prints a count per group (threads with no
-  host/provider/project group under "-") followed by the total.
+  Deleted and hidden threads are excluded, and archived ones too unless
+  --archived. Without --by the command prints one number; with --by it prints
+  a count per group (threads with no host/provider/project group under "-")
+  followed by the total.
 
 Sections:
 
@@ -219,6 +221,7 @@ Inspecting:
     --work-status                          Include git working-tree status
     --git-diff                             Include git diff
     --no-pr                                Skip the GitHub pull request lookup
+    --credits                              Include Cloud Credits, last 7 days (one website read)
     --diff-target <type>                   Diff scope: uncommitted, branch_committed, all, commit
     --diff-sha <sha>                       Commit SHA (for --diff-target commit)
     --diff-merge-base <branch>             Override merge-base branch for diff
@@ -324,7 +327,9 @@ Messaging:
   `input` to `threads.spawn` or `threads.send`.
 
   room-cli thread stop [id]                      Stop work and release the agent runtime
-  room-cli thread compact [id]                   Request compaction of an idle or errored thread's context
+  room-cli thread compact [id]                   Compact context now, or once the running turn ends
+    --then <text>                                Follow-up message after compaction (default: keep going)
+    --no-then                                    Send no follow-up
   room-cli thread clear [id]                     Clear model context for an idle or failed thread
   room-cli thread cancel-plan [id]               Exit the provider's active Plan mode
   room-cli thread clear-goal [id]                Clear the provider's Goal
@@ -334,8 +339,10 @@ Messaging:
                                                  (Goal commands: Codex threads only)
     --self                                 Target current thread
 
-  `thread compact` enqueues the same structured /compact turn used by the
-  composer. Follow the thread timeline for the eventual compaction result.
+  `thread compact` sends the same structured /compact turn as the composer. On a
+  busy thread it waits for the turn to end, so an agent can compact itself with
+  `--self` and then end its turn. The follow-up runs next, starting with whether
+  compaction worked; a stop drops it.
   `thread clear` keeps the Cloudroom thread, workspace, durable event history, and
   sticky execution settings. Its active timeline starts at one visible
   `Context cleared` boundary, and its next prompt starts a fresh provider
@@ -476,6 +483,7 @@ Lifecycle:
   room-cli thread unarchive [id]                 Unarchive a thread
     --self                                 Unarchive current thread
     --keep-parent                          Stay under the parent, even an archived one
+    --with-children                        Also unarchive the threads archived with it
 
   room-cli thread delete <id>                    Delete permanently
     --yes                                  Skip confirmation

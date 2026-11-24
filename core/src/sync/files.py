@@ -248,7 +248,9 @@ class Tree:
                             raise ValueError('invalid native header')
                         digest.update(line); count += len(line)
                         header = json.loads(line)
-                        metadata = header if native['harness'] == 'pi' else header.get('payload', {})
+                        metadata = header if native['harness'] == 'pi' else header.get('payload', {}) if isinstance(header, dict) else None
+                        if not isinstance(metadata, dict):
+                            raise ValueError('invalid native header')
                         expected = native['id']
                         if lineage:
                             owner = re.fullmatch(r'rollout-[0-9T-]{19}-([0-9a-f-]{36})(_[0-9a-f-]{36})?\.jsonl', lineage)
@@ -263,6 +265,8 @@ class Tree:
                         if lineage:
                             output.write(line)
                         else:
+                            if not isinstance(native['cwd'], str):
+                                raise ValueError('invalid native destination')
                             source, roots, posix = metadata.get('cwd'), metadata.get('runtime_workspace_roots'), native['cwd'].startswith('/')
                             metadata['cwd'] = native['cwd']
                             metadata.pop('dynamic_tools', None)
@@ -282,9 +286,48 @@ class Tree:
                         raise Conflict('upload checksum mismatch')
                     output.flush(); os.fsync(output.fileno())
                     os.fchmod(output.fileno(), 0o700 if request.get('executable') else 0o600)
+                if native and native['harness'] == 'antigravity':
+                    # A Teleport carries one SQLite backup, including committed WAL pages. Refuse a different
+                    # conversation or a Local/Cloud copy which advanced independently.
+                    import sqlite3
+                    base = f'/proc/self/fd/{fd}/'
+                    with contextlib.closing(sqlite3.connect('file:' + base + temporary + '?mode=ro&immutable=1', uri=True)) as db:
+                        db.execute('PRAGMA trusted_schema=OFF')
+                        if name != native['id'] + '.db' or not db.execute('SELECT 1 FROM trajectory_meta WHERE cascade_id=? LIMIT 1', (native['id'],)).fetchone():
+                            raise ValueError('Antigravity conversation identity mismatch')
+                        if os.path.lexists(base + name):
+                            # Let SQLite recover committed WAL pages and roll back a hot journal. Changing
+                            # out of WAL mode requires exclusive access. Never unlink the sidecars ourselves.
+                            for suffix in ('', '-wal', '-shm', '-journal'):
+                                path = base + name + suffix
+                                if os.path.lexists(path) and not stat.S_ISREG(os.lstat(path).st_mode):
+                                    raise Conflict('invalid Antigravity conversation file')
+                            with open(base + name, 'rb') as original, contextlib.closing(sqlite3.connect(
+                                    'file:' + base + name + '?mode=rw', uri=True, timeout=0)) as previous:
+                                previous.execute('PRAGMA trusted_schema=OFF')
+                                try:
+                                    previous.execute('PRAGMA locking_mode=EXCLUSIVE')
+                                    if previous.execute('PRAGMA journal_mode=DELETE').fetchone()[0] != 'delete':
+                                        raise Conflict('close the existing Antigravity conversation before moving it')
+                                    previous.execute('BEGIN EXCLUSIVE')
+                                except sqlite3.OperationalError as error:
+                                    raise Conflict('close the existing Antigravity conversation before moving it') from error
+                                previous.execute('ATTACH DATABASE ? AS incoming', ('file:' + base + temporary + '?mode=ro&immutable=1',))
+                                if not previous.execute('SELECT 1 FROM main.trajectory_meta WHERE cascade_id=? LIMIT 1', (native['id'],)).fetchone() or previous.execute('SELECT * FROM main.steps EXCEPT SELECT * FROM incoming.steps LIMIT 1').fetchone():
+                                    raise Conflict('the destination Antigravity conversation changed')
+                                previous_hash = hashlib.sha256()
+                                while chunk := original.read(CHUNK):
+                                    previous_hash.update(chunk)
+                                if previous_hash.digest() != digest.digest():
+                                    os.link(name, f'{name}.before-teleport-{uuid.uuid4().hex}', src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                                    os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
+                                    os.fsync(fd)
+                            return
                 try:
                     os.link(temporary, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
                 except FileExistsError:
+                    if native and native['harness'] == 'antigravity':
+                        raise Conflict('the destination Antigravity conversation changed during transfer')
                     def checksum(filename, limit=MAX_FILE_BYTES):
                         with os.fdopen(os.open(filename, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd), 'rb') as existing:
                             if not stat.S_ISREG(os.fstat(existing.fileno()).st_mode):

@@ -42,6 +42,9 @@ export type Db = Database.Database;
 const AUTOMATION_MAX_CONSECUTIVE_FAILURES = 3;
 /** Before a pause, a scheduled loop tries again 1 minute, then 15 minutes, after a failure. */
 export const AUTOMATION_RETRY_DELAYS_MS = [60_000, 15 * 60_000] as const;
+/** A run's error starts with this when its provider refused the work, say OpenAI's cybersecurity filter (run.ts). It
+ *  fails the run, but never counts toward a pause: its retry runs on the other provider (ADR 20261119-091500). */
+export const REFUSED = "Refused: ";
 // A paused loop tries again on its own (ADR 20261103-235500), like Cloud loops: 1 hour, 6 hours, then daily, until 10
 // failures in a row. Each try that fails adds one, so the count says how far along it is.
 const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
@@ -243,6 +246,8 @@ export const migrations = [
      ON automation_runs(started_at);`,
   `ALTER TABLE automations
      ADD COLUMN priority INTEGER NOT NULL DEFAULT 3;`,
+  // Core's ID for a same-thread run's message: its turn request, or queued row and content (#1100). Null keeps today's reports.
+  `ALTER TABLE automation_runs ADD COLUMN sent_id TEXT;`,
 ];
 
 export const REVIEW_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -835,7 +840,8 @@ function recordAutomationFailure(
   if (!automation) {
     return { consecutiveFailures: 0, paused: false, retryAt: null };
   }
-  const consecutiveFailures = automation.consecutiveFailures + 1;
+  const consecutiveFailures =
+    automation.consecutiveFailures + (args.error.startsWith(REFUSED) ? 0 : 1);
   // Turned off by hand while this run went on, it stays off: no pause mark, so it never tries again on its own.
   const paused =
     automation.enabled &&
@@ -1107,6 +1113,21 @@ export function setAutomationRunThread(
   return getAutomationRun(db, args.runId);
 }
 
+export function setAutomationRunSentId(db: Db, runId: string, sentId: string): void {
+  db.prepare(`UPDATE automation_runs SET sent_id = ? WHERE id = ?`).run(sentId, runId);
+}
+
+/** The thread's one run whose message Core took under one of these IDs; none or several stay unreported (#1100). */
+export function getSentRun(db: Db, threadId: string, ids: string[]): AutomationRunRow | null {
+  const rows = db
+    .prepare(
+      `SELECT ${AUTOMATION_RUN_COLUMNS} FROM automation_runs
+       WHERE thread_id = ? AND sent_id IN (SELECT value FROM json_each(?))`,
+    )
+    .all(threadId, JSON.stringify(ids));
+  return rows.length === 1 ? requiredRunRow(rows[0]) : null;
+}
+
 export function markAutomationThread(
   db: Db,
   args: { threadId: string; automationId: string; runId: string; now: number },
@@ -1130,6 +1151,33 @@ export function isAutomationSpawnedThread(db: Db, threadId: string): boolean {
       )
       .get(threadId) !== undefined
   );
+}
+
+/** A thread's wakes that have not fired yet: one-time loops it made to re-prompt itself. */
+export function countWaitingWakes(db: Db, threadId: string): number {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS waiting FROM automations
+       WHERE enabled = 1 AND trigger_type = 'once'
+         AND target_thread_id = ? AND created_by_thread_id = ?`,
+    )
+    .get(threadId, threadId) as { waiting: number };
+  return row.waiting;
+}
+
+/** One-time loops whose run succeeded before `before`: timers and reminders that did their job. A failed or
+ *  paused one stays, so its reason stays readable. */
+export function listFinishedOnceAutomations(
+  db: Db,
+  before: number,
+): { projectId: string; automationId: string }[] {
+  return db
+    .prepare(
+      `SELECT project_id AS projectId, id AS automationId FROM automations
+       WHERE trigger_type = 'once' AND enabled = 0
+         AND last_run_status = 'succeeded' AND last_run_at < ?`,
+    )
+    .all(before) as { projectId: string; automationId: string }[];
 }
 
 export function listRunningAutomationRuns(db: Db): AutomationRunRow[] {

@@ -11,6 +11,7 @@ import {
 import { z } from "zod";
 import {
   applyCodexRateLimitUpdate,
+  codexRateLimitsDelta,
   clearCodexEventTranslationThreadState,
   createCodexEventTranslationState,
   setCodexInjectedTools,
@@ -373,6 +374,7 @@ export function createCodexEventTranslator(
 ) {
   const additionalWorkspaceWriteRoots = options.additionalWorkspaceWriteRoots;
   const eventTranslationState = createCodexEventTranslationState();
+  let seedApplied = false;
   const nativeTurnStartClientRequestIdsByProviderThreadId = new Map<
     string,
     ClientTurnRequestId[]
@@ -1515,6 +1517,9 @@ export function createCodexEventTranslator(
         },
         required: false,
         onResult(result: unknown) {
+          // Codex's own updates are newer than this read (#1816).
+          if (eventTranslationState.codexSentRateLimits) return;
+          seedApplied = true;
           const response = codexRateLimitReadResponseSchema.parse(result);
           const snapshots = response.rateLimitsByLimitId;
           if (snapshots === null || Object.keys(snapshots).length === 0) {
@@ -1569,6 +1574,13 @@ export function createCodexEventTranslator(
     );
   }
 
+  /** The rate-limit event for a seed applied after the bridge stopped waiting. */
+  function takeLateSeedDeltas(): ThreadDelta[] {
+    if (!seedApplied) return [];
+    seedApplied = false;
+    return codexRateLimitsDelta(eventTranslationState);
+  }
+
   function configureInjectedTools(tools: readonly CodexInjectedTool[]): void {
     setCodexInjectedTools(eventTranslationState, tools);
   }
@@ -1581,6 +1593,7 @@ export function createCodexEventTranslator(
     getThreadGitWritableRoots,
     prepareTurnStart: queueNativeTurnStartClientRequestId,
     prepareWorkspaceWriteGitRoots,
+    takeLateSeedDeltas,
     translateEvent,
   };
 }

@@ -11,7 +11,7 @@ import {
   ViewIcon,
   ViewOffSlashIcon,
 } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import { HugeiconsIcon } from "@cloudroom/shared-ui/hugeicons-icon";
 import {
   SECRET_REQUEST_RENDERER_ID,
   secretRequestPayloadSchema,

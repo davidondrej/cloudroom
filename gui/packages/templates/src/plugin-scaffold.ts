@@ -1468,6 +1468,10 @@ Your editor and \`tsc\` resolve \`@get-bb/plugin-sdk\` there through ordinary no
 resolution — no path mapping. These are readable declarations: open them for an
 exact signature.
 
+One exception: AI services. Cloudroom rejects the npm types' \`complete\` and
+\`transcribe\` functions at install. Use \`kinds\` and a \`bb.host\` entry, as the
+\`plugin-authoring\` skill shows.
+
 The SDK surface grows with every Cloudroom release, so the pin has to track the Cloudroom you
 actually run:
 
