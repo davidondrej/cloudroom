@@ -15,7 +15,7 @@ import type { CreateThreadRequest } from "@cloudroom/server-contract";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomError, type SessionRecord } from "./client.js";
 import { sharedChildId } from "./cloud-threads.js";
-import { CLOUD_HARNESSES, HARNESS_NAMES, isCloudProvider, projectFollowUp, type CloudProvider } from "./events.js";
+import { CLOUD_HARNESSES, cloudProviderId, HARNESS_NAMES, isCloudProvider, projectFollowUp, type CloudProvider } from "./events.js";
 import {
   AGENT_FORK_WAIT,
   AGENT_FORKS,
@@ -186,8 +186,8 @@ export class CloudChildren {
   async adoptRun(run: AutomationRun): Promise<void> {
     // The run's own label names its agent (a launch may pick another); older runs fall back to the source thread's (ADR 0250).
     const source = this.rt.host.getThread(run.source), home = binding(this.rt.host.db, run.source);
-    const own = isCloudProvider(run.harness ?? undefined) && run.model;
-    const providerId = own ? run.harness : source && home ? source.providerId : run.harness;
+    const harness = cloudProviderId(run.harness), own = harness && run.model;
+    const providerId = own ? harness : source && home ? source.providerId : harness;
     const model = own ? run.model : home?.model ?? run.model;
     // A child the website started goes under the parent the website links (ADR 20261104-015709), so a move made on
     // any Mac stays, and one an older app showed top-level gets its parent. A website too old to say: who started it.
@@ -248,7 +248,7 @@ export class CloudChildren {
       }
       return;
     }
-    const providerId = isCloudProvider(child.harness ?? undefined) ? child.harness as CloudProvider : parentThread.providerId;
+    const providerId = cloudProviderId(child.harness) ?? parentThread.providerId;
     const model = child.model ?? parent.model;
     if (!isCloudProvider(providerId) || !model) return;
     const adopted = this.rt.host.db.transaction((tx) => {
