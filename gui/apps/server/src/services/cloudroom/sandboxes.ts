@@ -1422,7 +1422,25 @@ export class SandboxDirectory {
   async markLocal(thread: string, session: string): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "local", thread, session })).saved;
   }
-  async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
+  /** An archive right after a restore finds the sandbox busy until the restore ends, so keep trying. */
+  async archive(thread: string): Promise<void> {
+    this.forget(thread);
+    const signal = this.session.signal;
+    for (let tries = 1; ; tries++) {
+      try { return void await this.call({ action: "archive", thread }); }
+      catch (error) {
+        const wait = error instanceof CloudroomConnectionError || (error instanceof CloudroomError && WAIT_CODES.has(error.code ?? ""));
+        if (!wait || tries >= 30) throw error;
+      }
+      cancelled(signal);
+      await new Promise<void>(resolve => {
+        const done = () => { clearTimeout(timer); resolve(); };
+        const timer = setTimeout(() => { signal.removeEventListener("abort", done); resolve(); }, 3_000);
+        signal.addEventListener("abort", done, { once: true });
+      });
+      cancelled(signal);
+    }
+  }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
   async restore(thread: string, session?: string): Promise<void> {
