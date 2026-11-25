@@ -70,6 +70,14 @@ Every Cloud thread gets its own sandbox, running Cloudroom core next to the agen
   <img src="core/docs/architecture.png" alt="Cloudroom architecture: one cloud sandbox per agent, each running Cloudroom core and the agent, with the app on your Mac." width="80%">
 </p>
 
+## Telemetry
+
+The desktop app sends usage stats to Cloudroom: app starts, thread and message counts, token totals, plugin use, and scrubbed errors. Never your prompts, code, or files. Dev runs (`pnpm dev`) send nothing.
+
+Turn it off in Settings → General → Privacy & diagnostics, or set `CLOUDROOM_TELEMETRY=false` or `DO_NOT_TRACK=1`.
+
+Every event is listed in [`telemetry.ts`](gui/apps/server/src/services/system/telemetry.ts). Details: [privacy policy](https://www.cloudroom.dev/privacy).
+
 ## Security
 
 - Agents run as a separate Linux user, with no admin rights.
