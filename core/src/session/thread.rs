@@ -694,10 +694,13 @@ async fn own_child(
             if let Some(answer) = settle(true) {
                 return answer;
             }
+            // Why it waits, so a setup failing on every try isn't only "still starting" (#2643).
+            let last = relay::last_try(&slot).map(|why| format!(" (last try: {why})"));
+            let last = last.unwrap_or_default();
             return Err(fail(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &format!(
-                    "The child is still starting, and Cloudroom keeps starting it. Run the same command with --request-id {key} to get its ID; it never starts twice."
+                    "The child is still starting{last}, and Cloudroom keeps starting it. Run the same command with --request-id {key} to get its ID; it never starts twice."
                 ),
             ));
         }

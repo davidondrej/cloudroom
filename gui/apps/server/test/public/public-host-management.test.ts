@@ -581,6 +581,7 @@ describe("public host management", () => {
       for (const method of [
         "relayCredential",
         "revokeMachine",
+        "remoteAccess",
         "macs",
         "runSetupJob",
         "setupJobStatus",
@@ -600,6 +601,23 @@ describe("public host management", () => {
       expect(
         (await call("revokeMachine", { machineId: "m" }, "session")).status,
       ).toBe(403);
+      expect((await call("remoteAccess", {}, "session")).status).toBe(403);
+      expect((await call("remoteAccess", {})).status).toBe(200);
+      const putSettings = (
+        values: Record<string, unknown>,
+        gate?: "session" | "machine",
+      ) =>
+        harness.app.request(`${API}/plugins/${connect.id}/settings`, {
+          method: "PUT",
+          headers: {
+            "content-type": "application/json",
+            ...(gate === undefined ? {} : { "x-bb-gate-auth": gate }),
+          },
+          body: JSON.stringify({ values }),
+        });
+      expect((await putSettings({ enabled: false }, "session")).status).toBe(403);
+      expect((await putSettings({ enabled: false }, "machine")).status).toBe(403);
+      expect((await putSettings({ enabled: true })).status).toBe(200);
       expect((await call("runSetupJob", emptySetup, "session")).status).toBe(
         400,
       );

@@ -9,7 +9,9 @@ export interface BundledPluginDefinition {
   defaultEnabled: boolean;
   alwaysEnabled?: boolean;
   refuseMachineCli?: boolean;
+  refuseMachineCliSubcommands?: readonly string[];
   relayRefusedRpcs?: Readonly<Record<string, "machine" | "all">>;
+  relayRefusedSettings?: Readonly<Record<string, "machine" | "all">>;
 }
 
 export interface BundledPluginRegistration extends BundledPluginDefinition {
@@ -64,12 +66,20 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "connect",
     pluginId: "connect",
     defaultEnabled: true,
+    refuseMachineCliSubcommands: ["sign-out-phones"],
     relayRefusedRpcs: {
       relayCredential: "all",
       revokeMachine: "all",
+      remoteAccess: "all",
       macs: "machine",
+      listSessions: "machine",
+      revokeSession: "machine",
+      signOutPhones: "machine",
       runSetupJob: "machine",
       setupJobStatus: "machine",
+    } as const,
+    relayRefusedSettings: {
+      enabled: "all",
     } as const,
   },
   {

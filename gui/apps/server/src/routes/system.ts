@@ -92,6 +92,7 @@ import { environmentProviderMachineAvailability } from "../services/environments
 import { machineProviderAcceptsEmptyInputs } from "../services/machines/provider-availability.js";
 import { requirePublicProject } from "../services/lib/entity-lookup.js";
 import { clearUnsentMinutes } from "../services/cloudroom/time-in-app.js";
+import { setMacCommandReview } from "../services/cloudroom/previews.js";
 
 const LEADING_ENVIRONMENT_PROVIDER_IDS: readonly string[] = [
   "project-checkout",
@@ -272,7 +273,13 @@ export function registerSystemRoutes(
     );
   });
 
-  put(routes.generalSettings, (context, payload) => {
+  put(routes.generalSettings, async (context, payload) => {
+    if (getGateAuthKind(context) === "machine")
+      throw new ApiError(
+        403,
+        "forbidden",
+        "Machine credentials cannot change general settings",
+      );
     const {
       showUnhandledProviderEvents,
       providerOrder: _retiredProviderOrder,
@@ -289,6 +296,7 @@ export function registerSystemRoutes(
       commandGuardEnabled: settings.commandGuardEnabled ?? current.commandGuardEnabled,
       systemPromptEnabled: settings.systemPromptEnabled ?? current.systemPromptEnabled,
       bugReportsEnabled: settings.bugReportsEnabled ?? current.bugReportsEnabled,
+      macCommandReviewEnabled: settings.macCommandReviewEnabled ?? current.macCommandReviewEnabled,
       agentQuestionsEnabled: settings.agentQuestionsEnabled ?? current.agentQuestionsEnabled,
       stripAiCoAuthorsEnabled: settings.stripAiCoAuthorsEnabled ?? current.stripAiCoAuthorsEnabled,
       providerAutoUpdate: settings.providerAutoUpdate ?? current.providerAutoUpdate,
@@ -301,6 +309,9 @@ export function registerSystemRoutes(
           ? showUnhandledProviderEvents
           : diagnosticValue,
     });
+    if (updatedSettings.macCommandReviewEnabled !== current.macCommandReviewEnabled) {
+      await setMacCommandReview(deps, updatedSettings.macCommandReviewEnabled);
+    }
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
     if (!updatedSettings.telemetryEnabled) {

@@ -128,6 +128,8 @@ import {
   useMobileVisualViewportHeight,
 } from "./useMobileVisualViewportHeight";
 import { wsManager } from "@/lib/ws";
+import { isPhoneRelay } from "@/cloud/cloud-mode";
+import { appToast } from "@/components/ui/app-toast";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { findPaneByThread } from "@/lib/split-layout";
 import { applyThreadOpenToLayout } from "@/views/thread-detail/splitThreadNavigation";
@@ -532,6 +534,37 @@ export function AppLayout({ children }: AppLayoutProps) {
         void navigate(route, alreadyOpen ? { replace: true } : undefined);
       }),
     [isCompactViewport, navigate, store],
+  );
+  // Alert the local desktop when a new phone or other computer connects over Cloudroom Connect.
+  useEffect(
+    () =>
+      wsManager.onPluginSignal((signal) => {
+        if (
+          signal.pluginId !== "connect" ||
+          signal.channel !== "session-connected" ||
+          isPhoneRelay()
+        ) {
+          return;
+        }
+        const payload = signal.payload as { label?: unknown } | null;
+        const label =
+          typeof payload?.label === "string" && payload.label.trim().length > 0
+            ? payload.label.trim()
+            : "A remote device";
+        const body = `${label} connected via Cloudroom Connect. Review or sign out in Settings → Cloudroom Connect.`;
+        appToast.message("New remote connection", { description: body });
+        // Electron's main process delivers native OS alerts even with no local window open; only use web Notification in browser mode.
+        if (
+          window.bbDesktop === undefined &&
+          typeof Notification !== "undefined" &&
+          Notification.permission === "granted"
+        ) {
+          try {
+            new Notification("New remote connection", { body });
+          } catch {}
+        }
+      }),
+    [],
   );
   useAppCommandHandler("thread.new", () => {
     if (projectId !== undefined) {

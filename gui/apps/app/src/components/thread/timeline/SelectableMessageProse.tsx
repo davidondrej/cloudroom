@@ -20,6 +20,10 @@ export interface MessageProseSelection {
   rect: DOMRect;
   anchorPoint?: SelectionAnchorPoint;
   anchorSide?: SelectionAnchorSide;
+  /** Element whose scroll and layout ancestors move this selection. */
+  anchorElement?: Element | null;
+  /** Live viewport anchor rect, re-read on scroll, resize, or layout shifts. */
+  getAnchorRect?: () => DOMRect | null;
   sourceSeqEnd?: number;
 }
 
@@ -71,6 +75,94 @@ export function firstClientRect(range: Range): DOMRect | null {
   return rect.width > 0 || rect.height > 0 ? rect : null;
 }
 
+function lastClientRect(range: Range): DOMRect | null {
+  const rects = range.getClientRects();
+  for (let index = rects.length - 1; index >= 0; index -= 1) {
+    const rect = rects.item(index);
+    if (rect === null) {
+      continue;
+    }
+    if (rect.width > 0 || rect.height > 0) {
+      return rect;
+    }
+  }
+  const rect = range.getBoundingClientRect();
+  return rect.width > 0 || rect.height > 0 ? rect : null;
+}
+
+export function createLiveSelectionRectReader({
+  anchor,
+  anchorElement,
+  range,
+  rect,
+}: {
+  anchor: SelectionAnchor | null;
+  anchorElement: Element | null;
+  range?: Range | null;
+  rect: DOMRect;
+}): () => DOMRect | null {
+  const anchorSide = anchor?.side ?? "top";
+  const baseX = anchor?.point.x ?? rect.left + rect.width / 2;
+  const baseY =
+    anchor?.point.y ?? (anchorSide === "bottom" ? rect.bottom : rect.top);
+  const trackedRange =
+    range != null && typeof range.cloneRange === "function"
+      ? range.cloneRange()
+      : null;
+  const readRangeRect = (): DOMRect | null => {
+    if (
+      trackedRange === null ||
+      !trackedRange.startContainer?.isConnected ||
+      !trackedRange.endContainer?.isConnected
+    ) {
+      return null;
+    }
+    return anchorSide === "bottom"
+      ? lastClientRect(trackedRange)
+      : firstClientRect(trackedRange);
+  };
+  const baseRangeRect = readRangeRect();
+  const baseElementRect =
+    anchorElement !== null && anchorElement.isConnected
+      ? anchorElement.getBoundingClientRect()
+      : null;
+
+  return () => {
+    if (anchorElement !== null && !anchorElement.isConnected) {
+      return null;
+    }
+    const liveRangeRect = readRangeRect();
+    if (liveRangeRect !== null) {
+      if (anchor === null) {
+        return new DOMRect(
+          liveRangeRect.left + liveRangeRect.width / 2,
+          anchorSide === "bottom" ? liveRangeRect.bottom : liveRangeRect.top,
+          0,
+          0,
+        );
+      }
+      if (baseRangeRect !== null) {
+        return new DOMRect(
+          baseX + (liveRangeRect.left - baseRangeRect.left),
+          baseY + (liveRangeRect.top - baseRangeRect.top),
+          0,
+          0,
+        );
+      }
+    }
+    if (anchorElement !== null && baseElementRect !== null) {
+      const liveElementRect = anchorElement.getBoundingClientRect();
+      return new DOMRect(
+        baseX + (liveElementRect.left - baseElementRect.left),
+        baseY + (liveElementRect.top - baseElementRect.top),
+        0,
+        0,
+      );
+    }
+    return new DOMRect(baseX, baseY, 0, 0);
+  };
+}
+
 function normalizeSelectionText(text: string): string {
   return text.replace(/\s+/gu, " ").trim();
 }
@@ -99,17 +191,31 @@ function isSelectionBoundarySpillWithinNode(
 
 function toMessageProseSelection({
   anchor,
+  anchorElement,
   copyText,
+  range,
   rect,
   text,
 }: {
   anchor: SelectionAnchor | null;
+  anchorElement: Element | null;
   copyText?: string;
+  range?: Range | null;
   rect: DOMRect | null;
   text: string;
 }): MessageProseSelection | null {
   if (text.length === 0 || rect === null) return null;
-  const selection: MessageProseSelection = { text, rect };
+  const selection: MessageProseSelection = {
+    text,
+    rect,
+    anchorElement,
+    getAnchorRect: createLiveSelectionRectReader({
+      anchor,
+      anchorElement,
+      range,
+      rect,
+    }),
+  };
   if (copyText !== undefined) selection.copyText = copyText;
   if (anchor !== null) {
     selection.anchorPoint = anchor.point;
@@ -175,6 +281,10 @@ function readSelectionWithinNode(
     return null;
   }
 
+  const anchorElement =
+    commonElement !== null && node.contains(commonElement)
+      ? commonElement
+      : node;
   const accepted = isSelectionWithinNode(node, {
     isCollapsed: selection.isCollapsed,
     anchorNode: selection.anchorNode,
@@ -186,7 +296,9 @@ function readSelectionWithinNode(
     const rect = firstClientRect(range);
     return toMessageProseSelection({
       anchor,
+      anchorElement,
       copyText,
+      range,
       rect,
       text: copyText.trim(),
     });
@@ -195,7 +307,13 @@ function readSelectionWithinNode(
   const text = selection.toString().trim();
   if (isSelectionBoundarySpillWithinNode(node, range, text)) {
     const rect = firstClientRect(range);
-    return toMessageProseSelection({ anchor, rect, text });
+    return toMessageProseSelection({
+      anchor,
+      anchorElement: node,
+      range,
+      rect,
+      text,
+    });
   }
 
   return null;
@@ -290,6 +408,14 @@ function clipWhitespaceOnlyBoundarySpillForCopy(node: HTMLElement): boolean {
   return true;
 }
 
+interface SelectionSignature {
+  text: string;
+  anchorNode: Node | null;
+  anchorOffset: number;
+  focusNode: Node | null;
+  focusOffset: number;
+}
+
 interface SelectableProseInstance {
   node: HTMLElement;
   onSelectRef: {
@@ -298,9 +424,36 @@ interface SelectableProseInstance {
       | undefined;
   };
   hadSelection: boolean;
+  lastSelectionSignature: SelectionSignature | null;
   pendingReportAnchor: SelectionAnchor | null;
   lastPointerReleaseAnchor: SelectionAnchor | null;
   multiClickTimer: number | null;
+}
+
+function readSelectionSignature(text: string): SelectionSignature | null {
+  const selection = window.getSelection();
+  if (selection === null) return null;
+  return {
+    text,
+    anchorNode: selection.anchorNode,
+    anchorOffset: selection.anchorOffset,
+    focusNode: selection.focusNode,
+    focusOffset: selection.focusOffset,
+  };
+}
+
+function sameSelectionSignature(
+  a: SelectionSignature | null,
+  b: SelectionSignature | null,
+): boolean {
+  if (a === null || b === null) return false;
+  return (
+    a.text === b.text &&
+    a.anchorNode === b.anchorNode &&
+    a.anchorOffset === b.anchorOffset &&
+    a.focusNode === b.focusNode &&
+    a.focusOffset === b.focusOffset
+  );
 }
 
 const proseInstances = new Set<SelectableProseInstance>();
@@ -328,8 +481,23 @@ function reportInstanceSelection(instance: SelectableProseInstance): void {
   const anchor = instance.pendingReportAnchor;
   instance.pendingReportAnchor = null;
   const next = readSelectionWithinNode(instance.node, anchor);
-  if (next === null && !instance.hadSelection) return;
-  instance.hadSelection = next !== null;
+  if (next === null) {
+    if (!instance.hadSelection) return;
+    instance.hadSelection = false;
+    instance.lastSelectionSignature = null;
+    instance.onSelectRef.current?.(null);
+    return;
+  }
+  const signature = readSelectionSignature(next.copyText ?? next.text);
+  if (
+    anchor === null &&
+    instance.hadSelection &&
+    sameSelectionSignature(instance.lastSelectionSignature, signature)
+  ) {
+    return;
+  }
+  instance.hadSelection = true;
+  instance.lastSelectionSignature = signature;
   instance.onSelectRef.current?.(next);
 }
 
@@ -337,6 +505,7 @@ function reportInstanceNull(instance: SelectableProseInstance): void {
   instance.pendingReportAnchor = null;
   if (!instance.hadSelection) return;
   instance.hadSelection = false;
+  instance.lastSelectionSignature = null;
   instance.onSelectRef.current?.(null);
 }
 
@@ -469,7 +638,8 @@ function handleSharedPointerCancel(): void {
   scheduleSharedReport();
 }
 
-function handleSharedKeyUp(): void {
+function handleSharedKeyUp(event: KeyboardEvent): void {
+  if (event.key === "Escape") return;
   scheduleSharedReport();
 }
 
@@ -560,6 +730,7 @@ export function SelectableMessageProse({
       node,
       onSelectRef,
       hadSelection: false,
+      lastSelectionSignature: null,
       pendingReportAnchor: null,
       lastPointerReleaseAnchor: null,
       multiClickTimer: null,

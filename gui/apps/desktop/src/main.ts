@@ -19,6 +19,7 @@ import {
   nativeImage,
   nativeTheme,
   net,
+  Notification,
   powerMonitor,
   safeStorage,
   screen,
@@ -52,6 +53,7 @@ import {
 } from "@cloudroom/desktop-contract";
 import { installSocketTypeOfServiceGuard } from "@cloudroom/process-utils/socket-type-of-service";
 import {
+  pluginSignalSchema,
   serverMessageLenientSchema,
   type ClientMessage,
 } from "@cloudroom/server-contract";
@@ -120,6 +122,7 @@ import {
   createComputersSync,
   createReturnWatch,
   fetchRelayCredential,
+  hasSessionRevokedHeader,
   isRelayUrl,
   listComputers,
   createRelaySessionKeeper,
@@ -1055,7 +1058,9 @@ function setCurrentRuntime(runtime: DesktopRuntime | null): void {
   currentRuntime = runtime;
   if (runtime === null) {
     stopSystemConfigSync();
+    stopLocalAlertSync();
   } else {
+    startLocalAlertSync(runtime.serverUrl);
     computersSync?.onRuntimeReady();
   }
   refreshApplicationMenu();
@@ -1239,6 +1244,104 @@ function createRemoteSystemConfigSync(serverUrl: string): SystemConfigSync {
 function stopSystemConfigSync(): void {
   systemConfigSync?.stop();
   systemConfigSync = null;
+}
+
+let localAlertSync: SystemConfigSync | null = null;
+let localAlertServerUrl: string | null = null;
+
+/** Keeps a local-server WS open so native OS alerts fire even with zero windows open or while viewing another Mac. */
+function createLocalAlertSync(serverUrl: string): SystemConfigSync {
+  const realtimeUrl = formatRealtimeUrl(serverUrl);
+  let reconnectTimer: NodeJS.Timeout | null = null;
+  let socket: WebSocket | null = null;
+  let stopped = false;
+
+  function scheduleReconnect(): void {
+    if (stopped || reconnectTimer !== null) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, 2_000);
+    reconnectTimer.unref();
+  }
+
+  function handleMessage(event: MessageEvent): void {
+    if (typeof event.data !== "string") return;
+    try {
+      const parsed = pluginSignalSchema.safeParse(JSON.parse(event.data));
+      if (
+        !parsed.success ||
+        parsed.data.pluginId !== "connect" ||
+        parsed.data.channel !== "session-connected" ||
+        !Notification.isSupported()
+      ) {
+        return;
+      }
+      const payload = parsed.data.payload as { label?: unknown } | null;
+      const label =
+        typeof payload?.label === "string" && payload.label.trim().length > 0
+          ? payload.label.trim()
+          : "A remote device";
+      new Notification({
+        title: "New remote connection",
+        body: `${label} connected via Cloudroom Connect. Review or sign out in Settings → Cloudroom Connect.`,
+      }).show();
+    } catch {
+      return;
+    }
+  }
+
+  async function connect(): Promise<void> {
+    if (stopped) return;
+    const token = await callerTokenFor(serverUrl);
+    if (stopped) return;
+    let opened = false;
+    const HeaderWebSocket = WebSocket as unknown as new (
+      url: string,
+      init: { headers: Record<string, string> },
+    ) => WebSocket;
+    socket = new HeaderWebSocket(realtimeUrl, {
+      headers: token === null ? {} : { [CALLER_TOKEN_HEADER]: token },
+    });
+    socket.addEventListener("open", () => {
+      opened = true;
+    });
+    socket.addEventListener("message", handleMessage);
+    socket.addEventListener("close", () => {
+      if (!opened) void renewCallerToken(serverUrl, token);
+      scheduleReconnect();
+    });
+    socket.addEventListener("error", () => {
+      socket?.close();
+    });
+  }
+
+  void connect();
+
+  return {
+    stop(): void {
+      stopped = true;
+      if (reconnectTimer !== null) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      socket?.close();
+      socket = null;
+    },
+  };
+}
+
+function startLocalAlertSync(serverUrl: string): void {
+  if (localAlertSync !== null && localAlertServerUrl === serverUrl) return;
+  localAlertSync?.stop();
+  localAlertServerUrl = serverUrl;
+  localAlertSync = createLocalAlertSync(serverUrl);
+}
+
+function stopLocalAlertSync(): void {
+  localAlertSync?.stop();
+  localAlertSync = null;
+  localAlertServerUrl = null;
 }
 
 function startSystemConfigSync(serverUrl: string): void {
@@ -2064,6 +2167,7 @@ async function finishQuit(): Promise<void> {
   desktopBrowserBrokerClient?.stop();
   desktopBrowserBroker?.dispose();
   stopSystemConfigSync();
+  stopLocalAlertSync();
   desktopUpdateService?.stop();
   desktopAutoUpdateService?.stop();
   idleInstall?.stop();
@@ -3078,6 +3182,10 @@ async function runDesktopApp(): Promise<void> {
       desktopLogger.info("[desktop] could not sign in to the other Mac again — reopening it");
       void applyServerTarget();
     },
+    onRevoked() {
+      desktopLogger.info("[desktop] remote session was signed out — returning to this computer");
+      void serverTargetStore?.setTarget("builtin").then(() => applyServerTarget());
+    },
   });
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     otherMacRequestLog.started(details);
@@ -3090,7 +3198,11 @@ async function runDesktopApp(): Promise<void> {
   session.defaultSession.webRequest.onCompleted((details) => {
     otherMacRequestLog.completed(details);
     if (details.statusCode === 401 && isRelayUrl(details.url)) {
-      void relaySessionKeeper?.onSignInRequired(details.url, details.resourceType === "mainFrame");
+      void relaySessionKeeper?.onSignInRequired(
+        details.url,
+        details.resourceType === "mainFrame",
+        hasSessionRevokedHeader(details.responseHeaders),
+      );
     }
     // A Mac that drops off the relay stays on screen: its page shows "Reconnecting…" and recovers by itself.
     localCallerAuth.completed(details);

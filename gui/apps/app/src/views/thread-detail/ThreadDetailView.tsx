@@ -237,7 +237,7 @@ import { ThreadPendingInteractionBanner } from "@/components/thread/pending-inte
 import { CloudUsageLimitNotice } from "@/components/CloudUsageLimitNotice";
 import { PendingClaudeSignInRow } from "@/components/thread/timeline/AuthFailureRow";
 import { BackgroundCommandBubbles } from "@/components/thread/timeline/BackgroundCommandBubble";
-import { findLatestCloudLoginRowId } from "@/components/thread/timeline/CloudLoginRow";
+import { CloudGithubLoginRow, findLatestCloudLoginRowId } from "@/components/thread/timeline/CloudLoginRow";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -3242,6 +3242,11 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                 waitingCommands.length > 0 ||
                 chatCardInteraction ||
                 cloudThreadState.data?.usageLimit ||
+                (isCloudThread &&
+                  thread.archivedAt === null &&
+                  !thread.teleport &&
+                  !cloudThreadState.data?.authRequired &&
+                  Boolean(thread.projectCopy)) ||
                 (thread.providerId === "claude-code" &&
                   thread.archivedAt === null &&
                   ((!isCloudThread && thread.status === "pending") ||
@@ -3259,6 +3264,18 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                         className="mt-1 px-2"
                       />
                     )}
+                    {isCloudThread &&
+                      thread.archivedAt === null &&
+                      !thread.teleport &&
+                      !cloudThreadState.data?.authRequired &&
+                      thread.projectCopy && (
+                        <CloudGithubLoginRow
+                          key={thread.id}
+                          threadId={thread.id}
+                          projectCopy={thread.projectCopy}
+                          className="mt-1 px-2"
+                        />
+                      )}
                     {thread.providerId === "claude-code" &&
                       thread.archivedAt === null &&
                       ((!isCloudThread && thread.status === "pending") ||

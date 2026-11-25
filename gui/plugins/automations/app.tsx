@@ -35,7 +35,7 @@ import {
   type LoopDialogRun,
   type Priority,
 } from "./loop-dialog";
-import { replaceWebhookUrl, useCloudAutomations } from "./cloud-view";
+import { replaceWebhookUrl, showLoopError, useCloudAutomations } from "./cloud-view";
 import {
   AutomationOverviewView,
   automationProjectLabel,
@@ -583,13 +583,14 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
         );
       }
       if (failed[0]?.status === "rejected") {
-        toast.error(
+        showLoopError(
           `Couldn't add ${template.name} to ${failed.length} repo${failed.length === 1 ? "" : "s"}: ${errorText(failed[0].reason)}`,
+          () => navigate.openUrl("https://www.cloudroom.dev/billing"),
         );
       }
       onAdded();
     },
-    [providers, rpc, sdk, onAdded],
+    [navigate, providers, rpc, sdk, onAdded],
   );
   const onUpgrade = useCallback(
     () => navigate.openUrl("https://www.cloudroom.dev/billing"),

@@ -4,10 +4,11 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 const saved: string[] = [];
 const chosen: boolean[] = [];
-const copyFlags: boolean[] = [];
 let loggedIn = false;
-let canCopyMac = true;
 let localToken = "";
+let localAccount: { login: string | null } | null = null;
+let userStatus = 200;
+let userLogin = "davidondrej";
 let saveFails = false;
 let installStatus = 200;
 vi.mock("node:timers/promises", () => ({ setTimeout: (_ms: number, _v: unknown, o?: { signal?: AbortSignal }) => new Promise<void>((resolve, reject) => { if (o?.signal?.aborted) return reject(o.signal.reason); o?.signal?.addEventListener("abort", () => reject(o.signal!.reason)); setImmediate(resolve); }) }));
@@ -15,10 +16,19 @@ vi.mock("../../src/services/cloudroom/commands.js", () => ({ cloudroom: () => ({
   account: async () => ({ id: "a" }), logins: async () => ({ github: loggedIn }), githubAccount: async () => null, removeLogin: async () => {},
   saveLogin: async (_name: string, entry: string, _only: unknown, _background: boolean, byHand: boolean) => { if (saveFails) throw new Error("website down"); saved.push(entry); chosen.push(byHand); loggedIn = true; },
 } }) }));
-vi.mock("../../src/services/cloudroom/sync.js", () => ({ canCopyMacGithub: async () => canCopyMac, copyMacGithub: async () => true, setCopyMacGithub: async (_deps: unknown, on: boolean) => { copyFlags.push(on); } }));
-vi.mock("../../src/services/cloudroom/sandboxes.js", () => ({ githubAccountSchema: { parse: (x: unknown) => x }, macGithubToken: async () => localToken, sandboxGithubLogin: async (token: string) => JSON.stringify({ token }) }));
+vi.mock("../../src/services/cloudroom/sandboxes.js", async () => {
+  const actual = await vi.importActual<typeof import("../../src/services/cloudroom/sandboxes.js")>("../../src/services/cloudroom/sandboxes.js");
+  return {
+    ghHostsPath: actual.ghHostsPath,
+    parseGhHostsUser: actual.parseGhHostsUser,
+    macGithubToken: async () => localToken,
+    macGithubAccount: async () => localAccount,
+    sandboxGithubLogin: async (token: string) => JSON.stringify({ token }),
+  };
+});
 
-const { githubAuth } = await import("../../src/services/cloudroom/github-login.js");
+const { copyMacGithub, githubAuth } = await import("../../src/services/cloudroom/github-login.js");
+const { ghHostsPath, parseGhHostsUser } = await import("../../src/services/cloudroom/sandboxes.js");
 const deps = {} as never;
 type Call = { url: string; body: Record<string, string>; auth: string | null };
 let calls: Call[] = [];
@@ -27,13 +37,17 @@ let tokenAnswers: Record<string, unknown>[] = [];
 const until = async (test: () => boolean | Promise<boolean>) => { for (let i = 0; i < 2000; i++) { if (await test()) return; await new Promise((r) => setImmediate(r)); } throw new Error("timeout"); };
 
 beforeEach(() => {
-  calls = []; saved.length = 0; chosen.length = 0; copyFlags.length = 0; loggedIn = false; canCopyMac = true; localToken = ""; saveFails = false; installStatus = 200;
+  calls = []; saved.length = 0; chosen.length = 0; loggedIn = false; localToken = ""; localAccount = null; userStatus = 200; userLogin = "davidondrej"; saveFails = false; installStatus = 200;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const body = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")));
     calls.push({ url, body, auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
     const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
     if (url.endsWith("/login/device/code")) return json({ device_code: "dev", user_code: "ABCD-1234", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 5 });
     if (url.endsWith("/login/oauth/access_token")) return json(tokenAnswers.shift() ?? { error: "authorization_pending" });
+    if (url === "https://api.github.com/user") {
+      if (userStatus !== 200) return new Response("{}", { status: userStatus });
+      return json({ login: userLogin });
+    }
     if (url.includes("/user/installations")) {
       if (installStatus !== 200) return new Response("{}", { status: installStatus });
       const count = installs.length > 1 ? installs.shift()! : installs[0];
@@ -59,7 +73,6 @@ test("specific repos: the App's client ID, no scope, then waits for an install b
   await until(() => saved.length === 1);
   expect(JSON.parse(saved[0]).token).toBe("ghu_test");
   expect(chosen).toEqual([true]);
-  expect(copyFlags).toEqual([false]);
   await until(async () => (await githubAuth(deps)).state === "connected");
   expect((await githubAuth(deps)).message).toBeNull();
 });
@@ -93,12 +106,12 @@ test("GitHub refusing the new token ends the wait at once", async () => {
   expect(calls.filter((c) => c.url.includes("/user/installations")).length).toBe(1);
 });
 
-test("a failed save turns the Mac's gh copy back on", async () => {
+test("a failed save surfaces an error without marking connected", async () => {
   tokenAnswers = [{ access_token: "gho_test" }];
   saveFails = true;
   await githubAuth(deps, "login", "req7");
   await until(async () => (await githubAuth(deps)).state === "error");
-  expect(copyFlags).toEqual([false, true]);
+  expect((await githubAuth(deps)).message).toContain("website down");
 });
 
 test("every repo: the OAuth app and its scope, saved right away, no install check", async () => {
@@ -123,10 +136,51 @@ test("cancel while picking repos saves nothing", async () => {
   expect((await githubAuth(deps)).state).toBe("missing");
 });
 
-test("local gh only counts as connected when copying local logins is allowed", async () => {
+test("local gh is detected offline without connecting, then verified and copied once on click", async () => {
   localToken = "gho_local";
-  canCopyMac = false;
-  expect((await githubAuth(deps)).state).toBe("missing");
-  canCopyMac = true;
+  localAccount = { login: "davidondrej" };
+  expect(await githubAuth(deps)).toMatchObject({ state: "missing", local_github: { login: "davidondrej" } });
+  expect(calls).toEqual([]);
+  expect(saved).toEqual([]);
+
+  const result = await copyMacGithub(deps, "DavidOndrej");
+  expect(result.state).toBe("connected");
+  expect(calls.find((c) => c.url === "https://api.github.com/user")?.auth).toBe("Bearer gho_local");
+  expect(JSON.parse(saved[0]).token).toBe("gho_local");
+  expect(chosen).toEqual([true]);
   expect((await githubAuth(deps)).state).toBe("connected");
+});
+
+test("copyMacGithub rejects missing, revoked, mismatched, unverified, or failed uploads", async () => {
+  localToken = "";
+  await expect(copyMacGithub(deps)).rejects.toMatchObject({ status: 409 });
+
+  localToken = "gho_revoked";
+  userStatus = 401;
+  await expect(copyMacGithub(deps, "davidondrej")).rejects.toMatchObject({ status: 409, body: { code: "github_auth_invalid" } });
+  expect(saved).toEqual([]);
+
+  userStatus = 200;
+  userLogin = "other-user";
+  await expect(copyMacGithub(deps, "davidondrej")).rejects.toMatchObject({ status: 409, body: { code: "github_auth_mismatch" } });
+  expect(saved).toEqual([]);
+
+  userStatus = 500;
+  await expect(copyMacGithub(deps, "davidondrej")).rejects.toMatchObject({ status: 503 });
+  expect(saved).toEqual([]);
+
+  userStatus = 200;
+  userLogin = "davidondrej";
+  saveFails = true;
+  await expect(copyMacGithub(deps, "davidondrej")).rejects.toMatchObject({ status: 503 });
+});
+
+test("parseGhHostsUser and ghHostsPath handle multi-account hosts.yml and Windows XDG precedence", () => {
+  expect(parseGhHostsUser("github.com:\n    git_protocol: https\n    users:\n        alice:\n        bob:\n    user: bob\n")).toBe("bob");
+  expect(parseGhHostsUser("enterprise.example.com:\r\n  user: corp\r\n\"github.com\":\r\n  # comment\r\n  user: \"davidondrej\" # active\r\n")).toBe("davidondrej");
+  expect(parseGhHostsUser("enterprise.example.com:\n  user: corp\n")).toBeNull();
+  expect(parseGhHostsUser("github.com:\n  user: bad user!\n")).toBeNull();
+  expect(ghHostsPath("win32", { XDG_CONFIG_HOME: "/xdg", APPDATA: "/appdata" })).toBe("/xdg/gh/hosts.yml");
+  expect(ghHostsPath("win32", { APPDATA: "/appdata" })).toBe("/appdata/GitHub CLI/hosts.yml");
+  expect(ghHostsPath("darwin", { GH_CONFIG_DIR: "/custom", XDG_CONFIG_HOME: "/xdg" })).toBe("/custom/hosts.yml");
 });

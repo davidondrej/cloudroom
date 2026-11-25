@@ -7,8 +7,8 @@ import {
 } from "@get-bb/plugin-sdk/app";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
+import { showLoopError } from "./cloud-view";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { toast } from "sonner";
 import type { automationRpcContract } from "./src/rpc.js";
 import type { AgentSessions } from "./src/agent-sessions.js";
 
@@ -73,8 +73,9 @@ export function ScansView() {
       ({ threadId }) => navigate.toThread(threadId),
       (error: unknown) => {
         setStarting(null);
-        toast.error(
+        showLoopError(
           error instanceof Error ? error.message : "The scan could not start.",
+          () => navigate.openUrl("https://www.cloudroom.dev/billing"),
         );
       },
     );

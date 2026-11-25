@@ -46,12 +46,14 @@ export interface CloudroomStatus {
   computerOs?: "macos" | "linux" | "windows";
   /** Copy this computer's logins, API keys, and model providers to the VM (ADR 0130); null until first-run setup asks. */
   copyLogins?: boolean | null;
-  /** Agent logins found on this computer. Claude's is checked through its provider plugin. */
-  localLogins?: { codex: boolean };
+  /** Agent and GitHub CLI logins found on this computer. Claude's is checked through its provider plugin. */
+  localLogins?: { codex: boolean; github?: boolean; githubUser?: string | null };
   signingIn: boolean;
   signInError: string | null;
   /** The account's place in the cloud queue, or a blocked region: new Cloud threads wait. Null when it may start them. */
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
+  /** Non-null when Metal capacity is temporarily reserved for higher plans and this account's tier waits. */
+  cloudCapacity?: "paid" | "priority" | null;
   /** The website's database can't answer (an outage or planned work): Cloud waits and Local works. Missing from older servers. */
   cloudPaused?: boolean;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
@@ -76,6 +78,11 @@ export interface CloudroomCodexAuth {
   user_code: string | null;
   /** Claude and Codex: when Cloudroom started installing the missing CLI for this sign-in, in ms since 1970. */
   installing_since?: number | null;
+}
+
+export interface CloudroomGithubAuth extends CloudroomCodexAuth {
+  /** Local `gh` login found on this computer while Cloud has no GitHub login. Nothing is uploaded until `copyMacGithub()`. */
+  local_github?: { login: string | null } | null;
 }
 
 /** This Mac's Cloudroom Connect address and tunnel credential (ADR 0184). */
@@ -303,8 +310,10 @@ export interface CloudroomArea {
   codexAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
   codexLogin(requestId: string): Promise<CloudroomCodexAuth>;
   cancelCodexLogin(requestId: string): Promise<CloudroomCodexAuth>;
-  /** GitHub for cloud sandboxes: connected when this Mac's `gh` is signed in or the website holds a login. Login runs GitHub's device flow. */
-  githubAuth(signal?: AbortSignal): Promise<CloudroomCodexAuth>;
+  /** GitHub for cloud sandboxes: connected when the website holds a login; when missing, includes any local `gh` account detected on this computer. */
+  githubAuth(signal?: AbortSignal): Promise<CloudroomGithubAuth>;
+  /** Copies this computer's local `gh` login to Cloud once after explicit user confirmation (ADR 20261124-215124). */
+  copyMacGithub(expectedLogin?: string | null): Promise<CloudroomGithubAuth>;
   /** With `repos`, Cloud gets only the repos the user then picks on GitHub. While they pick, the answer is `waiting` with GitHub's page and no code. */
   githubLogin(requestId: string, repos?: boolean): Promise<CloudroomCodexAuth>;
   cancelGithubLogin(requestId: string): Promise<CloudroomCodexAuth>;
@@ -347,6 +356,8 @@ export interface CloudroomArea {
   /** `true` means Full access. */
   setMacAccess(access: boolean | MacAccessLevel): Promise<void>;
   setCopyLogins(enabled: boolean): Promise<void>;
+  /** Copies this computer's enabled logins to cloud sandboxes right away. */
+  copyLoginsNow(): Promise<void>;
   /** Whether DeepAPI is paid from the account's Cloud Credits (Settings → General → DeepAPI). */
   setDeepapi(enabled: boolean): Promise<void>;
   environment(signal?: AbortSignal): Promise<CloudEnvironment>;
@@ -401,7 +412,7 @@ export interface CloudroomArea {
   /** Clears package caches and Git-ignored dependency and build folders on a Cloud thread's sandbox, even while a full disk pauses its agent. */
   clearDisk(threadId: string): Promise<{ freedBytes: number }>;
   /** Copies a Cloud thread's project into its folder again after the copy failed. */
-  retryCopy(threadId: string): Promise<void>;
+  retryCopy(threadId: string): Promise<{ status?: "cloning" | "copied" | "folder_not_empty" }>;
   /** During an outage, continues a Cloud thread from its older copy instead of waiting; newer work is lost. */
   continueFromCopy(threadId: string): Promise<void>;
   /** `choice` runs the cloud thread on another model when the cloud cannot offer the local one. */
@@ -492,7 +503,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     codexAuth: (signal) => transport.readJson(request("/codex", undefined, signal)) as Promise<CloudroomCodexAuth>,
     codexLogin: (requestId) => transport.readJson(request("/codex/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelCodexLogin: (requestId) => transport.readJson(request("/codex/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
-    githubAuth: (signal) => transport.readJson(request("/github", undefined, signal)) as Promise<CloudroomCodexAuth>,
+    githubAuth: (signal) => transport.readJson(request("/github", undefined, signal)) as Promise<CloudroomGithubAuth>,
+    copyMacGithub: (expectedLogin) => transport.readJson(request("/github/mac", expectedLogin ? { expectedLogin } : {})) as Promise<CloudroomGithubAuth>,
     repoSuggestions: (signal) => transport.readJson(request("/repo-suggestions", undefined, signal)) as Promise<{ githubConnected: boolean; repos: RepoSuggestion[] }>,
     macRepoSuggestions: (signal) => transport.readJson(request("/repo-suggestions/mac", undefined, signal)) as Promise<{ repos: RepoSuggestion[] }>,
     gitlabConnection: (action,signal) => transport.readJson(request("/gitlab",{action},signal)) as Promise<GitlabConnection>,
@@ -521,6 +533,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     cancel: () => transport.readVoid(request("/cancel", {})),
     setMacAccess: (access) => transport.readVoid(request("/mac-access", typeof access === "boolean" ? { enabled: access } : { level: access })),
     setCopyLogins: (enabled) => transport.readVoid(request("/copy-logins", { enabled })),
+    copyLoginsNow: () => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/mac/logins`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
     setDeepapi: (enabled) => transport.readVoid(request("/deepapi", { enabled })),
     environment: (signal) => transport.readJson(request("/environment", undefined, signal)) as Promise<CloudEnvironment>,
     updateEnvironment: (change) => transport.readJson(request("/environment", change)) as Promise<CloudEnvironment>,
@@ -563,7 +576,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     exportableChats: (signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { signal })) as Promise<{ threads: { target: "local" | "cloud"; updatedAt: number }[] }>,
     exportChats: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ folder: string; count: number }>,
     reportBug: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/bug-reports`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ sent: boolean }>,
-    retryCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
+    retryCopy: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<{ status?: "cloning" | "copied" | "folder_not_empty" }>,
     continueFromCopy: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/from-copy`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
     threadShare: (threadId, signal, fresh) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share${fresh ? "?fresh=1" : ""}`, { signal })) as Promise<ThreadShare | null>,
     shareThread: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/share`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "save" }) })) as Promise<ThreadShare>,

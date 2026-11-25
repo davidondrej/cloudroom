@@ -23,7 +23,18 @@ export interface TunnelStatus {
 }
 
 export interface ConnectStatus extends TunnelStatus {
+  enabled: boolean;
   signedIn: boolean;
+}
+
+export interface RemoteSession {
+  id: string;
+  kind: "phone" | "mac";
+  label: string;
+  createdAt: number;
+  lastSeenAt: number;
+  macHandle: string;
+  macName: string | null;
 }
 
 export const PHONE_SETUP_URL = "https://www.cloudroom.dev/m";
@@ -61,5 +72,6 @@ export const PHONE_SETUP_URL_QR: readonly string[] = [
 ];
 
 export const CONNECT_REALTIME_CHANNEL = "connect";
+export const CONNECT_SESSION_CONNECTED_CHANNEL = "session-connected";
 
 export const REMOTE_ACTIVITY_INSTRUCTIONS_MS = 5 * 60 * 1000;

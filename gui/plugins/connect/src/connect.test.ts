@@ -1345,6 +1345,7 @@ describe("connect plugin", () => {
   it("toggles remote instructions while preserving active and recent usage conditions", async () => {
     const status: ConnectStatus = {
       state: "connected",
+      enabled: true,
       paired: true,
       handle: "test",
       url: "https://test.cloudroom.run",
@@ -1479,6 +1480,60 @@ describe("connect plugin", () => {
     await expect(harness.callRpc("signOutPhones")).rejects.toThrow(/Sign in to Cloudroom/);
     second.controller.abort();
     await second.done;
+  });
+
+  it("turns remote access off cleanly (retiring key and skipping reconnect) and re-registers when turned back on", async () => {
+    const connectRegister = vi.fn(async () => ({
+      handle: "k3x9m2p7qa",
+      credential: "d".repeat(64),
+      serverUrl: "http://k3x9m2p7qa.localhost:59342",
+      accountId: "acc-1",
+    }));
+    host = createConnectFakeHost({
+      cloudroom: { connectAccount: async () => ({ accountId: "acc-1" }), connectRegister },
+    });
+    const { bb, harness } = host;
+    const unregisterCalls: string[] = [];
+    let unregisterStatus = 429;
+    vi.stubGlobal("fetch", vi.fn(async (url: URL | string) => {
+      unregisterCalls.push(String(url));
+      return Response.json({ ok: unregisterStatus < 400 }, { status: unregisterStatus });
+    }));
+    await plugin(bb as unknown as Parameters<typeof plugin>[0]);
+    const service = harness.runService("tunnel");
+    await vi.waitFor(async () => {
+      expect(((await harness.callRpc("status")) as ConnectStatus).paired).toBe(true);
+    });
+    expect(connectRegister).toHaveBeenCalledTimes(1);
+
+    const off = (await harness.callRpc("remoteAccess", { enabled: false })) as { enabled: boolean };
+    expect(off).toEqual({ enabled: false });
+    const statusOff = (await harness.callRpc("status")) as ConnectStatus;
+    expect(statusOff).toMatchObject({ enabled: false, paired: false, state: "disconnected" });
+    expect(await bb.storage.kv.get("relay-credential")).toBeUndefined();
+    // 429 rate-limit must keep the key queued for retirement instead of discarding it.
+    expect(await bb.storage.kv.get("relay-retire")).toBeDefined();
+    expect(unregisterCalls).toContain("http://localhost:59342/api/unregister");
+    await expect(harness.callRpc("signOutPhones")).rejects.toThrow(/Remote access is turned off/);
+    expect(await harness.callRpc("macs")).toEqual({ macs: [] });
+    service.controller.abort();
+    await service.done;
+
+    // Starting the tunnel service while remote access is off retries pending retirement (now 200) without re-registering.
+    unregisterStatus = 200;
+    const whileOff = harness.runService("tunnel");
+    await vi.waitFor(async () => {
+      expect(await bb.storage.kv.get("relay-retire")).toBeUndefined();
+    });
+    expect(connectRegister).toHaveBeenCalledTimes(1);
+    whileOff.controller.abort();
+    await whileOff.done;
+
+    const on = (await harness.callRpc("remoteAccess", { enabled: true })) as { enabled: boolean };
+    expect(on).toEqual({ enabled: true });
+    const statusOn = (await harness.callRpc("status")) as ConnectStatus;
+    expect(statusOn).toMatchObject({ enabled: true, paired: true });
+    expect(connectRegister).toHaveBeenCalledTimes(2);
   });
 
   it("expose / listShares / unexpose rpc round-trip when paired", async () => {

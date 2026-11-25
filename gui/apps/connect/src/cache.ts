@@ -1,8 +1,10 @@
 import { rebuiltResponse } from "./response-encoding.js";
 import { withTimeout } from "./timeout.js";
 
-const CACHE_HOST = "https://bb-connect-asset-cache.internal";
-const SHELL_CACHE_HOST = "https://bb-connect-shell-cache.internal";
+const CACHE_HOST = "https://bb-connect-asset-cache-v2.internal";
+const SHELL_CACHE_HOST = "https://bb-connect-shell-cache-v2.internal";
+const STATIC_ASSET_PATH =
+  /^(?:\/assets\/|\/.*\.(?:js|mjs|css|svg|png|jpe?g|webp|ico|woff2?|ttf|wasm|webmanifest))$/iu;
 const MIN_CACHEABLE_MAX_AGE = 300;
 const SHELL_CACHE_CONTROL = "no-cache";
 const SHELL_STORE_CACHE_CONTROL = "max-age=300";
@@ -23,7 +25,8 @@ export function shellCacheKey(namespace: string, url: URL): Request {
   );
 }
 
-function isCacheable(resp: Response): boolean {
+function isCacheable(url: URL, resp: Response): boolean {
+  if (!STATIC_ASSET_PATH.test(url.pathname)) return false;
   if (!resp.ok) return false;
   if (resp.headers.has("set-cookie")) return false;
   const cc = resp.headers.get("cache-control") ?? "";
@@ -46,6 +49,7 @@ function isRevalidatableShell(resp: Response): boolean {
   if (!resp.ok) return false;
   if (resp.headers.has("set-cookie")) return false;
   if (resp.headers.get("etag") === null) return false;
+  if (!/^text\/html\b/iu.test(resp.headers.get("content-type") ?? "")) return false;
   const cc = resp.headers.get("cache-control") ?? "";
   if (/\b(no-store|private)\b/i.test(cc)) return false;
   return /\bno-cache\b/i.test(cc);
@@ -152,7 +156,7 @@ export async function serveWithCache(
   if (isRevalidatableShell(resp)) {
     return storeShellAndServe(resp, namespace, url, ctx);
   }
-  if (isCacheable(resp)) {
+  if (isCacheable(url, resp)) {
     ctx.waitUntil(caches.default.put(key, resp.clone()));
     const r = new Response(resp.body, resp);
     r.headers.set("x-bb-cache", "miss");

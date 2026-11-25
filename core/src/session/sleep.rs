@@ -533,9 +533,8 @@ fn repo_targets(local: &Local) -> Vec<crate::workspace::repo_sync::Target> {
             }),
         }
     }
-    for entry in std::fs::read_dir("/repos").into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() && !targets.iter().any(|t| t.path == path) {
+    for path in crate::workspace::files::repo_checkouts(std::path::Path::new("/repos")) {
+        if !targets.iter().any(|t| t.path == path) {
             targets.push(Target {
                 path,
                 tell: any_tell.clone(),

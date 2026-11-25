@@ -86,7 +86,7 @@ export function ThreadNamingSettingsSection() {
         </SettingsWithControl>
         <SettingsWithControl
           label="Rename vague titles"
-          description="After the first reply, gives a vague title a clearer name once. Titles you set are never changed."
+          description="After the first reply, gives a vague title a clearer name once. To check the title, the app sends your first message and the first reply to Cloudroom. We don't keep them. Titles you set are never changed."
         >
           <Switch
             aria-label="Rename vague titles"

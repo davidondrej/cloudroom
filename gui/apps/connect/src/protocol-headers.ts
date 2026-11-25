@@ -9,3 +9,5 @@ export const PHONE_SESSION_HEADER = "x-cloudroom-phone-session";
 export const TUNNEL_VPS_HEADER = "x-cloudroom-tunnel-vps";
 /** Set only by the relay on its own "threads changed" request to a Mac (#237); removed from every visitor request. */
 export const RELAY_SIGNAL_HEADER = "x-cloudroom-relay";
+/** Returned on 401 when the presented session was explicitly signed out, so Mac-to-Mac viewers stop auto-renewing. */
+export const SESSION_REVOKED_HEADER = "x-cloudroom-session-revoked";

@@ -4,9 +4,12 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
-import { createThread, getProject, replaceProjectGitRemoteUrl, setProjectGithubRepo } from "@cloudroom/db";
+import { cloudroomCommands, cloudroomThreads, createThread, getProject, replaceProjectGitRemoteUrl, setProjectGithubRepo } from "@cloudroom/db";
+import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { copyProject, envRefusal, githubRepository, localFiles, localProjectNote, movedRepos, pack, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
+import { parseGhHostsLogin } from "../../src/services/cloudroom/sandboxes.js";
 import { redactSecrets } from "../../src/services/cloudroom/shares.js";
+import { projectCopyProgress, saveProjectCopyProgress } from "../../src/services/cloudroom/store.js";
 import { seedHostSession, seedPrimaryHost, seedProjectWithSource } from "../helpers/seed.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
@@ -219,6 +222,73 @@ it("a project whose GitHub origin has a token saves it clean and copies as a Git
     expect(workspaceChecked).toBe(false);
   } finally {
     rmSync(app, { recursive: true, force: true });
+    await harness.cleanup();
+  }
+});
+
+it("parseGhHostsLogin only reads github.com entries and never crosses into other hosts", () => {
+  expect(parseGhHostsLogin("github.com:\n    user: alice\n")).toEqual({ found: true, user: "alice" });
+  expect(parseGhHostsLogin("github.com:\n    oauth_token: gho_fake\n")).toEqual({ found: true, user: null });
+  expect(parseGhHostsLogin("github.com:\n    git_protocol: https\nenterprise.example.com:\n    oauth_token: gho_other\n")).toEqual({ found: false, user: null });
+  expect(parseGhHostsLogin("")).toEqual({ found: false, user: null });
+});
+
+it("explicitRetry surfaces non-login clone errors instead of quietly completing, and retryCopy refreshes the owning sandbox", async () => {
+  const harness = await createTestAppHarness();
+  const root = mkdtempSync(join(tmpdir(), "cloudroom-retry-copy-"));
+  const service = cloudroom(harness.deps);
+  try {
+    const { deps } = harness;
+    const { host } = seedHostSession(deps, { id: "host_retry" });
+    seedPrimaryHost(deps, host.id);
+    const { project } = seedProjectWithSource(deps, { hostId: host.id, path: root });
+    setProjectGithubRepo(deps.db, deps.hub, project.id, { githubRepoId: 2, gitRemoteUrl: "https://github.com/acme/private.git" });
+    const thread = createThread(deps.db, deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" });
+
+    // 1. explicitRetry reports phase="error" even when a local project folder exists and clone fails for a non-login reason.
+    const failingClient = {
+      workspace: async () => ({ path: "/code/private" }),
+      alive: async () => {},
+      runOnVm: async ({ command }: { command: string }) => {
+        if (command.includes("git clone")) {
+          return { code: 1, stdout: Buffer.from("\x1dalice").toString("hex"), stderr: Buffer.from("remote: Repository not found.").toString("hex") };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    } as unknown as CloudroomClient;
+    const realSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void) => { fn(); return 0 as unknown as ReturnType<typeof setTimeout>; }) as typeof setTimeout;
+    try {
+      await new Promise<void>((resolve) => {
+        copyProject(deps, failingClient, {
+          threadId: thread.id, workspace: "bb_proj", key: "retry-explicit", localPath: root,
+          repository: "https://github.com/acme/private", clone: true, copyAll: false, teleport: false, explicitRetry: true,
+        }, () => resolve());
+      });
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+    }
+    const afterFail = projectCopyProgress(deps.db, thread.id);
+    expect(afterFail?.phase).toBe("error");
+    expect(afterFail?.error).toContain("can't see this repository");
+
+    // 2. retryCopy on a shared-sandbox child refreshes the owning parent sandbox and clears stale error when folder already has files.
+    deps.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: "sandbox:thr_parent_box", sessionId: "cr_child", startRequestId: "req_1", model: "test", reasoning: "medium" }).run();
+    deps.db.insert(cloudroomCommands).values({ id: `first_${thread.id}`, threadId: thread.id, command: "prompt", state: "completed", input: JSON.stringify({ workspace: "bb_proj" }), createdAt: Date.now() }).run();
+    saveProjectCopyProgress(deps.db, thread.id, { phase: "error", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." });
+    const refreshed: string[] = [];
+    service.sandboxes.refreshGithub = async (target: string) => { refreshed.push(target); };
+    (service as unknown as { rt: { client: () => Promise<CloudroomClient> } }).rt.client = async () => ({
+      workspace: async () => ({ path: "/code/private" }),
+      runOnVm: async () => ({ code: 1, stdout: "", stderr: "" }), // folder already has files
+    } as unknown as CloudroomClient);
+    const result = await service.retryCopy(thread.id);
+    expect(result).toEqual({ status: "folder_not_empty" });
+    expect(refreshed).toEqual(["thr_parent_box"]);
+    expect(projectCopyProgress(deps.db, thread.id)?.phase).toBe("complete");
+  } finally {
+    service.stop();
+    rmSync(root, { recursive: true, force: true });
     await harness.cleanup();
   }
 });

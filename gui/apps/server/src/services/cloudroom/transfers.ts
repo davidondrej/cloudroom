@@ -1,3 +1,4 @@
+import { gitlabRepository } from "@cloudroom/domain";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { ApiError } from "../../errors.js";
@@ -244,17 +245,48 @@ export class CloudTransfers {
   }
 
   /** "Try again" on a failed project copy: plans it again from the thread's first message, so it also works after a restart. */
-  async retryCopy(threadId: string): Promise<void> {
+  async retryCopy(threadId: string): Promise<{ status: "cloning" | "copied" | "folder_not_empty" }> {
     const saved = binding(this.rt.host.db, threadId);
     const input = command(this.rt.host.db, `first_${threadId}`)?.input;
     const workspace = copyWorkspace(input);
     if (!saved?.sessionId || !workspace) throw new ApiError(409, "cloudroom_no_project_copy", "This thread has no project to copy.");
+    const sandbox = sandboxThread(saved.coreUrl);
+    const key = copyKey(sandbox, workspace);
+    if (keyCopying(key)) throw new ApiError(409, "cloudroom_no_project_copy", "A project copy is already running.");
     const client = await this.rt.client(saved);
-    const job = await planProjectCopy(this.rt.host.deps, client, threadId, workspace, { key: copyKey(sandboxThread(saved.coreUrl), workspace), branch: baseBranch(input) });
+    const prior = projectCopyProgress(this.rt.host.db, threadId);
+    const job = await planProjectCopy(this.rt.host.deps, client, threadId, workspace, { key, branch: baseBranch(input) });
+    // Retrying a GitHub clone: give the owning awake sandbox the newest saved GitHub login first, even when the folder
+    // already has files so manual `git clone` / `gh` works immediately too.
+    const refreshGithub = Boolean(
+      sandbox && (
+        (job?.repository && !gitlabRepository(job.repository)) ||
+        (!job && prior?.phase === "error" && prior.gitHost !== "gitlab")
+      ),
+    );
+    if (refreshGithub) {
+      try {
+        await this.rt.sandboxes.refreshGithub(sandbox!);
+      } catch (error) {
+        if (error instanceof CloudroomError && (error.status === 409 || error.status === 502 || error.status === 503)) {
+          throw new ApiError(error.status as 409 | 502 | 503, "cloudroom_github_refresh", error.message);
+        }
+        this.rt.host.warn("Cloud GitHub login could not be refreshed before retrying clone", error, { threadId });
+      }
+    }
+    if (job && (job.clone || job.copyAll)) {
+      // A full copy lands like a new thread's, on the thread's own branch, which a copy that never ran never made.
+      this.copy(client, { ...job, explicitRetry: true }, this.landing(threadId, client, null, true, workspace, this.filesState(client, threadId, workspace, "copying")));
+      return { status: "cloning" };
+    }
+    if (prior?.phase === "error") {
+      reportProjectCopy(this.rt.host.deps, threadId, { phase: "complete", completed: 0, total: 0 });
+      if (job) this.copyInto(client, { ...job, explicitRetry: true });
+      return { status: "folder_not_empty" };
+    }
     if (!job) throw new ApiError(409, "cloudroom_no_project_copy", "Nothing is left to copy, or a copy is already running.");
-    // A full copy lands like a new thread's, on the thread's own branch, which a copy that never ran never made.
-    if (job.clone || job.copyAll) this.copy(client, job, this.landing(threadId, client, null, true, workspace, this.filesState(client, threadId, workspace, "copying")));
-    else this.copyInto(client, job);
+    this.copyInto(client, { ...job, explicitRetry: true });
+    return { status: "copied" };
   }
 
   /** A folder that already has files gets only its `.env` files again, so a copy cut short stays failed, never ready.

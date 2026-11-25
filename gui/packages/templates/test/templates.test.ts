@@ -80,6 +80,11 @@ describe("@cloudroom/templates", () => {
     expect(local).not.toMatch(/## Cloud sandboxes|room-cli files wait|--shared-sandbox/u);
     expect(cloud).toContain("## Cloud sandboxes");
     expect(cloud).toContain("room-cli files wait");
+    // #2628: Cloud agents wait for a running setup script before installing.
+    expect(cloud).toContain(
+      "`/var/lib/cloudroom-setup/status` says `running`? Wait up to 10 minutes",
+    );
+    expect(local).not.toContain("cloudroom-setup");
     expect(cloud).not.toMatch(/Local children share|ask before installing/u);
     // #1281: Cloud agents explain that a GH_TOKEN API key overrides the GitHub login.
     expect(cloud).toContain("a Cloud API key may be overriding the GitHub login.");

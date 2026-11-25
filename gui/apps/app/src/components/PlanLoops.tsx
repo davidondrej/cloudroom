@@ -12,6 +12,7 @@ import { getAppSurface } from "@/lib/app-surface";
 import { callPluginRpc, useProviders, useRoomContext } from "@/lib/plugin-sdk-hooks";
 import { usePopupSlot } from "@/lib/popups";
 import { getPluginPanelRoutePath } from "@/lib/route-paths";
+import { openUpgrade, splitUpgradeLink } from "@/lib/upgrade-prompt";
 
 // The pop-up after buying a plan (docs/scopes/loops.md#after-buying-a-plan): "You're on Pro!", then three loop
 // templates as paper tickets, turned on in the Cloud for one GitHub repo with one click. The Loops plugin decides
@@ -26,9 +27,9 @@ const NAMES: Record<string, string> = { pro: "Pro", super: "Super", ultra: "Ultr
 // What each plan includes, in the words of planPerks() in web/lib/model.ts. Keep the two in step.
 const SHARED = ["1:1 setup call", "H100 and B200 GPUs on demand"];
 const PERKS: Record<string, string[]> = {
-  pro: ["55,000 Cloud Credits every month", ...SHARED, "Agents stay awake 4× longer", "1 year storage"],
-  super: ["180,000 Cloud Credits every month", ...SHARED, "Agents stay awake 8× longer", "2 year storage", "Priority Support"],
-  ultra: ["650,000 Cloud Credits every month", ...SHARED, "Agents stay awake 12× longer", "5 year storage", "Slack channel with David"],
+  pro: ["55,000 Cloud Credits every month", "Up to 50 concurrent Cloud agents", "Up to 20 active Loops", ...SHARED, "1 year storage"],
+  super: ["180,000 Cloud Credits every month", "Up to 150 concurrent Cloud agents", "Up to 60 active Loops", "Priority Cloud capacity", ...SHARED, "2 year storage", "Priority Support"],
+  ultra: ["650,000 Cloud Credits every month", "Up to 500 concurrent Cloud agents", "Up to 200 active Loops", "Highest Cloud priority", ...SHARED, "5 year storage", "Slack channel with David"],
 };
 /** One color per ticket. */
 const INKS = ["#D97757", "#E2A72B", "#7F98F5"];
@@ -185,7 +186,22 @@ function Tickets({ data, done }: { data: PlanLoops; done: () => void }) {
             )}
           </label>
         </div>
-        {error && <p role="alert" className="mt-3 text-[13px] text-[#a23b1c]">{error}</p>}
+        {error && (() => {
+          const split = splitUpgradeLink(error);
+          return (
+            <p role="alert" className="mt-3 text-[13px] text-[#a23b1c]">
+              {split.text}
+              {split.hasLink && (
+                <>
+                  {" "}
+                  <button type="button" className="cursor-pointer font-semibold underline underline-offset-2" onClick={() => openUpgrade("limit_link")}>
+                    Upgrade
+                  </button>
+                </>
+              )}
+            </p>
+          );
+        })()}
         <p className="mt-5 flex flex-wrap items-center gap-x-3.5 gap-y-1 border-t border-dotted border-[#29251e]/30 pt-3.5 font-mono text-[10.5px] text-[#6f6655] [@media(max-height:720px)]:hidden">
           <span className="-rotate-[4deg] border-2 border-[#3d7a00] px-1.5 font-black tracking-[0.15em] text-[#3d7a00]">PAID</span>
           {(PERKS[data.plan] ?? []).map((perk) => <span key={perk} className="flex items-center gap-1 whitespace-nowrap"><Icon name="Check" className="size-3 text-[#3d7a00]" aria-hidden="true" />{perk}</span>)}

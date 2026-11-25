@@ -10,6 +10,7 @@ import {
   setGlobalDispatcher,
   type Dispatcher,
 } from "undici";
+import { linuxSandboxRefusedMessage } from "@cloudroom/sdk/node";
 import { CLI_READ_TIMEOUT_MS, cliFetch } from "./client.js";
 
 export interface PluginCliContributionEntry {
@@ -145,6 +146,8 @@ export function describeUnreachableServer(
     );
   }
   if (refused) {
+    const sandboxed = linuxSandboxRefusedMessage();
+    if (sandboxed) return sandboxed;
     return `Cloudroom is not running at ${baseUrl} — open the Cloudroom app, then re-run this command.`;
   }
   if (timedOut || retryable) {

@@ -3,7 +3,9 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, expect, it, vi } from "vitest";
+import { isCloudGithubLoginError } from "@cloudroom/domain";
 import { sdk } from "@/lib/sdk";
+import { isCloudGithubLoginMissing } from "@/components/thread/timeline/CloudLoginRow";
 import { cloudReasoningLevels, cloudroomStatusSchema, useCloudroomThreadWorkspace } from "./cloudroom-queries";
 
 vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { threadWorkspace: vi.fn() } } }));
@@ -49,4 +51,13 @@ it("keeps an unavailable core distinct from an empty folder", async () => {
   vi.mocked(sdk.cloudroom.threadWorkspace).mockResolvedValue({ path: "/code/project", branch: null, head: null });
   await act(() => hook.result.current.refetch());
   await waitFor(() => expect(hook.result.current.isError).toBe(false));
+});
+
+it("detects missing or rejected Cloud GitHub logins without matching GitLab or non-login errors", () => {
+  expect(isCloudGithubLoginError("The GitHub clone failed. Cloud sandboxes have no working GitHub login.")).toBe(true);
+  expect(isCloudGithubLoginError("GitHub rejected the cloud's GitHub login, which may have expired.")).toBe(true);
+  expect(isCloudGithubLoginError("Cloud sandboxes use GitHub account @alice, which can't see this repository.")).toBe(false);
+  expect(isCloudGithubLoginMissing({ phase: "error", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(true);
+  expect(isCloudGithubLoginMissing({ phase: "error", gitHost: "gitlab", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(false);
+  expect(isCloudGithubLoginMissing({ phase: "complete", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(false);
 });

@@ -12,7 +12,10 @@ import {
 import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 import { queueChildThreadTurnNotificationBestEffort } from "../../../src/services/threads/child-thread-notifications.js";
+import { applyLoggedThreadLifecycleEvent } from "../../../src/services/threads/lifecycle-outcome.js";
+import { requestQueuedMessageDispatch } from "../../../src/services/threads/queued-message-dispatch.js";
 import { sendThreadMessage } from "../../../src/services/threads/thread-send.js";
+import { retryFailedTurn } from "../../../src/services/threads/turn-retry.js";
 import {
   internalAuthHeaders,
   reportQueuedCommandError,
@@ -218,6 +221,86 @@ describe("child outcome reconciliation", () => {
       ]).toEqual(["child-failed", "child-completed"]);
     });
   }, 10_000);
+
+  // A parent that heard the failure hears "continued"; one whose turn was
+  // still being prepared hears nothing yet, and a queued failure delivered
+  // meanwhile carries the line itself (#2255).
+  it.each([
+    ["after the failure went", "sent", ["child-failed", "unlabeled"]],
+    ["during the parent's slow preparation", "slow", []],
+    ["while its queued failure is delivered", "queued", ["child-failed"]],
+  ] as const)(
+    "an account switch %s",
+    async (_, mode, expected) => {
+      await withTestHarness(async (harness) => {
+        const { child, parent } = seedFamily(harness, "account-switch");
+        const sleep = (ms: number) =>
+          new Promise((resolve) => setTimeout(resolve, ms));
+        const run = (
+          type: "run.started" | "run.failed" | "run.succeeded",
+          threadId: string,
+        ) =>
+          applyLoggedThreadLifecycleEvent(harness.deps, {
+            event: { type },
+            threadId,
+          });
+        run("run.started", child.id);
+        run("run.failed", child.id);
+        if (mode === "queued") run("run.started", parent.id);
+        await queueChildThreadTurnNotificationBestEffort(harness.deps, {
+          childThread: child,
+          parentThreadId: parent.id,
+          turnStatus: "failed",
+        });
+        const gates: (() => void)[] = [];
+        const stall = () =>
+          vi
+            .spyOn(harness.deps.providerRegistry, "whenRegistrationsSettled")
+            .mockImplementationOnce(
+              () => new Promise<void>((resolve) => gates.push(resolve)),
+            );
+        if (mode === "slow") stall();
+        await sleep(2_100);
+        if (mode !== "slow") run("run.succeeded", parent.id);
+        if (mode === "queued") {
+          stall();
+          requestQueuedMessageDispatch(harness.deps, {
+            kind: "thread-ready",
+            threadId: parent.id,
+          });
+          await sleep(300);
+        }
+        await retryFailedTurn(harness.deps, {
+          thread: getThread(harness.db, child.id)!,
+          request: {
+            turnRequestId: null,
+            sendAt: null,
+            reason: "Switched account",
+            accountSwitch: { provider: "claude-code", from: "A", to: "B" },
+          },
+        });
+        await sleep(2_100);
+        gates.forEach((open) => open());
+        await sleep(500);
+
+        expect([
+          ...parentSystemMessageKinds(harness, parent.id),
+          ...listQueuedThreadMessages(harness.db, parent.id),
+        ]).toEqual(expected);
+        if (mode === "queued")
+          expect(
+            JSON.stringify(
+              harness.db
+                .select()
+                .from(events)
+                .where(eq(events.threadId, parent.id))
+                .all(),
+            ),
+          ).toContain("has since continued on another account");
+      });
+    },
+    15_000,
+  );
 
   // full/free: writes fail with SQLITE_FULL or work; stall/pass: deliveries
   // stall on a gate or run; open: reopens gates oldest first; held: notices

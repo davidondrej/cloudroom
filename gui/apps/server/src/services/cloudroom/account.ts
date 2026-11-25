@@ -9,7 +9,7 @@ import { cloudroom, configuredWebsite, trustedWebsite } from "./commands.js";
 import { cancelClaudeToken } from "./claude-token.js";
 import { cancelGithubLogin } from "./github-login.js";
 import { macAccess, supportedMacAccessLevels } from "./previews.js";
-import { hasMacCodexLogin } from "./sandboxes.js";
+import { hasMacCodexLogin, macGithubLogin } from "./sandboxes.js";
 import { copyLogins } from "./sync.js";
 import { linkInstall, reportSignInFailed } from "./setup-telemetry.js";
 
@@ -65,7 +65,18 @@ export class CloudroomAccountService {
   async status() {
     const status = await cloudroom(this.deps).status();
     const macAccessLevel = await macAccess(this.deps);
-    return { ...status, macAccess: macAccessLevel === null ? null : macAccessLevel !== "off", macAccessLevel, macAccessLevels: supportedMacAccessLevels, computerOs, copyLogins: await copyLogins(this.deps), localLogins: { codex: await hasMacCodexLogin() }, signingIn: this.pending !== null, signInError: this.error };
+    const [codex, github] = await Promise.all([hasMacCodexLogin(), macGithubLogin()]);
+    return {
+      ...status,
+      macAccess: macAccessLevel === null ? null : macAccessLevel !== "off",
+      macAccessLevel,
+      macAccessLevels: supportedMacAccessLevels,
+      computerOs,
+      copyLogins: await copyLogins(this.deps),
+      localLogins: { codex, github: github.found, ...(github.user ? { githubUser: github.user } : {}) },
+      signingIn: this.pending !== null,
+      signInError: this.error,
+    };
   }
 
 

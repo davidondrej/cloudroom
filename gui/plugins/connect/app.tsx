@@ -14,9 +14,11 @@ import { Switch } from "@cloudroom/shared-ui/switch";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import {
   CONNECT_REALTIME_CHANNEL,
+  CONNECT_SESSION_CONNECTED_CHANNEL,
   PHONE_SETUP_URL_QR,
   type ConnectStateName,
   type ConnectStatus,
+  type RemoteSession,
 } from "@/src/types";
 
 
@@ -88,6 +90,7 @@ function asStatus(payload: unknown): ConnectStatus | null {
         ? record.lastRemoteActivityAt
         : null,
     shares,
+    enabled: record.enabled !== false,
     signedIn: record.signedIn === true,
   };
 }
@@ -505,6 +508,13 @@ function PhoneSetupCard() {
 }
 
 function PhoneTab({ status }: { status: ConnectStatus }) {
+  if (!status.enabled) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Remote access is turned off. Turn it on in Settings to use Cloudroom from your phone or another {COMPUTER}.
+      </p>
+    );
+  }
   if (!status.signedIn) {
     return (
       <p className="text-sm text-muted-foreground">
@@ -560,6 +570,56 @@ function SettingRow({
   );
 }
 
+function RemoteAccessRow({ enabled }: { enabled: boolean }) {
+  const rpc = useRpc<typeof connectRpcContract>();
+  const [checked, setChecked] = useState(enabled);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!pending) setChecked(enabled);
+  }, [enabled, pending]);
+  const change = useCallback(
+    (next: boolean) => {
+      setPending(true);
+      setError(null);
+      setChecked(next);
+      rpc.call("remoteAccess", { enabled: next }).then(
+        (result) => {
+          setPending(false);
+          setChecked(result.enabled);
+        },
+        (rpcError: unknown) => {
+          setPending(false);
+          setChecked(!next);
+          const text = errorText(rpcError);
+          setError(
+            text.includes("can't be called through Cloudroom Connect")
+              ? `Change this setting on your ${COMPUTER}.`
+              : text,
+          );
+        },
+      );
+    },
+    [rpc],
+  );
+  return (
+    <SettingRow
+      title="Remote access"
+      detail={
+        error ??
+        `Keep a private relay connection open so you can use Cloudroom from your phone or another ${COMPUTER}, and share dev servers.`
+      }
+    >
+      <Switch
+        checked={checked}
+        disabled={pending}
+        onCheckedChange={change}
+        aria-label="Remote access"
+      />
+    </SettingRow>
+  );
+}
+
 function RemoteInstructionsRow() {
   const rpc = useRpc<typeof connectRpcContract>();
   const [enabled, setEnabled] = useState<boolean | null>(null);
@@ -610,13 +670,56 @@ function RemoteInstructionsRow() {
 
 function SignOutPhones() {
   const rpc = useRpc<typeof connectRpcContract>();
+  const [sessions, setSessions] = useState<RemoteSession[] | null>(null);
+  const [revokingId, setRevokingId] = useState<string | null>(null);
   const [state, setState] = useState<"idle" | "confirm" | "pending">("idle");
   const [result, setResult] = useState<string | null>(null);
+
+  const loadSessions = useCallback(() => {
+    rpc.call("listSessions").then(
+      (data) => setSessions(data.sessions),
+      () => setSessions(null),
+    );
+  }, [rpc]);
+
+  useEffect(() => {
+    loadSessions();
+  }, [loadSessions]);
+
+  useRealtime(CONNECT_SESSION_CONNECTED_CHANNEL, () => {
+    loadSessions();
+  });
+
+  const revokeOne = useCallback(
+    (sessionId: string) => {
+      if (revokingId !== null) return;
+      setRevokingId(sessionId);
+      setResult(null);
+      rpc.call("revokeSession", { sessionId }).then(
+        ({ revoked }) => {
+          setRevokingId(null);
+          if (revoked) {
+            setSessions((prev) => prev?.filter((entry) => entry.id !== sessionId) ?? prev);
+          } else {
+            loadSessions();
+            setResult("That session was already signed out or could not be found.");
+          }
+        },
+        (error: unknown) => {
+          setRevokingId(null);
+          setResult(errorText(error));
+        },
+      );
+    },
+    [revokingId, rpc],
+  );
+
   const signOut = useCallback(() => {
     setState("pending");
     rpc.call("signOutPhones").then(
       ({ revoked }) => {
         setState("idle");
+        setSessions([]);
         setResult(revoked === 1 ? "Signed out 1 session." : `Signed out ${revoked} sessions.`);
       },
       (error: unknown) => {
@@ -625,33 +728,78 @@ function SignOutPhones() {
       },
     );
   }, [rpc]);
+
   return (
-    <SettingRow
-      title="Signed-in phones"
-      detail={result ?? "Phones stay signed in until you sign them out here."}
-    >
-      {state === "confirm" ? (
-        <Button type="button" variant="ghost" size="sm" onClick={() => setState("idle")}>
-          Cancel
-        </Button>
-      ) : null}
-      <Button
-        type="button"
-        variant="ghost"
-        size="sm"
-        className={DANGER_QUIET_CLASS}
-        disabled={state === "pending"}
-        onClick={() => (state === "confirm" ? signOut() : setState("confirm"))}
+    <div>
+      <SettingRow
+        title="Signed-in remote devices"
+        detail={
+          result ??
+          (sessions === null
+            ? "Phones stay signed in until you sign them out here."
+            : sessions.length === 0
+              ? "No phones or other computers are signed in."
+              : `${sessions.length === 1 ? "1 remote device" : `${sessions.length} remote devices`} signed in.`)
+        }
       >
-        {state === "confirm" ? "Sign out all phones?" : "Sign out all phones"}
-      </Button>
-    </SettingRow>
+        {state === "confirm" ? (
+          <Button type="button" variant="ghost" size="sm" onClick={() => setState("idle")}>
+            Cancel
+          </Button>
+        ) : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className={DANGER_QUIET_CLASS}
+          disabled={state === "pending"}
+          onClick={() => (state === "confirm" ? signOut() : setState("confirm"))}
+        >
+          {state === "confirm" ? "Sign out all phones?" : "Sign out all phones"}
+        </Button>
+      </SettingRow>
+      {sessions && sessions.length > 0 ? (
+        <ul className="divide-y divide-border-seam border-t border-border-seam bg-surface-recessed/40 px-4">
+          {sessions.map((session) => (
+            <li key={session.id} className="flex items-center gap-3 py-2.5">
+              <Icon
+                name={session.kind === "phone" ? "Smartphone" : "Laptop"}
+                className="size-4 shrink-0 text-muted-foreground"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-foreground">{session.label}</p>
+                <p className="truncate text-xs text-muted-foreground">
+                  Signed in {formatSince(session.createdAt)}
+                  {session.lastSeenAt > session.createdAt
+                    ? ` · Active ${formatSince(session.lastSeenAt)}`
+                    : ""}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className={DANGER_QUIET_CLASS}
+                disabled={revokingId === session.id || state === "pending"}
+                onClick={() => revokeOne(session.id)}
+              >
+                {revokingId === session.id ? (
+                  <Icon name="Spinner" className="size-4 animate-spin" />
+                ) : null}
+                Sign out
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
   );
 }
 
 function SettingsTab({ status }: { status: ConnectStatus }) {
   return (
     <div className="divide-y divide-border-seam rounded-lg border border-border">
+      <RemoteAccessRow enabled={status.enabled} />
       <RemoteInstructionsRow />
       {status.paired ? <SignOutPhones /> : null}
     </div>
@@ -660,25 +808,27 @@ function SettingsTab({ status }: { status: ConnectStatus }) {
 
 function StatusBadge({ status }: { status: ConnectStatus }) {
   const [tone, label, detail]: ["ok" | "warn" | "muted", string, string | null] =
-    !status.signedIn
-      ? ["muted", "Signed out", status.lastError]
-      : !status.paired
-        ? ["warn", "Setting up…", status.lastError]
-        : status.state !== "connected"
-          ? [
-              "warn",
-              "Reconnecting…",
-              [status.lastError, retryHint(status.nextRetryAt)]
-                .filter((part): part is string => Boolean(part))
-                .join(" · "),
-            ]
-          : [
-              "ok",
-              "Ready",
-              `since ${formatSince(status.since)}${
-                status.remoteClients > 0 ? ` · ${status.remoteClients} viewing remotely` : ""
-              }`,
-            ];
+    !status.enabled
+      ? ["muted", "Off", null]
+      : !status.signedIn
+        ? ["muted", "Signed out", status.lastError]
+        : !status.paired
+          ? ["warn", "Setting up…", status.lastError]
+          : status.state !== "connected"
+            ? [
+                "warn",
+                "Reconnecting…",
+                [status.lastError, retryHint(status.nextRetryAt)]
+                  .filter((part): part is string => Boolean(part))
+                  .join(" · "),
+              ]
+            : [
+                "ok",
+                "Ready",
+                `since ${formatSince(status.since)}${
+                  status.remoteClients > 0 ? ` · ${status.remoteClients} viewing remotely` : ""
+                }`,
+              ];
   return (
     <div className="flex min-w-0 items-center gap-2">
       {detail ? (
@@ -797,7 +947,11 @@ function ConnectSettingsSection() {
       </div>
       {tab === "phone" ? <PhoneTab status={status} /> : null}
       {tab === "servers" ? (
-        status.paired ? (
+        !status.enabled ? (
+          <p className="text-sm text-muted-foreground">
+            Remote access is turned off. Turn it on in Settings to share servers.
+          </p>
+        ) : status.paired ? (
           <SharedPortsSection
             shares={status.shares}
             dimmed={status.state !== "connected"}

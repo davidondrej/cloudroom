@@ -476,6 +476,11 @@ export function staleSandboxAddress(error: unknown): boolean {
   return error instanceof CloudroomError && (error.status === 404 || error.status === 410 || error.status === 401) && !error.code;
 }
 
+/** Core's own 404 when the requested session does not exist on this Core (e.g. a pruned/fresh sandbox). */
+export function sessionNotFound(error: unknown): boolean {
+  return error instanceof CloudroomError && error.status === 404 && !error.code && error.message.endsWith(": session not found");
+}
+
 export function connectionFailure(error: unknown): boolean {
   return error instanceof CloudroomConnectionError
     || (error instanceof DOMException && error.name === "AbortError")

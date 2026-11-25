@@ -33,6 +33,7 @@ import { useAppNavigationHost } from "@/lib/app-navigation-host";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
 import {
   anchorPointFromMouseEvent,
+  createLiveSelectionRectReader,
   selectionAnchorFromPointerRelease,
   type MessageProseSelection,
   type SelectionAnchor,
@@ -471,13 +472,20 @@ function buildTerminalSelection({
     return null;
   }
 
+  const rect =
+    anchor === null
+      ? containerElement.getBoundingClientRect()
+      : new DOMRect(anchor.point.x, anchor.point.y, 0, 0);
   const selection: MessageProseSelection = {
     text: trimmedText,
     copyText: text,
-    rect:
-      anchor === null
-        ? containerElement.getBoundingClientRect()
-        : new DOMRect(anchor.point.x, anchor.point.y, 0, 0),
+    rect,
+    anchorElement: containerElement,
+    getAnchorRect: createLiveSelectionRectReader({
+      anchor,
+      anchorElement: containerElement,
+      rect,
+    }),
   };
   if (anchor !== null) {
     selection.anchorPoint = anchor.point;

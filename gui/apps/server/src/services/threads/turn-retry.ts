@@ -27,6 +27,7 @@ import type {
 import { ApiError } from "../../errors.js";
 import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
+import { queueChildThreadContinuedNotificationBestEffort } from "./child-thread-notifications.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
 import { appendThreadEvent } from "./thread-events.js";
 import { toThreadQueuedMessage } from "./thread-queued-messages.js";
@@ -356,7 +357,7 @@ export async function retryFailedTurn(
       throw cancelled;
     }
     if (request.accountSwitch) {
-      appendThreadEvent(deps, {
+      const switched = appendThreadEvent(deps, {
         threadId: thread.id,
         environmentId: thread.environmentId,
         type: "system/operation",
@@ -369,6 +370,9 @@ export async function retryFailedTurn(
           metadata: request.accountSwitch,
         },
       });
+      // Only a retry that runs continues it; a queued one may never (#2255).
+      if (outcome.kind === "dispatched")
+        queueChildThreadContinuedNotificationBestEffort(deps, thread, switched);
     }
     if (outcome.kind === "dispatched") {
       return {

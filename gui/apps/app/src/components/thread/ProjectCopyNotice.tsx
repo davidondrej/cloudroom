@@ -3,6 +3,7 @@ import { COMPUTER, type Thread } from "@cloudroom/domain";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { GithubFaviconIcon } from "@/components/pull-request/GithubFaviconIcon";
+import { isCloudGithubLoginMissing } from "@/components/thread/timeline/CloudLoginRow";
 import { PROMPT_STACK_CARD_ROW_HEIGHT, PROMPT_STACK_INLAY_SEGMENT_CLASS, PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
 import { BannerActionSlot, PromptBannerActionButton } from "@/components/promptbox/banner/prompt-banner-actions";
 import { FixPrompt } from "@/components/ui/fix-prompt";
@@ -20,6 +21,7 @@ export function ProjectCopyNotice({ thread }: { thread: Thread }) {
   const progress = thread.projectCopy;
   const dismissKey = `cloudroom.project-copy.dismissed.${thread.id}`;
   if (!progress || progress.phase === "complete") return null;
+  if (!thread.teleport && isCloudGithubLoginMissing(progress)) return null;
   const failed = progress.phase === "error";
   const waiting = progress.phase === "waiting";
   if (failed && window.localStorage.getItem(dismissKey)) return null;

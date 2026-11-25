@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   describeThreadInterruption,
+  queuedMessageSystemNoticeSchema,
+  THREAD_ACCOUNT_SWITCH_OPERATION,
   UNDELIVERED_MESSAGE_WARNING,
   type PromptInput,
   type QueuedMessageSystemNotice,
   type SystemMessageSubject,
   type SystemThreadInterruptedEventData,
+  type Thread,
   type ThreadEventTurnStatus,
 } from "@cloudroom/domain";
 import {
@@ -18,17 +21,19 @@ import {
   isSqliteFullError,
   isThreadQueueAutoSendPaused,
   listActiveBackgroundTaskCountsByThreadIds,
+  listQueuedThreadMessages,
   queuedThreadMessages,
   threads,
   type DbConnection,
 } from "@cloudroom/db";
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, max, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/sqlite-core";
 import { renderTemplate } from "@cloudroom/templates";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import {
   buildParentSystemInputFromTemplateSlot,
   buildParentSystemThreadMention,
+  deliverParentSystemMessage,
   parentSystemThreadLabel,
   queueParentSystemMessage,
   UnsentParentSystemMessageError,
@@ -52,6 +57,11 @@ export interface ChildThreadTurnNotificationBatchItem {
   activeBackgroundCommandCount?: number;
   activeWorkflowCount: number;
   childThread: ChildThreadNotificationSource;
+  /**
+   * Its failure, reported at `failureSequence`, continued on another account;
+   * current only while it runs (#2255).
+   */
+  continued?: { failureSequence: number };
   failureReason?: string | null;
   /** The recorded stop that ended an interrupted turn, read at flush (#1159). */
   interruption?: SystemThreadInterruptedEventData | null;
@@ -155,6 +165,20 @@ const retriedChildThreadTurnItems =
 const waitingChildThreadNotifiedTurnIds = new Map<string, string>();
 /** Each child's last reported turn end, so a replay of it doesn't report again (#1671). */
 const reportedChildThreadTurnEnds = new Map<string, string>();
+/** Children whose failure went to their parent, by the report's sequence (#2255). */
+const toldChildThreadFailures = new Map<string, number>();
+const TOLD_CHILD_THREAD_FAILURES_LIMIT = 1_000;
+/** Queued child reports being delivered, as "child:sequence" (#2255). */
+const deliveringChildReports = new Set<string>();
+/** Follows the child's subject: "It" or its ID (#2255). */
+const formatChildThreadContinued = (failure: "this" | "its") =>
+  `has since continued on another account, so ${failure} failure is not final. Don't start a replacement; it will report again when it finishes.`;
+const CHILD_THREAD_CONTINUED_LINE =
+  " continued on another account after its reported failure, so that failure is not final.";
+const CHILD_THREAD_CONTINUED_GUIDANCE =
+  "Don't start a replacement; it will report again when it finishes.";
+const CHILD_THREAD_BATCH_CONTINUED_GUIDANCE =
+  "Don't start replacements for threads that continued; they will report again when they finish.";
 /** The last report each child's parent got (#1395): its reply's hash (null for none), where its turn started, and whether work still ran. */
 const lastChildReports = new Map<
   string,
@@ -272,6 +296,14 @@ function buildSingleChildThreadTurnStatusSegments(
   args: FormatChildThreadTurnStatusLineArgs,
 ): ParentSystemInputSegment[] {
   const { line } = args;
+  if (line.item.continued)
+    return [
+      { kind: "mention", mention: line.mention },
+      {
+        kind: "text",
+        text: `${CHILD_THREAD_CONTINUED_LINE}\n\n${CHILD_THREAD_CONTINUED_GUIDANCE}`,
+      },
+    ];
   switch (line.item.turnStatus) {
     case "completed": {
       const guidance = [
@@ -319,6 +351,11 @@ function buildChildThreadBatchStatusLineSegments(
   args: FormatChildThreadTurnStatusLineArgs,
 ): ParentSystemInputSegment[] {
   const { line } = args;
+  if (line.item.continued)
+    return [
+      { kind: "mention", mention: line.mention },
+      { kind: "text", text: CHILD_THREAD_CONTINUED_LINE },
+    ];
   return [
     { kind: "mention", mention: line.mention },
     {
@@ -476,6 +513,12 @@ function buildChildThreadTurnStatusBatchSegments(
       formatChildThreadSignedOut(item, item.childThread.id);
     if (retry !== null) segments.push({ kind: "text", text: `\n\n${retry}` });
   }
+  if (args.lines.some((line) => line.item.continued)) {
+    segments.push({
+      kind: "text",
+      text: `\n\n${CHILD_THREAD_BATCH_CONTINUED_GUIDANCE}`,
+    });
+  }
   if (args.lines.some((line) => line.item.turnStatus === "interrupted")) {
     segments.push({
       kind: "text",
@@ -524,7 +567,9 @@ function childThreadTurnStatusBatchTaxonomy(
   const single = items.length === 1 ? items[0] : undefined;
   if (single) {
     return {
-      systemMessageKind: childOutcomeSystemMessageKind(single.turnStatus),
+      systemMessageKind: single.continued
+        ? "unlabeled"
+        : childOutcomeSystemMessageKind(single.turnStatus),
       systemMessageSubject: childThreadSubject(single.childThread),
     };
   }
@@ -600,22 +645,108 @@ async function flushChildThreadTurnNotificationBatch(
   try {
     // Progress messages a settled interaction just released go first (#851).
     await waitForHeldMessageDrain(parentThreadId);
-    await queueParentSystemMessage(deps, {
-      input: buildChildThreadTurnStatusBatchInput({
-        items: batch.items.map((item) =>
-          withInterruption(deps.db, withQueuedRetry(deps.db, item)),
+    const sequence = (id: string) => batch.childReport.sequences[id] ?? 0;
+    // Failures that continued on another account since their report, in one
+    // read for the batch: each reports when that turn ends instead (#2255).
+    const readContinued = (items: ChildThreadTurnNotificationBatchItem[]) => {
+      const running = readRunningChildThreads(
+        deps.db,
+        items.flatMap((item) =>
+          item.turnStatus === "failed" ? [item.childThread.id] : [],
         ),
-      }),
-      parentThreadId,
-      ...childThreadTurnStatusBatchTaxonomy(batch.items),
-      childReport: batch.childReport,
-      stillCurrent: batch.items.some((item) =>
-        retriedChildThreadTurnItems.has(item),
-      )
-        ? () => batch.items.every(isCurrentChildThreadTurnItem)
-        : undefined,
-    });
-    for (const item of batch.items) {
+      );
+      const ids = items.flatMap(
+        ({ childThread: { id }, continued, turnStatus }) =>
+          turnStatus === "failed" &&
+          !continued &&
+          hasContinuedOnAnotherAccount(running, id, sequence(id))
+            ? [id]
+            : [],
+      );
+      return { ids, running };
+    };
+    let continuedMeanwhile: string[] = [];
+    const send = async (
+      sent: ChildThreadTurnNotificationBatchItem[],
+      checked: boolean,
+    ) => {
+      // Checked again right before the parent's request is written, since its
+      // preparation can be slow; a report that queues is checked at delivery.
+      const check = () => {
+        const { ids, running } = readContinued(sent);
+        continuedMeanwhile = ids;
+        return (
+          ids.length === 0 &&
+          (!checked ||
+            sent.every((item) => isCurrentChildThreadTurnItem(item, running)))
+        );
+      };
+      const delivered = await queueParentSystemMessage(deps, {
+        input: buildChildThreadTurnStatusBatchInput({
+          items: sent.map((item) =>
+            withInterruption(deps.db, withQueuedRetry(deps.db, item)),
+          ),
+        }),
+        parentThreadId,
+        ...childThreadTurnStatusBatchTaxonomy(sent),
+        childReport: {
+          at: batch.childReport.at,
+          sequences: Object.fromEntries(
+            sent.map(({ childThread: { id } }) => [id, sequence(id)]),
+          ),
+        },
+        ...(checked ? { stillCurrent: check } : { stillAccurate: check }),
+      });
+      return delivered ? sent : [];
+    };
+    // A continued line is advice: it goes only if the notice goes now and the
+    // child still runs. Otherwise the rest goes as it would without it (#2255).
+    const sendBatch = async (items: ChildThreadTurnNotificationBatchItem[]) => {
+      const rest = items.filter((item) => !item.continued);
+      if (rest.length < items.length) {
+        const sent = await send(items, true).catch((error: unknown) => {
+          const stale = error instanceof UnsentParentSystemMessageError;
+          if (stale && continuedMeanwhile.length === 0) return undefined;
+          throw error;
+        });
+        if (sent !== undefined || rest.length === 0) return sent ?? [];
+      }
+      return send(
+        rest,
+        rest.some((item) => retriedChildThreadTurnItems.has(item)),
+      );
+    };
+    let items = withoutHeldContinuations(deps.db, parentThreadId, batch.items);
+    let sent: ChildThreadTurnNotificationBatchItem[] | undefined;
+    while (sent === undefined) {
+      const { ids, running } = readContinued(items);
+      const left = [...ids, ...continuedMeanwhile];
+      items = items.filter((item) =>
+        item.continued
+          ? isCurrentChildThreadTurnItem(item, running)
+          : !left.includes(item.childThread.id),
+      );
+      if (items.length === 0) return;
+      continuedMeanwhile = [];
+      sent = await sendBatch(items).catch((error: unknown) => {
+        if (continuedMeanwhile.length === 0) throw error;
+        return undefined; // Send the rest again, without those (#2255).
+      });
+    }
+    // Told only once delivered or queued, and only for a child's latest
+    // report, so "continued" never goes ahead of its failure (#2255).
+    for (const item of sent) {
+      const { id } = item.childThread;
+      if (item.turnStatus !== "failed" || item.continued) continue;
+      if (latestChildThreadTurnItems.get(id) !== item) continue;
+      toldChildThreadFailures.set(id, sequence(id));
+      // A child that never continues drops out, oldest first.
+      if (toldChildThreadFailures.size > TOLD_CHILD_THREAD_FAILURES_LIMIT)
+        toldChildThreadFailures.delete(
+          toldChildThreadFailures.keys().next().value!,
+        );
+    }
+    for (const item of sent) {
       rememberChildReport(deps.db, childTurnReport(parentThreadId, item));
     }
   } catch (error) {
@@ -651,14 +782,18 @@ async function flushChildThreadTurnNotificationBatch(
   }
 }
 
-/** False for a retried outcome once its child reported again, even if sent. */
+/**
+ * False for a retried outcome once its child reported again, even if sent,
+ * and for a continuation once its child failed again or reported (#2255).
+ */
 function isCurrentChildThreadTurnItem(
   item: ChildThreadTurnNotificationBatchItem,
+  running: RunningChildThreads = new Map(),
 ): boolean {
-  return (
-    !retriedChildThreadTurnItems.has(item) ||
-    latestChildThreadTurnItems.get(item.childThread.id) === item
-  );
+  const latest = latestChildThreadTurnItems.get(item.childThread.id) === item;
+  return item.continued
+    ? latest && running.has(item.childThread.id)
+    : !retriedChildThreadTurnItems.has(item) || latest;
 }
 
 function retainChildThreadTurnNotificationBatch(
@@ -666,7 +801,9 @@ function retainChildThreadTurnNotificationBatch(
   parentThreadId: string,
   batch: ChildThreadTurnNotificationBatch,
 ): void {
-  const items = batch.items.filter(isCurrentChildThreadTurnItem);
+  const items = batch.items.filter(
+    (item) => !item.continued && isCurrentChildThreadTurnItem(item),
+  );
   if (items.length === 0) return;
   const newer = childThreadTurnNotificationBatches.get(parentThreadId);
   if (!newer) {
@@ -714,6 +851,112 @@ function findRunnableQueuedRetry(db: DbConnection, threadId: string) {
     .get();
 }
 
+/** Each running child's latest account-switch sequence, or null (#2255). */
+type RunningChildThreads = ReadonlyMap<string, number | null>;
+
+/**
+ * The children a turn runs on that aren't archived or deleted, with the
+ * sequence of their latest account switch (accounts plugin, or Core for
+ * Cloud), in one read for a whole batch (#2255).
+ */
+function readRunningChildThreads(
+  db: DbConnection,
+  threadIds: string[],
+): RunningChildThreads {
+  if (threadIds.length === 0) return new Map();
+  const rows = db
+    .select({ id: threads.id, switched: max(events.sequence) })
+    .from(threads)
+    .leftJoin(
+      events,
+      and(
+        eq(events.threadId, threads.id),
+        eq(events.type, "system/operation"),
+        sql`json_extract(${events.data}, '$.operation') = ${THREAD_ACCOUNT_SWITCH_OPERATION}`,
+      ),
+    )
+    .where(
+      and(
+        inArray(threads.id, threadIds),
+        inArray(threads.status, ["starting", "active"]),
+        isNull(threads.archivedAt),
+        isNull(threads.deletedAt),
+      ),
+    )
+    .groupBy(threads.id)
+    .all();
+  return new Map(rows.map(({ id, switched }) => [id, switched]));
+}
+
+/**
+ * Whether a failed child runs again on another account since `sequence`: an
+ * account switch retried its turn, and that retry still runs (#2255).
+ */
+function hasContinuedOnAnotherAccount(
+  running: RunningChildThreads,
+  threadId: string,
+  sequence: number,
+): boolean {
+  return (running.get(threadId) ?? -1) > sequence;
+}
+
+/**
+ * A parent that already heard its child fail hears, in the next child report,
+ * that a running retry continued it on another account, so it doesn't replace
+ * a healthy child (#2255). That line is dropped if the child fails again or
+ * reports first. A failure notice still in the parent's queue, or being
+ * delivered from it, says it at delivery instead. `switched` is the account
+ * switch's own sequence, so siblings resumed together read nothing here.
+ */
+export function queueChildThreadContinuedNotificationBestEffort(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  child: Thread,
+  switched: number,
+): void {
+  const failureSequence = toldChildThreadFailures.get(child.id);
+  if (failureSequence === undefined || !isParentNotifiableChildThread(child))
+    return;
+  addChildThreadTurnNotificationBatchItem(
+    deps,
+    child.parentThreadId,
+    {
+      activeWorkflowCount: 0,
+      childThread: child,
+      continued: { failureSequence },
+      terminalOutput: null,
+      turnStatus: "failed",
+    },
+    switched,
+  );
+}
+
+/**
+ * Drops "continued" lines whose failure is still in the parent's queue, or
+ * being delivered from it: that delivery says it. One queue read for the
+ * whole batch, however many siblings an account switch resumed (#2255).
+ */
+function withoutHeldContinuations(
+  db: DbConnection,
+  parentThreadId: string,
+  items: ChildThreadTurnNotificationBatchItem[],
+): ChildThreadTurnNotificationBatchItem[] {
+  if (!items.some((item) => item.continued)) return items;
+  const queued = new Set(
+    listQueuedThreadMessages(db, parentThreadId).flatMap(({ systemNotice }) =>
+      Object.entries(
+        (systemNotice === null
+          ? undefined
+          : queuedMessageSystemNoticeSchema.safeParse(JSON.parse(systemNotice))
+              .data?.childReport?.sequences) ?? {},
+      ).map(([id, sequence]) => `${id}:${sequence}`),
+    ),
+  );
+  return items.filter(({ childThread: { id }, continued }) => {
+    const key = `${id}:${continued?.failureSequence}`;
+    return !continued || (!queued.has(key) && !deliveringChildReports.has(key));
+  });
+}
+
 /**
  * The provider-retry plugin queues its retry on `turn.failed`, so it is read
  * at flush, after the batch delay (#1365). Without one, a failed login says
@@ -723,7 +966,7 @@ function withQueuedRetry(
   db: DbConnection,
   item: ChildThreadTurnNotificationBatchItem,
 ): ChildThreadTurnNotificationBatchItem {
-  if (item.turnStatus !== "failed") return item;
+  if (item.turnStatus !== "failed" || item.continued) return item;
   const retry = findRunnableQueuedRetry(db, item.childThread.id);
   if (retry) return { ...item, queuedRetry: { sendAt: retry.sendAt } };
   const child = getThread(db, item.childThread.id);
@@ -919,17 +1162,26 @@ function queueChildThreadTurnNotificationBatchItem(
   ) {
     return;
   }
-  const sequence = getLatestThreadSequence(deps.db, {
-    threadId: args.childThread.id,
-  });
-  latestChildThreadTurnItems.set(args.childThread.id, item);
-  const existingBatch = childThreadTurnNotificationBatches.get(
-    args.parentThreadId,
-  );
+  addChildThreadTurnNotificationBatchItem(deps, args.parentThreadId, item);
+}
+
+/** Adds a child's newest report to its parent's batch, replacing its older one. */
+function addChildThreadTurnNotificationBatchItem(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  parentThreadId: string,
+  item: ChildThreadTurnNotificationBatchItem,
+  sequence = getLatestThreadSequence(deps.db, {
+    threadId: item.childThread.id,
+  }),
+): void {
+  const childThreadId = item.childThread.id;
+  toldChildThreadFailures.delete(childThreadId);
+  latestChildThreadTurnItems.set(childThreadId, item);
+  const existingBatch = childThreadTurnNotificationBatches.get(parentThreadId);
   if (existingBatch) {
-    existingBatch.childReport.sequences[args.childThread.id] = sequence;
+    existingBatch.childReport.sequences[childThreadId] = sequence;
     const existingIndex = existingBatch.items.findIndex(
-      (entry) => entry.childThread.id === args.childThread.id,
+      (entry) => entry.childThread.id === childThreadId,
     );
     if (existingIndex === -1) {
       existingBatch.items.push(item);
@@ -939,21 +1191,18 @@ function queueChildThreadTurnNotificationBatchItem(
     clearTimeout(existingBatch.timer);
     existingBatch.timer = scheduleChildThreadTurnNotificationBatchFlush(
       deps,
-      args.parentThreadId,
+      parentThreadId,
     );
     return;
   }
 
-  childThreadTurnNotificationBatches.set(args.parentThreadId, {
+  childThreadTurnNotificationBatches.set(parentThreadId, {
     childReport: {
       at: Date.now(),
-      sequences: { [args.childThread.id]: sequence },
+      sequences: { [childThreadId]: sequence },
     },
     items: [item],
-    timer: scheduleChildThreadTurnNotificationBatchFlush(
-      deps,
-      args.parentThreadId,
-    ),
+    timer: scheduleChildThreadTurnNotificationBatchFlush(deps, parentThreadId),
   });
 }
 
@@ -1033,9 +1282,9 @@ export async function queueChildThreadNeedsAttentionNotificationBestEffort(
 
 /** A queued child report this old says when it is from (#1208). */
 const CHILD_THREAD_LATE_NOTICE_MS = 15 * 60_000;
-/** The line {@link withChildReportAge} adds, replaced on each delivery. */
+/** The lines {@link withChildReportAge} adds, replaced on each delivery. */
 const CHILD_THREAD_NOTICE_AGE_LINE =
-  /\n\n(?:From [^\n]* \(\d+ (?:min|h) ago\)|(?:This child has|Children with) newer output: room-cli thread output )[^\n]*$/u;
+  /(?:\n\n(?:From [^\n]* \(\d+ (?:min|h) ago\)|(?:This child has|Children with) newer output: room-cli thread output |\S+ has since continued on another account, so (?:this|its) failure )[^\n]*)+$/u;
 /** The line {@link formatChildThreadQueuedRetry} writes, rechecked on delivery. */
 const CHILD_THREAD_QUEUED_RETRY_LINE =
   /\n\nCloudroom will retry (this turn|\S+) automatically [^\n]* room-cli provider-retry cancel (\S+)$/gmu;
@@ -1059,14 +1308,22 @@ function formatChildNoticeAge(at: number, ageMs: number): string {
  * because a notice re-queued behind a starting turn keeps the text it got.
  * A retry promise whose retry was cancelled, failed, or archived meanwhile
  * goes back to the generic line, so the parent doesn't wait forever (#1365).
+ * A failure whose child continued on another account says so, unless `advise`
+ * is false (#2255).
  */
 export function withChildReportAge(
   db: DbConnection,
   input: PromptInput[],
   report: ChildReport | undefined,
-): PromptInput[] {
+  advise = true,
+): {
+  input: PromptInput[];
+  continued: [string, number][];
+  failed: [string, number][];
+} {
   const last = input.at(-1);
-  if (report === undefined || last?.type !== "text") return input;
+  if (report === undefined || last?.type !== "text")
+    return { input, continued: [], failed: [] };
   const children = Object.entries(report.sequences);
   const newer = children.flatMap(([threadId, sequence]) =>
     (getLatestThreadOutputEventRow(db, { threadId })?.sequence ?? 0) > sequence
@@ -1082,19 +1339,108 @@ export function withChildReportAge(
     ageMs >= CHILD_THREAD_LATE_NOTICE_MS
       ? `From ${formatChildNoticeAge(report.at, ageMs)}${newerOutput ? `; ${newerOutput}` : "."}`
       : `${newerOutput.charAt(0).toUpperCase()}${newerOutput.slice(1)}`;
-  const text = last.text
+  const failed = children.filter(([threadId]) =>
+    last.text.includes(`@thread:${threadId} failed`),
+  );
+  const running = readRunningChildThreads(
+    db,
+    advise ? failed.map(([threadId]) => threadId) : [],
+  );
+  const continued = failed.filter(([threadId, sequence]) =>
+    hasContinuedOnAnotherAccount(running, threadId, sequence),
+  );
+  const body = last.text
     .replace(CHILD_THREAD_NOTICE_AGE_LINE, "")
     .replace(CHILD_THREAD_QUEUED_RETRY_LINE, (retryLine, subject, threadId) =>
       findRunnableQueuedRetry(db, threadId)
         ? retryLine
-        : subject === "this turn"
+        : subject === "this turn" && !continued.some(([id]) => id === threadId)
           ? `\n\n${CHILD_THREAD_INSPECTION_GUIDANCE}`
           : "",
     );
-  return [
-    ...input.slice(0, -1),
-    { ...last, text: line ? `${text}\n\n${line}` : text },
-  ];
+  const lines = continued.map(([threadId]) =>
+    children.length === 1
+      ? `It ${formatChildThreadContinued("this")}`
+      : `${threadId} ${formatChildThreadContinued("its")}`,
+  );
+  const text = [body, ...lines, ...(line ? [line] : [])].join("\n\n");
+  return {
+    input: [...input.slice(0, -1), { ...last, text }],
+    continued,
+    failed,
+  };
+}
+
+/**
+ * Delivers a queued parent notice with the lines {@link withChildReportAge}
+ * adds. Its failed children are checked again right before the parent's
+ * request is written, since preparation can be slow: if one continued on
+ * another account, or stopped, since the notice was built, it is built again.
+ * One that would queue again goes without any "has since continued" line, so
+ * that line is only ever written with its check. Each attempt reads the parent
+ * afresh, and a third refusal leaves the row queued for its next delivery
+ * (#2255).
+ */
+export async function deliverQueuedParentNotice(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  args: Parameters<typeof deliverParentSystemMessage>[1],
+): Promise<boolean> {
+  // A switch meanwhile leaves its "continued" line to this delivery.
+  const keys = Object.entries(args.childReport?.sequences ?? {}).map(
+    ([id, sequence]) => `${id}:${sequence}`,
+  );
+  keys.forEach((key) => deliveringChildReports.add(key));
+  try {
+    let advise = true;
+    let { parentThread } = args;
+    for (let attempt = 1; ; attempt += 1) {
+      const { input, continued, failed } = withChildReportAge(
+        deps.db,
+        args.input,
+        args.childReport,
+        advise,
+      );
+      let changed = false;
+      // One read for the whole notice, right before it is written.
+      const check = () => {
+        const running = readRunningChildThreads(
+          deps.db,
+          failed.map(([id]) => id),
+        );
+        changed = failed.some(
+          ([id, sequence]) =>
+            continued.some(([continuedId]) => continuedId === id) !==
+            hasContinuedOnAnotherAccount(running, id, sequence),
+        );
+        return !changed;
+      };
+      try {
+        const delivered = await deliverParentSystemMessage(deps, {
+          ...args,
+          input,
+          parentThread,
+          ...(continued.length > 0
+            ? { stillCurrent: check }
+            : { stillAccurate: check }),
+        });
+        // Their "continued" lines went with it, so their own notices don't.
+        for (const [id, sequence] of delivered ? continued : [])
+          if (
+            latestChildThreadTurnItems.get(id)?.continued?.failureSequence ===
+            sequence
+          )
+            latestChildThreadTurnItems.delete(id);
+        return delivered;
+      } catch (error) {
+        if (!(error instanceof UnsentParentSystemMessageError)) throw error;
+        if (attempt === 3) return false; // Not sent: the row stays queued.
+        advise = changed;
+        parentThread = getThread(deps.db, parentThread.id) ?? parentThread;
+      }
+    }
+  } finally {
+    keys.forEach((key) => deliveringChildReports.delete(key));
+  }
 }
 
 const CHILD_THREAD_LOST_WORK_GUIDANCE =

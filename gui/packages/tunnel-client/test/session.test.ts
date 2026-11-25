@@ -8,7 +8,7 @@ import {
   encodeFrame,
   type Frame,
 } from "@cloudroom/tunnel-contract";
-import { TunnelSession } from "../src/session.js";
+import { resolveLoopbackUrl, TunnelSession } from "../src/session.js";
 
 const DOWNLOAD_BYTES = 4 * 1024 * 1024;
 
@@ -86,6 +86,60 @@ describe("TunnelSession", () => {
       .poll(() => tunnel.frames.at(-1)?.type, { timeout: 5_000 })
       .toBe("body-end");
     expect(tunnel.bodyBytes()).toBe(DOWNLOAD_BYTES);
+    session.dispose();
+  });
+
+  it("rejects malformed tunnel paths that could leave loopback on HTTP or WebSocket", () => {
+    expect(resolveLoopbackUrl("http://127.0.0.1:38886", "/api/v1/threads?a=1")?.href).toBe(
+      "http://127.0.0.1:38886/api/v1/threads?a=1",
+    );
+    expect(resolveLoopbackUrl("ws://127.0.0.1:38886", "/ws?token=1")?.href).toBe(
+      "ws://127.0.0.1:38886/ws?token=1",
+    );
+    for (const bad of ["@evil.test/steal", "//evil.test/steal", "/\\evil.test/steal", "http://evil.test/"]) {
+      expect(resolveLoopbackUrl("http://127.0.0.1:38886", bad), bad).toBeNull();
+      expect(resolveLoopbackUrl("ws://127.0.0.1:38886", bad), bad).toBeNull();
+    }
+
+    const tunnel = new SlowTunnel();
+    const session = new TunnelSession({
+      tunnel: tunnel as unknown as NodeWebSocket,
+      log: { warn() {} },
+      resolveOrigin: () => ({
+        kind: "ok",
+        resolved: { origin, publicOrigin: origin, headers: { "x-cloudroom-caller": "secret" } },
+      }),
+    });
+    session.start();
+    tunnel.emit(
+      "message",
+      Buffer.from(
+        encodeFrame({
+          type: "open-http",
+          streamId: 10,
+          method: "GET",
+          path: "@evil.test/steal",
+          headers: [],
+          hasBody: false,
+        }),
+      ),
+      true,
+    );
+    tunnel.emit(
+      "message",
+      Buffer.from(
+        encodeFrame({
+          type: "open-ws",
+          streamId: 11,
+          path: "//evil.test/ws",
+          headers: [],
+          protocols: [],
+        }),
+      ),
+      true,
+    );
+    expect(tunnel.frames.find((f) => f.type === "resp-head" && f.streamId === 10)).toMatchObject({ status: 400 });
+    expect(tunnel.frames.find((f) => f.type === "close-stream" && f.streamId === 11)).toMatchObject({ code: 1008 });
     session.dispose();
   });
 });

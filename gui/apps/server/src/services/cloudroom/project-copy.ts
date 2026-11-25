@@ -1,4 +1,4 @@
-import { COMPUTER, gitlabRepository, stripGitUrlCredentials } from "@cloudroom/domain";
+import { COMPUTER, gitlabRepository, isCloudGithubLoginError, stripGitUrlCredentials } from "@cloudroom/domain";
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createWriteStream, existsSync, realpathSync } from "node:fs";
@@ -20,7 +20,6 @@ import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
 import { sandboxThread } from "./sandboxes.js";
 import { redactSecrets } from "./shares.js";
 import { binding, command, saveProjectCopyProgress } from "./store.js";
-import { canCopyMacGithub } from "./sync.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // `key` is the copy target: one folder on a shared VM, or one per thread sandbox.
@@ -30,7 +29,7 @@ type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 /** `noEnv`: the thread's sandbox may not have the project's `.env` files (ADR 0342), so none are sent. `resumed`: a copy
  *  that goes on after a pause or an app restart, while the agent may already be working, so a move's edits go aside (#1970).
  *  `forkCode`: a fork's or child's code replaces folder files after this copy, so its agent must wait for it (no heartbeat). */
-export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean; resumed?: boolean; forkCode?: boolean };
+export type ProjectCopyJob = { threadId: string; workspace: string; key: string; localPath: string | null; repository: string | null; clone: boolean; copyAll: boolean; teleport: boolean; branch?: string; noEnv?: boolean; resumed?: boolean; forkCode?: boolean; explicitRetry?: boolean };
 
 const exec = promisify(execFile);
 // A stalled piece counts as dropped, so the retry sends it again.
@@ -185,7 +184,11 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   if (!path && !repository) return null;
   const existing = await client.workspace(workspace, signal);
   // Exit 1 means files are there; any other end of the check (a signal, a missing shell) says nothing about the folder.
-  const check = existing && (await client.runOnVm({ command: `[ -z "$(ls -A -- ${quote(existing.path)} 2>/dev/null | grep -Fvx .cloudroom)" ]`, stdin: "" }, signal)).code;
+  // A folder with no `.git` and only `.cloudroom` / `.env*` files still counts as empty so retrying a failed GitHub clone works.
+  const check = existing && (await client.runOnVm({
+    command: `[ ! -e ${quote(`${existing.path}/.git`)} ] && [ -z "$(find ${quote(existing.path)} -mindepth 1 -not -path ${quote(`${existing.path}/.cloudroom`)} -not -path ${quote(`${existing.path}/.cloudroom/*`)} \\( -type f -o -type l \\) -not -name '.env*' -print -quit 2>/dev/null)" ]`,
+    stdin: "",
+  }, signal)).code;
   if (existing && check !== 0 && check !== 1) throw new CloudroomError(`Could not check the cloud project folder (exit code ${check}).`);
   const empty = !existing || check === 0;
   if (!empty && teleport && !resumed) return null;
@@ -250,7 +253,10 @@ export function copyProject(deps: Deps, client: CloudroomClient, job: ProjectCop
       const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
       // The files are still on the Mac, so only the agent is told and pulls what it needs. The error card stays for
       // Teleport, whose uncommitted work must arrive, and for projects with no folder on the Mac.
-      const quiet = job.localPath !== null && !job.teleport;
+      // A failed private GitHub clone that didn't upload whole files still surfaces as an error so the timeline can offer one-click login recovery.
+      // Any user-initiated retry also reports its real error instead of flipping quietly to `complete`.
+      const githubLoginFailed = !job.teleport && !gitlabRepository(job.repository) && !message.includes("copied without Git history") && isCloudGithubLoginError(message);
+      const quiet = job.localPath !== null && !job.teleport && !job.explicitRetry && !githubLoginFailed;
       if (!quiet) report({ phase: "error", completed: 0, total: 0, error: message });
       await writeFailureNote(client, job, message).catch(() => {});
       await (quiet ? land(undefined, message) : land(message));
@@ -279,9 +285,9 @@ async function run(deps: Deps, client: CloudroomClient, job: ProjectCopyJob, rep
   let cloneError: string | null = null;
   if (job.clone && job.repository) {
     const branch = job.teleport && job.localPath ? (await git(job.localPath, ["rev-parse", "--abbrev-ref", "HEAD"]))?.trim() : job.branch;
-    cloneError = await clone(deps, client, target, job.repository, branch, !job.teleport);
+    cloneError = await clone(client, target, job.repository, branch, !job.teleport);
     // A short pause first, since an immediate retry often hits the same GitHub timeout (#555).
-    if (cloneError) cloneError = await new Promise((resolve) => setTimeout(resolve, 10_000)).then(() => clone(deps, client, target, job.repository!, branch, !job.teleport));
+    if (cloneError) cloneError = await new Promise((resolve) => setTimeout(resolve, 10_000)).then(() => clone(client, target, job.repository!, branch, !job.teleport));
   }
   const cloned = job.clone && !cloneError;
   // Git for Windows checks text files out with CRLF, so the cloud checkout must ignore line-ending-only changes.
@@ -364,17 +370,8 @@ async function git(cwd: string, args: string[], timeout = 0): Promise<string | n
 
 /** Returns null once the clone is in place, or why it failed. gc.auto=0: auto-packing during `git log -S` in a blobless
  * clone fills the sandbox disk with deleted packs the search still holds open. */
-async function clone(deps: Deps, client: CloudroomClient, target: string, repository: string, branch?: string, requireBranch = false): Promise<string | null> {
+async function clone(client: CloudroomClient, target: string, repository: string, branch?: string, requireBranch = false): Promise<string | null> {
   const gitlab = Boolean(gitlabRepository(repository));
-  const token = !gitlab && (await canCopyMacGithub(deps))
-    ? await exec("gh", ["auth", "token", "--hostname", "github.com"], {
-        timeout: 15_000,
-        windowsHide: true,
-      }).then(
-        (result) => result.stdout.trim(),
-        () => "",
-      )
-    : "";
   const temporary = quote(`${target}.cloudroom-clone`);
   // Holds the clone's shell PID while it runs, so an answer the connection lost can be checked against what really happened.
   // A clone a dropped request left running (#1970) ends before this one replaces its folder.
@@ -388,8 +385,6 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       `[ -e ${quote(`${target}/.git`)} ] && [ ! -e ${temporary} ] && exit 0`,
       `echo $$ > "$p"; trap 'rm -f -- "$p"' EXIT`,
       "export GIT_TERMINAL_PROMPT=0",
-      // `gh auth status` asks GitHub's API, so a used-up quota reads as a bad token (#1182). Log in only when gh has no token.
-      token ? "{ gh auth token --hostname github.com || gh auth login --hostname github.com --with-token; gh auth setup-git --hostname github.com; } >/dev/null 2>&1 || true" : "",
       `rm -rf -- ${temporary}`,
       `git clone --quiet --filter=blob:none -c gc.auto=0 -- ${quote(repository)} ${temporary} || { rm -rf -- ${temporary}; printf '\\035'; ${gitlab ? ':' : 'timeout 10 gh api user --jq .login 2>/dev/null'}; exit 1; }`,
       branch && branch !== "HEAD" ? (gitlab && requireBranch
@@ -401,7 +396,7 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
       `rm -rf -- ${temporary}`,
       `test -e ${quote(`${target}/.git`)} || { echo 'The clone did not reach the project folder.' >&2; exit 1; }`,
     ].join("\n"),
-    stdin: Buffer.from(token).toString("hex"),
+    stdin: "",
     keep: true,
   }, AbortSignal.timeout(CLONE_TIMEOUT)).catch((error: unknown) => {
     if (error instanceof CloudroomError && error.retryable) return error;
@@ -422,7 +417,7 @@ async function clone(deps: Deps, client: CloudroomClient, target: string, reposi
   }
   if (result.code === 0) return null;
   // Redacted before the cut, since the message reaches the failure note, the copy status, and `room-cli files wait` (#1847).
-  const error = redactSecrets(Buffer.from(result.stderr, "hex").toString(), [token]).trim().slice(-300) || `git clone exited with code ${result.code}`;
+  const error = redactSecrets(Buffer.from(result.stderr, "hex").toString(), []).trim().slice(-300) || `git clone exited with code ${result.code}`;
   if (gitlab && !Buffer.from(result.stdout, "hex").includes(0x1d)) return `Git said: ${error}`;
   if (gitlab) return `Check access to this project in Settings → Cloud environment → GitLab. Git said: ${error}`;
   const stdout = Buffer.from(result.stdout, "hex");

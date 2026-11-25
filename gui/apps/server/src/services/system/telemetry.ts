@@ -23,7 +23,7 @@ export type TelemetryExecution = "local" | "cloud_sandbox" | "cloud_vm";
 export const SETUP_STEPS = ["account", "agent", "github", "project"] as const;
 export const SETUP_ACTIONS = ["viewed", "started", "done", "skipped", "closed", "detected", "waitlist"] as const;
 export const SETUP_AGENTS = ["pi", "opencode", "cursor", "hermes", "grok", "devin", "droid", "kimi", "antigravity", "fx", "openclaw", "agent-zero"] as const;
-export const SETUP_DETAILS = ["github", "gitlab", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "repos", ...SETUP_AGENTS] as const;
+export const SETUP_DETAILS = ["github", "gitlab", "google", "email", "claude", "codex", "both", "none", "existing", "found", "folder", "recent_folder", "bb_import", "chat_import", "auto", "manual", "repos", "mac", ...SETUP_AGENTS] as const;
 
 export type TelemetryValue = string | number | boolean | null;
 
@@ -184,7 +184,7 @@ export type ShareAction = (typeof SHARE_CLICKS)[number] | "created" | "updated" 
 export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied", "shared"] as const;
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local", "switched_agent"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "claude_not_connected", "queue", "region"] as const;
-export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded", "one_click_scan"] as const;
+export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "capacity_card", "capacity_badge", "limit_link", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded", "one_click_scan"] as const;
 export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;

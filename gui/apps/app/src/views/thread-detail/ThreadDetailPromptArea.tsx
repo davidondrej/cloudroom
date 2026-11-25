@@ -12,6 +12,7 @@ import { DesktopUpdateCard } from "@/components/layout/DesktopUpdateBanner";
 import { ProjectCopyNotice } from "@/components/thread/ProjectCopyNotice";
 import { FixPrompt } from "@/components/ui/fix-prompt";
 import { cloudThreadFixPrompt, plainError } from "@/lib/fix-prompts";
+import { openUpgrade, splitUpgradeLink } from "@/lib/upgrade-prompt";
 import { canTeleportLocalThread, canTeleportThread } from "@/components/thread/ThreadActionsMenu";
 import { CloudMcpSignInNotice } from "@/components/CloudMcpSignIn";
 import { openTeleportLogin } from "@/components/CodexConnectionPanel";
@@ -2373,12 +2374,15 @@ export function ThreadDetailPromptArea({
   const cloudFixPrompt = cloudError || cloudState.data?.failedStart ? cloudThreadFixPrompt(thread.id, thread.providerId, cloudError) : null;
   const cloudStatusKey = `${thread.id}|${cloudState.data?.failedStart ? "failed" : ""}|${cloudError ?? ""}`;
   const cloudStatusDismissed = dismissedCloudStatus === cloudStatusKey;
+  const cloudWaitingLink = cloudWaiting ? splitUpgradeLink(cloudWaiting) : null;
+  const cloudErrorLink = cloudError ? splitUpgradeLink(plainError(cloudError)) : null;
   const cloudReconnectingPill = cloudReconnecting ? (
     <div className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background px-3 py-1 text-xs text-muted-foreground">
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-warning" />
-      <span role="status" className="flex min-w-0 items-center gap-2">{cloudOffline && <><span className="text-foreground">Offline</span><span aria-hidden>·</span></>}<span className="truncate" title={cloudWaiting ?? undefined}>{cloudWaiting ?? "Reconnecting…"}</span></span>
+      <span role="status" className="flex min-w-0 items-center gap-2">{cloudOffline && <><span className="text-foreground">Offline</span><span aria-hidden>·</span></>}<span className="truncate" title={cloudWaitingLink?.text ?? undefined}>{cloudWaitingLink?.text ?? "Reconnecting…"}</span></span>
       {!cloudWaiting && <><span aria-hidden>·</span>
       <button type="button" className="underline underline-offset-2 hover:text-foreground disabled:opacity-50" disabled={cloudState.isFetching} onClick={() => void cloudState.refetch()}>Retry</button></>}
+      {cloudWaitingLink?.hasLink && <><span aria-hidden>·</span><button type="button" className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-primary" onClick={() => openUpgrade("limit_link")}>Upgrade</button></>}
       {cloudWaiting && cloudState.data?.fromCopy && <><span aria-hidden>·</span><ContinueFromCopyButton threadId={thread.id} /></>}
     </div>
   ) : null;
@@ -2386,7 +2390,8 @@ export function ThreadDetailPromptArea({
     {cloudReconnectingPill}
     {cloudFixPrompt && !cloudStatusDismissed && <div role="alert" aria-label="Cloud thread status" className="flex min-w-0 max-w-full items-center gap-2 justify-self-center rounded-full border border-border bg-background py-1 pl-3 pr-1.5 text-xs text-muted-foreground">
       <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
-      <span className="truncate text-foreground" title={cloudError ?? undefined}>{cloudError ? plainError(cloudError) : "Cloud thread didn't start"}</span>
+      <span className="truncate text-foreground" title={cloudErrorLink?.text ?? undefined}>{cloudErrorLink ? cloudErrorLink.text : "Cloud thread didn't start"}</span>
+      {cloudErrorLink?.hasLink && <button type="button" className="shrink-0 font-medium text-foreground underline underline-offset-2 hover:text-primary" onClick={() => openUpgrade("limit_link")}>Upgrade</button>}
       {cloudState.data?.failedStart && <button type="button" className="shrink-0 text-foreground underline underline-offset-2 disabled:opacity-50" disabled={retryCloudStart.isPending} onClick={() => retryCloudStart.mutate()}>Retry</button>}
       {cloudState.isError && !cloudFetchFailed && <button type="button" className="shrink-0 text-foreground underline underline-offset-2 disabled:opacity-50" disabled={cloudState.isFetching} onClick={() => void cloudState.refetch()}>Reconnect</button>}
       <span aria-hidden className="h-3.5 w-px shrink-0 bg-border" />

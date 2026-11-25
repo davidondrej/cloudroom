@@ -56,7 +56,7 @@ import {
 } from "./sandboxes.js";
 import { CloudSecrets } from "./secrets.js";
 import { binding, command, coreInUse, saveBinding, type Binding } from "./store.js";
-import { copyMacGithub, copyMacLogin, loginMarkers, markLogin, stopSync } from "./sync.js";
+import { copyMacLogin, loginMarkers, markLogin, stopSync } from "./sync.js";
 
 /** Unified per-thread ephemeral runtime state. */
 export interface ThreadState {
@@ -188,7 +188,6 @@ export class CloudRuntime implements SyncHost {
         }
       }
       const skip = new Set(Object.keys(markers));
-      if (!await copyMacGithub(host.deps)) skip.add("github");
       if (!await copyMacLogin(host.deps, "cursor")) skip.add("cursor");
       return skip;
     };

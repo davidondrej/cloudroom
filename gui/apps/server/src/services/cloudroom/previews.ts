@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { appendFile, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { appendFile, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -79,6 +79,28 @@ export async function setMacAccess(deps: Deps, level: MacAccessLevel): Promise<v
   const file = macAccessFile(deps), temp = `${file}.${randomUUID()}.tmp`;
   await writeFile(temp, JSON.stringify({ level }), { mode: 0o600 });
   await rename(temp, file);
+}
+/** Mirrors the Jev Mac-command security review switch for the helper, which rereads it before each command. */
+const macReviewFile = (deps: Deps) => join(deps.config.dataDir, "cloudroom-mac-review.json");
+const macReviewWriteQueues = new Map<string, Promise<void>>();
+export function setMacCommandReview(deps: Deps, enabled: boolean): Promise<void> {
+  const file = macReviewFile(deps);
+  const previous = macReviewWriteQueues.get(file) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    const temp = `${file}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temp, JSON.stringify({ enabled }), { mode: 0o600 });
+      await rename(temp, file);
+    } catch (error) {
+      await rm(temp, { force: true }).catch(() => {});
+      throw error;
+    }
+  });
+  const settled = next.finally(() => {
+    if (macReviewWriteQueues.get(file) === settled) macReviewWriteQueues.delete(file);
+  });
+  macReviewWriteQueues.set(file, settled);
+  return next;
 }
 /** Whether this app has set up its helper, which then needs each new Mac access level. */
 export const previewsSetUp = (deps: Deps) => readFile(join(folder(deps), "config.json")).then(() => true, () => false);

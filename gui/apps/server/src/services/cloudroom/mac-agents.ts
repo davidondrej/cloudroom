@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { execPortableFile, findCliExecutable } from "@cloudroom/process-utils";
+import { execPortableFile, findCliExecutable, findCliOnPath } from "@cloudroom/process-utils";
 import { macAgentZeroLogin, macCursorLogin, macKimiLogin, macOpenclawLogin, macOpencodeLogin, macVariables } from "./sandboxes.js";
 
 const read = (path: string) => readFile(path, "utf8").catch(() => "");
@@ -43,4 +43,11 @@ const AGENTS: [id: string, cli: string, signedIn: () => Promise<boolean>][] = [
 export async function macSignedInAgents(): Promise<string[]> {
   const found = await Promise.all(AGENTS.map(async ([id, cli, signedIn]) => findCliExecutable(cli) && await signedIn().catch(() => false) ? id : null));
   return found.filter(id => id !== null);
+}
+
+/** Supported agent CLIs found on PATH, without reading fallback folders or auth files (used for onboarding telemetry). */
+export function macInstalledAgents(): string[] {
+  const primary = (["claude", "codex"] as const).filter((cli) => Boolean(findCliOnPath(cli)));
+  const extra = AGENTS.filter(([, cli]) => Boolean(findCliOnPath(cli))).map(([id]) => id);
+  return [...primary, ...extra];
 }

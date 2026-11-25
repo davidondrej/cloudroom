@@ -1147,7 +1147,22 @@ def script_of(job):
     return None
 
 
+def review_enabled(config):
+    """Whether Jev Mac-command security review is enabled in Settings -> Privacy. Defaults to True only when unset; fails closed on read/parse errors."""
+    if not config.get('connectionFile'):
+        return False
+    try:
+        saved = json.loads((Path(config['connectionFile']).parent / 'cloudroom-mac-review.json').read_text())
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return isinstance(saved, dict) and saved.get('enabled') is True
+
+
 def review(core, job, level, script):
+    if not review_enabled(core.config):
+        return
     account, token = (core.connection.get('account') or {}).get('id'), core.connection.get('sandboxToken')
     key = hashlib.sha256(f"{core.url}\0{job.get('command')}".encode(errors='surrogatepass')).digest()
     now = time.monotonic()

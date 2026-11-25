@@ -3,7 +3,7 @@ import { defineRpcContract, type PluginRpcHandlers } from "@get-bb/plugin-sdk";
 import { connectCredentialSchema } from "@cloudroom/connect-client";
 import type { ConnectTunnel } from "./tunnel.js";
 import type { PhoneRelay } from "./phone.js";
-import type { ConnectStatus, ShareListing } from "./types.js";
+import type { ConnectStatus, RemoteSession, ShareListing } from "./types.js";
 import type { ShareHostResolver } from "./hosts.js";
 import {
   setupJobInputSchema,
@@ -36,6 +36,7 @@ const stateSchema = z.enum(["disconnected", "connected", "reconnecting"]);
 const connectStatusSchema: z.ZodType<ConnectStatus> = z
   .object({
     state: stateSchema,
+    enabled: z.boolean(),
     paired: z.boolean(),
     handle: z.string().nullable(),
     url: z.string().nullable(),
@@ -61,6 +62,19 @@ const macSchema: z.ZodType<Mac> = z
   .strict();
 
 const hasPhoneSchema = z.object({ phone: z.boolean() }).strict();
+const remoteSessionSchema: z.ZodType<RemoteSession> = z
+  .object({
+    id: z.string().min(1),
+    kind: z.enum(["phone", "mac"]),
+    label: z.string().min(1),
+    createdAt: z.number().int(),
+    lastSeenAt: z.number().int(),
+    macHandle: z.string().min(1),
+    macName: z.string().nullable(),
+  })
+  .strict();
+const listSessionsSchema = z.object({ sessions: z.array(remoteSessionSchema) }).strict();
+const revokeSessionInputSchema = z.object({ sessionId: z.string().regex(/^[a-f0-9-]{16,64}$/) }).strict();
 const remoteInstructionsSchema = z.object({ enabled: z.boolean() }).strict();
 const remoteInstructionsInputSchema = z.object({ enabled: z.boolean().optional() }).strict();
 
@@ -69,6 +83,14 @@ export const connectRpcContract = defineRpcContract({
   signOutPhones: {
     input: z.null(),
     output: z.object({ revoked: z.number().int() }).strict(),
+  },
+  listSessions: {
+    input: z.null(),
+    output: listSessionsSchema,
+  },
+  revokeSession: {
+    input: revokeSessionInputSchema,
+    output: z.object({ revoked: z.boolean() }).strict(),
   },
   expose: { input: portInputSchema, output: shareListingSchema },
   unexpose: {
@@ -85,6 +107,8 @@ export const connectRpcContract = defineRpcContract({
   listShares: { input: z.null(), output: z.array(shareListingSchema) },
   /** This Mac's cloudroom.run key. The desktop app keeps it to list and open your other Macs. */
   relayCredential: { input: z.null(), output: connectCredentialSchema.nullable() },
+  /** Read the "Remote access" setting, or turn remote access on/off when `enabled` is given. */
+  remoteAccess: { input: remoteInstructionsInputSchema, output: remoteInstructionsSchema },
   /** Read the "Tell agents about remote access" setting, or set it when `enabled` is given. */
   remoteInstructions: { input: remoteInstructionsInputSchema, output: remoteInstructionsSchema },
   /** Removes a remote host's access to this Mac. The server calls it when you remove the machine. */
@@ -111,11 +135,12 @@ export function createRpcHandlers(args: {
   phone: PhoneRelay;
   status: () => ConnectStatus;
   hostResolver: ShareHostResolver;
+  remoteAccess: (enabled?: boolean) => Promise<boolean>;
   remoteInstructions: (enabled?: boolean) => Promise<boolean>;
   listMacs: () => Promise<Mac[]>;
   setupJobs: SetupJobs;
 }): ConnectRpcHandlers {
-  const { relay, phone, status, hostResolver, remoteInstructions, listMacs, setupJobs } = args;
+  const { relay, phone, status, hostResolver, remoteAccess, remoteInstructions, listMacs, setupJobs } = args;
   const tunnel = relay;
   return {
     async status() {
@@ -123,6 +148,12 @@ export function createRpcHandlers(args: {
     },
     async signOutPhones() {
       return phone.signOutPhones();
+    },
+    async listSessions() {
+      return listSessionsSchema.parse(await phone.listSessions());
+    },
+    async revokeSession(args) {
+      return z.object({ revoked: z.boolean() }).strict().parse(await phone.revokeSession(args.sessionId));
     },
     async expose(args) {
       const host =
@@ -145,6 +176,9 @@ export function createRpcHandlers(args: {
       await phone.check();
       return relay.getCredential();
     },
+    async remoteAccess(args) {
+      return { enabled: await remoteAccess(args.enabled) };
+    },
     async remoteInstructions(args) {
       return { enabled: await remoteInstructions(args.enabled) };
     },
@@ -153,6 +187,7 @@ export function createRpcHandlers(args: {
       return { ok: true };
     },
     async macs() {
+      if (!status().enabled) return { macs: [] };
       await phone.check();
       return { macs: phone.signedIn ? await listMacs() : [] };
     },

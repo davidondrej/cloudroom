@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { binding, command, saveStatus } from "../../src/services/cloudroom/store.js";
-import { setCopyLogins, setCopyMacGithub } from "../../src/services/cloudroom/sync.js";
+import { setCopyLogins } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { seedEnvironment, seedHostSession, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
@@ -705,7 +705,6 @@ it.each([
   const parent = kind.endsWith("child") ? createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle" }) : null;
   if (parent) harness.deps.db.insert(cloudroomThreads).values({ threadId: parent.id, coreUrl: `sandbox:${parent.id}`, sessionId: kind === "child" ? "cr_parent" : null, startRequestId: "parent", model: "test-model", reasoning: "medium" }).run();
   setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
-  await setCopyMacGithub(harness.deps, false);
   const service = cloudroom(harness.deps);
   const marker = () => readFile(`${folder}.cloudroom-files`, "utf8").catch(() => null);
   const checkout = () => ({ branch: spawnSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: folder, encoding: "utf8" }).stdout.trim(), status: spawnSync("git", ["status", "--porcelain"], { cwd: folder, encoding: "utf8" }).stdout.trim() });
@@ -1204,4 +1203,141 @@ it("Mac-only MCP programs like xcrun stay on this Mac (#1244)", async () => {
     const found = Object.fromEntries((await macMcpServers()).filter(({ name }) => name in servers).map(({ name, server }) => [name, !server]));
     expect(found).toEqual({ xcode: true, build: true, apple: true, npx: false, xcrunner: false, remote: false });
   } finally { vi.unstubAllEnvs(); await rm(dir, { recursive: true, force: true }); }
+});
+
+it("exposes cloudCapacity in status, keeps concurrent/capacity wait notices, and clears them when capacity reopens, plan upgrades, or another thread sleeps", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  let mode: Record<string, unknown> = { sandboxes: true, plan: "free", capacity: "paid" };
+  let wakeError: { code: string; error: string } | null = { code: "cloud_capacity_reserved", error: "Cloud servers are running low on free capacity right now." };
+  let awakeRows: { thread: string; origin: string; token: string }[] = [{ thread: "thr_other", origin: "http://127.0.0.1:1", token: "t".repeat(64) }];
+  const website = createServer(async (req, res) => {
+    const input = await body(req);
+    if (input.action === "mode") { res.writeHead(200, { "Content-Type": "application/json" }); return void res.end(JSON.stringify(mode)); }
+    if (input.action === "awake") { res.writeHead(200, { "Content-Type": "application/json" }); return void res.end(JSON.stringify({ sandboxes: awakeRows, recheck_ms: 0 })); }
+    if (input.action === "wake" && wakeError) { res.writeHead(429, { "Content-Type": "application/json" }); return void res.end(JSON.stringify(wakeError)); }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: "http://127.0.0.1:1", token: "t".repeat(64) }));
+  });
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, await listen(website), "a".repeat(64));
+    await vi.waitFor(async () => expect(await service.status()).toMatchObject({ plan: "free", cloudCapacity: "paid" }));
+
+    const project = { id: "proj_a", repository: null, folder: "a" };
+    // Capacity refusal sets waitNotice and clears when mode reports capacity open again.
+    await expect(service.sandboxes.connection("thr_wait", project, true)).rejects.toMatchObject({ code: "cloud_capacity_reserved" });
+    expect(service.sandboxes.waitNotice("thr_wait")).toContain("low on free capacity");
+    mode = { sandboxes: true, plan: "free", capacity: null };
+    await service.sandboxes.forNewThreads();
+    expect(service.sandboxes.cloudCapacity()).toBeNull();
+    expect(service.sandboxes.waitNotice("thr_wait")).toBeNull();
+
+    // Concurrent refusal sets waitNotice and clears immediately when another awake thread goes to sleep.
+    await service.sandboxes.connection("thr_probe", project, false, undefined, true);
+    wakeError = { code: "cloud_concurrent_limit", error: "You have 5 Cloud threads running at once." };
+    await expect(service.sandboxes.connection("thr_conc", project, true)).rejects.toMatchObject({ code: "cloud_concurrent_limit" });
+    expect(service.sandboxes.waitNotice("thr_conc")).toContain("5 Cloud threads running at once");
+    awakeRows = [];
+    await service.sandboxes.connection("thr_probe", project, false, undefined, true);
+    expect(service.sandboxes.waitNotice("thr_conc")).toBeNull();
+
+    // Upgrading the plan also clears a concurrent wait notice immediately on the next mode check.
+    await expect(service.sandboxes.connection("thr_conc2", project, true)).rejects.toMatchObject({ code: "cloud_concurrent_limit" });
+    expect(service.sandboxes.waitNotice("thr_conc2")).toContain("5 Cloud threads running at once");
+    mode = { sandboxes: true, plan: "pro", capacity: null };
+    await service.sandboxes.forNewThreads();
+    // Force a fresh mode check via a capacity refusal reset or status refresh: here plan changed once mode refreshes.
+    expect(service.sandboxes.waitNotice("thr_conc2")).not.toBeNull();
+    wakeError = { code: "cloud_capacity_reserved", error: "Cloud servers are running low." };
+    await expect(service.sandboxes.connection("thr_reset", project, true)).rejects.toMatchObject({ code: "cloud_capacity_reserved" });
+    await service.sandboxes.forNewThreads();
+    expect(service.sandboxes.currentPlan()).toBe("pro");
+    expect(service.sandboxes.waitNotice("thr_conc2")).toBeNull();
+  } finally { service.stop(); website.close(); await harness.cleanup(); }
+});
+
+it("recovers from Core 404 session not found on a pruned fresh sandbox by starting a new session and delivering the follow-up prompt", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  const starts: { request_id: string; workspace?: string; workspace_name?: string; session_id: string }[] = [];
+  const prompts: { session: string; text: string }[] = [];
+  const labelSwitches: { thread: string; session?: string }[] = [];
+  const liveSessions = new Set<string>();
+  let coreUrl = "";
+
+  const coreServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/v1/health") return json({});
+    if (req.url === "/v1/ready") return json({ ready: true });
+    if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/code", stop: true, resume: true, launch_settings: true, workspaces: true, direct_workspaces: true, root_workspace: true, command_guard: true, system_prompt: true, harnesses: [{ id: "codex", model: "test-model" }] });
+    if (req.url === "/v1/sessions" && req.method === "GET") {
+      return json({ total: liveSessions.size, sessions: [...liveSessions].map((session_id) => ({ session_id, harness: "codex", state: "idle", last_sequence: 0 })) });
+    }
+    if (req.url?.includes("/stream?")) {
+      const sid = req.url.match(/^\/v1\/sessions\/([^/]+)\/stream/)?.[1];
+      if (!sid || !liveSessions.has(sid)) return json({ error: "session not found" }, 404);
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.end(`id: 1\nevent: record\ndata: ${JSON.stringify({ sequence: 1, session_id: sid, kind: "state", data: { state: "idle" } })}\n\n`);
+      return;
+    }
+    if (req.method === "GET" && req.url?.match(/^\/v1\/sessions\/[^/]+\/workspace$/)) return json({}, 404);
+    const input = await body(req);
+    if (req.url === "/v1/sessions" && req.method === "POST") {
+      const session_id = `cr_${input.request_id}`;
+      liveSessions.add(session_id);
+      starts.push({ request_id: input.request_id, workspace: input.workspace, workspace_name: input.workspace_name, session_id });
+      return json({ session_id, receipt: { request_id: input.request_id, command: "start", input, state: "accepted" }, saving: {} }, 202);
+    }
+    const promptMatch = req.url?.match(/^\/v1\/sessions\/([^/]+)\/prompts$/);
+    if (promptMatch) {
+      const sid = promptMatch[1]!;
+      if (!liveSessions.has(sid)) return json({ error: "session not found" }, 404);
+      prompts.push({ session: sid, text: input.text });
+      return json({ session_id: sid, receipt: { request_id: input.request_id, command: "prompt", input, state: "accepted" }, saving: {} }, 202);
+    }
+    return json({ error: "session not found" }, 404);
+  });
+
+  const websiteServer = createServer(async (req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const input = await body(req);
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
+    if (input.action === "label") { labelSwitches.push({ thread: input.thread, session: input.session }); return json({ saved: true }); }
+    if (input.action === "awake") return json({ sandboxes: [] });
+    if (input.action === "wake") return json({ thread: input.thread, state: "awake", generation: 1, issue: null, origin: coreUrl, token: "t".repeat(64) });
+    return json({ ok: true });
+  });
+
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+
+    // Seed an adopted Cloud loop thread (no local `first_<threadId>` command) pointing at an old pruned session ID.
+    const thread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "codex", status: "idle", title: "Archived loop" });
+    harness.deps.db.insert(cloudroomThreads).values({
+      threadId: thread.id, coreUrl: `sandbox:${thread.id}`, startRequestId: "old_req", sessionId: "cr_old_pruned", model: "test-model", reasoning: "medium", cursor: 42,
+    }).run();
+
+    // Send a follow-up message: Core returns 404 session not found for cr_old_pruned, so delivery starts a fresh session.
+    const reply = await harness.app.request(`/api/v1/threads/${thread.id}/send`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "after-prune", mode: "auto", input: [{ type: "text", text: "Continue after prune", mentions: [] }] }),
+    });
+    expect(reply.status).toBe(200);
+
+    await waitFor(() => prompts.length === 1, "recovered prompt delivered");
+    const saved = binding(harness.db, thread.id)!;
+    expect(saved.sessionId).toBeTruthy();
+    expect(saved.sessionId).not.toBe("cr_old_pruned");
+    expect(saved.error).toBeNull();
+    expect(starts).toHaveLength(1);
+    expect(starts[0]!.workspace).toBeTruthy();
+    expect(prompts[0]!.session).toBe(saved.sessionId);
+    expect(prompts[0]!.text).toContain("Continue after prune");
+    await waitFor(() => labelSwitches.some((l) => l.thread === thread.id && l.session === saved.sessionId), "website label switched to new session");
+  } finally { service.stop(); coreServer.close(); websiteServer.close(); await harness.cleanup(); }
 });

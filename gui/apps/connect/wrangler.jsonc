@@ -5,7 +5,7 @@
   "account_id": "d23c61e641b3e7a374f6068540bbd4d6",
   "compatibility_date": "2026-06-11",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  "observability": { "enabled": true },
+  "observability": { "enabled": true, "logs": { "invocation_logs": false } },
   "assets": { "directory": "../app/public", "binding": "ASSETS", "run_worker_first": true },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TunnelDO"] }],
   "durable_objects": {

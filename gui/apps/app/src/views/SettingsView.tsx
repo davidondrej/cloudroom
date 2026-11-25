@@ -229,6 +229,8 @@ interface PrivacySettingsSectionProps {
   onTelemetryEnabledChange: (enabled: boolean) => void;
   bugReportsEnabled: boolean;
   onBugReportsEnabledChange: (enabled: boolean) => void;
+  macCommandReviewEnabled?: boolean;
+  onMacCommandReviewEnabledChange?: (enabled: boolean) => void;
   disabled: boolean;
   enabled: boolean;
   onEnabledChange: (enabled: boolean) => void;
@@ -1177,6 +1179,8 @@ export function PrivacySettingsSection({
   onTelemetryEnabledChange,
   bugReportsEnabled,
   onBugReportsEnabledChange,
+  macCommandReviewEnabled = true,
+  onMacCommandReviewEnabledChange,
 }: PrivacySettingsSectionProps) {
   return (
     <SettingsSection title="Privacy & diagnostics">
@@ -1197,7 +1201,7 @@ export function PrivacySettingsSection({
           label="Share usage data and setup errors"
           description={
             telemetryAllowed
-              ? "Send app starts, thread, message, and skill counts, reply times, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account. Never your prompts, code, or other tools' auth files. Custom models are masked. Takes effect immediately, or opt out via CLOUDROOM_TELEMETRY=false or DO_NOT_TRACK=1. Details: cloudroom.dev/privacy."
+              ? "Send app starts, thread, message, and skill counts, reply times, Local token totals, active days and minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account. Never your prompts, code, or other tools' auth files. Custom models are masked. Takes effect immediately, or opt out via CLOUDROOM_TELEMETRY=false or DO_NOT_TRACK=1. Details: cloudroom.dev/privacy."
               : "Turned off by environment variable (CLOUDROOM_TELEMETRY, BB_TELEMETRY, or DO_NOT_TRACK). No usage data or setup errors are sent from this server. Details: cloudroom.dev/privacy."
           }
         >
@@ -1218,6 +1222,18 @@ export function PrivacySettingsSection({
             disabled={disabled}
             onCheckedChange={onBugReportsEnabledChange}
             aria-label="Send agent feedback"
+          />
+        </SettingsWithControl>
+
+        <SettingsWithControl
+          label="Review cloud commands on this computer"
+          description="Check cloud agents' local commands and scripts for risky patterns using AI, after removing common secrets. Flagged commands are saved for security review. Takes effect on the next command."
+        >
+          <Switch
+            checked={macCommandReviewEnabled}
+            disabled={disabled || !onMacCommandReviewEnabledChange}
+            onCheckedChange={(next) => onMacCommandReviewEnabledChange?.(next)}
+            aria-label="Review cloud commands on this computer"
           />
         </SettingsWithControl>
 
@@ -1620,6 +1636,13 @@ export function SettingsView() {
             updateGeneralSettingsMutation.mutate({
               ...generalSettings,
               bugReportsEnabled: enabled,
+            })
+          }
+          macCommandReviewEnabled={generalSettings.macCommandReviewEnabled}
+          onMacCommandReviewEnabledChange={(enabled) =>
+            updateGeneralSettingsMutation.mutate({
+              ...generalSettings,
+              macCommandReviewEnabled: enabled,
             })
           }
           streamerMode={generalSettings.streamerMode}

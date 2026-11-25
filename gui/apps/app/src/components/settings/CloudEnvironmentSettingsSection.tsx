@@ -168,7 +168,7 @@ function CopyLoginsCard() {
     <Card
       icon="Key"
       title="Auth my agents in the cloud automatically"
-      description="Cloud threads will use this computer's agent and GitHub CLI logins"
+      description="Cloud threads will use this computer's agent logins"
       action={<Switch aria-label="Auth my agents in the cloud automatically" checked={enabled} disabled={!account.data || setCopyLogins.isPending} onCheckedChange={(on) => setCopyLogins.mutate(on)} />}
     >
       {setCopyLogins.error && <p role="alert" className="border-t border-border px-4 py-3 text-xs text-destructive-text">{errorText(setCopyLogins.error)}</p>}
@@ -180,6 +180,7 @@ function CopyLoginsCard() {
  *  RepoSync's repos that are on: they keep syncing with the plugin off, so this card always says so. */
 function GithubCard({ synced }: { synced: number }) {
   const queryClient = useQueryClient();
+  const here = useThisComputer();
   const requestId = useRef<string | null>(null);
   const status = useQuery({
     queryKey: ["cloudroom-github-auth"],
@@ -189,6 +190,7 @@ function GithubCard({ synced }: { synced: number }) {
   });
   const state = status.data?.state;
   const connected = state === "connected";
+  const localGithub = !connected ? status.data?.local_github ?? null : null;
   const account = useQuery({ queryKey: ["cloudroom-github-account"], queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal), enabled: connected, retry: false });
   // A switch or reconnect may land on another account, or on other repos.
   useEffect(() => {
@@ -204,6 +206,10 @@ function GithubCard({ synced }: { synced: number }) {
       const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
       if (result.state === "waiting" && result.verification_url && new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
     },
+    onSettled: refresh,
+  });
+  const copyMac = useMutation({
+    mutationFn: (expectedLogin: string | null) => sdk.cloudroom.copyMacGithub(expectedLogin),
     onSettled: refresh,
   });
   const cancel = useMutation({ mutationFn: () => sdk.cloudroom.cancelGithubLogin(requestId.current ?? status.data?.login_id ?? ""), onSettled: refresh });
@@ -223,10 +229,10 @@ function GithubCard({ synced }: { synced: number }) {
     await copyToClipboardWithToast(value, { successMessage: "Code copied. Paste it on github.com." });
     openGithub(url);
   };
-  const busy = connect.isPending || disconnect.isPending;
+  const busy = connect.isPending || copyMac.isPending || disconnect.isPending;
   const user = account.data;
   // A failed switch leaves the older login connected, and still says what failed.
-  const problem = errorText(status.error ?? connect.error ?? disconnect.error) ?? (state === "error" || state === "expired" || connected ? status.data?.message : null);
+  const problem = errorText(status.error ?? connect.error ?? copyMac.error ?? disconnect.error) ?? (state === "error" || state === "expired" || connected ? status.data?.message : null);
 
   return (
     <Card icon="Github" title="GitHub" description="Every cloud thread clones, pushes, and opens PRs as this account.">
@@ -257,16 +263,30 @@ function GithubCard({ synced }: { synced: number }) {
                 </div>
               </div>
             ) : (
-              <p className="text-xs text-subtle-foreground">{status.isPending ? "Checking GitHub…" : "Not connected. Cloud agents can only clone public repos."}</p>
+              <p className="text-xs text-subtle-foreground">
+                {status.isPending ? "Checking GitHub…"
+                  : localGithub ? `Not connected. Found ${localGithub.login ? `@${localGithub.login}` : "GitHub CLI"} on ${here}.`
+                  : "Not connected. Cloud agents can only clone public repos."}
+              </p>
             )}
             {!status.isPending && !status.isError && (
-              <div className="flex shrink-0 gap-2">
+              <div className="flex shrink-0 flex-wrap justify-end gap-2">
                 {connected && user?.reposUrl
                   ? <Button size="sm" variant="outline" onClick={() => openGithub(user.reposUrl)}>Change repos</Button>
-                  : <Button size="sm" variant={connected ? "outline" : "ghost"} className={connected ? undefined : "text-subtle-foreground"} disabled={busy || loading} onClick={() => connect.mutate(true)}>{connected ? "Limit to specific repos" : "Only specific repos"}</Button>}
-                <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy || loading} onClick={() => connect.mutate(Boolean(user?.reposUrl))}>
-                  {connected ? "Switch account" : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
-                </Button>
+                  : <Button size="sm" variant={connected ? "outline" : "ghost"} className={connected ? undefined : "text-subtle-foreground"} disabled={busy || loading} onClick={() => { copyMac.reset(); connect.mutate(true); }}>{connected ? "Limit to specific repos" : "Only specific repos"}</Button>}
+                {!connected && localGithub ? (
+                  <>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => { copyMac.reset(); connect.mutate(false); }}>Another account</Button>
+                    <Button size="sm" variant="default" disabled={busy} onClick={() => { connect.reset(); copyMac.mutate(localGithub.login); }}>
+                      <Icon name="Github" className="size-3.5" />
+                      {copyMac.isPending ? "Connecting…" : localGithub.login ? `Use @${localGithub.login}` : "Use GitHub CLI"}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy || loading} onClick={() => { copyMac.reset(); connect.mutate(Boolean(user?.reposUrl)); }}>
+                    {connected ? "Switch account" : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
+                  </Button>
+                )}
                 {connected && <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy} onClick={() => disconnect.mutate()}>Disconnect</Button>}
               </div>
             )}

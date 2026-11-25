@@ -174,6 +174,7 @@ class CloudroomService {
   configure(raw: unknown, account?: CloudroomAccount, signal?: AbortSignal, websiteUrl?: string, sandboxToken?: string) { return this.auth.configure(raw, account, signal, websiteUrl, sandboxToken); }
   disconnect(refused?: string) { return this.auth.disconnect(refused); }
   copyLoginsNow() { return this.auth.copyLoginsNow(); }
+  resetSignInCopy() { this.auth.resetSignInCopy(); }
   claudeAuth(action?: "login" | "cancel" | "complete" | "token" | "key", requestId?: string, code?: string, state?: string, follow?: boolean, owner?: string | null) { return this.auth.claudeAuth(action, requestId, code, state, follow, owner); }
   antigravityLogin(input: Record<string, unknown>) { return this.auth.antigravityLogin(input); }
   restartAwake(providerId: "claude-code" | "codex") { this.auth.restartAwake(providerId); }

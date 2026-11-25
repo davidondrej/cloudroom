@@ -80,18 +80,21 @@ export class CloudStatusPreviews {
     await this.warmSandbox(this.recentCloudProject() ?? PERSONAL_PROJECT_ID, "app_activity");
   }
 
-  /** Reports once per UTC day that this account sent a message, Local or Cloud, with past days' active minutes when telemetry is on. Failures retry after 10 minutes. */
+  /** Reports once per UTC day that this account sent a message, Local or Cloud, with past days' active minutes. Skipped when telemetry is off. Failures retry after 10 minutes. */
   noteActiveDay(): void {
+    const sharing = this.rt.host.config.telemetryAllowed !== false && this.rt.host.getAppSettings().telemetryEnabled;
+    if (!sharing) {
+      void clearUnsentMinutes(this.rt.host.deps).catch(() => {});
+      return;
+    }
     const day = new Date().toISOString().slice(0, 10);
     if (this.active.day === day || Date.now() - this.active.at < 600_000) return;
     this.active.at = Date.now();
     void (async () => {
-      const shareMinutes = this.rt.host.config.telemetryAllowed !== false && this.rt.host.getAppSettings().telemetryEnabled;
-      const minutes = shareMinutes ? await unsentMinutes(this.rt.host.deps) : {};
+      const minutes = await unsentMinutes(this.rt.host.deps);
       const saved = await this.rt.sandboxes.active(minutes);
       this.active.day = day;
-      if (shareMinutes) await markMinutesSent(this.rt.host.deps, saved ? minutes : {});
-      else await clearUnsentMinutes(this.rt.host.deps);
+      await markMinutesSent(this.rt.host.deps, saved ? minutes : {});
     })().catch(() => {});
   }
 
@@ -258,7 +261,7 @@ export class CloudStatusPreviews {
           model: capabilities?.harnesses.find((h) => h.id === "codex")?.model ?? null,
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
-          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.rt.sandboxes.cloudQueue(), cloudPaused: this.rt.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
+          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.rt.sandboxes.cloudQueue(), cloudCapacity: this.rt.sandboxes.cloudCapacity(), cloudPaused: this.rt.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
           plan: this.rt.sandboxes.currentPlan(), planUsage: this.rt.sandboxes.planUsage(), burning: this.rt.sandboxes.creditBurn(), deepapi: this.rt.sandboxes.deepapiState(),
         };
       }

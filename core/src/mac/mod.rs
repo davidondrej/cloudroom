@@ -73,7 +73,9 @@ pub(crate) const QUICK: Duration = Duration::from_secs(8);
 pub(crate) const READ: Duration = Duration::from_secs(45);
 /// The Mac app resends its report every minute, so an older one may describe a Mac that has since slept.
 const REPORTED: Duration = Duration::from_secs(150);
-pub const SKILL: &str = include_str!("cloud-mac/SKILL.md");
+pub const SKILL: &str = include_str!("user-computer/SKILL.md");
+/// The skill's old name, kept findable for agents and prompts that still say `cloud-mac` (#2118).
+pub const SKILL_STUB: &str = "---\nname: cloud-mac\ndescription: Old name of the user-computer skill. Read user-computer instead.\n---\n\nRenamed to `user-computer`: the user's computer can be macOS, Linux, or Windows. Read the `user-computer` skill.\n";
 pub const ROOM_CLI_SKILL: &str = include_str!("room-cli/SKILL.md");
 
 #[derive(Deserialize)]

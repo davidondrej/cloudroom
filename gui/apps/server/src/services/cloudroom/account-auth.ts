@@ -195,6 +195,10 @@ export class CloudAccountAuth {
     await this.rt.sandboxes.copyMacLogins().catch((error) => this.rt.host.warn("Logins could not be copied to cloud sandboxes", error));
   }
 
+  resetSignInCopy(): void {
+    this.signInCopyAt = 0;
+  }
+
   /** A sign-in in Settings just ended: copy this Mac's logins now, even if a wake copied them seconds ago, so a child the
    *  website starts next has them, not only after this Mac's next wake (#1708). At most once a minute; unchanged logins
    *  are not sent again. */

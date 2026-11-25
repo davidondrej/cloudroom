@@ -19,3 +19,10 @@ export function cloudLoginProvider(text: string | null | undefined): CloudLoginP
   const name = match?.[1] ?? match?.[2] ?? match?.[3];
   return name ? BY_NAME.get(name) ?? null : null;
 }
+
+const GITHUB_LOGIN_ERROR = /Cloud sandboxes have no working GitHub login|GitHub rejected the cloud's GitHub login/u;
+
+/** Whether a project copy error means Cloud needs a GitHub login to clone a private repository. */
+export function isCloudGithubLoginError(text: string | null | undefined): boolean {
+  return Boolean(text && GITHUB_LOGIN_ERROR.test(text));
+}

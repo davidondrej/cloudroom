@@ -2,6 +2,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   type MouseEvent,
   type PointerEvent,
 } from "react";
@@ -89,6 +90,71 @@ function ActionButton({
   );
 }
 
+const OVERFLOW_CLIP_PATTERN = /(auto|scroll|overlay|hidden|clip)/u;
+
+function getScrollAncestors(element: Element): Element[] {
+  const ancestors: Element[] = [];
+  let current = element.parentElement;
+  while (current !== null) {
+    const style = window.getComputedStyle(current);
+    if (
+      OVERFLOW_CLIP_PATTERN.test(style.overflowX) ||
+      OVERFLOW_CLIP_PATTERN.test(style.overflowY)
+    ) {
+      ancestors.push(current);
+    }
+    current = current.parentElement;
+  }
+  return ancestors;
+}
+
+function isAnchorClipped(rect: DOMRect, anchorElement: Element): boolean {
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+  if (
+    window.innerWidth > 0 &&
+    window.innerHeight > 0 &&
+    (x < 0 || x > window.innerWidth || y < 0 || y > window.innerHeight)
+  ) {
+    return true;
+  }
+  let current = anchorElement.parentElement;
+  while (current !== null) {
+    const style = window.getComputedStyle(current);
+    const clipsX = OVERFLOW_CLIP_PATTERN.test(style.overflowX);
+    const clipsY = OVERFLOW_CLIP_PATTERN.test(style.overflowY);
+    if (clipsX || clipsY) {
+      const bounds = current.getBoundingClientRect();
+      if (bounds.width > 0 || bounds.height > 0) {
+        if (clipsX && (x < bounds.left || x > bounds.right)) {
+          return true;
+        }
+        if (clipsY) {
+          let visibleBottom = bounds.bottom;
+          const footer = current.querySelector<HTMLElement>(
+            ":scope > * > [data-scroll-footer]",
+          );
+          if (footer !== null && !footer.contains(anchorElement)) {
+            const footerBounds = footer.getBoundingClientRect();
+            if (
+              footerBounds.height > 0 &&
+              footerBounds.top > bounds.top &&
+              footerBounds.top < visibleBottom
+            ) {
+              visibleBottom = footerBounds.top;
+            }
+          }
+          if (y < bounds.top || y > visibleBottom) {
+            return true;
+          }
+        }
+      }
+    }
+    current = current.parentElement;
+  }
+  return false;
+}
+
 export function TimelineSelectionMenu({
   selection,
   onAddToChat,
@@ -98,17 +164,9 @@ export function TimelineSelectionMenu({
 }: TimelineSelectionMenuProps) {
   const open = selection !== null;
   const portalScopeProps = usePortalScopeProps();
-
-  useEffect(() => {
-    if (!open || typeof window === "undefined") return;
-    const dismiss = () => onDismiss();
-    window.addEventListener("scroll", dismiss, true);
-    window.addEventListener("resize", dismiss);
-    return () => {
-      window.removeEventListener("scroll", dismiss, true);
-      window.removeEventListener("resize", dismiss);
-    };
-  }, [open, onDismiss]);
+  const [hiddenForSelection, setHiddenForSelection] =
+    useState<MessageProseSelection | null>(null);
+  const hidden = selection !== null && hiddenForSelection === selection;
 
   const anchorSide = selection?.anchorSide ?? "top";
   const anchorLeft =
@@ -121,14 +179,56 @@ export function TimelineSelectionMenu({
       : anchorSide === "bottom"
         ? selection.rect.bottom
         : selection.rect.top);
-  const virtualAnchor = useMemo(
-    () => ({
-      getBoundingClientRect: () => new DOMRect(anchorLeft, anchorTop, 0, 0),
-    }),
-    [anchorLeft, anchorTop],
-  );
+  const anchorElement = selection?.anchorElement ?? null;
+  const virtualAnchor = useMemo(() => {
+    let lastRect = new DOMRect(anchorLeft, anchorTop, 0, 0);
+    const getBoundingClientRect = () => {
+      const live = selection?.getAnchorRect?.();
+      if (live !== null && live !== undefined) {
+        lastRect = live;
+        return live;
+      }
+      return lastRect;
+    };
+    return anchorElement !== null
+      ? { getBoundingClientRect, contextElement: anchorElement }
+      : { getBoundingClientRect };
+  }, [anchorElement, anchorLeft, anchorTop, selection]);
   const virtualAnchorRef = useRef(virtualAnchor);
   virtualAnchorRef.current = virtualAnchor;
+
+  useEffect(() => {
+    if (!open || typeof window === "undefined" || anchorElement === null) {
+      return;
+    }
+    const updateVisibility = () => {
+      if (!anchorElement.isConnected) {
+        onDismiss();
+        return;
+      }
+      const clipped = isAnchorClipped(
+        virtualAnchor.getBoundingClientRect(),
+        anchorElement,
+      );
+      setHiddenForSelection((current) => {
+        if (clipped) return selection;
+        return current === selection ? null : current;
+      });
+    };
+    const scrollAncestors = getScrollAncestors(anchorElement);
+    for (const ancestor of scrollAncestors) {
+      ancestor.addEventListener("scroll", updateVisibility, { passive: true });
+    }
+    window.addEventListener("scroll", updateVisibility, { passive: true });
+    window.addEventListener("resize", updateVisibility);
+    return () => {
+      for (const ancestor of scrollAncestors) {
+        ancestor.removeEventListener("scroll", updateVisibility);
+      }
+      window.removeEventListener("scroll", updateVisibility);
+      window.removeEventListener("resize", updateVisibility);
+    };
+  }, [anchorElement, onDismiss, open, selection, virtualAnchor]);
 
   if (!selection) return null;
 
@@ -169,8 +269,23 @@ export function TimelineSelectionMenu({
           align="center"
           sideOffset={6}
           collisionPadding={8}
+          aria-hidden={hidden || undefined}
+          style={
+            hidden ? { visibility: "hidden", pointerEvents: "none" } : undefined
+          }
           className={SELECTION_MENU_CONTENT_CLASS}
+          onMouseDown={(event) => preventOverlayTriggerSelection(event)}
           onEscapeKeyDown={() => onDismiss()}
+          onFocusOutside={(event) => event.preventDefault()}
+          onPointerDownOutside={(event) => {
+            const target = event.target;
+            if (
+              target instanceof Element &&
+              target.closest(".thread-scroll-thumb") !== null
+            ) {
+              event.preventDefault();
+            }
+          }}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
         >

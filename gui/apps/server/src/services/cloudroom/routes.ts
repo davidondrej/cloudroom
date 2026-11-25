@@ -19,7 +19,7 @@ import { binding, command, teleportBlocked, teleportProgress } from "./store.js"
 import { browserRequestProblem } from "../../browser-request-guard.js";
 import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
-import { macSignedInAgents } from "./mac-agents.js";
+import { macInstalledAgents, macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
 import { importRoomThreads } from "./bb-import.js";
@@ -49,7 +49,7 @@ import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
 import { callTicket, cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
 import { activation } from "./activation.js";
-import { disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
+import { copyMacGithub, disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGitlabRepo, addGithubRepo, projectBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
 import { promptSuggestion, promptSuggestionEvent } from "../threads/prompt-suggestion.js";
@@ -130,6 +130,18 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (context.req.header("x-cloudroom-relay") !== "threads") return context.json({ message: "Not found" }, 404);
     const { tunnel } = z.object({ tunnel: z.boolean().optional() }).catch({}).parse(await context.req.json().catch(() => ({})));
     cloudroom(deps).sync.changed(tunnel);
+    return context.json(null, 202);
+  });
+  // The relay's signal that a new phone or other Mac just signed in over Connect. The relay strips this header from visitors.
+  app.post("/api/v1/cloudroom/connect/session-connected", async context => {
+    if (context.req.header("x-cloudroom-relay") !== "session-connected") return context.json({ message: "Not found" }, 404);
+    const input = z.object({
+      label: z.string().trim().min(1).max(64),
+      kind: z.enum(["phone", "mac"]),
+      at: z.number().int().positive(),
+    }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!input.success) return context.json({ message: "Invalid event" }, 400);
+    deps.hub.notifyPluginSignal("connect", "session-connected", input.data);
     return context.json(null, 202);
   });
   // The Archive dialog asks before it stops working children (#237, App 8): their real state, read once.
@@ -548,6 +560,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/account/copy-logins", async (context) => {
     const input = z.object({ enabled: z.boolean() }).strict().parse(await context.req.json());
     await setCopyLogins(deps, input.enabled);
+    if (input.enabled) cloudroom(deps).resetSignInCopy();
     return context.json({ ok: true });
   });
   // Settings → General → DeepAPI: whether DeepAPI is paid from the account's Cloud Credits (ADR 20261115-235507).
@@ -681,9 +694,17 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(macCodexStatus(startMacCodexLogin(deps)));
   });
   app.get("/api/v1/cloudroom/mac/codex-login", context => context.json(macCodexStatus(macCodexLogin())));
-  app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents() }));
+  app.get("/api/v1/cloudroom/mac/agents", async context => context.json({ agents: await macSignedInAgents(), installed: macInstalledAgents() }));
   app.post("/api/v1/cloudroom/mac/logins", async context => { await cloudroom(deps).copyLoginsNow(); return context.json({ ok: true }); });
   app.get("/api/v1/cloudroom/account/github", async context => context.json(await githubAuth(deps)));
+  app.post("/api/v1/cloudroom/account/github/mac", async context => {
+    const problem = browserRequestProblem(context, deps, { requireJsonForMutation: true });
+    if (problem) return context.json({ message: "Use the local Cloudroom app." }, problem.status);
+    const body = await context.req.json().catch(() => null);
+    const parsed = z.object({ expectedLogin: z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/).nullish() }).strict().safeParse(body);
+    if (!parsed.success) throw new ApiError(400, "invalid_github_mac", "Invalid GitHub request.");
+    return context.json(await copyMacGithub(deps, parsed.data.expectedLogin));
+  });
   app.get("/api/v1/cloudroom/account/github/account", async context => context.json(await githubAccount(deps)));
   app.post("/api/v1/cloudroom/account/github/disconnect", async context => { await disconnectGithub(deps); return context.json({ ok: true }); });
   const agentId = (context: { req: { param: (name: string) => string | undefined } }) => z.string().min(1).max(100).parse(context.req.param("providerId"));
@@ -818,8 +839,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json({ ok: true });
   });
   app.post("/api/v1/cloudroom/threads/:id/retry-copy", async (context) => {
-    await cloudroom(deps).retryCopy(context.req.param("id"));
-    return context.json({ ok: true });
+    const result = await cloudroom(deps).retryCopy(context.req.param("id"));
+    return context.json({ ok: true, ...result });
   });
   app.post("/api/v1/cloudroom/threads/:id/wake", async (context) => {
     const { reason } = await context.req.json<{ reason?: unknown }>().catch(() => ({ reason: undefined }));

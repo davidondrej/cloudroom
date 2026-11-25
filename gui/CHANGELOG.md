@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 168
+
+Sign out any connected device (2026-11-25)
+
+### Changes
+
+- Settings → Cloudroom Connect lists every phone and computer connected to your Mac, and you can sign any of them out at once.
+- You get an alert when a new device connects, and you can turn Remote access off for this Mac.
+- When a Cloud thread can't sign in to Codex or clone a private GitHub repo, you can fix the login right in the chat.
+- Antigravity's Cloud sign-in options now sit in its ⋯ menu, and oversized skills no longer stop the others from reaching Cloud threads.
+- Security fixes.
+
 ## 167
 
 Subagents nest six levels deep (2026-11-25)

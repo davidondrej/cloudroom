@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeFrame, encodeFrame, type Frame } from "@cloudroom/tunnel-contract";
 import { OFFLINE_HEADER } from "./pages";
 import { GATE_AUTH_HEADER, GATE_MACHINE_ID_HEADER, MACHINE_CREDENTIAL_HEADER, PHONE_SESSION_HEADER, RELAY_SIGNAL_HEADER, SESSION_COOKIE, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER } from "./protocol-headers";
-import { parseVisitorHost, requestForTunnelDo, returnUrl } from "./worker";
-import { DESKTOP_SESSION_TTL_MS, KEEP, MACS_PER_ACCOUNT, SESSION_TTL_MS, createShareCode, sha256Hex } from "./store";
+import { accountSignedOut, parseVisitorHost, requestForTunnelDo, returnUrl } from "./worker";
+import { DESKTOP_SESSION_TTL_MS, KEEP, MACS_PER_ACCOUNT, SESSION_TTL_MS, createMacSession, createMachine, createShareCode, serverByHandle, sha256Hex } from "./store";
 
 type ClientWebSocket = NonNullable<
   Awaited<ReturnType<Miniflare["dispatchFetch"]>>["webSocket"]
@@ -27,6 +27,11 @@ const MAC_HEADERS: [string, string][] = [
   ["x-bb-artifact-sha256", DIGEST],
 ];
 const seen: { path: string; headers: Record<string, string>; target?: string }[] = [];
+type Seen = (typeof seen)[number];
+const seenWaiters: { match: (entry: Seen) => boolean; resolve: () => void }[] = [];
+/** Resolves once the fake Mac has received a request that matches. */
+const seenOnce = (match: (entry: Seen) => boolean) =>
+  seen.some(match) ? Promise.resolve() : new Promise<void>((resolve) => seenWaiters.push({ match, resolve }));
 let website: (request: Request) => MiniflareResponse = () => MiniflareResponse.json({ userId: "user-1" });
 let mf: Miniflare;
 let tunnel: ClientWebSocket;
@@ -70,14 +75,21 @@ function serveMac(ws: ClientWebSocket): void {
   ws.addEventListener("message", (event) => {
     if (typeof event.data === "string") return;
     const frame = decodeFrame(event.data as ArrayBuffer);
-    const send = (out: Frame) => ws.send(new Uint8Array(encodeFrame(out)));
+    const send = (out: Frame) => {
+      if (ws.readyState === 1) ws.send(new Uint8Array(encodeFrame(out)));
+    };
     if (frame.type === "ws-data") {
       send(frame);
       return;
     }
     if (frame.type !== "open-http" && frame.type !== "open-ws") return;
     const asked = Object.fromEntries(frame.headers.map(([k, v]) => [k.toLowerCase(), v]));
-    seen.push({ path: frame.path, headers: asked, ...(frame.target ? { target: frame.target } : {}) });
+    const entry: Seen = { path: frame.path, headers: asked, ...(frame.target ? { target: frame.target } : {}) };
+    seen.push(entry);
+    for (const waiter of seenWaiters.filter((waiter) => waiter.match(entry))) {
+      seenWaiters.splice(seenWaiters.indexOf(waiter), 1);
+      waiter.resolve();
+    }
     if (frame.type === "open-ws") {
       send({ type: "ws-open-ack", streamId: frame.streamId, protocol: null });
       return;
@@ -88,9 +100,10 @@ function serveMac(ws: ClientWebSocket): void {
       return;
     }
     const gzip = (asked["accept-encoding"] ?? "").includes("gzip");
-    const headers: [string, string][] = frame.path.startsWith("/assets/")
-      ? [["cache-control", "public, max-age=31536000"]]
-      : [...MAC_HEADERS];
+    const headers: [string, string][] =
+      frame.path.startsWith("/assets/") || frame.path === "/api/v1/cache-probe" || frame.path === "/custom-data"
+        ? [["cache-control", "public, max-age=31536000"]]
+        : [...MAC_HEADERS];
     if (gzip) headers.push(["content-encoding", "gzip"]);
     send({ type: "resp-head", streamId: frame.streamId, status: 200, headers });
     const body = new TextEncoder().encode(`mac:${frame.target ?? "app"}:${frame.path}`);
@@ -143,7 +156,7 @@ beforeAll(async () => {
     outboundService: (request: unknown) => website(request as Request),
   });
   const db = await mf.getD1Database("DB");
-  const migration = ["0001_init.sql", "0002_server_name.sql", "0003_machines.sql", "0004_account_sessions.sql", "0005_vps.sql"]
+  const migration = ["0001_init.sql", "0002_server_name.sql", "0003_machines.sql", "0004_account_sessions.sql", "0005_vps.sql", "0006_session_device_info.sql"]
     .map((file) => readFileSync(fileURLToPath(new URL(`../migrations/${file}`, import.meta.url)), "utf8"))
     .join(";\n");
   for (const statement of migration.replace(/--.*$/gm, "").split(";")) {
@@ -600,16 +613,98 @@ describe("Cloudroom Connect relay", () => {
     expect(seen.at(-1)!.headers[GATE_AUTH_HEADER]).toBe("machine");
 
     const cookie = await signInPhone();
-    for (const method of ["macs", "runSetupJob", "setupJobStatus"]) {
+    const macsRes = await fetchRelay(`https://${handle}.${BASE}/api/v1/plugins/connect/rpc/macs`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: "null",
+    });
+    expect(await macsRes.text()).toBe("mac:app:/api/v1/plugins/connect/rpc/macs");
+    expect(seen.at(-1)!.headers[GATE_AUTH_HEADER]).toBe("session");
+
+    const appCookie = cookieFrom(await fetchRelay(`https://app.${BASE}/__signin`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://website.test" },
+      body: new URLSearchParams({ token: "a.b.c" }).toString(),
+    }));
+    for (const [origin, phoneCookie] of [
+      [`https://${handle}.${BASE}`, cookie],
+      [`https://app.${BASE}`, appCookie],
+    ]) {
+      for (const path of [
+        "/api/v1/plugins/connect/rpc/runSetupJob",
+        "/api/v1/plugins/connect/rpc/setupJobStatus",
+        "/api/v1/plugins/connect/rpc/%72unSetupJob",
+        "/api/v1/plugins/connect/rpc/runSetupJob/",
+        "/api/v1/plugins/connect/rpc/%E0%A4%A",
+      ]) {
+        const res = await fetchRelay(`${origin}${path}`, {
+          method: "POST",
+          headers: { cookie: phoneCookie, "content-type": "application/json" },
+          body: "null",
+        });
+        expect(res.status, `${origin}${path}`).toBe(403);
+      }
+    }
+
+    const peer = await register("22222222222222222222222222222222");
+    const opened = await fetchRelay(`https://${BASE}/api/computers/open`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${peer.credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ handle }),
+    });
+    expect(opened.status).toBe(200);
+    const { cookie: desktop } = (await opened.json()) as { cookie: { name: string; value: string } };
+    const desktopCookie = `${desktop.name}=${desktop.value}`;
+    for (const method of ["runSetupJob", "setupJobStatus"]) {
       const path = `/api/v1/plugins/connect/rpc/${method}`;
-      const phone = await fetchRelay(`https://${handle}.${BASE}${path}`, {
+      const res = await fetchRelay(`https://${handle}.${BASE}${path}`, {
         method: "POST",
-        headers: { cookie, "content-type": "application/json" },
+        headers: { cookie: desktopCookie, "content-type": "application/json" },
         body: "null",
       });
-      expect(await phone.text()).toBe(`mac:app:${path}`);
+      expect(await res.text()).toBe(`mac:app:${path}`);
       expect(seen.at(-1)!.headers[GATE_AUTH_HEADER]).toBe("session");
     }
+  });
+
+  it("never edge-caches API responses or port shares, even with public Cache-Control", async () => {
+    const app = `https://app.${BASE}`;
+    const appCookie = cookieFrom(await fetchRelay(`${app}/__signin`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://website.test" },
+      body: new URLSearchParams({ token: "a.b.c" }).toString(),
+    }));
+    const picked = await fetchRelay(`${app}/__mac`, {
+      method: "POST",
+      headers: { cookie: appCookie, origin: app, "content-type": "application/json" },
+      body: JSON.stringify({ handle }),
+    });
+    expect(picked.status).toBe(200);
+    const beforeApi = seen.length;
+    for (let i = 0; i < 2; i += 1) {
+      const res = await fetchRelay(`${app}/api/v1/cache-probe`, { headers: { cookie: appCookie } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-bb-cache")).toBeNull();
+    }
+    expect(seen.length - beforeApi).toBe(2);
+
+    const beforeOther = seen.length;
+    for (let i = 0; i < 2; i += 1) {
+      const res = await fetchRelay(`${app}/custom-data`, { headers: { cookie: appCookie } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-bb-cache")).toBeNull();
+    }
+    expect(seen.length - beforeOther).toBe(2);
+
+    const ticket = await fetchRelay(`${app}/__share?mac=${handle}&port=3000&return=%2F`, { headers: { cookie: appCookie } });
+    const shareCookie = cookieFrom(await fetchRelay(ticket.headers.get("location")!));
+    const beforeShare = seen.length;
+    for (let i = 0; i < 2; i += 1) {
+      const res = await fetchRelay(`https://${handle}--3000.${BASE}/assets/dev.js`, { headers: { cookie: shareCookie } });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("x-bb-cache")).toBeNull();
+    }
+    expect(seen.length - beforeShare).toBe(2);
   });
 
   it("signs phones in with the account only from the website, keeps them to its Macs, and signs them all out", async () => {
@@ -655,10 +750,13 @@ describe("Cloudroom Connect relay", () => {
       body: JSON.stringify(body),
     });
     const leaving = await register("44444444444444444444444444444444");
+    const db = await mf.getD1Database("DB");
+    const leavingOwner = (await serverByHandle(db, leaving.handle, true))!;
     expect((await asMac(leaving.credential, "/api/computers/open", { handle })).status).toBe(200);
     expect((await asMac(leaving.credential, "/api/unregister")).status).toBe(200);
     expect((await asMac(leaving.credential, "/api/computers")).status).toBe(401);
     expect((await asMac(leaving.credential, "/api/computers/open", { handle })).status).toBe(401);
+    expect(await createMachine(db, leavingOwner, "Late host")).toEqual({ kind: "retired" });
 
     const before = await register("55555555555555555555555555555555");
     website = () => MiniflareResponse.json({ userId: "user-2" });
@@ -884,6 +982,73 @@ describe("Cloudroom Connect relay", () => {
     expect(seen.some((request) => request.path === "/api/v1/send")).toBe(false);
   });
 
+  it("signs an account's phones and Mac keys out when the website asks, after a password reset (#1920)", async () => {
+    const asMac = (key: string) => fetchRelay(`https://${BASE}/api/computers`, { method: "POST", headers: { authorization: `Bearer ${key}` } });
+    const signedOut = (secret: string, userId = "user-3") => fetchRelay(`https://${BASE}/api/account-signed-out`, {
+      method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ user_id: userId }),
+    });
+    website = () => MiniflareResponse.json({ userId: "user-3" });
+    const mac = await register("99999999999999999999999999999999");
+    const fake = await register("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const phone = cookieFrom(await fetchRelay(`https://app.${BASE}/__signin`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", origin: "https://website.test" },
+      body: new URLSearchParams({ token: "a.b.c" }).toString(),
+    })).split("=")[1];
+    const phoneSession = () => fetchRelay(`https://${BASE}/api/phone-session`, { headers: { authorization: `Bearer ${phone}` } });
+    (await fetchRelay(`https://${fake.handle}.${BASE}/__tunnel?v=1`, { headers: { upgrade: "websocket", authorization: `Bearer ${fake.credential}` } })).webSocket!.accept();
+    const namespace = await mf.getDurableObjectNamespace("TUNNEL_DO");
+    const online = async () => ((await (await namespace.get(namespace.idFromName(fake.handle)).fetch(`https://${fake.handle}.${BASE}/__control/status`)).json()) as { online: boolean }).online;
+    expect(await online()).toBe(true);
+    expect((await phoneSession()).status).toBe(200);
+    expect((await asMac(fake.credential)).status).toBe(200);
+    // A request that checked the fake Mac's key just before the sign-out, and only writes after it.
+    const db = await mf.getD1Database("DB");
+    const checked = (await serverByHandle(db, fake.handle, true))!;
+
+    expect((await signedOut("wrong")).status).toBe(401);
+    expect((await signedOut("signal-secret", "not an id")).status).toBe(400);
+    expect((await signedOut("signal-secret")).status).toBe(200);
+    expect((await phoneSession()).status).toBe(401);
+    expect((await asMac(mac.credential)).status).toBe(401);
+    expect((await asMac(fake.credential)).status).toBe(401);
+    expect(await online()).toBe(false);
+    expect(await createMacSession(db, (await serverByHandle(db, mac.handle, true))!.id, checked)).toBeNull();
+    // A desktop sign-in revoked while the relay registers it leaves no working key.
+    let checks = 0;
+    website = () => (++checks === 1 ? MiniflareResponse.json({ userId: "user-3" }) : new MiniflareResponse("signed out", { status: 403 }));
+    const raced = await fetchRelay(`https://${BASE}/api/register`, {
+      method: "POST",
+      headers: { authorization: DESKTOP_AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ installId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }),
+    });
+    expect(raced.status).toBe(401);
+    expect(checks).toBe(2);
+    website = () => MiniflareResponse.json({ userId: "user-3" });
+    // Another account keeps its Mac, and this Mac takes its address back once its app signs in again.
+    expect((await asMac(credential)).status).toBe(200);
+    expect((await register("99999999999999999999999999999999")).handle).toBe(mac.handle);
+    website = () => MiniflareResponse.json({ userId: "user-1" });
+  });
+
+  it("closes every Mac's tunnel on an account sign-out even when a phone stream would not close (#1920)", async () => {
+    website = () => MiniflareResponse.json({ userId: "user-4" });
+    const macs = [await register("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), await register("cccccccccccccccccccccccccccccccc")];
+    website = () => MiniflareResponse.json({ userId: "user-1" });
+    const closed: string[] = [];
+    const TUNNEL_DO = { idFromName: (name: string) => name, get: (handle: string) => ({ fetch: async (request: Request) => {
+      if (request.url.endsWith("/revoke-visitors")) throw new Error("relay object did not answer");
+      closed.push(handle);
+      return new Response(null, { status: 204 });
+    } }) };
+    const env = { DB: await mf.getD1Database("DB"), BASE_DOMAIN: BASE, CONNECT_SIGNAL_SECRET: "signal-secret", TUNNEL_DO } as unknown as Parameters<typeof accountSignedOut>[1];
+    const response = await accountSignedOut(new Request(`https://${BASE}/api/account-signed-out`, {
+      method: "POST", headers: { authorization: "Bearer signal-secret", "content-type": "application/json" }, body: JSON.stringify({ user_id: "user-4" }),
+    }), env);
+    expect(response.status).toBe(503);
+    expect(closed.sort()).toEqual(macs.map((mac) => mac.handle).sort());
+  });
+
   it("tells the account's Macs their Cloud threads changed, only for the website, and sends a burst's last one", async () => {
     const signal = (secret: string) => fetchRelay(`https://${BASE}/api/threads-changed`, {
       method: "POST", headers: { authorization: `Bearer ${secret}`, "content-type": "application/json" }, body: JSON.stringify({ user_id: "user-1" }),
@@ -962,6 +1127,137 @@ describe("Cloudroom Connect relay", () => {
     expect(fromOtherAddress.status).toBe(503);
     expect(fromOtherAddress.headers.get(OFFLINE_HEADER)).toBeNull();
     expect(fromOtherAddress.headers.get("content-security-policy")).toBe("frame-ancestors 'self'");
+  });
+
+  it("lists remote sessions, notifies the Mac on new sign-in, and revokes one device without dropping others", async () => {
+    const dialed = await dial(credential);
+    if (!dialed.webSocket) throw new Error(`tunnel dial failed: ${dialed.status}`);
+    tunnel = dialed.webSocket;
+    serveMac(tunnel);
+    seen.length = 0;
+
+    const code1 = await phoneCode(credential);
+    const pair1 = await fetchRelay(`https://${handle}.${BASE}/__pair?code=${code1}`, {
+      headers: { "user-agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1" },
+    });
+    const cookie1 = cookieFrom(pair1);
+    const code2 = await phoneCode(credential);
+    const pair2 = await fetchRelay(`https://${handle}.${BASE}/__pair?code=${code2}`, {
+      headers: { "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" },
+    });
+    const cookie2 = cookieFrom(pair2);
+
+    // The background session-connected relay push reaches the Mac.
+    await seenOnce((req) => req.path === "/api/v1/cloudroom/connect/session-connected" && req.headers[RELAY_SIGNAL_HEADER] === "session-connected");
+
+    const listed = await fetchRelay(`https://${BASE}/api/phone-sessions/list`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    expect(listed.status).toBe(200);
+    const { sessions } = (await listed.json()) as { sessions: { id: string; label: string; kind: string }[] };
+    const iphone = sessions.find((s) => s.label === "iPhone · Safari");
+    const chrome = sessions.find((s) => s.label === "Mac · Chrome");
+    expect(iphone).toBeDefined();
+    expect(chrome).toBeDefined();
+
+    // Open live visitor WebSockets for both devices plus a port share minted from device 1.
+    const shareHop1 = await fetchRelay(`https://${handle}.${BASE}/__share?port=3000&return=/`, { headers: { cookie: cookie1 } });
+    expect(shareHop1.status).toBe(302);
+    const sharePair1 = await fetchRelay(shareHop1.headers.get("location")!);
+    const shareCookie1 = cookieFrom(sharePair1);
+    const shareHopUnused = await fetchRelay(`https://${handle}.${BASE}/__share?port=3001&return=/`, { headers: { cookie: cookie1 } });
+    const unusedShareUrl = shareHopUnused.headers.get("location")!;
+
+    const ws1Resp = await fetchRelay(`https://${handle}.${BASE}/ws`, { headers: { upgrade: "websocket", cookie: cookie1 } });
+    const ws2Resp = await fetchRelay(`https://${handle}.${BASE}/ws`, { headers: { upgrade: "websocket", cookie: cookie2 } });
+    const shareWsResp = await fetchRelay(`https://${handle}--3000.${BASE}/ws`, { headers: { upgrade: "websocket", cookie: shareCookie1 } });
+    expect(ws1Resp.status).toBe(101);
+    expect(ws2Resp.status).toBe(101);
+    expect(shareWsResp.status).toBe(101);
+    const ws1 = ws1Resp.webSocket!;
+    const ws2 = ws2Resp.webSocket!;
+    const shareWs = shareWsResp.webSocket!;
+    for (const socket of [ws1, ws2, shareWs]) {
+      socket.accept();
+      const echoed = new Promise<unknown>((resolve) => {
+        socket.addEventListener("message", (event) => resolve(event.data), { once: true });
+      });
+      socket.send("alive");
+      expect(await echoed).toBe("alive");
+    }
+    const ws1Closed = new Promise<void>((resolve) => {
+      ws1.addEventListener("close", () => { ws1.close(); resolve(); }, { once: true });
+    });
+    const shareWsClosed = new Promise<void>((resolve) => {
+      shareWs.addEventListener("close", () => { shareWs.close(); resolve(); }, { once: true });
+    });
+    let ws2Closed = false;
+    ws2.addEventListener("close", () => { ws2Closed = true; });
+
+    const revokeOne = await fetchRelay(`https://${BASE}/api/phone-sessions/revoke-one`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: iphone!.id }),
+    });
+    expect(revokeOne.status).toBe(200);
+    expect(await revokeOne.json()).toEqual({ revoked: true });
+
+    await Promise.race([
+      Promise.all([ws1Closed, shareWsClosed]),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`Sockets stayed open: ws1=${ws1.readyState} share=${shareWs.readyState} ws2=${ws2.readyState}`)), 1000)),
+    ]);
+    expect(ws2Closed).toBe(false);
+    const ws2Echo = new Promise<unknown>((resolve) => {
+      ws2.addEventListener("message", (event) => resolve(event.data), { once: true });
+    });
+    ws2.send("still-alive");
+    expect(await ws2Echo).toBe("still-alive");
+
+    const r1 = await fetchRelay(`https://${handle}.${BASE}/api/ping`, { headers: { cookie: cookie1 } });
+    const rShare = await fetchRelay(`https://${handle}--3000.${BASE}/api/ping`, { headers: { cookie: shareCookie1 } });
+    const rUnused = await fetchRelay(unusedShareUrl);
+    const r2 = await fetchRelay(`https://${handle}.${BASE}/api/ping`, { headers: { cookie: cookie2 } });
+    expect(r1.status).toBe(401);
+    expect(r1.headers.get("x-cloudroom-session-revoked")).toBe("1");
+    expect(rShare.status).toBe(401);
+    expect(rShare.headers.get("x-cloudroom-session-revoked")).toBe("1");
+    expect(rUnused.status).toBe(400);
+    expect(r2.status).toBe(200);
+
+    // Retry after an interrupted DO close (revoked_at set, closed_at NULL) still finds the session and completes closure.
+    const db = await mf.getD1Database("DB");
+    await db.prepare("UPDATE session SET closed_at = NULL WHERE id = ?").bind(iphone!.id).run();
+    const retryRevoke = await fetchRelay(`https://${BASE}/api/phone-sessions/revoke-one`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: iphone!.id }),
+    });
+    expect(retryRevoke.status).toBe(200);
+    expect(await retryRevoke.json()).toEqual({ revoked: true });
+    // After completion, a subsequent revoke reports revoked: false.
+    const alreadyDone = await fetchRelay(`https://${BASE}/api/phone-sessions/revoke-one`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: iphone!.id }),
+    });
+    expect(await alreadyDone.json()).toEqual({ revoked: false });
+
+    // Machine credentials cannot mutate owner general settings through the relay.
+    const addedMachine = await fetchRelay(`https://${BASE}/api/machines`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "worker" }),
+    });
+    const { credential: machineCred } = (await addedMachine.json()) as { credential: string };
+    const machineSettings = await fetchRelay(`https://${handle}.${BASE}/api/v1/settings/general`, {
+      method: "PUT",
+      headers: { "x-bb-connect-machine": machineCred, "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(machineSettings.status).toBe(403);
+
+    ws2.close(1000, "done");
   });
 });
 

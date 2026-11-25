@@ -8,8 +8,8 @@ import {
   type HeaderPair,
 } from "@cloudroom/tunnel-contract";
 import { relayedResponse } from "./response-encoding.js";
-import { RELAY_SIGNAL_HEADER, TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
-import { machineOwner, markServerSeen, sessionByToken } from "./store.js";
+import { RELAY_SIGNAL_HEADER, SESSION_REVOKED_HEADER, TUNNEL_MACHINE_HEADER, TUNNEL_SESSION_HEADER, TUNNEL_TARGET_HEADER, TUNNEL_VPS_HEADER } from "./protocol-headers.js";
+import { machineOwner, markServerSeen, markSessionSeenByHash, sessionLookup } from "./store.js";
 import { timedDb } from "./timeout.js";
 
 export interface Env {
@@ -39,6 +39,8 @@ const HEARD_EVERY_MS = 2_000;
 const WS_READY_STATE_OPEN = 1;
 /** The Mac's app fetches the account's changed Cloud threads when it gets this (#237). Older apps answer 404. */
 export const SIGNAL_PATH = "/api/v1/cloudroom/threads-changed";
+/** The Mac's app notifies the local user when a new phone or other Mac signs in through Connect. Older apps answer 404. */
+export const SESSION_CONNECTED_PATH = "/api/v1/cloudroom/connect/session-connected";
 const SIGNAL_EVERY_MS = 1_000;
 
 /** Saved on the Mac's tunnel socket, never in Durable Object storage: a storage hiccup resets the object and drops the Mac. */
@@ -165,9 +167,45 @@ export class TunnelDO {
       request.method === "POST" &&
       url.pathname === "/__control/revoke-visitors"
     ) {
-      this.abandonStreams("phone access revoked", "phone access revoked");
-      this.releaseWaiters(null);
-      return new Response(null, { status: 204 });
+      return this.state.blockConcurrencyWhile(async () => {
+        this.abandonStreams("phone access revoked", "phone access revoked");
+        this.releaseWaiters(null);
+        return new Response(null, { status: 204 });
+      });
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === "/__control/revoke-session"
+    ) {
+      return request.json().then((body) => {
+        const parsed = body as { sessionId?: unknown; sessionIds?: unknown } | null;
+        const ids = Array.isArray(parsed?.sessionIds)
+          ? parsed.sessionIds.filter((value): value is string => typeof value === "string" && value.length > 0)
+          : typeof parsed?.sessionId === "string" && parsed.sessionId
+            ? [parsed.sessionId]
+            : [];
+        if (ids.length === 0) return new Response(null, { status: 204 });
+        return this.state.blockConcurrencyWhile(async () => {
+          for (const id of ids) this.revokeSessionVisitors(id);
+          return new Response(null, { status: 204 });
+        });
+      }, () => new Response(null, { status: 400 }));
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname === "/__control/session-connected"
+    ) {
+      return request.json().then((body) => {
+        const info = body as { label?: unknown; kind?: unknown; at?: unknown } | null;
+        if (
+          typeof info?.label === "string" &&
+          (info.kind === "phone" || info.kind === "mac") &&
+          typeof info.at === "number"
+        ) {
+          this.signalSessionConnected({ label: info.label, kind: info.kind, at: info.at });
+        }
+        return new Response(null, { status: 202 });
+      }, () => new Response(null, { status: 400 }));
     }
 
     const tunnel = this.tunnelSocket();
@@ -224,7 +262,14 @@ export class TunnelDO {
             }
             return this.openVisitorWebSocket(request, url, tunnel, target);
           }
-          const session = await sessionByToken(this.env.DB, token!);
+          const lookup = await sessionLookup(this.env.DB, token!);
+          if (lookup.status === "revoked") {
+            return new Response("Sign in required\n", {
+              status: 401,
+              headers: { [SESSION_REVOKED_HEADER]: "1" },
+            });
+          }
+          const session = lookup.status === "active" ? lookup.session : null;
           if (
             !session ||
             session.serverId !== serverId ||
@@ -232,10 +277,15 @@ export class TunnelDO {
           ) {
             return new Response("Sign in required\n", { status: 401 });
           }
+          const seenHash = session.target === null ? session.tokenHash : undefined;
+          const response = this.openVisitorWebSocket(request, url, tunnel, target, session.id, seenHash);
+          if (seenHash) {
+            void markSessionSeenByHash(this.env.DB, seenHash).catch(() => {});
+          }
+          return response;
         } catch {
           return new Response("Could not verify phone sign-in\n", { status: 503 });
         }
-        return this.openVisitorWebSocket(request, url, tunnel, target);
       });
     }
     return this.proxyHttp(request, url, tunnel, target);
@@ -354,11 +404,47 @@ export class TunnelDO {
       .then((response) => response.body?.cancel(), () => {});
   }
 
+  /** Tells an online Mac that a new phone or other Mac just signed in to it over Connect. */
+  private signalSessionConnected(info: { label: string; kind: "phone" | "mac"; at: number }): void {
+    const tunnel = this.tunnelSocket();
+    if (!tunnel) return;
+    const url = new URL(`https://${tunnelInfo(tunnel).mac ?? "mac"}.${this.env.BASE_DOMAIN}${SESSION_CONNECTED_PATH}`);
+    void Promise.resolve(
+      this.relay(
+        new Request(url, {
+          method: "POST",
+          headers: { [RELAY_SIGNAL_HEADER]: "session-connected", "content-type": "application/json" },
+          body: JSON.stringify(info),
+        }),
+        url,
+        tunnel,
+      ),
+    ).then((response) => response.body?.cancel(), () => {});
+  }
+
+  /** Closes only visitor WebSockets belonging to one revoked session, leaving other devices connected. */
+  private revokeSessionVisitors(sessionId: string): void {
+    const tunnel = this.tunnelSocket();
+    for (const visitor of this.state.getWebSockets(`session:${sessionId}`)) {
+      if (tunnel) {
+        const { streamId } = visitor.deserializeAttachment() as { streamId: number };
+        this.trySend(tunnel, encodeFrame({
+          type: "close-stream", streamId, code: 1000, reason: "session revoked",
+        }));
+      }
+      try {
+        visitor.close(1001, "session revoked");
+      } catch {}
+    }
+  }
+
   private openVisitorWebSocket(
     request: Request,
     url: URL,
     tunnel: WebSocket,
     target: string | undefined,
+    sessionId?: string,
+    tokenHash?: string,
   ): Response {
     const streamId = this.nextStreamId++;
     const protocols =
@@ -382,8 +468,12 @@ export class TunnelDO {
     if (!opened) return this.offlineResponse();
 
     const pair = new WebSocketPair();
-    pair[1].serializeAttachment({ streamId });
-    this.state.acceptWebSocket(pair[1], [`visitor:${streamId}`]);
+    pair[1].serializeAttachment({
+      streamId,
+      ...(tokenHash ? { tokenHash } : {}),
+    });
+    const tags = sessionId ? [`visitor:${streamId}`, `session:${sessionId}`] : [`visitor:${streamId}`];
+    this.state.acceptWebSocket(pair[1], tags);
 
     const responseHeaders = new Headers();
     if (protocols.length > 0) {
@@ -458,7 +548,7 @@ export class TunnelDO {
       this.pendingHttp.delete(oldId);
       clearTimeout(entry.timeout);
       this.pendingHttp.set(streamId, { ...entry, held: false, resend: null, timeout: this.headDeadline(streamId, entry.deadline) });
-      console.log({ event: "tunnel_request_resent", path: open.path });
+      console.log({ event: "tunnel_request_resent", path: open.path.split("?")[0] });
       if (!this.trySend(tunnel, encodeFrame(open))) this.failHttpStream(streamId, 502, "tunnel reconnected mid-request");
     }
   }
@@ -585,7 +675,10 @@ export class TunnelDO {
       this.onTunnelFrame(decodeFrame(message));
       return;
     }
-    const attachment = ws.deserializeAttachment() as { streamId: number };
+    const attachment = ws.deserializeAttachment() as { streamId: number; tokenHash?: string };
+    if (attachment.tokenHash) {
+      void markSessionSeenByHash(this.env.DB, attachment.tokenHash).catch(() => {});
+    }
     const tunnel = this.tunnelSocket();
     if (!tunnel) {
       ws.close(1011, "tunnel disconnected");

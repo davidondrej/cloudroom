@@ -91,11 +91,40 @@ describe("desktop shell PATH loading", () => {
     expect(warningLogger.warnings).toEqual([]);
     expect(fakeSpawn.calls).toEqual([
       {
-        args: ["-ilc", 'printf "%s" "$PATH"'],
+        args: [
+          "-ilc",
+          'printf "%s\\0%s\\0%s\\0%s" "$PATH" "$DO_NOT_TRACK" "$CLOUDROOM_TELEMETRY" "$BB_TELEMETRY"',
+        ],
         command: "/bin/zsh",
         timeoutMs: 4_000,
       },
     ]);
+  });
+
+  it("imports telemetry opt-out variables from the login shell without overriding explicit ones", async () => {
+    const env: NodeJS.ProcessEnv = {
+      PATH: "/usr/bin:/bin",
+      BB_TELEMETRY: "true",
+    };
+    const shellPath = "/opt/homebrew/bin:/usr/bin:/bin";
+    const fakeSpawn = createFakeSpawn({
+      result: createSpawnResult({
+        stdout: [shellPath, "1", "false", "false"].join("\0"),
+      }),
+    });
+
+    await ensurePackagedUserShellPath({
+      env,
+      isPackaged: true,
+      logger: createWarningLogger().logger,
+      platform: "darwin",
+      spawnLoginShellPath: fakeSpawn.spawn,
+    });
+
+    expect(env.PATH).toBe(shellPath);
+    expect(env.DO_NOT_TRACK).toBe("1");
+    expect(env.CLOUDROOM_TELEMETRY).toBe("false");
+    expect(env.BB_TELEMETRY).toBe("true");
   });
 
   it("leaves PATH alone in desktop dev mode", async () => {
@@ -183,7 +212,10 @@ describe("desktop shell PATH loading", () => {
     expect(env.PATH).toBe(shellPath);
     expect(fakeSpawn.calls).toEqual([
       {
-        args: ["-ilc", 'printf "%s" "$PATH"'],
+        args: [
+          "-ilc",
+          'printf "%s\\0%s\\0%s\\0%s" "$PATH" "$DO_NOT_TRACK" "$CLOUDROOM_TELEMETRY" "$BB_TELEMETRY"',
+        ],
         command: "/usr/bin/fish",
         timeoutMs: 4_000,
       },

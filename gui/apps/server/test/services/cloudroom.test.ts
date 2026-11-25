@@ -671,7 +671,6 @@ it.each([["drops", 1], ["times out", 11_000]] as const)("clones a new Cloud thre
   await mkdir(root, { recursive: true });
   const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: root });
   setProjectGitRemoteUrlIfMissing(harness.db, harness.deps.hub, project.id, "https://github.com/example/project");
-  await sync.setCopyMacGithub(harness.deps, false);
   // Never install a real sync helper LaunchAgent on the developer's Mac.
   const setup = vi.spyOn(sync, "setupSync").mockResolvedValue();
   let started = false;
@@ -1754,15 +1753,16 @@ it("a background login save never brings back a login Disconnect removed, whethe
   }
 });
 
-// Local `gh` only copies to Cloud when "Auth my agents" (`copyLogins`) is on and GitHub hasn't been disconnected/replaced.
+// Local `gh` is never auto-copied to Cloud, even when "Auth my agents" (`copyLogins`) is on, a legacy cloudroom-github.json
+// exists on disk, or the user switches Cloudroom accounts (ADR 20261124-215124).
 it.each([
-  { case: "toggle off", copyLogins: false, githubCard: true, github: null },
-  { case: "toggle never chosen", copyLogins: null, githubCard: true, github: null },
-  { case: "toggle on", copyLogins: true, githubCard: true, github: "gho_fake" },
-  { case: "Disconnect, or another account picked here", copyLogins: true, githubCard: false, github: null },
-  { case: "Cloud already holds another computer's login with toggle off", copyLogins: false, githubCard: true, cloud: "other", github: "other" },
-  { case: "another Cloudroom account signed in within a minute", copyLogins: true, githubCard: true, steps: "reset", github: "gho_fake" },
-])("GitHub login sync to Cloud: $case", async ({ copyLogins, githubCard, cloud, steps, github }) => {
+  { case: "toggle off", copyLogins: false, legacyMacFile: false, github: null },
+  { case: "toggle never chosen", copyLogins: null, legacyMacFile: false, github: null },
+  { case: "toggle on", copyLogins: true, legacyMacFile: false, github: null },
+  { case: "toggle on with legacy cloudroom-github.json", copyLogins: true, legacyMacFile: true, github: null },
+  { case: "Cloud already holds a login with toggle off", copyLogins: false, legacyMacFile: false, cloud: "other", github: "other" },
+  { case: "another Cloudroom account signed in within a minute", copyLogins: true, legacyMacFile: true, steps: "reset", github: null },
+])("GitHub login sync to Cloud: $case", async ({ copyLogins, legacyMacFile, cloud, steps, github }) => {
   const home = await mkdtemp(join(tmpdir(), "cloudroom-gh-"));
   const env = { PATH: process.env.PATH, HOME: process.env.HOME };
   await writeFile(join(home, "gh"), "#!/bin/sh\n[ \"$1 $2\" = 'auth token' ] && echo gho_fake\n", { mode: 0o755 });
@@ -1775,16 +1775,46 @@ it.each([
   const syncLogins = () => (service as unknown as { auth: { syncLogins: () => Promise<void> } }).auth.syncLogins();
   try {
     if (copyLogins !== null) await sync.setCopyLogins(harness.deps, copyLogins);
-    await sync.setCopyMacGithub(harness.deps, githubCard);
+    if (legacyMacFile) await writeFile(join(harness.config.dataDir, "cloudroom-github.json"), JSON.stringify({ mac: true }));
     if (cloud) website.logins.set("github", JSON.stringify({ token: cloud }));
-    if (steps === "concurrent") { void syncLogins(); await syncLogins(); }
-    else await syncLogins();
+    await syncLogins();
     if (steps === "reset") { website.logins.clear(); service.sandboxes.reset(); await syncLogins(); }
     expect(website.logins.has("github") ? JSON.parse(website.logins.get("github")!).token : null).toBe(github);
   } finally {
     service.stop(); await website.close(); await harness.cleanup();
     process.env.PATH = env.PATH; process.env.HOME = env.HOME;
     await rm(home, { recursive: true, force: true });
+  }
+});
+
+it("POST /github/mac guards against cross-origin/bad bodies, and explicit chosen saves bypass the upload cache", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  const website = await fakeLoginsWebsite();
+  (service.sandboxes as { account: () => Promise<unknown> }).account = async () => website.account;
+  try {
+    const crossOrigin = await harness.app.request("/api/v1/cloudroom/account/github/mac", {
+      method: "POST",
+      headers: { Origin: "https://evil.example", "Content-Type": "application/json" },
+      body: "{}",
+    });
+    expect(crossOrigin.status).toBe(403);
+    const badBody = await harness.app.request("/api/v1/cloudroom/account/github/mac", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedLogin: "bad login!" }),
+    });
+    expect(badBody.status).toBe(400);
+
+    const entry = JSON.stringify({ token: "gho_same" });
+    await service.sandboxes.saveLogin("github", entry, undefined, false, true);
+    expect(JSON.parse(website.logins.get("github")!).token).toBe("gho_same");
+    // Simulate Disconnect on another computer (website clears login; this app keeps its in-memory digest cache).
+    website.logins.delete("github");
+    await service.sandboxes.saveLogin("github", entry, undefined, false, true);
+    expect(JSON.parse(website.logins.get("github")!).token).toBe("gho_same");
+  } finally {
+    service.stop(); await website.close(); await harness.cleanup();
   }
 });
 
@@ -1814,6 +1844,12 @@ it.each([
     await writeFile(join(home, "credentials", "kimi-code.json"), '{"access_token":"fake"}');
     expect((await harness.app.request("/api/v1/cloudroom/mac/logins", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status).toBe(200);
     expect(website.logins.has("kimi")).toBe(kimi);
+    if (!copyLogins && !removed) {
+      // Enabling copyLogins resets the 60s throttle so an immediate /mac/logins upload succeeds right away.
+      expect((await harness.app.request("/api/v1/cloudroom/account/copy-logins", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ enabled: true }) })).status).toBe(200);
+      expect((await harness.app.request("/api/v1/cloudroom/mac/logins", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })).status).toBe(200);
+      expect(website.logins.has("kimi")).toBe(true);
+    }
   } finally {
     service.stop(); await website.close(); await harness.cleanup();
     if (saved === undefined) delete process.env.KIMI_CODE_HOME; else process.env.KIMI_CODE_HOME = saved;

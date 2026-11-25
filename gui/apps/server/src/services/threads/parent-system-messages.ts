@@ -76,16 +76,24 @@ export interface ParentSystemMessageTaxonomy {
    * write, and the notice is never queued, so its retry stays in memory (#1542).
    */
   stillCurrent?: () => boolean;
+  /**
+   * Checked right before each write like `stillCurrent`, but the notice may
+   * still queue: a queued child report is checked again at delivery (#2255).
+   */
+  stillAccurate?: () => boolean;
 }
 
-/** Nothing was sent or queued: the retried notice went stale or would queue. */
+/** Nothing was sent or queued: the notice went stale, or a retry would queue. */
 export class UnsentParentSystemMessageError extends Error {}
 
 function throwIfStale(
-  args: Pick<ParentSystemMessageTaxonomy, "stillCurrent">,
+  args: Pick<ParentSystemMessageTaxonomy, "stillAccurate" | "stillCurrent">,
   queues = false,
 ) {
-  if (args.stillCurrent && (queues || !args.stillCurrent()))
+  if (
+    (args.stillCurrent && (queues || !args.stillCurrent())) ||
+    (!queues && args.stillAccurate && !args.stillAccurate())
+  )
     throw new UnsentParentSystemMessageError();
 }
 
@@ -563,6 +571,7 @@ export async function queueParentSystemMessage(
         input: args.input,
         interactionId: args.interactionId,
         parentThread,
+        stillAccurate: args.stillAccurate,
         stillCurrent: args.stillCurrent,
         systemMessageKind: args.systemMessageKind,
         systemMessageSubject: args.systemMessageSubject,
@@ -722,6 +731,7 @@ async function deliverParentSystemMessageWithContextGuard(
     execution,
     environment: readyEnvironment,
     sendNow: args.sendNow,
+    stillAccurate: args.stillAccurate,
     stillCurrent: args.stillCurrent,
     systemMessageKind: args.systemMessageKind,
     systemMessageSubject: args.systemMessageSubject,

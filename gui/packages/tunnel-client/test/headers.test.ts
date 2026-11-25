@@ -27,4 +27,30 @@ describe("headersForLoopbackRequest", () => {
       headersForLoopbackRequest([["Accept", "text/html"]], rewrite),
     ).toEqual({ Accept: "text/html" });
   });
+
+  it("forces x-bb-gate-auth on Connect server requests even if omitted or spoofed by the relay", () => {
+    expect(
+      headersForLoopbackRequest([["Accept", "application/json"]], {
+        ...rewrite,
+        enforceGateAuth: true,
+      }),
+    ).toEqual({ Accept: "application/json", "x-bb-gate-auth": "session" });
+
+    expect(
+      headersForLoopbackRequest(
+        [["X-BB-Gate-Auth", "local"]],
+        { ...rewrite, enforceGateAuth: true },
+      ),
+    ).toEqual({ "x-bb-gate-auth": "session" });
+
+    expect(
+      headersForLoopbackRequest(
+        [
+          ["X-BB-Gate-Auth", "machine"],
+          ["x-bb-gate-auth", "session"],
+        ],
+        { ...rewrite, enforceGateAuth: true },
+      ),
+    ).toEqual({ "x-bb-gate-auth": "machine" });
+  });
 });

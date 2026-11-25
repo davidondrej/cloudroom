@@ -184,6 +184,24 @@ fn saved_level(config: &Value) -> Option<&'static str> {
     }
 }
 
+/// Whether Jev Mac-command security review is enabled in Settings -> Privacy.
+/// Defaults to true only when the file does not exist; fails closed on read or parse errors.
+fn review_enabled(config: &Value) -> bool {
+    let Some(file) = text(config, "connectionFile") else {
+        return false;
+    };
+    let path = Path::new(file).with_file_name("cloudroom-mac-review.json");
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    match serde_json::from_str::<Value>(&raw) {
+        Ok(Value::Object(saved)) => saved.get("enabled") == Some(&Value::Bool(true)),
+        _ => false,
+    }
+}
+
 /// Python's truthiness, for job fields.
 fn truthy(value: &Value) -> bool {
     match value {
@@ -1508,6 +1526,9 @@ impl Jobs {
     }
 
     fn review(self: &Arc<Self>, core: &Core, job: &Value, level: &'static str, script: bool) {
+        if !review_enabled(&core.config) {
+            return;
+        }
         let (Some(account), Some(token)) = (
             core.connection["account"]["id"]
                 .as_str()

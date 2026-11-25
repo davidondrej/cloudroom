@@ -33,20 +33,13 @@ export async function setCopyLogins(deps: Deps, enabled: boolean): Promise<void>
   if (vm && await readFile(join(folder(deps), "config.json")).then(() => true, () => false)) await setupSync(deps);
 }
 
-/** False once the user picked another account for Cloud, so this Mac's own login stops replacing it: GitHub after Disconnect
- *  or another account in Settings, Cursor while an added account (Accounts plugin) is in use. */
-const macLoginFile = (deps: Deps, name: "github" | "cursor") => join(deps.config.dataDir, `cloudroom-${name}.json`);
-export async function copyMacLogin(deps: Deps, name: "github" | "cursor"): Promise<boolean> {
+/** Cursor copies this computer's login until an added account (Accounts plugin) replaces it. */
+const macLoginFile = (deps: Deps, name: "cursor") => join(deps.config.dataDir, `cloudroom-${name}.json`);
+export async function copyMacLogin(deps: Deps, name: "cursor"): Promise<boolean> {
   return readFile(macLoginFile(deps, name), "utf8").then((text) => JSON.parse(text).mac !== false, () => true);
 }
-export async function setCopyMacLogin(deps: Deps, name: "github" | "cursor", mac: boolean): Promise<void> {
+export async function setCopyMacLogin(deps: Deps, name: "cursor", mac: boolean): Promise<void> {
   await writeFile(macLoginFile(deps, name), JSON.stringify({ mac }), { mode: 0o600 });
-}
-export const copyMacGithub = (deps: Deps) => copyMacLogin(deps, "github");
-export const setCopyMacGithub = (deps: Deps, mac: boolean) => setCopyMacLogin(deps, "github", mac);
-/** True only when copying local logins is enabled AND GitHub hasn't been disconnected or replaced. */
-export async function canCopyMacGithub(deps: Deps): Promise<boolean> {
-  return (await copyLogins(deps)) === true && (await copyMacGithub(deps));
 }
 
 /** Agent logins the user disconnected or removed (ADR 0327). They never copy between this Mac and the cloud until the user

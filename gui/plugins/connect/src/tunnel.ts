@@ -60,14 +60,20 @@ export class ConnectTunnel {
     return this.credential;
   }
 
-  async start(): Promise<void> {
+  async start(autoConnect = true): Promise<void> {
     const stored = await this.options.store.read();
     if (stored) {
       this.credential = stored;
-      this.stopped = false;
-      this.openTunnel();
     }
-    this.startShareActivation();
+    if (autoConnect) {
+      if (stored) {
+        this.stopped = false;
+        this.openTunnel();
+      }
+      this.startShareActivation();
+    } else {
+      this.stopped = true;
+    }
     this.publish();
   }
 
@@ -138,7 +144,7 @@ export class ConnectTunnel {
   }
 
   private computeState(): ConnectStateName {
-    if (this.credential === null) return "disconnected";
+    if (this.credential === null || this.stopped) return "disconnected";
     return this.connected ? "connected" : "reconnecting";
   }
 
@@ -245,6 +251,7 @@ export class ConnectTunnel {
             ? new URL(this.credential.serverUrl).origin
             : this.options.getLoopbackBaseUrl(),
           headers: this.options.getLoopbackHeaders(),
+          enforceGateAuth: true,
         },
       };
     }

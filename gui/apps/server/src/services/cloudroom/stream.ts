@@ -16,7 +16,7 @@ import {
   type EarlierSession,
 } from "./events.js";
 import { codexOutage } from "./openai-status.js";
-import { connectionFailure, connectionOrReplayFailed, continuedFrom, young } from "./protocol.js";
+import { connectionFailure, connectionOrReplayFailed, continuedFrom, sessionNotFound, young } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
 import { sandboxThread } from "./sandboxes.js";
 import { binding, bindings, commands, saveBinding, saveStatus, type Binding } from "./store.js";
@@ -261,8 +261,9 @@ export class CloudStream {
       } catch (error) {
         const sandbox = sandboxThread(saved.coreUrl);
         // Only a stream that could not connect may mean the sandbox slept. A drop after connecting keeps its address,
-        // so a sandbox's many agents keep using it instead of checking it again.
-        if (sandbox && !connected) this.rt.sandboxes.forget(sandbox);
+        // so a sandbox's many agents keep using it instead of checking it again. Core's own "session not found" means
+        // the sandbox is awake and its old session was pruned; delivery recovers it on the next send.
+        if (sandbox && !connected && !sessionNotFound(error)) this.rt.sandboxes.forget(sandbox);
         if (!controller.signal.aborted) {
           this.streamBroke(saved.threadId, error);
           const phase = !projecting && (connectionFailure(error) || (error instanceof CloudroomError && error.status !== null)) ? "stream" : "replay";

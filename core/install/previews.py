@@ -102,11 +102,11 @@ Match all
             atomic(lookup, previous_lookup, mode=0o755)
         raise ValueError('SSH validation/reload failed; previous configuration restored') from None
     # Mac access (ADR 0113) and secret requests share the preview pairing's agent socket, so their skills install here too.
-    for name, flag in [('cloud-preview', '--preview-skill'), ('cloud-mac', '--mac-skill'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
+    for name, flag in [('cloud-preview', '--preview-skill'), ('user-computer', '--mac-skill'), ('cloud-mac', '--mac-skill-stub'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
         skill = subprocess.check_output([str(binary), flag], text=True)
         for base in ['.agents', '.codex', '.pi/agent', '.claude']:
             command = ['sudo', '-u', agent.pw_name, 'python3', '-c',
-                       'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); f=p/"SKILL.md"; data=sys.stdin.read(); f.write_text(data) if not f.exists() else None',
+                       'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); f=p/"SKILL.md"; data=sys.stdin.read(); f.write_text(data) if not f.exists() or p.name == "cloud-mac" else None',
                        str(Path(agent.pw_dir) / base / 'skills' / name)]
             subprocess.run(command, input=skill, text=True, check=True)
     # `room-cli` is the agent CLI's name (ADR 0240); `cloudroom` is the old one.
@@ -143,11 +143,11 @@ def self_hosted(state, binary, tunnel):
         runtime.mkdir(mode=0o711, exist_ok=True)
         os.chown(runtime, service.pw_uid, service.pw_gid); runtime.chmod(0o711)
     # The agent tools from configure(), through runuser: an older server may have no sudo.
-    for name, flag in [('cloud-preview', '--preview-skill'), ('cloud-mac', '--mac-skill'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
+    for name, flag in [('cloud-preview', '--preview-skill'), ('user-computer', '--mac-skill'), ('cloud-mac', '--mac-skill-stub'), ('cloud-secrets', '--secrets-skill'), ('room-cli', '--room-cli-skill')]:
         skill = subprocess.check_output([str(binary), flag], text=True)
         for base in ['.agents', '.codex', '.pi/agent', '.claude']:
             command = ['runuser', '-u', agent.pw_name, '--', 'python3', '-c',
-                       'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); f=p/"SKILL.md"; data=sys.stdin.read(); f.write_text(data) if not f.exists() else None',
+                       'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.mkdir(parents=True,exist_ok=True); f=p/"SKILL.md"; data=sys.stdin.read(); f.write_text(data) if not f.exists() or p.name == "cloud-mac" else None',
                        str(Path(agent.pw_dir) / base / 'skills' / name)]
             subprocess.run(command, input=skill, text=True, check=True)
     for link in [Path('/usr/local/bin/cloudroom'), Path('/usr/local/bin/room-cli')]:

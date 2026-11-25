@@ -58,10 +58,9 @@ import {
   isManualCompactionActive,
 } from "./thread-events.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
-import { deliverParentSystemMessage } from "./parent-system-messages.js";
 import {
+  deliverQueuedParentNotice,
   isChildInteractionSettled,
-  withChildReportAge,
 } from "./child-thread-notifications.js";
 import {
   createQueuedMessageClaimLostError,
@@ -490,13 +489,9 @@ async function sendClaimedSystemNotice(
     );
   }
   const queuedMessage = toThreadQueuedMessage(claimed);
-  const delivered = await deliverParentSystemMessage(deps, {
+  const delivered = await deliverQueuedParentNotice(deps, {
     childReport: notice.childReport,
-    input: withChildReportAge(
-      deps.db,
-      queuedMessage.content,
-      notice.childReport,
-    ),
+    input: queuedMessage.content,
     // An explicit send that requeues keeps the user's override (#2452).
     interactionId: args.sendNow ? undefined : notice.interactionId,
     parentThread: args.thread,

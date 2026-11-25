@@ -1,7 +1,13 @@
 import { spawn } from "node:child_process";
 
 const MACOS_LOGIN_SHELL = "/bin/zsh";
-const SHELL_PATH_COMMAND = 'printf "%s" "$PATH"';
+const TELEMETRY_OPT_OUT_VARS = [
+  "DO_NOT_TRACK",
+  "CLOUDROOM_TELEMETRY",
+  "BB_TELEMETRY",
+] as const;
+const SHELL_PATH_COMMAND =
+  'printf "%s\\0%s\\0%s\\0%s" "$PATH" "$DO_NOT_TRACK" "$CLOUDROOM_TELEMETRY" "$BB_TELEMETRY"';
 const SHELL_PATH_TIMEOUT_MS = 4_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const EXIT_DRAIN_MS = 250;
@@ -168,7 +174,8 @@ export async function ensurePackagedUserShellPath(
     return { kind: "unchanged", reason: "non-zero-status" };
   }
 
-  const shellPath = result.stdout.trim();
+  const [rawPath = "", ...optOutValues] = result.stdout.split("\0");
+  const shellPath = rawPath.trim();
   if (shellPath.length === 0) {
     warnShellPathFallback(args, "shell returned an empty PATH");
     return { kind: "unchanged", reason: "empty-output" };
@@ -176,5 +183,11 @@ export async function ensurePackagedUserShellPath(
 
   args.env.PATH = shellPath;
   args.env.CLOUDROOM_SHELL_PATH = shellPath;
+  for (const [index, name] of TELEMETRY_OPT_OUT_VARS.entries()) {
+    const value = optOutValues[index]?.trim();
+    if (args.env[name] === undefined && value) {
+      args.env[name] = value;
+    }
+  }
   return { kind: "updated", path: shellPath };
 }

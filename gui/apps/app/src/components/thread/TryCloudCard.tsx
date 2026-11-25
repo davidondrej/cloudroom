@@ -96,7 +96,7 @@ export function TryCloudCard({ threadId, active, attached, onMove }: { threadId:
   }, [active, threadId]);
   const started = activeSince.get(threadId);
   const show = !closed && !laptopSeen && active && !dismissed && affordable && started !== undefined && now - started >= SHOW_AFTER_MS
-    && connection?.ready === true && connection.teleport && !connection.usedCloud && !connection.cloudQueue;
+    && connection?.ready === true && connection.teleport && !connection.usedCloud && !connection.cloudQueue && !connection.cloudCapacity;
   const wants = laptop.hint ? LAPTOP_HINT_PROMPT[laptop.hint] : show ? "try_cloud" : null;
   const isFirst = useCard("cloud", wants !== null ? true : budget.left === null || laptop.loading ? null : false);
   if (isFirst !== first) setFirst(isFirst);

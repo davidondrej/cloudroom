@@ -140,6 +140,16 @@ export async function readVoidResponse<TResponse extends SdkResponseLike>(
   await resolveResponse(response);
 }
 
+// Claude Code's Linux sandbox runs each command in its own network (bubblewrap
+// --unshare-net), so Cloudroom's 127.0.0.1 is not there (#2508).
+export function linuxSandboxRefusedMessage(): string | undefined {
+  return typeof process !== "undefined" &&
+    process.platform === "linux" &&
+    process.env.SANDBOX_RUNTIME === "1"
+    ? "Cloudroom can't be reached from inside Claude Code's Linux sandbox. Run this command outside the sandbox (the user must approve it), or with the sandbox disabled for this command."
+    : undefined;
+}
+
 export async function resolveResponse<TResponse extends SdkResponseLike>(
   responsePromise: Promise<TResponse>,
 ): Promise<TResponse> {
@@ -149,7 +159,8 @@ export async function resolveResponse<TResponse extends SdkResponseLike>(
   } catch (error) {
     if (isTypeErrorWithCauseCode(error, "ECONNREFUSED")) {
       throw new Error(
-        "Cannot connect to Cloudroom server. Ensure it is running and ROOM_SERVER_URL is correct.",
+        linuxSandboxRefusedMessage() ??
+          "Cannot connect to Cloudroom server. Ensure it is running and ROOM_SERVER_URL is correct.",
         { cause: error },
       );
     }

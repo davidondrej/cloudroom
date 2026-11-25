@@ -103,6 +103,19 @@ export async function replaceWebhookUrl(
   }
 }
 
+const BILLING_URL = /(?: at)?\s*(?:https?:\/\/)?(?:www\.)?cloudroom\.dev\/billing\b/gi;
+
+/** Shows a toast error, turning any website billing URL into a one-click Upgrade action button. */
+export function showLoopError(message: string, onUpgrade: () => void): void {
+  if (!BILLING_URL.test(message)) {
+    toast.error(message);
+    return;
+  }
+  BILLING_URL.lastIndex = 0;
+  const clean = message.replace(BILLING_URL, "").replace(/\s+([.,;:])/g, "$1").trim();
+  toast.error(clean, { action: { label: "Upgrade", onClick: onUpgrade } });
+}
+
 const lastLoaded: {
   rows: CloudAutomation[] | null;
   stopAtLimit: boolean | null;
@@ -145,6 +158,10 @@ export function useCloudAutomations(): {
   }, [load]);
   useCloudLoginFixed(() => void load());
   usePlanLoopsChanged(() => void load());
+  const onUpgrade = useCallback(
+    () => navigate.openUrl("https://www.cloudroom.dev/billing"),
+    [navigate],
+  );
   const act = useCallback(
     async (request: Request, done: string) => {
       try {
@@ -152,11 +169,11 @@ export function useCloudAutomations(): {
         if (request.action !== "run") loopsChanged();
         toast.success(done);
       } catch (error: unknown) {
-        toast.error(error instanceof Error ? error.message : String(error));
+        showLoopError(error instanceof Error ? error.message : String(error), onUpgrade);
       }
       await load();
     },
-    [call, load],
+    [call, load, onUpgrade],
   );
   const actions = useMemo<CloudAutomationActions>(
     () => ({
@@ -183,7 +200,7 @@ export function useCloudAutomations(): {
         try {
           await call({ action: "update", id: a.id, priority });
         } catch (error: unknown) {
-          toast.error(error instanceof Error ? error.message : String(error));
+          showLoopError(error instanceof Error ? error.message : String(error), onUpgrade);
           throw error;
         }
         await load();
@@ -195,12 +212,12 @@ export function useCloudAutomations(): {
           await load();
           return true;
         } catch (error: unknown) {
-          toast.error(error instanceof Error ? error.message : String(error));
+          showLoopError(error instanceof Error ? error.message : String(error), onUpgrade);
           return false;
         }
       },
     }),
-    [act, call, load, navigate],
+    [act, call, load, navigate, onUpgrade],
   );
   return { rows, loaded, actions, reload: load };
 }

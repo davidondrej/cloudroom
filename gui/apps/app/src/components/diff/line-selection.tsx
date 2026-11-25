@@ -11,6 +11,7 @@ import {
 import type { SelectedLineRange } from "@pierre/diffs";
 import {
   anchorPointFromMouseEvent,
+  createLiveSelectionRectReader,
   selectionAnchorFromPointerRelease,
   type MessageProseSelection,
   type SelectionAnchor,
@@ -294,6 +295,22 @@ export function usePierreLineSelectionActions(args: {
         fallbackPt;
       const copyText = buildCopyText?.(range) ?? null;
 
+      const anchorElement = el?.firstElementChild ?? el ?? null;
+      const baseRect = new DOMRect(point.x, point.y, 0, 0);
+      const fallbackReader = createLiveSelectionRectReader({
+        anchor: { point, side },
+        anchorElement,
+        rect: baseRect,
+      });
+      const getAnchorRect = () => {
+        if (el !== null && !el.isConnected) return null;
+        const livePoint = resolveAnchorPoint(el, side);
+        if (livePoint !== null) {
+          return new DOMRect(livePoint.x, livePoint.y, 0, 0);
+        }
+        return fallbackReader();
+      };
+
       suppressedEndRef.current = null;
       currentRangeRef.current = range;
       setActiveRange(range);
@@ -301,9 +318,11 @@ export function usePierreLineSelectionActions(args: {
       setSelection({
         text,
         ...(copyText !== null ? { copyText } : {}),
-        rect: new DOMRect(point.x, point.y, 0, 0),
+        rect: baseRect,
         anchorPoint: point,
         anchorSide: side,
+        anchorElement,
+        getAnchorRect,
       });
     },
     [

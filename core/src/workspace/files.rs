@@ -271,12 +271,8 @@ fn checkouts(folder: &Path, repos: &Path) -> String {
             .filter(|out| out.status.success())?;
         Some(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     };
-    let mut found: Vec<String> = std::fs::read_dir(repos)
+    let mut found: Vec<String> = repo_checkouts(repos)
         .into_iter()
-        .flatten()
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.join(".git").is_dir())
         .filter_map(|path| {
             let origin = shown_origin(&git(&path, &["remote", "get-url", "origin"])?);
             let branch = git(&path, &["branch", "--show-current"])
@@ -300,6 +296,42 @@ fn checkouts(folder: &Path, repos: &Path) -> String {
         found.join("; "),
         repos.display()
     )
+}
+
+/// The checkouts in `repos` (`/repos`) by real path: `<owner>/<name>`, and `<name>` from the older layout or as a link
+/// to one (#2627). Skips clones still in progress (`.<name>.clone`), moves (`.<name>.move`), and dot folders that hold
+/// no checkout, such as parked `.old` copies: no GitHub owner starts with a dot.
+pub fn repo_checkouts(repos: &Path) -> Vec<PathBuf> {
+    let list = |dir: &Path| {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                !(name.starts_with('.') && (name.ends_with(".clone") || name.ends_with(".move")))
+            })
+    };
+    let mut found: Vec<PathBuf> = list(repos)
+        .flat_map(|path| {
+            if path.join(".git").exists() {
+                vec![path]
+            } else if path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+            {
+                vec![]
+            } else {
+                list(&path).collect()
+            }
+        })
+        .filter(|path| path.join(".git").exists())
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// An origin without its login: network URLs lose the userinfo after any number of slashes (an SSH user stays, its
@@ -478,7 +510,7 @@ mod tests {
         };
         std::fs::create_dir_all(folder.join(".cloudroom")).unwrap();
         assert_eq!(checkouts(&folder, &repos), "");
-        let repo = repos.join("demo");
+        let repo = repos.join("acme/demo");
         std::fs::create_dir_all(&repo).unwrap();
         run(
             &repo,
@@ -487,7 +519,13 @@ mod tests {
         std::fs::write(folder.join(FAILURE_NOTE), "failed").unwrap();
         std::fs::write(folder.join("a1.txt"), "mine").unwrap();
         let hint = checkouts(&folder, &repos);
-        assert!(hint.contains("branch main"), "{hint}");
+        assert_eq!(hint.matches("branch main").count(), 1, "{hint}");
+        std::os::unix::fs::symlink("acme/demo", repos.join("demo")).unwrap();
+        assert_eq!(checkouts(&folder, &repos), hint);
+        for staged in [".old/demo/.git", ".demo.move/.git", "acme/.demo.clone/.git"] {
+            std::fs::create_dir_all(repos.join(staged)).unwrap();
+        }
+        assert_eq!(repo_checkouts(&repos), [repo.canonicalize().unwrap()]);
         let line = hint
             .lines()
             .find(|line| line.starts_with("    git clone"))

@@ -31,7 +31,7 @@ import { getRootComposeRoutePath, getThreadRoutePath } from "@/lib/route-paths";
 import { usePaneContentSplitDrag } from "./usePaneContentSplitDrag";
 import { MacAccessChip } from "./MacAccessChip";
 import { ViewingMacBar } from "@/components/settings/YourComputers";
-import { CloudQueueChip, PlanCard } from "@/components/CloudQueue";
+import { CloudCapacityChip, CloudQueueChip, PlanCard } from "@/components/CloudQueue";
 import {
   EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS,
   getSidebarThreadNavigationTargets,
@@ -342,6 +342,7 @@ export function AppSidebar({
           />
           <SidebarUpdatesBadge onNavigate={closeOnMobile} />
           <CloudQueueChip />
+          <CloudCapacityChip />
           <MacAccessChip hidden={isHiddenHostedBody} />
         </SidebarMenu>
       </SidebarFooter>

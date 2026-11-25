@@ -513,7 +513,7 @@ class MacJobTests(unittest.TestCase):
                         time.sleep(.01)
                     self.assertEqual((jobs.taken, jobs.cancelled), ({}, set()))
             # The review list keeps a fixed-size key, never the command. Its report goes to a closed local port.
-            reviewed = SimpleNamespace(url='http://core', config={}, thread=None,
+            reviewed = SimpleNamespace(url='http://core', config={'connectionFile': str(Path(folder) / 'gone' / 'cloudroom.json')}, thread=None,
                                        connection={'account': {'id': 'a'}, 'sandboxToken': 't', 'websiteUrl': 'http://127.0.0.1:9'})
             with mock.patch.dict(preview.REVIEWS, sent={}), mock.patch.object(preview, 'control', lambda *_: None):
                 preview.review(reviewed, {'command': 'x' * 65536}, 'full', False)

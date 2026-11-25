@@ -214,21 +214,40 @@ const RENEW_BEFORE_MS = 7 * 24 * 60 * 60_000;
 // Other requests in that window are the old page's stragglers.
 const RECOVERY_WINDOW_MS = 60_000;
 
+export const SESSION_REVOKED_HEADER = "x-cloudroom-session-revoked";
+
+export function hasSessionRevokedHeader(
+  headers: Record<string, string[]> | undefined,
+): boolean {
+  if (!headers) return false;
+  for (const [name, values] of Object.entries(headers)) {
+    if (
+      name.toLowerCase() === SESSION_REVOKED_HEADER &&
+      values.some((value) => value.trim() === "1")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface RelaySessionKeeper {
   track(handle: string, opened: OpenedComputer): void;
   clear(): void;
   renewIfExpiring(): Promise<void>;
-  onSignInRequired(url: string, page: boolean): Promise<void>;
+  onSignInRequired(url: string, page: boolean, revoked?: boolean): Promise<void>;
 }
 
 /**
  * Keeps this app signed in to the Mac on screen. It renews the sign-in before it expires, and gets a new one
- * when the Mac answers "Sign in required" (after "Sign out all phones"). If that fails, `onLost` reopens it.
+ * when the Mac answers "Sign in required" after expiry. An explicit remote sign-out (`revoked: true`) does
+ * not auto-renew and returns the window to this Mac via `onRevoked`.
  */
 export function createRelaySessionKeeper(args: {
   renew: (handle: string) => Promise<ComputersResult<OpenedComputer>>;
   onRecovered: () => void;
   onLost: () => void;
+  onRevoked?: () => void;
   now?: () => number;
 }): RelaySessionKeeper {
   const now = args.now ?? Date.now;
@@ -270,14 +289,15 @@ export function createRelaySessionKeeper(args: {
       if (current !== null && current.expiresAt - now() < RENEW_BEFORE_MS)
         await renew();
     },
-    async onSignInRequired(url, page) {
+    async onSignInRequired(url, page, revoked = false) {
       const target = current;
-      if (
-        target === null ||
-        renewing !== null ||
-        new URL(url).origin !== target.origin
-      )
+      if (target === null || new URL(url).origin !== target.origin) return;
+      if (revoked) {
+        keeper.clear();
+        (args.onRevoked ?? args.onLost)();
         return;
+      }
+      if (renewing !== null) return;
       if (now() - recoveredAt < RECOVERY_WINDOW_MS) {
         if (!page) return;
         keeper.clear();

@@ -1,4 +1,9 @@
-import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
+import {
+  AntigravityCloudDialog,
+  useDisconnectAntigravityCloud,
+  type AntigravityCloudDialogMode,
+} from "@/components/AntigravityCloudLogin";
+import { useAntigravityCloud } from "@/lib/antigravity-cloud";
 import {
   ClaudeConnectionButton,
   useClaudeConnection,
@@ -330,8 +335,38 @@ function CodexCloudLogin() {
   );
 }
 
-function CloudLogin({ provider }: { provider: ProviderInfo }) {
-  if (provider.id === "acp-antigravity") return <AntigravityCloudLogin />;
+function AntigravityCloudCell({
+  onConnect,
+}: {
+  onConnect: () => void;
+}) {
+  const auth = useAntigravityCloud(true);
+  if (auth.isPending) return null;
+  if (auth.data?.connected)
+    return <Check label="Antigravity is connected in the Cloud" />;
+  return (
+    <TableButton
+      label="Connect Antigravity in the Cloud"
+      onClick={onConnect}
+    >
+      Connect
+    </TableButton>
+  );
+}
+
+function CloudLogin({
+  provider,
+  onOpenAntigravityCloud,
+}: {
+  provider: ProviderInfo;
+  onOpenAntigravityCloud: (mode: AntigravityCloudDialogMode) => void;
+}) {
+  if (provider.id === "acp-antigravity")
+    return (
+      <AntigravityCloudCell
+        onConnect={() => onOpenAntigravityCloud("google")}
+      />
+    );
   if (provider.id === "claude-code") return <ClaudeCloudLogin />;
   if (provider.id === "codex") return <CodexCloudLogin />;
   // Pi, opencode, Hermes, fx, and Devin have no Cloud sign-in: the Cloud reuses this Mac's login (ADR 0130).
@@ -453,7 +488,12 @@ function FailedNote({
 
 const SIGNS_OUT = new Set(["claude-code", "codex"]);
 /** Agents with several accounts, on Settings → Agents → Accounts (the Accounts plugin). */
-const HAS_ACCOUNTS = new Set(["claude-code", "codex", "acp-cursor"]);
+const HAS_ACCOUNTS = new Set([
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+]);
 
 function useAgentAction(onDone: () => void) {
   const queryClient = useQueryClient();
@@ -476,6 +516,9 @@ function useAgentAction(onDone: () => void) {
         queryClient.invalidateQueries({ queryKey: systemConfigQueryKey() }),
         queryClient.invalidateQueries({ queryKey: ["claude-connection"] }),
         queryClient.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] }),
+        queryClient.invalidateQueries({
+          queryKey: ["cloudroom-antigravity-login"],
+        }),
       ]);
     },
   });
@@ -486,17 +529,25 @@ function ProviderMenu({
   isDefault,
   onDone,
   onMakeDefault,
+  onOpenAntigravityCloud,
   provider,
+  showCloud,
 }: {
   canRemove: boolean;
   isDefault: boolean;
   onDone: () => void;
   onMakeDefault: (() => void) | null;
+  onOpenAntigravityCloud: (mode: AntigravityCloudDialogMode) => void;
   provider: ProviderInfo;
+  showCloud: boolean;
 }) {
   const navigate = useNavigate();
   const action = useAgentAction(onDone);
   const [confirm, setConfirm] = useState<"disconnect" | "remove" | null>(null);
+  const isAntigravityCloud = provider.id === "acp-antigravity" && showCloud;
+  const agyCloud = useAntigravityCloud(isAntigravityCloud);
+  const disconnectAgyCloud = useDisconnectAntigravityCloud();
+  const agyConnected = agyCloud.data?.connected === true;
   const signsOut = SIGNS_OUT.has(provider.id);
   const hasAccounts = HAS_ACCOUNTS.has(provider.id);
   const name = provider.displayName;
@@ -514,7 +565,7 @@ function ProviderMenu({
             size="icon"
             className="size-7 text-muted-foreground"
             aria-label={`${name} actions`}
-            disabled={action.isPending}
+            disabled={action.isPending || disconnectAgyCloud.isPending}
           >
             <Icon name="MoreHorizontal" />
           </Button>
@@ -540,6 +591,51 @@ function ProviderMenu({
             </DropdownMenuItem>
           ) : null}
           {onMakeDefault || hasAccounts ? <DropdownMenuSeparator /> : null}
+          {isAntigravityCloud ? (
+            <>
+              <DropdownMenuItem
+                onSelect={() => onOpenAntigravityCloud("google")}
+              >
+                <Icon name="Cloud" />
+                <span className="flex min-w-0 flex-col">
+                  <span>
+                    {agyConnected
+                      ? "Switch Google account"
+                      : "Sign in with Google"}
+                  </span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    Cloud login
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => onOpenAntigravityCloud("key")}>
+                <Icon name="Lock" />
+                <span className="flex min-w-0 flex-col">
+                  <span>Use Gemini API key</span>
+                  <span className="truncate text-xs text-muted-foreground">
+                    {agyConnected
+                      ? "Replace Cloud login with a key"
+                      : "Connect Cloud with a key"}
+                  </span>
+                </span>
+              </DropdownMenuItem>
+              {agyConnected ? (
+                <DropdownMenuItem
+                  disabled={disconnectAgyCloud.isPending}
+                  onSelect={() => disconnectAgyCloud.mutate()}
+                >
+                  <Icon name="LogOut" />
+                  <span className="flex min-w-0 flex-col">
+                    <span>Disconnect Cloud</span>
+                    <span className="truncate text-xs text-muted-foreground">
+                      Removes Antigravity Cloud login
+                    </span>
+                  </span>
+                </DropdownMenuItem>
+              ) : null}
+              <DropdownMenuSeparator />
+            </>
+          ) : null}
           {signsOut ? (
             <DropdownMenuItem onSelect={() => setConfirm("disconnect")}>
               <Icon name="LogOut" />
@@ -607,6 +703,7 @@ interface ProviderRowProps {
   isDefault: boolean;
   onGeneralSettingsChange: ProvidersSettingsSectionProps["onGeneralSettingsChange"];
   onLoginChange: () => void;
+  onOpenAntigravityCloud: (mode: AntigravityCloudDialogMode) => void;
   provider: ProviderInfo;
   showCloud: boolean;
   state: SystemProviderState | undefined;
@@ -621,6 +718,7 @@ function ProviderRow({
   isDefault,
   onGeneralSettingsChange,
   onLoginChange,
+  onOpenAntigravityCloud,
   provider,
   showCloud,
   state,
@@ -675,7 +773,9 @@ function ProviderRow({
                       defaultProviderId: provider.id,
                     })
             }
+            onOpenAntigravityCloud={onOpenAntigravityCloud}
             provider={provider}
+            showCloud={showCloud}
           />
         }
         mac={
@@ -690,7 +790,12 @@ function ProviderRow({
             />
           )
         }
-        cloud={<CloudLogin provider={provider} />}
+        cloud={
+          <CloudLogin
+            provider={provider}
+            onOpenAntigravityCloud={onOpenAntigravityCloud}
+          />
+        }
         auto={
           <AutoUpdateSwitch
             disabled={disabled}
@@ -767,11 +872,13 @@ function NotInstalledRow({
   hostId,
   installable: { provider, target },
   onDone,
+  onOpenAntigravityCloud,
   showCloud,
 }: {
   hostId: string;
   installable: InstallableProvider;
   onDone: () => void;
+  onOpenAntigravityCloud: (mode: AntigravityCloudDialogMode) => void;
   showCloud: boolean;
 }) {
   const { busy, startInstall } = useCliJob(hostId, provider.id);
@@ -787,7 +894,12 @@ function NotInstalledRow({
       <Cells
         showCloud={showCloud}
         mac={DASH}
-        cloud={<CloudLogin provider={provider} />}
+        cloud={
+          <CloudLogin
+            provider={provider}
+            onOpenAntigravityCloud={onOpenAntigravityCloud}
+          />
+        }
         auto={DASH}
         menu={
           <ProviderMenu
@@ -795,7 +907,9 @@ function NotInstalledRow({
             isDefault={false}
             onDone={onDone}
             onMakeDefault={null}
+            onOpenAntigravityCloud={onOpenAntigravityCloud}
             provider={provider}
+            showCloud={showCloud}
           />
         }
         status={
@@ -975,6 +1089,8 @@ export function ProvidersSettingsSection({
   }, [hostId, queryClient]);
   const hiddenInstallable = useInstallableProviders({ hostId }).data ?? [];
   const showCloud = useCloudroomAccount().data?.ready === true;
+  const [antigravityDialog, setAntigravityDialog] =
+    useState<AntigravityCloudDialogMode | null>(null);
   const serverProviders: ProviderInfo[] = providersQuery.data ?? [];
   // The server lists the user's own order, or the default first, then the most used.
   const [optimisticOrder, setOptimisticOrder] = useState<string[] | null>(null);
@@ -1104,6 +1220,7 @@ export function ProvidersSettingsSection({
                   isDefault={provider.id === defaultProviderId}
                   onGeneralSettingsChange={onGeneralSettingsChange}
                   onLoginChange={refreshStates}
+                  onOpenAntigravityCloud={setAntigravityDialog}
                   provider={provider}
                   showCloud={showCloud}
                   state={states.get(provider.id)}
@@ -1124,6 +1241,7 @@ export function ProvidersSettingsSection({
                     hostId={hostId}
                     installable={entry}
                     onDone={refreshStates}
+                    onOpenAntigravityCloud={setAntigravityDialog}
                     showCloud={showCloud}
                   />
                 ))}
@@ -1148,6 +1266,12 @@ export function ProvidersSettingsSection({
           )}
         </>
       )}
+      {showCloud ? (
+        <AntigravityCloudDialog
+          mode={antigravityDialog}
+          onClose={() => setAntigravityDialog(null)}
+        />
+      ) : null}
     </SettingsSection>
   );
 }

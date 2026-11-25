@@ -23,7 +23,7 @@ import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
 import { CloudClaudeStrip, useCloudClaudeMissing } from "./banner/CloudClaudeStrip";
-import { CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
+import { CloudCapacityCard, CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
 import { OneClickScans } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
@@ -984,6 +984,8 @@ export function NewThreadComposer({
   const cloudKnown = executionTarget === "cloud" && cloudCatalogKnown(cloudConnection.data);
   // The cloud queue (docs/scopes/public-launch.md): the card under the composer explains, and Send waits.
   const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
+  // Metal low-capacity reserve (ADR 20261124-103714): show the banner clearly when this tier's new starts wait.
+  const cloudCapacity = executionTarget === "cloud" && !landsOnVps && !cloudQueue ? cloudConnection.data?.cloudCapacity ?? null : null;
   const agyCloud = executionTarget === "cloud" && selectedProviderId === "acp-antigravity";
   const agyLogin = useAntigravityCloud(agyCloud && !cloudConnection.data?.selfHosted);
   const agyNeedsLogin = agyCloud && !cloudConnection.data?.selfHosted && !agyLogin.data?.connected;
@@ -2137,6 +2139,15 @@ export function NewThreadComposer({
                   setUserPickedEnvironment({ target: "local" });
                 }}
               />
+            ) : cloudCapacity ? (
+              <CloudCapacityCard
+                capacity={cloudCapacity}
+                onUseLocal={() => {
+                  setExecutionTarget("local");
+                  setCloudPicked(false);
+                  setUserPickedEnvironment({ target: "local" });
+                }}
+              />
             ) : <>{executionTarget === "cloud" && wantedCloudTarget === "vps" && !landsOnVps && vps.data ? (
               <p className="flex items-center gap-1.5 px-3.5 pt-1.5 text-xs text-muted-foreground">
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
@@ -2333,6 +2344,7 @@ export function NewThreadComposer({
       codexOffered,
       switchToCodex,
       cloudQueue,
+      cloudCapacity,
       machineServerAccessReason,
       setupRequiredProvider,
       environmentSetupRequiredReason,

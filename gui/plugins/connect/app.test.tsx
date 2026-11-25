@@ -27,6 +27,7 @@ afterEach(cleanup);
 function status(overrides: Partial<ConnectStatus> = {}): ConnectStatus {
   return {
     state: "disconnected",
+    enabled: true,
     paired: false,
     handle: null,
     url: null,
@@ -120,6 +121,7 @@ describe("connect settings section", () => {
         rpc: {
           status: () => connected(),
           remoteInstructions: () => ({ enabled: true }),
+          listSessions: () => ({ sessions: [] }),
           signOutPhones: () => ({ revoked: 2 }),
         },
       },
@@ -129,6 +131,43 @@ describe("connect settings section", () => {
     expect(slot.rpcCalls.some((call) => call.method === "signOutPhones")).toBe(false);
     fireEvent.click(slot.getByRole("button", { name: "Sign out all phones?" }));
     await slot.findByText("Signed out 2 sessions.");
+  });
+
+  it("lists active remote devices and signs out a single device", async () => {
+    const slot = renderSlot(
+      app.settingsSections[0]!,
+      {},
+      {
+        rpc: {
+          status: () => connected(),
+          remoteInstructions: () => ({ enabled: true }),
+          listSessions: () => ({
+            sessions: [
+              {
+                id: "11111111-1111-1111-1111-111111111111",
+                kind: "phone",
+                label: "iPhone · Safari",
+                createdAt: 1_700_000_000_000,
+                lastSeenAt: 1_700_000_060_000,
+                macHandle: "workstation",
+                macName: "Workstation",
+              },
+            ],
+          }),
+          revokeSession: () => ({ revoked: true }),
+        },
+      },
+    );
+    fireEvent.click(await slot.findByRole("tab", { name: /Settings/ }));
+    await slot.findByText("iPhone · Safari");
+    fireEvent.click(slot.getByRole("button", { name: "Sign out" }));
+    await waitFor(() =>
+      expect(slot.rpcCalls).toContainEqual({
+        method: "revokeSession",
+        input: { sessionId: "11111111-1111-1111-1111-111111111111" },
+      }),
+    );
+    await waitFor(() => expect(slot.queryByText("iPhone · Safari")).toBeNull());
   });
 
   it("revokes a shared port", async () => {
@@ -301,6 +340,34 @@ describe("connect settings section", () => {
       }),
     );
     await slot.findByText(/Cloudroom Connect is still setting up/);
+  });
+
+  it("shows Off when remote access is disabled and lets the user toggle it in Settings", async () => {
+    const slot = renderSlot(
+      app.settingsSections[0]!,
+      {},
+      {
+        rpc: {
+          status: () => status({ enabled: false }),
+          remoteInstructions: () => ({ enabled: true }),
+          remoteAccess: (input: unknown) => ({
+            enabled: (input as { enabled?: boolean } | null)?.enabled ?? false,
+          }),
+        },
+      },
+    );
+    await slot.findByText("Off");
+    await slot.findByText(/Remote access is turned off/);
+    expect(slot.queryByAltText("QR code to set up Cloudroom on your phone")).toBeNull();
+
+    fireEvent.click(slot.getByRole("tab", { name: /Settings/ }));
+    fireEvent.click(await slot.findByRole("switch", { name: "Remote access" }));
+    await waitFor(() =>
+      expect(slot.rpcCalls).toContainEqual({
+        method: "remoteAccess",
+        input: { enabled: true },
+      }),
+    );
   });
 
 });

@@ -6,6 +6,7 @@ pub use outbox::Journal;
 mod accounts;
 pub mod automation;
 mod catalog;
+mod coalesce;
 mod guard;
 pub(crate) mod history;
 pub mod info;
@@ -3142,7 +3143,34 @@ impl Manager {
         }
     }
 
-    /// Forward native events into the record path, shutting the harness if recording fails.
+    /// Forward one native event into the record path, shutting the harness on the first recording failure.
+    fn emit_native(
+        self: &Arc<Self>,
+        id: &str,
+        handle: &runtime::Handle,
+        failed: &mut bool,
+        event: runtime::Event,
+    ) {
+        // After a failed record, only the harness exit still matters: it settles the turn (core #55).
+        if *failed && !matches!(event, runtime::Event::Exited { .. }) {
+            return;
+        }
+        if self.record_native(id, handle, event).is_err() && !*failed {
+            *failed = true;
+            if let Some(handle) = self
+                .local
+                .lock()
+                .unwrap()
+                .sessions
+                .get(id)
+                .and_then(|s| s.handle.clone())
+            {
+                handle.request_shutdown();
+            }
+        }
+    }
+
+    /// Forward native events into the record path, coalescing streaming deltas before journal fsync.
     fn watch_events(
         self: &Arc<Self>,
         id: String,
@@ -3152,23 +3180,38 @@ impl Manager {
         let manager = self.clone();
         tokio::spawn(async move {
             let mut failed = false;
-            while let Some(event) = events.recv().await {
-                // After a failed record, only the harness exit still matters: it settles the turn (core #55).
-                if failed && !matches!(event, runtime::Event::Exited { .. }) {
+            let mut coalescer = coalesce::DeltaCoalescer::new();
+            loop {
+                let next = match coalescer.deadline() {
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline, events.recv()).await {
+                            Ok(item) => item,
+                            Err(_) => {
+                                if let Some(event) = coalescer.flush() {
+                                    manager.emit_native(&id, &handle, &mut failed, event);
+                                }
+                                continue;
+                            }
+                        }
+                    }
+                    None => events.recv().await,
+                };
+                let Some(event) = next else {
+                    if !failed && let Some(event) = coalescer.flush() {
+                        manager.emit_native(&id, &handle, &mut failed, event);
+                    }
+                    break;
+                };
+                if failed {
+                    coalescer.clear();
+                    manager.emit_native(&id, &handle, &mut failed, event);
                     continue;
                 }
-                if manager.record_native(&id, &handle, event).is_err() && !failed {
-                    failed = true;
-                    if let Some(handle) = manager
-                        .local
-                        .lock()
-                        .unwrap()
-                        .sessions
-                        .get(&id)
-                        .and_then(|s| s.handle.clone())
-                    {
-                        handle.request_shutdown();
-                    }
+                for ready in coalescer.push(event) {
+                    manager.emit_native(&id, &handle, &mut failed, ready);
+                }
+                if failed {
+                    coalescer.clear();
                 }
             }
         });

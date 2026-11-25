@@ -28,7 +28,30 @@ const MAX_QUEUED_BYTES = 256 * 1024;
 const QUEUE_CHECK_MS = 10;
 
 const UNREGISTERED_PORT_BODY = "this port is not shared";
+const INVALID_PATH_BODY = "invalid tunnel path";
 const textEncoder = new TextEncoder();
+
+/** Resolves a relayed frame path against the loopback origin; rejects any path that changes scheme/host or adds userinfo. */
+export function resolveLoopbackUrl(origin: string, path: string): URL | null {
+  if (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\")) {
+    return null;
+  }
+  try {
+    const base = new URL(origin);
+    const resolved = new URL(path, base);
+    if (
+      resolved.protocol !== base.protocol ||
+      resolved.host !== base.host ||
+      resolved.username !== "" ||
+      resolved.password !== ""
+    ) {
+      return null;
+    }
+    return resolved;
+  } catch {
+    return null;
+  }
+}
 const INITIAL_THREAD_LOAD_PATH =
   /^\/api\/v1\/threads\/[^/]+\/(?:timeline|conversation-outline)(?:\?|$)/u;
 
@@ -112,6 +135,7 @@ interface ResolvedStreamOrigin {
   publicOrigin: string;
   host?: string;
   headers?: Readonly<Record<string, string>>;
+  enforceGateAuth?: boolean;
 }
 
 export type StreamOriginResult =
@@ -280,12 +304,12 @@ export class TunnelSession {
     if (stream.countsAsRemoteClient) this.adjustRemoteClients(-1);
   }
 
-  private rejectUnregisteredHttp(streamId: number): void {
-    const body = textEncoder.encode(UNREGISTERED_PORT_BODY);
+  private rejectHttp(streamId: number, status: number, message: string): void {
+    const body = textEncoder.encode(message);
     this.send({
       type: "resp-head",
       streamId,
-      status: 404,
+      status,
       headers: [["content-type", "text/plain; charset=utf-8"]],
     });
     for (const c of chunkBody(streamId, body)) this.send(c);
@@ -299,16 +323,23 @@ export class TunnelSession {
     const { meta } = stream;
     const originResult = this.options.resolveOrigin(meta.target);
     if (originResult.kind === "unregistered") {
-      this.rejectUnregisteredHttp(streamId);
+      this.rejectHttp(streamId, 404, UNREGISTERED_PORT_BODY);
       this.httpStreams.delete(streamId);
       return;
     }
     const { resolved } = originResult;
+    const targetUrl = resolveLoopbackUrl(resolved.origin, meta.path);
+    if (targetUrl === null) {
+      this.rejectHttp(streamId, 400, INVALID_PATH_BODY);
+      this.httpStreams.delete(streamId);
+      return;
+    }
     const headers = headersForLoopbackRequest(meta.headers, {
       publicOrigin: resolved.publicOrigin,
-      loopbackOrigin: new URL(resolved.origin).origin,
+      loopbackOrigin: targetUrl.origin,
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
       ...(resolved.headers !== undefined ? { headers: resolved.headers } : {}),
+      ...(resolved.enforceGateAuth ? { enforceGateAuth: true } : {}),
     });
     // The relay can only say "waiting for the Mac". These lines say the wait is this Mac's own server.
     const label = `${meta.method} ${meta.path.split("?")[0]}`;
@@ -319,7 +350,7 @@ export class TunnelSession {
       const startedAt = performance.now();
       const body = meta.hasBody ? Buffer.concat(stream.chunks) : undefined;
       const res = await requestOriginHttp({
-        url: new URL(`${resolved.origin.replace(/\/$/u, "")}${meta.path}`),
+        url: targetUrl,
         method: meta.method,
         headers,
         body,
@@ -397,16 +428,27 @@ export class TunnelSession {
     }
     const { resolved } = originResult;
     const wsOrigin = resolved.origin.replace(/^http/, "ws");
+    const targetUrl = resolveLoopbackUrl(wsOrigin, frame.path);
+    if (targetUrl === null) {
+      this.send({
+        type: "close-stream",
+        streamId: frame.streamId,
+        code: 1008,
+        reason: INVALID_PATH_BODY,
+      });
+      return;
+    }
     const headers = headersForLoopbackRequest(frame.headers, {
       publicOrigin: resolved.publicOrigin,
       loopbackOrigin: new URL(resolved.origin).origin,
       ...(resolved.host !== undefined ? { host: resolved.host } : {}),
       ...(resolved.headers !== undefined ? { headers: resolved.headers } : {}),
+      ...(resolved.enforceGateAuth ? { enforceGateAuth: true } : {}),
     });
     const countsAsRemoteClient = isBareRoomRealtimeWs(frame.path, frame.target);
     let socket: NodeWebSocket;
     try {
-      socket = new NodeWebSocket(`${wsOrigin}${frame.path}`, frame.protocols, {
+      socket = new NodeWebSocket(targetUrl.toString(), frame.protocols, {
         headers,
       });
     } catch (e) {

@@ -238,6 +238,10 @@ async fn run(args: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", cloudroom::mac::SKILL);
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("--mac-skill-stub") {
+        print!("{}", cloudroom::mac::SKILL_STUB);
+        return Ok(());
+    }
     if args.first().map(String::as_str) == Some("--room-cli-skill") {
         print!("{}", cloudroom::mac::ROOM_CLI_SKILL);
         return Ok(());

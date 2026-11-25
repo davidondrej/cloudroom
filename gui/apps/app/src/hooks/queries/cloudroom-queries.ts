@@ -37,6 +37,8 @@ export const cloudroomStatusSchema = z.object({
   queue_reorder: z.boolean().default(false),
   /** The account's place in the cloud queue, or a blocked region: new Cloud threads wait (docs/scopes/public-launch.md). */
   cloudQueue: z.object({ position: z.number(), total: z.number(), regionBlocked: z.boolean() }).nullable().default(null),
+  /** Non-null when Metal capacity is temporarily reserved for higher plans and this tier waits (ADR 20261124-103714). */
+  cloudCapacity: z.enum(["paid", "priority"]).nullable().default(null),
   cloudPaused: z.boolean().default(false),
   usedCloud: z.boolean().default(true),
   lastCloudAt: z.number().nullable().optional(),
@@ -202,14 +204,30 @@ export function useCloudroomConnection(enabled = true) {
   return useQuery({ ...cloudroomConnectionQuery, enabled, refetchInterval: 10000 });
 }
 
-export function useMacAgents(enabled = true) {
+const macAgentsResponseSchema = z.object({
+  agents: z.array(z.string()),
+  installed: z.array(z.string()).default([]),
+});
+
+function useMacAgentsQuery(enabled = true) {
   return useQuery({
     queryKey: ["cloudroom-mac-agents"],
     enabled,
     staleTime: Infinity,
     gcTime: Infinity,
-    queryFn: async ({ signal }) => z.object({ agents: z.array(z.string()) }).parse(await (await fetchWithAppSurface("/api/v1/cloudroom/mac/agents", { signal })).json()).agents,
+    queryFn: async ({ signal }) => macAgentsResponseSchema.parse(await (await fetchWithAppSurface("/api/v1/cloudroom/mac/agents", { signal })).json()),
   });
+}
+
+export function useMacAgents(enabled = true) {
+  const query = useMacAgentsQuery(enabled);
+  return { ...query, data: query.data?.agents };
+}
+
+/** Supported agent CLIs found on PATH (no auth files read). Safe for onboarding telemetry. */
+export function useInstalledMacAgents(enabled = true) {
+  const query = useMacAgentsQuery(enabled);
+  return { ...query, data: query.data?.installed };
 }
 
 const desktopUpdateSchema = z.object({ version: z.string(), installAt: z.number().nullable(), installing: z.boolean() }).nullable();
@@ -352,12 +370,12 @@ export const MAC_ACCESS_MUTATION_KEY = ["cloudroom-mac-access"];
 /** How much cloud agents may do on this computer (ADR 0113, 0186). `true` means Full access. The account cache is the one
  *  source every menu reads: it changes at once and rolls back on failure (#109). `onSaved` and the app's error toast run
  *  with the mutation itself, so each shows once, even after the menu that made the change has closed. */
-export function useSetMacAccess(onSaved?: (access: MacAccessChoice) => void) {
+export function useSetMacAccess(onSaved?: (access: MacAccessChoice) => void, options?: { showErrorToast?: boolean }) {
   const client = useQueryClient();
   type Account = Awaited<ReturnType<typeof sdk.cloudroom.status>>;
   return useMutation({
     mutationKey: MAC_ACCESS_MUTATION_KEY,
-    meta: { errorMessage: `Couldn't change ${COMPUTER_TITLE} access.` },
+    meta: options?.showErrorToast === false ? { showErrorToast: false } : { errorMessage: `Couldn't change ${COMPUTER_TITLE} access.` },
     mutationFn: (access: MacAccessChoice) => sdk.cloudroom.setMacAccess(access),
     onMutate: async (access) => {
       await client.cancelQueries({ queryKey: ["cloudroom-account"] });
@@ -396,11 +414,7 @@ export function useSetCopyLogins() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (enabled: boolean) => sdk.cloudroom.setCopyLogins(enabled),
-    onSettled: () => {
-      void client.invalidateQueries({ queryKey: ["cloudroom-account"] });
-      void client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
-      void client.invalidateQueries({ queryKey: ["cloudroom-github-account"] });
-    },
+    onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
   });
 }
 
@@ -499,10 +513,11 @@ export function useExportChats() {
   return useMutation({ mutationFn: (input: Parameters<typeof sdk.cloudroom.exportChats>[0]) => sdk.cloudroom.exportChats(input) });
 }
 
-export function useRetryProjectCopy(threadId: string) {
+export function useRetryProjectCopy(threadId: string, options?: { showToast?: boolean }) {
   return useMutation({
     mutationFn: () => sdk.cloudroom.retryCopy(threadId),
-    onError: (error) => showMutationErrorToast({ error, fallbackMessage: "Could not copy the project" }),
+    meta: options?.showToast === false ? { showErrorToast: false } : undefined,
+    onError: options?.showToast === false ? undefined : (error) => showMutationErrorToast({ error, fallbackMessage: "Could not copy the project" }),
   });
 }
 

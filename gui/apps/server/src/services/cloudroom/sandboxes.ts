@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, chmod, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, chmod, constants, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -138,6 +138,8 @@ const insideLoginLock = new AsyncLocalStorage<true>();
 const PRELOAD_BATCH = 10, PRELOADS_PER_HOUR = 30, PRELOAD_AGAIN_MS = 3_600_000;
 const placeOf = (thread: string, project: SandboxProject) => ({ thread, project: project.id, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}) });
 export type CloudQueue = { position: number; total: number; regionBlocked: boolean };
+/** Metal low-capacity reservation (ADR 20261124-103714): non-null only when this account's tier is currently paused. */
+export type CloudCapacity = "paid" | "priority";
 /** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale. */
 /** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
  *  left in live packs (ADR 0317): 0 from older websites. */
@@ -152,6 +154,10 @@ const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
 /** A plan's new Cloud threads per hour or per 24 hours are used up (website ADR 20261124-183700): it frees up by itself. */
 const THREAD_LIMIT = "cloud_thread_limit";
+/** A plan's concurrent Cloud threads cap is reached (ADR 20261124-103714): running threads keep working. */
+const CONCURRENT_LIMIT = "cloud_concurrent_limit";
+/** Metal pool is near capacity and reserving slots for higher plans (ADR 20261124-103714). */
+const CAPACITY_LIMIT = "cloud_capacity_reserved";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
 export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
@@ -166,13 +172,23 @@ export const cloudPausedError = (error: unknown) => error instanceof CloudroomEr
 const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE, CLOUD_PAUSED]);
 /** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
 const SIGNED_OUT = "desktop_signed_out";
-export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, THREAD_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
+export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, THREAD_LIMIT, CONCURRENT_LIMIT, CAPACITY_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
 // The Mac's skills and global instructions that sandboxes receive, one way (docs/scopes/sandboxes.md).
 const SKILL_ROOTS = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"];
 const INSTRUCTION_FILES = [".claude/CLAUDE.md", ".codex/AGENTS.md", ".pi/agent/AGENTS.md", ".config/opencode/AGENTS.md"];
 const CONFIG_LIMIT = 45 * 1024 * 1024;
+const CONFIG_TAR_LIMIT = 4 * CONFIG_LIMIT;
+const CONFIG_TAR_BUDGET = CONFIG_TAR_LIMIT - 1024 * 1024;
+const CONFIG_TAR_TIMEOUT_MS = 60_000;
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
+/** Zero-process check for a local `gh` login on github.com; returns the handle when present in hosts.yml, never tokens. */
+export async function macGithubLogin(): Promise<{ found: boolean; user: string | null }> {
+  if (!findCliExecutable("gh")) return { found: false, user: null };
+  if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) return { found: true, user: null };
+  const text = await readFile(ghHostsPath(), "utf8").catch(() => "");
+  return text ? parseGhHostsLogin(text) : { found: false, user: null };
+}
 /** A fingerprint of this Mac's Codex login file, or null without one: it changes whenever Codex renews or signs in. */
 export const macCodexDigest = () => readFile(codexAuthPath()).then(file => createHash("sha256").update(file).digest("hex"), () => null);
 /** What `codex logout` does, for a Mac without the Codex CLI. */
@@ -596,6 +612,65 @@ export const githubAccountSchema = z.object({ login: z.string(), name: z.string(
 export type GithubAccount = z.infer<typeof githubAccountSchema>;
 /** This Mac's GitHub CLI token, or "" when `gh` is missing or signed out. */
 export const macGithubToken = () => output("gh", ["auth", "token", "--hostname", "github.com"]);
+/** Active `github.com` username from `gh`'s local `hosts.yml`, without touching the network. */
+export function parseGhHostsUser(yaml: string): string | null {
+  let inGithub = false;
+  let hostIndent = -1;
+  for (const raw of yaml.split(/\r?\n/)) {
+    const line = raw.replace(/(?:^|\s)#.*$/, "");
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trim();
+    if (indent === 0) {
+      inGithub = /^["']?github\.com["']?:\s*$/.test(trimmed);
+      hostIndent = -1;
+      continue;
+    }
+    if (!inGithub) continue;
+    if (hostIndent === -1) hostIndent = indent;
+    if (indent !== hostIndent) continue;
+    const match = trimmed.match(/^user:\s*["']?([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)["']?\s*$/);
+    if (match) return match[1]!;
+  }
+  return null;
+}
+/** Offline parse of `gh`'s `hosts.yml` for a `github.com` login (handle or `oauth_token`, bounded to `github.com`). */
+export function parseGhHostsLogin(yaml: string): { found: boolean; user: string | null } {
+  const user = parseGhHostsUser(yaml);
+  if (user) return { found: true, user };
+  let inGithub = false;
+  let hostIndent = -1;
+  for (const raw of yaml.split(/\r?\n/)) {
+    const line = raw.replace(/(?:^|\s)#.*$/, "");
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    const trimmed = line.trim();
+    if (indent === 0) {
+      inGithub = /^["']?github\.com["']?:\s*$/.test(trimmed);
+      hostIndent = -1;
+      continue;
+    }
+    if (!inGithub) continue;
+    if (hostIndent === -1) hostIndent = indent;
+    if (indent !== hostIndent) continue;
+    if (/^oauth_token:\s*\S/.test(trimmed)) return { found: true, user: null };
+  }
+  return { found: false, user: null };
+}
+export function ghHostsPath(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): string {
+  if (env.GH_CONFIG_DIR) return join(env.GH_CONFIG_DIR, "hosts.yml");
+  if (env.XDG_CONFIG_HOME) return join(env.XDG_CONFIG_HOME, "gh", "hosts.yml");
+  if (platform === "win32") return join(env.APPDATA || join(homedir(), "AppData", "Roaming"), "GitHub CLI", "hosts.yml");
+  return join(homedir(), ".config", "gh", "hosts.yml");
+}
+/** Local `gh` account on this computer (offline check, never uploads the token), or null when `gh` has no token. */
+export async function macGithubAccount(): Promise<{ login: string | null } | null> {
+  if (!await macGithubToken()) return null;
+  // Env-var tokens override hosts.yml in `gh`, so don't guess the handle from hosts.yml when one is set.
+  if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) return { login: null };
+  const yaml = await readFile(ghHostsPath(), "utf8").catch(() => "");
+  return { login: parseGhHostsUser(yaml) };
+}
 /** The GitHub login sandboxes receive. Agents commit as the user, with the Mac's Git identity. */
 export async function sandboxGithubLogin(token: string): Promise<string> {
   const [name, email] = await Promise.all([output("git", ["config", "--global", "user.name"]), output("git", ["config", "--global", "user.email"])]);
@@ -663,28 +738,126 @@ export async function macSkills(): Promise<MacSkill[]> {
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-async function configFiles(home: string, paths: string[]): Promise<string[]> {
+type ConfigPathFiles = { files: string[]; bytes: number; skipped: number };
+
+class ConfigTarError extends CloudroomError {
+  constructor(message: string, readonly transient: boolean) { super(message); }
+}
+
+/** Ustar holds up to 100 UTF-8 bytes in `name`, or `prefix/name` with prefix <= 155 and name <= 100. */
+function fitsUstarPath(relPath: string): boolean {
+  const bytes = Buffer.byteLength(relPath, "utf8");
+  if (bytes <= 100) return true;
+  if (bytes > 256) return false;
+  for (let i = relPath.indexOf("/"); i !== -1; i = relPath.indexOf("/", i + 1)) {
+    const prefix = Buffer.byteLength(relPath.slice(0, i), "utf8");
+    if (prefix > 155) return false;
+    const name = Buffer.byteLength(relPath.slice(i + 1), "utf8");
+    if (name > 0 && name <= 100) return true;
+  }
+  return false;
+}
+
+async function configFiles(home: string, paths: string[]): Promise<ConfigPathFiles> {
   const files: string[] = [];
+  let bytes = 0;
+  let skipped = 0;
   for (const path of paths) {
-    const root = await realpath(join(home, path));
+    const root = await realpath(join(home, path)).catch(() => null);
+    if (!root) { skipped += 1; continue; }
     const ancestors = new Set<string>();
-    const visit = async (path: string): Promise<void> => {
-      const full = join(home, path);
+    const visit = async (entry: string): Promise<void> => {
+      const full = join(home, entry);
       const target = await realpath(full).catch(() => null);
       if (!target || (target !== root && !target.startsWith(root + sep)) || ancestors.has(target)) return;
-      const info = await stat(full);
+      const info = await stat(full).catch(() => null);
+      if (!info) { skipped += 1; return; }
       if (!info.isFile() && !info.isDirectory()) return;
-      files.push(path.split(sep).join("/"));
-      if (!info.isDirectory()) return;
+      const tarPath = entry.split(sep).join("/");
+      if (info.isFile()) {
+        if (!fitsUstarPath(tarPath) || !await access(full, constants.R_OK).then(() => true, () => false)) { skipped += 1; return; }
+        files.push(tarPath);
+        bytes += 512 + Math.ceil(info.size / 512) * 512;
+        return;
+      }
+      const names = await readdir(full).catch(() => null);
+      if (!names) { skipped += 1; return; }
+      if (fitsUstarPath(tarPath)) {
+        files.push(tarPath);
+        bytes += 512;
+      }
       ancestors.add(target);
-      for (const name of await readdir(full)) {
-        if (![".git", "node_modules", ".DS_Store"].includes(name)) await visit(join(path, name));
+      for (const name of names) {
+        if (![".git", "node_modules", ".DS_Store"].includes(name)) await visit(join(entry, name));
       }
       ancestors.delete(target);
     };
     await visit(path);
   }
-  return files;
+  return { files, bytes, skipped };
+}
+
+type ExecFileError = Error & {
+  code?: number | string | null;
+  killed?: boolean;
+  signal?: NodeJS.Signals | null;
+  stderr?: Buffer | string;
+};
+
+function formatConfigTarError(error: unknown, fileCount: number, elapsedMs: number): ConfigTarError {
+  if (!(error instanceof Error)) return new ConfigTarError(`Packing skills failed: ${String(error)}`, false);
+  const err = error as ExecFileError;
+  if (err.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+    return new ConfigTarError(`Your skills are too large to pack (tar output exceeded ${Math.round(CONFIG_TAR_LIMIT / 1024 / 1024)} MB across ${fileCount} files).`, false);
+  }
+  const stderr = (Buffer.isBuffer(err.stderr) ? err.stderr.toString("utf8") : typeof err.stderr === "string" ? err.stderr : "").trim();
+  const detail = stderr ? stderr.split(/\r?\n/).filter(Boolean).slice(-3).join(" | ").slice(0, 300) : "";
+  if (err.killed && err.signal) {
+    const why = elapsedMs >= CONFIG_TAR_TIMEOUT_MS - 1_000
+      ? `Packing skills timed out after ${Math.round(CONFIG_TAR_TIMEOUT_MS / 1000)} s (${err.signal}, ${fileCount} files)`
+      : `Packing skills was killed (${err.signal}, ${fileCount} files)`;
+    return new ConfigTarError(detail ? `${why}: ${detail}` : `${why}.`, true);
+  }
+  if (err.signal) {
+    const why = `Packing skills stopped on ${err.signal} (${fileCount} files)`;
+    return new ConfigTarError(detail ? `${why}: ${detail}` : `${why}.`, true);
+  }
+  if (typeof err.code === "number") {
+    return new ConfigTarError(`Packing skills failed (tar exit ${err.code}, ${fileCount} files)${detail ? `: ${detail}` : " with no stderr."}`, false);
+  }
+  if (typeof err.code === "string") {
+    return new ConfigTarError(`Packing skills failed (${err.code}): ${detail || err.message}`, true);
+  }
+  return new ConfigTarError(`Packing skills failed: ${detail || err.message}`, false);
+}
+
+async function packConfigTar(home: string, files: string[]): Promise<Buffer> {
+  if (!files.length) return Buffer.alloc(1024);
+  const startedAt = Date.now();
+  const run = promisify(execFile)(
+    tarCommand(),
+    ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
+    { encoding: "buffer", maxBuffer: CONFIG_TAR_LIMIT, timeout: CONFIG_TAR_TIMEOUT_MS, windowsHide: true, env: { ...process.env, COPYFILE_DISABLE: "1" } },
+  );
+  run.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");
+  try {
+    return (await run).stdout;
+  } catch (error) {
+    throw formatConfigTarError(error, files.length, Date.now() - startedAt);
+  }
+}
+
+function summarizeConfigIssue(input: { fallbackReason: string | null; oversized: string[]; unreadable: string[]; copiedAny: boolean }): string | null {
+  if (input.fallbackReason) return `${input.fallbackReason.replace(/\.$/, "")}. Only global instructions were copied.`;
+  const listNames = (names: string[]) => {
+    const unique = [...new Set(names)];
+    return unique.length <= 5 ? unique.join(", ") : `${unique.slice(0, 5).join(", ")} and ${unique.length - 5} more`;
+  };
+  const parts: string[] = [];
+  if (input.oversized.length) parts.push(`skipped oversized skills (${Math.round(CONFIG_LIMIT / 1024 / 1024)} MB limit): ${listNames(input.oversized)}`);
+  if (input.unreadable.length) parts.push(`skipped unreadable or long-path files in: ${listNames(input.unreadable)}`);
+  if (!parts.length) return null;
+  return input.copiedAny ? `${parts.join("; ")}. Other files were copied.` : `${parts.join("; ")}.`;
 }
 
 export type MacMcpServer = { name: string; server: McpServer | null };
@@ -831,8 +1004,8 @@ export class SandboxDirectory {
       const code = typeof value.code === "string" ? value.code : null;
       if (stale) throw new CloudroomError(message, path !== "gitlab" && response.status >= 500 ? null : response.status, code);
       if (code === USAGE_LIMIT) this.limit = { on: true, at: Date.now() };
-      // Refused for the cloud queue or the region: ask again soon, so the composer shows the right card.
-      if (code === CLOUD_QUEUE || code === CLOUD_REGION) this.mode = null;
+      // Refused for the cloud queue, region, or reserved capacity: ask again soon, so the composer shows the right card.
+      if (code === CLOUD_QUEUE || code === CLOUD_REGION || code === CAPACITY_LIMIT) this.mode = null;
       if (code === SIGNED_OUT) this.onSignedOut(account.token);
       // A 4xx (say, "This account is not enabled") means the database answered: Cloud is back, whatever the answer.
       if (code === CLOUD_PAUSED) this.pausedAnswers += 1;
@@ -1011,8 +1184,10 @@ export class SandboxDirectory {
     if (!this.awakeCheck) {
       const check: Promise<void> = this.call({ action: "awake" }).then(value => awakeSchema.parse(value)).then(listed => {
         if (this.awakeCheck !== check) return;
+        const before = this.awake.size;
         this.awake = new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { origin, token }]));
-        if (this.refused && this.awake.has(this.refused.thread)) this.refused = null;
+        if (this.refused && (this.awake.has(this.refused.thread) || (this.refused.code === CONCURRENT_LIMIT && this.awake.size < before))) this.refused = null;
+        if (this.awake.size < before) for (const [thread, waiting] of this.backoff) if (waiting.refusal?.code === CONCURRENT_LIMIT) this.backoff.delete(thread);
         this.awakeChecks++;
         if (listed.runs.length) this.onRuns(listed.runs);
         this.awakeEvery = listed.recheck_ms;
@@ -1127,12 +1302,13 @@ export class SandboxDirectory {
     const value = z.object({
       sandboxes: z.boolean(), limited: z.boolean().default(false),
       queue: z.object({ position: z.number(), total: z.number() }).nullable().default(null), region_blocked: z.boolean().default(false),
+      capacity: z.enum(["paid", "priority"]).nullable().default(null),
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
     const planChanged = Boolean(this.plan && value.plan !== this.plan), usageChanged = Boolean((this.limit?.on && !value.limited) || planChanged);
     this.plan = value.plan;
-    // An upgrade lifts a new-thread cap at once.
-    const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === THREAD_LIMIT && planChanged) || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
+    // An upgrade lifts a new-thread or concurrent cap at once; capacity clearing lifts reserved-slot waits.
+    const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === THREAD_LIMIT && planChanged) || (code === CONCURRENT_LIMIT && planChanged) || (code === CAPACITY_LIMIT && (!value.capacity || planChanged)) || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
     if (cleared(this.refused?.code)) this.refused = null;
     for (const [thread, waiting] of this.backoff) if (cleared(waiting.refusal?.code)) this.backoff.delete(thread);
     if (value.plan && value.plan !== "free") this.liftFreeCap();
@@ -1140,6 +1316,7 @@ export class SandboxDirectory {
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
     this.queue = value.queue || value.region_blocked ? { position: value.queue?.position ?? 0, total: value.queue?.total ?? 0, regionBlocked: value.region_blocked } : null;
+    this.capacity = value.capacity;
     // Limit cleared or plan changed (bought credits or upgraded): refresh credits now instead of waiting up to 10 minutes.
     if (usageChanged && this.usage) { this.usage = { ...this.usage, next: 0 }; this.planUsage(true); }
     return value.sandboxes;
@@ -1149,6 +1326,9 @@ export class SandboxDirectory {
   /** The account's place in the cloud queue, or a blocked region: new Cloud threads wait (docs/scopes/public-launch.md).
    *  Null when it may start them. Refreshed with forNewThreads(). */
   cloudQueue(): CloudQueue | null { return this.queue; }
+  private capacity: CloudCapacity | null = null;
+  /** Non-null when Metal capacity is temporarily reserved for higher plans and this account's tier waits. */
+  cloudCapacity(): CloudCapacity | null { return this.capacity; }
 
   async preload(threads: { thread: string; project: SandboxProject }[], beforeWake: () => Promise<void>): Promise<void> {
     if (!this.mode) await this.forNewThreads();
@@ -1316,6 +1496,7 @@ export class SandboxDirectory {
     this.mode = null;
     this.limit = null;
     this.plan = null;
+    this.capacity = null;
     this.preloadOn = false;
     this.preloaded.clear();
     this.preloadQueue.length = 0;
@@ -1436,6 +1617,7 @@ export class SandboxDirectory {
   }
   async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
+  async refreshGithub(thread: string): Promise<void> { await this.call({ action: "github", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
   async restore(thread: string, session?: string): Promise<void> {
     this.forget(thread);
@@ -1470,7 +1652,8 @@ export class SandboxDirectory {
 
   private async putLogin(name: SandboxLogin, value: string, only: AccountRequest, chosen = false): Promise<void> {
     const digest = createHash("sha256").update(value).digest("hex");
-    if (this.uploaded.get(name) === digest) return;
+    // Explicit user actions (`chosen`) always upload, even if this computer sent the same login earlier and another computer disconnected it.
+    if (!chosen && this.uploaded.get(name) === digest) return;
     const session = this.session.signal;
     await this.call(chosen ? { name, value, chosen } : { name, value }, "logins", only);
     // A caller-bound save outlives a reset, but its digest never fills the next account's cache.
@@ -1706,7 +1889,7 @@ export class SandboxDirectory {
 
   private copiedAt = 0;
   get loginsCopied(): boolean { return this.copiedAt > 0; }
-  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Agent Zero, Cursor, and GitHub logins when the user allowed it (ADRs 0128, 0130).
+  /** Copies this Mac's Codex, Pi, opencode, Hermes, Devin, Kimi Code, OpenClaw, Agent Zero, and Cursor logins when the user allowed it (ADRs 0128, 0130).
    *  At most once a minute, unless the user just clicked Connect. */
   copyMacLogins(force = false): Promise<void> {
     if (!force && Date.now() - this.copiedAt < RECHECK_MS) return Promise.resolve();
@@ -1736,7 +1919,7 @@ export class SandboxDirectory {
     const files = [["codex", codexAuthPath()], ["pi", join(piHome, "auth.json")]] as const;
     // One failed login never stops the others; all failures are reported together.
     const failed: string[] = [];
-    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor" | "github", value: string) => this.putLogin(name, value, only).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
+    const save = (name: "codex" | "pi" | "opencode" | "hermes" | "devin" | "kimi" | "openclaw" | "agent-zero" | "cursor", value: string) => this.putLogin(name, value, only).catch((error: unknown) => { failed.push(`${name}: ${error instanceof Error ? error.message : String(error)}`); });
     for (const [name, path] of files) {
       if (skip.has(name)) continue;
       const value = await readFile(path, "utf8").catch(() => null);
@@ -1756,8 +1939,6 @@ export class SandboxDirectory {
     await copy("openclaw", macOpenclawLogin);
     await copy("agent-zero", macAgentZeroLogin);
     await copy("cursor", macCursorLogin);
-    const githubToken = skip.has("github") ? "" : await macGithubToken();
-    if (githubToken) await save("github", await sandboxGithubLogin(githubToken));
     if (failed.length) throw new CloudroomError(`Some logins could not be copied to cloud sandboxes. ${failed.join("; ")}`);
   }
 
@@ -1883,27 +2064,116 @@ export class SandboxDirectory {
     if (!force && Date.now() - this.configAt < RECHECK_MS) return;
     this.configAt = Date.now();
     const home = homedir();
-    const instructions = (await Promise.all(INSTRUCTION_FILES.map(path => stat(join(home, path)).then(() => path, () => null)))).filter((path): path is string => path !== null);
-    const present = [...(await macSkills()).filter(skill => inCloud(skill.name)).flatMap(skill => skill.paths), ...instructions];
-    const files = await configFiles(home, present);
-    // A computer with no skills or instructions never replaces the account's bundle on its own (#237); only a Settings change may empty it.
-    if (!files.length && !force) { this.configIssue = null; return; }
-    const run = files.length ? promisify(execFile)(tarCommand(), ["-c", "-h", ...(process.platform === "linux" ? ["--hard-dereference"] : []), "--no-recursion", "--format", "ustar", "-C", home, "--null", "-T", "-"],
-      { encoding: "buffer", maxBuffer: 4 * CONFIG_LIMIT, timeout: 30_000, windowsHide: true, env: { ...process.env, COPYFILE_DISABLE: "1" } }) : null;
-    run?.child.stdin?.on("error", () => {}).end(files.join("\0") + "\0");
-    const tar = run ? (await run).stdout : Buffer.alloc(1024);
+    const collect = async () => {
+      const instructionPaths = (await Promise.all(
+        INSTRUCTION_FILES.map(path => stat(join(home, path)).then(info => info.isFile() ? path : null, () => null)),
+      )).filter((path): path is string => path !== null);
+      const instructions = await configFiles(home, instructionPaths);
+      const selectedSkills = (await macSkills()).filter(skill => inCloud(skill.name));
+      const skillEntries = await Promise.all(selectedSkills.map(async skill => ({ name: skill.name, ...(await configFiles(home, skill.paths)) })));
+      const unreadable: string[] = [];
+      const oversized: string[] = [];
+      if (instructions.skipped > 0) unreadable.push("instruction files");
+      for (const entry of skillEntries) if (entry.skipped > 0) unreadable.push(entry.name);
+      // Drop the largest skills first when uncompressed size would exceed tar's capture buffer (#214).
+      let keptSkills = skillEntries.filter(entry => entry.files.length > 0);
+      let totalBytes = instructions.bytes + keptSkills.reduce((sum, entry) => sum + entry.bytes, 0);
+      if (totalBytes > CONFIG_TAR_BUDGET) {
+        const dropped = new Set<string>();
+        for (const entry of [...keptSkills].sort((a, b) => b.bytes - a.bytes)) {
+          if (totalBytes <= CONFIG_TAR_BUDGET) break;
+          dropped.add(entry.name);
+          oversized.push(entry.name);
+          totalBytes -= entry.bytes;
+        }
+        keptSkills = keptSkills.filter(entry => !dropped.has(entry.name));
+      }
+      return { instructions, keptSkills, totalBytes, unreadable, oversized };
+    };
+    type Picked = Awaited<ReturnType<typeof collect>>;
+    const filesOf = (p: Picked) => [...p.keptSkills.flatMap(entry => entry.files), ...p.instructions.files];
+    const packAndFit = async (p: Picked): Promise<{ tar: Buffer; body: Buffer<ArrayBuffer> }> => {
+      const tar = await packConfigTar(home, filesOf(p));
+      const body = gzipSync(tar);
+      if (body.length <= CONFIG_LIMIT || !p.keptSkills.length) return { tar, body };
+      // Trim the largest skills in one pass using the observed compression ratio, then fall back to instructions alone if still over limit.
+      const target = Math.floor(p.instructions.bytes + Math.max(0, p.totalBytes - p.instructions.bytes) * ((CONFIG_LIMIT * 0.85) / body.length));
+      const dropped = new Set<string>();
+      let remaining = p.totalBytes;
+      for (const entry of [...p.keptSkills].sort((a, b) => b.bytes - a.bytes)) {
+        if (remaining <= target && dropped.size > 0) break;
+        dropped.add(entry.name);
+        p.oversized.push(entry.name);
+        remaining -= entry.bytes;
+      }
+      p.keptSkills = p.keptSkills.filter(entry => !dropped.has(entry.name));
+      const trimmedFiles = filesOf(p);
+      if (!trimmedFiles.length) throw new CloudroomError(summarizeConfigIssue({ fallbackReason: null, oversized: p.oversized, unreadable: p.unreadable, copiedAny: false })!);
+      const trimmedTar = await packConfigTar(home, trimmedFiles);
+      const trimmedBody = gzipSync(trimmedTar);
+      if (trimmedBody.length <= CONFIG_LIMIT || !p.keptSkills.length) return { tar: trimmedTar, body: trimmedBody };
+      for (const entry of p.keptSkills) p.oversized.push(entry.name);
+      p.keptSkills = [];
+      if (!p.instructions.files.length) throw new CloudroomError(summarizeConfigIssue({ fallbackReason: null, oversized: p.oversized, unreadable: p.unreadable, copiedAny: false })!);
+      const onlyTar = await packConfigTar(home, p.instructions.files);
+      return { tar: onlyTar, body: gzipSync(onlyTar) };
+    };
+
+    let picked = await collect();
+    let files = filesOf(picked);
+    if (!files.length) {
+      const issue = summarizeConfigIssue({ fallbackReason: null, oversized: picked.oversized, unreadable: picked.unreadable, copiedAny: false });
+      if (issue) throw new CloudroomError(issue);
+      // A computer with no skills or instructions never replaces the account's bundle on its own (#237); only a Settings change may empty it.
+      if (!force) { this.configIssue = null; return; }
+    }
+
+    let tar: Buffer;
+    let body: Buffer<ArrayBuffer>;
+    let fallbackReason: string | null = null;
+    try {
+      ({ tar, body } = await packAndFit(picked));
+    } catch (firstError) {
+      if (firstError instanceof ConfigTarError && firstError.transient) throw firstError;
+      // Re-scan once to survive a file edited or removed mid-tar before falling back to global instructions only.
+      picked = await collect();
+      files = filesOf(picked);
+      if (!files.length) {
+        const issue = summarizeConfigIssue({ fallbackReason: null, oversized: picked.oversized, unreadable: picked.unreadable, copiedAny: false });
+        if (issue) throw new CloudroomError(issue);
+        throw firstError;
+      }
+      try {
+        ({ tar, body } = await packAndFit(picked));
+      } catch (error) {
+        if (error instanceof ConfigTarError && error.transient) throw error;
+        if (!picked.keptSkills.length || !picked.instructions.files.length) throw error;
+        fallbackReason = error instanceof Error ? error.message : String(error);
+        tar = await packConfigTar(home, picked.instructions.files);
+        body = gzipSync(tar);
+      }
+    }
+
+    if (body.length > CONFIG_LIMIT) {
+      throw new CloudroomError(`Your skills are too large to copy to cloud sandboxes (${(body.length / 1024 / 1024).toFixed(1)} MB compressed, ${Math.round(CONFIG_LIMIT / 1024 / 1024)} MB limit).`);
+    }
+    const issue = summarizeConfigIssue({ fallbackReason, oversized: picked.oversized, unreadable: picked.unreadable, copiedAny: true });
+    const prevIssue = this.configIssue;
     const digest = contentDigest(tar);
-    if (digest === this.configDigest) { this.configIssue = null; return; }
-    const body = gzipSync(tar);
-    if (body.length > CONFIG_LIMIT) throw new CloudroomError("Your skills are too large to copy to cloud sandboxes.");
+    if (digest === this.configDigest) {
+      this.configIssue = issue;
+      if (issue && issue !== prevIssue) throw new CloudroomError(issue);
+      return;
+    }
     const { url } = z.object({ url: z.string().url() }).parse(await this.call({ action: "upload" }, "config"));
     const response = await fetch(url, { method: "PUT", redirect: "error", headers: { "Content-Type": "application/gzip", "x-upsert": "true" }, body, signal: AbortSignal.timeout(120_000) });
     if (!response.ok) throw new CloudroomError(`Your skills could not be copied to cloud sandboxes (HTTP ${response.status}).`);
     this.configDigest = digest;
-    this.configIssue = null;
+    this.configIssue = issue;
     // Awake sandboxes get the change now; sleeping ones apply it when they wake.
     await this.call({ action: "push" }, "config").catch((error: unknown) => {
       throw new CloudroomError(`Your skills were saved, but awake sandboxes could not get them yet: ${error instanceof Error ? error.message : String(error)}`);
     });
+    if (issue && issue !== prevIssue) throw new CloudroomError(issue);
   }
 }

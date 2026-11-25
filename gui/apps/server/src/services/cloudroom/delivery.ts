@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import { cloudroomCommands } from "@cloudroom/db";
-import { cloudLoginProvider, COMPUTER, type PromptInput } from "@cloudroom/domain";
+import { cloudLoginProvider, COMPUTER, PERSONAL_PROJECT_ID, type PromptInput } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import type { CloudAccountAuth } from "./account-auth.js";
 import { antigravitySignInRequired, CloudroomClient, CloudroomError } from "./client.js";
@@ -14,7 +14,7 @@ import { macHarnessVersions } from "./harness-versions.js";
 import type { CloudLifecycle } from "./lifecycle.js";
 import type { CloudMessaging } from "./messaging.js";
 import { helperDevice } from "./previews.js";
-import { copyKey, localFilesNote, localProjectPath, planNewProjectCopy, reportProjectCopy, writeFilesState } from "./project-copy.js";
+import { copyKey, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, reportProjectCopy, workspaceId, workspaceName, writeFilesState } from "./project-copy.js";
 import { syncLoopEnv } from "./project-loops.js";
 import {
   capabilitiesSchema,
@@ -33,11 +33,13 @@ import {
   roomIds,
   ROOT_WORKSPACE,
   sandboxTransition,
+  sessionNotFound,
   slowSandbox,
   STALE_REWAKES,
   staleSandboxAddress,
   unreachableSandbox,
   unsentWork,
+  WEBSITE_CHILD,
   type Capabilities,
 } from "./protocol.js";
 import type { CloudQueue } from "./queue.js";
@@ -242,6 +244,7 @@ export class CloudDelivery {
       if (!cached) await this.rt.rememberCapabilities(capabilities, Boolean(sandbox));
       // Tells the sandbox which Mac uses this thread, the only one a sleeping Mac's pairing may move to (#608).
       if (sandbox && capabilities.mac_device) client.macDevice = await helperDevice(this.rt.host.deps) ?? undefined;
+      let recovered = false;
       if (!saved.sessionId) {
         const started = await this.ensureSession(threadId, saved, client, capabilities, sandbox, ctx);
         if (!started) return;
@@ -249,15 +252,57 @@ export class CloudDelivery {
       }
       if (epoch !== this.rt.epoch) return;
       this.stream.follow(saved, client);
-      const flushed = await this.flushOutbox(threadId, saved, client, capabilities, sandbox, epoch, ctx);
+      let flushed: number;
+      try {
+        flushed = await this.flushOutbox(threadId, saved, client, capabilities, sandbox, epoch, ctx);
+      } catch (error) {
+        if (sandbox !== threadId || !saved.sessionId || !sessionNotFound(error)) throw error;
+        const fresh = await this.recoverMissingSession(threadId, saved, client, capabilities, sandbox, epoch, ctx);
+        if (!fresh) throw error;
+        saved = fresh;
+        recovered = true;
+        if (epoch !== this.rt.epoch) return;
+        this.stream.follow(saved, client);
+        flushed = await this.flushOutbox(threadId, saved, client, capabilities, sandbox, epoch, ctx, true);
+      }
       if (epoch !== this.rt.epoch) return;
       this.rt.setConnectionIssue(threadId, "delivery");
       this.rt.state(threadId).rewoken = 0;
-      if (flushed > 0) this.rt.notify(threadId);
+      if (flushed > 0 || recovered) this.rt.notify(threadId);
     } catch (error) {
       if (epoch !== this.rt.epoch) return;
       this.handleDeliveryError(threadId, saved, error, ctx);
     } finally { ctx.releaseCopy?.(); }
+  }
+
+  /** When a thread's own sandbox woke fresh without its old Core session (e.g. archived loop/subagent whose R2 backup
+   *  was skipped or pruned), verify Core genuinely lacks that session, reset the stale binding, and start a fresh one
+   *  while preserving all earlier timeline history. */
+  private async recoverMissingSession(
+    threadId: string,
+    saved: Binding,
+    client: CloudroomClient,
+    capabilities: Capabilities,
+    sandbox: string,
+    epoch: number,
+    ctx: { deliveringCommand: boolean; step: string; releaseCopy?: () => void },
+  ): Promise<Binding | null> {
+    const oldSession = saved.sessionId;
+    if (!oldSession) return null;
+    const { sessions } = await client.listSessions();
+    if (epoch !== this.rt.epoch || sessions.some((item) => item.session_id === oldSession)) return null;
+    this.rt.detach(threadId);
+    this.rt.setConnectionIssue(threadId, "stream");
+    const startRequestId = `${saved.startRequestId?.startsWith(WEBSITE_CHILD) ? WEBSITE_CHILD : ""}${randomUUID()}`;
+    this.rt.host.db.transaction((tx) => {
+      saveBinding(tx, threadId, { sessionId: null, startRequestId, cursor: 0, nativeId: null, turnId: null, error: null });
+      this.rt.host.markInstructionsLost(tx, threadId);
+    });
+    const known = this.rt.threadStates.get(threadId);
+    this.rt.threadStates.set(threadId, { home: null, from: null, ...known, session: "", actFrom: 0, history: undefined, before: [oldSession, ...known?.before ?? []].slice(0, 5) });
+    const reset = binding(this.rt.host.db, threadId);
+    if (!reset) return null;
+    return this.ensureSession(threadId, reset, client, capabilities, sandbox, ctx, true);
   }
 
   private async ensureSession(
@@ -267,6 +312,7 @@ export class CloudDelivery {
     capabilities: Capabilities,
     sandbox: string | null,
     ctx: { deliveringCommand: boolean; step: string; releaseCopy?: () => void },
+    recovery = false,
   ): Promise<Binding | null> {
     if (this.messaging.mustNotStart(threadId)) return null;
     ctx.deliveringCommand = true;
@@ -274,10 +320,26 @@ export class CloudDelivery {
     const thread = this.rt.host.getThread(threadId);
     const harness = thread?.providerId;
     if (!isCloudProvider(harness)) throw new ApiError(409, "cloudroom_harness", "Unsupported cloud harness; native execution is blocked.");
-    this.messaging.progress(threadId, [cloudStep(Boolean(sandbox), "completed"), { key: "agent", text: `Starting ${HARNESS_NAMES[harness]}`, status: "started" }]);
-    const { model, provider } = coreModel(harness, saved.model, capabilities);
     const initial = command(this.rt.host.db, `first_${threadId}`);
+    // Recovering a thread whose previous session vanished on a fresh sandbox: never re-run old fork/side-chat/code_from,
+    // and fall back to the thread's current project & settings when there is no local first command (e.g. adopted loops).
+    const recovering = recovery || !initial || (initial.command === "prompt" && initial.state !== "sending");
+    if (!recovering) this.messaging.progress(threadId, [cloudStep(Boolean(sandbox), "completed"), { key: "agent", text: `Starting ${HARNESS_NAMES[harness]}`, status: "started" }]);
+    const { model, provider } = coreModel(harness, saved.model, capabilities);
     const options = initial ? z.object({ workspace: z.string().optional(), workspace_name: z.string().optional(), provider: z.string().optional(), command_guard_enabled: z.boolean().optional(), strip_ai_co_authors: z.boolean().optional(), system_prompt: z.string().optional() }).parse(JSON.parse(initial.input)) : {};
+    if (recovering && thread) {
+      const project = this.rt.host.getProject(thread.projectId);
+      if (!options.workspace && project) {
+        Object.assign(options, project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) });
+      }
+      const settings = this.rt.host.getAppSettings();
+      options.command_guard_enabled ??= settings.commandGuardEnabled;
+      options.strip_ai_co_authors ??= settings.stripAiCoAuthorsEnabled;
+      if (!options.system_prompt) {
+        const projectNote = project && project.id !== PERSONAL_PROJECT_ID ? await localProjectNote(this.rt.host.deps, project.id) : undefined;
+        options.system_prompt = this.rt.host.buildSystemPrompt(threadId, thread.projectId, this.rt.sandboxes.vpsConnected, projectNote);
+      }
+    }
     if (!capabilities.command_guard) delete options.command_guard_enabled;
     if (!capabilities.strip_ai_co_authors) delete options.strip_ai_co_authors;
     if (!capabilities.system_prompt) delete options.system_prompt;
@@ -285,9 +347,9 @@ export class CloudDelivery {
     if (options.workspace === ROOT_WORKSPACE && !capabilities.root_workspace) throw new ApiError(503, "cloudroom_update", "Update the cloud core to start agents outside a project. Your message is saved.");
     if (harness === "codex" && capabilities.codex_auth_import && !sandbox) await importCodexLogin(this.rt.host.deps);
     if (harness === "pi") await this.auth.copyPiSetup(client, Boolean(sandbox));
-    const fork = cloudForkOf(initial?.input);
-    const sideChat = initial?.command === "side_chat" ? z.object({ side_chat: z.string() }).parse(JSON.parse(initial.input)).side_chat : null;
-    const codeFrom = codeFromOf(initial?.input);
+    const fork = recovering ? null : cloudForkOf(initial?.input);
+    const sideChat = !recovering && initial?.command === "side_chat" ? z.object({ side_chat: z.string() }).parse(JSON.parse(initial.input)).side_chat : null;
+    const codeFrom = recovering ? undefined : codeFromOf(initial?.input);
     // A Cloud parent's child reports its own turns, and takes tell, stop and archive, through the website (ADR 0259).
     // Only a parent with a sandbox of its own has a link there; children of one sharing a sandbox keep the app's path.
     const relayed = Boolean(codeFrom && this.rt.host.getThread(threadId)?.parentThreadId === codeFrom && capabilities.relay && binding(this.rt.host.db, codeFrom)?.coreUrl === SANDBOX_PREFIX + codeFrom);
@@ -297,7 +359,7 @@ export class CloudDelivery {
     const parentThread = relayed ? { parent_thread: codeFrom } : {};
     const target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
     if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
-    const plan = { key: copyKey(sandbox, target ?? ""), branch: baseBranch(initial?.input) };
+    const plan = { key: copyKey(sandbox, target ?? ""), branch: recovering ? undefined : baseBranch(initial?.input) };
     // The project's loops get its current .env files (ADR 20261101-004659).
     if (target) syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
     const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
@@ -318,7 +380,7 @@ export class CloudDelivery {
               const latest = command(this.rt.host.db, `first_${threadId}`)!;
               this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
             })
-          : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) }).then((accepted) => {
+          : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: !recovering && initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) }).then((accepted) => {
               const transfer = `child_${threadId}`;
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
             }),
@@ -354,7 +416,7 @@ export class CloudDelivery {
     const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace(/^https:\/\/(?:github\.com\/)?/, "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
     const files: StartStep[] = copying ? [{ key: "files", text: copying, status: "started" }] : [];
     const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
-    this.messaging.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
+    if (!recovering) this.messaging.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
     const firstSent = new Promise<void>((resolve) => { ctx.releaseCopy = resolve; });
     ctx.step = "workspace";
     const entry = this.rt.state(threadId);
@@ -383,6 +445,11 @@ export class CloudDelivery {
       throw new ApiError(400, "cloudroom_files", `Cloudroom could not prepare the project folder: ${error instanceof Error ? error.message : String(error)}`);
     });
     saveBinding(this.rt.host.db, threadId, { sessionId: started.sessionId, error: null });
+    if (recovering) {
+      const prev = this.rt.threadStates.get(threadId);
+      this.rt.threadStates.set(threadId, { home: null, from: null, ...prev, session: started.sessionId, actFrom: 0, history: undefined });
+      this.children.syncLabel(threadId, "switch");
+    }
     entry.refusedSince = undefined;
     const updated = binding(this.rt.host.db, threadId)!;
     const landed = this.transfers.landing(threadId, client, started, files.length > 0, workspace, workspace ? Promise.resolve() : null);
@@ -401,6 +468,7 @@ export class CloudDelivery {
     sandbox: string | null,
     epoch: number,
     ctx: { deliveringCommand: boolean; rejectedCommand: boolean; step: string },
+    recovered = false,
   ): Promise<number> {
     const sessionId = saved.sessionId!, harness = this.rt.host.getThread(threadId)?.providerId;
     // Queue deletes go first, so a message that can't be sent yet never holds one back.
@@ -414,10 +482,12 @@ export class CloudDelivery {
       if (pending.command === "prompt" && unsentDeletes(this.rt.host.db, threadId).has(pending.id)) continue;
       ctx.deliveringCommand = true;
       try {
-        const result = await this.dispatchCommand(threadId, saved, sessionId, harness, client, capabilities, sandbox, pending);
+        const result = await this.dispatchCommand(threadId, saved, sessionId, harness, client, capabilities, sandbox, pending, recovered);
         if (result && command(this.rt.host.db, pending.id)?.state === "sending") saveCommandState(this.rt.host.db, threadId, pending.id, result.receipt.state);
         if (result && pending.command === "prompt") void this.statusPreviews.rememberCloudMessage(sessionId, pending.id, epoch).catch(() => {});
       } catch (error) {
+        // Keep pending prompts unsent so deliverPending can start a fresh session when a pruned sandbox lacks the old one.
+        if (!recovered && sandbox === threadId && sessionNotFound(error) && commands(this.rt.host.db, threadId, "sending").some((c) => c.command === "prompt")) throw error;
         const action = await this.handleCommandRefusal(threadId, saved, pending, error, ctx);
         if (action === "return") return 0;
         if (action === "continue") continue;
@@ -436,6 +506,7 @@ export class CloudDelivery {
     capabilities: Capabilities,
     sandbox: string | null,
     pending: Command,
+    recovered = false,
   ) {
     if (pending.command === "title") {
       const thread = this.rt.host.getThread(threadId);
@@ -481,8 +552,8 @@ export class CloudDelivery {
       const fork = pending.id === `first_${threadId}` ? cloudForkOf(pending.input) : null;
       const child = pending.id === `first_${threadId}` && Boolean(JSON.parse(pending.input).code_from);
       let context = parsed.workspaceContext;
-      if (context === undefined) {
-        const copying = pending.id === `first_${threadId}` && ["cloning", "uploading", "waiting"].includes(projectCopyProgress(this.rt.host.db, threadId)?.phase ?? "");
+      if (context === undefined || (recovered && !context)) {
+        const copying = (pending.id === `first_${threadId}` || recovered) && ["cloning", "uploading", "waiting"].includes(projectCopyProgress(this.rt.host.db, threadId)?.phase ?? "");
         const hint = fork || (child && this.rt.host.getThread(threadId)?.originKind === "fork") ? FORK_HINT : child ? CHILD_HINT : copying ? `[Cloud workspace context]\nThis project is new on the VM. Cloudroom is copying its files into this folder right now: a GitHub clone or an upload from the user's ${COMPUTER}, plus uncommitted edits and .env files. Run \`room-cli files wait\` before you rely on them; it returns once they land, or says why they won't. Never recreate missing files or instructions such as AGENTS.md.` : null;
         context = this.promptContext(threadId, saved.coreUrl, capabilities, parsed.text, enriched.text, hint);
         this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(pending.input), workspaceContext: context }) }).where(eq(cloudroomCommands.id, pending.id)).run();

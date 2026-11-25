@@ -7,6 +7,7 @@ import {
   PHONE_SESSION_HEADER,
   RELAY_SIGNAL_HEADER,
   SESSION_COOKIE,
+  SESSION_REVOKED_HEADER,
   TUNNEL_MACHINE_HEADER,
   TUNNEL_SESSION_HEADER,
   TUNNEL_TARGET_HEADER,
@@ -18,16 +19,23 @@ import {
   SESSION_TTL_MS,
   accountHandles,
   accountServers,
+  beginRevokeAllSessions,
+  beginRevokeSession,
   codeHandle,
+  completeRevokeSessions,
   createMacSession,
   createMachine,
   createPhoneCode,
   createPhoneSession,
   createShareCode,
   deleteMachine,
+  deviceLabelFromUserAgent,
+  endSession,
   formatCode,
   hasPhone,
+  listSessions,
   machineByCredential,
+  markSessionSeenByHash,
   newHandle,
   normalizeCode,
   phoneUser,
@@ -35,12 +43,13 @@ import {
   redeemCode,
   registerServer,
   registerVps,
+  retireAccountMacs,
+  retireKey,
   retireServer,
-  revokeSessions,
   serverByCredential,
   serverByHandle,
   serverById,
-  sessionByToken,
+  sessionLookup,
   setServerName,
   sha256Hex,
   type Server,
@@ -66,7 +75,10 @@ const INSTALL_FILES = new Map([
 ]);
 /** The only Mac headers a download keeps, so no Mac can answer it with a web page or a cookie for cloudroom.run. */
 const INSTALL_HEADERS = new Set(["cache-control", "content-encoding", "content-length", "etag", "vary", "x-bb-artifact-sha256"]);
-const MAC_ONLY_CONNECT_RPCS = new Set(["relayCredential", "revokeMachine", "runSetupJob", "setupJobStatus", "macs"]);
+const MAC_ONLY_CONNECT_RPCS = new Set(["relayCredential", "revokeMachine", "remoteAccess", "runSetupJob", "setupJobStatus", "macs", "listSessions", "revokeSession", "signOutPhones"]);
+/** Phones never run Mac-to-Mac host setup jobs; only the desktop app's Mac-to-Mac session calls them. */
+const PHONE_REFUSED_CONNECT_RPCS = new Set(["runSetupJob", "setupJobStatus"]);
+const SESSION_ID = /^[a-f0-9-]{16,64}$/;
 const APP_HANDLE = "app";
 const LOGIN_TOKEN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const MAC_HEADER = "x-cloudroom-mac";
@@ -160,8 +172,27 @@ async function computers(request: Request, env: Env, self: Server): Promise<Resp
   });
 }
 
+function notifySessionConnected(
+  env: Env,
+  ctx: ExecutionContext,
+  handle: string,
+  info: { label: string; kind: "phone" | "mac"; at: number },
+): void {
+  ctx.waitUntil(
+    env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
+      .fetch(
+        new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/session-connected`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(info),
+        }),
+      )
+      .then((response) => response.body?.cancel(), () => {}),
+  );
+}
+
 /** Signs the caller in to another Mac on the same account. The desktop app installs the cookie and opens the Mac. */
-async function openComputer(request: Request, env: Env, self: Server): Promise<Response> {
+async function openComputer(request: Request, env: Env, ctx: ExecutionContext, self: Server): Promise<Response> {
   const handle = (await readJson(request)).handle;
   const target = typeof handle === "string" && HANDLE.test(handle) ? await serverByHandle(env.DB, handle, true) : null;
   // Only Macs: a remote host's or VPS's address serves no app, so a sign-in there would only add a row.
@@ -171,7 +202,10 @@ async function openComputer(request: Request, env: Env, self: Server): Promise<R
   if (!(await isOnline(env, target.handle))) return json({ error: "That Mac is offline.", offline: true }, 409);
   const origin = `https://${target.handle}.${env.BASE_DOMAIN}`;
   const expiresAt = Date.now() + DESKTOP_SESSION_TTL_MS;
-  const value = await createMacSession(env.DB, target.id);
+  const label = self.name ?? "Mac";
+  const value = await createMacSession(env.DB, target.id, self, label);
+  if (value === null) return json({ error: "Unknown Mac." }, 401);
+  notifySessionConnected(env, ctx, target.handle, { label, kind: "mac", at: Date.now() });
   return json({ url: origin, cookie: { name: SESSION_COOKIE, value, expiresAt } });
 }
 
@@ -261,10 +295,27 @@ function isHostManagement(method: string, pathname: string): boolean {
   if (method === "POST" && (pathname === "/internal/hosts/enroll-key" || pathname === "/api/v1/hosts/join-codes")) {
     return true;
   }
+  if (method === "PUT" && pathname === "/api/v1/settings/general") return true;
   const connectRpc = /^\/api\/v1\/plugins\/connect\/rpc\/([^/]+)$/u.exec(pathname)?.[1];
   if (method === "POST" && connectRpc !== undefined && MAC_ONLY_CONNECT_RPCS.has(connectRpc)) return true;
   if (method === "PATCH" && /^\/api\/v1\/hosts\/[^/]+\/permission-ceiling$/u.test(pathname)) return true;
   return (method === "PATCH" || method === "DELETE") && /^\/api\/v1\/hosts\/[^/]+$/u.test(pathname);
+}
+
+/** Phones never set up another Mac to run threads; only the desktop app's Mac-to-Mac session does. */
+function isPhoneRefused(method: string, pathname: string): boolean {
+  if (method !== "POST") return false;
+  const path = decodedPath(pathname);
+  if (path === null) return true;
+  const rpc = /^\/api\/v1\/plugins\/connect\/rpc\/([^/]+)\/?$/u.exec(path)?.[1];
+  return rpc !== undefined && PHONE_REFUSED_CONNECT_RPCS.has(rpc);
+}
+
+function withRevokedSession(response: Response): Response {
+  const marked = new Response(response.body, response);
+  marked.headers.set(SESSION_REVOKED_HEADER, "1");
+  marked.headers.append("set-cookie", `${SESSION_COOKIE}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+  return marked;
 }
 
 export function returnUrl(origin: string, value: string | null): string {
@@ -285,6 +336,21 @@ function homeCookie(handle: string | null): string {
   return `${HOME_COOKIE}=${handle ?? ""}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${handle === null ? 0 : SESSION_TTL_MS / 1000}`;
 }
 
+/** Whose sign-in the website says `authorization` is: the account, 401 or 403 when it refuses it, null when unsure. */
+async function websiteUser(env: Env, path: string, authorization: string): Promise<string | 401 | 403 | null> {
+  const verified = await fetch(`${new URL(env.WEBSITE_URL).origin}${path}`, {
+    method: "POST",
+    headers: { authorization },
+    redirect: "manual",
+  }).catch(() => null);
+  if (verified?.status === 401) return 401;
+  if (verified?.status === 403) return 403;
+  const userId = verified?.ok
+    ? ((await verified.json().catch(() => null)) as { userId?: unknown } | null)?.userId
+    : undefined;
+  return typeof userId === "string" && userId ? userId : null;
+}
+
 async function register(request: Request, env: Env): Promise<Response> {
   const authorization = request.headers.get("authorization") ?? "";
   if (!/^Basic [A-Za-z0-9+/=]{1,2048}$/.test(authorization)) {
@@ -295,23 +361,18 @@ async function register(request: Request, env: Env): Promise<Response> {
   if (typeof installId !== "string" || !/^[a-f0-9]{32}$/.test(installId)) {
     return json({ error: "Invalid install ID." }, 400);
   }
-  const verified = await fetch(`${env.WEBSITE_URL}/api/desktop/connect`, {
-    method: "POST",
-    headers: { authorization },
-    redirect: "manual",
-  }).catch(() => null);
-  if (verified?.status === 401 || verified?.status === 403) {
-    return json({ error: "Cloudroom rejected this Mac's sign-in." }, 401);
-  }
-  const userId = verified?.ok
-    ? ((await verified.json().catch(() => null)) as { userId?: unknown } | null)?.userId
-    : undefined;
-  if (typeof userId !== "string" || !userId) {
-    return json({ error: "Cloudroom could not verify this Mac. Try again soon." }, 503);
-  }
+  const userId = await websiteUser(env, "/api/desktop/connect", authorization);
+  if (userId === 401 || userId === 403) return json({ error: "Cloudroom rejected this Mac's sign-in." }, 401);
+  if (userId === null) return json({ error: "Cloudroom could not verify this Mac. Try again soon." }, 503);
   const registered = await registerServer(env.DB, userId, installId);
   if (!registered) {
     return json({ error: `This account has the most Macs Cloudroom allows (${MACS_PER_ACCOUNT}). Contact support to remove old ones.` }, 409);
+  }
+  // A sign-in revoked while this ran (password reset, #1920) must not leave a working key, so it is checked again.
+  const again = await websiteUser(env, "/api/desktop/connect", authorization);
+  if (again !== userId) {
+    await retireKey(env.DB, registered.credential);
+    return again === 401 || again === 403 ? json({ error: "Cloudroom rejected this Mac's sign-in." }, 401) : json({ error: "Cloudroom could not verify this Mac. Try again soon." }, 503);
   }
   const { handle, credential } = registered;
   return json({ handle, credential, serverUrl: `https://${handle}.${env.BASE_DOMAIN}` });
@@ -337,7 +398,8 @@ async function cloud(request: Request, path: string, url: URL, env: Env, token: 
 /** Adds a remote host that runs threads for this Mac. Its daemon sends the credential to reach the Mac. */
 async function addMachine(request: Request, env: Env, owner: Server): Promise<Response> {
   const machine = await createMachine(env.DB, owner, computerName((await readJson(request)).name));
-  if (!machine) return json({ error: "machine_limit" }, 409);
+  if (machine.kind === "retired") return json({ error: "Unknown Mac." }, 401);
+  if (machine.kind === "limit") return json({ error: "machine_limit" }, 409);
   return json({
     machineId: machine.id,
     credential: machine.credential,
@@ -400,17 +462,48 @@ async function machineLabel(request: Request, env: Env): Promise<Response> {
   return json({ label: machine.handle });
 }
 
-/** Apps seen in this window get "threads changed"; older installs that never come back don't. */
-const SIGNAL_SEEN_MS = 30 * 86_400_000;
-/** The website says an account's Cloud threads changed (#237): each of its app computers online fetches them. Only
- *  the website may send it, with the shared secret; VPS hosts, remote hosts and phones never get it. */
-async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+/** The account a website call is about. Only the website may call, with the shared secret. */
+async function websiteAccount(request: Request, env: Env): Promise<string | Response> {
   const secret = env.CONNECT_SIGNAL_SECRET ?? "";
   const [given, wanted] = await Promise.all([sha256Hex(bearer(request)), sha256Hex(secret)]);
   if (!secret || given !== wanted) return json({ error: "Not allowed." }, 401);
   const body = (await request.json().catch(() => null)) as { user_id?: unknown } | null;
   const userId = typeof body?.user_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.user_id) ? body.user_id : null;
-  if (!userId) return json({ error: "Invalid account." }, 400);
+  return userId ?? json({ error: "Invalid account." }, 400);
+}
+
+/** Tells each Mac's relay object to `action` (revoke-visitors, close). False if one did not answer. */
+async function controlAll(env: Env, handles: string[], action: string): Promise<boolean> {
+  const done = await Promise.all(handles.map((handle) =>
+    env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
+      .fetch(new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/${action}`, { method: "POST" }))
+      .then((response) => response.ok, () => false),
+  ));
+  return !done.includes(false);
+}
+
+/** The website signed the account out everywhere (password reset, account deleted; #1920): its phones and codes go,
+ *  and its Mac keys retire, so an old key can't open its Macs. Safe to repeat. */
+export async function accountSignedOut(request: Request, env: Env): Promise<Response> {
+  const userId = await websiteAccount(request, env);
+  if (userId instanceof Response) return userId;
+  // Keys first, so a Mac can't make a new sign-in between the two.
+  const macs = await retireAccountMacs(env.DB, userId);
+  const { revoked, tokenHashes } = await beginRevokeAllSessions(env.DB, userId);
+  // Both always run: a phone stream that would not close must not keep every Mac's tunnel open.
+  const closed = await Promise.all([controlAll(env, await accountHandles(env.DB, userId), "revoke-visitors"), controlAll(env, macs, "close")]);
+  if (!closed.every(Boolean)) return json({ error: "Could not close connections. Try again." }, 503);
+  await completeRevokeSessions(env.DB, tokenHashes);
+  return json({ revoked });
+}
+
+/** Apps seen in this window get "threads changed"; older installs that never come back don't. */
+const SIGNAL_SEEN_MS = 30 * 86_400_000;
+/** The website says an account's Cloud threads changed (#237): each of its app computers online fetches them. Only
+ *  the website may send it, with the shared secret; VPS hosts, remote hosts and phones never get it. */
+async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const userId = await websiteAccount(request, env);
+  if (userId instanceof Response) return userId;
   ctx.waitUntil((async () => {
     const seen = Date.now() - SIGNAL_SEEN_MS;
     for (const server of await accountServers(env.DB, userId)) {
@@ -424,6 +517,7 @@ async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext)
 
 async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/threads-changed") return threadsChanged(request, env, ctx);
+  if (request.method === "POST" && url.pathname === "/api/account-signed-out") return accountSignedOut(request, env);
   if (request.method === "POST" && url.pathname === "/api/register") {
     return register(request, env);
   }
@@ -442,8 +536,38 @@ async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext)
     const server = await serverByCredential(env.DB, bearer(request));
     if (!server || server.ownerServerId !== null || server.vps) return json({ error: "Unknown Mac." }, 401);
     if (url.pathname === "/api/computers") return computers(request, env, server);
-    if (url.pathname === "/api/computers/open") return openComputer(request, env, server);
+    if (url.pathname === "/api/computers/open") return openComputer(request, env, ctx, server);
     if (url.pathname === "/api/phones") return json({ phone: await hasPhone(env.DB, server.userId) });
+    if (url.pathname === "/api/phone-sessions/list") {
+      return json({ sessions: await listSessions(env.DB, server.userId) });
+    }
+    if (url.pathname === "/api/phone-sessions/revoke-one") {
+      const sessionId = (await readJson(request)).sessionId;
+      if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) {
+        return json({ error: "Invalid sessionId." }, 400);
+      }
+      const { sessionIds, tokenHashes } = await beginRevokeSession(env.DB, server.userId, sessionId);
+      if (sessionIds.length > 0) {
+        const closed = await Promise.all(
+          (await accountHandles(env.DB, server.userId)).map((handle) =>
+            env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
+              .fetch(
+                new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/revoke-session`, {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  body: JSON.stringify({ sessionIds }),
+                }),
+              )
+              .then((response) => response.ok, () => false),
+          ),
+        );
+        if (closed.includes(false)) {
+          return json({ error: "Could not close that session's connections. Try again." }, 503);
+        }
+        await completeRevokeSessions(env.DB, tokenHashes);
+      }
+      return json({ revoked: sessionIds.length > 0 });
+    }
     if (url.pathname === "/api/machines") return addMachine(request, env, server);
     if (url.pathname === "/api/machines/revoke") return removeMachine(request, env, server);
     if (url.pathname === "/api/unregister") {
@@ -451,7 +575,9 @@ async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext)
       return json({ ok: true });
     }
     if (url.pathname === "/api/phone-code") {
-      const { code, expiresAt } = await createPhoneCode(env.DB, server);
+      const created = await createPhoneCode(env.DB, server);
+      if (!created) return json({ error: "Unknown Mac." }, 401);
+      const { code, expiresAt } = created;
       const formatted = formatCode(code);
       return json({
         code: formatted,
@@ -460,17 +586,11 @@ async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext)
       });
     }
     if (url.pathname === "/api/phone-sessions/revoke") {
-      const revoked = await revokeSessions(env.DB, server.userId);
-      const closed = await Promise.all(
-        (await accountHandles(env.DB, server.userId)).map((handle) =>
-          env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
-            .fetch(new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/revoke-visitors`, { method: "POST" }))
-            .then((response) => response.ok, () => false),
-        ),
-      );
-      if (closed.includes(false)) {
+      const { revoked, tokenHashes } = await beginRevokeAllSessions(env.DB, server.userId);
+      if (!(await controlAll(env, await accountHandles(env.DB, server.userId), "revoke-visitors"))) {
         return json({ error: "Could not close phone connections. Try again." }, 503);
       }
+      await completeRevokeSessions(env.DB, tokenHashes);
       return json({ revoked });
     }
   }
@@ -548,7 +668,12 @@ async function visitor(
     }
     const forward = new URL(request.url);
     forward.searchParams.set("serverId", server.id);
-    return stub.fetch(new Request(forward, request));
+    const accepted = await stub.fetch(new Request(forward, request));
+    // A key retired between the check and the tunnel opening (#1920): the retire's close may have come first.
+    if ((await serverByHandle(env.DB, handle, true).catch(() => null))?.credentialHash !== server.credentialHash) {
+      await stub.fetch(new Request(`https://${server.handle}.${env.BASE_DOMAIN}/__control/close`, { method: "POST" })).catch(() => {});
+    }
+    return accepted;
   }
 
   // `/__` paths are the tunnel's own controls (close, revoke), never a sandbox's.
@@ -578,18 +703,24 @@ async function visitor(
 
   if (url.pathname === "/__pair") {
     const code = normalizeCode(url.searchParams.get("code") ?? "");
-    const token = code === null ? null : await redeemCode(env.DB, code, server, target);
+    const label = target === null ? deviceLabelFromUserAgent(request.headers.get("user-agent"), "Phone") : null;
+    const token = code === null ? null : await redeemCode(env.DB, code, server, target, label);
     if (token === null) {
       return target === null
         ? codePage("/__pair", WRONG_CODE)
         : messagePage("Link expired", "Open the link again.", 400);
+    }
+    if (target === null && label !== null) {
+      notifySessionConnected(env, ctx, server.handle, { label, kind: "phone", at: Date.now() });
     }
     return redirect(returnUrl(serverOrigin(server, target, env), url.searchParams.get("return")), sessionCookie(token));
   }
 
   const token = sessionToken(request);
   trace.stage = "session lookup";
-  const session: Session | null = token ? await sessionByToken(env.DB, token) : null;
+  const lookup = token ? await sessionLookup(env.DB, token) : { status: "missing" as const };
+  const session: Session | null = lookup.status === "active" ? lookup.session : null;
+  const sessionRevoked = lookup.status === "revoked";
   trace.stage = "mac";
   const signedIn = session?.serverId === server.id && session.target === target;
 
@@ -597,16 +728,27 @@ async function visitor(
   if (server.ownerServerId !== null) {
     if (target === null || url.pathname.startsWith("/__")) return text("Not found\n", 404);
     if (!signedIn) {
-      if (request.method !== "GET" || !wantsHtml(request)) return text("Sign in required\n", 401);
+      if (request.method !== "GET" || !wantsHtml(request)) {
+        const denied = text("Sign in required\n", 401);
+        return sessionRevoked ? withRevokedSession(denied) : denied;
+      }
       const owner = await serverById(env.DB, server.ownerServerId);
       if (!owner) return text("Not found\n", 404);
-      return redirect(shareHop(owner, target, url.pathname + url.search, env, server.handle));
+      const hop = redirect(shareHop(owner, target, url.pathname + url.search, env, server.handle));
+      return sessionRevoked ? withRevokedSession(hop) : hop;
     }
+  }
+
+  if (signedIn && session && target === null) {
+    ctx.waitUntil(markSessionSeenByHash(env.DB, session.tokenHash).catch(() => {}));
   }
 
   const cloudPath = CLOUD_PATH.exec(url.pathname)?.[1];
   if (cloudPath !== undefined) {
-    if (!signedIn || target !== null || !token) return json({ error: "Sign in required." }, 401);
+    if (!signedIn || target !== null || !token) {
+      const denied = json({ error: "Sign in required." }, 401);
+      return sessionRevoked ? withRevokedSession(denied) : denied;
+    }
     return cloud(request, cloudPath, url, env, token);
   }
 
@@ -616,7 +758,8 @@ async function visitor(
       const next = new URL(`https://${APP_HANDLE}.${env.BASE_DOMAIN}/__share${url.search}`);
       next.searchParams.set("mac", server.handle);
       next.searchParams.set("signin", "1");
-      return redirect(next.toString());
+      const hop = redirect(next.toString());
+      return sessionRevoked ? withRevokedSession(hop) : hop;
     }
     return shareRedirect(env, server, url, token);
   }
@@ -625,11 +768,18 @@ async function visitor(
   if (!signedIn) {
     const file = target === null ? publicAppFile(request, url, env) : null;
     if (file) return file;
-    if (request.method !== "GET" || !wantsHtml(request)) return text("Sign in required\n", 401);
-    if (target === null) return codePage("/__pair");
-    return redirect(shareHop(server, target, url.pathname + url.search, env));
+    if (request.method !== "GET" || !wantsHtml(request)) {
+      const denied = text("Sign in required\n", 401);
+      return sessionRevoked ? withRevokedSession(denied) : denied;
+    }
+    if (target === null) {
+      const denied = codePage("/__pair");
+      return sessionRevoked ? withRevokedSession(denied) : denied;
+    }
+    const hop = redirect(shareHop(server, target, url.pathname + url.search, env));
+    return sessionRevoked ? withRevokedSession(hop) : hop;
   }
-  return forward(request, env, ctx, server, target);
+  return forward(request, env, ctx, server, target, session?.isPhone ?? false);
 }
 
 async function shareRedirect(env: Env, mac: Server, url: URL, token: string): Promise<Response> {
@@ -657,30 +807,51 @@ async function forward(
   ctx: ExecutionContext,
   server: Server,
   target: string | null,
+  isPhone = false,
 ): Promise<Response> {
+  const pathname = new URL(request.url).pathname;
+  if (isPhone && target === null && isPhoneRefused(request.method, pathname)) {
+    return text("Phones cannot run Mac setup jobs\n", 403);
+  }
   const stub = env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(server.handle));
   const doRequest = requestForTunnelDo(request, target);
   if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
     return callMac(stub, doRequest);
   }
-  const { response } = await serveWithCache(
-    request,
-    target === null ? server.handle : `${server.handle}--${target}`,
-    ctx,
-    (init) => {
-      if (init === undefined) return callMac(stub, doRequest);
-      const headers = new Headers(doRequest.headers);
-      headers.set("if-none-match", init.ifNoneMatch);
-      return callMac(stub, new Request(doRequest, { headers }));
-    },
-  );
+  const decoded = decodedPath(pathname);
+  // Only cache the Cloudroom app's own static assets and HTML shell — never API, internal, health, WS, or port shares.
+  const bypassCache =
+    target !== null ||
+    decoded === null ||
+    decoded === "/api" ||
+    decoded.startsWith("/api/") ||
+    decoded === "/internal" ||
+    decoded.startsWith("/internal/") ||
+    decoded === "/health" ||
+    decoded === "/ws" ||
+    decoded.startsWith("/ws/");
+  const response = bypassCache
+    ? await callMac(stub, doRequest)
+    : (
+        await serveWithCache(
+          request,
+          server.handle,
+          ctx,
+          (init) => {
+            if (init === undefined) return callMac(stub, doRequest);
+            const headers = new Headers(doRequest.headers);
+            headers.set("if-none-match", init.ifNoneMatch);
+            return callMac(stub, new Request(doRequest, { headers }));
+          },
+        )
+      ).response;
   const offline = response.status === 503 && response.headers.get(TUNNEL_OFFLINE_HEADER) === "1";
   if (response.status >= 502 && response.status <= 504) {
     console.log({
       event: "phone_request_failed",
       mac: server.handle,
       port: target,
-      path: new URL(request.url).pathname,
+      path: pathname,
       status: response.status,
       reason: offline ? "mac offline" : response.status === 504 ? "timed out" : "mac error",
     });
@@ -693,27 +864,17 @@ async function forward(
   return response;
 }
 
-async function signIn(request: Request, env: Env): Promise<Response> {
+async function signIn(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const website = new URL(env.WEBSITE_URL);
   const setup = `${website.origin}/m`;
   if (request.headers.get("origin") !== website.origin) return redirect(setup);
   const login = (await request.formData().catch(() => null))?.get("token");
   if (typeof login !== "string" || login.length > 8192 || !LOGIN_TOKEN.test(login)) return redirect(setup);
-  const verified = await fetch(`${website.origin}/api/connect/phone-sign-in`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${login}` },
-    redirect: "manual",
-  }).catch(() => null);
-  if (verified?.status === 401) return redirect(setup);
-  if (verified?.status === 403) {
-    return messagePage("No access yet", "This Cloudroom account can't use the app yet.", 403);
-  }
-  const userId = verified?.ok
-    ? ((await verified.json().catch(() => null)) as { userId?: unknown } | null)?.userId
-    : undefined;
-  if (typeof userId !== "string" || !userId) {
-    return messagePage("Try again", "Cloudroom could not check your sign-in. Try again soon.", 503);
-  }
+  const verify = () => websiteUser(env, "/api/connect/phone-sign-in", `Bearer ${login}`);
+  const userId = await verify();
+  if (userId === 401) return redirect(setup);
+  if (userId === 403) return messagePage("No access yet", "This Cloudroom account can't use the app yet.", 403);
+  if (userId === null) return messagePage("Try again", "Cloudroom could not check your sign-in. Try again soon.", 503);
   const [mac] = (await accountServers(env.DB, userId)).sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0));
   if (!mac) {
     return messagePage(
@@ -722,7 +883,14 @@ async function signIn(request: Request, env: Env): Promise<Response> {
       409,
     );
   }
-  const token = await createPhoneSession(env.DB, mac.id, userId);
+  const label = deviceLabelFromUserAgent(request.headers.get("user-agent"), "Phone");
+  const token = await createPhoneSession(env.DB, mac.id, userId, label);
+  // A login signed out while this ran (password reset, #1920) must not leave a session, so it is checked again.
+  if (token === null || (await verify()) !== userId) {
+    if (token !== null) await endSession(env.DB, token);
+    return redirect(setup);
+  }
+  notifySessionConnected(env, ctx, mac.handle, { label, kind: "phone", at: Date.now() });
   return redirect(
     shareReturn(readCookie(request.headers.get("cookie"), NEXT_COOKIE)),
     sessionCookie(token),
@@ -782,27 +950,36 @@ async function pageMac(request: Request, env: Env, token: string, picked: Server
 }
 
 async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
-  if (request.method === "POST" && url.pathname === "/__signin") return signIn(request, env);
+  if (request.method === "POST" && url.pathname === "/__signin") return signIn(request, env, ctx);
   const token = sessionToken(request);
-  const session = token ? await sessionByToken(env.DB, token) : null;
+  const lookup = token ? await sessionLookup(env.DB, token) : { status: "missing" as const };
+  const session = lookup.status === "active" ? lookup.session : null;
+  const sessionRevoked = lookup.status === "revoked";
   const picked = session?.userId && session.target === null ? await serverById(env.DB, session.serverId) : null;
   if (!token || !session?.userId || !picked || picked.userId !== session.userId) {
     const mac = url.searchParams.get("mac") ?? "";
     if (url.pathname === "/__share" && HANDLE.test(mac)) {
       if (url.searchParams.get("signin") !== "1") {
-        return redirect(`https://${mac}.${env.BASE_DOMAIN}/__share${url.search}`);
+        const hop = redirect(`https://${mac}.${env.BASE_DOMAIN}/__share${url.search}`);
+        return sessionRevoked ? withRevokedSession(hop) : hop;
       }
       url.searchParams.delete("signin");
-      return redirect(
+      const hop = redirect(
         `${new URL(env.WEBSITE_URL).origin}/m`,
         `${NEXT_COOKIE}=${encodeURIComponent(url.pathname + url.search)}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=900`,
       );
+      return sessionRevoked ? withRevokedSession(hop) : hop;
     }
     const file = publicAppFile(request, url, env);
     if (file) return file;
-    if (request.method !== "GET" || !wantsHtml(request)) return text("Sign in required\n", 401);
-    return redirect(`${new URL(env.WEBSITE_URL).origin}/m`);
+    if (request.method !== "GET" || !wantsHtml(request)) {
+      const denied = text("Sign in required\n", 401);
+      return sessionRevoked ? withRevokedSession(denied) : denied;
+    }
+    const hop = redirect(`${new URL(env.WEBSITE_URL).origin}/m`);
+    return sessionRevoked ? withRevokedSession(hop) : hop;
   }
+  ctx.waitUntil(markSessionSeenByHash(env.DB, session.tokenHash).catch(() => {}));
   if (request.method === "POST" && url.pathname === "/__mac") {
     return switchMac(request, url, env, token, session.userId);
   }
@@ -818,7 +995,7 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
   const { server, home } = request.method === "GET" && wantsHtml(request) ? await pageMac(request, env, token, picked) : { server: picked };
   const proxied =
     request.headers.get("origin") === url.origin ? withOrigin(request, serverOrigin(server, null, env)) : request;
-  const response = await forward(proxied, env, ctx, server, null);
+  const response = await forward(proxied, env, ctx, server, null, true);
   if (response.webSocket) return response;
   const scoped = new Response(response.body, response);
   scoped.headers.set(MAC_HEADER, server.handle);

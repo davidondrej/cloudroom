@@ -33,7 +33,7 @@ export function TryCloudHint({ draftLength, github, onUseCloud }: { draftLength:
   if (laptop.hint && !laptopSeen) setLaptopSeen(true);
   const [snoozed, setSnoozed] = useState(() => Date.now() - Number(localStorage.getItem(SHOWN_AT_KEY) ?? 0) < 3 * DAY);
   const lastCloudAt = connection?.lastCloudAt;
-  const show = !closed && !laptopSeen && !snoozed && draftLength >= MIN_DRAFT_LENGTH && connection?.ready === true && !connection.cloudQueue
+  const show = !closed && !laptopSeen && !snoozed && draftLength >= MIN_DRAFT_LENGTH && connection?.ready === true && !connection.cloudQueue && !connection.cloudCapacity
     && lastCloudAt !== undefined && (lastCloudAt === null || Date.now() - lastCloudAt > 2 * DAY);
   useEffect(() => {
     if (show || laptop.hint) localStorage.setItem(SHOWN_AT_KEY, String(Date.now()));

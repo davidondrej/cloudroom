@@ -165,6 +165,13 @@ fn note_try(m: &Manager, session: &str, request: &str, why: String) {
     }
 }
 
+/// Why the last try of the start `{session}/{request}` failed, while it is pending (`note_try`).
+pub(super) fn last_try(key: &str) -> Option<String> {
+    let last = LAST_TRY.lock().unwrap();
+    let (_, why) = last.iter().rfind(|(k, _)| k == key)?;
+    Some(why.clone())
+}
+
 /// How long this Core has repeated the start of `child` the website hasn't finished, and why it waits (#1957).
 pub(super) fn waiting_start(m: &Manager, parent: &str, child: &str) -> Option<String> {
     let (key, at) = {
@@ -180,13 +187,7 @@ pub(super) fn waiting_start(m: &Manager, parent: &str, child: &str) -> Option<St
     } else {
         String::new()
     };
-    let last = LAST_TRY
-        .lock()
-        .unwrap()
-        .iter()
-        .rfind(|(k, _)| *k == key)
-        .map(|(_, why)| why.clone());
-    let last = last.unwrap_or_else(|| "its sandbox is being set up".to_owned());
+    let last = last_try(&key).unwrap_or_else(|| "its sandbox is being set up".to_owned());
     Some(format!(
         "Cloudroom has been starting it{long} and keeps trying (last: {last})."
     ))

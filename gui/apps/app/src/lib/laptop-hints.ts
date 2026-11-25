@@ -151,7 +151,7 @@ export function useLaptopHint(place: LaptopPlace, { enabled, github = false, com
   const dropsAt = dropTimes.filter((at) => now - at < DROP_WINDOW);
   const drops = dropsAt.length;
   const online = typeof navigator === "undefined" || navigator.onLine;
-  const ready = !!vitals && enabled && !hidden && !!account && connection?.ready === true && !connection.cloudQueue
+  const ready = !!vitals && enabled && !hidden && !!account && connection?.ready === true && !connection.cloudQueue && !connection.cloudCapacity
     && connection.recentThreads !== undefined && !outOfCredits && (place === "new-thread" || connection.teleport);
   const mine = owner?.id === id ? owner.kind : null;
   const hint = ready && (!owner || mine) ? pickLaptopHint({ vitals, drops, online, place, github, recentThreads: connection.recentThreads ?? { local: 0, cloud: 0 }, threadId, working, shown: readShown(), active: mine, now }) : null;

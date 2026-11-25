@@ -38,7 +38,7 @@ import type {
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
+import remarkMath from "./markdown-math.js";
 import { ImageLightbox, getWrappedImageIndex } from "./image-lightbox.js";
 import { InlineImageGalleryContext } from "./inline-image-gallery-context.js";
 import { remarkLineBreaks } from "./markdown-line-breaks.js";

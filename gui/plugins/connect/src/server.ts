@@ -32,6 +32,13 @@ function recentlyRemote(status: TunnelStatus): boolean {
 
 export default async function plugin(room: BbPluginApi) {
   const settings = room.settings.define({
+    enabled: {
+      type: "boolean",
+      label: "Remote access",
+      description:
+        "Keep a private relay connection open so you can use Cloudroom from your phone or another computer, and share dev servers.",
+      default: true,
+    },
     sendRemoteInstructions: {
       type: "boolean",
       label: "Tell agents about remote access",
@@ -41,12 +48,16 @@ export default async function plugin(room: BbPluginApi) {
     },
   });
   let currentSettings = await settings.get();
-  settings.onChange((next) => {
-    currentSettings = next;
-  });
   let relay!: ConnectTunnel;
   let tunnelUp = false;
   let phone!: PhoneRelay;
+  settings.onChange((next) => {
+    const enabledChanged = next.enabled !== currentSettings.enabled;
+    currentSettings = next;
+    if (enabledChanged) {
+      void phone?.setEnabled(next.enabled);
+    }
+  });
   const credential = () => relay.getCredential();
   const hostResolver = new ShareHostResolver(() => room.sdk);
   const getLoopbackBaseUrl = () =>
@@ -57,7 +68,8 @@ export default async function plugin(room: BbPluginApi) {
 
   const status = (base: TunnelStatus = relay.status()): ConnectStatus => ({
     ...base,
-    lastError: base.lastError ?? phone?.error ?? null,
+    enabled: currentSettings.enabled,
+    lastError: currentSettings.enabled ? (base.lastError ?? phone?.error ?? null) : null,
     signedIn: phone?.signedIn ?? false,
   });
   const publish = () => room.realtime.publish(CONNECT_REALTIME_CHANNEL, status());
@@ -96,13 +108,13 @@ export default async function plugin(room: BbPluginApi) {
     },
     onCredentialRejected: () => void phone.check(true),
   });
-  phone = new PhoneRelay(room, relay, publish);
+  phone = new PhoneRelay(room, relay, publish, () => currentSettings.enabled);
   void room.storage.kv.delete(LEGACY_CREDENTIAL_KV_KEY).catch(() => {});
 
   const macs = registerMacs(room, phone);
   await registerServerAccess(room, {
     call: (path, body) => phone.call(path, body),
-    status: () => relay.status(),
+    status: () => status(),
   });
 
   room.rpc.register(
@@ -114,6 +126,13 @@ export default async function plugin(room: BbPluginApi) {
       hostResolver,
       listMacs: macs.list,
       setupJobs: new SetupJobs(),
+      remoteAccess: async (enabled) => {
+        if (enabled === undefined) return currentSettings.enabled;
+        const next = await settings.experimental_set({ enabled });
+        currentSettings = next;
+        await phone.setEnabled(next.enabled);
+        return next.enabled;
+      },
       remoteInstructions: async (enabled) =>
         enabled === undefined
           ? currentSettings.sendRemoteInstructions
@@ -124,7 +143,7 @@ export default async function plugin(room: BbPluginApi) {
   registerConnectCli({ bb: room, relay, phone, status, hostResolver });
 
   room.agents.contributeInstructions(() => {
-    if (!currentSettings.sendRemoteInstructions) return null;
+    if (!currentSettings.enabled || !currentSettings.sendRemoteInstructions) return null;
     const viewing = relay.status();
     if (!viewing.paired || viewing.url === null || !recentlyRemote(viewing)) return null;
     return (

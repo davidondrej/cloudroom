@@ -13,6 +13,17 @@ if (typeof Element !== "undefined" && !Element.prototype.scrollIntoView) {
   });
 }
 
+// Tiptap asks where text is on screen (placeholder, scroll into view); jsdom has no layout.
+if (typeof document !== "undefined" && !document.elementFromPoint) {
+  document.elementFromPoint = () => document.body;
+}
+if (typeof Range !== "undefined" && !Range.prototype.getClientRects) {
+  Object.defineProperties(Range.prototype, {
+    getClientRects: { configurable: true, value: () => [] },
+    getBoundingClientRect: { configurable: true, value: () => new DOMRect() },
+  });
+}
+
 if (typeof window !== "undefined" && !window.matchMedia) {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,

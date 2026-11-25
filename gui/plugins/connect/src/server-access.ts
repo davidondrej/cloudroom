@@ -23,7 +23,7 @@ const machineSchema = z.object({
 
 export interface RelayAccess {
   call(path: string, body: unknown): Promise<unknown>;
-  status(): { paired: boolean; url: string | null };
+  status(): { enabled?: boolean; paired: boolean; url: string | null };
 }
 
 export function createServerAccessRecheck(
@@ -69,7 +69,10 @@ export async function registerServerAccess(room: BbPluginApi, relay: RelayAccess
           }
         : {
             status: "setup-required",
-            message: `Sign in to Cloudroom so other machines can reach this ${COMPUTER}`,
+            message:
+              status.enabled === false
+                ? "Remote access is turned off in Settings → Cloudroom Connect"
+                : `Sign in to Cloudroom so other machines can reach this ${COMPUTER}`,
           };
     },
     acquire({ hostId, signal }) {

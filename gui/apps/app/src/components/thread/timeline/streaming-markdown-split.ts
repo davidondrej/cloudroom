@@ -1,4 +1,3 @@
-import remend from "remend";
 import { closeUnterminatedMarkdownCodeSpan } from "@cloudroom/client-core";
 import {
   closesAnyIndentMarkdownFence,
@@ -8,6 +7,7 @@ import {
   parseAnyIndentMarkdownFenceStart,
   type MarkdownFence,
 } from "@/components/ui/markdown-prompt-blockquote-boundaries";
+import { closeIncompleteMarkdown } from "./streaming-markdown-repair";
 
 interface StreamingMarkdownSplit {
   settled: string;
@@ -21,14 +21,7 @@ export function repairStreamingMarkdownTail(tail: string): string {
   if (STREAMING_MARKDOWN_BYPASS_PATTERN.test(tail)) {
     return tail;
   }
-  return remend(closeUnterminatedMarkdownCodeSpan(tail), {
-    linkMode: "text-only",
-    comparisonOperators: false,
-    htmlTags: false,
-    katex: false,
-    setextHeadings: false,
-    singleTilde: false,
-  });
+  return closeIncompleteMarkdown(closeUnterminatedMarkdownCodeSpan(tail));
 }
 
 const MATH_DELIMITER = "$$";

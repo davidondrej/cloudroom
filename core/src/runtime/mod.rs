@@ -454,14 +454,14 @@ pub type RoomEnv = Vec<(&'static str, String)>;
 
 /// A Git 2.54+ config hook that drops AI agent Co-authored-by lines from commit messages and says so on stderr.
 /// With a session folder, it strips only real repositories (#811): the session's own (any worktree, submodule, or
-/// git dir layout), `/repos/<name>`, or `<session>/<name>` when the session folder is no repository. Throwaway
-/// fixtures elsewhere, even nested inside the project, keep their trailers.
+/// git dir layout), `/repos/<owner>/<name>` (or the older `/repos/<name>`), or `<session>/<name>` when the session
+/// folder is no repository. Throwaway fixtures elsewhere, even nested inside the project, keep their trailers.
 fn strip_ai_co_authors_env(command: &mut Command, session: Option<&Path>) {
     const PATTERN: &str = "'^co-authored-by:.*(claude|anthropic|cursor|codex|openai|chatgpt|copilot|gemini|aider\\.chat|devin-ai|factory-droid|windsurf|codeium)'";
     let scope = session.map_or(String::new(), |session| {
         let session = format!("'{}'", session.to_string_lossy().replace('\'', r"'\''"));
         format!(
-            r#"g() ( cd "$1" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git rev-parse --path-format=absolute --git-common-dir ) 2>/dev/null; c=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0; s=$(g {session}); if [ "$c" != "$s" ]; then p=$(git rev-parse --show-superproject-working-tree 2>/dev/null); [ -n "$p" ] && c=$(g "$p"); fi; p=${{c%/.git}}; case "$c" in "$s") ;; */.git) [ "${{p%/*}}" = /repos ] || {{ [ -z "$s" ] && [ "${{p%/*}}" = "$(cd {session} && pwd -P)" ]; }} || return 0 ;; *) return 0 ;; esac; "#
+            r#"g() ( cd "$1" && env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git rev-parse --path-format=absolute --git-common-dir ) 2>/dev/null; c=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0; s=$(g {session}); if [ "$c" != "$s" ]; then p=$(git rev-parse --show-superproject-working-tree 2>/dev/null); [ -n "$p" ] && c=$(g "$p"); fi; p=${{c%/.git}}; case "$c" in "$s") ;; */.git) [ "${{p%/*}}" = /repos ] || {{ [ "${{p%/*/*}}" = /repos ] && [ ! -e "${{p%/*}}/.git" ]; }} || {{ [ -z "$s" ] && [ "${{p%/*}}" = "$(cd {session} && pwd -P)" ]; }} || return 0 ;; *) return 0 ;; esac; "#
         )
     });
     let hook = format!(

@@ -8,6 +8,7 @@ import {
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import {
   anchorPointFromMouseEvent,
+  createLiveSelectionRectReader,
   firstClientRect,
   selectionAnchorFromPointerRelease,
   type MessageProseSelection,
@@ -48,11 +49,24 @@ function capturePanelSelection(
   const range = sel.getRangeAt(0);
   if (!startedInside && !rangeIntersectsElement(range, container)) return null;
 
+  const common = range.commonAncestorContainer;
+  const commonElement =
+    common instanceof Element ? common : common.parentElement;
+  const anchorElement =
+    commonElement !== null && container.contains(commonElement)
+      ? commonElement
+      : container;
   const rect =
     firstClientRect(range) ??
     (anchor
       ? new DOMRect(anchor.point.x, anchor.point.y, 0, 0)
-      : container.getBoundingClientRect());
+      : anchorElement.getBoundingClientRect());
+  const getAnchorRect = createLiveSelectionRectReader({
+    anchor,
+    anchorElement,
+    range,
+    rect,
+  });
 
   return anchor
     ? {
@@ -61,8 +75,10 @@ function capturePanelSelection(
         rect,
         anchorPoint: anchor.point,
         anchorSide: anchor.side,
+        anchorElement,
+        getAnchorRect,
       }
-    : { text, copyText, rect };
+    : { text, copyText, rect, anchorElement, getAnchorRect };
 }
 
 export function SecondaryPanelSelectionActions({
@@ -148,7 +164,8 @@ export function SecondaryPanelSelectionActions({
       scheduleRead(trackingRef.current.lastAnchor);
     };
 
-    const onSelectionEvent = () => {
+    const onSelectionEvent = (event: Event) => {
+      if (event instanceof KeyboardEvent && event.key === "Escape") return;
       if (trackingRef.current.isPointerDown) return;
       scheduleRead(trackingRef.current.lastAnchor);
     };

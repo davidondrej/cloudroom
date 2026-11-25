@@ -229,18 +229,7 @@ function newestClaude(candidates: string[]): string | null {
   return best;
 }
 
-export function findCliExecutable(
-  cli: string,
-  env: NodeJS.ProcessEnv = process.env,
-): string | null {
-  // OpenAI's official Codex wins over PATH: it is the one copy we can always
-  // update, however tangled the Mac's npm or Homebrew copies are.
-  const official =
-    cli === "codex" && process.getuid?.() !== 0 ? officialCodexPaths(env) : [];
-  const candidates = withWindowsExtensions(
-    [...official, ...pathCandidates(cli, env), ...fallbackCandidates(cli, env)],
-    env,
-  );
+function selectCliCandidate(cli: string, candidates: string[]): string | null {
   const usable = (candidate: string) =>
     isExecutableFile(candidate) &&
     !(cli === "codex" && insideAppBundle(candidate)) &&
@@ -253,6 +242,32 @@ export function findCliExecutable(
       ? candidates.find((c) => usable(c) && !insideAppBundle(c))
       : undefined;
   return standalone ?? candidates.find(usable) ?? null;
+}
+
+/** Checks only PATH entries (never home fallback folders or auth files). */
+export function findCliOnPath(
+  cli: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  return selectCliCandidate(
+    cli,
+    withWindowsExtensions(pathCandidates(cli, env), env),
+  );
+}
+
+export function findCliExecutable(
+  cli: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  // OpenAI's official Codex wins over PATH: it is the one copy we can always
+  // update, however tangled the Mac's npm or Homebrew copies are.
+  const official =
+    cli === "codex" && process.getuid?.() !== 0 ? officialCodexPaths(env) : [];
+  const candidates = withWindowsExtensions(
+    [...official, ...pathCandidates(cli, env), ...fallbackCandidates(cli, env)],
+    env,
+  );
+  return selectCliCandidate(cli, candidates);
 }
 
 export function findBrokenCliLink(

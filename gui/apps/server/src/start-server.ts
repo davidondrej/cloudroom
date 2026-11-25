@@ -42,6 +42,7 @@ import { installFirstResponseTelemetry } from "./services/system/first-response-
 import { installSkillTelemetry } from "./services/system/skill-telemetry.js";
 import { installTokenTelemetry } from "./services/system/token-telemetry.js";
 import { startOrgPlugin } from "./services/cloudroom/org-plugin.js";
+import { setMacCommandReview } from "./services/cloudroom/previews.js";
 import { startSetupTelemetry } from "./services/cloudroom/setup-telemetry.js";
 import { installTitleRecheck } from "./services/threads/title-recheck.js";
 import { installThreadPurpose } from "./services/threads/thread-purpose.js";
@@ -168,13 +169,17 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
     logger,
   });
 
+  const initialSettings = getAppSettings(db);
+  await setMacCommandReview({ config: runtimeConfig }, initialSettings.macCommandReviewEnabled).catch((error) => {
+    logger.warn({ err: error }, "Failed to mirror Mac-command review setting");
+  });
   const telemetry = await createTelemetryService({
     appSurface: serverConfig.BB_APP_SURFACE,
     appVersion: serverConfig.BB_APP_VERSION,
     dataDir: serverConfig.BB_DATA_DIR,
     desktopVersion: process.env.BB_DESKTOP_VERSION,
     enabled: serverConfig.BB_TELEMETRY && isProduction,
-    telemetryEnabled: getAppSettings(db).telemetryEnabled,
+    telemetryEnabled: initialSettings.telemetryEnabled,
     logger,
   });
 

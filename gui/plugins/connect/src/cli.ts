@@ -74,6 +74,9 @@ function helpText(): string {
 }
 
 function formatStatus(status: ConnectStatus): string {
+  if (!status.enabled) {
+    return "Remote access is off (enable it in Settings → Cloudroom Connect).";
+  }
   const lines = !status.paired
     ? [
         status.signedIn
@@ -195,7 +198,14 @@ export function registerConnectCli(args: {
           }
           const parsed = parseFlags(argv.slice(2));
           validateFlags(parsed, { boolean: ["json"], value: ["host"] });
-          if (!relay.status().paired) {
+          const current = status();
+          if (!current.enabled) {
+            return {
+              exitCode: 1,
+              stderr: "Remote access is turned off in Settings → Cloudroom Connect.\n",
+            };
+          }
+          if (!current.paired) {
             return { exitCode: 1, stderr: `${notPairedError()}\n` };
           }
           const targetHost = await hostResolver.resolve(

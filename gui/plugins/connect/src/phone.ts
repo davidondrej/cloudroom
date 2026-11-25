@@ -18,10 +18,11 @@ export class PhoneRelay {
     private readonly room: Pick<BbPluginApi, "sdk" | "storage" | "log">,
     private readonly tunnel: ConnectTunnel,
     private readonly onChange: () => void,
+    private readonly isEnabled: () => boolean = () => true,
   ) {}
 
   async start(): Promise<void> {
-    await this.tunnel.start();
+    await this.tunnel.start(this.isEnabled());
     await this.check();
     this.timer = setInterval(() => void this.check(), CHECK_INTERVAL_MS);
     this.timer.unref?.();
@@ -30,6 +31,15 @@ export class PhoneRelay {
   stop(): void {
     clearInterval(this.timer);
     this.tunnel.stop();
+  }
+
+  async setEnabled(enabled: boolean): Promise<void> {
+    // Stop the local tunnel immediately when turning off so a storage error can never leave it connected.
+    if (!enabled) this.tunnel.stop();
+    // Wait for any in-flight reconcile so a toggle never gets lost behind it.
+    await this.checking?.catch(() => {});
+    // Idempotent: disabling retires any credential; enabling registers only when no credential is active.
+    await this.check(false);
   }
 
   check(force = false): Promise<void> {
@@ -53,8 +63,21 @@ export class PhoneRelay {
     return this.call("/api/phone-sessions/revoke") as Promise<{ revoked: number }>;
   }
 
+  listSessions(): Promise<{ sessions: unknown }> {
+    return this.call("/api/phone-sessions/list") as Promise<{ sessions: unknown }>;
+  }
+
+  revokeSession(sessionId: string): Promise<{ revoked: boolean }> {
+    return this.call("/api/phone-sessions/revoke-one", { sessionId }) as Promise<{ revoked: boolean }>;
+  }
+
   private async reconcile(force: boolean): Promise<void> {
     await this.retirePending();
+    if (!this.isEnabled()) {
+      const existing = this.tunnel.getCredential();
+      if (existing !== null) await this.retire(existing);
+      return;
+    }
     const { accountId, blocked } = await this.room.sdk.cloudroom.connectAccount();
     this.signedIn = accountId !== null;
     if (accountId === null) {
@@ -71,22 +94,32 @@ export class PhoneRelay {
     const previous = registeredFor !== accountId ? this.tunnel.getCredential() : null;
     if (previous !== null) await this.retire(previous);
     const registration = await this.room.sdk.cloudroom.connectRegister();
-    await this.room.storage.kv.set(ACCOUNT_KV_KEY, registration.accountId);
-    await this.tunnel.useCredential({
+    const credential = {
       serverUrl: registration.serverUrl,
       handle: registration.handle,
       credential: registration.credential,
-    });
+    };
+    if (!this.isEnabled()) {
+      // Turned off while registration was in flight: retire the new key instead of opening a tunnel.
+      await this.retire(credential);
+      return;
+    }
+    await this.room.storage.kv.set(ACCOUNT_KV_KEY, registration.accountId);
+    await this.tunnel.useCredential(credential);
   }
 
   /** Retires the key on the relay too, so no saved copy can still reach the account's other Macs. */
   private async retire(credential: NonNullable<ReturnType<ConnectTunnel["getCredential"]>>): Promise<void> {
-    await this.room.storage.kv.set(RETIRE_KV_KEY, credential);
-    await this.tunnel.forget();
+    this.tunnel.stop();
+    try {
+      await this.room.storage.kv.set(RETIRE_KV_KEY, credential);
+    } finally {
+      await this.tunnel.forget();
+    }
     await this.retirePending();
   }
 
-  /** Offline, the key stays saved and the next check retries; only network errors and relay outages keep it. */
+  /** Offline or rate-limited, the key stays saved and the next check retries until the relay confirms retirement or invalidation. */
   private async retirePending(): Promise<void> {
     const saved = connectCredentialSchema.safeParse(await this.room.storage.kv.get<unknown>(RETIRE_KV_KEY));
     if (!saved.success) return;
@@ -95,10 +128,19 @@ export class PhoneRelay {
       headers: { authorization: `Bearer ${saved.data.credential}` },
       signal: AbortSignal.timeout(10_000),
     }).catch(() => null);
-    if (response !== null && response.status < 500) await this.room.storage.kv.delete(RETIRE_KV_KEY);
+    const done =
+      response !== null &&
+      (response.ok ||
+        response.status === 401 ||
+        response.status === 403 ||
+        response.status === 404);
+    if (done) await this.room.storage.kv.delete(RETIRE_KV_KEY);
   }
 
   async call(path: string, body?: unknown): Promise<unknown> {
+    if (!this.isEnabled()) {
+      throw new Error("Remote access is turned off in Settings → Cloudroom Connect.");
+    }
     const credential = this.tunnel.getCredential();
     if (credential === null) {
       throw new Error(

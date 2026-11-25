@@ -10,7 +10,6 @@ import ReactMarkdown from "react-markdown";
 import type { Root } from "mdast";
 import remarkDirective from "remark-directive";
 import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
 import { describe, expect, it } from "vitest";
 import { STREAMING_MARKDOWN_FIXTURES } from "@/test/fixtures/streaming-markdown";
 import {
@@ -25,6 +24,7 @@ import {
   type MarkdownPieceRenderConfig,
 } from "./markdown-incremental-pieces";
 import rehypeKatex from "./markdown-katex";
+import remarkMath from "./markdown-math";
 import { normalizeMathFences } from "./markdown-math-fences";
 import {
   buildMessageDirectiveRegistry,
