@@ -50,6 +50,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
+import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
@@ -291,6 +292,9 @@ export function AppSidebar({
         )}
         data-testid="app-sidebar-navigation-divider"
       />
+      {isCompactCustomizeModeActive ? null : (
+        <SidebarNeedsYou onNavigate={closeOnMobile} />
+      )}
       <SidebarContent
         className={cn(isCompactCustomizeModeActive && "hidden")}
         aria-hidden={isCompactCustomizeModeActive ? true : undefined}
