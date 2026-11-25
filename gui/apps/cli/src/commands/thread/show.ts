@@ -628,6 +628,11 @@ export function registerShowCommand(
           } else {
             console.log("(no output)");
           }
+          if (result.partialOutput) {
+            console.log(
+              `\n(Still writing a newer message:)\n${result.partialOutput}`,
+            );
+          }
         },
       ),
     );

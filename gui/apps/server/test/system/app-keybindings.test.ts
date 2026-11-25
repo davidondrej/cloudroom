@@ -161,7 +161,7 @@ describe("app keybindings", () => {
       ).toMatchObject({
         desktopOnly: false,
         shortcut: { key: "w", mod: true, shift: false },
-        when: { all: ["mainSurface"], none: ["modalOpen"] },
+        when: { all: ["mainSurface"], none: ["modalOpen", "terminalFocus"] },
       });
       for (const command of [
         "pane.focus.previous",
@@ -366,7 +366,7 @@ describe("app keybindings", () => {
         shortcut: { key: "c", mod: true, shift: true },
         when: {
           all: ["mainSurface", "promptAvailable"],
-          none: ["modalOpen", "terminalFocus", "browserFocus"],
+          none: ["modalOpen", "browserFocus"],
         },
       });
       const composerWhen = {
@@ -651,7 +651,7 @@ describe("app keybindings", () => {
           command: "thread.archive",
           desktopOnly: false,
           shortcut,
-          when: { all: ["mainSurface"], none: ["modalOpen"] },
+          when: { all: ["mainSurface"], none: ["modalOpen", "terminalFocus"] },
         },
       ]);
     });

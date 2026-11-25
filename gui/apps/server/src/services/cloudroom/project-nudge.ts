@@ -11,7 +11,7 @@ import {
   setProjectSummaries,
   threads,
 } from "@cloudroom/db";
-import { gitSafetyArgs } from "@cloudroom/host-workspace";
+import { GIT_NO_FETCH_ENV, gitSafetyArgs } from "@cloudroom/host-workspace";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import type { CommandResultSideEffectsDeps } from "../../internal/command-result-side-effects.js";
 import type { AppDeps } from "../../types.js";
@@ -45,9 +45,12 @@ type Deps = CommandResultSideEffectsDeps;
 let writing: { again: boolean } | null = null;
 const failedAt = new Map<string, number>();
 
-/** On for paid plans unless the user turned it off; off for Free unless they turned it on. */
-function enabled(deps: Deps): boolean {
-  return readUiPreferences(deps)["projectNudge.enabled"].value ?? cloudroom(deps).sandboxes.currentPlan() !== "free";
+/** On for confirmed paid plans unless the user turned it off; off for Free and signed-out unless they turned it on. */
+export function isProjectNudgeEnabled(deps: Deps): boolean {
+  const pref = readUiPreferences(deps)["projectNudge.enabled"].value;
+  if (pref !== null) return pref;
+  const plan = cloudroom(deps).sandboxes.currentPlan();
+  return plan !== null && plan !== "free";
 }
 
 /** Writes summaries 30 s after the app starts and whenever a project is added, so the first prompts get a hint too. */
@@ -66,7 +69,7 @@ export function installProjectSummaries(deps: Deps): () => void {
 
 /** Another project the prompt is for, when Jev is at least as sure as the user's confidence setting; null otherwise. */
 export async function projectSuggestion(deps: AppDeps, prompt: string, projectId: string): Promise<string | null> {
-  if (!enabled(deps)) return null;
+  if (!isProjectNudgeEnabled(deps)) return null;
   const projects = listPublicProjects(deps.db);
   void writeSummaries(deps);
   const summaries = getProjectSummaries(deps.db);
@@ -102,18 +105,28 @@ export function fitCheck(input: ProjectCheck, projectId: string): ProjectCheck |
 
 /** Writes missing and week-old summaries one at a time. Projects with no folder on this Mac are skipped.
  *  A call during a run makes the run go once more, so a project added meanwhile isn't missed. */
-async function writeSummaries(deps: Deps): Promise<void> {
+export async function writeSummaries(deps: Deps): Promise<void> {
   if (writing) {
     writing.again = true;
     return;
   }
-  if (!enabled(deps)) return;
+  const pref = readUiPreferences(deps)["projectNudge.enabled"].value;
+  if (pref === false) return;
   const state = { again: false };
   writing = state;
   try {
+    if (pref === null) {
+      const sandboxes = cloudroom(deps).sandboxes;
+      if (sandboxes.currentPlan() === null) {
+        if (!(await sandboxes.account().catch(() => null))) return;
+        await sandboxes.forNewThreads().catch(() => {});
+      }
+      if (!isProjectNudgeEnabled(deps)) return;
+    }
     const projects = listPublicProjects(deps.db);
     const sources = listProjectSourcesByProjectIds(deps.db, projects.map((project) => project.id));
     for (const project of projects) {
+      if (!isProjectNudgeEnabled(deps)) return;
       const summary = getProjectSummaries(deps.db)[project.id];
       if (summary && Date.now() - summary.updatedAt < REWRITE_MS) continue;
       if (Date.now() - (failedAt.get(project.id) ?? 0) < RETRY_MS) continue;
@@ -214,7 +227,7 @@ async function repoContext(folder: string): Promise<string> {
   };
   await list(folder, "", 1);
   parts.push(`## Folders\n${lines.slice(0, 300).join("\n")}`);
-  const commits = await run("git", [...gitSafetyArgs(), "-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000, windowsHide: true })
+  const commits = await run("git", [...gitSafetyArgs(), "-C", folder, "log", "-20", "--format=%s"], { timeout: 10_000, env: { ...process.env, ...GIT_NO_FETCH_ENV }, windowsHide: true })
     .then((result) => result.stdout.trim(), () => "");
   if (commits) parts.push(`## Recent commits\n${commits}`);
   return parts.join("\n\n");

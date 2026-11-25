@@ -338,7 +338,7 @@ export class CloudChildren {
       void this.holdChildReport(threadId, status, turn, error).then(() => this.deliverChildReports(), (error: unknown) => this.rt.host.warn("A child report could not be saved", error, { threadId }));
       return;
     }
-    this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, error);
+    this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, error, turn);
   }
 
   /** A parent moving either way holds its children's reports until it lands. Teleport to Local closes the Cloud session
@@ -372,7 +372,7 @@ export class CloudChildren {
               const sent = await this.noticeCloudParent(report.child, status, report.turn).then(() => true, (error: unknown) => { this.rt.host.warn("A child report could not be sent", error, { threadId: report.child }); return false; });
               if (!sent) { failed = true; continue; }
             } else if (parent && thread?.parentThreadId) {
-              this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, report.error);
+              this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, report.error, report.turn);
             }
             await this.rt.updateRecords(CHILD_REPORTS, childReportSchema, ({ [key]: _done, ...rest }) => rest);
           }
@@ -405,6 +405,10 @@ export class CloudChildren {
     if (!first && await this.coreReports(child.id, own)) return;
     const name = child.title ? `"${child.title}" (${child.id})` : child.id;
     const reply = this.rt.host.getLastOutput(child.id)?.trim();
+    // Judged on this turn's own reply; a parent mid-move gets the held report afterwards, judged then (#1395).
+    const report = { childThreadId: child.id, parentThreadId: parent.id, reply: this.rt.host.getLastOutput(child.id, turn), turnId: turn, turnStatus: status };
+    const moving = this.moving(parent.id);
+    if (!moving && this.rt.host.isRepeatedChildReport(report)) return;
     const text = status === "refused" || status === "blocked"
       ? `[Cloudroom] Child thread ${name} has not started: ${cause} ${status === "refused" ? "It starts by itself once that clears, so don't spawn a replacement. If it can't wait, ask" : "That may not change soon, so ask"} the user to archive it, then spawn it again with --shared-sandbox.`
       : status === "completed"
@@ -412,7 +416,7 @@ export class CloudChildren {
         : status === "interrupted"
           ? `[Cloudroom] Child thread ${name} was interrupted. If the user stopped it, do not restart or replace its work unless they ask.`
           : `[Cloudroom] Child thread ${name} failed or its outcome is uncertain.${cause ? ` Cause: ${cause.trim().replace(/\.$/, "")}.` : ""} ${status === "not_started" ? "It did not start." : "Its turn did not finish; resend the task if it still matters."}`;
-    this.queuePrompt(parent.id, `notice_${createHash("sha256").update(`${child.id}:${turn}`).digest("hex").slice(0, 40)}`, text);
+    if (this.queuePrompt(parent.id, `notice_${createHash("sha256").update(`${child.id}:${turn}`).digest("hex").slice(0, 40)}`, text) && !moving) this.rt.host.rememberChildReport(report);
   }
 
   /** Whether a child's Core reports its turns itself: its session's start named a parent thread, which an agent switch
@@ -435,13 +439,14 @@ export class CloudChildren {
 
   /** Saves a message from a parent or child thread and delivers it. Saving the same ID again does nothing. Unlike
    *  a user's message it never resumes a thread the user stopped: like Core's own notices, it waits in the queue. */
-  private queuePrompt(threadId: string, id: string, text: string): void {
+  private queuePrompt(threadId: string, id: string, text: string): boolean {
     const thread = this.rt.host.getThread(threadId);
-    if (!thread || thread.archivedAt || thread.deletedAt || command(this.rt.host.db, id)) return;
+    if (!thread || thread.archivedAt || thread.deletedAt || command(this.rt.host.db, id)) return false;
     try { this.hooks.enqueue(threadId, id, "prompt", { text }); }
-    catch (error) { this.rt.host.warn("A message between parent and child threads was not saved", error, { threadId }); return; }
+    catch (error) { this.rt.host.warn("A message between parent and child threads was not saved", error, { threadId }); return false; }
     if (this.rt.host.db.transaction((tx) => projectFollowUp(tx, threadId, id))) this.rt.notify(threadId, ["client/turn/requested"]);
     void this.hooks.deliver(threadId).catch(() => {});
+    return true;
   }
 
   /** ADR 0229: a Cloud agent's `room-cli thread spawn` asks the app to start the child in a sandbox of its own

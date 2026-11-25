@@ -8,6 +8,7 @@
     "self-archive",
     "browser-harness",
     "create-loop",
-    "deepapi"
+    "deepapi",
+    "malware-scan"
   ]
 }

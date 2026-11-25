@@ -34,11 +34,16 @@ export function LowDiskBanner() {
     >
       <Icon name="AlertTriangle" className="size-4 shrink-0 text-destructive" />
       <span className="min-w-0 flex-1 truncate">
-        <strong>Your disk is almost full: {gb(storage.freeBytes)} free.</strong>{" "}
+        <strong>
+          The disk on {storage.computerName || "the computer running Cloudroom"}{" "}
+          is almost full: {gb(storage.freeBytes)} free.
+        </strong>{" "}
         {storage.usedBytes === null
           ? ""
           : `Worktrees use ${gb(storage.usedBytes)}. `}
-        Archive finished threads to free space.
+        {storage.usedBytes !== null && storage.usedBytes < 1e9
+          ? "Cloud threads are not affected."
+          : "Archive finished threads to free space."}
       </span>
       <Button
         size="icon"

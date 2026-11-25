@@ -474,6 +474,27 @@ it.each([
   }),
 );
 
+it("runs the teardown hook of an archived worktree that a refused park left counted (#2517)", () =>
+  withWorktree(async ({ h, tree, host, session, environment, archive }) => {
+    h.db
+      .update(environments)
+      .set({ providerOwnsPath: true, teardownAttempt: 1 })
+      .where(eq(environments.id, environment.id))
+      .run();
+    const resumeOnly: boolean[] = [];
+    registerTestHostRpcCapture(h.deps, {
+      hostId: host.id,
+      sessionId: session.id,
+      onEnvironmentHook: async (command) =>
+        void resumeOnly.push(command.resumeOnly),
+    });
+    archive();
+    await sweepProviderLifecycles(h.deps);
+    // Never sent before, so not a resume: the daemon would answer "unknown" and block removal for good.
+    expect(resumeOnly).toEqual([false]);
+    expect(existsSync(tree)).toBe(false);
+  }));
+
 it("drops a quiet park that a restart cut off before it removed anything, and undoes its save", () =>
   withWorktree(async ({ h, repo, tree, provider, environment }) => {
     const head = git(tree, "rev-parse", "HEAD");

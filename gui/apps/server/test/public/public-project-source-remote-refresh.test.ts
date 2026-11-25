@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { getProject, projects } from "@cloudroom/db";
 import { describe, expect, it } from "vitest";
@@ -139,6 +143,30 @@ describe("public project source remote refresh", () => {
         message:
           "git clone --progress https://git.example.test/x.git /t failed",
       });
+    });
+  });
+
+  it("saves this computer's folder's new origin when its source is saved again (#2548)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, { id: "host-origin-moved" });
+      seedPrimaryHost(harness.deps, host.id);
+      const path = mkdtempSync(join(tmpdir(), "cloudroom-origin-moved-"));
+      try {
+        execFileSync("git", ["-C", path, "init", "-q"]);
+        execFileSync("git", ["-C", path, "remote", "add", "origin", "git@github.com:example/app.git"]);
+        const { project, source } = seedProjectWithSource(harness.deps, { hostId: host.id, path });
+        // Saved before a split: the old repo was renamed, and a new one took its name.
+        harness.deps.db.update(projects).set({ gitRemoteUrl: "git@github.com:example/app-original.git", githubRepoId: 1 }).where(eq(projects.id, project.id)).run();
+        const response = await harness.app.request(`/api/v1/projects/${project.id}/sources/${source.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ type: "local_path", path }),
+        });
+        expect(response.status).toBe(200);
+        expect(getProject(harness.deps.db, project.id)).toMatchObject({ gitRemoteUrl: "git@github.com:example/app.git", githubRepoId: null });
+      } finally {
+        rmSync(path, { recursive: true, force: true });
+      }
     });
   });
 });

@@ -224,6 +224,7 @@ interface GeneralSettingsSectionProps {
 interface PrivacySettingsSectionProps {
   onStreamerModeChange: (enabled: boolean) => void;
   streamerMode: boolean;
+  telemetryAllowed?: boolean;
   telemetryEnabled: boolean;
   onTelemetryEnabledChange: (enabled: boolean) => void;
   bugReportsEnabled: boolean;
@@ -1171,6 +1172,7 @@ export function PrivacySettingsSection({
   onEnabledChange,
   streamerMode,
   onStreamerModeChange,
+  telemetryAllowed = true,
   telemetryEnabled,
   onTelemetryEnabledChange,
   bugReportsEnabled,
@@ -1193,11 +1195,15 @@ export function PrivacySettingsSection({
 
         <SettingsWithControl
           label="Share usage data and setup errors"
-          description="Send app starts, thread and message counts, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account so we can help fix them. Turning this off takes effect immediately for this server. Details: cloudroom.dev/privacy."
+          description={
+            telemetryAllowed
+              ? "Send app starts, thread, message, and skill counts, reply times, Local token totals, active minutes, plugin installs, scrubbed turn errors and crash logs, setup summaries, and short letters-only settings searches that find nothing. Failures are saved with your account. Never your prompts, code, or other tools' auth files. Custom models are masked. Takes effect immediately, or opt out via CLOUDROOM_TELEMETRY=false or DO_NOT_TRACK=1. Details: cloudroom.dev/privacy."
+              : "Turned off by environment variable (CLOUDROOM_TELEMETRY, BB_TELEMETRY, or DO_NOT_TRACK). No usage data or setup errors are sent from this server. Details: cloudroom.dev/privacy."
+          }
         >
           <Switch
-            checked={telemetryEnabled}
-            disabled={disabled}
+            checked={telemetryAllowed && telemetryEnabled}
+            disabled={disabled || !telemetryAllowed}
             onCheckedChange={onTelemetryEnabledChange}
             aria-label="Share usage data and setup errors"
           />
@@ -1601,6 +1607,7 @@ export function SettingsView() {
         <DeepapiSettingsSection />
         <VoiceInputSettingsSection />
         <PrivacySettingsSection
+          telemetryAllowed={systemConfigQuery.data?.telemetryAllowed !== false}
           telemetryEnabled={generalSettings.telemetryEnabled}
           onTelemetryEnabledChange={(enabled) =>
             updateGeneralSettingsMutation.mutate({

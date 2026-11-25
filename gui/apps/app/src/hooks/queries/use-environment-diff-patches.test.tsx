@@ -360,6 +360,42 @@ describe("useEnvironmentDiffPatches", () => {
     );
   });
 
+  it("shows a file's reason instead of its older cached diff (#2189)", async () => {
+    const { wrapper, queryClient } = createQueryClientTestHarness();
+    const olderPatch: DiffPatchEntry = {
+      path: PATH,
+      patch: "diff --git a/file.ts b/file.ts\n+older\n",
+      truncated: false,
+    };
+    const reason = "This partial clone hasn't downloaded the file content.";
+    vi.mocked(sdk.environments.diffPatch).mockResolvedValue(
+      availableResponse({
+        path: PATH,
+        patch: "",
+        truncated: false,
+        error: reason,
+      }),
+    );
+
+    const { result } = renderHook(
+      () => useEnvironmentDiffPatches(ENVIRONMENT_ID, { target: TARGET }),
+      { wrapper },
+    );
+    act(() => {
+      result.current.seedInitialPatches([olderPatch]);
+      bumpDiffPatchFreshnessGeneration(ENVIRONMENT_ID);
+      result.current.requestPaths({ visible: [PATH], overscan: [] });
+    });
+
+    await waitFor(() => {
+      expect(result.current.getPatchState(PATH)).toEqual({
+        status: "error",
+        error: reason,
+      });
+    });
+    expect(queryClient.getQueryData(patchKey())).toBeUndefined();
+  });
+
   it("loads on demand after a failed generation becomes stale", async () => {
     const { wrapper } = createQueryClientTestHarness();
     const patch: DiffPatchEntry = {

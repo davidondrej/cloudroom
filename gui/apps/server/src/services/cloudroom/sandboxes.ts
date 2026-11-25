@@ -150,6 +150,8 @@ const burningSchema = z.array(z.object({ thread: z.string(), credits: z.number()
 export type DeepapiState = { enabled: boolean };
 const USAGE_LIMIT = "cloud_usage_limit";
 const AGENT_LIMIT = "cloud_agent_limit";
+/** A plan's new Cloud threads per hour or per 24 hours are used up (website ADR 20261124-183700): it frees up by itself. */
+const THREAD_LIMIT = "cloud_thread_limit";
 /** Free's shared daily budget is spent: like the limits above, the website refused before starting the sandbox. */
 export const BUDGET_LIMIT = "cloud_budget_limit";
 const CLOUD_QUEUE = "cloud_queue";
@@ -164,7 +166,7 @@ export const cloudPausedError = (error: unknown) => error instanceof CloudroomEr
 const WAIT_CODES = new Set(["sandbox_restarting", "sandbox_restoring", "sandbox_repairing", "sandbox_full", OUTAGE_CHOICE, CLOUD_PAUSED]);
 /** The website no longer has this sign-in's token: it was signed out there, or the password was reset. */
 const SIGNED_OUT = "desktop_signed_out";
-export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
+export const startRefused = (error: unknown): error is CloudroomError & { code: string } => error instanceof CloudroomError && [USAGE_LIMIT, AGENT_LIMIT, THREAD_LIMIT, CLOUD_QUEUE, CLOUD_REGION].includes(error.code ?? "");
 // The Mac's skills and global instructions that sandboxes receive, one way (docs/scopes/sandboxes.md).
 const SKILL_ROOTS = [".agents/skills", ".claude/skills", ".codex/skills", ".pi/agent/skills"];
 const INSTRUCTION_FILES = [".claude/CLAUDE.md", ".codex/AGENTS.md", ".pi/agent/AGENTS.md", ".config/opencode/AGENTS.md"];
@@ -1127,11 +1129,13 @@ export class SandboxDirectory {
       queue: z.object({ position: z.number(), total: z.number() }).nullable().default(null), region_blocked: z.boolean().default(false),
       plan: z.string().nullable().default(null), preload: z.boolean().default(false),
     }).parse(await this.call({ action: "mode" }));
-    const usageChanged = Boolean((this.limit?.on && !value.limited) || (this.plan && value.plan !== this.plan));
+    const planChanged = Boolean(this.plan && value.plan !== this.plan), usageChanged = Boolean((this.limit?.on && !value.limited) || planChanged);
     this.plan = value.plan;
-    const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === AGENT_LIMIT && value.plan && value.plan !== "free") || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
+    // An upgrade lifts a new-thread cap at once.
+    const cleared = (code?: string | null) => (code === USAGE_LIMIT && !value.limited) || (code === THREAD_LIMIT && planChanged) || (code === CLOUD_QUEUE && !value.queue) || (code === CLOUD_REGION && !value.region_blocked);
     if (cleared(this.refused?.code)) this.refused = null;
     for (const [thread, waiting] of this.backoff) if (cleared(waiting.refusal?.code)) this.backoff.delete(thread);
+    if (value.plan && value.plan !== "free") this.liftFreeCap();
     this.preloadOn = value.preload;
     this.mode = { on: value.sandboxes, at: Date.now() };
     this.limit = { on: value.limited, at: Date.now() };
@@ -1202,6 +1206,12 @@ export class SandboxDirectory {
   private usage: { value: PlanUsage | null; next: number } | null = null;
   private usageRefresh: Promise<void> | null = null;
   private lastForcedUsageAt = 0;
+  /** Forgets Free's monthly thread cap (`cloud_agent_limit`, ADR 20261124-160120): refusals, waits, and capped threads. */
+  private liftFreeCap(): void {
+    if (this.refused?.code === AGENT_LIMIT) this.refused = null;
+    for (const [thread, waiting] of this.backoff) if (waiting.refusal?.code === AGENT_LIMIT) this.backoff.delete(thread);
+    this.capped.clear();
+  }
   private fetchUsage(): Promise<void> {
     if (this.usageRefresh) return this.usageRefresh;
     this.usageRefresh = this.call({ action: "usage" }).then((value) => {
@@ -1214,6 +1224,8 @@ export class SandboxDirectory {
       // the website couldn't read it, so the lines stay as they are.
       const sent = (value as { burning?: unknown } | null)?.burning;
       if (sent !== null) this.burning = new Map(burningSchema.parse(sent ?? []).filter((row) => row.hot || this.burning.has(row.thread)).map((row) => [row.thread, { credits: row.credits, subagents: row.subagents }]));
+      // Bought or gifted credits lift Free's monthly thread cap on the website, so the app stops waiting on it too.
+      if (parsed.success && parsed.data.plan === "free" && parsed.data.extra_credits > 0) this.liftFreeCap();
       this.usage = {
         value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
           extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total } : null,
@@ -1273,11 +1285,12 @@ export class SandboxDirectory {
 
   private warmed: { project: string; at: number } | null = null;
   /** Asks the website to keep hot spare sandboxes ready for the next cloud threads, in any project. The project lets it
-   *  build that project's template. At most once a minute per project. */
-  async warm(project: SandboxProject, trigger: SandboxTrigger = "composer"): Promise<void> {
-    if (this.warmed?.project === project.id && Date.now() - this.warmed.at < RECHECK_MS) return;
+   *  build that project's template. At most once a minute per project. `moved`: its repo just changed on this computer, so
+   *  the website moves its template and loops there too, which it otherwise does only at a person's Cloud start (#2548). */
+  async warm(project: SandboxProject, trigger: SandboxTrigger = "composer", moved = false): Promise<void> {
+    if (!moved && this.warmed?.project === project.id && Date.now() - this.warmed.at < RECHECK_MS) return;
     this.warmed = { project: project.id, at: Date.now() };
-    await this.call({ action: "warm", project: project.id, trigger, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}), harnesses: await macHarnessVersions() });
+    await this.call({ action: "warm", project: project.id, trigger, ...(project.repository ? { repository: project.repository, folder: project.folder } : {}), ...(moved ? { moved: true } : {}), harnesses: await macHarnessVersions() });
   }
 
   /** Forgets what was learned under the last account: sandbox tokens, uploaded logins and config, and its settings. */
@@ -1312,8 +1325,6 @@ export class SandboxDirectory {
     this.warmed = null;
     this.copiedAt = 0;
     this.pulledAt = 0;
-    this.githubAt = 0;
-    this.githubRun = null;
     cloudClaude = null;
     this.configAt = 0;
     this.configDigest = "";
@@ -1372,11 +1383,12 @@ export class SandboxDirectory {
     setTimeout(check, 5_000).unref();
   }
   coolingDown(thread: string | null): boolean { return Boolean(thread && (this.backoff.get(thread)?.until ?? 0) > Date.now()); }
-  /** The website's words for a wake that waits on its server ("The server running this thread is restarting…"), until
-   *  a wake gets through or the sandbox is seen awake. Null otherwise. */
+  /** The website's words for a wake that waits on its server ("The server running this thread is restarting…") or that
+   *  it refused (credits, a plan cap, the queue, the region), until a wake gets through or the sandbox is seen awake. */
   waitNotice(thread: string): string | null {
     const refusal = this.backoff.get(thread)?.refusal;
-    return refusal && WAIT_CODES.has(refusal.code ?? "") && !this.isAwake(thread) ? refusal.message : null;
+    // A refused start shows its reason, never "Reconnecting…" (F#6505); unlike WAIT_CODES it keeps its own retry.
+    return refusal && (WAIT_CODES.has(refusal.code ?? "") || startRefused(refusal) || refusal.code === BUDGET_LIMIT) && !this.isAwake(thread) ? refusal.message : null;
   }
 
   /** Saves a thread's title, project name, harness, model, Core session ID, and the thread that started it on the
@@ -1435,7 +1447,13 @@ export class SandboxDirectory {
       await new Promise(resolve => setTimeout(resolve, 3_000));
     }
   }
-  async remove(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "remove", thread }); }
+  async remove(thread: string): Promise<void> {
+    this.forget(thread);
+    const reply = await this.call({ action: "remove", thread }) as { thread?: unknown; state?: unknown };
+    if (reply.thread !== thread || reply.state !== "deleted") {
+      throw new CloudroomConnectionError("The website returned an unexpected sandbox removal reply.");
+    }
+  }
 
   /** Saves a login for every sandbox of this account (ADR 0145), skipping values already uploaded. */
   /** A `background` save (not one the user just asked for) is dropped while the login is disconnected (ADR 0327).
@@ -1695,27 +1713,6 @@ export class SandboxDirectory {
     this.copiedAt = Date.now();
     const signal = this.session.signal;
     return this.withLogins(async () => this.uploadMacLogins(await this.bind(signal)));
-  }
-
-  private githubAt = 0;
-  private githubRun: Promise<void> | null = null;
-  /** With "Auth my agents" off, GitHub still follows its own card in Settings, so a clone's login survives sleep (#1628).
-   *  It only fills a gap: a GitHub login Cloud holds, maybe another computer's or account's, is never replaced.
-   *  At most once a minute, and callers meanwhile wait for the running copy; Disconnect or another account skips it. */
-  copyMacGithubLogin(): Promise<void> {
-    if (this.githubRun) return this.githubRun;
-    if (Date.now() - this.githubAt < RECHECK_MS) return Promise.resolve();
-    this.githubAt = Date.now();
-    const signal = this.session.signal;
-    const run = this.githubRun = this.withLogins(async () => {
-      // Bound to the account it started under: a switch during the status check must not fill the new account's login.
-      const account = await this.account();
-      const token = account && !(await this.skipLogins()).has("github") ? await macGithubToken() : "";
-      const only = account && { account, signal };
-      // Once this app saved it, Cloud holds a login, so no status check is needed.
-      if (only && token && !this.uploaded.has("github") && !(await this.logins(only)).github) await this.putLogin("github", await sandboxGithubLogin(token), only);
-    }).finally(() => { if (this.githubRun === run) this.githubRun = null; });
-    return run;
   }
 
   /** Sends this Mac's Codex login again, even unchanged: Cloud's copy may have died while this one still works.

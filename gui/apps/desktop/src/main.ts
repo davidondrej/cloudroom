@@ -1437,13 +1437,16 @@ async function showThisMac(isCurrent: () => boolean): Promise<boolean> {
   const attached = await ensureBuiltinRuntimeAttached();
   if (!isCurrent()) return false;
   if (!attached) {
-    await loadStartupError({
-      details:
-        `Could not connect to the local Cloudroom server on this ${COMPUTER}. Check that the port is free or that a compatible Cloudroom server is running.`,
-      logs: "",
-      retryable: true,
-      title: "Could not connect",
-    });
+    // A failed start already shows its own error, with logs and Try again; keep it.
+    if (startupRetryUrl === null) {
+      await loadStartupError({
+        details:
+          `Could not connect to the local Cloudroom server on this ${COMPUTER}. Check that the port is free or that a compatible Cloudroom server is running.`,
+        logs: "",
+        retryable: true,
+        title: "Could not connect",
+      });
+    }
     return false;
   }
   const localServerUrl = currentRuntime?.serverUrl ?? builtinServerUrl;
@@ -2518,7 +2521,7 @@ async function startOwnedRuntime(
         raceResult.exit,
       )}.`,
       logs: roomProcess.logs.text(),
-      retryable: false,
+      retryable: true,
       title: "Could not start Cloudroom",
     });
     setCurrentRuntime(null);
@@ -2538,16 +2541,21 @@ async function startOwnedRuntime(
   }
 
   await args.windowsReady;
-  await loadStartupError({
-    details:
-      raceResult.result.kind === "incompatible"
-        ? `Port ${args.serverUrl} is responding, but it does not look like Cloudroom: ${raceResult.result.reason}.`
-        : `Timed out waiting for Cloudroom at ${args.serverUrl}: ${raceResult.result.reason}.`,
-    logs: roomProcess.logs.text(),
-    retryable: false,
-    title: "Could not start Cloudroom",
-  });
-  await stopOwnedRuntime();
+  const logs = roomProcess.logs.text();
+  // Stop the backend before offering Try again, so a retry never meets the old one still shutting down.
+  try {
+    await stopOwnedRuntime();
+  } finally {
+    await loadStartupError({
+      details:
+        raceResult.result.kind === "incompatible"
+          ? `Port ${args.serverUrl} is responding, but it does not look like Cloudroom: ${raceResult.result.reason}.`
+          : `Timed out waiting for Cloudroom at ${args.serverUrl}: ${raceResult.result.reason}.`,
+      logs,
+      retryable: true,
+      title: "Could not start Cloudroom",
+    });
+  }
   return null;
 }
 

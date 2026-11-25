@@ -252,6 +252,7 @@ vi.mock("@/hooks/queries/cloudroom-queries", () => ({
     isLoading: false,
   }),
   useCloudroomConnection: () => ({ data: undefined }),
+  useRetryCloudStart: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   useSetCloudReasoning: () => ({
     mutate: mocks.setCloudReasoningMutate,
     isPending: false,

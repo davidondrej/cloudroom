@@ -725,16 +725,21 @@ describe("WatchManager", () => {
     });
     workspace.getLocalStateFingerprint.mockClear();
     workspace.setLocalStateFingerprintError(new Error("workspace vanished"));
+    workspace.setSharedGitRefsFingerprint("refs:/tmp/env-watch:changed");
     watchWorkspaceArgs?.onChange({
-      changedPaths: ["/tmp/env-watch/.git/index"],
-      changeKinds: ["workspace-git-changed"],
+      changedPaths: ["/tmp/env-watch/.git/refs/heads/main"],
+      changeKinds: ["workspace-git-changed", "shared-git-refs-changed"],
       kind: "workspace-status-changed",
       environmentId: "env-watch",
     });
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(onWorkspaceStatusChanged).not.toHaveBeenCalled();
+    // The failed local read must not drop the ref change in the same batch (#2189).
+    expect(onWorkspaceStatusChanged).toHaveBeenCalledExactlyOnceWith({
+      changeKinds: ["git-refs-changed"],
+      environmentId: "env-watch",
+    });
     expect(onWorkspaceStatusWatchError).toHaveBeenCalledWith({
       error: {
         environmentId: "env-watch",

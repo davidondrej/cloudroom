@@ -72,7 +72,7 @@ export default function plugin(room: BbPluginApi) {
       type: "boolean",
       label: "claude.ai connectors",
       description:
-        "Load connectors from your claude.ai account, like Gmail and Google Drive. Applies to new Claude sessions.",
+        "Load connectors from your claude.ai account, like Gmail and Google Drive. Applies to new Claude sessions. Needs a full Claude Code login on this computer: if an account shows “Sign in again for claude.ai connectors” in Settings → Agents → Accounts, click it.",
       default: false,
     },
   });

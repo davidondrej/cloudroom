@@ -210,7 +210,7 @@ function QuestionInputBlock({
   });
   const options = question.options;
   // A note after the question itself reads lighter: "Pick one? It changes X."
-  const noteStart = question.prompt.indexOf("? ") + 1;
+  const noteStart = question.prompt.search(/\?\s/) + 1;
   const freeTextLabel = `${question.shortLabel} answer`;
 
   useLayoutEffect(() => {
@@ -236,7 +236,7 @@ function QuestionInputBlock({
     <fieldset disabled={disabled} className="min-w-0">
       <legend className="sr-only">{question.prompt}</legend>
       <div className="flex items-start gap-3">
-        <div className="min-w-0 flex-1 text-base font-semibold leading-snug text-foreground">
+        <div className="min-w-0 flex-1 whitespace-pre-line text-base font-semibold leading-snug text-foreground">
           {noteStart > 0
             ? question.prompt.slice(0, noteStart)
             : question.prompt}

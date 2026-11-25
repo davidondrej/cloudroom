@@ -1155,6 +1155,7 @@ const workspaceDiffPatchResultSchema = z.discriminatedUnion("outcome", [
             path: z.string(),
             patch: z.string(),
             truncated: z.boolean(),
+            error: z.string().optional(),
           })
           .strict(),
       ),

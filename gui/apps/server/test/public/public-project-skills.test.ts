@@ -1143,6 +1143,7 @@ describe("public project skills route", () => {
           "decisions",
           "deepapi",
           "file-tree",
+          "malware-scan",
           "risky-changes",
           "self-archive",
           "setup-help",

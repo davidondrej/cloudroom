@@ -71,24 +71,15 @@ interface AssistantToolUseMessageArgs {
   toolUseId: string;
 }
 
-interface CanUseToolPolicyAllowExpectation {
-  behavior: "allow";
-  updatedInput: Record<string, unknown>;
-}
-
 interface CanUseToolPolicyDenyExpectation {
   behavior: "deny";
   messageIncludes: string;
 }
 
-type CanUseToolPolicyExpectation =
-  | CanUseToolPolicyAllowExpectation
-  | CanUseToolPolicyDenyExpectation;
-
 interface CanUseToolPolicyCase {
   blockedPath?: string;
   decisionReason?: string;
-  expected: CanUseToolPolicyExpectation;
+  expected: CanUseToolPolicyDenyExpectation;
   id: string;
   input: Record<string, unknown>;
   name: string;
@@ -1487,24 +1478,6 @@ describe("bridge", () => {
           messageIncludes: "Cloudroom's workspace sandbox allows work inside",
         },
       },
-      {
-        id: "full-bypass-allow",
-        name: "full bypass allows Bash input unchanged",
-        policy: FULL_POLICY,
-        toolName: "Bash",
-        decisionReason: "This command requires approval",
-        input: {
-          command: "git status --short",
-          description: "Permission boundary test",
-        },
-        expected: {
-          behavior: "allow",
-          updatedInput: {
-            command: "git status --short",
-            description: "Permission boundary test",
-          },
-        },
-      },
     ] satisfies CanUseToolPolicyCase[];
 
     it.each(policyCases)("$name", async (testCase) => {
@@ -1547,23 +1520,11 @@ describe("bridge", () => {
           throw new Error(`Expected ${testCase.name} to return a decision`);
         }
 
-        switch (testCase.expected.behavior) {
-          case "allow":
-            expect(result).toMatchObject({
-              behavior: "allow",
-              toolUseID,
-              updatedInput: testCase.expected.updatedInput,
-            });
-            expect("decisionClassification" in result).toBe(false);
-            break;
-          case "deny":
-            if (result.behavior !== "deny") {
-              throw new Error(`Expected ${testCase.name} to deny`);
-            }
-            expect(result.toolUseID).toBe(toolUseID);
-            expect(result.message).toContain(testCase.expected.messageIncludes);
-            break;
+        if (result.behavior !== "deny") {
+          throw new Error(`Expected ${testCase.name} to deny`);
         }
+        expect(result.toolUseID).toBe(toolUseID);
+        expect(result.message).toContain(testCase.expected.messageIncludes);
 
         bridge.sendRequest(stopRequestId, "thread/stop", {
           threadId,
@@ -1574,6 +1535,75 @@ describe("bridge", () => {
         await bridge.flushWork();
         queries[0]?.finish();
         await bridge.waitForResponse(stopRequestId);
+      } finally {
+        bridge.restore();
+      }
+    });
+
+    it("forwards canUseTool to the user in full access instead of silently auto-allowing", async () => {
+      const bridge = createBridgeJsonRpcTestHarness(handleLine);
+      const queries: ControlledClaudeQuery[] = [];
+      queryMock.mockImplementation(() => {
+        const query = createControlledClaudeQuery();
+        queries.push(query);
+        return query;
+      });
+
+      try {
+        const threadId = "thread-full-forwards-can-use-tool";
+        const toolUseID = "tool-full-ask";
+        const input = { command: "rm -rf /tmp/demo" };
+        bridge.sendRequest(1, "thread/start", {
+          threadId,
+          cwd: "/tmp/worktree",
+          instructionMode: "append",
+          options: {
+            ...FULL_POLICY,
+            instructions: "test",
+            providerOptions: { workflowsEnabled: false },
+          },
+        });
+        await bridge.waitForResponse(1);
+
+        const canUseTool = getLastCanUseTool();
+        const resultPromise = canUseTool("Bash", input, {
+          decisionReason: "Bypass permissions disabled by settings",
+          matchedAskRule: { source: "userSettings", toolName: "Bash" },
+          requestId: "control-request",
+          signal: new AbortController().signal,
+          toolUseID,
+        });
+        await bridge.flushWork();
+
+        const approvalRequest = bridge.messages.find((message) =>
+          isApprovalInteraction(message),
+        );
+        if (approvalRequest?.id === undefined) {
+          throw new Error("Expected full-access canUseTool to request user approval");
+        }
+        expect(approvalRequest).toMatchObject({
+          params: {
+            threadId,
+            payload: {
+              kind: "approval",
+              subject: expect.objectContaining({ itemId: toolUseID }),
+            },
+          },
+        });
+
+        handleLine(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: approvalRequest.id,
+            result: { decision: "deny", grantedPermissions: null },
+          }),
+        );
+        await expect(resultPromise).resolves.toMatchObject({
+          behavior: "deny",
+          toolUseID,
+        });
+
+        await stopBridgeThread({ bridge, queries, threadId });
       } finally {
         bridge.restore();
       }
@@ -1846,6 +1876,22 @@ describe("bridge", () => {
       });
       expect(approvals()).toHaveLength(3);
 
+      // An explicit matchedAskRule still prompts even after a session network grant.
+      const askedNetwork = getLastCanUseTool()(
+        "SandboxNetworkAccess",
+        { host: "restricted.internal" },
+        {
+          matchedAskRule: { source: "userSettings", toolName: "SandboxNetworkAccess" },
+          requestId: "control-request",
+          signal: new AbortController().signal,
+          toolUseID: "tool-network-ask-rule",
+        },
+      );
+      await bridge.flushWork();
+      expect(approvals()).toHaveLength(4);
+      answer(approvals().at(-1)?.id, "deny");
+      await expect(askedNetwork).resolves.toMatchObject({ behavior: "deny" });
+
       // Claude's session rules already allow plain repeats, so these asks are
       // ones Claude still wants a person for: an ask rule matched part of the
       // command or the fetch.
@@ -1864,7 +1910,7 @@ describe("bridge", () => {
         "tool-fetch-2",
       );
       await bridge.flushWork();
-      const pending = approvals().slice(3);
+      const pending = approvals().slice(4);
       expect(pending.map((message) => interactionPayload(message))).toEqual([
         expect.objectContaining({
           reason: "Run this command outside the sandbox?",
@@ -2297,22 +2343,9 @@ describe("bridge", () => {
       await expect(planPromise).resolves.toMatchObject({ behavior: "allow" });
       await bridge.flushWork();
 
-      const editResult = await canUseTool(
-        "Edit",
-        { file_path: "/tmp/worktree/test.md", new_string: "hi" },
-        {
-          requestId: "control-request",
-          signal: new AbortController().signal,
-          toolUseID: "tool-edit",
-          blockedPath: "/tmp/worktree",
-          decisionReason: "Outside the sandbox",
-        },
+      expect(queries[0]?.setPermissionMode).toHaveBeenLastCalledWith(
+        "bypassPermissions",
       );
-
-      expect(editResult).toMatchObject({ behavior: "allow" });
-      expect(
-        bridge.messages.filter((message) => isApprovalInteraction(message)),
-      ).toHaveLength(1);
 
       await stopBridgeThread({ bridge, queries, threadId });
     } finally {

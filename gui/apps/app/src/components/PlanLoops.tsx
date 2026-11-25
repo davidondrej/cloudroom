@@ -26,9 +26,9 @@ const NAMES: Record<string, string> = { pro: "Pro", super: "Super", ultra: "Ultr
 // What each plan includes, in the words of planPerks() in web/lib/model.ts. Keep the two in step.
 const SHARED = ["1:1 setup call", "H100 and B200 GPUs on demand"];
 const PERKS: Record<string, string[]> = {
-  pro: ["50,000 Cloud Credits every month", ...SHARED, "Agents stay awake 4× longer", "1 year storage"],
-  super: ["150,000 Cloud Credits every month", ...SHARED, "Agents stay awake 8× longer", "2 year storage", "Priority Support"],
-  ultra: ["500,000 Cloud Credits every month", ...SHARED, "Agents stay awake 12× longer", "5 year storage", "Slack channel with David"],
+  pro: ["55,000 Cloud Credits every month", ...SHARED, "Agents stay awake 4× longer", "1 year storage"],
+  super: ["180,000 Cloud Credits every month", ...SHARED, "Agents stay awake 8× longer", "2 year storage", "Priority Support"],
+  ultra: ["650,000 Cloud Credits every month", ...SHARED, "Agents stay awake 12× longer", "5 year storage", "Slack channel with David"],
 };
 /** One color per ticket. */
 const INKS = ["#D97757", "#E2A72B", "#7F98F5"];

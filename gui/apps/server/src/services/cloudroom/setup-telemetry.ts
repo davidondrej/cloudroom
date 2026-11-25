@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, statfsSync } from "node:fs";
+import { existsSync, statSync, statfsSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { cpus, homedir, release, totalmem } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -8,7 +8,7 @@ import { execPortableFile, findCliExecutable, type KnownCli } from "@cloudroom/p
 import { readOrCreateSecretFile } from "@cloudroom/secret-storage";
 import type { AppDeps } from "../../types.js";
 import { TELEMETRY_ID_FILE_NAME, type TelemetryValue } from "../system/telemetry.js";
-import { claudeAuthStatus, claudeBinary, desktopClaude } from "./claude-token.js";
+import { claudeAuthStatus, claudeBinary } from "./claude-token.js";
 import { macAccess } from "./previews.js";
 import type { SandboxDirectory } from "./sandboxes.js";
 import { copyLogins } from "./sync.js";
@@ -88,6 +88,7 @@ const KNOWN_TOKEN = /\b(?:(?:gh[pousr]|github_pat|whsec|polar_oat|sbp)_[A-Za-z0-
 
 function scrubSecrets(text: string): string {
   return stripTextGitUrlCredentials(text)
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]+@/gi, "$1***@")
     .replace(PRIVATE_KEY, "<private-key>")
     .replace(/\bBearer\s+[^\s"',;]+|\bBasic\s+[A-Za-z0-9+/=]{8,}/g, match => `${match.split(/\s/)[0]} ***`)
     .replace(/\b((?:api[_-]?)?key|(?:access[_-]?|refresh[_-]?)?token|(?:client[_-]?)?secret|password|passwd|authorization)(["']?\s*[:=]\s*["']?)[^\s"',;&]+/gi, "$1$2***")
@@ -220,6 +221,7 @@ export const linkInstall = () => { void save("install_linked", {}); };
 
 const helperProblems = new Map<string, number>();
 export function reportMacHelperProblem(detail: string): void {
+  if (!sharingEnabled(deps)) return;
   const now = Date.now(), next = helperProblems.get(detail);
   if (next === undefined ? helperProblems.size >= 20 : next > now) return;
   helperProblems.set(detail, Infinity);
@@ -232,7 +234,7 @@ export function reportMacHelperProblem(detail: string): void {
 let helperDownDay = "";
 export function reportMacHelperDown(message: string): void {
   const day = new Date().toISOString().slice(0, 10);
-  if (!deps || helperDownDay === day) return;
+  if (!sharingEnabled(deps) || helperDownDay === day) return;
   helperDownDay = day;
   const marker = join(deps.config.dataDir, "cloudroom-mac-helper-down.txt");
   void readFile(marker, "utf8").catch(() => "").then(async (last) => {
@@ -265,50 +267,13 @@ const run = (file: string, args: string[]) => execPortableFile(file, args, { tim
 const version = (text: string) => text.match(/\d+\.\d+(?:\.\d+)?/)?.[0] ?? null;
 const home = (...parts: string[]) => join(homedir(), ...parts);
 const onPath = (cli: string) => (process.env.PATH ?? "").split(delimiter).some(dir => dir && existsSync(join(dir, cli)));
-function daysSince(...paths: string[]): number | null {
-  const times = paths.flatMap(path => { try { return [statSync(path).mtimeMs]; } catch { return []; } });
-  return times.length ? Math.floor((Date.now() - Math.max(...times)) / 86_400_000) : null;
-}
-/** The newest entry's path inside `dir`, by name, `depth` levels down (Codex keeps sessions in YYYY/MM/DD folders). */
-function newestPath(dir: string, depth: number): string {
-  for (let level = 0; level < depth; level++) { const name = newest(dir); if (!name) break; dir = join(dir, name); }
-  return dir;
-}
-function children(dir: string): string[] {
-  try { return readdirSync(dir).map(name => join(dir, name)); } catch { return []; }
-}
-function newest(dir: string): string | null {
-  try { return readdirSync(dir).filter(name => /^[0-9.]+$/.test(name)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).at(-1) ?? null; } catch { return null; }
-}
-async function appVersion(app: string): Promise<string | null> {
-  const bundle = [join("/Applications", app), home("Applications", app)].find(path => existsSync(path));
-  if (!bundle) return null;
-  return version(await run("/usr/bin/plutil", ["-extract", "CFBundleShortVersionString", "raw", "-o", "-", join(bundle, "Contents", "Info.plist")])) ?? "unknown";
-}
-function jwtClaims(token: unknown): Record<string, unknown> | null {
-  try { return typeof token === "string" ? JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString()) as Record<string, unknown> : null; } catch { return null; }
-}
-const plan = (value: unknown) => (typeof value === "string" && /^[a-z_]{1,32}$/.test(value) ? value : null);
 
-async function codexLogin(): Promise<Record<string, TelemetryValue>> {
-  const text = await readFile(join(process.env.CODEX_HOME || home(".codex"), "auth.json"), "utf8").catch(() => null);
-  if (text === null) return { codex_login: null, codex_plan: null, codex_token_expired: null };
-  try {
-    const auth = JSON.parse(text) as { OPENAI_API_KEY?: unknown; tokens?: { id_token?: unknown; access_token?: unknown } };
-    const openai = jwtClaims(auth.tokens?.id_token)?.["https://api.openai.com/auth"] as Record<string, unknown> | undefined;
-    const exp = jwtClaims(auth.tokens?.access_token)?.exp;
-    return {
-      codex_login: auth.tokens ? "chatgpt" : auth.OPENAI_API_KEY ? "api_key" : "unknown",
-      codex_plan: plan(openai?.chatgpt_plan_type),
-      codex_token_expired: typeof exp === "number" ? exp * 1000 < Date.now() : null,
-    };
-  } catch { return { codex_login: "unreadable", codex_plan: null, codex_token_expired: null }; }
-}
-
-/** Which agents are signed in on this computer: `claude`, `codex`, `both`, or `none`. */
+/** Which agents are signed in on this computer: `claude`, `codex`, `both`, or `none`.
+ *  Only checks CLI status / file existence; never reads credential file contents. */
 export async function localLogins(): Promise<string> {
-  const [claude, codex] = await Promise.all([claudeAuthStatus().catch(() => null), codexLogin()]);
-  const claudeIn = claude?.loggedIn === true, codexIn = codex.codex_login === "chatgpt" || codex.codex_login === "api_key";
+  const claude = await claudeAuthStatus().catch(() => null);
+  const claudeIn = claude?.loggedIn === true;
+  const codexIn = existsSync(join(process.env.CODEX_HOME || home(".codex"), "auth.json"));
   return claudeIn && codexIn ? "both" : claudeIn ? "claude" : codexIn ? "codex" : "none";
 }
 
@@ -345,15 +310,10 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_f
   const claude = claudeBinary() ?? null, codex = findCliExecutable("codex") ?? null;
   // A failure's snapshot also checks the network.
   const network = reason !== "first_launch" ? networkCheck() : {};
-  const [osVersion, claudeVersion, codexVersion, claudeStatus, codexAuth, claudeApp, codexApp, chatgptApp, proxy, logins, access, reach] = await Promise.all([
+  const [osVersion, claudeVersion, codexVersion, proxy, logins, access, reach] = await Promise.all([
     process.platform === "darwin" ? run("/usr/bin/sw_vers", ["-productVersion"]) : Promise.resolve(release()),
     claude ? run(claude, ["--version"]).then(version) : null,
     codex ? run(codex, ["--version"]).then(version) : null,
-    claudeAuthStatus(),
-    codexLogin(),
-    appVersion("Claude.app"),
-    appVersion("Codex.app"),
-    appVersion("ChatGPT.app"),
     proxySettings(),
     copyLogins(deps),
     macAccess(deps),
@@ -372,18 +332,9 @@ async function sendSnapshot(reason: "first_launch" | "connect_failed" | "cloud_f
     claude_cli_place: cliPlace(claude),
     claude_cli_on_path: onPath("claude"),
     claude_cli_version: claudeVersion,
-    claude_logged_in: typeof claudeStatus?.loggedIn === "boolean" ? claudeStatus.loggedIn : null,
-    claude_plan: plan(claudeStatus?.subscriptionType),
-    claude_app_version: claudeApp,
-    claude_app_cli_version: desktopClaude() ? newest(home("Library/Application Support/Claude/claude-code")) : null,
-    claude_last_used_days: daysSince(home(".claude", "history.jsonl"), ...children(home(".claude", "projects"))),
     codex_cli_place: cliPlace(codex),
     codex_cli_on_path: onPath("codex"),
     codex_cli_version: codexVersion,
-    ...codexAuth,
-    codex_app_version: codexApp,
-    chatgpt_app_version: chatgptApp,
-    codex_last_used_days: daysSince(home(".codex", "history.jsonl"), newestPath(home(".codex", "sessions"), 3)),
     old_bb_data: existsSync(home(".bb")),
     dev_build_data: existsSync(home(".gui-cloudroom-dev")),
     env_proxy: ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"].some(name => Boolean(process.env[name])),

@@ -201,7 +201,7 @@ const PARENT_THREAD_INVALID_REASON_TEXT: Record<
   deleted: "it was deleted",
   self: "a thread cannot be its own parent",
   cycle: "it is a child of this thread",
-  too_deep: "thread nesting is limited to 4 levels",
+  too_deep: "thread nesting is limited to 6 levels",
 };
 
 export function throwParentThreadInvalid(

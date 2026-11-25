@@ -1149,6 +1149,19 @@
     animation-delay: calc(var(--n) * 400ms - 1600ms - var(--o, 0ms));
   }
 
+  /* Sidebar: a thread waiting on its subagents. Spinner grey, so it never outshines real work (#1537). */
+  .subagent-grid.is-waiting {
+    opacity: 0.5;
+  }
+
+  .subagent-grid.is-waiting i::before {
+    opacity: 0.4;
+  }
+
+  .subagent-grid.is-waiting i::after {
+    background: var(--muted-foreground);
+  }
+
   /*
    * Hidden hosts keep shimmering rows mounted: the closed sidebar drawer's
    * inert panel, a collapsed `aria-hidden` banner body, a retained overlay.

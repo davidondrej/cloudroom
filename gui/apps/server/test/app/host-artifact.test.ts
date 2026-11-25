@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { extract, list } from "tar";
+import { gunzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createRoomAppArtifactService,
@@ -105,18 +105,38 @@ afterEach(async () => {
   );
 });
 
+// Each packed path's mode, read from the tar headers: a pax `path` record names
+// long and UTF-8 paths. `tar -tv` would print those per locale.
 async function packedEntries(
   hostPackageRoot: string,
 ): Promise<Record<string, string>> {
-  const file = join(dirname(hostPackageRoot), "packed.tgz");
-  await writeFile(file, await packHostPackage(hostPackageRoot));
+  const bytes = await packHostPackage(hostPackageRoot);
+  await writeFile(join(dirname(hostPackageRoot), "packed.tgz"), bytes);
+  const tar = gunzipSync(bytes);
   const entries: Record<string, string> = {};
-  await list({
-    file,
-    onReadEntry: (entry) => {
-      entries[entry.path] = (entry.mode ?? 0).toString(8);
-    },
-  });
+  let paxPath: string | undefined;
+  for (let offset = 0; offset < tar.length && tar[offset] !== 0;) {
+    const field = (start: number, length: number) =>
+      tar
+        .toString("utf8", offset + start, offset + start + length)
+        .replace(/\0.*/su, "");
+    let sum = 8 * 0x20;
+    for (let i = 0; i < 512; i++) {
+      if (i < 148 || i >= 156) sum += tar[offset + i]!;
+    }
+    expect(parseInt(field(148, 8), 8)).toBe(sum);
+    const size = parseInt(field(124, 12), 8);
+    if (field(156, 1) === "x") {
+      const pax = tar.toString("utf8", offset + 512, offset + 512 + size);
+      paxPath = /^\d+ path=(.*)$/mu.exec(pax)?.[1];
+    } else {
+      const prefix = field(345, 155);
+      const path = paxPath ?? (prefix ? `${prefix}/` : "") + field(0, 100);
+      entries[path] = parseInt(field(100, 8), 8).toString(8);
+      paxPath = undefined;
+    }
+    offset += 512 + Math.ceil(size / 512) * 512;
+  }
   return entries;
 }
 
@@ -191,10 +211,12 @@ describe("packHostPackage", () => {
     const entries = await packedEntries(hostPackageRoot);
     const extracted = join(dirname(hostPackageRoot), "extracted");
     await mkdir(extracted);
-    await extract({
-      cwd: extracted,
-      file: join(dirname(hostPackageRoot), "packed.tgz"),
-    });
+    await execFileAsync("tar", [
+      "-xzf",
+      join(dirname(hostPackageRoot), "packed.tgz"),
+      "-C",
+      extracted,
+    ]);
     for (const file of files) {
       expect(entries[`package/${file}`]).toBe("644");
       expect(await readFile(join(extracted, "package", file), "utf8")).toBe(

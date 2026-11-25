@@ -2250,28 +2250,21 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
         toolUseID: options.toolUseID,
       };
     }
-    // Claude calls this only for a call it would ask the user about, so
-    // outside Full access every ask reaches the user. "Allow for session"
-    // reaches Claude as a session rule, and Claude still asks when an ask
-    // rule, a safety check or a sandbox exit needs a person. Claude keeps no
-    // such rule for sandbox network asks, so the bridge remembers that one.
+    // Claude calls this only for a call it would ask the user about — including
+    // when an ask rule, a safety check, or disableBypassPermissionsMode blocked
+    // bypass mode — so every ask reaches the user even in Full access. "Allow
+    // for session" reaches Claude as a session rule; Claude keeps no such rule
+    // for sandbox network asks, so the bridge remembers that one.
     if (
       toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
-      threadSession.attachment.sandboxNetworkAllowed
+      threadSession.attachment.sandboxNetworkAllowed &&
+      !options.matchedAskRule
     ) {
       return {
         behavior: "allow",
         updatedInput: input,
         toolUseID: options.toolUseID,
         decisionClassification: "user_permanent",
-      };
-    }
-
-    if (threadSession.attachment.permissionMode === "bypassPermissions") {
-      return {
-        behavior: "allow",
-        updatedInput: input,
-        toolUseID: options.toolUseID,
       };
     }
 

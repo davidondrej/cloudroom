@@ -76,6 +76,7 @@ def report(d, state, stage):
 
 def start(d, state, n):
     prompt = open(state.get("prompt") or os.path.join(HERE, "reader.md"), encoding="utf-8").read() + open(os.path.join(d, "slices", f"slice-{n}.txt"), encoding="utf-8").read()
+    prompt = prompt.replace("\0", " ")  # a chat's NUL byte would stop the launch: process arguments can't hold one (#2569)
     prompt_args = ["--prompt", prompt]
     if WIN:  # too long for ROOM_CLI_ARGV (32K); room-cli reads the file back as UTF-8
         prompt_args = ["--prompt-file", os.path.join(d, "slices", f"prompt-{n}.txt")]

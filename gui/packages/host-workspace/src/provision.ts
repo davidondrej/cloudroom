@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+import path from "node:path";
 import type {
   ProvisioningTranscriptEntry,
   RawDiffFileStat,
@@ -6,6 +8,7 @@ import type {
   WorkspaceStatus,
 } from "@cloudroom/domain";
 import { pathExists } from "@cloudroom/process-utils";
+import { GIT_NO_FETCH_ENV } from "bb-environment-provider-host/git";
 import { withCheckoutMutationLock } from "./checkout-mutation-lock.js";
 import { coreGit, coreGitTarget } from "./core-git.js";
 import {
@@ -123,8 +126,9 @@ class ProvisionedHostWorkspace implements HostWorkspace {
     return coreGit<T>(this.path, args, { ...this.git, ...options });
   }
 
+  /** The watcher's automatic reads, so they never fetch (#2189). */
   private async lines(args: string[]): Promise<string> {
-    return (await runGit(args, { cwd: this.path, timeoutMs: WORKSPACE_GIT_TIMEOUT_MS, ...this.git })).stdout;
+    return (await runGit(args, { cwd: this.path, timeoutMs: WORKSPACE_GIT_TIMEOUT_MS, env: GIT_NO_FETCH_ENV, ...this.git })).stdout;
   }
 
   async getCurrentBranch(): Promise<string | null> {
@@ -138,7 +142,7 @@ class ProvisionedHostWorkspace implements HostWorkspace {
 
   async getHeadSha(): Promise<string | null> {
     await ensureGitRepo(this.path, this.git);
-    const result = await runGit(["rev-parse", "-q", "--verify", "HEAD^{commit}"], { cwd: this.path, allowFailure: true, ...this.git });
+    const result = await runGit(["rev-parse", "-q", "--verify", "HEAD^{commit}"], { cwd: this.path, allowFailure: true, env: GIT_NO_FETCH_ENV, ...this.git });
     return result.exitCode === 0 ? result.stdout.trim() || null : null;
   }
 
@@ -147,9 +151,29 @@ class ProvisionedHostWorkspace implements HostWorkspace {
     await ensureGitRepo(this.path, this.git);
     const [headSha, porcelain] = await Promise.all([
       this.getHeadSha(),
-      this.lines(["--no-optional-locks", "status", "--porcelain=v1", "--branch", "--untracked-files=normal"]),
+      // No rename detection: in a blobless clone it can need a missing old file.
+      this.lines([
+        "--no-optional-locks",
+        "status",
+        "--porcelain=v1",
+        "--branch",
+        "--untracked-files=normal",
+        "--no-renames",
+      ]).catch(() => null),
     ]);
-    return JSON.stringify({ headSha, porcelain });
+    if (porcelain !== null) return JSON.stringify({ headSha, porcelain });
+    // Status fails when HEAD's tree is missing and may not be fetched, as in a treeless clone after
+    // `git reset --soft` (#2189). The index file changes on every staging and needs no Git object.
+    // File edits notify on their own.
+    const indexPath = path.resolve(
+      this.path,
+      (await this.lines(["rev-parse", "--git-path", "index"])).trim(),
+    );
+    const index = await stat(indexPath).then(
+      ({ ino, size, mtimeMs }) => [ino, size, mtimeMs],
+      () => null,
+    );
+    return JSON.stringify({ headSha, index });
   }
 
   /** Changes when any branch or origin's HEAD moves. */

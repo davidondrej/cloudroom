@@ -164,6 +164,9 @@ pub struct Session {
     // Turns already reported to the parent in another sandbox (relay.rs).
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub reported: std::collections::BTreeSet<String>,
+    // The reply its parent last got from it, as a key (children.rs `told`, #1395); none after a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told_reply: Option<String>,
     // What this parent last heard of each child in its own sandbox, by thread ID (relay.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub child_states: BTreeMap<String, String>,
@@ -3127,7 +3130,7 @@ impl Manager {
                 let spent = tokens::Tokens::of(&usage, session.harness)?.since(session.tokens);
                 (spent != tokens::Tokens::default()).then(|| Signal::Tokens {
                     harness: session.harness,
-                    model: session.model.clone(),
+                    model: crate::observability::public_model(session.model.as_deref()),
                     child: session.parent_session.is_some(),
                     tokens: spent,
                 })

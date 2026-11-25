@@ -252,6 +252,29 @@ fn reads_never_change_the_repository() {
             "{args:?}"
         );
     }
+
+    // A blobless clone after `git reset --soft HEAD~1` lacks a.txt's old content, and reads never fetch it: the
+    // file still shows, without counts, and its patch says why.
+    repo.git(&["config", "uploadpack.allowFilter", "true"]);
+    let clone = Repo(repo.0.with_extension("blobless"));
+    let _ = fs::remove_dir_all(&clone.0);
+    let url = format!("file://{}", repo.0.display());
+    repo.git(&[
+        "clone",
+        "-q",
+        "--filter=blob:none",
+        &url,
+        clone.0.to_str().unwrap(),
+    ]);
+    clone.git(&["reset", "-q", "--soft", "HEAD~1"]);
+    let status = clone.json(&["status"]);
+    assert_eq!(
+        summary(&status["workingTree"]["files"]),
+        ["a.txt \"M\" null null"]
+    );
+    assert_eq!(status["workingTree"]["lineStatsComplete"], false);
+    let patch = clone.json_in(&["patch", "uncommitted"], "a.txt\0");
+    assert!(patch[0]["error"].is_string());
 }
 
 #[test]

@@ -12,6 +12,7 @@ import {
   type PromptTextMention,
 } from "@cloudroom/domain";
 import type { IconName } from "@cloudroom/shared-ui/icon";
+import { appToast } from "@/components/ui/app-toast";
 import type { ComposerView } from "@get-bb/plugin-sdk";
 import type { ComponentType, ReactNode, Ref } from "react";
 import type { VoiceUnsupportedReason } from "@/hooks/voice-input-support";
@@ -246,8 +247,11 @@ export function promptModelShortcuts(
       icon: harness?.icon,
       onSelect: async () => {
         const model = "models" in source ? known : newestModel(await source.loadModels(providerId), name);
-        // Rejecting keeps the typed shortcut in the draft.
-        if (!model) throw new Error(`${harnessName} lists no ${name} model`);
+        // Rejecting drops a held Enter, so the prompt never goes to the old model.
+        if (!model) {
+          appToast.error(`${harnessName} lists no ${name} model.`);
+          throw new Error(`${harnessName} lists no ${name} model`);
+        }
         await selectModel({ providerId, model });
       },
     });

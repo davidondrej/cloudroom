@@ -8,6 +8,11 @@ import {
   createCallerProofIssuer,
 } from "@cloudroom/config/caller-proof";
 import {
+  createHumanClickSigner,
+  createHumanClickVerifier,
+  HUMAN_CLICK_HEADER,
+} from "@cloudroom/config/human-click";
+import {
   callerTokenTarget,
   createLocalCallerAuth,
   type LocalCallerOrigins,
@@ -131,5 +136,41 @@ describe("createLocalCallerAuth", () => {
 
     auth.completed(refusal(`${serverUrl}/api/v1/hosts`, "invalid"));
     await vi.waitFor(() => expect(reloadAppWindows).toHaveBeenCalledTimes(1));
+  });
+
+  it("signs interaction responses only from the app's own top-level frame", async () => {
+    const serverUrl = await startProofServer();
+    const signer = createHumanClickSigner();
+    const verifier = createHumanClickVerifier(signer.publicKey);
+    const auth = createLocalCallerAuth({
+      isAppWebContents: (id) => id === 1,
+      localServerUrl: () => serverUrl,
+      reloadAppWindows: vi.fn(),
+      signHumanClick: signer.sign,
+    });
+    await auth.prepare(serverUrl, serverUrl);
+
+    const path = "/api/v1/threads/thr_1/interactions/pint_23456789ab/respond";
+    const send = (frame: { parent: unknown } | null) =>
+      new Promise<Record<string, string>>((resolve) =>
+        auth.beforeSendHeaders(
+          {
+            frame,
+            method: "POST",
+            requestHeaders: { [HUMAN_CLICK_HEADER]: "forged" },
+            url: `${serverUrl}${path}`,
+            webContentsId: 1,
+          },
+          ({ requestHeaders }) => resolve(requestHeaders),
+        ),
+      );
+
+    const subframe = await send({ parent: {} });
+    expect(subframe[HUMAN_CLICK_HEADER]).toBeUndefined();
+
+    const topFrame = await send({ parent: null });
+    expect(verifier.verify(topFrame[HUMAN_CLICK_HEADER], "POST", path)).toBe(
+      true,
+    );
   });
 });

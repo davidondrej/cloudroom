@@ -7,6 +7,9 @@ import type { useFolderPicker } from "./useFolderPicker";
 
 /** Every row in the project picker: one height, no icon on the left. */
 export const PICKER_ROW_CLASS_NAME = "group h-7 rounded-md py-0 text-xs max-md:h-10";
+/** Mobile floating-sheet project row (Design 1A, David, 2026-11-24). */
+export const COMPACT_PICKER_ROW_CLASS_NAME =
+  "group h-auto min-h-[42px] gap-3 rounded-[14px] px-3.5 py-2 text-[16px] leading-snug";
 /** Small gray text on the right of a row, and next to a folder's name. */
 export const PICKER_DETAIL_CLASS_NAME = "text-[0.6875rem] text-muted-foreground/45";
 const PATH_ROWS = 50;
@@ -40,28 +43,45 @@ export function RowAction({ label, busy = false, visible = false }: { label: str
 }
 
 /** Path mode: the typed folder's subfolders, most likely first, plus the folder itself when no name is typed. */
-export function FolderPathGroup({ folders, addingKey, onPick }: { folders: FolderPicker; addingKey: string | null; onPick: (folder: PickedFolder) => void }) {
+export function FolderPathGroup({
+  folders,
+  addingKey,
+  onPick,
+  compact = false,
+}: {
+  folders: FolderPicker;
+  addingKey: string | null;
+  onPick: (folder: PickedFolder) => void;
+  compact?: boolean;
+}) {
   const now = Date.now();
   const { listing, matches, leaf, home } = folders;
+  const rowClassName = compact
+    ? `${COMPACT_PICKER_ROW_CLASS_NAME} text-foreground/90 data-[selected=true]:bg-transparent active:bg-state-hover`
+    : PICKER_ROW_CLASS_NAME;
   const heading = folders.missing
     ? `No folder at ${folders.folder}`
     : listing
       ? <>{tildePath(listing.directory, home)} <span className="font-normal opacity-70">{leaf ? `${matches.length} match${matches.length === 1 ? "" : "es"}` : `${matches.length} folders`}</span></>
       : "Loading…";
   return (
-    <CommandGroup heading={heading}>
+    <CommandGroup
+      heading={heading}
+      className={compact ? "p-0 [&_[cmdk-group-heading]]:px-3.5 [&_[cmdk-group-items]]:flex [&_[cmdk-group-items]]:flex-col [&_[cmdk-group-items]]:gap-0.5" : undefined}
+    >
       {listing && !leaf && folders.canAddHere ? (
         <CommandItem
           value={HERE_VALUE}
           disabled={addingKey !== null}
           onSelect={() => onPick({ path: listing.directory, name: baseName(listing.directory), ...(listing.projectId ? { projectId: listing.projectId } : {}) })}
-          className={PICKER_ROW_CLASS_NAME}
+          className={rowClassName}
         >
+          {compact ? <Icon name="Folder" className="size-[19px]! shrink-0 text-muted-foreground" aria-hidden /> : null}
           <span className="min-w-0 flex-1 truncate">
             {baseName(listing.directory)}
             <span className={`ml-1.5 ${PICKER_DETAIL_CLASS_NAME}`}>this folder</span>
           </span>
-          <RowAction label={listing.projectId ? "Select" : "Add"} busy={addingKey === listing.directory} />
+          <RowAction label={listing.projectId ? "Select" : "Add"} busy={addingKey === listing.directory} visible={compact} />
         </CommandItem>
       ) : null}
       {matches.slice(0, PATH_ROWS).map((entry) => (
@@ -70,21 +90,22 @@ export function FolderPathGroup({ folders, addingKey, onPick }: { folders: Folde
           value={folderValue(entry.path)}
           disabled={addingKey !== null && addingKey !== entry.path}
           onSelect={() => onPick(entry)}
-          className={PICKER_ROW_CLASS_NAME}
+          className={rowClassName}
         >
+          {compact ? <Icon name="Folder" className="size-[19px]! shrink-0 text-muted-foreground" aria-hidden /> : null}
           <span className="min-w-0 flex-1 truncate">
             {entry.name}/
             {entry.activityAt ? <span className={`ml-1.5 ${PICKER_DETAIL_CLASS_NAME}`}>{formatRelativeTime({ timestamp: entry.activityAt, now })}</span> : null}
           </span>
           {entry.projectId ? <Icon name="Check" className="size-3.5! text-muted-foreground/45 group-data-[selected=true]:hidden" aria-label="Already a project" /> : null}
           {entry.git === "repo" ? <Icon name="GitBranch" className="size-3.5! text-muted-foreground/45 group-data-[selected=true]:hidden" aria-label="Git repo" /> : null}
-          <RowAction label={entry.projectId ? "Select" : "Add"} busy={addingKey === entry.path} />
+          {compact ? null : <RowAction label={entry.projectId ? "Select" : "Add"} busy={addingKey === entry.path} />}
         </CommandItem>
       ))}
       {matches.length > PATH_ROWS ? (
-        <div className={`px-2 py-1 ${PICKER_DETAIL_CLASS_NAME}`}>+{matches.length - PATH_ROWS} more, newest first</div>
+        <div className={compact ? `px-3.5 py-1.5 ${PICKER_DETAIL_CLASS_NAME}` : `px-2 py-1 ${PICKER_DETAIL_CLASS_NAME}`}>+{matches.length - PATH_ROWS} more, newest first</div>
       ) : listing && leaf && matches.length === 0 ? (
-        <div className="px-2 py-1.5 text-xs text-muted-foreground/70">No folder starts with “{leaf}”</div>
+        <div className={compact ? "px-3.5 py-2 text-sm text-muted-foreground/70" : "px-2 py-1.5 text-xs text-muted-foreground/70"}>No folder starts with “{leaf}”</div>
       ) : null}
     </CommandGroup>
   );

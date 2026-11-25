@@ -267,13 +267,14 @@ impl Manager {
         if super::relay::start_pending(&local) {
             return json!({"drained":false,"reason":"child_start_pending"});
         }
+        // A command waiting on the user's Mac keeps the sandbox awake, also one started from a terminal (feedback 0024).
+        // Checked first: a Mac command is often also an agent's background job, and this is the reason that matters.
+        if self.mac.waiting() > 0 {
+            return json!({"drained":false,"reason":"mac_command"});
+        }
         // ADR 0031: background jobs keep the sandbox awake. The website stops it two hours after the last activity.
         if local.agent_counts().background > 0 {
             return json!({"drained":false,"reason":"background_jobs"});
-        }
-        // So does a command waiting on the user's Mac, also one started from a terminal.
-        if self.mac.waiting() > 0 {
-            return json!({"drained":false,"reason":"mac_command"});
         }
         // A RepoSync check finishes its Git work before the GitHub login is wiped and the sandbox stops.
         if self.repo_sync.running() {
@@ -315,6 +316,13 @@ impl Manager {
         };
         let out = async { while pending() && changed.changed().await.is_ok() {} };
         let _ = tokio::time::timeout(wait, out).await;
+    }
+
+    /// Runs `start` unless the sandbox is draining, under the drain's lock, so a drain that begins later sees what it
+    /// started: a Mac command's count (mac/mod.rs).
+    pub(crate) fn unless_draining<T>(&self, start: impl FnOnce() -> T) -> Option<T> {
+        let local = self.local.lock().unwrap();
+        (!local.draining).then(start)
     }
 
     /// RepoSync (workspace/repo_sync.rs) checks every few seconds and when a turn ends. A check counts as running from

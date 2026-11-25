@@ -906,6 +906,9 @@ impl Local {
                 if let Some(request) = record.data["request_id"].as_str() {
                     session.reported.insert(request.to_owned());
                 }
+                if let Some(reply) = record.data.get("reply") {
+                    session.told_reply = reply.as_str().map(str::to_owned);
+                }
             }
             "usage_limited" => {
                 session.usage_limited = true;

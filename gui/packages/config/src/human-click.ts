@@ -27,6 +27,10 @@ const ACTIONS = [
   ["approve", /^\/api\/v1\/human-clicks\/[^/]+\/approve$/u],
   ["decline", /^\/api\/v1\/human-clicks\/[^/]+\/decline$/u],
   ["mac-access", /^\/api\/v1\/cloudroom\/account\/mac-access$/u],
+  [
+    "interaction-respond",
+    /^\/api\/v1\/threads\/[^/]+\/interactions\/[^/]+\/respond$/u,
+  ],
 ] as const;
 
 export type HumanClickAction = (typeof ACTIONS)[number][0];

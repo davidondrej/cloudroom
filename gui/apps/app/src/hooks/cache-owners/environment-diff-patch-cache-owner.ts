@@ -170,17 +170,28 @@ export function pruneDiffPatchEntries({
     ) {
       continue;
     }
-    entries.delete(key);
-    queryClient.removeQueries({
-      exact: true,
-      queryKey: environmentDiffPatchQueryKey(
-        identity.environmentId,
-        identity.targetType,
-        identity.targetKey,
-        path,
-      ),
-    });
+    removeDiffPatchEntry({ queryClient, identity, path });
   }
+}
+
+/** Drops one file's cached patch, so a stale diff never shows in place of a newer answer. */
+export function removeDiffPatchEntry({
+  queryClient,
+  identity,
+  path,
+}: ReadDiffPatchEntryArgs): void {
+  getDiffPatchFreshnessEntries(queryClient, identity.environmentId).delete(
+    diffPatchEntryFreshnessKey(identity, path),
+  );
+  queryClient.removeQueries({
+    exact: true,
+    queryKey: environmentDiffPatchQueryKey(
+      identity.environmentId,
+      identity.targetType,
+      identity.targetKey,
+      path,
+    ),
+  });
 }
 
 interface DiffPatchRetentionLease {

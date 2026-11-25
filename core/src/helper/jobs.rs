@@ -30,8 +30,11 @@ pub(super) const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folder
 const NOT_APPROVED: &str =
     "The user did not approve this command on their Mac. Do not retry it unless they ask you to.";
 const CHANGED: &str = "The folder changed after it was approved, so this command did not run.";
+// A command whose sandbox slept (or went Off) never starts: it would change the Mac with nobody to read the result.
 const UNWANTED: &str =
     "The Mac stopped taking commands from this sandbox, so this command did not run.";
+const STOPPED: &str =
+    "The sandbox stopped while the approval was open, so this command did not run.";
 
 /// The real path of the folder a command would run in, and its identity. The OS opens the path as given, so `..` never
 /// skips a missing part, and its real path must be that same folder. The error is the one starting there would give.
@@ -1456,6 +1459,9 @@ impl Jobs {
             }
             Err(error) => return Some(error),
         }
+        if !self.wanted.lock().unwrap().contains(&core.key) {
+            return Some(UNWANTED.into());
+        }
         if self.approve(core, job).await {
             // The user may have lowered Mac access while the popup was open.
             let now = level(&self.enabled().unwrap_or(Value::Null));
@@ -1599,6 +1605,16 @@ impl Jobs {
                 None => Some("The Mac could not download this command's input from the cloud, so it did not run. Try again.".to_owned()),
             };
         }
+        // Approved on Ask first: Core must still want it. The pop-up stays open up to 5 minutes after the first confirmation,
+        // and a sandbox that slept or restarted meanwhile would leave nobody to read the result (feedback 0024).
+        if refused.is_none()
+            && job.get("approvedFolder").is_some()
+            && post(json!({"state": "running"}), Duration::from_secs(10))
+                .await
+                .is_err()
+        {
+            refused = Some(STOPPED.to_owned());
+        }
         // Refused commands are checked too, but a script file is read only for a command that will run.
         self.review(
             &core,
@@ -1622,15 +1638,11 @@ impl Jobs {
             Some(reason) => {
                 json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(reason.as_bytes()), "truncated": false})
             }
-            // Approved after its sandbox slept, a write command would change the Mac with nobody to read the result.
-            None if !self.wanted.lock().unwrap().contains(&core.key) => {
-                json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(UNWANTED.as_bytes()), "truncated": false})
-            }
             None => {
-                let sandbox = sandboxed.then_some(&core.key);
                 self.run(
                     &job,
-                    sandbox,
+                    &core.key,
+                    sandboxed,
                     &data,
                     text(&core.config, "shellPath"),
                     text(&core.config, "serverUrl"),
@@ -1648,20 +1660,20 @@ impl Jobs {
         }
     }
 
-    /// Runs one approved job as this user, through the login shell, and returns its result. With `sandbox`, the key of
-    /// the core that sent it, it runs read-only, and everything it starts ends with it or with that core's stream.
+    /// Runs one approved job from `core` as this user, through the login shell, and returns its result. `sandboxed` runs
+    /// it read-only, and everything it starts ends with it or with that core's stream.
     pub(super) async fn run(
         &self,
         job: &Value,
-        sandbox: Option<&Key>,
+        core: &Key,
+        sandboxed: bool,
         data: &Path,
         saved_path: Option<&str>,
         server: Option<&str>,
     ) -> Value {
         let id = job["id"].as_str().unwrap_or_default().to_owned();
-        let sandboxed = sandbox.is_some();
         // Never the job's ID, which a sandbox can pick.
-        let mark = match sandbox.map(|_| super::uuid4()).transpose() {
+        let mark = match sandboxed.then(super::uuid4).transpose() {
             Ok(token) => token.map(|token| format!("{}.{}", self.boot, &token[..16])),
             Err(error) => {
                 return json!({"state": "done", "code": 127, "stdout": "", "stderr": hex(error.to_string().as_bytes()), "truncated": false});
@@ -1766,8 +1778,9 @@ impl Jobs {
                 denied(
                     "Cloudroom on the Mac is stopping, so this command did not run. Try again in a minute.",
                 )
-            } else if sandbox.is_some_and(|key| !self.wanted.lock().unwrap().contains(key)) {
-                // end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on.
+            } else if !self.wanted.lock().unwrap().contains(core) {
+                // end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on. A write
+                // command too, as in client.py.
                 denied(UNWANTED)
             } else {
                 let spawned = command(&argv[0])
@@ -1781,9 +1794,9 @@ impl Jobs {
                     && let Some(pid) = child.id()
                 {
                     processes.running.insert(id.clone(), pid);
-                    if let (Some(mark), Some(key)) = (&mark, sandbox) {
+                    if let Some(mark) = &mark {
                         let running = Sandbox {
-                            core: Some(key.clone()),
+                            core: Some(core.clone()),
                             allowed: None,
                             shell: Some(pid),
                         };

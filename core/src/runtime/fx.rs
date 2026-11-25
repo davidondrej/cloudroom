@@ -72,7 +72,7 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
     *handle.acp_config.lock().unwrap() = session;
     let requested = handle.profile.model.as_str();
     if requested != "default" {
-        if !offers(&handle.acp_config.lock().unwrap(), "model", requested) {
+        if !cursor::offers(&handle.acp_config.lock().unwrap(), "model", requested) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("fx model {requested} is unavailable for this account"),
@@ -91,7 +91,8 @@ pub(super) async fn prepare_turn(handle: &Handle) -> io::Result<()> {
     };
     let change = {
         let state = handle.acp_config.lock().unwrap();
-        offers(&state, "effort", effort) && cursor::option_value(&state, "effort") != Some(effort)
+        cursor::offers(&state, "effort", effort)
+            && cursor::option_value(&state, "effort") != Some(effort)
     };
     if change {
         set(handle, &handle.native()?, "effort", effort).await?;
@@ -154,14 +155,6 @@ fn v2_log(home: &Path, id: &str) -> std::path::PathBuf {
     home.join("sessions/v2").join(id).join("log.jsonl")
 }
 
-fn offers(session: &Value, option: &str, value: &str) -> bool {
-    session["configOptions"]
-        .as_array()
-        .and_then(|options| options.iter().find(|o| o["id"] == option))
-        .and_then(|option| option["options"].as_array())
-        .is_some_and(|options| options.iter().any(|o| o["value"] == value))
-}
-
 async fn set(handle: &Handle, id: &str, option: &str, value: &str) -> io::Result<()> {
     let result = handle
         .call(
@@ -170,9 +163,10 @@ async fn set(handle: &Handle, id: &str, option: &str, value: &str) -> io::Result
         )
         .await?;
     if cursor::option_value(&result, option) != Some(value) {
-        return Err(io::Error::other(format!(
-            "fx did not confirm {option} {value}"
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("fx did not confirm {option} {value}"),
+        ));
     }
     *handle.acp_config.lock().unwrap() = result;
     Ok(())

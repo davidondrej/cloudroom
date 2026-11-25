@@ -323,6 +323,12 @@ export class CloudDelivery {
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
             }),
     ]);
+    // A side chat switched agent or model while this start ran: drop the old session; the next tick starts the new one.
+    const now = binding(this.rt.host.db, threadId);
+    if (sideChat && (this.rt.host.getThread(threadId)?.providerId !== harness || now?.model !== saved.model || now?.startRequestId !== saved.startRequestId)) {
+      void client.close(started.sessionId, randomUUID()).catch(() => {});
+      return null;
+    }
     if (harness === "acp-antigravity" && !fork) {
       const failure = await this.lifecycle.startFailure(client, started.sessionId, true);
       if (failure) {
@@ -553,9 +559,9 @@ export class CloudDelivery {
     if (stale || !refused(error, targeted, error instanceof SandboxAsleep)) return "throw";
     if (pending.command === "steer") {
       // Usually its turn just ended. It queues ahead of anything sent after it; the same ID makes a repeat harmless.
-      const { text, content, attachments } = z.object({ text: z.string(), content: z.unknown().optional(), attachments: z.array(z.unknown()).optional() }).parse(JSON.parse(pending.input));
+      const { text, content, attachments, sender_thread_id } = z.object({ text: z.string(), content: z.unknown().optional(), attachments: z.array(z.unknown()).optional(), sender_thread_id: z.string().optional() }).parse(JSON.parse(pending.input));
       const id = appRequestId(await this.rt.me(), `queued-${createHash("sha256").update(pending.id).digest("hex").slice(0, 32)}`);
-      this.queue.enqueue(threadId, id, "prompt", { text, ...(content === undefined ? {} : { content }), ...(attachments?.length ? { attachments } : {}) }, pending.createdAt);
+      this.queue.enqueue(threadId, id, "prompt", { text, ...(content === undefined ? {} : { content }), ...(attachments?.length ? { attachments } : {}), ...(sender_thread_id ? { sender_thread_id } : {}) }, pending.createdAt);
       saveCommandState(this.rt.host.db, threadId, pending.id, "failed");
       if (this.rt.host.db.transaction((tx) => projectFollowUp(tx, threadId, id))) this.rt.notify(threadId, ["client/turn/requested"]);
       void this.deliver(threadId).catch(() => {});

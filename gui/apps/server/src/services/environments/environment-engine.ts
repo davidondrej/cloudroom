@@ -760,7 +760,6 @@ async function runRemove(
   deps: Deps,
   environmentId: string,
   attempt: number,
-  resumeOnly: boolean,
   signal: AbortSignal,
   quiet?: number | "finish",
 ): Promise<void> {
@@ -848,7 +847,6 @@ async function runRemove(
           hostId: row.hostId,
           path: row.path,
           kind: "teardown",
-          resumeOnly,
           report: {
             step: () => undefined,
             log: (text) =>
@@ -1074,7 +1072,7 @@ async function sweepProviderEnvironmentInSlot(
       teardownAttempt: attempt,
       teardownMessage: null,
     });
-    await runRemove(deps, environmentId, attempt, false, signal, "finish");
+    await runRemove(deps, environmentId, attempt, signal, "finish");
     return;
   }
   if (
@@ -1137,13 +1135,7 @@ async function sweepProviderEnvironmentInSlot(
     teardownAttempt: attempt,
     teardownMessage: null,
   });
-  await runRemove(
-    deps,
-    environmentId,
-    attempt,
-    row.teardownAttempt > 0,
-    signal,
-  );
+  await runRemove(deps, environmentId, attempt, signal);
 }
 
 /**
@@ -1181,7 +1173,7 @@ export async function parkQuietWorktree(
           teardownAttempt: attempt,
           teardownMessage: null,
         });
-        await runRemove(deps, environmentId, attempt, false, signal, quietSince);
+        await runRemove(deps, environmentId, attempt, signal, quietSince);
       }),
   }).done;
   return getEnvironment(deps.db, environmentId)?.parkedAt != null;

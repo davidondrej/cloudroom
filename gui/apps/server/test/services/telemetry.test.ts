@@ -412,6 +412,26 @@ describe("telemetry service", () => {
         name: "first_response",
         properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "acp-opencode", sandbox_woke: null, model: "gpt-5.4" },
       });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "acp-opencode", sandbox_woke: null, model: "my-proxy/claude-opus-5-5" },
+      });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "claude-code", sandbox_woke: null, model: "arn:aws:bedrock:us-east-1:123456:inference-profile/secret" },
+      });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "pi", sandbox_woke: null, model: "ollama/qwen3-coder" },
+      });
+      telemetry.capture({
+        name: "token_usage",
+        properties: { day: "2026-11-24", provider: "claude-code", model: "Opus 5.5", is_child_thread: false, input: 10, cached: 0, cache_write: 0, output: 5, turns: 1 },
+      });
+      telemetry.capture({
+        name: "first_response",
+        properties: { execution: "local", is_child_thread: false, message_source: "thread_send", ms: 100, provider: "pi", sandbox_woke: null, model: "openrouter/anthropic/claude-opus-5-5[1m]" },
+      });
 
       const [batch] = await batches(telemetry);
       expect(batch!.events.map((event) => ({
@@ -426,6 +446,11 @@ describe("telemetry service", () => {
         { name: "first_response", provider: "custom", model: "custom", from: undefined, to: undefined },
         { name: "harness_switched", provider: undefined, model: undefined, from: "custom", to: "acp-opencode" },
         { name: "first_response", provider: "acp-opencode", model: "gpt-5.4", from: undefined, to: undefined },
+        { name: "first_response", provider: "acp-opencode", model: "custom", from: undefined, to: undefined },
+        { name: "first_response", provider: "claude-code", model: "custom", from: undefined, to: undefined },
+        { name: "first_response", provider: "pi", model: "custom", from: undefined, to: undefined },
+        { name: "token_usage", provider: "claude-code", model: "Opus 5.5", from: undefined, to: undefined },
+        { name: "first_response", provider: "pi", model: "openrouter/anthropic/claude-opus-5-5[1m]", from: undefined, to: undefined },
       ]);
     } finally {
       db.$client.close();

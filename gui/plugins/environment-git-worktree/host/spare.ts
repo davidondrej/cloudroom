@@ -1,9 +1,13 @@
 import {
   findWorktreeForBranch,
+  getGitCommonDir,
   runGit,
   type GitCommandResult,
 } from "bb-environment-provider-host/git";
-import { runGitWithWorktreeMetadataLock } from "bb-environment-provider-host/locks";
+import {
+  runGitWithWorktreeMetadataLock,
+  withWorktreeMetadataLock,
+} from "bb-environment-provider-host/locks";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -121,23 +125,32 @@ export async function claimSpareWorktree(args: {
       return null;
     try {
       // `runGit` starts no file watcher in the spare: on Windows one would hold
-      // its folder open and block the move.
-      await runGitWithWorktreeMetadataLock(
-        ["worktree", "move", sparePath, targetPath],
-        { cwd: sourcePath, signal },
-      );
-      // No hook runs here: `runGit` turns them off, and the hook runs below.
-      return await runGit(
-        [
-          "-c",
-          "checkout.workers=0",
-          "checkout",
-          "--force",
-          "-B",
-          args.branchName,
-          args.startPoint,
-        ],
-        { cwd: targetPath, signal },
+      // its folder open and block the move. The checkout writes the branch's
+      // upstream to .git/config, as `git worktree add -B` does, so it runs
+      // under the same lock (#2561).
+      return await withWorktreeMetadataLock(
+        await getGitCommonDir(sourcePath, { signal }),
+        async () => {
+          await runGit(["worktree", "move", sparePath, targetPath], {
+            cwd: sourcePath,
+            signal,
+          });
+          // No hook runs here: `runGit` turns them off, and the hook runs below.
+          return runGit(
+            [
+              "-c",
+              "checkout.workers=0",
+              "checkout",
+              "--force",
+              "-B",
+              args.branchName,
+              args.startPoint,
+            ],
+            { cwd: targetPath, signal },
+          );
+        },
+        signal,
+        true,
       );
     } catch (error) {
       if (signal.aborted) throw error;

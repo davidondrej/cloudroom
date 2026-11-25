@@ -1,6 +1,7 @@
-import type {
-  CommandDispatchOptions,
-  CommandOf,
+import {
+  CommandDispatchError,
+  type CommandDispatchOptions,
+  type CommandOf,
 } from "../command-dispatch-support.js";
 import {
   DEFAULT_ENV_SETUP_SCRIPT_NAME,
@@ -49,15 +50,22 @@ export async function runEnvironmentHook(
 ): Promise<Record<string, never>> {
   const active = controllers(options);
   const existing = active.get(command.operationId);
+  // This daemon never ran it. The server gives up on it once its time limit passes.
   if (existing === "cancelled")
-    throw new Error("Environment hook cancelled before dispatch");
+    throw new CommandDispatchError(
+      "environment_hook_unknown",
+      "Environment hook cancelled before dispatch",
+    );
   if (existing !== undefined) {
     if (existing.path !== command.path || existing.kind !== command.kind)
       throw new Error("Environment hook identity mismatch");
     return existing.done;
   }
   if (command.resumeOnly)
-    throw new Error("Environment hook outcome is unknown after daemon restart");
+    throw new CommandDispatchError(
+      "environment_hook_unknown",
+      "Environment hook outcome is unknown after daemon restart",
+    );
   const controller = new AbortController();
   const outcome: HookOutcome = { terminationUnverified: false };
   const emit = (entry: {

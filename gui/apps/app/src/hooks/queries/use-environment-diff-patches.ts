@@ -15,6 +15,7 @@ import {
   isDiffPatchEntryFresh,
   pruneDiffPatchEntries,
   readDiffPatchEntry,
+  removeDiffPatchEntry,
   retainDiffPatchQueries,
   writeDiffPatchEntry,
 } from "../cache-owners/environment-diff-patch-cache-owner";
@@ -222,7 +223,14 @@ export function useEnvironmentDiffPatches(
         }
         if (response.outcome === "available") {
           const returnedPaths = new Set<string>();
+          const reasons = new Map<string, string>();
           for (const entry of response.patches) {
+            // A file Git couldn't diff shows why, not an empty or older diff.
+            if (entry.error !== undefined) {
+              reasons.set(entry.path, entry.error);
+              removeDiffPatchEntry({ queryClient, identity, path: entry.path });
+              continue;
+            }
             writeDiffPatchEntry({
               queryClient,
               identity,
@@ -237,6 +245,7 @@ export function useEnvironmentDiffPatches(
               paths,
               loadingGeneration: freshnessGeneration,
               returnedPaths,
+              reasons,
             }),
           );
         } else {
@@ -424,6 +433,8 @@ export function useEnvironmentDiffPatches(
     (entries: DiffPatchEntry[]) => {
       let changed = false;
       for (const entry of entries) {
+        // Left to fetch, which shows the reason.
+        if (entry.error !== undefined) continue;
         const previous = readDiffPatchEntry({
           queryClient,
           identity,
@@ -495,6 +506,7 @@ interface SettlePageArgs {
   loadingGeneration: number;
   error?: string;
   returnedPaths?: ReadonlySet<string>;
+  reasons?: ReadonlyMap<string, string>;
 }
 
 function settlePage({
@@ -503,6 +515,7 @@ function settlePage({
   loadingGeneration,
   error,
   returnedPaths,
+  reasons,
 }: SettlePageArgs): InFlightState {
   const loading = new Map(previous.loading);
   const errors = new Map(previous.errors);
@@ -515,7 +528,7 @@ function settlePage({
     } else if (returnedPaths !== undefined && !returnedPaths.has(path)) {
       errors.set(path, {
         generation: loadingGeneration,
-        message: MISSING_PATCH_MESSAGE,
+        message: reasons?.get(path) ?? MISSING_PATCH_MESSAGE,
       });
     } else {
       errors.delete(path);

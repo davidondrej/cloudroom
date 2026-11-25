@@ -1620,7 +1620,22 @@ export default async function plugin(room: BbPluginApi) {
             return { status: "complete" as const, message: null, authorizeUrl: null };
           }
           if (!state.account) {
-            state.account = await profileAccount(profilePath(state.profile!));
+            const signedIn = await profileAccount(profilePath(state.profile!));
+            // A plain add of an account already here would only refresh it, and no row appears (#2547).
+            if (
+              !state.replace &&
+              accounts.some(
+                (entry) =>
+                  entry.provider === "claude-code" &&
+                  signedIn.orgId !== null &&
+                  entry.org === signedIn.orgId &&
+                  entry.email === signedIn.email,
+              )
+            )
+              throw new Error(
+                `${signedIn.email ?? "This Claude account"} is already added. Sign out of claude.ai or use a private window, then try again.`,
+              );
+            state.account = signedIn;
             const next = await claudeLogin.start();
             state.login = next.sessionId;
             state.url = next.authorizeUrl;

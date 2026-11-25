@@ -55,7 +55,7 @@ export function AccountOverview({ email: real, onSignOut }: { email: string; onS
       <div className={cn(SETTINGS_CARD_CLASS, "flex flex-col")}>
         {paid
           ? <ActionRow icon="CreditCard" title="Manage plan" detail="Upgrade, change, or cancel" external onClick={openBilling} />
-          : <ActionRow icon="Zap" title="Upgrade to Pro" detail="50,000 Cloud Credits every month" external onClick={openBilling} />}
+          : <ActionRow icon="Zap" title="Upgrade to Pro" detail="55,000 Cloud Credits every month" external onClick={openBilling} />}
         <ActionRow icon="Plus" title="Buy credits" detail="From $5 · $1 = 1,000 credits" external onClick={openBilling} />
         <ActionRow icon="FileText" title="Invoices" detail="Receipts for every payment" external onClick={openBilling} />
         {paid && <ActionRow icon="Calendar" title="Book a 1:1 call" detail="30 minutes with our team" external onClick={() => openUrlInExternalBrowser(CALL_URL)} />}

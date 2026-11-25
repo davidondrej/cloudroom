@@ -174,6 +174,15 @@ pub(super) fn option_value<'a>(state: &'a Value, name: &str) -> Option<&'a str> 
         .as_str()
 }
 
+/// Whether the ACP session lists `value` for config option `name`.
+pub(super) fn offers(state: &Value, name: &str, value: &str) -> bool {
+    state["configOptions"]
+        .as_array()
+        .and_then(|options| options.iter().find(|o| o["id"] == name))
+        .and_then(|option| option["options"].as_array())
+        .is_some_and(|options| options.iter().any(|o| o["value"] == value))
+}
+
 pub(super) async fn send(handle: &Handle, request: &str, input: &Value) -> io::Result<()> {
     if handle.kind == Kind::Cursor {
         // Fast is per turn: the driver runs the selected model's `-fast` variant when Cursor offers one.

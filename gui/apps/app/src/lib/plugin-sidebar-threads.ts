@@ -21,7 +21,8 @@ export function toPluginSidebarThread(
   );
   const indicator: PluginSidebarThreadIndicator =
     resolvedIndicator === "queued-waiting" ||
-    resolvedIndicator === "queued-failed"
+    resolvedIndicator === "queued-failed" ||
+    resolvedIndicator === "waiting-on-subagents"
       ? "none"
       : resolvedIndicator;
 

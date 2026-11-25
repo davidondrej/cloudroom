@@ -78,6 +78,8 @@ export interface ThreadListIndicatorState {
   isPlanModeActive: boolean;
   isRuntimeActive: boolean;
   isWorkflowActive: boolean;
+  /** Idle itself while a subagent under it works: a still grey cube, not a spinner (#1537). */
+  isWaitingOnSubagents?: boolean;
   /**
    * Whether the thread has work waiting on its queue. Read straight off the list
    * entry rather than inferred from the thread's status: a `pending` thread is
@@ -91,6 +93,7 @@ export type ThreadListIndicatorKind =
   | "unread-error"
   | "waiting-for-input"
   | "working-draft"
+  | "waiting-on-subagents"
   | "workflow"
   | "background-agent"
   | "background-command"
@@ -110,6 +113,7 @@ const THREAD_LIST_INDICATOR_LABELS: Record<
   "unread-error": "Unread thread failed",
   "waiting-for-input": "Thread needs user input",
   "working-draft": "Thread working with unsubmitted draft",
+  "waiting-on-subagents": "Waiting on subagents",
   workflow: "Workflow running",
   "background-agent": "Background agent running",
   "background-command": "Background command running",
@@ -171,6 +175,7 @@ export function resolveThreadListIndicator(
 
   const hasActiveWork = hasThreadListWorkingActivity(state);
   if (state.hasUnsubmittedDraft && hasActiveWork) return "working-draft";
+  if (state.isWaitingOnSubagents) return "waiting-on-subagents";
   if (state.isPlanModeActive) return "plan-mode";
   if (state.isGoalActive) return "goal";
   if (state.isRuntimeActive) return "runtime";

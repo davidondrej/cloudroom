@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream } from "node:fs";
 import {
   access,
+  constants,
   mkdir,
   mkdtemp,
   open,
@@ -10,10 +11,11 @@ import {
   readFile,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
-import { connect } from "node:net";
-import { homedir, tmpdir } from "node:os";
+import { connect, type Socket } from "node:net";
+import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -41,7 +43,7 @@ function isGnomeWayland() {
   );
 }
 
-function driverEnv(home: string): NodeJS.ProcessEnv {
+export function driverEnv(home: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
     HOME: home,
@@ -49,10 +51,76 @@ function driverEnv(home: string): NodeJS.ProcessEnv {
     CUA_DRIVER_RS_UPDATE_CHECK: "false",
   };
   // The driver reads the desktop name to avoid claiming a screen reader on GNOME, which starts Orca.
-  const keys = ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TMPDIR"];
+  const keys = ["DISPLAY", "WAYLAND_DISPLAY", "CUA_DRIVER_RS_ENABLE_WAYLAND", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TMPDIR"];
   for (const key of [...keys, "XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION"])
     if (process.env[key]) env[key] = process.env[key];
   return env;
+}
+
+// HOME is private, so X11 needs XAUTHORITY for its cookie (#2450). But a set XAUTHORITY stops
+// the driver finding the cookie itself, so pass it only if the local X server accepts its cookie.
+export function workingXauthority(display = process.env.DISPLAY, file = process.env.XAUTHORITY, socketDir = "/tmp/.X11-unix") {
+  return new Promise<string | undefined>((resolve) => {
+    let socket: Socket | undefined;
+    let settled = false;
+    const done = (ok: boolean) => {
+      settled = true;
+      clearTimeout(timer);
+      socket?.destroy();
+      resolve(ok ? file : undefined);
+    };
+    const timer = setTimeout(() => done(false), 2_000);
+    const number = /^(?:unix)?:(\d+)(?:\.\d+)?$/.exec(display ?? "")?.[1];
+    void (async () => {
+      const cookie = number && file ? await readCookie(file, number) : undefined;
+      if (!cookie || settled) return done(false);
+      const name = Buffer.from("MIT-MAGIC-COOKIE-1");
+      const setup = Buffer.alloc(12 + 20 + cookie.length + (-cookie.length & 3));
+      setup.write("l");
+      setup.writeUInt16LE(11, 2);
+      setup.writeUInt16LE(name.length, 6);
+      setup.writeUInt16LE(cookie.length, 8);
+      name.copy(setup, 12);
+      cookie.copy(setup, 32);
+      socket = connect(join(socketDir, `X${number}`));
+      socket.once("connect", () => socket?.write(setup));
+      socket.once("data", (reply) => done(reply[0] === 1));
+      for (const event of ["error", "end", "close"]) socket.once(event, () => done(false));
+    })().catch(() => done(false));
+  });
+}
+
+// The cookie the X client would pick, or nothing if the file is not a small, fully valid Xauthority file.
+async function readCookie(file: string, number: string) {
+  if (!(await stat(file)).isFile()) return undefined;
+  const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK);
+  let data: Buffer;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > 64 * 1024) return undefined;
+    data = await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+  // Entries: a 2-byte family, then address, display number, auth name and cookie, each length-prefixed.
+  let at = 0;
+  const field = () => {
+    const end = at + 2 + data.readUInt16BE(at);
+    if (end > data.length) throw new RangeError("truncated Xauthority entry");
+    const value = data.subarray(at + 2, end);
+    at = end;
+    return value;
+  };
+  let cookie: Buffer | undefined;
+  while (at < data.length) {
+    const family = data.readUInt16BE(at);
+    at += 2;
+    const [address, entryNumber, name, value] = [field(), field(), field(), field()];
+    const host = family === 0xffff || (family === 256 && address.toString() === hostname());
+    if (!cookie && host && [number, ""].includes(entryNumber.toString()) && name.toString() === "MIT-MAGIC-COOKIE-1")
+      cookie = value;
+  }
+  return cookie;
 }
 
 async function exists(path: string) {
@@ -416,8 +484,9 @@ export function createHostEntry() {
     // broken stderr pipe kept it running forever (with screen capture on).
     const logFile = join(home(), "driver.log");
     const log = await open(logFile, "w");
+    const xauthority = process.platform === "linux" ? await workingXauthority() : undefined;
     const child = spawn(binary(), args, {
-      env: { ...driverEnv(home()), CUA_DRIVER_PARENT_LIVENESS_STDIN: "1" },
+      env: { ...driverEnv(home()), ...(xauthority && { XAUTHORITY: xauthority }), CUA_DRIVER_PARENT_LIVENESS_STDIN: "1" },
       stdio: ["pipe", "ignore", log.fd],
     });
     await log.close();

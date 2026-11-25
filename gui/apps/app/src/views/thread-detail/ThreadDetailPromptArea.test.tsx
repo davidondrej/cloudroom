@@ -143,6 +143,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       };
       composer: {
         canModifierSubmit: boolean;
+        isFollowUpSubmitting: boolean;
         message: string;
         onChangeMessage: (message: string, mentions: []) => void;
         onEscape?: () => void;
@@ -325,6 +326,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           <>
             <input
               aria-label="Composer message"
+              data-busy={composer.isFollowUpSubmitting}
               value={composer.message}
               onChange={(event) =>
                 composer.onChangeMessage(event.currentTarget.value, [])
@@ -1124,6 +1126,28 @@ describe("ThreadDetailPromptArea", () => {
     ).toBe(true);
     expect(screen.queryByText("Queue")).toBeNull();
   });
+
+  it.each(["checking", "uploading", "error"] as const)(
+    "keeps the composer and its draft while Teleport to Cloud is %s, with sending held (#2575)",
+    (phase) => {
+      mocks.promptDraft.text = "half typed prompt";
+      renderPromptArea({
+        thread: makeThread({
+          teleport: { id: "tp_1", owner: "thr_1", phase, completed: 0, total: 1 },
+        }),
+      });
+
+      const composer = screen.getByLabelText("Composer message") as HTMLInputElement;
+      expect(composer.value).toBe("half typed prompt");
+      expect(composer.dataset.busy).toBe("true");
+      expect(screen.getByTestId("execution-read-only").textContent).toBe(
+        "true",
+      );
+      expect(screen.getByTestId("permission-read-only").textContent).toBe(
+        "true",
+      );
+    },
+  );
 
   it("keeps sent-message edit submission out of the normal send path", () => {
     mocks.defaultExecutionOptions = {

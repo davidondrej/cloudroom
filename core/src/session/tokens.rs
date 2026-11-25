@@ -38,7 +38,7 @@ impl Tokens {
     /// What a loop run's turn used, as the website saves it on the run's row (ADR 20261111-222523).
     pub fn report(self, run: &Run, session: &str, harness: Kind, model: Option<&str>) -> Value {
         json!({"action":"tokens","request":run.request,"session":session,"tokens":{
-            "harness":harness,"model":model,"completed":run.completed,
+            "harness":harness,"model":crate::observability::public_model(model),"completed":run.completed,
             "input":self.input,"output":self.output,"cacheRead":self.cached,"cacheWrite":self.cache_write}})
     }
 

@@ -270,6 +270,7 @@ export const systemConfigResponseSchema = z.object({
   serverUrl: z.string().url(),
   primaryHostId: z.string().nullable(),
   primaryHostPlatform: hostPlatformSchema.nullable(),
+  telemetryAllowed: z.boolean().optional(),
   voiceTranscriptionEnabled: z.boolean(),
   aiServices: systemAiServicesSchema,
   dataDir: z.string(),
@@ -430,6 +431,8 @@ export const systemUsageAnalyticsResponseSchema = z.object({
 export type SystemUsageAnalyticsResponse = z.infer<typeof systemUsageAnalyticsResponseSchema>;
 
 export interface SystemWorktreeStorageResponse {
+  /** The name of the computer whose disk was measured: the server's own. Missing on older servers. */
+  computerName?: string | null;
   freeBytes: number | null;
   usedBytes: number | null;
   low: boolean;

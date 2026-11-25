@@ -51,13 +51,37 @@ macro_rules! node_keys {
 "#
     };
 }
-const NODE_KEYS: &str = node_keys!();
-/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU. It restores the
-/// keys itself, without requiring keys.cjs: `node --permission` may read only the preload it was given (#2225).
+/// A container's `os.totalmem()` and `os.freemem()` read the host's RAM, and `next dev` gives its server half of
+/// that as a heap limit, far past the container's (#2571). Capped only where Node knows a smaller cgroup limit.
+macro_rules! node_memory {
+    () => {
+        r#"{ const os = require('node:os'), limit = process.constrainedMemory?.(), total = os.totalmem, free = os.freemem;
+  if (limit > 0 && limit < total()) {
+    os.totalmem = () => Math.min(total(), limit);
+    os.freemem = () => Math.min(free(), limit, process.availableMemory?.() ?? limit);
+    require('node:module').syncBuiltinESMExports();
+  } }
+"#
+    };
+}
+const NODE_KEYS: &str = concat!(node_memory!(), node_keys!());
+/// A container's `os.cpus()` lists every host CPU, and tools such as Next.js start a worker per CPU. Older Node (20.19,
+/// 22.4) ignores the quota in `os.availableParallelism()` too, so with a readable quota both return min(current count,
+/// quota) on each call (#2583). Without one (`node --permission` can't read it), `os.cpus()` keeps the count from
+/// startup as before. It restores the keys itself, without requiring keys.cjs: `node --permission` may read only the
+/// preload it was given (#2225).
 const NODE_CPUS: &str = concat!(
-    r#"const os = require('node:os'), cpus = os.cpus, usable = os.availableParallelism?.();
-if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
+    r#"const os = require('node:os'), cpus = os.cpus, parallelism = os.availableParallelism, usable = parallelism?.();
+let quota;
+try { const [max, period] = require('node:fs').readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').split(' ').map(Number); quota = Math.max(1, Math.ceil(max / period)); } catch {}
+if (quota < Infinity) {
+  const capped = () => Math.min(parallelism?.() ?? quota, quota);
+  os.cpus = () => cpus().slice(0, capped());
+  if (parallelism) os.availableParallelism = capped;
+  require('node:module').syncBuiltinESMExports();
+} else if (usable) { os.cpus = () => cpus().slice(0, usable); require('node:module').syncBuiltinESMExports(); }
 "#,
+    node_memory!(),
     node_keys!()
 );
 /// Python 3.13 reads PYTHON_CPU_COUNT itself; older versions count every host CPU for worker pools. Then it runs the
@@ -915,11 +939,12 @@ bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
     #[test]
     fn node_gets_one_preload_that_caps_cpus_and_restores_keys() {
         // Next.js workers fold repeated `--require`s into one missing path, so Core passes one (#1632). Permission
-        // mode lets Node read only that preload and the script (#2225).
+        // mode lets Node read only that preload and the script (#2225), not the quota: `os.cpus()` keeps its startup
+        // count and `os.availableParallelism()` stays Node's own, as before #2583.
         let dir = std::env::temp_dir().join(format!("node-preload-test-{}", std::process::id()));
         write_helpers(&dir).unwrap();
         let script = dir.join("check.js");
-        fs::write(&script, "const os = require('node:os'); process.stdout.write(`${os.cpus.toString().includes('usable')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)").unwrap();
+        fs::write(&script, "const os = require('node:os'); process.stdout.write(`${os.cpus.toString() === '() => cpus().slice(0, usable)' && os.availableParallelism.toString().includes('native')}|${process.env.ANTHROPIC_API_KEY}|${process.env.CLOUDROOM_APP_ANTHROPIC_API_KEY}`)").unwrap();
         for (quota, expected) in [(true, "true|app|undefined"), (false, "false|app|undefined")] {
             let options = node_options(&dir, quota);
             assert_eq!(options.matches("--require").count(), 1, "{options}");
@@ -939,6 +964,51 @@ bash -c 'printf %s "${ANTHROPIC_API_KEY-unset}"'"#;
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+        // A readable quota below the CPU count caps both counts, in Node and the Node it starts (#2583).
+        let quota = dir.join("cpu.max");
+        fs::write(&quota, "100000 100000\n").unwrap();
+        let preload = NODE_CPUS.replace("/sys/fs/cgroup/cpu.max", &quota.display().to_string());
+        fs::write(dir.join("cpus.cjs"), preload).unwrap();
+        fs::write(&script, "const os = require('node:os'), own = `${os.availableParallelism()}/${os.cpus().length}`; process.stdout.write(process.argv[2] ? own : `${own}|${require('node:child_process').execFileSync(process.execPath, [__filename, 'child'])}`)").unwrap();
+        let output = std::process::Command::new("node")
+            .arg(&script)
+            .env("NODE_OPTIONS", node_options(&dir, true))
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "1/1|1/1",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn node_sees_the_cgroup_memory_limit_not_the_hosts() {
+        // A stub stands in for a 1 MiB cgroup limit; with none (0), Node's own figures stay (#2571).
+        let dir = std::env::temp_dir().join(format!("node-memory-test-{}", std::process::id()));
+        write_helpers(&dir).unwrap();
+        let stub = dir.join("limit.cjs");
+        let script = "const os = require('node:os'); process.stdout.write(`${os.totalmem() === 2 ** 20}|${os.freemem() <= 2 ** 20}`)";
+        for (limit, expected) in [("2 ** 20", "true|true"), ("0", "false|false")] {
+            fs::write(&stub, format!("process.constrainedMemory = () => {limit};")).unwrap();
+            for file in ["cpus.cjs", "keys.cjs"] {
+                let output = std::process::Command::new("node")
+                    .args([
+                        "-r",
+                        &stub.display().to_string(),
+                        "-r",
+                        &dir.join(file).display().to_string(),
+                    ])
+                    .args(["-e", script])
+                    .env_clear()
+                    .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                    .output()
+                    .unwrap();
+                assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{file}");
+            }
         }
         let _ = fs::remove_dir_all(dir);
     }

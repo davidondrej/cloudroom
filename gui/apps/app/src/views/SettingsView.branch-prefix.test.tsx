@@ -12,6 +12,7 @@ import { GeneralSettingsSection, PrivacySettingsSection } from "./SettingsView";
 afterEach(cleanup);
 
 function renderSection(overrides?: {
+  telemetryAllowed?: boolean;
   telemetryEnabled?: boolean;
   onTelemetryEnabledChange?: (enabled: boolean) => void;
   managedBranchPrefix?: string;
@@ -43,6 +44,7 @@ function renderSection(overrides?: {
         onEnabledChange={vi.fn()}
         onStreamerModeChange={vi.fn()}
         streamerMode={false}
+        telemetryAllowed={overrides?.telemetryAllowed ?? true}
         telemetryEnabled={overrides?.telemetryEnabled ?? true}
         onTelemetryEnabledChange={
           overrides?.onTelemetryEnabledChange ?? vi.fn()
@@ -130,4 +132,11 @@ it("shows the saved telemetry preference and allows opting out", () => {
       .getByRole("switch", { name: "Share usage data and setup errors" })
       .getAttribute("aria-checked"),
   ).toBe("false");
+  cleanup();
+  renderSection({ telemetryAllowed: false, telemetryEnabled: true });
+  const envDisabled = screen.getByRole("switch", {
+    name: "Share usage data and setup errors",
+  });
+  expect(envDisabled.getAttribute("aria-checked")).toBe("false");
+  expect(envDisabled.hasAttribute("disabled")).toBe(true);
 });

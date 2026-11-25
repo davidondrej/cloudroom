@@ -33,7 +33,7 @@ impl Manager {
             "runtime":{"ready":!self.is_stopping() && storage.level != Level::Blocked && local.journal.writable(),"version":crate::VERSION,"commit":crate::COMMIT,
                 "configured":!self.config.harnesses.is_empty()},
             "appConnectivity":"unknown",
-            "resources":{"cpu":resources["cpu"],"memory":resources["memory"],"disk":resources["disk"]},
+            "resources":{"cpu":resources["cpu"],"memory":resources["memory"],"disk":resources["disk"]},"cpuMinuteMs":resources["cpuMinuteMs"],
             "resourceBytes":{"memoryUsedBytes":resources["memoryUsedBytes"],"memoryTotalBytes":resources["memoryTotalBytes"],
                 "diskAvailableBytes":resources["diskAvailableBytes"],"diskTotalBytes":resources["diskTotalBytes"]},
             "storage":storage,
@@ -296,10 +296,12 @@ impl Manager {
                     // Cursor and OpenCode open images from the attached path; fx gets them inline.
                     harness["attachments"] = json!({"images":true,"files":true});
                     harness["provider_selection"] = json!(false);
-                    // fx switches effort per turn; the others keep the launch level.
+                    // fx and Antigravity switch effort per turn; the others keep the launch level.
                     if *kind == runtime::Kind::Fx {
                         harness["reasoning_levels"] =
                             json!([runtime::PI_REASONING_LEVELS, &["max"]].concat());
+                    }
+                    if matches!(*kind, runtime::Kind::Fx | runtime::Kind::Antigravity) {
                         harness["prompt_reasoning"] = json!(true);
                     }
                     if matches!(
@@ -390,7 +392,6 @@ impl Manager {
                     | runtime::Kind::Devin
                     | runtime::Kind::Droid
                     | runtime::Kind::Kimi
-                    | runtime::Kind::Antigravity
                     | runtime::Kind::OpenClaw
                     | runtime::Kind::AgentZero
             ) && session.reasoning.as_deref() != Some(reasoning)

@@ -38,6 +38,7 @@ import {
 import { getLeadingAgentOnlyInput, resolveDeferredFirstTurnContext } from "../threads/deferred-first-turn-context.js";
 import { buildSuggestedBranchName } from "../threads/thread-create-helpers.js";
 import { getLastThreadOutput } from "../threads/thread-data.js";
+import { isRepeatedChildReport, rememberChildReport, type ChildTurnReport } from "../threads/child-thread-notifications.js";
 import { appendClientTurnEvent, getLastExecutionOptions } from "../threads/thread-events.js";
 import { copyForkSourceHistory } from "../threads/thread-fork-history.js";
 import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadata-inference.js";
@@ -56,7 +57,7 @@ export interface HostHooks {
   /** Main's archive of a thread and its idle children; `websiteHasIt`: the website already has this thread archived. */
   archiveRequest?: (threadId: string, liveThreadIds?: string[], websiteHasIt?: boolean) => void;
   /** `failureReason`: Core's error on a failed turn's receipt (#2513). */
-  childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus, failureReason?: string) => void;
+  childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus, failureReason?: string, turnId?: string) => void;
   moveRequest?: (threadId: string, project: string) => void;
 }
 
@@ -275,7 +276,9 @@ export class CloudHostBridge {
   shouldGenerateTitle(input: PromptInput[]) { return shouldGenerateThreadTitle(input); }
   queueTitle(tx: DbTransaction, threadId: string, input: PromptInput[]) { queueThreadTitle(tx, threadId, input); }
   suggestedBranchName(title: string | null, threadId: string) { return buildSuggestedBranchName({ branchPrefix: "room/", title, threadId }); }
-  getLastOutput(threadId: string) { return getLastThreadOutput(this.deps.db, threadId); }
+  getLastOutput(threadId: string, turnId?: string) { return getLastThreadOutput(this.deps.db, threadId, turnId, turnId !== undefined); }
+  isRepeatedChildReport(report: ChildTurnReport) { return isRepeatedChildReport(this.deps.db, report); }
+  rememberChildReport(report: ChildTurnReport) { rememberChildReport(this.deps.db, report); }
   getLastExecutionOptions(threadId: string) { return getLastExecutionOptions(this.deps, threadId); }
   leadingAgentOnlyInput(content: PromptInput[]) { return getLeadingAgentOnlyInput(content); }
   deferredFirstTurnContext(thread: Thread) { return resolveDeferredFirstTurnContext(this.deps.db, thread); }

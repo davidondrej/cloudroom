@@ -396,7 +396,11 @@ export function useSetCopyLogins() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: (enabled: boolean) => sdk.cloudroom.setCopyLogins(enabled),
-    onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-account"] }),
+    onSettled: () => {
+      void client.invalidateQueries({ queryKey: ["cloudroom-account"] });
+      void client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
+      void client.invalidateQueries({ queryKey: ["cloudroom-github-account"] });
+    },
   });
 }
 

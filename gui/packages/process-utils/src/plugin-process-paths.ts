@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { mkdir, mkdtemp, realpath, stat } from "node:fs/promises";
 import { userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -218,7 +218,7 @@ export function privateDataPaths(dataDir: string | undefined): string[] {
   const root = dataDir?.trim();
   if (!root) return [];
   const plugins = join(root, "plugins");
-  return [
+  const paths = [
     ...new Set([
       ...PRIVATE_DATA_FILES.map((name) => join(root, name)),
       // Every plugin's secret settings and HTTP token.
@@ -233,4 +233,10 @@ export function privateDataPaths(dataDir: string | undefined): string[] {
       ),
     ]),
   ];
+  // Leave out paths inside a listed folder, like `plugins/snapshots/secrets`:
+  // the folder covers them, and Codex's Linux sandbox fails to start when an
+  // existing one is hidden under it (#2579).
+  return paths.filter(
+    (path) => !paths.some((dir) => path.startsWith(dir + sep)),
+  );
 }

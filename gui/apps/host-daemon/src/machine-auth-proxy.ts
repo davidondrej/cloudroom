@@ -2,10 +2,11 @@ import {
   CALLER_PROOF_REQUIRED_CODE,
   CALLER_PROOF_REQUIRED_MESSAGE,
   CALLER_PROOF_STATUS_HEADER,
+  CALLER_PROOF_TIMED_OUT_MESSAGE,
   CALLER_TOKEN_HEADER,
   type CallerProofIssuer,
+  checkOpenWithoutCallerProof,
   createCallerProofIssuer,
-  isOpenWithoutCallerProof,
   MACHINE_PROXY_URL_FILE_NAME,
   SERVER_CALLER_PROOF_PATH,
 } from "@cloudroom/config/caller-proof";
@@ -55,7 +56,11 @@ type ProxyDecision =
   | { action: "reject"; status: 400 | 403 }
   | { action: "start-proof" }
   | { action: "finish-proof"; id: string }
-  | { action: "require-proof"; proofStatus: "required" | "invalid" }
+  | {
+      action: "require-proof";
+      busy: boolean;
+      proofStatus: "required" | "invalid";
+    }
   | { action: "forward"; path: string };
 
 function isBrowserRequest(headers: IncomingHttpHeaders): boolean {
@@ -181,12 +186,14 @@ async function decide(
   }
   const header = request.headers[CALLER_TOKEN_HEADER];
   const token = Array.isArray(header) ? header.join(", ") : header;
-  if (
-    !callerProofs.verify(token) &&
-    !(await isOpenWithoutCallerProof(method, url.pathname, request.socket))
-  ) {
+  const access = callerProofs.verify(token)
+    ? "open"
+    : await checkOpenWithoutCallerProof(method, url.pathname, request.socket);
+  if (access !== "open") {
     return {
       action: "require-proof",
+      // No answer from the OS user check: busy, not sandboxed (#2435).
+      busy: access === "unanswered",
       proofStatus: token === undefined ? "required" : "invalid",
     };
   }
@@ -313,7 +320,9 @@ async function proxyRequest(args: {
         401,
         {
           code: CALLER_PROOF_REQUIRED_CODE,
-          message: CALLER_PROOF_REQUIRED_MESSAGE,
+          message: decision.busy
+            ? CALLER_PROOF_TIMED_OUT_MESSAGE
+            : CALLER_PROOF_REQUIRED_MESSAGE,
         },
         { [CALLER_PROOF_STATUS_HEADER]: decision.proofStatus },
       );

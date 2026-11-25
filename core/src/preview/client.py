@@ -1062,6 +1062,9 @@ def block(text):
 # and each part must upload within MAC_POST_SECONDS on a slow home connection.
 MAC_PART = 1024 * 1024
 MAC_POST_SECONDS = 60
+# A command whose sandbox slept (or went Off) never starts: it would change the Mac with nobody to read the result.
+MAC_UNWANTED = 'The Mac stopped taking commands from this sandbox, so this command did not run.'
+MAC_STOPPED = 'The sandbox stopped while the approval was open, so this command did not run.'
 # New per helper process: when it changes, Core ends jobs the old process was running (#569).
 MAC_BOOT = uuid.uuid4().hex
 # A sandbox's agent has root, so it can answer in place of Core: the helper keeps no more than a real Core sends. The
@@ -1516,6 +1519,8 @@ class MacJobs:
             job['cwd'], job['approved_folder'] = real_folder(str(Path.home() / os.path.expanduser(job.get('cwd') or '~')))
         except OSError as error:
             return str(error)
+        if core.key not in self.wanted:
+            return MAC_UNWANTED
         if self.approve(core, job):
             # The user may have lowered Mac access while the popup was open.
             return None if mac_level(self.enabled() or {}) in ('ask', 'full') else 'Mac access was lowered, so this command did not run.'
@@ -1664,6 +1669,13 @@ class MacJobs:
             job['stdin'] = mac_stdin(core, device, job)
             refused = ("The Mac could not download this command's input from the cloud, so it did not run. Try again." if job['stdin'] is None else
                        self.refusal(core, job))
+        # Approved on Ask first: Core must still want it. The pop-up stays open up to 5 minutes after the first confirmation,
+        # and a sandbox that slept or restarted meanwhile would leave nobody to read the result (feedback 0024).
+        if not refused and job.get('approved_folder') is not None:
+            try:
+                post({'state': 'running'}, 10)
+            except (ControlError, OSError, ValueError):
+                refused = MAC_STOPPED
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
@@ -1740,7 +1752,7 @@ class MacJobs:
                 # end_unwanted only ends what started before: Off or a sleeping sandbox counts from here on. A write
                 # command too: approved after its sandbox slept, it would change the Mac with nobody to read the result.
                 if core.key not in self.wanted:
-                    raise PermissionError('The Mac stopped taking commands from this sandbox, so this command did not run.')
+                    raise PermissionError(MAC_UNWANTED)
                 if WINDOWS:
                     process, process.job = windows_start(shell, cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                          stderr=subprocess.PIPE)

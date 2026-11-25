@@ -168,6 +168,248 @@ pub(crate) fn elapsed_ms(start: Instant) -> u64 {
     start.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
 
+const PUBLIC_MODEL_VENDORS: &[&str] = &[
+    "openrouter",
+    "anthropic",
+    "openai",
+    "google",
+    "google-ai",
+    "google-vertex",
+    "google-gemini-cli",
+    "xai",
+    "x-ai",
+    "grok",
+    "moonshot",
+    "moonshotai",
+    "moonshotai-cn",
+    "kimi",
+    "kimi-for-coding",
+    "deepseek",
+    "qwen",
+    "qwen-portal",
+    "alibaba",
+    "alibaba-coding-plan",
+    "dashscope",
+    "meta",
+    "meta-llama",
+    "mistral",
+    "mistralai",
+    "mistral-ai",
+    "zhipu",
+    "zhipuai",
+    "zai",
+    "z-ai",
+    "zai-coding-plan",
+    "minimax",
+    "minimax-cn",
+    "cursor",
+    "cohere",
+    "perplexity",
+    "amazon",
+    "amazon-bedrock",
+    "aws-bedrock",
+    "bedrock",
+    "vertex",
+    "azure",
+    "azure-openai",
+    "nvidia",
+    "microsoft",
+    "huggingface",
+    "together",
+    "fireworks",
+    "groq",
+    "cerebras",
+    "sambanova",
+    "vercel",
+    "opencode",
+    "opencode-go",
+    "opencode-zen",
+    "github-copilot",
+    "copilot",
+    "codex",
+    "claude",
+    "gemini",
+    "antigravity",
+    "droid",
+    "factory",
+    "devin",
+    "hermes",
+    "fx",
+    "amp",
+    "kilo",
+    "kilo-auto",
+    "cline",
+    "openclaw",
+    "agent-zero",
+    "stepfun",
+    "bytedance",
+    "bytedance-seed",
+    "xiaomi",
+    "ai21",
+    "nousresearch",
+    "nous",
+    "allenai",
+    "inflection",
+    "inception",
+    "arcee-ai",
+    "featherless",
+    "chutes",
+    "nebius",
+    "novita",
+    "deepinfra",
+    "baseten",
+    "replicate",
+    "cloudflare",
+    "synthetic",
+    "venice",
+];
+
+const PUBLIC_MODEL_SUFFIXES: &[&str] = &[
+    "free", "thinking", "beta", "exacto", "nitro", "floor", "online", "extended", "high", "medium",
+    "low", "max", "fast",
+];
+
+const PUBLIC_MODEL_SENTINELS: &[&str] = &["auto", "default", "best", "unknown", "opusplan"];
+const KILO_AUTO_MODES: &[&str] = &["free", "frontier", "balanced", "efficient"];
+
+const PUBLIC_MODEL_FAMILIES: &[&str] = &[
+    "claude",
+    "opus",
+    "sonnet",
+    "haiku",
+    "fable",
+    "gpt",
+    "chatgpt",
+    "codex",
+    "gemini",
+    "gemma",
+    "grok",
+    "kimi",
+    "moonshot",
+    "deepseek",
+    "qwen",
+    "qwq",
+    "llama",
+    "muse",
+    "mistral",
+    "mixtral",
+    "codestral",
+    "devstral",
+    "pixtral",
+    "ministral",
+    "magistral",
+    "glm",
+    "minimax",
+    "composer",
+    "nova",
+    "command",
+    "sonar",
+    "phi",
+    "nemotron",
+    "granite",
+    "trinity",
+    "mercury",
+    "doubao",
+    "seed",
+    "step",
+    "swe",
+    "devin",
+    "jamba",
+    "hermes",
+    "mimo",
+    "big-pickle",
+];
+
+fn strip_context_bracket(value: &str) -> &str {
+    let Some(without_end) = value.strip_suffix(']') else {
+        return value;
+    };
+    let Some((head, inner)) = without_end.rsplit_once('[') else {
+        return value;
+    };
+    let bytes = inner.as_bytes();
+    if bytes.len() >= 2
+        && matches!(bytes[bytes.len() - 1], b'k' | b'K' | b'm' | b'M')
+        && bytes[..bytes.len() - 1].iter().all(u8::is_ascii_digit)
+    {
+        head
+    } else {
+        value
+    }
+}
+
+/// Allowlist for public model IDs in diagnostics. Anything custom or private becomes `"custom"`.
+pub(crate) fn is_public_model(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > 120 {
+        return false;
+    }
+    let mut cleaned = strip_context_bracket(trimmed);
+    if let Some((head, tail)) = cleaned.rsplit_once(':')
+        && PUBLIC_MODEL_SUFFIXES.contains(&tail.to_ascii_lowercase().as_str())
+    {
+        cleaned = head;
+    }
+    if cleaned.contains(':') {
+        return false;
+    }
+    let parts: Vec<&str> = cleaned.split('/').collect();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return false;
+    }
+    let prefixes = &parts[..parts.len() - 1];
+    if !prefixes
+        .iter()
+        .all(|prefix| PUBLIC_MODEL_VENDORS.contains(&prefix.to_ascii_lowercase().as_str()))
+    {
+        return false;
+    }
+    let base = parts[parts.len() - 1].to_ascii_lowercase();
+    let bytes = base.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > 81
+        || !bytes[0].is_ascii_alphanumeric()
+        || !bytes
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b' ' | b'-'))
+    {
+        return false;
+    }
+    if PUBLIC_MODEL_SENTINELS.contains(&base.as_str()) {
+        return true;
+    }
+    if prefixes
+        .last()
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("kilo-auto"))
+        && KILO_AUTO_MODES.contains(&base.as_str())
+    {
+        return true;
+    }
+    if base.starts_with("o1") || base.starts_with("o3") || base.starts_with("o4") {
+        return bytes.len() == 2 || matches!(bytes[2], b'-' | b' ' | b'.');
+    }
+    PUBLIC_MODEL_FAMILIES.iter().any(|family| {
+        base.strip_prefix(family).is_some_and(|rest| {
+            rest.is_empty()
+                || rest.as_bytes()[0].is_ascii_digit()
+                || matches!(rest.as_bytes()[0], b'-' | b' ' | b'.' | b'_')
+        })
+    })
+}
+
+pub(crate) fn public_model(model: Option<&str>) -> Option<String> {
+    model.and_then(|name| {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            None
+        } else if is_public_model(trimmed) {
+            Some(trimmed.to_owned())
+        } else {
+            Some("custom".to_owned())
+        }
+    })
+}
+
 impl Observability {
     pub fn start(
         config: &Config,

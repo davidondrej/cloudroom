@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { gitlabRepository } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { z } from "zod";
@@ -5,7 +6,7 @@ import { createRemoteProject, getProject, listProjectSourcesByProjectIds, listPu
 import type { AppDeps } from "../../types.js";
 import { cloudroom } from "./commands.js";
 import { localRepos, type LocalRepo } from "./local-repos.js";
-import { githubRepository } from "./project-copy.js";
+import { githubRepository, ownFolders } from "./project-copy.js";
 import { macGithubToken } from "./sandboxes.js";
 
 /** A repo the user works on that is not a Cloudroom project yet: a Git folder on this Mac, or an `owner/name` GitHub repo. */
@@ -53,10 +54,13 @@ async function githubRepos(deps: AppDeps, token: string | null): Promise<{ conne
   return { connected: Boolean(token) || names.length > 0, repos: names.map((repo) => ({ id: view?.ids?.[repo] ?? null, repo, updatedAt: view?.pushed?.[repo] ?? null })) };
 }
 
-/** The project's GitHub repo. The first answer saves its ID. A rename or transfer saves the new name, so clones never rely on GitHub's redirect from the old one. */
+/** The project's GitHub repo. The first answer saves its ID. A rename or transfer saves the new name, so clones never rely on GitHub's redirect from the old one.
+ *  A project with a folder on this computer follows that folder's origin instead (projectRemote), so it is only looked up by name: after a
+ *  split, its ID names the renamed old repo, not the one now at that name (#2548). */
 async function projectRepo(deps: AppDeps, project: ProjectRow, token: string | null): Promise<GithubRepo | null> {
   const name = repoName(project.gitRemoteUrl);
   if (!project.gitRemoteUrl || !name) return null;
+  if (ownFolders(deps, project.id).some((path) => existsSync(path))) return (await lookup(name, token)) ?? { id: null, repo: name };
   const repo = await lookup(project.githubRepoId ? `#${project.githubRepoId}` : name, token);
   if (!repo?.id) return { id: project.githubRepoId, repo: name };
   if (repo.id !== project.githubRepoId || repo.repo.toLowerCase() !== name) {

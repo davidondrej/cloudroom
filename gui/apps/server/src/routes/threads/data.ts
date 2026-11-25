@@ -18,6 +18,7 @@ import {
   getLatestStoredConversationOutlineSequence,
   listQueuedThreadMessages,
   getRootTurnInterruption,
+  getUnfinishedAgentMessageText,
 } from "@cloudroom/db";
 import type { Hono } from "hono";
 import {
@@ -604,8 +605,14 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.output, (context) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
+    // A newer reply still being written, which `output` (the last finished one) doesn't include yet (#2451).
+    const partialOutput =
+      thread.status === "active"
+        ? getUnfinishedAgentMessageText(deps.db, thread.id)
+        : null;
     return context.json({
       output: getLastThreadOutput(deps.db, thread.id),
+      ...(partialOutput === null ? {} : { partialOutput }),
       // `thread show` reports why a thread failed (feedback #571, #390), or
       // that an active one may be stalled (#977) or is retrying (#1853).
       error:

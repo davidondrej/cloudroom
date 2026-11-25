@@ -608,8 +608,8 @@ fn owed(s: &Session) -> impl Iterator<Item = (&super::Receipt, u64)> {
         .filter(move |(r, _)| !s.archived || s.archive_turn.as_ref() == Some(&r.request_id))
 }
 
-/// The first owed turn due by `now`, and its report.
-fn next_report(local: &Local, now: u64) -> Option<(String, String, Value)> {
+/// The first owed turn due by `now`, its report, and its `report_key` (`None`: a repeat, marked reported unsent).
+fn next_report(local: &Local, now: u64) -> Option<(String, String, Value, Option<Value>)> {
     local
         .sessions
         .values()
@@ -624,7 +624,8 @@ fn next_report(local: &Local, now: u64) -> Option<(String, String, Value)> {
             let (_, queued) = notice_ids(&s.session_id, &r.request_id);
             let error = r.error.as_ref().map(|e| e.chars().take(2000).collect::<String>());
             let body = json!({"action":"report","request_id":queued,"state":r.state,"error":error,"reply":reply});
-            Some((s.session_id.clone(), r.request_id.clone(), body))
+            let key = super::children::report_key(s, r);
+            Some((s.session_id.clone(), r.request_id.clone(), body, key))
         })
 }
 
@@ -858,6 +859,36 @@ fn pending_in(local: &Local, session: &str, request: &str) -> bool {
     })
 }
 
+/// Waits up to `limit` for the children `session` still starts to get their first prompt, so its own archive never
+/// cancels one its spawn already named (#2562). Returns those still starting then: child IDs, or the request IDs of
+/// ones the website hasn't named yet.
+pub(super) async fn settle_starts(
+    local: &Mutex<Local>,
+    session: &str,
+    limit: Duration,
+) -> Vec<String> {
+    let mut changed = local.lock().unwrap().changed.subscribe();
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let starting: Vec<String> = {
+            let local = local.lock().unwrap();
+            let starts = local.sessions.get(session).map(|s| s.child_starts.iter());
+            (starts.into_iter().flatten())
+                .filter(|(request, _)| pending_in(&local, session, request))
+                .map(|(request, start)| start.child.clone().unwrap_or_else(|| request.clone()))
+                .collect()
+        };
+        if starting.is_empty()
+            || !matches!(
+                tokio::time::timeout_at(deadline, changed.changed()).await,
+                Ok(Ok(()))
+            )
+        {
+            return starting;
+        }
+    }
+}
+
 /// Repeats a child start until the website says its first prompt is in (each call continues the same start, keyed by
 /// this thread and the request ID), refuses it for good, or its thread is archived. Outages are never final: the
 /// request stays saved. The parent hears of a refusal the agent wasn't told.
@@ -947,7 +978,9 @@ async fn drive_start(
         let fresh = named
             .as_deref()
             .is_none_or(|child| recorded && note_start(&m, &session, child, "error"));
-        if recorded && !waiting && fresh {
+        // An archived parent never hears: the notice would wake it for a turn (#2562).
+        let archived = (m.local.lock().unwrap().sessions.get(&session)).is_some_and(|s| s.archived);
+        if recorded && !waiting && fresh && !archived {
             let text = match &named {
                 Some(child) => {
                     format!("[Cloudroom] Child thread {child} could not be started: {error}.")
@@ -1100,9 +1133,19 @@ impl Manager {
                     let now = crate::observability::now_ms();
                     (next_report(&local, now), next_due(&local))
                 };
-                let Some((session, turn, body)) = due else {
+                let Some((session, turn, body, key)) = due else {
                     if !changed_or_due(&mut changed, held).await {
                         return;
+                    }
+                    continue;
+                };
+                // A repeat of what the parent last got is marked reported, unsent (#1395).
+                let Some(key) = key else {
+                    let marked =
+                        (manager.note(&session, "parent_report", json!({"request_id":turn})))
+                            .is_ok();
+                    if !marked {
+                        tokio::time::sleep(wait).await;
                     }
                     continue;
                 };
@@ -1111,12 +1154,13 @@ impl Manager {
                 // While uploads fail, the report goes at once.
                 manager.flush_history(Duration::from_secs(5), true).await;
                 // Taken, or refused for good (410: the parent is gone or archived): never sent again.
-                let done = match api.post_waking("relay", &body).await {
-                    Ok(_) | Err(ApiError::Status(400 | 403 | 410, _)) => manager
-                        .note(&session, "parent_report", json!({"request_id":turn}))
-                        .is_ok(),
-                    Err(_) => false,
+                let report = match api.post_waking("relay", &body).await {
+                    Ok(_) => Some(json!({"request_id":turn,"reply":key})),
+                    Err(ApiError::Status(400 | 403 | 410, _)) => Some(json!({"request_id":turn})),
+                    Err(_) => None,
                 };
+                let done = report
+                    .is_some_and(|data| manager.note(&session, "parent_report", data).is_ok());
                 failed(!done);
                 if done {
                     wait = Duration::from_secs(5);
@@ -1132,6 +1176,49 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thread's own archive waits for the children it still starts (#2562): one whose first prompt goes in meanwhile
+    /// is kept, one still starting when the wait ends is named, and the wait ends as soon as the last one starts.
+    #[tokio::test]
+    async fn an_archive_waits_for_children_still_starting() {
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-settle-starts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        for (request, child) in [("r1", "thr_one"), ("r2", "thr_two")] {
+            let start = json!({"request_id":request,"body":{"prompt":"go"}});
+            local.append("a", "child_start", start, None).unwrap();
+            let named = json!({"request_id":request,"child":child,"done":false});
+            local.append("a", "child_start_state", named, None).unwrap();
+        }
+        let local = Arc::new(Mutex::new(local));
+        let done = |local: &Mutex<Local>, request: &str| {
+            let state = json!({"request_id":request,"done":true});
+            local
+                .lock()
+                .unwrap()
+                .append("a", "child_start_state", state, None)
+                .unwrap();
+        };
+        let later = |request: &'static str| {
+            let local = local.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                done(&local, request);
+            });
+        };
+        later("r1");
+        let starting = settle_starts(&local, "a", Duration::from_millis(500)).await;
+        assert_eq!(starting, ["thr_two"]);
+        // The wait ends as soon as the last one starts.
+        later("r2");
+        let quick = tokio::time::timeout(
+            Duration::from_secs(1),
+            settle_starts(&local, "a", Duration::from_secs(60)),
+        );
+        assert!(quick.await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_relayed_message_names_its_sender_with_or_without_bb() {
@@ -1277,7 +1364,7 @@ mod tests {
         }
         drop(local);
         let mut local = Local::open(&dir).unwrap();
-        let (session, turn, _) = next_report(&local, 0).unwrap();
+        let (session, turn, _, _) = next_report(&local, 0).unwrap();
         assert_eq!((session.as_str(), turn.as_str()), ("self", "p2"));
         local
             .append("self", "parent_report", json!({"request_id":"p2"}), None)
@@ -1338,7 +1425,7 @@ mod tests {
         turn(&mut local, "auto_empty", ended(5, false), None, "");
         let mut sent = vec![];
         let mut send = |local: &mut Local, now: u64| {
-            while let Some((_, turn, body)) = next_report(local, now) {
+            while let Some((_, turn, body, _)) = next_report(local, now) {
                 sent.push((
                     turn.clone(),
                     body["reply"].as_str().unwrap_or_default().to_owned(),
@@ -1389,6 +1476,99 @@ mod tests {
             ("p2", ""),
         ];
         assert_eq!(sent, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #1395: a reply that repeats the one the parent last got is marked reported, unsent, for good: not after more
+    /// replies than the cache keeps, a restart, or an archive. A parent's message, a new reply, and the reply after a
+    /// failure always report; so does a new result the child repeats in its own turns.
+    #[test]
+    fn a_child_repeating_its_last_reply_reports_once() {
+        let dir = std::env::temp_dir().join(format!("cloudroom-repeats-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut local = Local::open(&dir).unwrap();
+        let start = json!({"request_id":"s","command":"start","state":"completed","input":{"parent_thread":"thr_p"}});
+        local.append("kid", "receipt", start, None).unwrap();
+        let turn = |local: &mut Local, id: &str, input: Value, text: &str| {
+            let command = if id.starts_with("auto") {
+                "auto"
+            } else {
+                "prompt"
+            };
+            let (state, error) = if text.is_empty() {
+                ("failed", json!("boom"))
+            } else {
+                ("completed", json!(null))
+            };
+            if !text.is_empty() {
+                let reply = json!({"request_id":id,"text":text});
+                local.append("kid", "child_reply", reply, None).unwrap();
+            }
+            let receipt = json!({"request_id":id,"command":command,"state":state,"input":input,"error":error});
+            local.append("kid", "receipt", receipt, None).unwrap();
+        };
+        // As `watch_reports` does: send each due turn and remember its reply, or mark a repeat reported.
+        let send = |local: &mut Local| {
+            let mut sent = vec![];
+            while let Some((_, turn, _, key)) = next_report(local, u64::MAX) {
+                let data = match key {
+                    Some(key) => {
+                        sent.push(turn.clone());
+                        json!({"request_id":turn,"reply":key})
+                    }
+                    None => json!({"request_id":turn}),
+                };
+                local.append("kid", "parent_report", data, None).unwrap();
+            }
+            sent
+        };
+        turn(&mut local, "p0", json!({}), "No change.");
+        assert_eq!(send(&mut local), ["p0"]);
+        for n in 1..=10 {
+            turn(&mut local, &format!("p{n}"), json!({}), " No   change.\n");
+            assert!(send(&mut local).is_empty(), "repeat {n} reported");
+        }
+        drop(local);
+        local = Local::open(&dir).unwrap();
+        assert!(
+            send(&mut local).is_empty(),
+            "a restart brings a repeat back"
+        );
+        // Each turn ends and reports before the next starts, as they do.
+        let mut sent = vec![];
+        for (id, input, text) in [
+            ("p_told", json!({"from_parent":true}), "No change."),
+            ("p_sent", json!({"sender_thread_id":"thr_p"}), "No change."),
+            ("p_other", json!({"sender_thread_id":"thr_x"}), "No change."),
+            ("p_fail", json!({}), ""),
+            ("p_back", json!({}), "No change."),
+            ("p_new", json!({}), "Shipped."),
+        ] {
+            turn(&mut local, id, input, text);
+            sent.extend(send(&mut local));
+        }
+        assert_eq!(sent, ["p_told", "p_sent", "p_fail", "p_back", "p_new"]);
+        // Its own turns repeating a new result: the newest reports it once the child is quiet.
+        turn(
+            &mut local,
+            "auto_1",
+            json!({"report":true,"ended":1,"replied":true}),
+            "Build failed",
+        );
+        turn(
+            &mut local,
+            "auto_2",
+            json!({"report":true,"ended":2,"replied":true}),
+            "Build failed",
+        );
+        assert_eq!(send(&mut local), ["auto_2"]);
+        turn(&mut local, "p_last", json!({}), "Build failed");
+        assert!(send(&mut local).is_empty());
+        local.append("kid", "archive", json!({}), None).unwrap();
+        assert!(
+            unreported(&local.sessions["kid"]).is_empty(),
+            "an archive brings a repeat back"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

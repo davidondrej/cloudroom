@@ -34,7 +34,8 @@ export interface ChildProcessRun extends ManagedProcessRun {
   childProcess: ChildProcess;
 }
 
-const HEALTH_TIMEOUT_MS = 60_000;
+// As long as the desktop app waits (STARTUP_TIMEOUT_MS): a first start after an update can take minutes on Windows.
+const HEALTH_TIMEOUT_MS = 180_000;
 const HEALTH_POLL_MS = 100;
 const HEALTH_REQUEST_TIMEOUT_MS = 1_000;
 const STOP_TIMEOUT_MS = 5_000;

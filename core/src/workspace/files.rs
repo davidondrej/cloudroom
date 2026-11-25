@@ -124,6 +124,12 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
                         doc.display()
                     );
                 }
+                for doc in claude_instructions(&folder) {
+                    println!(
+                        "If {} is not already in your instructions, read it now and follow it, with any files it imports with `@`: your session may have started before it arrived.",
+                        doc.display()
+                    );
+                }
                 return Ok(0);
             }
             Some(Copy::Failed(folder, reason)) => {
@@ -184,7 +190,7 @@ async fn wait(cwd: &Path) -> io::Result<i32> {
 /// The project instructions Codex picks at startup, which a copy that landed later kept from it: the harness starts
 /// before the copy (ADR 0101), and Codex reads them only then (#2359). None when a Codex setting might skip or cap them
 /// (an untrusted project, `project_doc_*`), or when they pass Codex's default 32 KiB budget: the agent goes on as before.
-/// Only Codex gets it: Core sets `CODEX_HOME` for Codex alone, and other harnesses read other files.
+/// Only Codex gets it: Core sets `CODEX_HOME` for Codex alone. Claude Code gets `claude_instructions`.
 fn late_instructions(folder: &Path) -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("CODEX_HOME").filter(|home| !home.is_empty())?);
     let configs = [
@@ -223,6 +229,21 @@ fn late_instructions(folder: &Path) -> Option<PathBuf> {
         .map(|name| folder.join(name))
         .find(|doc| doc.is_file())?;
     (doc.metadata().ok()?.len() <= 32 * 1024).then_some(doc)
+}
+
+/// The same for Claude Code, which also reads its project instructions only at startup (#2527). Claude marks the
+/// commands it runs with `CLAUDECODE`. A Codex shell (`CODEX_HOME`) never gets these, even with a `CLAUDECODE` from
+/// Cloud environment settings.
+fn claude_instructions(folder: &Path) -> Vec<PathBuf> {
+    let set = |name| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    if !set("CLAUDECODE") || set("CODEX_HOME") {
+        return Vec::new();
+    }
+    ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"]
+        .into_iter()
+        .map(|name| folder.join(name))
+        .filter(|doc| doc.is_file())
+        .collect()
 }
 
 const CONFIG_LIMIT: u64 = 64 * 1024;

@@ -3445,6 +3445,59 @@ export function getLatestThreadOutputEventRow(
   );
 }
 
+/** The text streamed so far of the open root turn's newest reply, while no root reply has completed since it began
+ *  streaming. An interrupted turn's fragment is not live, and nested replies don't count (#2451). */
+export function getUnfinishedAgentMessageText(
+  db: DbConnection,
+  threadId: string,
+): string | null {
+  const turnId = getActiveStoredTurnId(db, threadId);
+  if (turnId === null) return null;
+  const root = and(
+    eq(events.threadId, threadId),
+    eq(events.turnId, turnId),
+    isNull(events.parentToolCallId),
+  );
+  const newest = db
+    .select({ itemId: events.itemId, sequence: events.sequence })
+    .from(events)
+    .where(and(root, eq(events.type, "item/agentMessage/delta")))
+    .orderBy(desc(events.sequence))
+    .limit(1)
+    .get();
+  if (!newest?.itemId) return null;
+  const completedSince = db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      and(
+        root,
+        eq(events.type, "item/completed"),
+        eq(events.itemKind, "agentMessage"),
+        gt(events.sequence, newest.sequence),
+      ),
+    )
+    .limit(1)
+    .get();
+  if (completedSince) return null;
+  const text = db
+    .select({ delta: sql<unknown>`json_extract(${events.data}, '$.delta')` })
+    .from(events)
+    .where(
+      and(
+        root,
+        eq(events.type, "item/agentMessage/delta"),
+        eq(events.itemId, newest.itemId),
+      ),
+    )
+    .orderBy(events.sequence)
+    .all()
+    .map((row) => (typeof row.delta === "string" ? row.delta : ""))
+    .join("")
+    .trim();
+  return text || null;
+}
+
 export function getLatestThreadSystemErrorEventRow(
   db: DbConnection,
   args: GetLatestThreadSystemErrorEventRowArgs,

@@ -62,9 +62,15 @@ function useSubagentName(thread: ThreadListEntry): string {
   return useThreadTitleDisplayText(getThreadDisplayTitle(thread));
 }
 
-function SubagentGrid({ offset }: { offset: number }) {
+export function SubagentGrid({
+  offset,
+  className,
+}: {
+  offset: number;
+  className?: string;
+}) {
   return (
-    <span className="subagent-grid" aria-hidden>
+    <span className={cn("subagent-grid", className)} aria-hidden>
       {ORBIT.map((n, index) => (
         <i
           key={index}

@@ -24,9 +24,12 @@ import {
   OPTION_TRIGGER_CONTENT_CLASS_NAME,
 } from "@cloudroom/shared-ui/option-display";
 import { Popover, PopoverContent, PopoverTrigger } from "@cloudroom/shared-ui/popover";
+import { FLOATING_DRAWER_CLASS_NAME } from "@cloudroom/shared-ui/responsive-overlay";
+import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { folderValue, tildePath } from "./folder-path";
 import {
+  COMPACT_PICKER_ROW_CLASS_NAME,
   FolderPathGroup,
   HERE_VALUE,
   PICKER_DETAIL_CLASS_NAME,
@@ -44,6 +47,13 @@ const VISIBLE_REPO_SUGGESTIONS = 5;
 const FOLDER_SEARCH_ROWS = 6;
 const NAVIGATION_KEYS = new Set(["ArrowDown", "ArrowUp", "Home", "End"]);
 const MUTED_LINE_CLASS_NAME = "px-2 py-1.5 text-xs text-muted-foreground/70 max-md:py-2";
+// Mobile sheet: same floating drawer and padding as the Model, Effort, and Environment pickers (Design 1A, David, 2026-11-24).
+const COMPACT_SHEET_PADDING_CLASS_NAME =
+  "px-3.5 pt-0 pb-[max(1.5rem,env(safe-area-inset-bottom))]";
+const COMPACT_FOOTER_ROW_CLASS_NAME =
+  "flex min-h-[42px] items-center gap-3 rounded-[14px] px-3.5 py-1.5 text-[15.5px] leading-snug transition-colors";
+const COMPACT_COMMAND_INPUT_CLASS_NAME =
+  "[&_[cmdk-input-wrapper]]:mx-0.5 [&_[cmdk-input-wrapper]]:mb-2 [&_[cmdk-input-wrapper]]:h-10 [&_[cmdk-input-wrapper]]:rounded-full [&_[cmdk-input-wrapper]]:border-0 [&_[cmdk-input-wrapper]]:bg-surface-recessed [&_[cmdk-input-wrapper]]:px-3.5 [&_[cmdk-input-wrapper]_svg]:mr-2.5 [&_[cmdk-input-wrapper]_svg]:size-4 [&_[cmdk-input-wrapper]_svg]:text-muted-foreground/70 [&_[cmdk-input-wrapper]_svg]:opacity-100";
 
 export const repoKey = (repo: RepoSuggestion) =>
   repo.source === "mac" ? repo.path : repo.repo;
@@ -109,6 +119,7 @@ export function ProjectSelector({
   const commandRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const listRef = useResetPickerScroll<HTMLDivElement>(searchQuery);
+  const isCompactViewport = useIsCompactViewport();
   const disabled = disabledProp || isLoading;
   const suggestions = createProject?.suggestions;
   // With repo suggestions the search box shows from the start, so the menu doesn't jump when repos arrive.
@@ -279,23 +290,48 @@ export function ProjectSelector({
   // Rows that are not projects yet are dimmer, unless there is no project to tell them apart from.
   const dim = projects.length > 0;
   const addingKey = suggestions?.addingKey ?? null;
-  const projectRows = filteredProjects.map((project) => ({
-    at: project.updatedAt ?? 0,
-    current: project.id === value,
-    node: (
-      <CommandItem
-        key={project.id}
-        value={project.id}
-        keywords={[project.name]}
-        aria-current={project.id === value ? "true" : undefined}
-        onSelect={() => selectProject(project.id)}
-        className={cn(PICKER_ROW_CLASS_NAME, project.id === value && "font-medium")}
-      >
-        <span className="min-w-0 flex-1 truncate">{project.name}</span>
-        {project.id === value ? <CurrentCheck /> : null}
-      </CommandItem>
-    ),
-  }));
+  const projectRows = filteredProjects.map((project) => {
+    const isCurrent = project.id === value;
+    return {
+      at: project.updatedAt ?? 0,
+      current: isCurrent,
+      node: (
+        <CommandItem
+          key={project.id}
+          value={project.id}
+          keywords={[project.name]}
+          aria-current={isCurrent ? "true" : undefined}
+          onSelect={() => selectProject(project.id)}
+          className={
+            isCompactViewport
+              ? cn(
+                  COMPACT_PICKER_ROW_CLASS_NAME,
+                  // Touch has no keyboard cursor: only the chosen row is highlighted.
+                  isCurrent
+                    ? "bg-composer font-medium text-foreground shadow-message data-[selected=true]:bg-composer"
+                    : "text-foreground/90 data-[selected=true]:bg-transparent active:bg-state-hover",
+                )
+              : cn(PICKER_ROW_CLASS_NAME, isCurrent && "font-medium")
+          }
+        >
+          {isCompactViewport ? (
+            <Icon
+              name="Folder"
+              className={cn(
+                "size-[19px]! shrink-0",
+                isCurrent
+                  ? "text-foreground dark:text-primary"
+                  : "text-muted-foreground",
+              )}
+              aria-hidden
+            />
+          ) : null}
+          <span className="min-w-0 flex-1 truncate">{project.name}</span>
+          {isCurrent ? <CurrentCheck compact={isCompactViewport} /> : null}
+        </CommandItem>
+      ),
+    };
+  });
   const foundRows = folderResults.map((entry) => (
     <AddRow
       key={entry.path}
@@ -303,6 +339,8 @@ export function ProjectSelector({
       name={entry.name}
       detail={tildePath(getHostPathDirname(entry.path) ?? entry.path, folders.home)}
       action={entry.projectId ? "Select" : "Add"}
+      compact={isCompactViewport}
+      icon="Folder"
       dim={dim}
       adding={addingKey === entry.path}
       disabled={addingKey !== null && addingKey !== entry.path}
@@ -310,11 +348,18 @@ export function ProjectSelector({
     />
   ));
   const repoRows = visibleRepos.map((repo) => repo.source === "gitlab" ? (
-    <GitlabRepoRow key={repo.repo} repo={repo} addingKey={addingKey} onAdd={addRepo}/>
+    <GitlabRepoRow
+      key={repo.repo}
+      repo={repo}
+      compact={isCompactViewport}
+      addingKey={addingKey}
+      onAdd={addRepo}
+    />
   ) : (
     <RepoRow
       key={`repo:${repoKey(repo)}`}
       repo={repo}
+      compact={isCompactViewport}
       dim={dim}
       addingKey={addingKey}
       onAdd={addRepo}
@@ -347,6 +392,43 @@ export function ProjectSelector({
         : suggestions
           ? "No projects yet."
           : null;
+
+  const hasListContent =
+    (pathMode && Boolean(suggestions)) ||
+    rows.length > 0 ||
+    Boolean(loadingMessage) ||
+    Boolean(emptyMessage);
+  const mutedLineClassName = isCompactViewport
+    ? "px-3.5 py-2.5 text-sm text-muted-foreground/70"
+    : MUTED_LINE_CLASS_NAME;
+
+  const listItems =
+    pathMode && suggestions ? (
+      <FolderPathGroup
+        folders={folders}
+        addingKey={suggestions.addingKey}
+        onPick={pickFolder}
+        compact={isCompactViewport}
+      />
+    ) : rows.length > 0 || loadingMessage || emptyMessage ? (
+      <CommandGroup
+        className={
+          isCompactViewport
+            ? "p-0 [&_[cmdk-group-items]]:flex [&_[cmdk-group-items]]:flex-col [&_[cmdk-group-items]]:gap-0.5"
+            : undefined
+        }
+      >
+        {rows}
+        {loadingMessage ? (
+          <div className={cn(mutedLineClassName, "flex items-center gap-2")}>
+            <Icon name="Loading" className="size-3.5 animate-spin" aria-hidden />
+            {loadingMessage}
+          </div>
+        ) : emptyMessage ? (
+          <div className={mutedLineClassName}>{emptyMessage}</div>
+        ) : null}
+      </CommandGroup>
+    ) : null;
 
   return (
     <Popover open={open} onOpenChange={handleOpenChange} modal={modal}>
@@ -393,6 +475,7 @@ export function ProjectSelector({
         align="start"
         aria-label="Project"
         mobileTitle="Project"
+        mobileClassName={FLOATING_DRAWER_CLASS_NAME}
         onEscapeKeyDown={(event) => {
           // The first Esc clears the search; the next one closes.
           if (!searchQuery) return;
@@ -409,10 +492,22 @@ export function ProjectSelector({
         }}
         // Gray lines, not the theme's accent-tinted border, and a slightly lifted surface in dark mode.
         className={cn(
-          "flex max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] flex-col overflow-hidden rounded-xl border-muted bg-[var(--picker-surface)] p-0 shadow-xl [--picker-surface:var(--popover)] dark:[--picker-surface:color-mix(in_oklch,var(--ink)_4%,var(--canvas))] max-md:min-h-0 max-md:flex-1",
-          suggestions ? "w-[18.75rem]" : "w-52",
+          isCompactViewport
+            ? cn(
+                "flex min-h-0 w-full flex-1 flex-col overflow-hidden rounded-none border-0 bg-transparent shadow-none",
+                COMPACT_SHEET_PADDING_CLASS_NAME,
+              )
+            : cn(
+                "flex max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))] flex-col overflow-hidden rounded-xl border-muted bg-[var(--picker-surface)] p-0 shadow-xl [--picker-surface:var(--popover)] dark:[--picker-surface:color-mix(in_oklch,var(--ink)_4%,var(--canvas))]",
+                suggestions ? "w-[18.75rem]" : "w-52",
+              ),
         )}
       >
+        {isCompactViewport ? (
+          <div className="shrink-0 px-4 pt-1 pb-2 text-sm text-subtle-foreground">
+            Project
+          </div>
+        ) : null}
         <Command
           ref={commandRef}
           label="Search projects"
@@ -422,7 +517,12 @@ export function ProjectSelector({
           onKeyDown={(event) => {
             if (NAVIGATION_KEYS.has(event.key) || (event.ctrlKey && "npjk".includes(event.key))) markUserMove();
           }}
-          className="relative min-h-0 bg-transparent [&_[cmdk-input-wrapper]]:border-accent"
+          className={cn(
+            "relative min-h-0 flex-1 bg-transparent",
+            isCompactViewport
+              ? COMPACT_COMMAND_INPUT_CLASS_NAME
+              : "[&_[cmdk-input-wrapper]]:border-accent",
+          )}
         >
           {showSearch ? (
             <CommandInput
@@ -432,79 +532,137 @@ export function ProjectSelector({
               value={searchQuery}
               onValueChange={setSearchQuery}
               onKeyDown={handleSearchKeyDown}
-              ghost={suggestions ? ghost : undefined}
-              className="h-9 text-xs caret-primary placeholder:text-muted-foreground/50"
+              ghost={!isCompactViewport && suggestions ? ghost : undefined}
+              className={
+                isCompactViewport
+                  ? "h-10 py-0 text-base text-foreground caret-primary placeholder:text-subtle-foreground"
+                  : "h-9 text-xs caret-primary placeholder:text-muted-foreground/50"
+              }
             />
           ) : null}
-          {suggestions && showTab ? (
+          {!isCompactViewport && suggestions && showTab ? (
             <kbd className="pointer-events-none absolute right-3 top-2.5 rounded-sm border border-muted px-1 font-sans text-[0.625rem] leading-4 text-muted-foreground">
               tab
             </kbd>
           ) : null}
-          <CommandList
-            ref={listRef}
-            onPointerMoveCapture={markUserMove}
-            className="min-h-0 max-h-[20.25rem] flex-1 scroll-pb-10 overscroll-contain max-md:max-h-none"
-          >
-            {pathMode && suggestions ? (
-              <FolderPathGroup
-                folders={folders}
-                addingKey={suggestions.addingKey}
-                onPick={pickFolder}
-              />
-            ) : rows.length > 0 || loadingMessage || emptyMessage ? (
-              <CommandGroup>
-                {rows}
-                {loadingMessage ? (
-                  <div className={cn(MUTED_LINE_CLASS_NAME, "flex items-center gap-2")}>
-                    <Icon name="Loading" className="size-3.5 animate-spin" aria-hidden />
-                    {loadingMessage}
-                  </div>
-                ) : emptyMessage ? (
-                  <div className={MUTED_LINE_CLASS_NAME}>{emptyMessage}</div>
-                ) : null}
-              </CommandGroup>
-            ) : null}
-            {createProject || allowNoProject ? (
-              <div className="sticky bottom-0 flex items-center justify-between gap-1 border-t border-accent bg-[var(--picker-surface)] p-1">
-                <div
-                  ref={watchListEnd}
-                  aria-hidden
-                  className="pointer-events-none absolute inset-x-0 bottom-[calc(100%+1px)] h-8 bg-gradient-to-b from-transparent to-[var(--picker-surface)]"
-                />
-                {createProject ? (
-                  <CommandItem
-                    disabled={createProject.disabled}
-                    value="new-project"
-                    onSelect={() => {
-                      createProject.onCreate();
-                      handleOpenChange(false);
-                    }}
-                    className={cn(PICKER_ROW_CLASS_NAME, "text-muted-foreground/70")}
+          {isCompactViewport ? (
+            <>
+              {hasListContent ? (
+                <div className="relative -mx-1 flex min-h-0 flex-1 flex-col">
+                  <CommandList
+                    ref={listRef}
+                    onPointerMoveCapture={markUserMove}
+                    className="min-h-0 max-h-[310px] flex-1 overscroll-contain px-1 pt-0.5 pb-2"
                   >
-                    <Icon name="FolderPlus" className="size-3.5! opacity-70" aria-hidden />
-                    {createProject.isCreating ? "Creating..." : "New project"}
-                  </CommandItem>
-                ) : (
-                  <span />
-                )}
-                {allowNoProject ? (
-                  <CommandItem
-                    value="no-project"
-                    aria-current={value === null ? "true" : undefined}
-                    onSelect={() => selectProject(null)}
-                    className={cn(
-                      PICKER_ROW_CLASS_NAME,
-                      value === null ? "font-medium" : "text-muted-foreground/70",
+                    {listItems}
+                  </CommandList>
+                  <div
+                    ref={watchListEnd}
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-b from-transparent to-background"
+                  />
+                </div>
+              ) : null}
+              {createProject || allowNoProject ? (
+                <>
+                  {hasListContent ? (
+                    <div className="mx-4 my-2 h-px shrink-0 bg-border" />
+                  ) : null}
+                  <div className="flex shrink-0 items-center justify-between gap-2">
+                    {createProject ? (
+                      <button
+                        type="button"
+                        disabled={createProject.disabled}
+                        onClick={() => {
+                          createProject.onCreate();
+                          handleOpenChange(false);
+                        }}
+                        className={cn(
+                          COMPACT_FOOTER_ROW_CLASS_NAME,
+                          "flex-1 text-subtle-foreground active:bg-state-hover disabled:opacity-50",
+                        )}
+                      >
+                        <Icon
+                          name="FolderPlus"
+                          className="size-[19px]! shrink-0"
+                          aria-hidden
+                        />
+                        <span>
+                          {createProject.isCreating ? "Creating..." : "New project"}
+                        </span>
+                      </button>
+                    ) : (
+                      <span />
                     )}
-                  >
-                    No project
-                    {value === null ? <CurrentCheck /> : null}
-                  </CommandItem>
-                ) : null}
-              </div>
-            ) : null}
-          </CommandList>
+                    {allowNoProject ? (
+                      <button
+                        type="button"
+                        aria-current={value === null ? "true" : undefined}
+                        onClick={() => selectProject(null)}
+                        className={cn(
+                          COMPACT_FOOTER_ROW_CLASS_NAME,
+                          "shrink-0",
+                          value === null
+                            ? "bg-composer font-medium text-foreground shadow-message"
+                            : "text-subtle-foreground active:bg-state-hover",
+                        )}
+                      >
+                        <span>No project</span>
+                        {value === null ? <CurrentCheck compact /> : null}
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <CommandList
+              ref={listRef}
+              onPointerMoveCapture={markUserMove}
+              className="min-h-0 max-h-[20.25rem] flex-1 scroll-pb-10 overscroll-contain"
+            >
+              {listItems}
+              {createProject || allowNoProject ? (
+                <div className="sticky bottom-0 flex items-center justify-between gap-1 border-t border-accent bg-[var(--picker-surface)] p-1">
+                  <div
+                    ref={watchListEnd}
+                    aria-hidden
+                    className="pointer-events-none absolute inset-x-0 bottom-[calc(100%+1px)] h-8 bg-gradient-to-b from-transparent to-[var(--picker-surface)]"
+                  />
+                  {createProject ? (
+                    <CommandItem
+                      disabled={createProject.disabled}
+                      value="new-project"
+                      onSelect={() => {
+                        createProject.onCreate();
+                        handleOpenChange(false);
+                      }}
+                      className={cn(PICKER_ROW_CLASS_NAME, "text-muted-foreground/70")}
+                    >
+                      <Icon name="FolderPlus" className="size-3.5! opacity-70" aria-hidden />
+                      {createProject.isCreating ? "Creating..." : "New project"}
+                    </CommandItem>
+                  ) : (
+                    <span />
+                  )}
+                  {allowNoProject ? (
+                    <CommandItem
+                      value="no-project"
+                      aria-current={value === null ? "true" : undefined}
+                      onSelect={() => selectProject(null)}
+                      className={cn(
+                        PICKER_ROW_CLASS_NAME,
+                        value === null ? "font-medium" : "text-muted-foreground/70",
+                      )}
+                    >
+                      No project
+                      {value === null ? <CurrentCheck /> : null}
+                    </CommandItem>
+                  ) : null}
+                </div>
+              ) : null}
+            </CommandList>
+          )}
         </Command>
       </PopoverContent>
     </Popover>
@@ -513,7 +671,9 @@ export function ProjectSelector({
 
 /** The fade above the footer says "more below". It hides when the list fits, or is scrolled to its end. */
 function watchListEnd(fade: HTMLDivElement | null) {
-  const list = fade?.closest<HTMLElement>("[cmdk-list]");
+  const list =
+    fade?.closest<HTMLElement>("[cmdk-list]") ??
+    fade?.parentElement?.querySelector<HTMLElement>("[cmdk-list]");
   if (!fade || !list || typeof ResizeObserver === "undefined") return;
   const update = () => {
     fade.hidden = list.scrollHeight - list.scrollTop - list.clientHeight < 4;
@@ -528,8 +688,18 @@ function watchListEnd(fade: HTMLDivElement | null) {
   };
 }
 
-function CurrentCheck() {
-  return <Icon name="Check" className="size-3.5! text-primary-text [&_*]:stroke-2" aria-hidden />;
+function CurrentCheck({ compact = false }: { compact?: boolean }) {
+  return (
+    <Icon
+      name="Check"
+      className={
+        compact
+          ? "size-[18px]! shrink-0 text-foreground"
+          : "size-3.5! text-primary-text [&_*]:stroke-2"
+      }
+      aria-hidden
+    />
+  );
 }
 
 interface AddRowProps {
@@ -539,6 +709,8 @@ interface AddRowProps {
   detail: ReactNode;
   repositoryUrl?: string;
   action?: string;
+  compact?: boolean;
+  icon?: "Folder" | "Laptop" | "Github";
   dim: boolean;
   adding: boolean;
   disabled: boolean;
@@ -546,38 +718,74 @@ interface AddRowProps {
 }
 
 /** A repo or folder that is not a project yet. */
-function AddRow({ value, name, detail, repositoryUrl, action = "Add", dim, adding, disabled, onSelect }: AddRowProps) {
+function AddRow({
+  value,
+  name,
+  detail,
+  repositoryUrl,
+  action = "Add",
+  compact = false,
+  icon = "Folder",
+  dim,
+  adding,
+  disabled,
+  onSelect,
+}: AddRowProps) {
   return (
     <CommandItem
       value={value}
       keywords={[name]}
       disabled={disabled}
       onSelect={onSelect}
-      className={cn(PICKER_ROW_CLASS_NAME, "animate-in fade-in duration-300 motion-reduce:animate-none")}
+      className={cn(
+        compact
+          ? cn(
+              COMPACT_PICKER_ROW_CLASS_NAME,
+              "text-foreground/90 data-[selected=true]:bg-transparent active:bg-state-hover",
+            )
+          : PICKER_ROW_CLASS_NAME,
+        "animate-in fade-in duration-300 motion-reduce:animate-none",
+      )}
     >
-      {repositoryUrl && <img className="size-4 shrink-0" src="/gitlab.svg" alt=""/>}
+      {repositoryUrl ? (
+        <img className={cn(compact ? "size-[19px]" : "size-4", "shrink-0")} src="/gitlab.svg" alt="" />
+      ) : compact ? (
+        <Icon name={icon} className="size-[19px]! shrink-0 text-muted-foreground/60" aria-hidden />
+      ) : null}
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
-          dim && "text-muted-foreground/70 group-data-[selected=true]:text-foreground",
+          dim &&
+            (compact
+              ? "text-muted-foreground/75"
+              : "text-muted-foreground/70 group-data-[selected=true]:text-foreground"),
         )}
       >
         {name}
         {repositoryUrl && <small className="block truncate text-2xs font-normal text-muted-foreground">{repositoryUrl}</small>}
       </span>
       {adding || repositoryUrl ? null : (
-        <span className={cn(PICKER_DETAIL_CLASS_NAME, "flex shrink-0 items-center gap-2 group-data-[selected=true]:hidden")}>
+        <span
+          className={cn(
+            compact
+              ? "flex shrink-0 items-center gap-2 text-xs text-muted-foreground/55"
+              : cn(PICKER_DETAIL_CLASS_NAME, "flex shrink-0 items-center gap-2 group-data-[selected=true]:hidden"),
+          )}
+        >
           {detail}
-          <Icon name="Plus" className="size-3.5!" aria-hidden />
+          <Icon name="Plus" className={compact ? "size-4! shrink-0" : "size-3.5!"} aria-hidden />
         </span>
       )}
-      <RowAction label={action} busy={adding} visible={Boolean(repositoryUrl)} />
+      {compact && !adding && !repositoryUrl ? null : (
+        <RowAction label={action} busy={adding} visible={Boolean(repositoryUrl)} />
+      )}
     </CommandItem>
   );
 }
 
 interface RepoRowProps {
   repo: RepoSuggestion;
+  compact?: boolean;
   dim: boolean;
   addingKey: string | null;
   onAdd: (repo: RepoSuggestion) => void;
@@ -585,9 +793,10 @@ interface RepoRowProps {
 
 function GitlabRepoRow({
   repo,
+  compact = false,
   addingKey,
   onAdd,
-}: Pick<RepoRowProps, "addingKey" | "onAdd"> & {
+}: Pick<RepoRowProps, "compact" | "addingKey" | "onAdd"> & {
   repo: RepoSuggestion & { repo: string };
 }) {
   const connection = useGitlabConnection();
@@ -624,6 +833,7 @@ function GitlabRepoRow({
       value={"repo:" + repoKey(repo)}
       name={repo.name}
       detail={null}
+      compact={compact}
       repositoryUrl={repo.repo
         .replace("https://", "")
         .split("/")
@@ -668,7 +878,7 @@ function GitlabRepoRow({
   );
 }
 
-function RepoRow({ repo, dim, addingKey, onAdd }: RepoRowProps) {
+function RepoRow({ repo, compact = false, dim, addingKey, onAdd }: RepoRowProps) {
   const computer = useThisComputer() === "this PC" ? "PC" : COMPUTER_TITLE;
   const key = repoKey(repo);
   const age =
@@ -680,6 +890,8 @@ function RepoRow({ repo, dim, addingKey, onAdd }: RepoRowProps) {
       value={`repo:${key}`}
       name={repo.name}
       detail={`${repo.source === "github" ? "GitHub" : computer}${age}`}
+      compact={compact}
+      icon={repo.source === "github" ? "Github" : "Laptop"}
       dim={dim}
       adding={addingKey === key}
       disabled={addingKey !== null && addingKey !== key}

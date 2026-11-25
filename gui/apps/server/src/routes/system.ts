@@ -91,6 +91,7 @@ import {
 import { environmentProviderMachineAvailability } from "../services/environments/provider-machine-availability.js";
 import { machineProviderAcceptsEmptyInputs } from "../services/machines/provider-availability.js";
 import { requirePublicProject } from "../services/lib/entity-lookup.js";
+import { clearUnsentMinutes } from "../services/cloudroom/time-in-app.js";
 
 const LEADING_ENVIRONMENT_PROVIDER_IDS: readonly string[] = [
   "project-checkout",
@@ -222,6 +223,7 @@ export function registerSystemRoutes(
         primaryHostId === null
           ? null
           : deps.hub.getDaemonPlatformForHost(primaryHostId),
+      telemetryAllowed: deps.config.telemetryAllowed !== false,
       voiceTranscriptionEnabled: resolveVoiceTranscriptionEnabled(deps),
       aiServices: {
         inference: deps.config.inferenceModel,
@@ -301,6 +303,9 @@ export function registerSystemRoutes(
     });
     setAppSettings(deps.db, updatedSettings);
     deps.telemetry.setEnabled(updatedSettings.telemetryEnabled);
+    if (!updatedSettings.telemetryEnabled) {
+      void clearUnsentMinutes(deps).catch(() => {});
+    }
     deps.hub.notifySystem(["config-changed"]);
     if (current.providerAutoUpdate.some((id) => !updatedSettings.providerAutoUpdate.includes(id))) {
       for (const hostId of deps.hub.listConnectedHostIds()) {

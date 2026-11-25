@@ -261,7 +261,7 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
       : { website: configuredWebsite() };
   });
   const stopFirstResponseTelemetry = installFirstResponseTelemetry({ db, hub, telemetry }, (threadId, at) => cloud.sandboxes.wokeSince(threadId, at), (threadId, at) => cloud.sandboxes.startupSince(threadId, at));
-  const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry });
+  const stopAuthFailureTelemetry = installAuthFailureTelemetry({ db, logger, telemetry, telemetryAllowed: serverConfig.BB_TELEMETRY });
   const stopPlanLimitTelemetry = installPlanLimitTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
   const stopTokenTelemetry = installTokenTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });
   const stopSkillTelemetry = installSkillTelemetry({ db, telemetry, dataDir: runtimeConfig.dataDir, logger });

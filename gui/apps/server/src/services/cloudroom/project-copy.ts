@@ -20,7 +20,7 @@ import { CloudroomError, UPLOAD_PART, type CloudroomClient } from "./client.js";
 import { sandboxThread } from "./sandboxes.js";
 import { redactSecrets } from "./shares.js";
 import { binding, command, saveProjectCopyProgress } from "./store.js";
-import { copyMacGithub } from "./sync.js";
+import { canCopyMacGithub } from "./sync.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // `key` is the copy target: one folder on a shared VM, or one per thread sandbox.
@@ -66,9 +66,11 @@ export function cloudRepository(remote: string | null): string | null {
   return githubRepository(remote) ?? gitlabRepository(remote);
 }
 
+/** The project's folder here: this computer's own first, since another computer's path can exist here too, then the default. */
 export function localProjectPath(deps: Deps, projectId: string): string | undefined {
+  const host = resolvePrimaryHostId(deps);
   const sources = listProjectSourcesByProjectIds(deps.db, [projectId]).filter((source) => existsSync(source.path));
-  return (sources.find((source) => source.isDefault) ?? sources[0])?.path;
+  return (sources.find((source) => source.hostId === host) ?? sources.find((source) => source.isDefault) ?? sources[0])?.path;
 }
 
 /** Compares remotes across https and ssh forms, case, a trailing slash and `.git`. */
@@ -77,30 +79,36 @@ export function remoteKey(remote: unknown): string | null {
   return remote.trim().toLowerCase().replace(/^[a-z+]+:\/\//, "").replace(/^[^@/]+@/, "").replace(/^([^/:]+):/, "$1/").replace(/\/+$/, "").replace(/\.git$/, "") || null;
 }
 
-/** A project added before it had a GitHub remote picks the remote up here, at its next cloud thread. A folder on this
- *  computer added while it was inside another repo saved that repo's remote: once the folder is a checkout of its own,
- *  its own origin is saved instead, so the copy, template, loops and sync agree (#1850). */
+/** A project's folder on this computer decides its repo (#2548): when the folder's origin changes (a split or moved repo,
+ *  or a folder added inside another repo that became its own checkout, #1850), the new one is saved, so the copy,
+ *  template, loops and sync follow it. A folder without an origin keeps the saved remote; a project without one picks
+ *  the folder's up here. */
 export async function projectRemote(deps: Deps, project: { id: string; gitRemoteUrl: string | null }, path: string | null | undefined): Promise<string | null> {
   if (!path) return project.gitRemoteUrl;
   const saved = project.gitRemoteUrl;
-  if (saved !== null) {
-    // Another computer's folder path can exist here too, as an unrelated checkout.
-    const host = resolvePrimaryHostId(deps);
-    const own = listProjectSourcesByProjectIds(deps.db, [project.id]).some((source) => source.hostId === host && source.path === path);
-    const real = own ? (() => { try { return realpathSync(path); } catch { return null; } })() : null;
-    if (!real || (await git(real, ["rev-parse", "--show-prefix"], 5_000))?.trim() !== "" || remoteKey(await git(dirname(real), ["remote", "get-url", "origin"], 5_000)) !== remoteKey(saved)) return saved;
-    // A folder whose own repo has no origin keeps main's behavior for now.
-    const remote = stripGitUrlCredentials((await git(real, ["remote", "get-url", "origin"], 5_000))?.trim() ?? "") || null;
-    if (!remote || remoteKey(remote) === remoteKey(saved)) return saved;
-    // A remote saved meanwhile wins.
-    return replaceProjectGitRemoteUrl(deps.db, deps.hub, project.id, saved, remote) ? remote : getProject(deps.db, project.id)?.gitRemoteUrl ?? null;
+  if (saved !== null && !ownFolders(deps, project.id).includes(path)) return saved;
+  const remote = stripGitUrlCredentials((await git(path, ["remote", "get-url", "origin"], 5_000))?.trim() ?? "") || null;
+  if (saved === null) {
+    if (remote) setProjectGitRemoteUrlIfMissing(deps.db, deps.hub, project.id, remote);
+    return remote;
   }
-  const remote = stripGitUrlCredentials((await git(path, ["remote", "get-url", "origin"]))?.trim() ?? "") || null;
-  if (remote) setProjectGitRemoteUrlIfMissing(deps.db, deps.hub, project.id, remote);
+  if (!remote || remoteKey(remote) === remoteKey(saved)) return saved;
+  // A remote saved meanwhile wins.
+  if (!replaceProjectGitRemoteUrl(deps.db, deps.hub, project.id, saved, remote)) return getProject(deps.db, project.id)?.gitRemoteUrl ?? null;
+  movedRepos.add(project.id);
   return remote;
 }
 
-/** Fixes a stale saved remote before a project's sandbox is warmed, so its template clones the right repo (#1850). */
+/** Projects whose repo changed here since a warm-up last told the website, which then moves their template and loops. */
+export const movedRepos = new Set<string>();
+
+/** The project's folders on this computer. Another computer's folder path can exist here too, as an unrelated checkout. */
+export function ownFolders(deps: Deps, projectId: string): string[] {
+  const host = resolvePrimaryHostId(deps);
+  return listProjectSourcesByProjectIds(deps.db, [projectId]).filter((source) => source.hostId === host).map((source) => source.path);
+}
+
+/** Saves the folder's repo before a project's sandbox is warmed, so its template and loops clone it. */
 export async function refreshProjectRemote(deps: Deps, projectId: string): Promise<void> {
   const project = getProject(deps.db, projectId);
   const path = project?.gitRemoteUrl ? localProjectPath(deps, project.id) : undefined;
@@ -171,8 +179,9 @@ export async function planProjectCopyOrThrow(deps: Deps, client: CloudroomClient
   const project = getProject(deps.db, getThread(deps.db, threadId)?.projectId ?? "");
   if (!project) return null;
   if (copying.has(key)) throw new Error(BUSY);
-  const path = localPath ?? localProjectPath(deps, project.id) ?? null;
-  const repository = cloudRepository(await projectRemote(deps, project, path));
+  const own = localProjectPath(deps, project.id), path = localPath ?? own ?? null;
+  // The repo comes from the project's folder, not a worktree Teleport passes (#2548).
+  const repository = cloudRepository(await projectRemote(deps, project, own ?? path));
   if (!path && !repository) return null;
   const existing = await client.workspace(workspace, signal);
   // Exit 1 means files are there; any other end of the check (a signal, a missing shell) says nothing about the folder.
@@ -357,7 +366,7 @@ async function git(cwd: string, args: string[], timeout = 0): Promise<string | n
  * clone fills the sandbox disk with deleted packs the search still holds open. */
 async function clone(deps: Deps, client: CloudroomClient, target: string, repository: string, branch?: string, requireBranch = false): Promise<string | null> {
   const gitlab = Boolean(gitlabRepository(repository));
-  const token = !gitlab && (await copyMacGithub(deps))
+  const token = !gitlab && (await canCopyMacGithub(deps))
     ? await exec("gh", ["auth", "token", "--hostname", "github.com"], {
         timeout: 15_000,
         windowsHide: true,

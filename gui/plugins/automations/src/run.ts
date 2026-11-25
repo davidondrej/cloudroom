@@ -23,7 +23,7 @@ import {
   type AutomationRunRow,
   type Db,
 } from "./data.js";
-import { loopAgent, type FallbackSdk } from "./fallback.js";
+import { fallbackNote, loopAgent, type FallbackSdk } from "./fallback.js";
 import { publishAutomationChange } from "./realtime.js";
 import { savedReports } from "./review.js";
 import { executeStoredScript, mapScriptResultToRun } from "./script-runner.js";
@@ -222,16 +222,20 @@ export async function executeAgentRun(
       pastNotes(room, db, args.automation.id),
       reportAsk(room.sdk),
     ]);
+    const agent = await loopAgent(room.sdk, db, args.automation, args.execution);
     const input = {
       requestId: args.run.id,
       projectId: args.automation.projectId,
       environment: args.execution.environment,
       prompt: withEvents(
-        args.execution.prompt + memoryText(notes) + ask,
+        fallbackNote(args.automation, args.execution, agent) +
+          args.execution.prompt +
+          memoryText(notes) +
+          ask,
         args.events,
       ),
       title: args.automation.name,
-      ...(await loopAgent(room.sdk, db, args.automation, args.execution)),
+      ...agent,
       permissionMode: args.execution.permissionMode,
     };
     let spawned: unknown;

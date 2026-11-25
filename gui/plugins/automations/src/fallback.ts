@@ -291,6 +291,25 @@ export async function loopAgent(
   return other;
 }
 
+const NAMES: Record<string, string> = { "claude-code": "Claude Code", codex: "Codex", "acp-antigravity": "Antigravity" };
+
+/** The line a fallback run's prompt starts with, so its agent knows why it runs and says so: a silent switch made runs
+ *  that needed the loop's own agent fail with no reason anyone could see (#2153). Empty on the loop's own agent, and for
+ *  agents that take turns. Cloud loops say the same (web/lib/automations.ts). */
+export function fallbackNote(
+  automation: AutomationRow,
+  execution: AgentExecution,
+  agent: LoopAgent,
+): string {
+  if (agent.providerId === execution.providerId || (execution.agents?.length ?? 0) > 1) return "";
+  const own = NAMES[execution.providerId] ?? execution.providerId;
+  const why =
+    (refusedUntil.get(`${automation.id}:${execution.providerId}`) ?? 0) > Date.now()
+      ? `${own} refused one of its recent runs`
+      : `${own} is at its plan limit`;
+  return `Note from Cloudroom: this run is on ${NAMES[agent.providerId] ?? agent.providerId} · ${agent.model} instead of this loop's own ${own}${execution.model ? ` · ${execution.model}` : ""}, because ${why}. Say so in your reply and your report. If the task needs a tool you don't have here, report needs-you and stop instead of working around it.\n\n`;
+}
+
 /** The agent a run's thread ran on, or null when unknown. */
 async function ranOn(
   sdk: FallbackSdk,

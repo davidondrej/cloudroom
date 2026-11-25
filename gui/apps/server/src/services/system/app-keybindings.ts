@@ -160,7 +160,13 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
   binding("thread.search", "k", { mod: true }, mainWithoutModal),
   binding("thread.rename", "d", { mod: true, shift: true }, mainWithoutModal),
   binding("thread.pin", "g", { mod: true }, mainWithoutModal),
-  binding("thread.archive", "w", { mod: true }, mainWithoutModal),
+  // Not from the terminal: there Cmd+W means "close this", not "archive the thread".
+  binding(
+    "thread.archive",
+    "w",
+    { mod: true },
+    { all: ["mainSurface"], none: ["modalOpen", "terminalFocus"] },
+  ),
   binding("app.back", "Escape", {}, mainWithoutModal),
   binding("history.back", "[", { mod: true }, historyWithoutModal),
   binding("history.forward", "]", { mod: true }, historyWithoutModal),
@@ -255,11 +261,15 @@ export const DEFAULT_APP_KEYBINDINGS: AppDefaultKeybindings = [
     { mod: true, shift: true },
     mainWithoutModal,
   ),
+  // Works from the terminal too: it is the way back to chat.
   binding(
     "composer.focus",
     "c",
     { mod: true, shift: true },
-    composerWithoutModal,
+    {
+      all: ["mainSurface", "promptAvailable"],
+      none: ["modalOpen", "browserFocus"],
+    },
   ),
   binding(
     "composer.hardQueue",

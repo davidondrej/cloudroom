@@ -1,6 +1,9 @@
 import {
+  CALLER_PROOF_REQUIRED_MESSAGE,
   CALLER_PROOF_STATUS_HEADER,
+  CALLER_PROOF_TIMED_OUT_MESSAGE,
   CALLER_TOKEN_HEADER,
+  checkOpenWithoutCallerProof,
   proveLocalCaller,
   readMachineProxyUrl,
   SERVER_CALLER_PROOF_PATH,
@@ -17,6 +20,15 @@ import {
   startMachineAuthProxy,
   type MachineAuthProxy,
 } from "./machine-auth-proxy.js";
+
+vi.mock("@cloudroom/config/caller-proof", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@cloudroom/config/caller-proof")>();
+  return {
+    ...actual,
+    checkOpenWithoutCallerProof: vi.fn(actual.checkOpenWithoutCallerProof),
+  };
+});
 
 const proxies: MachineAuthProxy[] = [];
 const servers: Array<http.Server | net.Server> = [];
@@ -486,6 +498,7 @@ describe("startMachineAuthProxy", () => {
         );
         expect(await refused.json()).toMatchObject({
           code: "caller_proof_required",
+          message: CALLER_PROOF_REQUIRED_MESSAGE,
         });
         const proven = await fetch(`${proxy.serverUrl}/api/v1/threads`, {
           headers: { [CALLER_TOKEN_HEADER]: token },
@@ -497,6 +510,21 @@ describe("startMachineAuthProxy", () => {
       expect(received).toEqual(["/api/v1/threads"]);
     },
   );
+
+  it("says busy, not sandboxed, when the OS user check gets no answer (#2435)", async () => {
+    const upstream = http.createServer((_request, response) => {
+      response.end("{}");
+    });
+    const { proxy } = await startProxy(await listen(upstream));
+    vi.mocked(checkOpenWithoutCallerProof).mockResolvedValueOnce("unanswered");
+    const refused = await fetch(`${proxy.serverUrl}/api/v1/threads`);
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get(CALLER_PROOF_STATUS_HEADER)).toBe("required");
+    expect(await refused.json()).toEqual({
+      code: "caller_proof_required",
+      message: CALLER_PROOF_TIMED_OUT_MESSAGE,
+    });
+  });
 
   it("gives a token only to a caller that writes the proof file", async () => {
     let upstreamRequests = 0;

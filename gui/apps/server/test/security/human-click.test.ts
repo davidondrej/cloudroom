@@ -1,3 +1,6 @@
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import {
   createHumanClickSigner,
   HUMAN_CLICK_HEADER,
@@ -6,6 +9,7 @@ import {
 import type { InstalledPlugin } from "@cloudroom/server-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
+import { seedThreadFixture } from "../helpers/seed.js";
 import {
   createTestAppHarness,
   type TestAppHarness,
@@ -150,5 +154,208 @@ describe("human clicks (ADR 0260)", () => {
       (await post(`/api/v1/human-clicks/${requestId}/approve`, PHONE)).status,
     ).toBe(403);
     expect(install).not.toHaveBeenCalled();
+  });
+
+  it("refuses forged Origin and remote-machine answers to a GPU approval card, and accepts a desktop click or signed-in phone", async () => {
+    const { app, harness, post, signer } = await start();
+    const { thread } = seedThreadFixture(harness);
+    const origin = `http://127.0.0.1:${harness.config.serverPort}`;
+
+    // Obtain a real non-internal caller-proof token, like a local agent or curl.
+    const started = (await (
+      await app.request("/api/v1/caller-proofs", { method: "POST" })
+    ).json()) as { claim: string; directory: string; id: string };
+    await writeFile(join(started.directory, started.id), started.id);
+    const { token: localAgentToken } = (await (
+      await app.request(`/api/v1/caller-proofs/${started.id}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ claim: started.claim }),
+      })
+    ).json()) as { token: string };
+    expect(localAgentToken).toBeTruthy();
+
+    const openGpuCard = () => {
+      const pending = harness.deps.pendingInteractions.requestPluginInteraction(
+        {
+          pluginId: "gpu",
+          rendererId: "gpu-approval",
+          threadId: thread.id,
+          title: "Use a GPU?",
+          payload: { max_credits: 320_000 },
+          timeoutMs: 60_000,
+        },
+      );
+      const [interaction] =
+        harness.deps.pendingInteractions.listPendingThreadInteractions(
+          thread.id,
+        );
+      expect(interaction).toBeDefined();
+      return {
+        pending,
+        path: `/api/v1/threads/${thread.id}/interactions/${interaction!.id}/respond`,
+      };
+    };
+
+    const first = openGpuCard();
+    // Local agent forging a trusted Origin header (with or without a spoofed gate-auth header).
+    expect(
+      (
+        await post(
+          first.path,
+          { [CALLER_TOKEN_HEADER]: localAgentToken, origin },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await post(
+          first.path,
+          {
+            [CALLER_TOKEN_HEADER]: localAgentToken,
+            "x-bb-gate-auth": "session",
+            origin,
+          },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(403);
+    // Remote Connect machine (internal relay token) forging a trusted Origin header.
+    expect(
+      (
+        await post(
+          first.path,
+          { "x-bb-gate-auth": "machine", origin },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(403);
+    // Wrong-path signature and another key's signature are refused.
+    const elsewhere = signer.sign("POST", MAC_ACCESS) ?? "";
+    const otherKey = createHumanClickSigner().sign("POST", first.path) ?? "";
+    for (const header of [elsewhere, otherKey]) {
+      expect(
+        (
+          await post(
+            first.path,
+            {
+              [CALLER_TOKEN_HEADER]: localAgentToken,
+              [HUMAN_CLICK_HEADER]: header,
+              origin,
+            },
+            { value: { approve: true } },
+          )
+        ).status,
+      ).toBe(403);
+    }
+    // Card is still pending until a real human click answers it.
+    expect(
+      harness.deps.pendingInteractions.listPendingThreadInteractions(thread.id),
+    ).toHaveLength(1);
+
+    const click = signer.sign("POST", first.path) ?? "";
+    expect(click).not.toBe("");
+    expect(
+      (
+        await post(
+          first.path,
+          { [HUMAN_CLICK_HEADER]: click, origin },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(200);
+    expect(await first.pending).toEqual({
+      outcome: "submitted",
+      value: { approve: true },
+    });
+    // Replaying the same signature is refused with 403 before interaction resolution.
+    expect(
+      (
+        await post(
+          first.path,
+          {
+            [CALLER_TOKEN_HEADER]: localAgentToken,
+            [HUMAN_CLICK_HEADER]: click,
+            origin,
+          },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(403);
+
+    // Signed-in Connect phone (internal relay token + session gate) can approve a GPU card.
+    const second = openGpuCard();
+    expect(
+      (
+        await post(
+          second.path,
+          { ...PHONE, origin },
+          { value: { approve: true } },
+        )
+      ).status,
+    ).toBe(200);
+    expect(await second.pending).toEqual({
+      outcome: "submitted",
+      value: { approve: true },
+    });
+
+    // Ordinary plugin interactions (outside APP_ONLY_PLUGINS) still accept unsigned CLI responses.
+    const ordinary = harness.deps.pendingInteractions.requestPluginInteraction({
+      pluginId: "ask-user-question",
+      rendererId: "question",
+      threadId: thread.id,
+      title: "Pick one",
+      payload: {},
+      timeoutMs: 60_000,
+    });
+    const [ordinaryItem] =
+      harness.deps.pendingInteractions.listPendingThreadInteractions(thread.id);
+    expect(
+      (
+        await post(
+          `/api/v1/threads/${thread.id}/interactions/${ordinaryItem!.id}/respond`,
+          { [CALLER_TOKEN_HEADER]: localAgentToken },
+          { value: { answer: "yes" } },
+        )
+      ).status,
+    ).toBe(200);
+    expect(await ordinary).toEqual({
+      outcome: "submitted",
+      value: { answer: "yes" },
+    });
+  });
+
+  it("still refuses remote-machine GPU approvals even when no human-click key is configured", async () => {
+    harness = await createTestAppHarness();
+    const { thread } = seedThreadFixture(harness);
+    const origin = `http://127.0.0.1:${harness.config.serverPort}`;
+    const pending = harness.deps.pendingInteractions.requestPluginInteraction({
+      pluginId: "gpu",
+      rendererId: "gpu-approval",
+      threadId: thread.id,
+      title: "Use a GPU?",
+      payload: { max_credits: 320_000 },
+      timeoutMs: 60_000,
+    });
+    const [interaction] =
+      harness.deps.pendingInteractions.listPendingThreadInteractions(thread.id);
+    const path = `/api/v1/threads/${thread.id}/interactions/${interaction!.id}/respond`;
+    const respond = (headers: Record<string, string>) =>
+      harness!.app.request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ value: { approve: true } }),
+      });
+
+    expect(
+      (await respond({ "x-bb-gate-auth": "machine", origin })).status,
+    ).toBe(403);
+    expect((await respond({})).status).toBe(403);
+    expect((await respond({ origin })).status).toBe(200);
+    expect(await pending).toEqual({
+      outcome: "submitted",
+      value: { approve: true },
+    });
   });
 });

@@ -92,9 +92,11 @@ import {
   partitionCloudOpenCodeModelOptions,
   useCloudroomConnection,
   useCloudroomThread,
+  useRetryCloudStart,
   useSetCloudReasoning,
 } from "@/hooks/queries/cloudroom-queries";
 import { resolveModelReasoningLevel } from "@/hooks/thread-creation-options/model-catalog-selection";
+import { plainError } from "@/lib/fix-prompts";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
@@ -316,6 +318,7 @@ function EmbeddedThreadChatWithComposer({
   const cloudState = useCloudroomThread(threadId, isCloud);
   const cloudConnection = useCloudroomConnection();
   const setCloudReasoning = useSetCloudReasoning(threadId);
+  const retryCloudStart = useRetryCloudStart(threadId);
   const { mutate: updateExecution } = useUpdateThread({
     threadId,
     errorMessage: "Failed to save thread execution settings.",
@@ -344,6 +347,7 @@ function EmbeddedThreadChatWithComposer({
     cloudState.data?.reasoning ??
     "medium";
   const cloudModel = pendingSwitch?.model ?? cloudState.data?.model;
+  const cloudSessionId = cloudState.data?.sessionId ?? null;
 
   const executionOptionsQuery = useThreadDefaultExecutionOptions(
     composer.executionDefaultsThreadId,
@@ -409,7 +413,9 @@ function EmbeddedThreadChatWithComposer({
     [providerOptions],
   );
   const cloudFollowUpReasoningOptions = useMemo(() => {
+    // Before its first message a side chat has no session, so any effort its agent offers can still be picked.
     const fixed =
+      Boolean(cloudSessionId) &&
       activeCloudProviderId.startsWith("acp-") &&
       !cloudHarness(cloudConnection.data, activeCloudProviderId)?.prompt_reasoning;
     const levels = fixed
@@ -427,7 +433,7 @@ function EmbeddedThreadChatWithComposer({
           reasoningLevelSchema.options.indexOf(a.value) -
           reasoningLevelSchema.options.indexOf(b.value),
       );
-  }, [activeCloudProviderId, cloudConnection.data, cloudModel, cloudReasoning]);
+  }, [activeCloudProviderId, cloudConnection.data, cloudModel, cloudReasoning, cloudSessionId]);
   const cloudFastSupported =
     isCloud && cloudServiceTierSupported(cloudConnection.data, activeCloudProviderId);
   const ultraFast =
@@ -523,8 +529,14 @@ function EmbeddedThreadChatWithComposer({
       updateExecution(
         { id: threadId, ...next },
         {
-          onSuccess: () => {
-            void queryClient.invalidateQueries({ queryKey: ["cloudroom-thread", threadId] });
+          // Show the new model and effort at once, so a quick send can't carry the old ones.
+          onSuccess: async () => {
+            const queryKey = ["cloudroom-thread", threadId];
+            await queryClient.cancelQueries({ queryKey });
+            queryClient.setQueryData<{ model: string; reasoning: string } | null>(queryKey, (data) =>
+              data && { ...data, model: next.model, reasoning: next.reasoningLevel },
+            );
+            void queryClient.invalidateQueries({ queryKey });
           },
           onError: () => setProviderModelReasoning(previous),
         },
@@ -1405,10 +1417,22 @@ function EmbeddedThreadChatWithComposer({
       threadId={threadId}
     />
   ) : null;
+  const startError = retryCloudStart.error?.message ?? cloudState.data?.error ?? null;
   const footer = (
     <div className={cn("relative", surfaceClassName)}>
       <OverflowFade placement="above" tone={surfaceTone} />
       <div className="px-4 pb-4 pt-2">
+        {isCloud && cloudState.data?.failedStart && (
+          <div role="alert" aria-label="Side chat status" className="mb-2 flex min-w-0 items-center gap-2 rounded-full border border-border bg-background py-1 pl-3 pr-2 text-xs text-muted-foreground">
+            <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
+            <span className="min-w-0 flex-1 truncate text-foreground" title={startError ?? undefined}>
+              {startError ? plainError(startError) : "Side chat didn't start"}
+            </span>
+            <button type="button" className="shrink-0 text-foreground underline underline-offset-2 disabled:opacity-50" disabled={retryCloudStart.isPending} onClick={() => retryCloudStart.mutate()}>
+              Retry
+            </button>
+          </div>
+        )}
         <PromptDraftContextsContext.Provider value={currentPromptDraft.contexts}>
         <FollowUpPromptBox
           threadProviderId={

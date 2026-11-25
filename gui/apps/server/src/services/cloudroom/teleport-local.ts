@@ -23,7 +23,7 @@ import {
   threads,
 } from "@cloudroom/db";
 import { chatImagePaths, getHostPathComparisonKey, legacyChatFileCopySegments, PERSONAL_PROJECT_ID, THREAD_TELEPORT_LOCAL_OPERATION, threadScope, type PromptInput, type TeleportLocalStep, type Thread, COMPUTER } from "@cloudroom/domain";
-import { chatFileCopyPath, readRegularFile, saveChatFileCopy } from "@cloudroom/config/chat-file-copies";
+import { chatFileCopyPath, readRegularFile } from "@cloudroom/config/chat-file-copies";
 import { gitSafetyArgs } from "@cloudroom/host-workspace";
 import { folderOpenerCommand, tarCommand } from "@cloudroom/process-utils";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
@@ -42,7 +42,7 @@ import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-pro
 import { requestQueuedMessageDispatch } from "../threads/queued-message-dispatch.js";
 import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "../threads/background-task-reconciliation.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
-import { requireHostDataDir } from "../threads/thread-storage.js";
+import { requireHostDataDir, saveChatFileCopyForThread } from "../threads/thread-storage.js";
 import { cloudroom } from "./commands.js";
 import { RECORD_VALUES, values, type CloudroomClient } from "./client.js";
 import { SKIPPED } from "./project-copy.js";
@@ -438,6 +438,7 @@ function savedCloudFiles(dataDir: string, threadId: string, path: string): strin
 export async function saveCloudImages(deps: ImageDeps, threadId: string, text: string): Promise<void> {
   const paths = chatImagePaths(text).filter((path) => path.startsWith("/"));
   if (!paths.length) return;
+  const requireThread = Boolean(getThread(deps.db, threadId));
   const client = await cloudroom(deps).threadClient(threadId, false).catch(() => null);
   if (!client) return;
   const dataDir = imageDataDir(deps);
@@ -445,13 +446,14 @@ export async function saveCloudImages(deps: ImageDeps, threadId: string, text: s
   for (const path of paths) {
     const data = await download(client, path, PREVIEW_MB).catch(() => null);
     // Keep going: the other images can still be saved. The first error is still reported.
-    if (data) await saveChatFileCopy({ data, dataDir, filePath: path, threadId }).catch((error: unknown) => { failure ??= error; });
+    if (data) await saveChatFileCopyForThread(deps, { data, dataDir, filePath: path, requireThread, threadId }).catch((error: unknown) => { failure ??= error; });
   }
   if (failure !== undefined) throw failure;
 }
 
 export async function cloudFile(deps: AppDeps, threadId: string, path: string): Promise<Buffer> {
   if (!isAbsolute(path)) throw new ApiError(400, "invalid_path", "Cloud file paths must be absolute.");
+  const requireThread = Boolean(getThread(deps.db, threadId));
   const dataDir = imageDataDir(deps);
   let saved: Buffer | null = null;
   for (const file of savedCloudFiles(dataDir, threadId, path)) {
@@ -462,7 +464,7 @@ export async function cloudFile(deps: AppDeps, threadId: string, path: string): 
     // Only a copy that can be shown spares a sleeping sandbox the wake.
     const data = await download(await cloudroom(deps).threadClient(threadId, saved === null), path, PREVIEW_MB);
     // A copy that can't be saved still leaves the file to show.
-    await saveChatFileCopy({ data, dataDir, filePath: path, threadId }).catch(() => {});
+    await saveChatFileCopyForThread(deps, { data, dataDir, filePath: path, requireThread, threadId }).catch(() => {});
     return data;
   } catch (error) {
     if (saved) return saved;

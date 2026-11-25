@@ -427,6 +427,11 @@ function SignInRow({
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [privacy] = usePrivacyMode();
+  // Privacy mode hides any email in the message ("<email> is already added"), not the whole message.
+  const shown = error?.replace(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, (email) =>
+    hideEmail(email, privacy),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -499,10 +504,16 @@ function SignInRow({
           className="size-4 shrink-0 animate-spin text-primary"
         />
       )}
-      <div className="min-w-0 flex-1 truncate text-muted-foreground">
+      {/* Errors wrap so the next step is never cut off; status text stays on one line. */}
+      <div
+        className={cn(
+          "min-w-0 flex-1 text-muted-foreground",
+          error ? "break-words" : "truncate",
+        )}
+      >
         {error ? (
-          <span className="text-destructive-text" title={error}>
-            {error}
+          <span className="text-destructive-text">
+            {shown}
           </span>
         ) : step === null ? (
           "Starting sign-in…"

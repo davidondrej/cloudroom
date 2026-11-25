@@ -93,7 +93,7 @@ Errors return `{"error": "...", "code": "..."}`. Show `error` to people; branch 
 
 - `401`: missing or wrong token.
 - `404`: unknown session or other resource.
-- `409`: rejected. Some codes are temporary: `storage_blocked`, `service_stopping`, `model_catalog_unavailable`, and the `*_auth_unavailable` codes.
+- `409`: rejected. Some codes are temporary: `storage_blocked` (clears once disk space is freed — interactive clients can hold or retry the prompt, while unattended background loops treat it as a user-side pause), `service_stopping`, `model_catalog_unavailable`, and the `*_auth_unavailable` codes.
 - `503` with `storage_unavailable`: saving failed. Retry with the same `request_id`.
 
 Codes: `invalid_model`, `invalid_provider`, `invalid_reasoning_effort`, `invalid_service_tier`, `invalid_workspace`, `invalid_attachment`, `attachment_too_large`, `attachment_permission_denied`, `request_conflict`, `harness_not_configured`, `unsupported_command`, `storage_blocked`, `service_stopping`, `model_catalog_unavailable`, `codex_auth_required`, `codex_auth_unavailable`, `codex_auth_busy`, `codex_usage_limit`, `claude_auth_required`, `claude_auth_unavailable`, `cursor_auth_required`, `cursor_auth_unavailable`, `cursor_auth_busy`, `teleport_rejected`, `teleport_cancelled`, `teleport_running`, and `request_rejected` for everything else.

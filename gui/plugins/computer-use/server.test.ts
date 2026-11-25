@@ -2,13 +2,15 @@ import {
   createFakePluginHost,
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
-import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { assetFor } from "./driver.js";
-import { install, pruneOldVersions } from "./host.js";
+import { driverEnv, install, pruneOldVersions, workingXauthority } from "./host.js";
 import computerUsePlugin, { acceptFocusedWindow, decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
@@ -188,6 +190,45 @@ it("tells the agent which browser route works when the driver wants an existing-
   await computerUsePlugin(fake.bb);
   const result = await fake.harness.runCli(["call", "get_browser_state", "{}"], { threadId: "thr_1" });
   expect(JSON.parse(result.stdout ?? "")).toEqual({ ...refusal, hint: expect.stringContaining("browser-harness") });
+});
+
+// #2450: a set XAUTHORITY stops the driver finding the cookie itself, so pass only one that works.
+it.runIf(process.platform !== "win32")("passes XAUTHORITY to the driver only when the X server accepts its cookie", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "xauth-"));
+  const good = Buffer.from("fake-cookie-0001");
+  // X5 answers by cookie; X6 hangs up without replying.
+  const server = createServer((socket) => socket.once("data", (setup) => socket.end(Buffer.from([setup.includes(good) ? 1 : 0]))));
+  const hangup = createServer((socket) => socket.once("data", () => socket.end()));
+  await new Promise<void>((resolve) => server.listen(join(dir, "X5"), resolve));
+  await new Promise<void>((resolve) => hangup.listen(join(dir, "X6"), resolve));
+  const field = (value: Buffer) => Buffer.concat([Buffer.from([0, value.length]), value]);
+  const entry = (cookie: Buffer) => Buffer.concat([Buffer.from([0xff, 0xff]), ...[Buffer.alloc(0), Buffer.from(""), Buffer.from("MIT-MAGIC-COOKIE-1"), cookie].map(field)]);
+  const xauth = async (name: string, data: Buffer) => {
+    await writeFile(join(dir, name), data);
+    return join(dir, name);
+  };
+  vi.stubEnv("XAUTHORITY", "/fake/xauth");
+  vi.stubEnv("CUA_DRIVER_RS_ENABLE_WAYLAND", "1");
+  try {
+    expect(driverEnv("/private-home")).toMatchObject({ HOME: "/private-home", CUA_DRIVER_RS_ENABLE_WAYLAND: "1" });
+    expect(driverEnv("/private-home").XAUTHORITY).toBeUndefined();
+    const valid = await xauth("valid", entry(good));
+    expect(await workingXauthority(":5", valid, dir)).toBe(valid);
+    expect(await workingXauthority(":5", await xauth("stale", entry(Buffer.from("fake-cookie-9999"))), dir)).toBeUndefined();
+    expect(await workingXauthority(":5", join(dir, "missing"), dir)).toBeUndefined();
+    // The driver rejects a whole file with a cut-off entry, even after a good one.
+    expect(await workingXauthority(":5", await xauth("truncated", Buffer.concat([entry(good), entry(good).subarray(0, 9)])), dir)).toBeUndefined();
+    execFileSync("mkfifo", [join(dir, "fifo")]);
+    const started = Date.now();
+    expect(await workingXauthority(":5", join(dir, "fifo"), dir)).toBeUndefined();
+    expect(await workingXauthority(":6", valid, dir)).toBeUndefined();
+    expect(Date.now() - started).toBeLessThan(1_000);
+  } finally {
+    vi.unstubAllEnvs();
+    server.close();
+    hangup.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // #1242: GitHub's download sometimes answers 5xx; retry it, never skip the checksum.

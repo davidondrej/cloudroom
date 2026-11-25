@@ -49,6 +49,7 @@ import { validatePromptAttachmentReferences } from "../../services/projects/atta
 import {
   createQueuedMessageForThread,
   sendQueuedMessageNow,
+  wasQueuedMessageDrainAccepted,
 } from "../../services/threads/queued-messages.js";
 import {
   ensureThreadIsNotAwaitingUserInteraction,
@@ -279,6 +280,15 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.sendQueuedMessage, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     ensureThreadQueueIsWritable(thread);
+    // A delivered message stays "sent" even if its turn now asks the user (#1954).
+    if (
+      wasQueuedMessageDrainAccepted(deps.db, {
+        queuedMessageId: context.req.param("queuedMessageId"),
+        threadId: thread.id,
+      })
+    ) {
+      return context.json({ ok: true, delivery: "sent" as const });
+    }
     ensureThreadIsNotAwaitingUserInteraction(deps, thread.id);
     const result = await sendQueuedMessageNow(deps, {
       queuedMessageId: context.req.param("queuedMessageId"),

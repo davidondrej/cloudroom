@@ -3,6 +3,7 @@ import {
   countProjectSources,
   findOrCreateProjectByLocalPathSource,
   getPersonalProject,
+  getProject,
   getProjectExecutionDefaults,
   getPublicProjectByLocalPathSource,
   deleteProjectSource,
@@ -87,6 +88,8 @@ import {
   beginProjectDeletion,
   requestProjectDeletionAdvance,
 } from "../services/projects/project-deletion.js";
+import { projectRemote } from "../services/cloudroom/project-copy.js";
+import { stopSharingDeleted } from "../services/cloudroom/shares.js";
 import { resolveDefaultWorktreeBaseBranch } from "../services/projects/worktree-base-branch.js";
 import {
   listCommandUsage,
@@ -501,6 +504,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     beginProjectDeletion(deps, { projectId: id });
+    void stopSharingDeleted(deps);
     requestProjectDeletionAdvance(deps, { projectId: id });
     return context.json({ ok: true });
   });
@@ -605,6 +609,9 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     }
     if (source.type === "local_path") {
       await fillProjectGitRemote(deps, project, source);
+      // This computer's folder decides the project's repo, so a changed origin is saved now, not at the next Cloud start (#2548).
+      const saved = getProject(deps.db, projectId);
+      if (saved?.gitRemoteUrl) await projectRemote(deps, saved, source.path).catch(() => null);
     }
     return context.json(source);
   });

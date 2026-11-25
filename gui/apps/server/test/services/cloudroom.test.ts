@@ -828,7 +828,7 @@ it("lets a Cloud thread clear or keep its parent, re-links one in its own sandbo
     const reports = vi.fn();
     service.childTurnEnded = reports;
     service.children.tellLocalParent(own.id, "completed", "turn-1");
-    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed", undefined);
+    expect(reports).toHaveBeenCalledWith(expect.objectContaining({ id: own.id, parentThreadId: lead.id }), "completed", undefined, "turn-1");
     expect((await patch(own.id, cloudParent.id)).status).toBe(200);
     expect(parentOf(own.id)).toBe(cloudParent.id);
 
@@ -1754,15 +1754,14 @@ it("a background login save never brings back a login Disconnect removed, whethe
   }
 });
 
-// The clone signs gh in with this Mac's login, and sleep wipes it, so Cloud must hold it to give it back on wake (#1628).
-// It only fills a gap: another computer's or account's saved login stays.
+// Local `gh` only copies to Cloud when "Auth my agents" (`copyLogins`) is on and GitHub hasn't been disconnected/replaced.
 it.each([
-  { case: "toggle off", copyLogins: false, githubCard: true, github: "gho_fake" },
-  { case: "toggle never chosen", copyLogins: null, githubCard: true, github: "gho_fake" },
-  { case: "Disconnect, or another account picked here", copyLogins: false, githubCard: false, github: null },
-  { case: "Cloud already holds another computer's login", copyLogins: false, githubCard: true, cloud: "other", github: "other" },
-  { case: "a second wake during the copy waits for it", copyLogins: false, githubCard: true, steps: "concurrent", github: "gho_fake" },
-  { case: "another Cloudroom account signed in within a minute", copyLogins: false, githubCard: true, steps: "reset", github: "gho_fake" },
+  { case: "toggle off", copyLogins: false, githubCard: true, github: null },
+  { case: "toggle never chosen", copyLogins: null, githubCard: true, github: null },
+  { case: "toggle on", copyLogins: true, githubCard: true, github: "gho_fake" },
+  { case: "Disconnect, or another account picked here", copyLogins: true, githubCard: false, github: null },
+  { case: "Cloud already holds another computer's login with toggle off", copyLogins: false, githubCard: true, cloud: "other", github: "other" },
+  { case: "another Cloudroom account signed in within a minute", copyLogins: true, githubCard: true, steps: "reset", github: "gho_fake" },
 ])("GitHub login sync to Cloud: $case", async ({ copyLogins, githubCard, cloud, steps, github }) => {
   const home = await mkdtemp(join(tmpdir(), "cloudroom-gh-"));
   const env = { PATH: process.env.PATH, HOME: process.env.HOME };

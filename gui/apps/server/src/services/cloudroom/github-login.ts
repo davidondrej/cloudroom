@@ -5,7 +5,7 @@ import { ApiError } from "../../errors.js";
 import type { CodexAuthStatus } from "./client.js";
 import { cloudroom } from "./commands.js";
 import { githubAccountSchema, macGithubToken, sandboxGithubLogin, type GithubAccount, type SandboxAccount } from "./sandboxes.js";
-import { copyMacGithub, setCopyMacGithub } from "./sync.js";
+import { canCopyMacGithub, copyMacGithub, setCopyMacGithub } from "./sync.js";
 
 // The public Client ID of Cloudroom's GitHub OAuth App, with Device Flow enabled. Sign-in stays off until it is set.
 const GITHUB_OAUTH_CLIENT_ID = "Ov23li9OTKaEYO6RAHos";
@@ -57,8 +57,8 @@ export async function githubAuth(deps: AppDeps, action?: "login" | "cancel", req
   return logins.github ? connected : failure ?? idle;
 }
 
-/** This Mac's `gh` token while it is the one copied to cloud sandboxes, else "". */
-const macGithub = async (deps: AppDeps) => await copyMacGithub(deps) ? macGithubToken() : "";
+/** This Mac's `gh` token while copying local logins is enabled and GitHub isn't disconnected/replaced, else "". */
+const macGithub = async (deps: AppDeps) => await canCopyMacGithub(deps) ? macGithubToken() : "";
 
 /** The GitHub account cloud sandboxes use, or null when it can't be told. */
 export async function githubAccount(deps: AppDeps): Promise<GithubAccount | null> {

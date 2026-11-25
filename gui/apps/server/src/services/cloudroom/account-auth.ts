@@ -186,14 +186,11 @@ export class CloudAccountAuth {
   }
 
   /** Copies logins both ways when the user allowed it (ADRs 0130, 0175), and the DeepAPI key to this Mac
-   *  (ADR 20261111-214204). Only the Mac → cloud copy is awaited.
-   *  Without that, only GitHub, which its own card in Settings governs (#1628). */
+   *  (ADR 20261111-214204). Only the Mac → cloud copy is awaited. */
   async syncLogins(cloudChanged = false): Promise<void> {
     if (!await this.rt.sandboxMode()) return;
     void this.rt.sandboxes.copyDeepapiKey().catch((error) => this.rt.host.warn("The DeepAPI key could not be copied to this Mac", error));
-    if (await copyLogins(this.rt.host.deps) !== true) {
-      return this.rt.sandboxes.copyMacGithubLogin().catch((error) => this.rt.host.warn("GitHub login could not be copied to cloud sandboxes", error));
-    }
+    if (await copyLogins(this.rt.host.deps) !== true) return;
     void this.rt.sandboxes.copyCloudLogins(cloudChanged).catch((error) => this.rt.host.warn("Cloud logins could not be copied to this Mac", error));
     await this.rt.sandboxes.copyMacLogins().catch((error) => this.rt.host.warn("Logins could not be copied to cloud sandboxes", error));
   }

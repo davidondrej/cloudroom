@@ -112,7 +112,7 @@ import {
   type CallerTrustReader,
   callerProofRequiredResponse,
   captureCallerTrust,
-  isOpenWithoutCallerProof,
+  checkOpenWithoutCallerProof,
   isTrustedCaller,
   loopbackPeer,
   PLUGIN_WIRE_HTTP_PATH,
@@ -592,17 +592,14 @@ export function createApp(
     if (problem !== null) {
       throw new ApiError(problem.status, "forbidden_origin", problem.error);
     }
-    if (
-      isTrustedCaller(context) ||
-      (await isOpenWithoutCallerProof(
-        context.req.method,
-        context.req.path,
-        loopbackPeer(context),
-      ))
-    ) {
-      return next();
-    }
-    return callerProofRequiredResponse(context);
+    if (isTrustedCaller(context)) return next();
+    const access = await checkOpenWithoutCallerProof(
+      context.req.method,
+      context.req.path,
+      loopbackPeer(context),
+    );
+    if (access === "open") return next();
+    return callerProofRequiredResponse(context, access === "unanswered");
   });
   app.use("/api/v1/development-only/*", async (_context, next) => {
     if (!deps.config.isDevelopment) {

@@ -12,7 +12,7 @@ import { throwParentThreadInvalid } from "../lib/lifecycle-api-errors.js";
 import { teleportBlocked } from "../cloudroom/store.js";
 import { ApiError } from "../../errors.js";
 
-const MAX_THREAD_HIERARCHY_DEPTH = 4;
+export const MAX_THREAD_HIERARCHY_DEPTH = 6;
 
 export function isAgentDelegatedChildThread<
   T extends Pick<Thread, "parentThreadId">,

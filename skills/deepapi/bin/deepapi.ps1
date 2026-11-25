@@ -79,6 +79,8 @@ function Invoke-Raw([string]$Method, [string]$Path, [string]$Body, [string]$Acce
     $Params["ContentType"] = "application/json"
     $Params["Body"] = $Body
   }
+  # PowerShell 7 disposes the error body before the catch below can read it.
+  if ($PSVersionTable.PSVersion.Major -ge 7) { $Params["SkipHttpErrorCheck"] = $true }
   try {
     $Res = Invoke-WebRequest @Params
     return @{ Status = [int]$Res.StatusCode; Content = [string]$Res.Content; Ok = $true }
@@ -131,12 +133,11 @@ function Run-JsonCall([bool]$AutoPoll, [string]$Method, [string]$Path, [string]$
     break
   }
   Write-Output $Res.Content
-  if ($Res.Status -ge 100 -and $Res.Status -lt 400) { return 0 }
-  return 1
+  if ($Res.Status -lt 100 -or $Res.Status -ge 400) { $script:ExitCode = 1 }
 }
 
 function Run-Request([string]$Method, [string]$Path, [string]$Body = "") {
-  if ($script:WantJson) { return (Run-JsonCall $true $Method $Path $Body) }
+  if ($script:WantJson) { Run-JsonCall $true $Method $Path $Body; return }
   Assert-Client
   $Started = [DateTime]::UtcNow
   $Announced = $false
@@ -151,7 +152,7 @@ function Run-Request([string]$Method, [string]$Path, [string]$Body = "") {
     }
     if (([DateTime]::UtcNow - $Started).TotalSeconds -ge $PollLimitSecs) {
       Write-Output "$($Res.Content)`nnote: not finished after ${PollLimitSecs}s; poll the link above to continue"
-      return 1
+      $script:ExitCode = 1; return
     }
     $PollPath = Parse-HeaderVal "poll" $FirstLine
     $AfterRaw = Parse-HeaderVal "after" $FirstLine
@@ -162,8 +163,7 @@ function Run-Request([string]$Method, [string]$Path, [string]$Body = "") {
   }
   Write-Output $Res.Content
   $FinalHeader = ($Res.Content -split "`r?`n")[0]
-  if ($FinalHeader -match '^\[deepapi\] status=(succeeded|dry_run)\b') { return 0 }
-  return 1
+  if ($FinalHeader -notmatch '^\[deepapi\] status=(succeeded|dry_run)\b') { $script:ExitCode = 1 }
 }
 
 function Parse-PosInt([string]$Flag, [string]$Val) {
@@ -174,7 +174,7 @@ function Parse-PosInt([string]$Flag, [string]$Val) {
 
 if ($args.Count -eq 0) { Fail-Usage }
 $Command = [string]$args[0]
-$Rest = if ($args.Count -gt 1) { @($args[1..($args.Count - 1)]) } else { @() }
+$Rest = @($args | Select-Object -Skip 1)
 
 if ($Command -eq "-h" -or $Command -eq "--help") { Show-Help; exit 0 }
 
@@ -189,8 +189,8 @@ switch ($Command) {
       else { $Topic = $Arg }
     }
     if (-not $Topic) { Show-Help; exit 0 }
-    if ($Topic -eq "all" -or $Topic -eq "endpoints") { $ExitCode = Run-Request "GET" "/v1/capabilities" }
-    else { $ExitCode = Run-Request "GET" "/v1/capabilities?capability=$([Uri]::EscapeDataString($Topic))" }
+    if ($Topic -eq "all" -or $Topic -eq "endpoints") { Run-Request "GET" "/v1/capabilities" }
+    else { Run-Request "GET" "/v1/capabilities?capability=$([Uri]::EscapeDataString($Topic))" }
   }
   "search" {
     $MaxVal = $null; $Items = New-Object "System.Collections.Generic.List[string]"
@@ -208,8 +208,7 @@ switch ($Command) {
       if (-not $script:WantJson) { Write-Output "=== search: $Item ===" }
       $Payload = @{ query = $Item }
       if ($null -ne $MaxVal) { $Payload["maxResults"] = $MaxVal }
-      $rc = Run-Request "POST" "/v1/search/web" ($Payload | ConvertTo-Json -Compress)
-      if ($rc -ne 0) { $ExitCode = 1 }
+      Run-Request "POST" "/v1/search/web" ($Payload | ConvertTo-Json -Compress)
     }
   }
   "scrape" {
@@ -228,8 +227,7 @@ switch ($Command) {
       if (-not $script:WantJson) { Write-Output "=== scrape: $Item ===" }
       $Payload = @{ urls = @($Item); contentFormat = "markdown" }
       if ($null -ne $MaxChars) { $Payload["maxChars"] = $MaxChars }
-      $rc = Run-Request "POST" "/v1/scrape/website" ($Payload | ConvertTo-Json -Compress)
-      if ($rc -ne 0) { $ExitCode = 1 }
+      Run-Request "POST" "/v1/scrape/website" ($Payload | ConvertTo-Json -Compress)
     }
   }
   "research" {
@@ -249,7 +247,7 @@ switch ($Command) {
     $Payload = @{ query = $Query }
     if ($Mode) { $Payload["mode"] = $Mode }
     if ($MaxCost) { $Payload["maxCostUsd"] = $MaxCost }
-    $ExitCode = Run-Request "POST" "/v1/research/deep" ($Payload | ConvertTo-Json -Compress)
+    Run-Request "POST" "/v1/research/deep" ($Payload | ConvertTo-Json -Compress)
   }
   "pdf" {
     $MaxPages = $null; $MaxChars = $null; $Url = ""
@@ -266,7 +264,7 @@ switch ($Command) {
     $Payload = @{ url = $Url }
     if ($null -ne $MaxPages) { $Payload["maxPages"] = $MaxPages }
     if ($null -ne $MaxChars) { $Payload["maxChars"] = $MaxChars }
-    $ExitCode = Run-Request "POST" "/v1/scrape/pdf" ($Payload | ConvertTo-Json -Compress)
+    Run-Request "POST" "/v1/scrape/pdf" ($Payload | ConvertTo-Json -Compress)
   }
   "reddit" {
     $MaxItems = $null; $Sub = $null; $Query = ""
@@ -283,7 +281,7 @@ switch ($Command) {
     $Payload = @{ query = $Query }
     if ($Sub) { $Payload["subreddit"] = $Sub }
     if ($null -ne $MaxItems) { $Payload["maxItems"] = $MaxItems }
-    $ExitCode = Run-Request "POST" "/v1/scrape/reddit/search" ($Payload | ConvertTo-Json -Compress)
+    Run-Request "POST" "/v1/scrape/reddit/search" ($Payload | ConvertTo-Json -Compress)
   }
   "github" {
     $GType = "repositories"; $MaxItems = $null; $Query = ""
@@ -299,7 +297,7 @@ switch ($Command) {
     if (-not $Query) { Fail-Usage }
     $Payload = @{ type = $GType; query = $Query }
     if ($null -ne $MaxItems) { $Payload["maxItems"] = $MaxItems }
-    $ExitCode = Run-Request "POST" "/v1/scrape/github/search" ($Payload | ConvertTo-Json -Compress)
+    Run-Request "POST" "/v1/scrape/github/search" ($Payload | ConvertTo-Json -Compress)
   }
   "twitter" {
     $Sort = $null; $MaxItems = $null; $Query = ""
@@ -316,7 +314,7 @@ switch ($Command) {
     $Payload = @{ query = $Query }
     if ($Sort) { $Payload["sort"] = $Sort }
     if ($null -ne $MaxItems) { $Payload["maxItems"] = $MaxItems }
-    $ExitCode = Run-Request "POST" "/v1/scrape/twitter/search" ($Payload | ConvertTo-Json -Compress)
+    Run-Request "POST" "/v1/scrape/twitter/search" ($Payload | ConvertTo-Json -Compress)
   }
   "youtube" {
     $Sub = "search"; $Start = 0; $MaxItems = $null; $Target = ""
@@ -331,11 +329,11 @@ switch ($Command) {
     }
     if (-not $Target) { Fail-Usage }
     if ($Sub -eq "transcript") {
-      $ExitCode = Run-Request "POST" "/v1/scrape/youtube/transcript" (@{ url = $Target } | ConvertTo-Json -Compress)
+      Run-Request "POST" "/v1/scrape/youtube/transcript" (@{ url = $Target } | ConvertTo-Json -Compress)
     } else {
       $Payload = @{ query = $Target }
       if ($null -ne $MaxItems) { $Payload["maxItems"] = $MaxItems }
-      $ExitCode = Run-Request "POST" "/v1/scrape/youtube/search" ($Payload | ConvertTo-Json -Compress)
+      Run-Request "POST" "/v1/scrape/youtube/search" ($Payload | ConvertTo-Json -Compress)
     }
   }
   "balance" {
@@ -344,7 +342,7 @@ switch ($Command) {
       elseif ($a -eq "--json") { $script:WantJson = $true }
       else { Fail-Usage "unknown option: $a" }
     }
-    $ExitCode = Run-Request "GET" "/v1/balance"
+    Run-Request "GET" "/v1/balance"
   }
   "requests" {
     $ReqId = ""
@@ -354,8 +352,8 @@ switch ($Command) {
       elseif ($a -like "-*") { Fail-Usage "unknown option: $a" }
       else { $ReqId = $a }
     }
-    if ($ReqId) { $ExitCode = Run-Request "GET" "/v1/requests/$([Uri]::EscapeDataString($ReqId))" }
-    else { $ExitCode = Run-Request "GET" "/v1/requests" }
+    if ($ReqId) { Run-Request "GET" "/v1/requests/$([Uri]::EscapeDataString($ReqId))" }
+    else { Run-Request "GET" "/v1/requests" }
   }
   "call" {
     $AutoPoll = $true; $Idx = 0
@@ -367,7 +365,7 @@ switch ($Command) {
     $CallArgs = @($Rest[$Idx..($Rest.Count - 1)])
     if ($CallArgs.Count -lt 2 -or $CallArgs.Count -gt 3) { Fail-Usage }
     $CallBody = if ($CallArgs.Count -eq 3) { [string]$CallArgs[2] } else { "" }
-    $ExitCode = Run-JsonCall $AutoPoll ([string]$CallArgs[0]) ([string]$CallArgs[1]) $CallBody
+    Run-JsonCall $AutoPoll ([string]$CallArgs[0]) ([string]$CallArgs[1]) $CallBody
   }
   default { Fail-Usage }
 }

@@ -693,4 +693,31 @@ describe("worktree host entry", () => {
     );
     await harness.experimental_dispose();
   });
+
+  it("waits for another Git to release the config lock (#2561)", async () => {
+    const {
+      root,
+      sourcePath: origin,
+      dataDir,
+    } = await createSourceRepository("origin");
+    const sourcePath = join(root, "repo");
+    await git(root, "clone", origin, sourcePath);
+    // Held past Git's own one-second wait, like an agent's slow `git push -u`.
+    const lock = join(sourcePath, ".git", "config.lock");
+    await writeFile(lock, "");
+    const release = setTimeout(() => void rm(lock, { force: true }), 1_500);
+    const harness = createHarness(dataDir);
+    const created = await harness.experimental_call(
+      "create",
+      createInput({
+        operationId: "create-locked",
+        sourcePath,
+        pathKey: "locked",
+        branchName: "bb/locked",
+      }),
+    );
+    clearTimeout(release);
+    expect(created).toMatchObject({ status: "created" });
+    await harness.experimental_dispose();
+  });
 });

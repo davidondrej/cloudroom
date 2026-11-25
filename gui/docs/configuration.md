@@ -385,6 +385,11 @@ character input. A configured app shortcut takes precedence in editable
 controls; when no matching command handles a chord, the control retains its
 native behavior.
 
+In the terminal, app shortcuts that use `Command`, `Alt`, or `Ctrl+Shift` win
+over the shell. Plain keys, Escape, and `Ctrl+letter` always reach the shell,
+so on Windows and Linux only `Mod+Shift` shortcuts work there. `Mod+W` never
+archives the thread from the terminal.
+
 The desktop application menu uses the same resolved bindings for New Thread,
 New Window, New Tab, Archive Thread, Close, and Settings. There is no separate
 menu shortcut configuration.

@@ -71,6 +71,8 @@ interface RemoveWorktreeArgs {
 const REMOTE_BASE_FETCH_TIMEOUT_MS = 60_000;
 const REMOTE_REF_LOCK_RETRY_INTERVAL_MS = 200;
 const REMOTE_REF_LOCK_RETRY_TIMEOUT_MS = 2_000;
+const CONFIG_LOCK_RETRY_INTERVAL_MS = 250;
+const CONFIG_LOCK_RETRY_TIMEOUT_MS = 3_000;
 const WORKTREE_INCLUDE_TRANSCRIPT_PATH_LIMIT = 20;
 
 type ConcurrentRemoteRefUpdateErrorKind = "stale-value" | "lock-file-exists";
@@ -747,6 +749,49 @@ export async function allowLongPaths(
   );
 }
 
+/**
+ * `worktree add -B` writes the branch's upstream to .git/config, whose lock
+ * other Git in the repository takes too, like an agent's `git push -u`. Git
+ * fails before it adds the worktree, so the same command runs again (#2561).
+ */
+async function addWorktree(
+  gitArgs: string[],
+  args: CreateWorktreeArgs,
+): Promise<GitCommandResult> {
+  let retryDeadline: number | undefined;
+  while (true) {
+    try {
+      // One checkout worker per core; Git's default is one in total.
+      return await runGitWithWorktreeMetadataLock(
+        ["-c", "checkout.workers=0", ...gitArgs],
+        {
+          cwd: args.sourcePath,
+          // The user's post-checkout hook runs, as in their own `git worktree add`.
+          hooks: true,
+          // English messages for the match below; the hook keeps the user's
+          // character set.
+          env: { LC_ALL: "", LC_MESSAGES: "C", LANGUAGE: "C" },
+          ...signalOptions(args.signal),
+        },
+      );
+    } catch (error) {
+      retryDeadline ??= Date.now() + CONFIG_LOCK_RETRY_TIMEOUT_MS;
+      if (
+        !(error instanceof WorkspaceError) ||
+        !error.message.includes("could not lock config file") ||
+        Date.now() >= retryDeadline ||
+        // A failing post-checkout hook runs after the worktree is added.
+        (await fs.access(args.targetPath).then(
+          () => true,
+          () => false,
+        ))
+      )
+        throw error;
+      await waitForProvisionRetry(CONFIG_LOCK_RETRY_INTERVAL_MS, args.signal);
+    }
+  }
+}
+
 export async function createWorktree(
   args: CreateWorktreeArgs,
 ): Promise<{ path: string; startPoint?: string }> {
@@ -857,16 +902,7 @@ export async function createWorktree(
   try {
     const result =
       (startPoint === undefined ? null : await args.claimSpare?.(startPoint)) ??
-      // One checkout worker per core; Git's default is one in total.
-      (await runGitWithWorktreeMetadataLock(
-        ["-c", "checkout.workers=0", ...gitArgs],
-        {
-          cwd: args.sourcePath,
-          // The user's post-checkout hook runs, as in their own `git worktree add`.
-          hooks: true,
-          ...(args.signal !== undefined ? { signal: args.signal } : {}),
-        },
-      ));
+      (await addWorktree(gitArgs, args));
     emitGitOutput(args.onProgress, "git-worktree", result);
     emitStep({
       onProgress: args.onProgress,

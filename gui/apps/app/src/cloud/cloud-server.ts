@@ -665,10 +665,11 @@ class CloudServer {
   }
 
   /** The Mac is off, so it can't count this message. The website does, but only while the Mac's saved settings
-   *  have usage data on. */
+   *  and environment allow usage data. */
   private async usageSurface(): Promise<string | undefined> {
     const config = object(await this.saved("/api/v1/system/config"));
-    return object(config.generalSettings).telemetryEnabled === true
+    return config.telemetryAllowed !== false &&
+      object(config.generalSettings).telemetryEnabled === true
       ? getAppSurface()
       : undefined;
   }

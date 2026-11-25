@@ -191,6 +191,12 @@ export class CloudMessaging {
       else await this.hooks.deliver(previous.id);
       return this.rt.host.getThread(previous.id)!;
     }
+    // While the website refuses new starts (credits, a plan cap, the queue, the region), an agent's spawn fails at once
+    // with its reason, like a Cloud parent's (#345): one held thread says why, the rest would only wait (F#6505).
+    if (sandbox && request.launcherThreadId) {
+      const refusal = await this.rt.sandboxes.startRefusal();
+      if (refusal) throw new ApiError(429, "cloud_start_refused", refusal);
+    }
     const remoteModel = capabilities ? coreModel(request.providerId, model, capabilities) : null;
     // A sleeping sandbox's saved catalog may predate a login or OpenCode config edit; its Core checks the model at start.
     if (capabilities && remoteModel && !piDefault && !(sandbox && (profile?.models === null || request.providerId === "acp-opencode"))) validateReasoning(request.providerId, remoteModel.model, reasoning, capabilities);
@@ -259,7 +265,12 @@ export class CloudMessaging {
     if (!saved) throw new ApiError(409, "cloudroom_missing_binding", "Cloud thread has no core binding; native execution is blocked");
     if (thread.archivedAt || thread.deletedAt) throw new ApiError(409, "thread_not_writable", "Thread is archived or deleted");
     await this.rt.requireOwnThread(saved);
-    if (reasoningLevel !== null) {
+    // An unstarted side chat has no session yet, so any effort its agent offers is a new start's, not a follow-up's.
+    if (reasoningLevel !== null && !saved.sessionId && isCloudProvider(thread.providerId) && command(this.rt.host.db, `first_${thread.id}`)?.command === "side_chat") {
+      const capabilities = (sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities) ?? await this.rt.liveCapabilities(saved);
+      validateReasoning(thread.providerId, coreModel(thread.providerId, saved.model, capabilities).model, reasoningLevel, capabilities);
+      saveBinding(this.rt.host.db, thread.id, { reasoning: reasoningLevel });
+    } else if (reasoningLevel !== null) {
       const known = sandboxThread(saved.coreUrl) ? await this.rt.savedCapabilities() : this.rt.lastCapabilities;
       try { validateFollowUpReasoning(thread.providerId, saved, reasoningLevel, known ?? await this.rt.liveCapabilities(saved)); }
       catch (error) {
@@ -418,7 +429,7 @@ export class CloudMessaging {
       parsed = followUpPayload(thread.providerId, saved, payload, validated, capabilities = await live());
     }
     if (steer) {
-      this.queue.enqueue(thread.id, id, "steer", { target_request_id: saved.turnId, text: parsed.text, content: parsed.content, attachments: parsed.attachments });
+      this.queue.enqueue(thread.id, id, "steer", { target_request_id: saved.turnId, text: parsed.text, content: parsed.content, attachments: parsed.attachments, ...(payload.senderThreadId ? { sender_thread_id: payload.senderThreadId } : {}) });
       await this.hooks.deliver(thread.id);
       return { ok: true, delivery: "sent" };
     }

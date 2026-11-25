@@ -402,7 +402,7 @@ function describeParentThreadInvalid({
       return errorDescription({
         operation,
         title,
-        body: "Thread nesting is limited to 4 levels.",
+        body: "Thread nesting is limited to 6 levels.",
       });
     default:
       return assertNever(error.details.reason);

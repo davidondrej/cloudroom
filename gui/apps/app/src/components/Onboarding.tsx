@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { atom, useAtom, useAtomValue, useSetAtom } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -115,26 +115,39 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
   const gitlabChosen = lab?.waiting || (lab?.login && !lab.expired && progress.github.data?.state !== "connected");
   const [ownCoreForm, setOwnCoreForm] = useState(false);
   const [choices, setChoices] = useState({ macAccess: true, copyLogins: true });
+  // Only choices the user actually saw on Step 1 are ever saved; Skip setup saves nothing.
+  const shownChoices = useRef({ mac: false, logins: false });
+  const markChoiceShown = useCallback((kind: "mac" | "logins") => { shownChoices.current[kind] = true; }, []);
   // Step 4's progress lives here, so going back a step keeps the Added ticks and Continue.
   const [added, setAdded] = useState<AddedFolder[]>([]);
   const [imported, setImported] = useState(false);
+  const client = useQueryClient();
   const saveMacAccess = useSetMacAccess();
   const saveCopyLogins = useSetCopyLogins();
   const os = account.data?.computerOs;
-  const leave = () => {
+  const saveShownChoices = async () => {
     const saves = Boolean(account.data?.account) || progress.ownCore;
-    // Windows (#958): skipping never turns access on, nor when the computer's system is unknown. It stays unset (Off),
-    // and on Windows the chip asks once (MacAccessChip). The server's system counts, not the viewer's.
-    if (saves && os !== undefined && os !== "windows" && account.data?.macAccessSupported !== false && account.data?.macAccess == null) saveMacAccess.mutate(choices.macAccess);
-    if (saves && account.data?.copyLogins == null) saveCopyLogins.mutate(choices.copyLogins);
+    // Windows (#958): setup never turns access on, nor when the computer's system is unknown.
+    const canSaveMac = saves && os !== undefined && os !== "windows" && account.data?.macAccessSupported !== false;
+    await Promise.all([
+      shownChoices.current.mac && canSaveMac && account.data?.macAccess !== choices.macAccess && saveMacAccess.mutateAsync(choices.macAccess),
+      shownChoices.current.logins && saves && account.data?.copyLogins !== choices.copyLogins && saveCopyLogins.mutateAsync(choices.copyLogins),
+    ]);
+  };
+  const leave = () => {
+    void saveShownChoices();
     close();
   };
   useFirstAgentDefault(progress.agents);
   const first = done.findIndex((isDone) => !isDone);
   const [picked, setPicked] = useState<number | null>(null);
   const step = picked ?? (first === -1 ? 3 : first);
-  const skip = () => { track(STEP_IDS[step] ?? "project", "closed"); leave(); };
+  const skip = () => { track(STEP_IDS[step] ?? "project", "closed"); close(); };
   const next = () => setPicked(nextStep(done, step));
+  const finishAgentStep = (githubConnected?: boolean) => {
+    const effective = githubConnected ? [done[0], done[1], true] : done;
+    setPicked(nextStep(effective, 1));
+  };
   const signedIn = done[0];
   const wasSignedIn = useRef(signedIn);
   useEffect(() => {
@@ -145,7 +158,7 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
   const { claude, codex } = progress.agents;
   const hadAgents = useRef({ claude, codex });
   const [stamped, setStamped] = useState(false);
-  const [countdown, setCountdown] = useState<{ left: number; to: number } | null>(null);
+  const [countdown, setCountdown] = useState<number | null>(null);
   useEffect(() => {
     if (step === 1 && picked === null) setPicked(1);
     const had = hadAgents.current;
@@ -155,14 +168,27 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
       return setCountdown(null);
     }
     if ((claude && !had.claude) || (codex && !had.codex)) setStamped(true);
-    if (claude && codex && !(had.claude && had.codex)) setCountdown({ left: AGENT_COUNTDOWN, to: nextStep(done, 1) });
-  }, [claude, codex, step, picked, done]);
+    if (claude && codex && !(had.claude && had.codex)) setCountdown(AGENT_COUNTDOWN);
+  }, [claude, codex, step, picked]);
+  const advanceAfterCountdown = useRef<() => void>(() => {});
   useEffect(() => {
-    if (!countdown) return;
+    advanceAfterCountdown.current = () => {
+      void saveShownChoices().then(async () => {
+        const accountId = account.data?.account?.id;
+        const gh = shownChoices.current.logins && choices.copyLogins && accountId && progress.ready
+          ? await client.fetchQuery({ queryKey: ["cloudroom-github-auth", accountId], queryFn: ({ signal }) => sdk.cloudroom.githubAuth(signal) }).catch(() => null)
+          : null;
+        track("agent", "done", "both");
+        finishAgentStep(gh?.state === "connected");
+      }).catch(() => {});
+    };
+  });
+  useEffect(() => {
+    if (countdown === null) return;
     const timer = setTimeout(() => {
-      if (countdown.left > 1) return setCountdown({ ...countdown, left: countdown.left - 1 });
+      if (countdown > 1) return setCountdown(countdown - 1);
       setCountdown(null);
-      setPicked(countdown.to);
+      advanceAfterCountdown.current();
     }, 1000);
     return () => clearTimeout(timer);
   }, [countdown]);
@@ -204,7 +230,10 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
                   <button
                     type="button"
                     disabled={!reachable}
-                    onClick={() => setPicked(index)}
+                    onClick={() => {
+                      if (step === 1 && index > 1) void saveShownChoices();
+                      setPicked(index);
+                    }}
                     aria-current={state === "now" ? "step" : undefined}
                     className={cn(
                       "relative flex w-full items-start gap-3.5 border border-transparent p-3 text-left",
@@ -249,7 +278,7 @@ function Setup({ signedOut, fresh, close }: { signedOut: boolean; fresh: boolean
             {step === 1 && stamped ? <TickStamp key={`${claude}-${codex}`} /> : <RoomLogo className="mb-6 size-[72px] -rotate-[5deg]" />}
             <p className="font-serif text-base text-(--ob-muted) italic">Step {step + 1} of 4</p>
             {step === 0 && (progress.ownCore ? <OwnCoreDone next={next} /> : signedOut && ownCoreForm ? <OwnCoreStep /> : <AccountStep email={account.data?.account?.email ?? null} signingIn={account.data?.signingIn === true} error={account.data?.signInError ?? null} next={next} fresh={fresh} skip={signedOut ? skip : null} />)}
-            {step === 1 && <AgentStep progress={progress} next={next} stamped={stamped} left={countdown?.left ?? null} choices={choices} setChoices={setChoices} />}
+            {step === 1 && <AgentStep progress={progress} onDone={finishAgentStep} stamped={stamped} left={countdown} choices={choices} setChoices={setChoices} onChoiceShown={markChoiceShown} />}
             {step === 2 && <GithubStep progress={progress} next={next} stay={()=>setPicked(2)} />}
             {step === 3 && <ProjectStep close={leave} added={added} setAdded={setAdded} imported={imported} setImported={setImported} />}
           </div>
@@ -488,7 +517,7 @@ function OwnCoreDone({ next }: { next: () => void }) {
 }
 
 type Choices = { macAccess: boolean; copyLogins: boolean };
-function AgentStep({ progress, next, stamped, left, choices, setChoices }: { progress: ReturnType<typeof useSetupProgress>; next: () => void; stamped: boolean; left: number | null; choices: Choices; setChoices: (choices: Choices) => void }) {
+function AgentStep({ progress, onDone, stamped, left, choices, setChoices, onChoiceShown }: { progress: ReturnType<typeof useSetupProgress>; onDone: (githubConnected?: boolean) => void; stamped: boolean; left: number | null; choices: Choices; setChoices: (choices: Choices) => void; onChoiceShown: (kind: "mac" | "logins") => void }) {
   const { account, agents, codex, ready, offline } = progress;
   const defaultAgent = useSystemConfig().data?.generalSettings.defaultProviderId;
   const { localHostId } = useHostDaemon();
@@ -523,6 +552,12 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
   const os = account.data?.computerOs;
   const ask = { ...askedAccess, mac: askedAccess.mac && os !== undefined && os !== "windows" };
   const { macAccess, copyLogins } = choices;
+  const showingChoices = Boolean(agents.claude || agents.codex || agents.other);
+  useEffect(() => {
+    if (!showingChoices) return;
+    if (ask.mac) onChoiceShown("mac");
+    if (ask.logins) onChoiceShown("logins");
+  }, [showingChoices, ask.mac, ask.logins, onChoiceShown]);
   // Save whenever a box differs from the saved choice, so re-checking it after a Connect works.
   const saveChoices = () =>
     Promise.all([
@@ -531,7 +566,8 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     ]);
   const connectCodex = useMutation({
     mutationFn: async () => {
-      await saveChoices();
+      // Codex sandbox sign-in needs copyLogins, never macAccess before that box is even shown.
+      if (ask.logins && account.data?.copyLogins !== copyLogins) await saveCopyLogins.mutateAsync(copyLogins);
       const result = await sdk.cloudroom.codexLogin(crypto.randomUUID());
       // A VM signs in with a device code; a sandbox signs in on this Mac, where Codex opens the browser itself.
       if (result.state === "waiting" && result.user_code) openCodexConnection();
@@ -542,7 +578,23 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
     onError: (error) => appToast.error(error.message),
     onSettled: () => client.invalidateQueries({ queryKey: ["cloudroom-codex-auth"] }),
   });
-  const finish = useMutation({ mutationFn: saveChoices, onSuccess: () => { track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : "codex"); next(); }, meta: { showErrorToast: false }, onError: (error) => appToast.error(error.message) });
+  const finish = useMutation({
+    mutationFn: async () => {
+      await saveChoices();
+      const accountId = account.data?.account?.id;
+      if (ask.logins && copyLogins && accountId && ready) {
+        const gh = await client.fetchQuery({ queryKey: ["cloudroom-github-auth", accountId], queryFn: ({ signal }) => sdk.cloudroom.githubAuth(signal) }).catch(() => null);
+        return gh?.state === "connected";
+      }
+      return undefined;
+    },
+    onSuccess: (githubConnected) => {
+      track("agent", "done", agents.other ? agentDetail(agents.other) : agents.claude && agents.codex ? "both" : agents.claude ? "claude" : "codex");
+      onDone(githubConnected);
+    },
+    meta: { showErrorToast: false },
+    onError: (error) => appToast.error(error.message),
+  });
   const codexBrowser = codex.data?.state === "waiting" && !codex.data.user_code ? codex.data : null;
   // Connect installs a missing Codex first; the button shows it (ADR 20261111-123959).
   const codexInstalling = useInstallPercent(codexBrowser?.installing_since);
@@ -582,10 +634,10 @@ function AgentStep({ progress, next, stamped, left, choices, setChoices }: { pro
       <MoreAgents agents={macAgents.data ?? []} picked={agents.other} pick={pick} />
       {offline && <CloudOffline />}
       {/* Hidden until an agent connects, so the choices don't distract from Connect. */}
-      {(agents.claude || agents.codex || agents.other) && (ask.mac || ask.logins) && (
+      {showingChoices && (ask.mac || ask.logins) && (
         <div className="mt-4 flex gap-6 text-[12.5px] text-(--ob-muted) duration-300 animate-in fade-in-0">
-          {ask.logins && <Choice checked={copyLogins} onChange={(value) => setChoices({ ...choices, copyLogins: value })} label="Copy logins to the cloud" detail="Agent logins, API keys, and model providers." />}
-          {ask.mac && <Choice checked={macAccess} onChange={(value) => setChoices({ ...choices, macAccess: value })} label="Let cloud agents use this computer" detail="Far more powerful agents. Turn off anytime." />}
+          {ask.logins && <Choice checked={copyLogins} onChange={(value) => { setChoices({ ...choices, copyLogins: value }); if (account.data?.copyLogins != null && account.data.copyLogins !== value) saveCopyLogins.mutate(value); }} label="Copy logins to the cloud" detail="Agent logins, API keys, model providers, and GitHub CLI." />}
+          {ask.mac && <Choice checked={macAccess} onChange={(value) => { setChoices({ ...choices, macAccess: value }); if (account.data?.macAccess != null && account.data.macAccess !== value) saveMacAccess.mutate(value); }} label="Let cloud agents use this computer" detail="Far more powerful agents. Turn off anytime." />}
         </div>
       )}
       <div className="mt-8 flex items-center gap-5">

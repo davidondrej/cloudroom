@@ -44,6 +44,10 @@ const syncSchema = z.object({
   deferred: z.record(z.string(), z.array(z.unknown())).default({}),
   /** Threads deleted here that the website hasn't listed as deleted yet: never adopted back. */
   deleted: z.array(z.string()).default([]),
+  /** Sandbox-owning threads deleted here whose website remove call has not yet succeeded (legacy flat list, migrated on load). */
+  pendingDeletes: z.array(z.string()).default([]),
+  /** Sandbox-owning threads deleted here per owning account whose website remove call has not yet succeeded. */
+  pendingDeletesByAccount: z.record(z.string(), z.array(z.string())).default({}),
   /** The website's project ID → this computer's, for projects found by repo or name. */
   projects: z.record(z.string(), z.string()).default({}),
   /** A Cloud thread's sandbox went to sleep: the row's `updated_at` when this computer first saw it asleep. */
@@ -75,6 +79,10 @@ const PAUSE_MS = 5_000, FRESH_MS = 10 * 60_000, DEFERRED_MAX = 2_000, LABEL_MS =
 const LAUNCH_WINDOW_MS = 7 * 86_400_000;
 const repo = (url: string | null | undefined) => url?.toLowerCase().replace(/\.git$/, "").replace(/\/$/, "") ?? null;
 const asleep = (row: ThreadChange) => row.state === "open" && (row.sandbox === "asleep" || row.sandbox === "cold");
+const isAlreadyGone = (error: unknown): boolean => {
+  const status = error && typeof error === "object" && "status" in error ? Number((error as { status?: unknown }).status) : 0;
+  return status === 404;
+};
 /** Asleep or cold since, per thread, for the Thread cleanup loop (`room-cli thread list --json`). */
 export const asleepSince = new Map<string, string>();
 
@@ -92,22 +100,35 @@ export class CloudSync {
   private stopped = false;
   private every = { up: 3_600_000, down: 600_000 };
   private repairs: string[] = [];
+  private readonly removing = new Set<string>();
+  private flushingDeletes: Promise<void> | null = null;
   private tag = "";
   private pinBackfillUnsupported = false;
   constructor(private readonly deps: Pick<AppDeps, "db" | "hub" | "config"> & Partial<Pick<AppDeps, "logger">>, private readonly host: SyncHost) {}
 
   private loadedFor: string | null = null;
   /** The state for the signed-in account; another account's is dropped, with its cursor (it lists from the start).
+   *  Pending sandbox deletes stay keyed by owning account across account switches.
    *  Signed out, or the connection unreadable for a moment: none, and nothing is loaded, reset or saved. */
   private async state(): Promise<SyncState | null> {
     const account = (await this.host.sandboxes.account().catch(() => null))?.userId ?? null;
     if (!account) return null;
     if (this.loaded && this.loadedFor !== account) this.loaded = undefined;
     this.loadedFor = account;
-    return this.loaded ??= readFile(join(this.deps.config.dataDir, "cloudroom-thread-sync.json"), "utf8")
+    return this.loaded ??= this.writing
+      .then(() => readFile(join(this.deps.config.dataDir, "cloudroom-thread-sync.json"), "utf8"))
       .then((text) => syncSchema.parse(JSON.parse(text)), () => syncSchema.parse({}))
       .then((saved) => {
-        const state = saved.account === account ? saved : syncSchema.parse({ account });
+        const pendingByAccount: Record<string, string[]> = {};
+        for (const [owner, ids] of Object.entries(saved.pendingDeletesByAccount)) {
+          if (ids.length) pendingByAccount[owner] = [...new Set(ids)];
+        }
+        if (saved.account && saved.pendingDeletes.length) {
+          pendingByAccount[saved.account] = [...new Set([...(pendingByAccount[saved.account] ?? []), ...saved.pendingDeletes])];
+        }
+        const state = saved.account === account
+          ? { ...saved, pendingDeletes: [], pendingDeletesByAccount: pendingByAccount }
+          : syncSchema.parse({ account, pendingDeletesByAccount: pendingByAccount });
         asleepSince.clear();
         for (const [id, at] of Object.entries(state.asleep)) asleepSince.set(id, at);
         return state;
@@ -165,6 +186,8 @@ export class CloudSync {
   private async once(): Promise<void> {
     const account = (await this.host.sandboxes.account().catch(() => null))?.userId;
     if (!account) return;
+    const preState = await this.state();
+    if (preState && this.pendingDeletesFor(preState, account).length) this.kickPendingDeletes(account, preState);
     const follows = await this.host.sandboxes.followsThreads();
     if (follows === null) {
       this.deps.logger?.warn("Cloud threads not listed: the website didn't answer whether it lists them");
@@ -281,7 +304,10 @@ export class CloudSync {
   private asked = 0;
   /** One row, by itself: adopt it, or bring this computer's copy in line. */
   private apply(row: ThreadChange, state: SyncState, buffer: NotificationBuffer, first: boolean): void {
-    if (row.state === "deleted") state.deleted = state.deleted.filter((id) => id !== row.thread);
+    if (row.state === "deleted") {
+      state.deleted = state.deleted.filter((id) => id !== row.thread);
+      if (state.account) this.dropPendingDelete(state, state.account, row.thread);
+    }
     if (asleep(row)) { state.asleep[row.thread] ??= row.updated_at; asleepSince.set(row.thread, state.asleep[row.thread]!); }
     else { delete state.asleep[row.thread]; asleepSince.delete(row.thread); }
     const thread = getThread(this.deps.db, row.thread);
@@ -524,16 +550,90 @@ export class CloudSync {
     }
   }
 
-  /** A delete made here: never adopted back before the website lists it deleted. */
-  async deletedHere(threadId: string): Promise<void> {
+  private pendingDeletesFor(state: SyncState, account: string): string[] {
+    return state.pendingDeletesByAccount[account] ?? [];
+  }
+
+  private addPendingDelete(state: SyncState, account: string, threadId: string): void {
+    const list = state.pendingDeletesByAccount[account] ?? [];
+    if (!list.includes(threadId)) state.pendingDeletesByAccount[account] = [...list, threadId];
+  }
+
+  private dropPendingDelete(state: SyncState, account: string, threadId: string): boolean {
+    const list = state.pendingDeletesByAccount[account];
+    if (!list?.includes(threadId)) return false;
+    const next = list.filter((id) => id !== threadId);
+    if (next.length) state.pendingDeletesByAccount[account] = next;
+    else delete state.pendingDeletesByAccount[account];
+    return true;
+  }
+
+  /** A delete made here: never adopted back before the website lists it deleted.
+   *  When `queueRemove` is true, also queues the website sandbox removal for retry until confirmed. */
+  async deletedHere(threadId: string, queueRemove = false): Promise<void> {
     const state = await this.state();
     if (!state) return;
     if (!state.deleted.includes(threadId)) state.deleted.push(threadId);
+    if (queueRemove && state.account) this.addPendingDelete(state, state.account, threadId);
     state.archived = state.archived.filter((id) => id !== threadId);
     delete state.labels[threadId];
     delete state.efforts[threadId];
     delete state.pins[threadId];
     await this.save();
+  }
+
+  private async tryRemove(threadId: string, onWarn?: (error: unknown) => void): Promise<boolean> {
+    if (this.removing.has(threadId)) return false;
+    this.removing.add(threadId);
+    try {
+      await this.host.sandboxes.remove(threadId);
+      return true;
+    } catch (error) {
+      if (isAlreadyGone(error)) return true;
+      onWarn?.(error);
+      return false;
+    } finally {
+      this.removing.delete(threadId);
+    }
+  }
+
+  /** Removes a deleted Cloud thread's sandbox on the website; keeps it queued in `pendingDeletesByAccount` to retry if it fails. */
+  async removeOnWebsite(threadId: string, onWarn?: (error: unknown) => void): Promise<void> {
+    const account = (await this.host.sandboxes.account().catch(() => null))?.userId;
+    if (!account) return;
+    if (await this.tryRemove(threadId, onWarn)) {
+      if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account) return;
+      const state = await this.state();
+      if (state && this.dropPendingDelete(state, account, threadId)) await this.save();
+      return;
+    }
+    if (!this.stopped) {
+      this.soon ??= setTimeout(() => { this.soon = null; void this.run(); }, BLIP_MS);
+      this.soon?.unref?.();
+    }
+  }
+
+  /** Kicks off queued sandbox removals without blocking Cloud thread listing. */
+  private kickPendingDeletes(account: string, state: SyncState): void {
+    if (this.flushingDeletes) return;
+    this.flushingDeletes = this.flushPendingDeletes(account, state)
+      .catch((error: unknown) => this.deps.logger?.warn({ error: error instanceof Error ? error.message : String(error) }, "Pending Cloud thread deletes could not be flushed"))
+      .finally(() => { this.flushingDeletes = null; });
+  }
+
+  /** Retries queued sandbox removals that failed offline or during a blip, until confirmed or 404. */
+  private async flushPendingDeletes(account: string, state: SyncState): Promise<void> {
+    for (const threadId of [...this.pendingDeletesFor(state, account)]) {
+      if (this.stopped) return;
+      if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account || state !== await this.state()) return;
+      if (this.removing.has(threadId)) continue;
+      const done = await this.tryRemove(threadId, (error) =>
+        this.deps.logger?.warn({ threadId, error: error instanceof Error ? error.message : String(error) }, "A pending Cloud thread delete could not reach the website"),
+      );
+      if (done && (await this.host.sandboxes.account().catch(() => null))?.userId === account && state === await this.state()) {
+        if (this.dropPendingDelete(state, account, threadId)) await this.save();
+      }
+    }
   }
 
   /** A label change the website didn't take (`sent`: it did now, or refused it for good). The hour counts from the

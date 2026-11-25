@@ -1,11 +1,14 @@
 import { execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { afterEach, expect, it, vi } from "vitest";
-import { isOpenWithoutCallerProof } from "../src/caller-proof.js";
+import {
+  checkOpenWithoutCallerProof,
+  isOpenWithoutCallerProof,
+} from "../src/caller-proof.js";
 
 vi.mock("node:child_process", () => ({ execFile: vi.fn() }));
 
-type Done = (error: unknown, stdout: string) => void;
+type Done = (error: unknown, stdout: string, stderr?: string) => void;
 const platform = process.platform;
 
 afterEach(() => {
@@ -43,6 +46,10 @@ it.skipIf(process.getuid === undefined)(
     await vi.advanceTimersByTimeAsync(6_000);
     await expect(first).resolves.toBe(false);
     await expect(queued).resolves.toBe(false);
+    // No answer is "unanswered", so the server says busy, not sandboxed (#2435).
+    await expect(
+      checkOpenWithoutCallerProof("GET", "/api/v1/threads", socket(50006)),
+    ).resolves.toBe("unanswered");
     // While it is still stuck, reads are refused at once without another lsof.
     await expect(read(socket(50003))).resolves.toBe(false);
     // A kill that failed calls back early, but lsof is alive: no second run.
@@ -71,5 +78,32 @@ it.skipIf(process.getuid === undefined)(
     expect(runs).toHaveLength(4);
     runs[3]!.done(null, "p1\nn127.0.0.1:50005->127.0.0.1:39886\n");
     await expect(fresh).resolves.toBe(true);
+
+    // A listing without the caller (another user, say) is still a refusal.
+    const other = checkOpenWithoutCallerProof(
+      "GET",
+      "/api/v1/threads",
+      socket(50007),
+    );
+    runs[3]!.child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    runs[4]!.done(null, "p1\n");
+    await expect(other).resolves.toBe("refused");
+
+    // An lsof that couldn't list processes says busy, and stays refused on that socket.
+    const failed = socket(50008);
+    const busy = checkOpenWithoutCallerProof("GET", "/api/v1/threads", failed);
+    runs[4]!.child.emit("close");
+    await vi.advanceTimersByTimeAsync(0);
+    runs[5]!.done(
+      Object.assign(new Error("exit 1"), { code: 1 }),
+      "",
+      "lsof: can't get PID list: Operation not permitted\n",
+    );
+    await expect(busy).resolves.toBe("unanswered");
+    await expect(
+      checkOpenWithoutCallerProof("GET", "/api/v1/threads", failed),
+    ).resolves.toBe("unanswered");
+    expect(runs).toHaveLength(6);
   },
 );

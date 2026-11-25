@@ -67,6 +67,16 @@ export function gitSafetyArgs(hooks = false): string[] {
   ];
 }
 
+/**
+ * For automatic reads only: a partial clone's missing objects are never fetched, so no transport program the checkout
+ * picks (`core.sshCommand`, `core.gitProxy`) can start (#2189). `GIT_ALLOW_PROTOCOL` covers Git before 2.44.
+ * Fetches, clones and checkouts the user asked for keep lazy fetches.
+ */
+export const GIT_NO_FETCH_ENV = {
+  GIT_NO_LAZY_FETCH: "1",
+  GIT_ALLOW_PROTOCOL: "none",
+};
+
 export interface GitCommandResult {
   stdout: string;
   stderr: string;

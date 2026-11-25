@@ -16,14 +16,19 @@ import {
   releaseStaleQueuedMessageClaims,
   setQueuedThreadMessageWaitingOn,
   threadHasProviderSession,
+  events,
+  listStoredTurnInputAcceptedRowsByClientRequestIds,
   type ClaimedQueuedThreadMessageRow,
+  type DbConnection,
   type DbQueryConnection,
   type QueuedThreadMessageClaimPolicy,
   type QueuedThreadMessageEligibility,
   type QueuedThreadMessageRow,
 } from "@cloudroom/db";
+import { and, eq, sql } from "drizzle-orm";
 import { queuedMessageSystemNoticeSchema } from "@cloudroom/domain";
 import type {
+  ClientTurnRequestId,
   QueuedMessageWaitingOn,
   Thread,
   ThreadQueuedMessage,
@@ -690,12 +695,20 @@ export async function sendQueuedMessageNow(
   | { delivery: "sent" }
   | { delivery: "queued"; queuedMessage: ThreadQueuedMessage }
 > {
-  await sendQueuedMessage(deps, {
-    claimPolicy: { kind: "explicit-send" },
-    mode: args.mode,
-    queuedMessageId: args.queuedMessageId,
-    threadId: args.threadId,
-  });
+  try {
+    await sendQueuedMessage(deps, {
+      claimPolicy: { kind: "explicit-send" },
+      mode: args.mode,
+      queuedMessageId: args.queuedMessageId,
+      threadId: args.threadId,
+    });
+  } catch (error) {
+    // The drain may have delivered it first; the sender must not resend (#1954).
+    if (wasQueuedMessageDrainAccepted(deps.db, args)) {
+      return { delivery: "sent" };
+    }
+    throw error;
+  }
   const remainingQueuedMessage = getQueuedThreadMessage(
     deps.db,
     args.queuedMessageId,
@@ -706,6 +719,36 @@ export async function sendQueuedMessageNow(
         queuedMessage: toThreadQueuedMessage(remainingQueuedMessage),
       }
     : { delivery: "sent" };
+}
+
+/**
+ * The drain sent this row on this thread, and the provider accepted it.
+ * Forks copy acceptances without a provider thread, so those never count.
+ */
+export function wasQueuedMessageDrainAccepted(
+  db: DbConnection,
+  args: { queuedMessageId: string; threadId: string },
+): boolean {
+  if (getQueuedThreadMessage(db, args.queuedMessageId) !== null) return false;
+  const requestIds = db
+    .select({
+      id: sql<ClientTurnRequestId>`json_extract(${events.data}, '$.requestId')`,
+    })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "client/turn/requested"),
+        sql`json_extract(${events.data}, '$.queuedMessageId') = ${args.queuedMessageId}`,
+      ),
+    )
+    .all()
+    .map((row) => row.id);
+  return listStoredTurnInputAcceptedRowsByClientRequestIds(db, {
+    threadId: args.threadId,
+    clientRequestIds: requestIds,
+    afterSequence: 0,
+  }).some((row) => row.providerThreadId !== null);
 }
 
 export async function sendNextQueuedMessageIfPresent(

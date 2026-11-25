@@ -8,15 +8,18 @@ import type { Hono } from "hono";
 import { z } from "zod";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { isHumanClick } from "../../human-click.js";
+import { getGateAuthKind } from "../../request-context.js";
 import { requirePublicThread } from "../../services/lib/entity-lookup.js";
 
 const pendingInteractionIdSchema = z
   .string()
   .regex(/^pint_[23456789abcdefghijkmnpqrstuvwxyz]{10}$/);
 
-/** Cards only the user answers, in the app window: paid GPU sessions (ADR 0331). The app's requests always carry an
- *  Origin header, which the browser guard has already checked; `room-cli thread interactions respond` sends none, so
- *  an agent can't approve its own GPU that way. */
+/** Cards only the user answers, in the app window: paid GPU sessions (ADR 0331). Requires a signed desktop human click
+ *  or a signed-in Connect phone session (never a forged Origin header or a remote Connect machine). When the server was
+ *  started without a human-click key (dev/test), falls back to requiring an Origin header while still refusing remote
+ *  machines. */
 const APP_ONLY_PLUGINS = new Set(["gpu"]);
 
 function parsePendingInteractionId(rawInteractionId: string): string {
@@ -77,12 +80,17 @@ export function registerThreadInteractionRoutes(
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     const current = deps.pendingInteractions.getThreadInteraction({
       threadId: thread.id,
-      interactionId: parsePendingInteractionId(context.req.param("interactionId")),
+      interactionId: parsePendingInteractionId(
+        context.req.param("interactionId"),
+      ),
     });
     if (
       current.origin?.kind === "plugin" &&
       APP_ONLY_PLUGINS.has(current.origin.pluginId) &&
-      !context.req.header("origin")
+      (getGateAuthKind(context) === "machine" ||
+        !isHumanClick(context) ||
+        (deps.config.humanClickPublicKey === undefined &&
+          !context.req.header("origin")))
     ) {
       throw new ApiError(
         403,

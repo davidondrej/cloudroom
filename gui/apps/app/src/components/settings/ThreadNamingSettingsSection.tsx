@@ -240,7 +240,7 @@ export function ProjectNudgeSettingsSection() {
     else setDraft(String(confidence));
   };
   const plan = useCloudroomAccount().data?.plan ?? null;
-  const on = enabled ?? plan !== "free";
+  const on = enabled ?? (plan !== null && plan !== "free");
 
   return (
     <SettingsSection

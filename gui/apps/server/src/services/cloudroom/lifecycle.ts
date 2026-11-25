@@ -90,9 +90,7 @@ export class CloudLifecycle {
       const archivedAt = this.rt.host.getThread(threadId)?.archivedAt;
       if (archivedAt == null) return;
       const stillArchived = () => this.rt.host.getThread(threadId)?.archivedAt === archivedAt;
-      for (const pending of commands(this.rt.host.db, threadId, "sending")) {
-        if (pending.command === "unarchive_session") saveCommandState(this.rt.host.db, threadId, pending.id, "cancelled");
-      }
+      for (const pending of commands(this.rt.host.db, threadId, "sending")) if (pending.command === "unarchive_session") saveCommandState(this.rt.host.db, threadId, pending.id, "cancelled");
       const last = !coreInUse(this.rt.host.db, saved.coreUrl);
       const session = saved.sessionId;
       if (!last && session) {
@@ -230,11 +228,14 @@ export class CloudLifecycle {
     if (!saved) return;
     this.rt.detach(threadId);
     this.rt.threadStates.set(threadId, null);
-    void this.rt.sync.deletedHere(threadId);
-    const sandbox = sandboxThread(saved.coreUrl);
-    if (sandbox === threadId) {
-      void this.rt.sandboxes.remove(sandbox).catch((error) => this.rt.host.warn("The thread's sandbox could not be deleted; it sleeps on its own", error, { threadId }));
-    }
+    const ownsSandbox = sandboxThread(saved.coreUrl) === threadId;
+    void this.rt.sync.deletedHere(threadId, ownsSandbox).then(() =>
+      ownsSandbox
+        ? this.rt.sync.removeOnWebsite(threadId, (error) =>
+            this.rt.host.warn("The thread's sandbox could not be deleted; will retry", error, { threadId }),
+          )
+        : undefined,
+    );
   }
 
   /** Archives a deleted project's Cloud threads on the website one after another, a second apart, not in one burst.
@@ -483,10 +484,10 @@ export class CloudLifecycle {
     const sameAsSource = source?.providerId === harness && sourceSaved?.model === saved.model && sourceSaved?.reasoning === reasoning;
     const accepted = capabilities.side_chat_any_harness
       ? await client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { fork: { session: liveSource, fresh: true }, model, reasoning, ...(provider ? { provider } : {}), ...ids })
-          .catch((error: unknown) => error instanceof CloudroomError && [400, 409, 422].includes(error.status ?? 0) ? direct() : Promise.reject(error))
+          .catch((error: unknown) => oldCoreRejected(error) ? direct() : Promise.reject(error))
       : capabilities.side_chat_fresh && sameAsSource
         ? await client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { fork: { session: liveSource, fresh: true } })
-            .catch((error: unknown) => error instanceof CloudroomError && [400, 409, 422].includes(error.status ?? 0) ? direct() : Promise.reject(error))
+            .catch((error: unknown) => oldCoreRejected(error) ? direct() : Promise.reject(error))
         : await direct();
     return { sessionId: accepted.session_id, transfer: `child_${saved.startRequestId}`, code: null };
   }
@@ -509,6 +510,8 @@ export class CloudLifecycle {
   private async switchUnstartedSideChat(thread: Thread, saved: Binding, initial: Command, target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null }): Promise<void> {
     const entry = this.rt.state(thread.id);
     if (entry.switching || entry.activeSends > 0) throw new ApiError(409, "thread_busy", "Wait until the message is sent, then switch.");
+    // A sent first message is starting the agent; switching now could bind the old agent's session to the new one.
+    if (entry.delivery && initial.state !== "failed" && commands(this.rt.host.db, thread.id, "sending").length) throw new ApiError(409, "thread_busy", "Wait until the agent starts, then switch.");
     entry.switching = true;
     try {
       await this.rt.requireOwnThread(saved);
@@ -525,11 +528,18 @@ export class CloudLifecycle {
       this.rt.host.db.transaction((tx) => {
         if (binding(tx, thread.id)?.sessionId) throw new ApiError(409, "thread_busy", "The agent started while switching. Try again.");
         this.rt.host.updateThread(tx, thread.id, { providerId: target.providerId });
-        saveBinding(tx, thread.id, { model: target.model, reasoning, error: null, ...(initial.state === "failed" ? { startRequestId: randomUUID() } : {}) });
+        // A new start ID, so a start already sent for the old agent can't be mistaken for this one.
+        saveBinding(tx, thread.id, { model: target.model, reasoning, error: null, startRequestId: randomUUID() });
         if (initial.state === "failed") { saveCommandState(tx, thread.id, initial.id, "completed"); saveStatus(tx, thread.id, "idle"); }
+        // Waiting messages (a failed start's prompt) take the new agent's effort and tier, not the old one's.
+        for (const item of commands(tx, thread.id, "sending").filter((c) => c.command === "prompt")) {
+          const { reasoning: _reasoning, service_tier: _tier, ...rest } = JSON.parse(item.input);
+          tx.update(cloudroomCommands).set({ input: JSON.stringify(rest) }).where(eq(cloudroomCommands.id, item.id)).run();
+        }
         this.rt.host.setExecutionOverride({ threadId: thread.id, modelOverride: null, reasoningLevelOverride: reasoningLevelSchema.safeParse(reasoning).data ?? null }, tx);
       });
       this.rt.notify(thread.id);
+      if (initial.state === "failed") void this.hooks.deliver(thread.id).catch(() => {});
     } finally { entry.switching = false; }
   }
 
@@ -622,14 +632,19 @@ export class CloudLifecycle {
         continues.done = true;
         return true;
       }
-      const started = await client.start(startRequestId, CLOUD_HARNESSES[target.providerId], {
-        model, reasoning, ...(provider ? { provider } : {}), ...workspace,
-        ...(capabilities.command_guard && typeof startInput.command_guard_enabled === "boolean" ? { command_guard_enabled: startInput.command_guard_enabled } : {}),
-        ...(capabilities.strip_ai_co_authors && typeof startInput.strip_ai_co_authors === "boolean" ? { strip_ai_co_authors: startInput.strip_ai_co_authors } : {}),
-        ...(capabilities.system_prompt && startInput.system_prompt ? { system_prompt: startInput.system_prompt } : {}),
-        ...(startInput.parent_thread ? { parent_thread: startInput.parent_thread } : {}),
-        ...ids,
-      });
+      // A side chat stays a fork of its main thread, so it keeps reaching the main thread's subagents (ADR 0189).
+      const sideChatOf = !target.workspace && capabilities.side_chat_any_harness && command(this.rt.host.db, `first_${thread.id}`)?.command === "side_chat"
+        ? binding(this.rt.host.db, thread.sourceThreadId ?? "")?.sessionId : null;
+      const started = sideChatOf
+        ? await client.start(startRequestId, CLOUD_HARNESSES[target.providerId], { fork: { session: sideChatOf, fresh: true }, model, reasoning, ...(provider ? { provider } : {}), ...ids })
+        : await client.start(startRequestId, CLOUD_HARNESSES[target.providerId], {
+          model, reasoning, ...(provider ? { provider } : {}), ...workspace,
+          ...(capabilities.command_guard && typeof startInput.command_guard_enabled === "boolean" ? { command_guard_enabled: startInput.command_guard_enabled } : {}),
+          ...(capabilities.strip_ai_co_authors && typeof startInput.strip_ai_co_authors === "boolean" ? { strip_ai_co_authors: startInput.strip_ai_co_authors } : {}),
+          ...(capabilities.system_prompt && startInput.system_prompt ? { system_prompt: startInput.system_prompt } : {}),
+          ...(startInput.parent_thread ? { parent_thread: startInput.parent_thread } : {}),
+          ...ids,
+        });
       const failure = await this.startFailure(client, started.session_id);
       if (failure) {
         void client.close(started.session_id, randomUUID()).catch(() => {});
@@ -705,4 +720,11 @@ export class CloudLifecycle {
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
   }
+}
+
+/** An older Core turns down a side chat on another agent (`fork.fresh` with a model, or any `fork.fresh`). Only that
+ *  falls back to a plain start; a login, usage limit, or draining sandbox reaches the user as it is. */
+function oldCoreRejected(error: unknown): boolean {
+  return error instanceof CloudroomError && (error.status === 400 || error.status === 422
+    || (error.status === 409 && /takes only harness and fork|inherits its source's folder and settings/.test(error.message)));
 }

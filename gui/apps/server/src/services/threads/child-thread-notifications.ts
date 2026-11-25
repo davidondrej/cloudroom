@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   describeThreadInterruption,
   UNDELIVERED_MESSAGE_WARNING,
@@ -154,6 +155,11 @@ const retriedChildThreadTurnItems =
 const waitingChildThreadNotifiedTurnIds = new Map<string, string>();
 /** Each child's last reported turn end, so a replay of it doesn't report again (#1671). */
 const reportedChildThreadTurnEnds = new Map<string, string>();
+/** The last report each child's parent got (#1395): its reply's hash (null for none), where its turn started, and whether work still ran. */
+const lastChildReports = new Map<
+  string,
+  { parentThreadId: string; reply: string | null; since: number; waiting: boolean }
+>();
 
 function childThreadTurnStatusLabel(turnStatus: ThreadEventTurnStatus): string {
   switch (turnStatus) {
@@ -609,6 +615,9 @@ async function flushChildThreadTurnNotificationBatch(
         ? () => batch.items.every(isCurrentChildThreadTurnItem)
         : undefined,
     });
+    for (const item of batch.items) {
+      rememberChildReport(deps.db, childTurnReport(parentThreadId, item));
+    }
   } catch (error) {
     // A full disk rolled the send and its queue fallback back, and a retried
     // notice is never written stale or queued, so nothing reached the parent:
@@ -772,6 +781,116 @@ function isReplayedChildThreadTurnEnd(
   return false;
 }
 
+/** A child's finished turn as its parent would hear of it (#1395). */
+export interface ChildTurnReport {
+  childThreadId: string;
+  parentThreadId: string;
+  /** That turn's own reply; without `turnId` it is never judged a repeat. */
+  reply: string | null | undefined;
+  turnId?: string | undefined;
+  turnStatus: string;
+  /** Background commands or workflows still ran when it ended (#862). */
+  waiting?: boolean;
+}
+
+function replyKey(report: ChildTurnReport): string | null {
+  const text =
+    report.turnStatus === "completed"
+      ? report.reply?.trim().split(/\s+/u).join(" ")
+      : "";
+  return text ? createHash("sha256").update(text).digest("hex") : null;
+}
+
+/**
+ * A finished turn whose reply repeats, word for word, the one its parent last
+ * got ("No change.") tells it nothing new: it neither wakes the parent nor
+ * shows in its chat (#1395). Failures, interruptions, a changed reply, work
+ * still running, and any turn after the parent messaged the child report.
+ */
+export function isRepeatedChildReport(
+  db: DbConnection,
+  report: ChildTurnReport,
+): boolean {
+  const last = lastChildReports.get(report.childThreadId);
+  const key = replyKey(report);
+  return Boolean(
+    report.turnId &&
+      key &&
+      !report.waiting &&
+      last &&
+      !last.waiting &&
+      last.parentThreadId === report.parentThreadId &&
+      last.reply === key &&
+      !hasParentMessageSince(db, report, last.since),
+  );
+}
+
+/** Call once a report is queued for the parent, so a failed send never counts as heard. */
+export function rememberChildReport(
+  db: DbConnection,
+  report: ChildTurnReport,
+): void {
+  const started = report.turnId
+    ? db
+        .select({ sequence: events.sequence })
+        .from(events)
+        .where(
+          and(
+            eq(events.threadId, report.childThreadId),
+            eq(events.turnId, report.turnId),
+            eq(events.type, "turn/started"),
+          ),
+        )
+        .limit(1)
+        .get()?.sequence
+    : undefined;
+  lastChildReports.set(report.childThreadId, {
+    parentThreadId: report.parentThreadId,
+    reply: replyKey(report),
+    // From the reported turn's start, so a message steered into it counts too.
+    since: started ?? 0,
+    waiting: Boolean(report.waiting),
+  });
+}
+
+/** Whether the parent sent the child a message after event `since`. */
+function hasParentMessageSince(
+  db: DbConnection,
+  report: ChildTurnReport,
+  since: number,
+): boolean {
+  return (
+    db
+      .select({ sequence: events.sequence })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, report.childThreadId),
+          eq(events.type, "client/turn/requested"),
+          sql`${events.sequence} > ${since}`,
+          sql`json_extract(${events.data}, '$.senderThreadId') = ${report.parentThreadId}`,
+        ),
+      )
+      .limit(1)
+      .get() !== undefined
+  );
+}
+
+function childTurnReport(
+  parentThreadId: string,
+  item: ChildThreadTurnNotificationBatchItem,
+): ChildTurnReport {
+  return {
+    childThreadId: item.childThread.id,
+    parentThreadId,
+    reply: item.terminalOutput,
+    turnId: item.turnId,
+    turnStatus: item.turnStatus,
+    waiting:
+      item.activeWorkflowCount + (item.activeBackgroundCommandCount ?? 0) > 0,
+  };
+}
+
 function queueChildThreadTurnNotificationBatchItem(
   deps: LoggedPendingInteractionWorkSessionDeps,
   args: QueueChildThreadTurnNotificationArgs,
@@ -795,6 +914,11 @@ function queueChildThreadTurnNotificationBatchItem(
     terminalOutput: getChildThreadCompletionOutput(deps, args),
     turnStatus: args.turnStatus,
   };
+  if (
+    isRepeatedChildReport(deps.db, childTurnReport(args.parentThreadId, item))
+  ) {
+    return;
+  }
   const sequence = getLatestThreadSequence(deps.db, {
     threadId: args.childThread.id,
   });

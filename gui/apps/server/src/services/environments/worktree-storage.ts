@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { statfsSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
+import { getHost } from "@cloudroom/db";
 import { safePluginSegment } from "@cloudroom/process-utils";
 import type { SystemWorktreeStorageResponse } from "@cloudroom/server-contract";
 import type { AppDeps } from "../../types.js";
@@ -72,7 +73,9 @@ export function worktreeDiskStatus(
     ),
   );
   const free = freeBytesAt(dataDir);
+  const hostId = readPrimaryHostIdFromDataDir({ dataDir: deps.config.dataDir });
   return {
+    computerName: (hostId && getHost(deps.db, hostId)?.name) || null,
     freeBytes: free,
     usedBytes: usage.bytes,
     low: free !== null && free < LOW_DISK_BYTES,

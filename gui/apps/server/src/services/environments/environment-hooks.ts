@@ -1,3 +1,4 @@
+import { ApiError } from "../../errors.js";
 import { resolveHostEnvironment } from "../hosts/host-environment.js";
 import { environmentHookOperations } from "@cloudroom/db";
 import { eq } from "drizzle-orm";
@@ -66,7 +67,6 @@ export async function runEnvironmentHook(
     hostId: string;
     path: string;
     kind: "teardown";
-    resumeOnly: boolean;
     report: PluginEnvironmentProviderProgress;
     signal: AbortSignal;
   },
@@ -120,7 +120,8 @@ export async function runEnvironmentHook(
           hostId: args.hostId,
           projectId: null,
         }),
-        resumeOnly: args.resumeOnly || existing !== undefined,
+        // Only a saved row means it was sent before (#2517).
+        resumeOnly: existing !== undefined,
         operationId,
         environmentId: args.environmentId,
         path: args.path,
@@ -135,10 +136,28 @@ export async function runEnvironmentHook(
       .run();
     args.signal.throwIfAborted();
   } catch (error) {
-    await cancelPendingEnvironmentHook(deps, {
-      id: args.id,
-      hostId: args.hostId,
-    });
+    // The daemon has no record of it (it restarted, or never got it) and the
+    // hook's time limit has passed: give up on it so removal can go on (#2517).
+    if (
+      existing !== undefined &&
+      error instanceof ApiError &&
+      error.body.code === "environment_hook_unknown" &&
+      Date.now() - existing.startedAt >
+        ENVIRONMENT_HOOK_TIMEOUT_MS + TRANSPORT_GRACE_MS
+    )
+      deps.db
+        .update(environmentHookOperations)
+        .set({
+          finishedAt: Date.now(),
+          error: "Environment hook outcome unknown after its time limit",
+        })
+        .where(eq(environmentHookOperations.id, args.id))
+        .run();
+    else
+      await cancelPendingEnvironmentHook(deps, {
+        id: args.id,
+        hostId: args.hostId,
+      });
     const text = error instanceof Error ? error.message : String(error);
     args.report.log(text);
     deps.logger.warn(
@@ -172,7 +191,7 @@ export async function cancelPendingEnvironmentHook(
   });
   if (result.status === "unknown")
     throw new Error(
-      "Environment hook outcome is unknown after interruption. Automatic cleanup is blocked; inspect the workspace before recovering it.",
+      "Environment hook outcome is unknown after interruption, so cleanup waits in case it still runs. Cloudroom retries on its own; if this lasts past 15 minutes, restart Cloudroom.",
     );
   deps.db
     .update(environmentHookOperations)

@@ -176,7 +176,7 @@ export const capabilitiesSchema = z.object({
     attachments: z.object({ images: z.boolean(), files: z.boolean() }).optional(),
     subagents: z.boolean().default(false),
     usage: z.boolean().default(false),
-    /** fx switches effort per turn; other ACP harnesses keep the launch level. */
+    /** fx and Antigravity switch effort per turn; other ACP harnesses keep the launch level. */
     prompt_reasoning: z.boolean().default(false),
     /** Claude switches models in its session (`POST …/model`), as on Local; the others start a new session (ADR 0211). */
     set_model: z.boolean().default(false),

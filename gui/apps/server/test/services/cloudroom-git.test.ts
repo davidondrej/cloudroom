@@ -212,7 +212,7 @@ describe("cloud git", () => {
       const expected = { aheadCount: 1, behindCount: 1, commits: [expect.objectContaining({ subject: "Change file" })], files: [{ path: "file.txt", status: "M", insertions: null, deletions: null }], lineStatsComplete: false };
 
       expect((await cloudGitStatus(inClone)).mergeBase).toMatchObject(expected);
-      await expect(cloudGitDiffPatch(inClone, { type: "branch_committed", mergeBaseBranch: "main" }, ["file.txt"])).rejects.toBeInstanceOf(CloudGitError);
+      expect(await cloudGitDiffPatch(inClone, { type: "branch_committed", mergeBaseBranch: "main" }, ["file.txt"])).toEqual([expect.objectContaining({ path: "file.txt", patch: "", error: expect.stringContaining("partial clone") })]);
       expect(readdirSync(join(clone, ".git", "objects", "pack")).sort()).toEqual(packs);
 
       rmSync(bare, { recursive: true, force: true });

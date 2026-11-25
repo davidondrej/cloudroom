@@ -503,7 +503,7 @@ pub struct Handle {
     live_model: Arc<Mutex<String>>,
     /// ACP agent capabilities from `initialize`; empty for other harnesses.
     acp: Arc<Mutex<Value>>,
-    /// The ACP session's latest config options (model, effort); only fx keeps them.
+    /// The ACP session's latest config options (model, effort); only fx and Antigravity keep them.
     acp_config: Arc<Mutex<Value>>,
     rpc_timeout: Duration,
     command_guard_enabled: bool,
@@ -909,7 +909,7 @@ impl Handle {
         startup.rpc_timeout = self.rpc_timeout * STARTUP_RPC_MULTIPLIER;
         codex::start(&startup, Some(fork)).await
     }
-    /// Pi confirms the turn's thinking level and fx switches its effort before the prompt.
+    /// Pi confirms the turn's thinking level; fx and Antigravity switch their effort before the prompt.
     /// Codex sends effort with turn/start.
     pub async fn prepare_turn(&self) -> io::Result<()> {
         if self.kind == Kind::OpenClaw {
@@ -917,6 +917,9 @@ impl Handle {
         }
         if self.kind == Kind::Fx {
             return fx::prepare_turn(self).await;
+        }
+        if self.kind == Kind::Antigravity {
+            return antigravity::prepare_turn(self).await;
         }
         if self.kind == Kind::Pi
             && let Some(reasoning) = &self.reasoning

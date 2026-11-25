@@ -152,6 +152,10 @@ it("lists the data folder's secret files, including ones found by scanning", asy
   });
   await mkdir(join(dataDir, "cloudroom-preview-old"), { recursive: true });
   await mkdir(join(dataDir, "thread-storage"), { recursive: true });
+  // A folder inside the listed snapshots folder.
+  await mkdir(join(dataDir, "plugins", "snapshots", "secrets"), {
+    recursive: true,
+  });
 
   const paths = privateDataPaths(dataDir);
 
@@ -170,6 +174,8 @@ it("lists the data folder's secret files, including ones found by scanning", asy
     ),
   );
   expect(paths.some((p) => p.includes("thread-storage"))).toBe(false);
+  // Codex's Linux sandbox can't start with it (#2579).
+  expect(paths).not.toContain(join(dataDir, "plugins", "snapshots", "secrets"));
   expect(new Set(paths).size).toBe(paths.length);
   expect(privateDataPaths(undefined)).toEqual([]);
   expect(privateDataPaths("  ")).toEqual([]);

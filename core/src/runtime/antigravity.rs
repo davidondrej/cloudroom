@@ -112,40 +112,44 @@ pub(super) async fn start(handle: &Handle) -> io::Result<String> {
                 e
             }
         })?;
+    *handle.acp_config.lock().unwrap() = session.clone();
     let model = handle.profile.model.as_str();
     if model != "default" && cursor::option_value(&session, "model") != Some(model) {
-        if !session["configOptions"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|opt| opt["id"] == "model")
-            .filter_map(|opt| opt["options"].as_array())
-            .flatten()
-            .any(|opt| opt["value"] == model)
-        {
+        if !cursor::offers(&session, "model", model) {
             return Err(io::Error::other(
                 "Antigravity no longer offers the selected model.",
             ));
         }
         session = set_option(handle, &id, "model", model).await?;
     }
-    let high_offered = session["configOptions"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|opt| opt["id"] == "thought_level")
-        .and_then(|opt| opt["options"].as_array())
-        .is_some_and(|levels| levels.iter().any(|level| level["value"] == "high"));
+    // New sessions default to high. A level the model lacks keeps Antigravity's default, like fx, so a saved one
+    // never blocks a resume.
     let requested = handle
         .reasoning
         .as_deref()
-        .or_else(|| (handle.resume.is_none() && high_offered).then_some("high"));
-    if let Some(level) = requested.filter(|level| *level != "none")
+        .or_else(|| handle.resume.is_none().then_some("high"));
+    if let Some(level) = requested.filter(|level| cursor::offers(&session, "thought_level", level))
         && cursor::option_value(&session, "thought_level") != Some(level)
     {
         set_option(handle, &id, "thought_level", level).await?;
     }
     Ok(id)
+}
+
+/// Switches to the turn's effort before the prompt, when it changed and the model offers it (like fx).
+pub(super) async fn prepare_turn(handle: &Handle) -> io::Result<()> {
+    let Some(level) = handle.reasoning.as_deref() else {
+        return Ok(());
+    };
+    let change = {
+        let state = handle.acp_config.lock().unwrap();
+        cursor::offers(&state, "thought_level", level)
+            && cursor::option_value(&state, "thought_level") != Some(level)
+    };
+    if change {
+        set_option(handle, &handle.native()?, "thought_level", level).await?;
+    }
+    Ok(())
 }
 
 async fn set_option(
@@ -161,10 +165,12 @@ async fn set_option(
         )
         .await?;
     if cursor::option_value(&state, option) != Some(value) {
-        return Err(io::Error::other(format!(
-            "Antigravity did not accept {option} {value}"
-        )));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("Antigravity did not accept {option} {value}"),
+        ));
     }
+    *handle.acp_config.lock().unwrap() = state.clone();
     Ok(state)
 }
 

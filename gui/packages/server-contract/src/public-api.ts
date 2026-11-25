@@ -1549,7 +1549,7 @@ export const publicApiRoutes = {
       path: "/threads/:id/output",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<{ output: string | null; error?: string | null; interruption?: SystemThreadInterruptedEventData | null }>(),
+      response: jsonResponse<{ output: string | null; partialOutput?: string; error?: string | null; interruption?: SystemThreadInterruptedEventData | null }>(),
     }),
     events: defineRoute({
       path: "/threads/:id/events",

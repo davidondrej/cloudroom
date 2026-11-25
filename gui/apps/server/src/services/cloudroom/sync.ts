@@ -44,6 +44,10 @@ export async function setCopyMacLogin(deps: Deps, name: "github" | "cursor", mac
 }
 export const copyMacGithub = (deps: Deps) => copyMacLogin(deps, "github");
 export const setCopyMacGithub = (deps: Deps, mac: boolean) => setCopyMacLogin(deps, "github", mac);
+/** True only when copying local logins is enabled AND GitHub hasn't been disconnected or replaced. */
+export async function canCopyMacGithub(deps: Deps): Promise<boolean> {
+  return (await copyLogins(deps)) === true && (await copyMacGithub(deps));
+}
 
 /** Agent logins the user disconnected or removed (ADR 0327). They never copy between this Mac and the cloud until the user
  *  connects again. "signed-out" means Disconnect signed the CLI out, so a later login on this Mac is a new sign-in. */

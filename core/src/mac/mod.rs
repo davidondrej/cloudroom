@@ -196,6 +196,8 @@ pub struct Mac {
     /// Commands an agent or terminal is waiting on the Mac for right now. They use no CPU here (an approval pop-up, a
     /// long copy), so the dashboard and the drain count them, or the sandbox sleeps under them (feedback 0024).
     waiting: AtomicUsize,
+    /// When the last one ended: a big copy's next piece, or a retry, starts a moment later (`GRACE`).
+    ended: Mutex<Option<Instant>>,
 }
 impl Default for Mac {
     fn default() -> Self {
@@ -217,12 +219,16 @@ impl Default for Mac {
             kept_out: Mutex::default(),
             last_ran: Mutex::default(),
             waiting: AtomicUsize::default(),
+            ended: Mutex::default(),
         }
     }
 }
 impl Mac {
+    /// Commands waiting on the Mac, or 1 for `GRACE` after the last one ended.
     pub(crate) fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::Relaxed)
+        let count = self.waiting.load(Ordering::Relaxed);
+        let recent = || (self.ended.lock().unwrap()).is_some_and(|at| at.elapsed() < GRACE);
+        if count == 0 && recent() { 1 } else { count }
     }
     /// A new thread or a dropped helper reopens the short wait for the Mac.
     pub(crate) fn expect(&self) {
@@ -462,17 +468,20 @@ impl Drop for Cancel {
     }
 }
 
+/// How long a finished Mac command still counts as waiting: the gap before a big copy's next piece, retries included.
+const GRACE: Duration = Duration::from_secs(5);
 /// Counts one command as waiting on the Mac until its `mac run` returns: done, refused, disconnected, or stopped.
-struct Waiting<'a>(&'a AtomicUsize);
+struct Waiting<'a>(&'a Mac);
 impl<'a> Waiting<'a> {
-    fn start(count: &'a AtomicUsize) -> Self {
-        count.fetch_add(1, Ordering::Relaxed);
-        Self(count)
+    fn start(mac: &'a Mac) -> Self {
+        mac.waiting.fetch_add(1, Ordering::Relaxed);
+        Self(mac)
     }
 }
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        *self.0.ended.lock().unwrap() = Some(Instant::now());
+        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -741,6 +750,13 @@ async fn local_run(
     let stdin = validate(&run)?;
     let started = Instant::now();
     let mac = &m.mac;
+    // Counted from before the wait for the Mac, under the drain's lock: a drain that begins later sees it, and a sandbox
+    // going to sleep starts none (feedback 0024).
+    let Some(_waiting) = m.unless_draining(|| Waiting::start(mac)) else {
+        return Err(conflict(
+            "This sandbox is going to sleep, so the command did not run. Try again.",
+        ));
+    };
     let mut changed = mac.changed.subscribe();
     let Some((generation, device, boot, fetch, events)) = attach(mac).await else {
         return Err(refused(&m, started));
@@ -785,7 +801,6 @@ async fn local_run(
         events,
         armed: true,
     };
-    let _waiting = Waiting::start(&mac.waiting);
     let slow = if fetch {
         0
     } else {
@@ -1326,14 +1341,18 @@ mod tests {
     fn a_command_counts_as_waiting_until_its_run_returns() {
         // The dashboard and the drain read this count, so a sandbox never sleeps under a Mac approval pop-up.
         let mac = super::Mac::default();
-        let (first, second) = (
-            super::Waiting::start(&mac.waiting),
-            super::Waiting::start(&mac.waiting),
-        );
+        let (first, second) = (super::Waiting::start(&mac), super::Waiting::start(&mac));
         assert_eq!(mac.waiting(), 2);
         drop(first);
         assert_eq!(mac.waiting(), 1);
         drop(second);
+        assert_eq!(
+            mac.waiting(),
+            1,
+            "a big copy's next piece comes a moment later"
+        );
+        let past = std::time::Instant::now().checked_sub(super::GRACE);
+        *mac.ended.lock().unwrap() = past;
         assert_eq!(mac.waiting(), 0);
     }
 

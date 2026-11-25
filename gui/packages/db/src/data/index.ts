@@ -295,6 +295,7 @@ export {
   isErrorQueueReleaseHeld,
   getStoredTurnRequestEventForTurn,
   getLatestThreadOutputEventRow,
+  getUnfinishedAgentMessageText,
   getLatestStoredConversationOutlineSequence,
   getLatestCompletedThreadContextClearSequence,
   getLatestThreadSystemErrorEventRow,

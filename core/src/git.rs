@@ -73,6 +73,14 @@ pub(crate) const READ_ENV: &[(&str, &str)] = &[
     ("GIT_ALLOW_PROTOCOL", "none"),
     ("LC_ALL", "C"),
 ];
+/// Why a file has no diff when a partial clone lacks content: reads never fetch it, the user's own Git commands do.
+const NOT_DOWNLOADED: &str = "This partial clone hasn't downloaded the file content this diff needs, and Cloudroom \
+    never downloads it. A Git command you run that reads it, like git diff HEAD, does; then retry.";
+
+/// Whether Git failed for content a partial clone never downloaded (Git's message: `READ_ENV` keeps it in English).
+fn not_downloaded(message: &str) -> bool {
+    message.contains("from promisor remote")
+}
 
 struct Failure {
     code: i32,
@@ -882,16 +890,23 @@ fn status(
     })
 }
 
-/// Changed files on disk with their line counts, and whether every untracked file got counts. Counts only the
-/// first untracked files that fit both budgets.
+/// Changed files on disk with their line counts, and whether every file got counts. Counts only the first untracked
+/// files that fit both budgets.
 fn working_tree(
     repo: &Repo,
     head: Option<&str>,
     max_files: usize,
     max_bytes: u64,
 ) -> Result<(Vec<Entry>, Vec<Counts>, bool)> {
-    let entries =
-        porcelain(&repo.out(&["status", "--porcelain=v1", "-z", "--untracked-files=all"])?);
+    // Pairing renames reads the old file, which a blobless clone may lack: then list the files without renames.
+    let list = [
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+        "--no-renames",
+    ];
+    let entries = porcelain(&repo.out(&list[..4]).or_else(|_| repo.out(&list))?);
     let mut budget = max_bytes;
     let mut counted = Vec::new();
     for entry in entries.iter().filter(|entry| entry.code == "??") {
@@ -937,14 +952,20 @@ fn working_tree(
             diff(&repo.with_untracked(&counted)?, "--no-renames", &counted)
         },
     );
-    let mut counts = numstat(&tracked?);
+    // Line counts read the old files too: without them, tracked files still show, with unknown counts.
+    let tracked = match tracked {
+        Err(failure) if not_downloaded(&failure.message) => None,
+        tracked => Some(tracked?),
+    };
+    let tracked_counted = tracked.is_some();
+    let mut counts = tracked.map_or_else(HashMap::new, |out| numstat(&out));
     counts.extend(numstat(&untracked.unwrap_or_default()));
     let mut complete = true;
     let files = entries
         .iter()
         .map(|entry| match counts.get(&entry.path) {
             Some(counts) => *counts,
-            None if entry.code == "??" => {
+            None if entry.code == "??" || !tracked_counted => {
                 complete = false;
                 (None, None)
             }
@@ -1243,7 +1264,15 @@ fn patch(repo: &Repo, target: &Target, paths: &[String], max_bytes: usize) -> Re
     for (path, run) in paths.iter().zip(runs) {
         let mut run = run?;
         if !run.ok {
-            return fail(FAILED, text(&run.stderr));
+            let detail = text(&run.stderr);
+            if !not_downloaded(&detail) {
+                return fail(FAILED, detail);
+            }
+            // The other files' diffs still show.
+            patches.push(
+                json!({ "path": path, "patch": "", "truncated": false, "error": NOT_DOWNLOADED }),
+            );
+            continue;
         }
         if run.stdout.len() > left {
             run.stdout.truncate(left);

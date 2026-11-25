@@ -368,6 +368,8 @@ export const diffPatchEntrySchema = z.object({
   path: z.string(),
   patch: z.string(),
   truncated: z.boolean(),
+  /** Why the file has no patch, as when a partial clone lacks its content. */
+  error: z.string().optional(),
 });
 export type DiffPatchEntry = z.infer<typeof diffPatchEntrySchema>;
 

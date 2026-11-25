@@ -1,4 +1,5 @@
 import { SidebarRowControls } from "./SidebarRowControls";
+import { SubagentGrid } from "@/views/thread-detail/SubagentBar";
 import {
   memo,
   useCallback,
@@ -386,6 +387,7 @@ export function ThreadStatusGlyph({
   isGoalActive,
   isPlanModeActive,
   isRuntimeActive,
+  isWaitingOnSubagents,
   isWorkflowActive,
   queuedWork,
 }: ThreadStatusGlyphProps) {
@@ -399,6 +401,7 @@ export function ThreadStatusGlyph({
     isGoalActive,
     isPlanModeActive,
     isRuntimeActive,
+    isWaitingOnSubagents,
     isWorkflowActive,
     queuedWork,
   });
@@ -427,6 +430,16 @@ export function ThreadStatusGlyph({
       );
     case "working-draft":
       return <ThreadDraftIndicator isWorking />;
+    case "waiting-on-subagents":
+      return (
+        <span
+          role="img"
+          className="flex"
+          aria-label={getThreadListIndicatorLabel(kind) ?? undefined}
+        >
+          <SubagentGrid offset={0} className="is-waiting" />
+        </span>
+      );
     case "workflow":
     case "background-agent":
     case "background-command":
@@ -686,6 +699,16 @@ function ThreadRowComponent({
       threadRuntimeBusy || (hasHiddenChildren && childActivity.runtimeWorking),
     isWorkflowActive:
       threadWorkflowActive || (hasHiddenChildren && childActivity.workflow),
+    // Idle itself, with a subagent at work: expanded or folded, the row shows the cube (David, 2026-11-24).
+    isWaitingOnSubagents:
+      hasChildren &&
+      childActivity.working &&
+      !threadRuntimeBusy &&
+      !threadWorkflowActive &&
+      !threadBackgroundAgentActive &&
+      !threadBackgroundCommandActive &&
+      !threadPlanModeActive &&
+      !threadGoalActive,
   };
   // Any other wait (question, approval, API key form, a folded subagent) gets a soft yellow row
   // with a "Needs you" chip instead of the grey "?" (David, 2026-11-13, design Y3). One line, so it still pins.

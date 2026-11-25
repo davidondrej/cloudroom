@@ -6,6 +6,8 @@ const saved: string[] = [];
 const chosen: boolean[] = [];
 const copyFlags: boolean[] = [];
 let loggedIn = false;
+let canCopyMac = true;
+let localToken = "";
 let saveFails = false;
 let installStatus = 200;
 vi.mock("node:timers/promises", () => ({ setTimeout: (_ms: number, _v: unknown, o?: { signal?: AbortSignal }) => new Promise<void>((resolve, reject) => { if (o?.signal?.aborted) return reject(o.signal.reason); o?.signal?.addEventListener("abort", () => reject(o.signal!.reason)); setImmediate(resolve); }) }));
@@ -13,8 +15,8 @@ vi.mock("../../src/services/cloudroom/commands.js", () => ({ cloudroom: () => ({
   account: async () => ({ id: "a" }), logins: async () => ({ github: loggedIn }), githubAccount: async () => null, removeLogin: async () => {},
   saveLogin: async (_name: string, entry: string, _only: unknown, _background: boolean, byHand: boolean) => { if (saveFails) throw new Error("website down"); saved.push(entry); chosen.push(byHand); loggedIn = true; },
 } }) }));
-vi.mock("../../src/services/cloudroom/sync.js", () => ({ copyMacGithub: async () => true, setCopyMacGithub: async (_deps: unknown, on: boolean) => { copyFlags.push(on); } }));
-vi.mock("../../src/services/cloudroom/sandboxes.js", () => ({ githubAccountSchema: { parse: (x: unknown) => x }, macGithubToken: async () => "", sandboxGithubLogin: async (token: string) => JSON.stringify({ token }) }));
+vi.mock("../../src/services/cloudroom/sync.js", () => ({ canCopyMacGithub: async () => canCopyMac, copyMacGithub: async () => true, setCopyMacGithub: async (_deps: unknown, on: boolean) => { copyFlags.push(on); } }));
+vi.mock("../../src/services/cloudroom/sandboxes.js", () => ({ githubAccountSchema: { parse: (x: unknown) => x }, macGithubToken: async () => localToken, sandboxGithubLogin: async (token: string) => JSON.stringify({ token }) }));
 
 const { githubAuth } = await import("../../src/services/cloudroom/github-login.js");
 const deps = {} as never;
@@ -25,7 +27,7 @@ let tokenAnswers: Record<string, unknown>[] = [];
 const until = async (test: () => boolean | Promise<boolean>) => { for (let i = 0; i < 2000; i++) { if (await test()) return; await new Promise((r) => setImmediate(r)); } throw new Error("timeout"); };
 
 beforeEach(() => {
-  calls = []; saved.length = 0; chosen.length = 0; copyFlags.length = 0; loggedIn = false; saveFails = false; installStatus = 200;
+  calls = []; saved.length = 0; chosen.length = 0; copyFlags.length = 0; loggedIn = false; canCopyMac = true; localToken = ""; saveFails = false; installStatus = 200;
   vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
     const body = Object.fromEntries(new URLSearchParams(String(init?.body ?? "")));
     calls.push({ url, body, auth: (init?.headers as Record<string, string> | undefined)?.Authorization ?? null });
@@ -119,4 +121,12 @@ test("cancel while picking repos saves nothing", async () => {
   expect(calls.length).toBe(polls);
   expect(saved).toEqual([]);
   expect((await githubAuth(deps)).state).toBe("missing");
+});
+
+test("local gh only counts as connected when copying local logins is allowed", async () => {
+  localToken = "gho_local";
+  canCopyMac = false;
+  expect((await githubAuth(deps)).state).toBe("missing");
+  canCopyMac = true;
+  expect((await githubAuth(deps)).state).toBe("connected");
 });

@@ -586,7 +586,8 @@ export function useWorktreeStorage() {
   return useQuery<SystemWorktreeStorageResponse>({
     queryKey: systemWorktreeStorageQueryKey(),
     queryFn: ({ signal }) => sdk.system.worktreeStorage({ signal }),
-    refetchInterval: 10 * 60_000,
+    // Recheck every minute while low so the banner clears soon after cleanup.
+    refetchInterval: (query) => (query.state.data?.low ? 60_000 : 10 * 60_000),
     staleTime: 60_000,
   });
 }

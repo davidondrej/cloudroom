@@ -1590,6 +1590,87 @@ describe("service tier execution lifecycle", () => {
     });
   });
 
+  it("reports a queued message the drain already delivered as sent (#1954)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedProviderThreadFixture({
+        harness,
+        value: 1954,
+        status: "active",
+      });
+      const other = seedProviderThreadFixture({ harness, value: 1955 });
+      const queued = await createQueuedMessageForThread(harness.deps, {
+        thread,
+        payload: { input: textInput("follow-up") },
+      });
+      applyLoggedThreadLifecycleEvent(harness.deps, {
+        event: { type: "run.succeeded" },
+        threadId: thread.id,
+      });
+      await sendNextQueuedMessageIfPresent(harness.deps, {
+        threadId: thread.id,
+      });
+      const send = (threadId: string) =>
+        harness.app.request(
+          `/api/v1/threads/${threadId}/queued-messages/${queued.id}/send`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode: "auto" }),
+          },
+        );
+      // Not accepted by the provider yet: still unknown, as before.
+      expect((await send(thread.id)).status).toBe(404);
+      const [submit] = listQueuedThreadCommands(
+        harness,
+        "turn.submit",
+        thread.id,
+      );
+      if (submit?.type !== "turn.submit") throw new Error("Expected a submit");
+      seedStoredEvent(harness.deps, {
+        data: { clientRequestId: submit.requestId },
+        environmentId: environment.id,
+        providerThreadId: "provider-send-dispatch-1954",
+        scope: turnScope("turn-drained"),
+        sequence: 100,
+        threadId: thread.id,
+        type: "turn/input/accepted",
+      });
+      // A pending question in the delivered turn does not hide the receipt.
+      createPendingInteraction(harness.db, {
+        originKind: "plugin",
+        pluginId: "plugin-1954",
+        rendererId: "renderer-1954",
+        threadId: thread.id,
+        turnId: null,
+        payload: JSON.stringify({ kind: "plugin", title: "Approve" }),
+      });
+      const sent = await send(thread.id);
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toEqual({ ok: true, delivery: "sent" });
+      // A fork's copied receipt has no provider thread and never counts.
+      const copied = {
+        scope: turnScope("turn-drained"),
+        threadId: other.thread.id,
+      };
+      seedStoredEvent(harness.deps, {
+        ...copied,
+        data: { requestId: submit.requestId, queuedMessageId: queued.id },
+        sequence: 200,
+        type: "client/turn/requested",
+      });
+      seedStoredEvent(harness.deps, {
+        ...copied,
+        data: { clientRequestId: submit.requestId },
+        sequence: 201,
+        type: "turn/input/accepted",
+      });
+      expect((await send(other.thread.id)).status).toBe(404);
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toHaveLength(1);
+    });
+  });
+
   it("snapshots a busy follow-up without changing the active tier", async () => {
     await withTestHarness(async (harness) => {
       const { thread } = seedProviderThreadFixture({

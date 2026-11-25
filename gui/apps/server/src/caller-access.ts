@@ -2,6 +2,7 @@ import {
   CALLER_PROOF_REQUIRED_CODE,
   CALLER_PROOF_REQUIRED_MESSAGE,
   CALLER_PROOF_STATUS_HEADER,
+  CALLER_PROOF_TIMED_OUT_MESSAGE,
   CALLER_TOKEN_HEADER,
   type CallerPeer,
   type CallerProofIssuer,
@@ -11,7 +12,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiError } from "./errors.js";
 
-export { isOpenWithoutCallerProof } from "@cloudroom/config/caller-proof";
+export { checkOpenWithoutCallerProof } from "@cloudroom/config/caller-proof";
 
 const CALLER_TRUSTED_CONTEXT_KEY = "cloudroomCallerTrusted";
 const CALLER_TOKEN_REJECTED_CONTEXT_KEY = "cloudroomCallerTokenRejected";
@@ -99,13 +100,18 @@ export function isTrustedCaller(context: CallerTrustReader): boolean {
   return context.get(CALLER_TRUSTED_CONTEXT_KEY) === true;
 }
 
+// `busy`: an open read whose OS user check got no answer, so the caller is
+// told to retry instead of being blamed on its sandbox (#2435).
 export function callerProofRequiredResponse(
   context: CallerTrustReader,
+  busy = false,
 ): Response {
   return new Response(
     JSON.stringify({
       code: CALLER_PROOF_REQUIRED_CODE,
-      message: CALLER_PROOF_REQUIRED_MESSAGE,
+      message: busy
+        ? CALLER_PROOF_TIMED_OUT_MESSAGE
+        : CALLER_PROOF_REQUIRED_MESSAGE,
     }),
     {
       headers: {

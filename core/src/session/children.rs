@@ -215,6 +215,40 @@ pub(super) fn untold(s: &Session, told: impl Fn(&Receipt) -> bool) -> Vec<(&Rece
     owed
 }
 
+/// How a due turn reaches its parent (#1395): `None` when its reply only repeats the one the parent last got, so it is
+/// marked reported, unsent; else the key to remember once it is sent (null for a failure, interruption or empty reply).
+/// A turn a message from its parent started or steered, and an archived or closing child's, always reports.
+pub(super) fn report_key(s: &Session, r: &Receipt) -> Option<Value> {
+    let reply = (s.replies.iter())
+        .find(|(id, _)| *id == r.request_id)
+        .map(|(_, text)| text.split_whitespace().collect::<Vec<_>>().join(" "));
+    let key = reply
+        .filter(|text| r.state == "completed" && r.error.is_none() && !text.is_empty())
+        .map(|text| format!("{:016x}", fnv(&text)));
+    let from_parent = |input: &Value| {
+        input["from_parent"] == true
+            || (input["sender_thread_id"].as_str()).is_some_and(|t| Some(t) == s.parent_thread())
+    };
+    let steered = |x: &Receipt| {
+        x.command == "steer"
+            && x.input["target_request_id"] == r.request_id.as_str()
+            && from_parent(&x.input)
+    };
+    let repeat = key.is_some()
+        && key == s.told_reply
+        && !(s.archived || s.close_request.is_some() || s.state == SessionState::Closed)
+        && !from_parent(&r.input)
+        && !s.receipts.values().any(steered);
+    (!repeat).then(|| json!(key))
+}
+
+/// FNV-1a: a short stable key for a long string.
+fn fnv(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// A child's turns its parent hasn't heard of, if it tells one: in another sandbox through the website, or in this one
 /// (`true`), as long as that parent is open. A turn marked reported counts as heard of either way.
 fn owed_by<'a>(local: &'a Local, c: &'a Session) -> Option<(Vec<(&'a Receipt, u64)>, bool)> {
@@ -553,10 +587,7 @@ pub(super) fn fork_history(
 pub(super) fn notice_ids(child: &str, request: &str) -> (String, String) {
     let mut queued = legacy_notice_id(child, request);
     if queued.len() + "_steer".len() > 64 {
-        let hash = queued.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
-            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-        });
-        queued = format!("notice_{hash:016x}");
+        queued = format!("notice_{:016x}", fnv(&queued));
     }
     (format!("{queued}_steer"), queued)
 }
@@ -1213,6 +1244,7 @@ impl Manager {
                                 .map(|(_, text)| text.clone()),
                             title(c),
                             p.current_request.clone().filter(|_| steer),
+                            report_key(c, r),
                         )),
                         None if c.close_request.is_some() || c.state == SessionState::Closed => {
                             return;
@@ -1221,7 +1253,17 @@ impl Manager {
                     };
                     (due, held)
                 };
-                if let Some((parent, request, state, error, reply, title, target)) = due {
+                if let Some((parent, request, state, error, reply, title, target, key)) = due {
+                    // A repeat of what the parent last got is marked reported, unsent (#1395).
+                    let Some(key) = key else {
+                        if manager
+                            .note(&child, "parent_report", json!({"request_id":request}))
+                            .is_err()
+                        {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
+                        continue;
+                    };
                     let text = notice(&child, title, &state, error, reply);
                     let (steer, queued) = notice_ids(&child, &request);
                     // A turn that just ended, or a harness that cannot steer, falls back to the queue.
@@ -1239,6 +1281,8 @@ impl Manager {
                         .command(&parent, queued, "prompt", json!({"text":text}))
                         .is_ok()
                     {
+                        // Not `request_id`: a steer lost later still falls back to the queue (#1579).
+                        let _ = manager.note(&child, "parent_report", json!({"reply":key}));
                         continue;
                     }
                     tokio::time::sleep(Duration::from_secs(5)).await;

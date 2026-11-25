@@ -180,6 +180,8 @@ export type ThreadSearchResult = ThreadSearchResponse;
 export type ThreadResolveMentionsResult = ResolveThreadMentionsResponse;
 export interface ThreadOutputResponse {
   output: string | null;
+  /** A newer reply an active thread is still writing, not yet in `output` (#2451). */
+  partialOutput?: string;
   /** Why the thread failed; null unless its status is `error`. */
   error?: string | null;
   /** The recorded stop, when the last turn was interrupted (#1159). */

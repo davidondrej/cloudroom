@@ -12,6 +12,7 @@ import {
   assertValidParentThread,
   isAgentDelegatedChildThread,
   isParentNotifiableChildThread,
+  MAX_THREAD_HIERARCHY_DEPTH,
 } from "../../src/services/threads/thread-parent.js";
 
 type ThrowingCallback = () => void;
@@ -31,6 +32,27 @@ function setup() {
     },
   });
   return { db, host, project };
+}
+
+/** A root thread and its descendants, one per level: `length` threads deep. */
+function createChain(
+  db: ReturnType<typeof setup>["db"],
+  projectId: string,
+  length: number,
+) {
+  const chain = [
+    createThread(db, noopNotifier, { projectId, providerId: "codex" }),
+  ];
+  while (chain.length < length) {
+    chain.push(
+      createThread(db, noopNotifier, {
+        parentThreadId: chain.at(-1)!.id,
+        projectId,
+        providerId: "codex",
+      }),
+    );
+  }
+  return chain;
 }
 
 function captureApiError(callback: ThrowingCallback): ApiError {
@@ -144,58 +166,28 @@ describe("thread parent validation", () => {
 
   it("allows nesting up to the configured depth cap", () => {
     const { db, project } = setup();
-    const rootThread = createThread(db, noopNotifier, {
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level2Thread = createThread(db, noopNotifier, {
-      parentThreadId: rootThread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level3Thread = createThread(db, noopNotifier, {
-      parentThreadId: level2Thread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
+    const chain = createChain(db, project.id, MAX_THREAD_HIERARCHY_DEPTH - 1);
+    const deepest = chain.at(-1)!;
 
     const validatedParent = assertValidParentThread(
       { db },
       {
-        parentThreadId: level3Thread.id,
+        parentThreadId: deepest.id,
       },
     );
 
-    expect(validatedParent.id).toBe(level3Thread.id);
+    expect(validatedParent.id).toBe(deepest.id);
   });
 
   it("rejects new children beyond the configured depth cap", () => {
     const { db, project } = setup();
-    const rootThread = createThread(db, noopNotifier, {
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level2Thread = createThread(db, noopNotifier, {
-      parentThreadId: rootThread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level3Thread = createThread(db, noopNotifier, {
-      parentThreadId: level2Thread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level4Thread = createThread(db, noopNotifier, {
-      parentThreadId: level3Thread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
+    const chain = createChain(db, project.id, MAX_THREAD_HIERARCHY_DEPTH);
 
     const error = captureApiError(() => {
       assertValidParentThread(
         { db },
         {
-          parentThreadId: level4Thread.id,
+          parentThreadId: chain.at(-1)!.id,
         },
       );
     });
@@ -208,36 +200,15 @@ describe("thread parent validation", () => {
 
   it("rejects moves whose existing descendants would exceed the depth cap", () => {
     const { db, project } = setup();
-    const rootThread = createThread(db, noopNotifier, {
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level2Thread = createThread(db, noopNotifier, {
-      parentThreadId: rootThread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const level3Thread = createThread(db, noopNotifier, {
-      parentThreadId: level2Thread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
-    const movingThread = createThread(db, noopNotifier, {
-      projectId: project.id,
-      providerId: "codex",
-    });
-    createThread(db, noopNotifier, {
-      parentThreadId: movingThread.id,
-      projectId: project.id,
-      providerId: "codex",
-    });
+    const chain = createChain(db, project.id, MAX_THREAD_HIERARCHY_DEPTH - 1);
+    const [movingThread] = createChain(db, project.id, 2);
 
     const error = captureApiError(() => {
       assertValidParentThread(
         { db },
         {
-          childThreadId: movingThread.id,
-          parentThreadId: level3Thread.id,
+          childThreadId: movingThread!.id,
+          parentThreadId: chain.at(-1)!.id,
         },
       );
     });

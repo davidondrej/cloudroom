@@ -1,8 +1,8 @@
 // Risky local actions need a human click (ADR 0260, docs/scopes/security.md).
 // A click is a request the desktop app signed. A signed-in phone also counts,
-// but only for Mac access. Anyone else who asks for a plugin install or update
-// gets a request ID instead: the server checks the request and says what it
-// would do, the app shows that, and a click there runs it.
+// but only for Mac access and app-only cards (GPU). Anyone else who asks for a
+// plugin install or update gets a request ID instead: the server checks the
+// request and says what it would do, the app shows that, and a click there runs it.
 import { randomUUID } from "node:crypto";
 import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import {
@@ -272,14 +272,20 @@ export function installHumanClick(
       !verifier.enabled ||
       approved.has(context.req.raw) ||
       verifier.verify(header, method, path) ||
-      // A signed-in phone may change Mac access, nothing else (David, 2026-11-23). The relay
-      // runs in this process; a machine on the relay is not a person.
-      (action === "mac-access" &&
+      // A signed-in phone may change Mac access or answer an app-only card (GPU), nothing else.
+      // The relay runs in this process; a machine on the relay is not a person.
+      ((action === "mac-access" || action === "interaction-respond") &&
         getGateAuthKind(context) === "session" &&
         deps.callerProofs.isInternal(context.req.header(CALLER_TOKEN_HEADER)));
     context.set(HUMAN_CLICK_CONTEXT_KEY, human);
-    // Mac access checks for itself: only raising it needs a click.
-    if (human || action === null || action === "mac-access") return next();
+    // Mac access and interaction responses check for themselves: only raising Mac access or answering an app-only card needs a click.
+    if (
+      human ||
+      action === null ||
+      action === "mac-access" ||
+      action === "interaction-respond"
+    )
+      return next();
     // The app's own click failed: it didn't start this server.
     if (header !== undefined) return refuse(REFUSED_MESSAGE);
     if (action === "approve" || action === "decline") {

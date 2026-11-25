@@ -16,7 +16,10 @@ import { ApiError } from "../../src/errors.js";
 import type { TelemetryService } from "../../src/services/system/telemetry.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
 import { buildExecutionOptions } from "../../src/services/threads/thread-commands.js";
-import { canThreadSpawnChild } from "../../src/services/threads/thread-parent.js";
+import {
+  canThreadSpawnChild,
+  MAX_THREAD_HIERARCHY_DEPTH,
+} from "../../src/services/threads/thread-parent.js";
 import {
   reportQueuedCommandSuccess,
   waitForQueuedCommand,
@@ -316,24 +319,19 @@ describe("canThreadSpawnChild", () => {
         path: "/tmp/can-spawn-child-project",
       });
 
-      const root = seedThread(harness.deps, { projectId: project.id });
-      const level2 = seedThread(harness.deps, {
-        projectId: project.id,
-        parentThreadId: root.id,
-      });
-      const level3 = seedThread(harness.deps, {
-        projectId: project.id,
-        parentThreadId: level2.id,
-      });
-      const level4 = seedThread(harness.deps, {
-        projectId: project.id,
-        parentThreadId: level3.id,
-      });
+      const chain = [seedThread(harness.deps, { projectId: project.id })];
+      while (chain.length < MAX_THREAD_HIERARCHY_DEPTH) {
+        chain.push(
+          seedThread(harness.deps, {
+            projectId: project.id,
+            parentThreadId: chain.at(-1)!.id,
+          }),
+        );
+      }
 
-      expect(canThreadSpawnChild(harness.deps, { thread: root })).toBe(true);
-      expect(canThreadSpawnChild(harness.deps, { thread: level2 })).toBe(true);
-      expect(canThreadSpawnChild(harness.deps, { thread: level3 })).toBe(true);
-      expect(canThreadSpawnChild(harness.deps, { thread: level4 })).toBe(false);
+      expect(
+        chain.map((thread) => canThreadSpawnChild(harness.deps, { thread })),
+      ).toEqual([...chain.slice(1).map(() => true), false]);
     });
   });
 
@@ -353,20 +351,16 @@ describe("canThreadSpawnChild", () => {
         path,
       });
 
-      const root = seedThread(harness.deps, { projectId: project.id });
-      const level2 = seedThread(harness.deps, {
-        projectId: project.id,
-        parentThreadId: root.id,
-      });
-      const level3 = seedThread(harness.deps, {
-        projectId: project.id,
-        parentThreadId: level2.id,
-      });
-      const level4 = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        parentThreadId: level3.id,
-      });
+      let deepest = seedThread(harness.deps, { projectId: project.id });
+      for (let level = 2; level <= MAX_THREAD_HIERARCHY_DEPTH; level += 1) {
+        deepest = seedThread(harness.deps, {
+          projectId: project.id,
+          parentThreadId: deepest.id,
+          ...(level === MAX_THREAD_HIERARCHY_DEPTH
+            ? { environmentId: environment.id }
+            : {}),
+        });
+      }
 
       let caught: ApiError | null = null;
       try {
@@ -381,7 +375,7 @@ describe("canThreadSpawnChild", () => {
           originKind: "fork",
           projectId: project.id,
           providerId: "codex",
-          sourceThreadId: level4.id,
+          sourceThreadId: deepest.id,
           startedOnBehalfOf: null,
         });
       } catch (error) {
@@ -1144,7 +1138,9 @@ describe("thread creation child-thread boundary validation", () => {
         expect(error.status).toBe(400);
         expect(error.body.code).toBe("fork_source_session_unavailable");
         // Nothing finished to copy, natively or as text.
-        expect(error.body.message).toBe("Fork from a message whose turn has finished.");
+        expect(error.body.message).toBe(
+          "Fork from a message whose turn has finished.",
+        );
       },
     );
   });
@@ -1172,7 +1168,9 @@ describe("thread creation child-thread boundary validation", () => {
         expect(error.status).toBe(400);
         expect(error.body.code).toBe("fork_source_session_unavailable");
         // Nothing finished to copy, natively or as text.
-        expect(error.body.message).toBe("Fork from a message whose turn has finished.");
+        expect(error.body.message).toBe(
+          "Fork from a message whose turn has finished.",
+        );
       },
     );
   });

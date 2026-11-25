@@ -272,10 +272,14 @@ export function lsofListsCaller(peer: CallerPeer, listing: string): boolean {
   });
 }
 
+// `failed`: lsof exited but printed an error, such as not being able to list
+// processes, so an empty listing doesn't mean another user (#2435).
+type LsofListing = { failed: boolean; text: string } | null;
+
 interface LsofQueue {
   running: boolean;
   stuck: boolean;
-  waiting: Array<(listing: string | null) => void>;
+  waiting: Array<(listing: LsofListing) => void>;
 }
 
 const lsofQueues = new Map<number, LsofQueue>();
@@ -286,7 +290,7 @@ const lsofQueues = new Map<number, LsofQueue>();
 function runLsof(port: number, uid: number, queue: LsofQueue): void {
   let waiters = queue.waiting;
   queue.waiting = [];
-  const answer = (listing: string | null) => {
+  const answer = (listing: LsofListing) => {
     for (const waiter of waiters) waiter(listing);
     waiters = [];
   };
@@ -305,9 +309,17 @@ function runLsof(port: number, uid: number, queue: LsofQueue): void {
       maxBuffer: LSOF_MAX_BYTES,
       timeout: LSOF_TIMEOUT_MS,
     },
-    // lsof exits 1 when it lists nothing; any exit code is its answer.
-    (error, stdout) =>
-      answer(error === null || typeof error.code === "number" ? stdout : null),
+    // lsof exits 1 when it lists nothing; any exit code is its answer. Its
+    // errors start "lsof: ", its warnings "lsof: WARNING".
+    (error, stdout, stderr) =>
+      answer(
+        error === null || typeof error.code === "number"
+          ? {
+              failed: error !== null && /^lsof: (?!WARNING)/mu.test(stderr),
+              text: stdout,
+            }
+          : null,
+      ),
   );
   // The slot stays taken until lsof is really gone, so a failed kill can't
   // start a second one on this port. One still alive 30 s after its kill
@@ -336,7 +348,7 @@ function runLsof(port: number, uid: number, queue: LsofQueue): void {
 // One lsof at a time per port (about 70 ms on a busy Mac), shared by every
 // lookup that was waiting when it started. A run that started before a
 // connection opened can't vouch for it, so later lookups wait for the next.
-function nextLsofListing(port: number, uid: number): Promise<string | null> {
+function nextLsofListing(port: number, uid: number): Promise<LsofListing> {
   const queue = lsofQueues.get(port) ?? {
     running: false,
     stuck: false,
@@ -352,14 +364,14 @@ function nextLsofListing(port: number, uid: number): Promise<string | null> {
   });
 }
 
-const peerUserChecks = new WeakMap<CallerPeer, Promise<boolean>>();
+const peerUserChecks = new WeakMap<CallerPeer, Promise<boolean | null>>();
 
 // Every OS account on a computer can reach its loopback, so the open reads
 // need a caller that runs as this OS user. Linux names each socket's owner,
 // and on macOS lsof lists this user's sockets. Windows can't tell cheaply,
 // so there every local caller still gets them (docs/scopes/security.md).
-// One lookup per connection.
-function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
+// One lookup per connection. Null when lsof gave no answer or failed (#2435).
+function runsAsThisOsUser(peer: CallerPeer): Promise<boolean | null> {
   const uid = process.getuid?.();
   const { platform } = process;
   if ((platform !== "linux" && platform !== "darwin") || uid === undefined) {
@@ -375,9 +387,15 @@ function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
         : peer.localPort === undefined
           ? Promise.resolve(false)
           : nextLsofListing(peer.localPort, uid).then((listing) => {
-              if (listing !== null) return lsofListsCaller(peer, listing);
-              peerUserChecks.delete(peer);
-              return false;
+              if (listing === null) {
+                peerUserChecks.delete(peer);
+                return null;
+              }
+              // A failed run stays refused on this socket, as before, but says busy.
+              return (
+                lsofListsCaller(peer, listing.text) ||
+                (listing.failed ? null : false)
+              );
             });
     peerUserChecks.set(peer, check);
   }
@@ -387,21 +405,35 @@ function runsAsThisOsUser(peer: CallerPeer): Promise<boolean> {
 // The requests a caller without a token may make. The Mac's server and a
 // remote machine's agent proxy both use this list. `peer` is the loopback
 // connection the request came on; null skips the OS user check (no socket,
-// or a request from another computer).
+// or a request from another computer). "unanswered" is an open read whose OS
+// user check got no answer (a busy Mac), not a sandboxed caller (#2435).
+export async function checkOpenWithoutCallerProof(
+  method: string,
+  path: string,
+  peer: CallerPeer | null,
+): Promise<"open" | "refused" | "unanswered"> {
+  const verb = method.toUpperCase();
+  if (verb === "POST") {
+    return OPEN_POSTS.some((pattern) => pattern.test(path))
+      ? "open"
+      : "refused";
+  }
+  if (
+    (verb !== "GET" && verb !== "HEAD") ||
+    !OPEN_READS.some((pattern) => pattern.test(path))
+  ) {
+    return "refused";
+  }
+  const sameUser = peer === null || (await runsAsThisOsUser(peer));
+  return sameUser === null ? "unanswered" : sameUser ? "open" : "refused";
+}
+
 export async function isOpenWithoutCallerProof(
   method: string,
   path: string,
   peer: CallerPeer | null,
 ): Promise<boolean> {
-  const verb = method.toUpperCase();
-  if (verb === "POST") {
-    return OPEN_POSTS.some((pattern) => pattern.test(path));
-  }
-  return (
-    (verb === "GET" || verb === "HEAD") &&
-    OPEN_READS.some((pattern) => pattern.test(path)) &&
-    (peer === null || (await runsAsThisOsUser(peer)))
-  );
+  return (await checkOpenWithoutCallerProof(method, path, peer)) === "open";
 }
 
 export interface StartedCallerProof {

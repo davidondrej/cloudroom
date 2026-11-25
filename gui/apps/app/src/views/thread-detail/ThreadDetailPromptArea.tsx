@@ -461,6 +461,8 @@ export function ThreadDetailPromptArea({
   const teleportLocal = useTeleportLocal(thread.id);
   const movingToLocal = useTeleportDirection(thread) === "local";
   const canTeleportLocal = canTeleportLocalThread(thread) && !movingToLocal;
+  // Moving either way keeps the composer and its unsent draft; sending waits until the move ends (#2575).
+  const moving = teleporting || movingToLocal;
   const startTeleportLocal = useCallback(() => teleportLocal.mutate(), [teleportLocal]);
   const claudeThread = thread.providerId === "claude-code";
   // Cloud login prompts render inline in the timeline (CloudLoginRow / PendingClaudeSignInRow), never as a card or modal.
@@ -746,7 +748,7 @@ export function ThreadDetailPromptArea({
     initialEnvironmentSelectionValue: thread.environmentId ?? undefined,
   });
   const cloudFollowUpReasoningOptions = useMemo(() => {
-    // ACP harnesses keep their launch level, unless Cloud can switch it per turn (fx).
+    // ACP harnesses keep their launch level, unless Cloud can switch it per turn (fx, Antigravity).
     const fixed = thread.providerId.startsWith("acp-") && !cloudHarness(cloudConnection.data, thread.providerId)?.prompt_reasoning;
     const levels = fixed ? [cloudReasoning] : cloudReasoningLevels(cloudConnection.data, thread.providerId, cloudState.data?.model);
     return [...new Set([cloudReasoning, ...levels])].flatMap((level) => {
@@ -1043,7 +1045,7 @@ export function ThreadDetailPromptArea({
   const { start: startFreshThread } = freshThread;
   const contextWindowActions = useMemo<ThreadContextWindowActions | undefined>(
     () =>
-      shouldHideComposer
+      shouldHideComposer || moving
         ? undefined
         : {
             onCompact: canCompact
@@ -1065,6 +1067,7 @@ export function ThreadDetailPromptArea({
       compactThread.isPending,
       compactThreadMutate,
       freshThread.isPending,
+      moving,
       shouldHideComposer,
       startFreshThread,
       thread.id,
@@ -1289,8 +1292,8 @@ export function ThreadDetailPromptArea({
       submitOptions: ExperimentalComposerSubmitOptions,
       pluginSubmission: SendMessageRequest["pluginSubmission"],
     ) => {
-      if (movingToLocal) {
-        throw new Error("Wait for Teleport to Local to finish.");
+      if (moving) {
+        throw new Error("Wait for Teleport to finish.");
       }
       if (isDefaultExecutionOptionsLoading) {
         throw new Error("This thread's execution settings are still loading.");
@@ -1336,7 +1339,7 @@ export function ThreadDetailPromptArea({
     [
       followUpExecutionSelection,
       isDefaultExecutionOptionsLoading,
-      movingToLocal,
+      moving,
       promptDraft,
       sendMessage,
       dismissBottomAttachmentFailures,
@@ -1525,7 +1528,7 @@ export function ThreadDetailPromptArea({
         onSelectEntry: promptDraft.setDraft,
         resetKey: thread.id,
       },
-      isFollowUpSubmitting: isFollowUpSubmitting || movingToLocal,
+      isFollowUpSubmitting: isFollowUpSubmitting || moving,
       message: currentPromptDraft.text,
       mentionRanges: currentPromptDraft.mentions,
       onChangeMessage: handleBottomComposerMessageChange,
@@ -1541,7 +1544,7 @@ export function ThreadDetailPromptArea({
       onGhostText: handlePromptSuggestionEvent,
       canModifierSubmit: (!isCloud || cloudSteerSupported) && canSubmitModifierShortcut,
       steerActiveThreadOnEnter: isCloud ? cloudSteerSupported && steerActiveThreadOnEnter : steerActiveThreadOnEnter,
-      submitMode: movingToLocal ? { kind: "ready" } : submitMode,
+      submitMode: moving ? { kind: "ready" } : submitMode,
       threadRuntimeDisplayStatus: runtimeDisplayStatus,
     }),
     [
@@ -1554,7 +1557,7 @@ export function ThreadDetailPromptArea({
       handleBottomComposerModifierSubmit,
       handleBottomComposerSubmit,
       isFollowUpSubmitting,
-      movingToLocal,
+      moving,
       promptHistoryDrafts,
       promptPlaceholder,
       promptPlaceholderHint,
@@ -2256,7 +2259,7 @@ export function ThreadDetailPromptArea({
               isFollowUpSubmitting ||
               isExecutionUpdatePending ||
               isQueueMutationPending ||
-              movingToLocal
+              moving
             }
             actionDisabled={isQueueMutationPending}
             processingMessageId={displayedProcessingQueuedMessage?.id ?? null}
@@ -2287,7 +2290,7 @@ export function ThreadDetailPromptArea({
       isExecutionUpdatePending,
       isUnarchiveCurrentThreadPending,
       isQueueMutationPending,
-      movingToLocal,
+      moving,
       queuedMessageEditor,
       activeGoalCard,
       activePromptModeCard,
@@ -2429,7 +2432,9 @@ export function ThreadDetailPromptArea({
       stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{pendingInteractionNode && !pendingInteractionInChat ? pendingInteractionStack : promptStack}</>}
       pendingInteraction={pendingInteractionInChat ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
-      composer={shouldHideComposer || (teleporting && !movingToLocal) || transferredChild ? null : bottomComposerConfig}
+      composer={shouldHideComposer || transferredChild ? null : bottomComposerConfig}
+      executionReadOnly={moving}
+      permissionReadOnly={moving}
       pluginComposerHost={normalPluginComposerHost}
       pluginComposerScope={normalPluginComposerHost.scope}
       textEffects={promptTextEffects}

@@ -248,3 +248,27 @@ fn private_stderr_rejects_unsafe_existing_paths_without_touching_targets() {
         assert_eq!(fs::read(&target).unwrap(), b"UNCHANGED");
     }
 }
+
+#[test]
+fn public_model_masks_custom_and_private_model_names() {
+    for allowed in [
+        "claude-opus-5-5[1m]",
+        "gpt-6.2-astra",
+        "openrouter/anthropic/claude-sonnet-4-6:thinking",
+        "o3-mini",
+        "kilo/kilo-auto/free",
+        "auto",
+    ] {
+        assert_eq!(public_model(Some(allowed)).as_deref(), Some(allowed));
+    }
+    for private in [
+        "internal-codename-7b",
+        "my-proxy/claude-opus-5-5",
+        "arn:aws:bedrock:us-east-1:123456789012:inference-profile/secret",
+        "ft:gpt-4o:acme:secret:123",
+        "ollama/qwen3-coder",
+    ] {
+        assert_eq!(public_model(Some(private)).as_deref(), Some("custom"));
+    }
+    assert_eq!(public_model(None), None);
+}

@@ -75,10 +75,17 @@ function runGitIgnoredMatchingStatus(
         "-z",
         "--ignored=matching",
         "--untracked-files=normal",
+        "--no-renames",
       ],
       {
         cwd: args.cwd,
         encoding: "utf8",
+        // Never fetches a partial clone's missing objects, so the checkout's SSH or proxy program can't start (#2189).
+        env: {
+          ...process.env,
+          GIT_NO_LAZY_FETCH: "1",
+          GIT_ALLOW_PROTOCOL: "none",
+        },
         maxBuffer: WORKSPACE_ROOT_IGNORE_STATUS_MAX_BUFFER_BYTES,
         timeout: WORKSPACE_ROOT_IGNORE_STATUS_TIMEOUT_MS,
         windowsHide: true,

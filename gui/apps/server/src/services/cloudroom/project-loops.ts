@@ -6,7 +6,7 @@ import { getAppSettings, getProject } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { cloudroomSystemPrompt } from "../threads/custom-instructions.js";
-import { envRefusal, cloudRepository, localFiles, localProjectPath, pack, workspaceId, workspaceName } from "./project-copy.js";
+import { envRefusal, cloudRepository, localFiles, localProjectPath, pack, projectRemote, workspaceId, workspaceName } from "./project-copy.js";
 
 type Deps = Pick<AppDeps, "db" | "hub" | "config">;
 // The web's limit for a loop's packed .env files (web/lib/cloud-start.ts ENV_LIMIT).
@@ -35,10 +35,12 @@ async function packedEnv(root: string | undefined, repository: string | null): P
 export async function projectLoopSettings(deps: Deps, projectId: string, vps: boolean): Promise<Record<string, unknown>> {
   const project = getProject(deps.db, projectId);
   if (!project) throw new ApiError(404, "cloud_automation", "Project not found.");
-  const repository = cloudRepository(project.gitRemoteUrl);
+  const root = localProjectPath(deps, project.id);
+  // The folder's repo, so a loop made after its origin changed never clones the old one (#2548).
+  const repository = cloudRepository(await projectRemote(deps, project, root));
   if (!repository) throw new ApiError(400, "cloud_automation", "This project needs a GitHub or GitLab.com remote. Create its Cloud loop from a Cloud thread in it instead.");
   const settings = getAppSettings(deps.db), systemPrompt = cloudroomSystemPrompt(deps.db, "cloud", { vps });
-  const env = await packedEnv(localProjectPath(deps, project.id), repository);
+  const env = await packedEnv(root, repository);
   return {
     repository, workspace: workspaceId(project.id), folder: workspaceName(project.name), project_name: project.name,
     ...(env === null ? {} : { env }),

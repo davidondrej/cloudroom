@@ -200,7 +200,7 @@ export function CreditsExplainer() {
 }
 
 const PRO_REASONS = [
-  "Pro gives you 50,000 Cloud Credits a month. Free gives you 3,000.",
+  "Pro gives you 55,000 Cloud Credits a month. Free gives you 1,000.",
   "Pro keeps cloud agents awake 4× longer, so they reply faster.",
   "Pro cloud agents never get paused when the cloud gets busy.",
   "Pro keeps your chat history up to 1 year. Free keeps 7 days.",

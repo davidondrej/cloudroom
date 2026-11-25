@@ -389,7 +389,7 @@ function buildTerminalEnv(args: BuildTerminalEnvArgs): NodeJS.ProcessEnv {
           threadStoragePath: args.threadStoragePath,
         })
       : baseShellEnv;
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...sanitizeInheritedChildProcessEnv({ env: process.env }),
     ...shellEnv,
     BB_TERMINAL_SESSION_ID: args.terminalId,
@@ -399,6 +399,23 @@ function buildTerminalEnv(args: BuildTerminalEnvArgs): NodeJS.ProcessEnv {
     PROMPT_EOL_MARK: "",
     TERM: "xterm-256color",
   };
+  // A root systemd service starts with no HOME, so installers wrote to
+  // `/.cargo` (#1984). Fill it from this account's passwd entry.
+  if (process.platform !== "win32" && !path.isAbsolute(env.HOME ?? "")) {
+    const home = accountHomeDirectory();
+    if (home !== undefined) env.HOME = home;
+  }
+  return env;
+}
+
+/** This account's home from the OS user database, ignoring `$HOME`. */
+function accountHomeDirectory(): string | undefined {
+  try {
+    const home = os.userInfo().homedir;
+    return path.isAbsolute(home) ? home : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -457,8 +474,15 @@ function terminalTitleForStart(
   }
 }
 
+/** `os.homedir()`, or on POSIX this account's home when `$HOME` is empty. */
+function defaultTerminalCwd(): string {
+  const home = os.homedir();
+  if (process.platform === "win32" || path.isAbsolute(home)) return home;
+  return accountHomeDirectory() ?? home;
+}
+
 async function requireTerminalCwd(cwd: string | null): Promise<string> {
-  const resolvedCwd = cwd ?? os.homedir();
+  const resolvedCwd = cwd ?? defaultTerminalCwd();
   if (!path.isAbsolute(resolvedCwd)) {
     throw new Error("Terminal cwd must be an absolute path");
   }

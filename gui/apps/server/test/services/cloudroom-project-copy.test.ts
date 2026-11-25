@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { expect, it } from "vitest";
 import type { CloudroomClient } from "../../src/services/cloudroom/client.js";
 import { createThread, getProject, replaceProjectGitRemoteUrl, setProjectGithubRepo } from "@cloudroom/db";
-import { copyProject, envRefusal, githubRepository, localFiles, localProjectNote, pack, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
+import { copyProject, envRefusal, githubRepository, localFiles, localProjectNote, movedRepos, pack, planProjectCopyOrThrow, projectRemote, refreshProjectRemote } from "../../src/services/cloudroom/project-copy.js";
 import { redactSecrets } from "../../src/services/cloudroom/shares.js";
 import { seedHostSession, seedPrimaryHost, seedProjectWithSource } from "../helpers/seed.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
@@ -133,7 +133,7 @@ it("removes GitHub tokens from a failed clone's Git output before it is shown (#
   expect(safe).toContain("see https://[secret removed]@example.org/x or https://example.org?email=a@b.org");
 });
 
-it("a project folder on this computer that became its own checkout saves and clones its own repo, not the one it was added inside (#1850)", async () => {
+it("a project folder on this computer decides its repo: its own checkout's origin is saved, not the repo it was added inside (#1850) or an old one (#2548)", async () => {
   const harness = await createTestAppHarness();
   const root = mkdtempSync(join(tmpdir(), "cloudroom-project-copy-"));
   const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args]);
@@ -174,6 +174,14 @@ it("a project folder on this computer that became its own checkout saves and clo
     replaceProjectGitRemoteUrl(deps.db, deps.hub, here!.project.id, "git@github.com:example/app.git", "https://github.com/example/newer.git");
     expect(await projectRemote(deps, { id: here!.project.id, gitRemoteUrl: "git@github.com:Example/Outer" }, app)).toBe("https://github.com/example/newer.git");
     expect(saved(here!.project)).toEqual(["https://github.com/example/newer.git", null]);
+    // Any later change to the folder's origin, like a split repo, is saved too, and stays a move for the website until
+    // a warm-up sends it, whatever saved it: here a new thread's copy (#2548).
+    movedRepos.clear();
+    git(app, "remote", "set-url", "origin", "git@github.com:example/split.git");
+    expect(await repository(here!.thread)).toBe("https://github.com/example/split.git");
+    expect(saved(here!.project)).toEqual(["git@github.com:example/split.git", null]);
+    await refreshProjectRemote(deps, here!.project.id);
+    expect([...movedRepos]).toEqual([here!.project.id]);
     // Another computer's folder path that also exists here is left alone.
     expect(await repository(elsewhere!.thread)).toBe("https://github.com/Example/Outer");
     expect(saved(elsewhere!.project)).toEqual(["git@github.com:Example/Outer", 1]);

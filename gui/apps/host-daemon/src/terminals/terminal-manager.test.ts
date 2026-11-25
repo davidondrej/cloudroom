@@ -1002,6 +1002,38 @@ describe("TerminalManager", () => {
     expect(env?.NODE_ENV).toBeUndefined();
   });
 
+  posixOnly("gives a terminal this account's home when the daemon's HOME is empty (#1984)", async () => {
+    vi.stubEnv("HOME", "");
+    const harness = createHarness();
+    await openTerminal(harness);
+
+    expect(harness.adapter.spawned[0]?.args.env.HOME).toBe(os.userInfo().homedir);
+  });
+
+  it("opens a terminal in its given cwd when the home lookup fails (#1984)", async () => {
+    const cwd = await makeTempDir("bb-terminal-no-home-");
+    const homedir = vi.spyOn(os, "homedir").mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+    try {
+      const harness = createHarness();
+      await harness.manager.handleMessage({
+        type: "terminal.open",
+        contributedEnv: [],
+        requestId: "open-no-home",
+        terminalId: "term-no-home",
+        target: { kind: "host_path", cwd },
+        cols: 80,
+        rows: 24,
+        start: DEFAULT_TERMINAL_START,
+      });
+
+      expect(harness.adapter.spawned[0]?.args.cwd).toBe(cwd);
+    } finally {
+      homedir.mockRestore();
+    }
+  });
+
   posixOnly("makes every available node-pty spawn-helper executable", async () => {
     const logger = createFakeLogger();
     const packageDirectory = await makeTempDir("bb-node-pty-package-");

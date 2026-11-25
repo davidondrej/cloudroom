@@ -685,6 +685,7 @@ class MacJobTests(unittest.TestCase):
         popup = mock.Mock(side_effect=lambda args, **_: shown.append(args[3]) or mock.Mock(communicate=lambda: ('Allow', None)))
         jobs, job = preview.MacJobs(Path('/unused')), {'id': 'job', 'command': 'make', 'write': True,
                                                      'cwd': '~/code/' + './' * 100 + '../' * 30 + str(home).lstrip('/') + '/temp/b'}
+        jobs.wanted = {'core'}
         with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'TEMP_FOLDERS', (str(home / 'temp-link'),)), \
                 mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.subprocess, 'Popen', popup), \
                 mock.patch.object(jobs, 'closed', return_value=('ask', None)), mock.patch.object(preview, 'mac_level', return_value='ask'):
@@ -724,15 +725,23 @@ class MacJobTests(unittest.TestCase):
         with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'review', lambda *_: None), \
                 mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.MacJobs, 'ask', lambda *_: True):
             preview.configure(folder, connection, False, None, 'ask')
+            running = []  # Core's next answers to "running": the first confirmation, then the one after Allow.
+            def fetch(url, body, *_):
+                if body['state'] == 'running' and running and not running.pop(0):
+                    raise preview.ControlError(404)
+                if body['state'] == 'done':
+                    results.append(body)
             core = SimpleNamespace(url='http://core', headers={}, key='vm', sandbox=False, connection={},
-                                   config=preview.private_json(folder / 'config.json'),
-                                   fetch=lambda url, body, *_: results.append(body) if body['state'] == 'done' else None)
+                                   config=preview.private_json(folder / 'config.json'), fetch=fetch)
             jobs, run = preview.MacJobs(folder), {'id': 'run', 'command': 'pwd', 'cwd': '~/code/../temp/b', 'write': True}
-            # Allow clicked after the sandbox slept: its write command no longer starts, as nobody would read the result
+            # A sandbox known to be asleep gets no pop-up, and its command does not run: nobody would read the result
             # (feedback 0024).
             jobs.execute(core, 'mac', dict(run))
             self.assertIn('stopped taking commands', bytes.fromhex(results[-1]['stderr']).decode())
-            jobs.wanted = {'vm'}
+            # Core restarted while the pop-up was open, so it no longer knows the job: the approved command does not run.
+            jobs.wanted, running[:] = {'vm'}, [True, False]
+            jobs.execute(core, 'mac', dict(run))
+            self.assertIn('stopped while the approval was open', bytes.fromhex(results[-1]['stderr']).decode())
             jobs.execute(core, 'mac', run)
         self.assertEqual(bytes.fromhex(results[-1]['stdout']).decode().strip(), str(home / 'temp/b'))
         # A folder swapped after Allow no longer matches what was approved, so it does not start.

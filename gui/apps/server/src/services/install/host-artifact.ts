@@ -12,11 +12,12 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
+import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createGzip } from "node:zlib";
 import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
-import { create as createTar } from "tar";
 
 const execFileAsync = promisify(execFile);
 const HOST_DEPENDENCIES = [
@@ -267,32 +268,120 @@ async function listPackageFiles(root: string, dir = ""): Promise<string[]> {
   return files;
 }
 
+// The .tgz node-tar 7 wrote here with `portable: true`, byte for byte: per file
+// a ustar header (after a pax header when the path is long or not ASCII), the
+// data padded to 512 bytes, two zero blocks, then gzip level 9 with OS byte
+// 255. Hard links are packed as plain files.
+function tarString(block: Buffer, offset: number, size: number, value: string) {
+  block.write(value, offset, size, "utf8");
+  return value.length !== Buffer.byteLength(value) || value.length > size;
+}
+
+function tarNumber(block: Buffer, offset: number, size: number, value: number) {
+  const octal = Math.floor(value).toString(8);
+  block.write(
+    octal.length === size - 1
+      ? `${octal}\0`
+      : `${octal.padStart(size - 2, "0")} \0`,
+    offset,
+    size,
+    "ascii",
+  );
+}
+
+// node-tar's split: a path of 100+ bytes keeps its leading folders in the
+// 155-byte prefix ("package" always fits), and a name over 100 bytes needs pax.
+function splitTarPath(path: string): [string, string, boolean] {
+  if (Buffer.byteLength(path) < 100) return [path, "", false];
+  let name = posix.basename(path);
+  let prefix = posix.dirname(path);
+  while (Buffer.byteLength(prefix) > 155) {
+    name = posix.join(posix.basename(prefix), name);
+    prefix = posix.dirname(prefix);
+  }
+  return Buffer.byteLength(name) <= 100
+    ? [name, prefix, false]
+    : [name.slice(0, 99), prefix, true];
+}
+
+function tarHeader(path: string, type: "0" | "x", mode: number, size: number) {
+  const block = Buffer.alloc(512);
+  const [name, prefix, tooLong] = splitTarPath(path);
+  let needsPax = tarString(block, 0, 100, name) || tooLong;
+  tarNumber(block, 100, 8, mode);
+  tarNumber(block, 124, 12, size);
+  tarNumber(block, 136, 12, NPM_PACK_MTIME.getTime() / 1000);
+  block[156] = type.charCodeAt(0);
+  block.write("ustar\u000000", 257, "ascii");
+  tarNumber(block, 329, 8, 0);
+  tarNumber(block, 337, 8, 0);
+  needsPax = tarString(block, 345, 155, prefix) || needsPax;
+  // The still-empty checksum field counts as 8 spaces.
+  tarNumber(
+    block,
+    148,
+    8,
+    block.reduce((sum, byte) => sum + byte, 8 * 0x20),
+  );
+  return { block, needsPax };
+}
+
+function paxRecord(key: string, value: string | number): string {
+  const record = ` ${key}=${value}\n`;
+  const bytes = Buffer.byteLength(record);
+  // The record's length counts its own digits.
+  let digits = String(bytes).length;
+  if (bytes + digits >= 10 ** digits) digits += 1;
+  return `${digits + bytes}${record}`;
+}
+
+const padTo512 = (bytes: Buffer) =>
+  Buffer.concat([bytes, Buffer.alloc((512 - (bytes.length % 512)) % 512)]);
+
+async function* tarBlocks(root: string, files: string[]) {
+  for (const file of files) {
+    const stats = await lstat(join(root, file));
+    const data = await readFile(join(root, file));
+    // Windows has no exec bit, so every mode is set explicitly.
+    const executable = HOST_EXECUTABLES.has(file) || (stats.mode & 0o111) !== 0;
+    const path = `package/${file}`;
+    const header = tarHeader(
+      path,
+      "0",
+      executable ? 0o755 : 0o644,
+      data.length,
+    );
+    if (header.needsPax) {
+      const pax = Buffer.from(
+        paxRecord("path", path) +
+          paxRecord("mtime", NPM_PACK_MTIME.getTime() / 1000) +
+          paxRecord("size", data.length),
+      );
+      const name = `PaxHeader/${posix.basename(path)}`.slice(0, 99);
+      yield tarHeader(name, "x", 0o644, pax.length).block;
+      yield padTo512(pax);
+    }
+    yield header.block;
+    if (data.length > 0) yield padTo512(data);
+  }
+  yield Buffer.alloc(1024);
+}
+
 export async function packHostPackage(
   hostPackageRoot: string,
 ): Promise<Buffer> {
+  const files = await listPackageFiles(hostPackageRoot);
   const chunks: Buffer[] = [];
-  const archive = createTar(
-    {
-      cwd: hostPackageRoot,
-      gzip: { level: 9 },
-      mtime: NPM_PACK_MTIME,
-      portable: true,
-      prefix: "package",
-      // Windows has no exec bit, so set every mode explicitly. This relies on
-      // node-tar reusing this stat object; the mode test in
-      // host-artifact.test.ts catches it if a tar update changes that.
-      filter: (path, stat) => {
-        const executable =
-          HOST_EXECUTABLES.has(path.replaceAll("\\", "/")) ||
-          (stat.mode! & 0o111) !== 0;
-        stat.mode = (stat.mode! & ~0o7777) | (executable ? 0o755 : 0o644);
-        return true;
-      },
+  await pipeline(
+    tarBlocks(hostPackageRoot, files),
+    createGzip({ level: 9 }),
+    async (gzipped: AsyncIterable<Buffer>) => {
+      for await (const chunk of gzipped) chunks.push(chunk);
     },
-    await listPackageFiles(hostPackageRoot),
   );
-  for await (const chunk of archive) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks);
+  const bytes = Buffer.concat(chunks);
+  bytes[9] = 255; // gzip's OS byte: "unknown", the same on every OS
+  return bytes;
 }
 
 function sha256(bytes: Uint8Array): string {

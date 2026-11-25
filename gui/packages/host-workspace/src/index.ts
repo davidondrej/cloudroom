@@ -4,7 +4,10 @@ export type { HostWorkspace, ProvisionWorkspaceArgs } from "./provision.js";
 
 export type { PullRequestActionOptions } from "./provision.js";
 export { withGitRefMutationLock } from "bb-environment-provider-host/process-local-lock";
-export { gitSafetyArgs } from "bb-environment-provider-host/git";
+export {
+  GIT_NO_FETCH_ENV,
+  gitSafetyArgs,
+} from "bb-environment-provider-host/git";
 
 export {
   WorkspaceError,

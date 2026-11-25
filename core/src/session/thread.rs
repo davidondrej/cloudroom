@@ -81,7 +81,9 @@ fn mark_note(verb: &str) -> String {
 /// `thread compact`'s follow-up unless `--then` or `--no-then`. The Local CLI sends the same.
 const COMPACT_THEN: &str = "Keep going with your task. If it's done, say what we should do next.";
 const SPAWN_NOTE: &str = "Started in this sandbox and folder. Keep working: Cloudroom sends you a message each time it finishes a turn.";
-const OWN_NOTE: &str = "Started in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
+const STARTING_NOTE: &str = "Still starting: Cloudroom keeps starting it, and `thread archive --self` waits up to 75 s for it to start.";
+const CANCELLED_NOTE: &str = "The children in cancelled_starts were still starting after 75 s. This archive stopped waiting, so they may not get their prompt.";
+const OWN_NOTE: &str = "It runs in its own sandbox with a copy of your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch. It doesn't see your later edits; share work through Git. Use this ID with tell, stop and archive. Keep working: Cloudroom sends you a message each time it finishes a turn.";
 /// What `thread tell` answers once its message is steered, unconfirmed or queued: for a subagent, which reports back,
 /// or for another thread, which doesn't (#177). The website words its own relayed tells the same.
 const CHILD_NOTES: [&str; 3] = [
@@ -387,19 +389,29 @@ async fn pin_child(
     record(&m, &id, "pin", json!({"pinned": true}))
 }
 
-/// The app archives the thread and its children, which also stops this session.
+/// The app archives the thread and its children, which also stops this session. Children it still starts get their
+/// first prompt first, for up to SPAWN_WAIT; the archive cancels and names any still starting then (#2562).
 async fn archive(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
 ) -> Result<Json<Value>, Failure> {
     let session = caller(&m, peer, "thread")?;
+    // Core never clears `archived`, so only an archive during the wait counts: a restored thread archives again.
+    let archived = || (m.local.lock().unwrap().sessions.get(&session)).is_some_and(|s| s.archived);
+    let before = archived();
+    // No task of its own: an archive whose command was killed or stopped shouldn't land later, after the user moved on.
+    let cancelled = relay::settle_starts(&m.local, &session, SPAWN_WAIT).await;
+    // The user, the app or its parent archived it meanwhile: never a second, self archive on top.
+    if !before && archived() {
+        return Ok(Json(json!({"archived":true})));
+    }
     let kept = archive_under(&m, &session)?;
-    record(
-        &m,
-        &session,
-        "archive",
-        json!({"archived":true,"kept_live":kept,"self":true,"wake":m.wake_id()}),
-    )
+    let mut data = json!({"archived":true,"kept_live":kept,"self":true,"wake":m.wake_id()});
+    if !cancelled.is_empty() {
+        data["cancelled_starts"] = json!(cancelled);
+        data["note"] = json!(CANCELLED_NOTE);
+    }
+    record(&m, &session, "archive", data)
 }
 
 /// The app moves this thread to another project once its turn ends: a fresh session in that project's folder, in
@@ -656,9 +668,14 @@ async fn own_child(
                 StatusCode::CONFLICT,
                 &format!("The child could not be started: {error}"),
             ))),
-            None => start
-                .and_then(|s| s.child)
-                .map(|child| Ok(Json(json!({"id":child,"note":OWN_NOTE})))),
+            // Named but not started yet: the website still starts it (#2562).
+            None => start.and_then(|s| {
+                let note = match s.done {
+                    true => OWN_NOTE.to_owned(),
+                    false => format!("{STARTING_NOTE} {OWN_NOTE}"),
+                };
+                Some(Ok(Json(json!({"id":s.child?,"note":note}))))
+            }),
         };
         if answer.is_some() || done {
             waiting.remove(&slot);
@@ -1087,13 +1104,36 @@ async fn tell(
     } else {
         from_thread(&sender, &input.text)
     };
-    let prompt = json!({"text":text});
+    let mut prompt = json!({"text":text});
+    // A message from a thread above it always gets the child's report, even one that repeats its last (#1395).
+    if under {
+        prompt["from_parent"] = json!(true);
+    }
     let request =
         random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
     if under {
         revive(&m, &id, &request, Some(&sender));
     }
-    deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await
+    let told = if to_parent {
+        "your parent thread"
+    } else {
+        "that thread"
+    };
+    (deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await)
+        .map_err(|failure| not_running(failure, told))
+}
+
+/// A tell to a thread here whose agent isn't running (lost, say, in a Core restart, and not started again) says so,
+/// as a tell through the website does (web/lib/mobile.ts), instead of Core's internal refusal (#2565).
+fn not_running(failure: Failure, told: &str) -> Failure {
+    if failure.1.0["error"] != super::GONE {
+        return failure;
+    }
+    let error = format!(
+        "Not delivered: {told}'s agent isn't running, so it can't take messages, and sending it again won't help. \
+         Say what it needed in your reply here instead; the user sees it."
+    );
+    fail(StatusCode::CONFLICT, &error)
 }
 
 /// A tell from a thread that started this one first restarts its lost agent (a crash after its one automatic
@@ -1379,6 +1419,18 @@ fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
     (0..words.len())
         .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
         .map(|i| words[i])
+}
+
+/// `thread show` of a child this thread last heard failed, while its saved chat says it is at work (#2047). Nothing
+/// orders that chat after the failure: it may be newer work, or the failed turn not saved yet. So the failure stays
+/// as reported, and the item only adds what the chat says.
+fn resumed(child: &mut Value, chat: &Value) {
+    if let Some(state @ ("starting_turn" | "running" | "resuming")) = chat["state"].as_str() {
+        child["chatState"] = json!(state);
+        child["note"] = json!(format!(
+            "Its saved chat says {state}: it may be at work again after this failure, or the failed turn isn't saved yet. Its next turn report settles it."
+        ));
+    }
 }
 
 /// A Core session ID: `cr_` and up to 80 ASCII letters, digits, underscores or hyphens, as the app checks them.
@@ -1776,7 +1828,23 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                     );
                     return Ok(1);
                 };
-                child.take()
+                let mut child = child.take();
+                // The list keeps a failed turn's report until the next one, but the child may be at work again, say
+                // after a usage limit reset (#2047): what its chat says, as `output` reads it, is added. One read of
+                // 5 s at most; a failure adds nothing.
+                if child["sandbox"] == "own"
+                    && child["state"] == "error"
+                    && relay::thread_id(ids[0])
+                {
+                    let path = format!("/children/{}", ids[0]);
+                    let limit = Some(Duration::from_secs(5));
+                    let read =
+                        crate::mac::request_within(crate::mac::SOCKET, "GET", &path, None, limit);
+                    if let Ok(chat) = read.await {
+                        resumed(&mut child, &chat);
+                    }
+                }
+                child
             }
             Ok(_) => return usage(),
             Err(code) => return Ok(code),
@@ -1945,8 +2013,52 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{first_key, mark_note, mark_waited, mention, missing_value, plain, session_id};
+    use super::{
+        first_key, mark_note, mark_waited, mention, missing_value, not_running, plain, resumed,
+        session_id,
+    };
     use serde_json::json;
+
+    // #2047: a failed child whose saved chat says running keeps its error, since that chat may be the failed turn
+    // not saved yet; it only adds what the chat says.
+    #[test]
+    fn a_failed_child_keeps_its_error_whatever_its_chat_says() {
+        let failed =
+            json!({"id":"thr_a","state":"error","status":"error","sandbox":"own","issue":"x"});
+        let mut child = failed.clone();
+        resumed(&mut child, &json!({"state":"running","reply":"Working"}));
+        assert_eq!(child["chatState"], "running");
+        child
+            .as_object_mut()
+            .unwrap()
+            .retain(|k, _| k != "chatState" && k != "note");
+        assert_eq!(child, failed);
+        for chat in [json!({"state":"idle"}), json!({}), json!(null)] {
+            let mut child = failed.clone();
+            resumed(&mut child, &chat);
+            assert_eq!(child, failed);
+        }
+    }
+
+    // #2565: a child's tell to a parent that lost its agent printed Core's internal refusal.
+    #[test]
+    fn a_tell_to_an_agent_that_isnt_running_says_so() {
+        use axum::http::StatusCode;
+        let gone = super::fail(StatusCode::CONFLICT, super::super::GONE);
+        let (status, said) = not_running(gone, "your parent thread");
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            said["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Not delivered: your parent thread's agent isn't running")
+        );
+        let other = super::fail(
+            StatusCode::CONFLICT,
+            "storage unsafe; new execution is blocked",
+        );
+        assert_eq!(not_running(other.clone(), "that thread").1.0, other.1.0);
+    }
 
     // #2271: `thread show`'s moved-child check puts the ID in a request path, so only a whole session ID gets there.
     #[test]

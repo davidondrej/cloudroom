@@ -156,6 +156,17 @@ export async function stopSharing(deps: AppDeps, threadId: string): Promise<void
   track(deps, "stopped", link, threadId);
 }
 
+/** Deleting a thread or project also deletes its shared copies, so old links stop working. Checks every share this
+ *  computer made, so one a signed-out or offline delete missed goes with the next delete. */
+export async function stopSharingDeleted(deps: AppDeps): Promise<void> {
+  try {
+    for (const threadId of Object.keys(await readStore(deps))) {
+      const thread = getThread(deps.db, threadId);
+      if (!thread || thread.deletedAt) await stopSharing(deps, threadId).catch(() => {});
+    }
+  } catch { /* never fails a delete; the next one tries again */ }
+}
+
 export async function continueShare(deps: AppDeps, link: string): Promise<{ threadId: string; projectId: string }> {
   const token = link.trim().match(TOKEN)?.[1];
   if (!token) throw new ApiError(400, "invalid_share_link", "This is not a Cloudroom share link.");

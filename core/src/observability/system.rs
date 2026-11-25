@@ -5,11 +5,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs,
     os::unix::fs::MetadataExt,
     path::Path,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 /// Linux reports process CPU in 100 Hz ticks (USER_HZ) on every architecture we run on.
@@ -31,6 +31,9 @@ pub(super) const PREVIEW_IN_USE_MS: u64 = 2 * 60 * 60 * 1000;
 const GLANCE_BUSY_US: u64 = 500_000;
 /// More processes than any sandbox runs in a minute; a fork storm only loses names, never CPU.
 const GLANCE_MAX: usize = 20_000;
+/// How far back the dashboard's `cpuMinuteMs` looks. The website's sleep job judges background jobs by it, so one
+/// quiet moment never stops a busy job (#2526).
+const RECENT: Duration = Duration::from_secs(180);
 
 #[derive(Serialize)]
 pub(crate) struct Resources {
@@ -49,6 +52,9 @@ pub(crate) struct Resources {
     /// Disk the history journal takes, with the CPU minute (#280).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) journal_bytes: Option<u64>,
+    /// CPU used per minute over the last `RECENT` (`per_minute`). Dashboard only.
+    #[serde(skip)]
+    cpu_minute_ms: Option<u64>,
 }
 
 /// Where this machine's (or container's) CPU went in the last minute. Program names only, never arguments or paths.
@@ -166,7 +172,7 @@ impl Resources {
                 .filter(|(used, total)| *total > 0 && used <= total)
                 .map(|(used, total)| used as f64 * 100.0 / total as f64)
         };
-        json!({"cpu": self.cpu_used_percent,
+        json!({"cpu": self.cpu_used_percent, "cpuMinuteMs": self.cpu_minute_ms,
             "memory": percent(self.memory_used_bytes, self.memory_total_bytes),
             "disk": self.workspace_disk.as_ref().and_then(|d| percent(Some(d.used_bytes), d.used_bytes.checked_add(d.available_bytes))),
             "memoryUsedBytes": self.memory_used_bytes, "memoryTotalBytes": self.memory_total_bytes,
@@ -189,6 +195,8 @@ pub(super) struct Sampler {
     seen: Processes,
     /// The container's CPU counter at the last glance.
     glance_usage: Option<u64>,
+    /// The CPU counter `cpu_used_percent` reads (ms, all CPUs) at each sample of the last `RECENT`, oldest first.
+    recent: VecDeque<(Instant, u64)>,
 }
 
 impl Sampler {
@@ -206,7 +214,8 @@ impl Sampler {
                         .then(|| (total - idle) as f64 * 100.0 / total as f64)
                 });
         self.cpu = current;
-        if let Some((usage, cpus)) = container_usage().zip(cgroup_cpus()) {
+        let container = container_usage().zip(cgroup_cpus());
+        if let Some((usage, cpus)) = container {
             let now = Instant::now();
             cpu_used_percent = self.container_cpu.and_then(|(old, at)| {
                 let wall = now.duration_since(at).as_micros() as f64 * cpus;
@@ -240,6 +249,10 @@ impl Sampler {
             agents: None,
             cpu_minute: None,
             journal_bytes: None,
+            cpu_minute_ms: container
+                .map(|(usage, _)| usage / 1000)
+                .or(current.map(|(total, idle)| total.saturating_sub(idle) * MS_PER_TICK))
+                .and_then(|used| per_minute(&mut self.recent, Instant::now(), used)),
         }
     }
 
@@ -323,6 +336,24 @@ impl Sampler {
             burning,
         })
     }
+}
+
+/// Adds a reading of a CPU counter (ms used, all CPUs) and returns the CPU used per minute over the last `RECENT`, once
+/// the readings span a minute. A counter that went back (a new container) starts over.
+fn per_minute(recent: &mut VecDeque<(Instant, u64)>, at: Instant, used: u64) -> Option<u64> {
+    if recent.back().is_some_and(|&(_, last)| used < last) {
+        recent.clear();
+    }
+    recent.push_back((at, used));
+    while recent
+        .get(1)
+        .is_some_and(|&(time, _)| at.duration_since(time) >= RECENT)
+    {
+        recent.pop_front();
+    }
+    let &(start, first) = recent.front()?;
+    let span = at.duration_since(start);
+    (span >= Duration::from_secs(60)).then(|| (used - first) * 60_000 / span.as_millis() as u64)
 }
 
 /// The top programs by CPU, and `(other)` for the rest.
@@ -535,6 +566,7 @@ fn disk_percentage_excludes_reserved_blocks() {
         agents: None,
         cpu_minute: None,
         journal_bytes: None,
+        cpu_minute_ms: None,
     };
     assert_eq!(resources.dashboard()["disk"], 100.0);
     resources.workspace_disk = Some(Disk {
@@ -581,6 +613,31 @@ fn ticks(program: &str, own: u64, children: u64) -> Ticks {
         own,
         children,
     }
+}
+
+#[test]
+fn cpu_per_minute_covers_the_last_three_minutes() {
+    let (start, mut recent) = (Instant::now(), VecDeque::new());
+    let mut read =
+        |seconds, used| per_minute(&mut recent, start + Duration::from_secs(seconds), used);
+    assert_eq!(read(0, 1_000), None);
+    assert_eq!(read(30, 16_000), None, "under a minute of readings");
+    assert_eq!(
+        read(66, 34_000),
+        Some(30_000),
+        "per 60 s, not per 66 s between readings"
+    );
+    assert_eq!(read(200, 34_000), Some(9_900), "a quiet stretch lowers it");
+    assert_eq!(
+        read(250, 34_000),
+        Some(0),
+        "the busy minute is over 3 minutes old"
+    );
+    assert_eq!(
+        read(320, 5_000),
+        None,
+        "a counter that went back starts over"
+    );
 }
 
 #[test]

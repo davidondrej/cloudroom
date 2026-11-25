@@ -2171,6 +2171,75 @@ describe("public thread data routes", () => {
     });
   });
 
+  it("names a newer reply the open turn is still writing, until it completes (#2451)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedThreadFixture(harness, {
+        thread: { status: "active" },
+      });
+      let sequence = 0;
+      const seed = (
+        turnId: string,
+        type: "turn/started" | "item/agentMessage/delta" | "item/completed",
+        id: string,
+        text: string,
+        parentToolCallId?: string,
+      ) =>
+        seedEvent(harness.deps, {
+          threadId: thread.id,
+          environmentId: environment.id,
+          providerThreadId: "provider-output",
+          scope: turnScope(turnId),
+          sequence: ++sequence,
+          type,
+          data:
+            type === "turn/started"
+              ? { providerThreadId: "provider-output" }
+              : type === "item/completed"
+                ? {
+                    item: {
+                      type: "agentMessage",
+                      id,
+                      text,
+                      ...(parentToolCallId ? { parentToolCallId } : {}),
+                    },
+                  }
+                : {
+                    itemId: id,
+                    delta: text,
+                    ...(parentToolCallId ? { parentToolCallId } : {}),
+                  },
+        } as never);
+      const read = async () =>
+        readJson(
+          await harness.app.request(`/api/v1/threads/${thread.id}/output`),
+        );
+
+      // An interrupted turn's fragment is not live once the next turn starts.
+      seed("turn-1", "turn/started", "", "");
+      seed("turn-1", "item/agentMessage/delta", "msg-0", "Abandoned handoff");
+      seed("turn-2", "turn/started", "", "");
+      await expect(read()).resolves.not.toHaveProperty("partialOutput");
+
+      seed("turn-2", "item/completed", "msg-1", "Compiling");
+      seed("turn-2", "item/agentMessage/delta", "msg-2", "Handoff: ");
+      seed("turn-2", "item/agentMessage/delta", "msg-2", "start validation");
+      // A nested reply with the same item ID neither splices into nor hides the root one.
+      seed("turn-2", "item/agentMessage/delta", "msg-2", " NESTED", "call-1");
+      seed("turn-2", "item/completed", "msg-2", "NESTED", "call-1");
+      await expect(read()).resolves.toMatchObject({
+        output: "NESTED",
+        partialOutput: "Handoff: start validation",
+      });
+
+      seed("turn-2", "item/completed", "msg-2", "Handoff: start validation");
+      await expect(read()).resolves.toEqual({
+        output: "Handoff: start validation",
+        error: null,
+        interruption: null,
+      });
+    });
+  });
+
   it("skips malformed item/completed events and returns the last valid output", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedThreadFixture(harness);

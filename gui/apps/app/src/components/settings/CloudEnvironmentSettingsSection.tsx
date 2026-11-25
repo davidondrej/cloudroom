@@ -168,7 +168,7 @@ function CopyLoginsCard() {
     <Card
       icon="Key"
       title="Auth my agents in the cloud automatically"
-      description="Cloud threads will use this computer's auth for inference providers"
+      description="Cloud threads will use this computer's agent and GitHub CLI logins"
       action={<Switch aria-label="Auth my agents in the cloud automatically" checked={enabled} disabled={!account.data || setCopyLogins.isPending} onCheckedChange={(on) => setCopyLogins.mutate(on)} />}
     >
       {setCopyLogins.error && <p role="alert" className="border-t border-border px-4 py-3 text-xs text-destructive-text">{errorText(setCopyLogins.error)}</p>}

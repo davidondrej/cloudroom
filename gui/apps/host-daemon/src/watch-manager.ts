@@ -283,22 +283,23 @@ export class WatchManager {
     if (!entry.workspace.isGitRepo) {
       return;
     }
-    try {
-      const [lastLocalFingerprint, lastSharedRefsFingerprint] =
-        await Promise.all([
-          entry.workspace.getLocalStateFingerprint(),
-          entry.workspace.getSharedGitRefsFingerprint(),
-        ]);
-      if (this.workspaceEntries.get(entry.target.environmentId) !== entry) {
-        return;
-      }
-      entry.watchState.lastLocalFingerprint = lastLocalFingerprint;
-      entry.watchState.lastSharedRefsFingerprint = lastSharedRefsFingerprint;
-    } catch (error) {
-      if (this.workspaceEntries.get(entry.target.environmentId) !== entry) {
-        return;
-      }
-      this.reportWorkspaceWatchError(entry, error);
+    // Settled one by one, so one failed read never leaves the other unset (#2189).
+    const [local, sharedRefs] = await Promise.allSettled([
+      entry.workspace.getLocalStateFingerprint(),
+      entry.workspace.getSharedGitRefsFingerprint(),
+    ]);
+    if (this.workspaceEntries.get(entry.target.environmentId) !== entry) {
+      return;
+    }
+    if (local.status === "fulfilled") {
+      entry.watchState.lastLocalFingerprint = local.value;
+    } else {
+      this.reportWorkspaceWatchError(entry, local.reason);
+    }
+    if (sharedRefs.status === "fulfilled") {
+      entry.watchState.lastSharedRefsFingerprint = sharedRefs.value;
+    } else {
+      this.reportWorkspaceWatchError(entry, sharedRefs.reason);
     }
   }
 
@@ -359,13 +360,19 @@ export class WatchManager {
           "workspace-content-changed",
         );
         if (args.entry.workspace.isGitRepo && !workspaceContentChanged) {
-          const nextLocalFingerprint =
-            await args.entry.workspace.getLocalStateFingerprint();
-          if (
-            args.entry.watchState.lastLocalFingerprint !== nextLocalFingerprint
-          ) {
-            args.entry.watchState.lastLocalFingerprint = nextLocalFingerprint;
-            changeKinds.push("work-status-changed");
+          // Each read reports its own failure, so it never drops the other's change (#2189).
+          try {
+            const nextLocalFingerprint =
+              await args.entry.workspace.getLocalStateFingerprint();
+            if (
+              args.entry.watchState.lastLocalFingerprint !==
+              nextLocalFingerprint
+            ) {
+              args.entry.watchState.lastLocalFingerprint = nextLocalFingerprint;
+              changeKinds.push("work-status-changed");
+            }
+          } catch (error) {
+            this.reportWorkspaceWatchError(args.entry, error);
           }
         }
       }
@@ -373,15 +380,19 @@ export class WatchManager {
         args.entry.workspace.isGitRepo &&
         pendingKinds.includes("shared-git-refs-changed")
       ) {
-        const nextSharedRefsFingerprint =
-          await args.entry.workspace.getSharedGitRefsFingerprint();
-        if (
-          args.entry.watchState.lastSharedRefsFingerprint !==
-          nextSharedRefsFingerprint
-        ) {
-          args.entry.watchState.lastSharedRefsFingerprint =
-            nextSharedRefsFingerprint;
-          changeKinds.push("git-refs-changed");
+        try {
+          const nextSharedRefsFingerprint =
+            await args.entry.workspace.getSharedGitRefsFingerprint();
+          if (
+            args.entry.watchState.lastSharedRefsFingerprint !==
+            nextSharedRefsFingerprint
+          ) {
+            args.entry.watchState.lastSharedRefsFingerprint =
+              nextSharedRefsFingerprint;
+            changeKinds.push("git-refs-changed");
+          }
+        } catch (error) {
+          this.reportWorkspaceWatchError(args.entry, error);
         }
       }
       if (changeKinds.length === 0) {

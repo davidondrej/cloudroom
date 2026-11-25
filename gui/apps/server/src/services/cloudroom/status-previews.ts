@@ -5,7 +5,7 @@ import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import { CloudroomClient, CloudroomError } from "./client.js";
 import { checkPreviewsNow, helperRunning, macAccess, previewStatus, previewsSetUp, setupPreviews } from "./previews.js";
-import { refreshProjectRemote } from "./project-copy.js";
+import { movedRepos, refreshProjectRemote } from "./project-copy.js";
 import { HOSTED_WEBSITE, publicError, type Capabilities, type CloudroomAccount, type Storage } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
 import { sandboxThread, type SandboxTrigger } from "./sandboxes.js";
@@ -67,7 +67,10 @@ export class CloudStatusPreviews {
     await this.hooks.syncLogins();
     void this.hooks.uploadMacConfig();
     await refreshProjectRemote(this.rt.host.deps, projectId).catch(() => {});
-    await this.rt.sandboxes.warm(this.rt.sandboxProject(projectId), trigger);
+    // Sent until a warm-up goes through, whatever saved the new repo (#2548).
+    const moved = movedRepos.has(projectId);
+    await this.rt.sandboxes.warm(this.rt.sandboxProject(projectId), trigger, moved);
+    movedRepos.delete(projectId);
   }
 
   /** Any app use, Local threads included, keeps the spares warm, so no cloud thread boots (ADRs 0159, 0164). */

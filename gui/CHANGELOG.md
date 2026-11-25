@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 167
+
+Subagents nest six levels deep (2026-11-25)
+
+### Changes
+
+- Subagents can now nest up to six levels deep, and a parent waiting on them shows a grey cube instead of a spinner.
+- A subagent that repeats its last reply no longer wakes its parent or clutters its chat.
+- App shortcuts work while the terminal has focus, and Cmd+Shift+C jumps back to the chat.
+- Cloud threads and loops follow your project to its new repo, and Claude Code in Cloud reads a CLAUDE.md that arrives after it starts.
+- Question cards keep their line breaks, /opus and /neon no longer leave text in the chat box, and Teleport keeps your unsent draft.
+- Security fixes.
+
 ## 166
 
 Side chats pick their own agent (2026-11-24)

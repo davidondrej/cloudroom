@@ -131,6 +131,7 @@ import { requeueRefusedTurnRequest } from "./queue-waits.js";
 import { scheduleThreadProvisioningAdvance } from "./thread-provisioning.js";
 import { pendingImportFork } from "./thread-fork-history.js";
 import { isPreStartThreadStatus } from "./thread-status.js";
+import { deleteLocalChatFileCopies } from "./thread-storage.js";
 import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "./background-task-reconciliation.js";
 
 type ThreadStartCommand = Awaited<ReturnType<typeof buildThreadStartCommand>>;
@@ -1207,6 +1208,7 @@ export function requestThreadStorageDeletion(
     reason: "thread-deleted",
   });
   if (thread.environmentId === null) {
+    deleteLocalChatFileCopies(deps, thread.id);
     markThreadStorageDeleted(deps.db, { threadId: thread.id });
     finalizeStoppedThread(deps, { threadId: thread.id });
     return;
@@ -1243,6 +1245,7 @@ export function requestThreadStorageDeletion(
 export function deleteThreadOnMac(deps: AppDeps, thread: Thread): void {
   const deleted = markThreadDeleted(deps.db, deps.hub, { threadId: thread.id });
   if (deleted) emitPluginThreadDeleted(deleted);
+  void stopSharingDeleted(deps);
   cancelAbandonedProviderCreations(deps, thread.id);
   deps.terminalSessions.closeDeletedThreadTerminals({ threadId: thread.id });
   requestThreadStorageDeletion(
@@ -1693,6 +1696,7 @@ export function requestThreadStopForCurrentState(
 }
 
 import { cloudroom, isCloudThread } from "../cloudroom/commands.js";
+import { stopSharingDeleted } from "../cloudroom/shares.js";
 import { forgetSentMessage } from "../system/first-response-telemetry.js";
 
 export async function stopThreadForCurrentState(
