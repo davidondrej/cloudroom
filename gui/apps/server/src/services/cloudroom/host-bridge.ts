@@ -29,6 +29,7 @@ import { firstAgentThreadId } from "../system/first-agent.js";
 import type { createThreadFromRequest } from "../threads/thread-create.js";
 import {
   cloudPluginInstructions,
+  cloudroomMachineContext,
   cloudroomSystemPrompt,
   dueCustomInstructions,
   markCustomInstructionsLost,
@@ -246,8 +247,12 @@ export class CloudHostBridge {
     ].filter(Boolean).join("\n\n") || undefined;
   }
 
-  prepareInstructionInput(prompt: { text: string; content?: unknown }, customInstructions: string, limit: number) {
-    return prepareCloudInstructionInput(prompt, customInstructions, limit);
+  machineContext(kind: "local" | "cloud"): string {
+    return cloudroomMachineContext(this.deps.db, kind);
+  }
+
+  prepareInstructionInput(prompt: { text: string; content?: unknown }, customInstructions: string, limit: number, savedMachineContext?: string) {
+    return prepareCloudInstructionInput(prompt, customInstructions, limit, this.deps.db, savedMachineContext);
   }
 
   snapshotInstructions(db: DbQueryConnection, thread: Pick<Thread, "id" | "projectId" | "providerId">, action: Command["command"], input: object): object {
@@ -257,7 +262,7 @@ export class CloudHostBridge {
     );
     const context = { threadId: thread.id, projectId: thread.projectId, experimental_execution: { providerId: thread.providerId, model: binding(db, thread.id)?.model ?? null } };
     // Checked with the instructions even when this message won't carry them. The core's real limit is checked again on send.
-    prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null));
+    prepareCloudInstructionInput(prompt, resolveCustomInstructions(context), cloudPromptLimit(null), db);
     // An edit replaces a queued message and a rewind drops later ones, either of which may have carried them.
     return { ...input, customInstructions: dueCustomInstructions(db, context, action === "edit" || action === "rewind") };
   }

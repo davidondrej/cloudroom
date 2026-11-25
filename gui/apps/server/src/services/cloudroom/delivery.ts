@@ -462,6 +462,14 @@ export class CloudDelivery {
       return null;
     }
     if (pending.command === "side_chat") { saveCommandState(this.rt.host.db, threadId, pending.id, "completed"); return null; }
+    // Bind context before the first send. Retries must keep identical bytes under the same request ID.
+    const stored = JSON.parse(pending.input);
+    let machine = stored.machineContext;
+    if (["prompt", "edit", "steer", "rewind"].includes(pending.command) && typeof machine !== "string") {
+      machine = this.rt.host.machineContext("cloud");
+      pending.input = JSON.stringify({ ...stored, machineContext: machine });
+      this.rt.host.db.update(cloudroomCommands).set({ input: pending.input }).where(eq(cloudroomCommands.id, pending.id)).run();
+    }
     if (pending.command === "prompt") {
       const parsed = z.object({
         text: z.string(), reasoning: z.string().optional(), content: z.unknown().optional(),
@@ -476,7 +484,7 @@ export class CloudDelivery {
       const attachments = capabilities.attachments ? await this.queue.uploadAttachments(client, sessionId, pending.id, parsed.attachments ?? [], this.rt.host.getThread(threadId)?.projectId ?? "", capabilities.upload_parts) : [];
       // An upload can take minutes: a delete or a Stop saved meanwhile still wins.
       if (command(this.rt.host.db, pending.id)?.state !== "sending" || unsentDeletes(this.rt.host.db, threadId).has(pending.id)) return null;
-      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), machine);
       // A fork's first message is a native fork of the copied conversation (fork.ts).
       const fork = pending.id === `first_${threadId}` ? cloudForkOf(pending.input) : null;
       const child = pending.id === `first_${threadId}` && Boolean(JSON.parse(pending.input).code_from);
@@ -501,7 +509,7 @@ export class CloudDelivery {
         service_tier: z.string().optional(), customInstructions: z.string().default(""),
       }).parse(JSON.parse(pending.input));
       requireClaudeSkillSupport(parsed.content, capabilities, harness);
-      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.text, content: cloudTextContent(parsed.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), machine);
       const attachments = await this.queue.uploadAttachments(client, sessionId, pending.id, parsed.attachments ?? [], this.rt.host.getThread(threadId)!.projectId, capabilities.upload_parts);
       return client.edit(sessionId, pending.id, parsed.target_request_id, parsed.expected_revision, enriched.text, {
         ...(enriched.content === undefined ? {} : { content: enriched.content as never }), attachments: attachments as never,
@@ -524,7 +532,7 @@ export class CloudDelivery {
       if (parsed.attachments.length && !capabilities.attachments) throw new ApiError(400, "cloudroom_unsupported", "Update the cloud core to use attachments. Your message is saved.");
       // Core steers text only, so files go up first and the agent gets their paths, as Core does for prompt files.
       const uploaded = await this.queue.uploadAttachments(client, sessionId, pending.id, parsed.attachments, this.rt.host.getThread(threadId)?.projectId ?? "", capabilities.upload_parts);
-      const text = [this.rt.host.prepareInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text, ...uploaded.map((file) => `[Attached ${file.kind}: ${file.path}]`)].join("\n");
+      const text = [this.rt.host.prepareInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities), machine).text, ...uploaded.map((file) => `[Attached ${file.kind}: ${file.path}]`)].join("\n");
       return client.steer(sessionId, pending.id, parsed.target_request_id, text);
     }
     if (pending.command === "compact") return client.compact(sessionId, pending.id, z.object({ then: z.string().optional() }).parse(JSON.parse(pending.input)).then);
@@ -532,7 +540,7 @@ export class CloudDelivery {
     if (pending.command === "rewind") {
       const parsed = z.object({ before: z.string(), last_turn_id: z.string().optional(), customInstructions: z.string().default(""), replacement: z.object({ request_id: z.string(), text: z.string(), content: z.unknown().optional(), attachments: z.array(z.object({ name: z.string(), kind: z.enum(["image", "file"]), localPath: z.string().optional(), path: z.string().optional(), id: z.string().optional() })).optional(), reasoning: z.string().optional(), service_tier: z.string().optional() }) }).parse(JSON.parse(pending.input));
       requireClaudeSkillSupport(parsed.replacement.content, capabilities, harness);
-      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.replacement.text, content: cloudTextContent(parsed.replacement.content) }, parsed.customInstructions, cloudPromptLimit(capabilities));
+      const enriched = this.rt.host.prepareInstructionInput({ text: parsed.replacement.text, content: cloudTextContent(parsed.replacement.content) }, parsed.customInstructions, cloudPromptLimit(capabilities), machine);
       const attachments = await this.queue.uploadAttachments(client, sessionId, parsed.replacement.request_id, parsed.replacement.attachments ?? [], this.rt.host.getThread(threadId)!.projectId, capabilities.upload_parts);
       return client.rewind(sessionId, pending.id, parsed.before, parsed.last_turn_id, { ...parsed.replacement, ...enriched, content: enriched.content as never, attachments: attachments as never });
     }

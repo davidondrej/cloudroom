@@ -34,7 +34,7 @@ export class CloudQueue {
   enqueue(threadId: string, id: string, action: Command["command"], input: object, at?: number): void {
     const previous = command(this.rt.host.db, id);
     if (previous) {
-      const { customInstructions: _instructions, workspaceContext: _workspace, ...original } = JSON.parse(previous.input);
+      const { customInstructions: _instructions, machineContext: _machine, workspaceContext: _workspace, ...original } = JSON.parse(previous.input);
       if (previous.threadId !== threadId || previous.command !== action || JSON.stringify(original) !== JSON.stringify(input)) {
         throw new ApiError(409, "request_conflict", "Request ID was already used with different content");
       }
