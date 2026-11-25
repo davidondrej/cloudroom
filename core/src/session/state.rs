@@ -980,24 +980,44 @@ impl Local {
                 native.as_deref(),
             )?;
         }
-        let record = Record {
-            sequence: self.journal.last() + 1,
-            session_id: session.into(),
-            kind: kind.into(),
-            timestamp_ms: Some(now_ms()),
-            data,
-            native,
-        };
-        self.journal.append(&serde_json::to_vec(&record)?)?;
-        if kind != "parent_report" {
-            self.loud = record.sequence;
+        let mut records = self.append_all(session, [(kind, data, native)])?;
+        Ok(records.pop().expect("one record"))
+    }
+
+    /// Saves records with one directory sync, then applies and announces them together. Not for `native_record`,
+    /// whose checkpoint `append` checks against the cursor each record moves.
+    pub(super) fn append_all<'a>(
+        &mut self,
+        session: &str,
+        records: impl IntoIterator<Item = (&'a str, Value, Option<String>)>,
+    ) -> io::Result<Vec<Record>> {
+        let records: Vec<_> = (self.journal.last() + 1..)
+            .zip(records)
+            .map(|(sequence, (kind, data, native))| Record {
+                sequence,
+                session_id: session.into(),
+                kind: kind.into(),
+                timestamp_ms: Some(now_ms()),
+                data,
+                native,
+            })
+            .collect();
+        let encoded = (records.iter())
+            .map(serde_json::to_vec)
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let bytes: Vec<_> = encoded.iter().map(Vec::as_slice).collect();
+        let last = self.journal.append_all(&bytes)?;
+        for record in &records {
+            if record.kind != "parent_report" {
+                self.loud = record.sequence;
+            }
+            self.apply(record)?;
         }
-        self.apply(&record)?;
-        if record.sequence >= self.snapshot_at + SNAPSHOT_EVERY {
+        if last >= self.snapshot_at + SNAPSHOT_EVERY {
             self.save_snapshot();
         }
-        self.changed.send_replace(record.sequence);
-        Ok(record)
+        self.changed.send_replace(last);
+        Ok(records)
     }
 }
 
@@ -1141,6 +1161,16 @@ mod tests {
                 local.save_snapshot();
             }
         }
+        let deltas = [
+            ("text_delta", json!({"delta":" wor"}), None),
+            ("thinking_delta", json!({"delta":"ld"}), None),
+        ];
+        let saved = local.append_all("a", deltas).unwrap();
+        assert_eq!(
+            saved.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            [15, 16]
+        );
+        assert_eq!(*local.changed.borrow(), 16);
         let expected = state(&local);
         let reply = vec![("p0".to_owned(), "done".to_owned())];
         assert_eq!(local.sessions["a"].replies, reply);

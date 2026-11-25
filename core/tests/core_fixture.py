@@ -162,6 +162,10 @@ def codex():
                     event("item/started", turnId=turn, item={"id": "tool", "type": "commandExecution", "processId": str(child.pid)})
                 elif text == "hang":
                     time.sleep(30)
+                elif text == "burst":
+                    for n in range(200):
+                        event("item/agentMessage/delta", turnId=turn, itemId="text", delta=f"{n} ")
+                    event("turn/completed", turn={"id": turn, "status": "completed"})
                 elif text == "long":
                     event("item/completed", turnId=turn, item={"id": "text", "type": "agentMessage", "text": LONG_REPLY})
                     event("turn/completed", turn={"id": turn, "status": "completed"})
@@ -692,6 +696,15 @@ class RecoveryTests(unittest.TestCase):
     def ready(self):
         self.wait(lambda: self.status()["state"] == "idle", "resumed idle session")
         self.assertEqual(self.status()["native_id"], self.native)
+
+    def test_a_burst_of_deltas_is_saved_whole_and_in_order(self):
+        # Deltas that queue while the disk is busy are saved together: none may be lost, reordered or renumbered.
+        self.seed(); self.start(); self.ready()
+        self.prompt("burst", "burst")
+        self.wait(lambda: self.status()["receipts"]["burst"]["state"] == "completed", "burst completed")
+        records = self.service.records("cr_seed")
+        self.assertEqual([r["sequence"] for r in records], list(range(1, len(records) + 1)))
+        self.assertEqual([r["data"]["delta"] for r in records if r["kind"] == "text_delta"], [f"{n} " for n in range(200)])
 
     def test_a_switch_continues_the_conversation_once_and_a_move_freezes_the_thread(self):
         # #237: any computer switches through Core, which hands the website the new session before closing the old one.

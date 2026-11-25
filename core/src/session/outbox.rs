@@ -273,20 +273,29 @@ impl Journal {
     }
 
     pub fn append(&mut self, record: &[u8]) -> io::Result<u64> {
-        let id = self.next;
+        self.append_all(&[record])
+    }
+
+    /// Saves records in order with one directory sync for all of them, and returns the last one's id.
+    pub fn append_all(&mut self, records: &[&[u8]]) -> io::Result<u64> {
+        let files: Vec<_> = (self.next..)
+            .map(record_name)
+            .zip(records.iter().copied())
+            .collect();
         // A write refused for space deletes the reserve kept for history (`Guard::reserve`) and tries again (#606).
-        match self.write_atomic(&record_name(id), record) {
+        match self.write_atomic(&files) {
             Err(error)
-                if no_space(&error)
+                if self.writable
+                    && no_space(&error)
                     && fs::remove_file(self.directory.join(crate::workspace::storage::RESERVE))
                         .is_ok() =>
             {
-                self.write_atomic(&record_name(id), record)?
+                self.write_atomic(&files)?
             }
             written => written?,
         }
-        self.next += 1;
-        Ok(id)
+        self.next += records.len() as u64;
+        Ok(self.next - 1)
     }
 
     /// The replay snapshot (`Local::save_snapshot`), if one was saved.
@@ -350,7 +359,7 @@ impl Journal {
         if end <= self.saved || end >= self.next {
             return Err(io::Error::other("invalid upload batch"));
         }
-        self.write_atomic("uploading", end.to_string().as_bytes())?;
+        self.write_atomic(&[("uploading".into(), end.to_string().as_bytes())])?;
         self.uploading = Some(end);
         Ok(())
     }
@@ -371,39 +380,54 @@ impl Journal {
         if id < self.saved || id >= self.next {
             return Err(io::Error::other("invalid acknowledgement"));
         }
-        self.write_atomic("saved", id.to_string().as_bytes())?;
+        self.write_atomic(&[("saved".into(), id.to_string().as_bytes())])?;
         self.saved = id;
         Ok(())
     }
 
-    fn write_atomic(&mut self, name: &str, bytes: &[u8]) -> io::Result<()> {
+    fn write_atomic(&mut self, files: &[(String, &[u8])]) -> io::Result<()> {
         if !self.writable {
             return Err(io::Error::other(
                 "journal requires recovery after a write failure",
             ));
         }
-        // A failure before the rename leaves the journal as it was (a full disk fails here), so only that write fails.
-        let temporary = self.directory.join("pending.tmp");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        // A partial write gives its space back at once, so a full disk isn't left at zero.
-        if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
+        // Every file is synced before the first rename, so a failure before it leaves the journal as it was
+        // (a full disk fails here), and only this write fails.
+        let temporary = |i: usize| match i {
+            0 => self.directory.join("pending.tmp"),
+            _ => self.directory.join(format!("pending.{i}.tmp")),
+        };
+        let cleanup = |count: usize| {
+            for i in 0..count {
+                let _ = fs::remove_file(temporary(i));
+            }
+        };
+        for (i, (_, bytes)) in files.iter().enumerate() {
+            let path = temporary(i);
+            let write = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&path)
+                .and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()));
+            // A partial write gives its space back at once, so a full disk isn't left at zero.
+            if let Err(error) = write {
+                cleanup(i + 1);
+                return Err(error);
+            }
         }
-        // A rename refused for space changed nothing (a full disk can refuse a new directory block), so only that
-        // write fails (#211). Any other failed rename, or a failed directory fsync after one, has an uncertain outcome:
-        // refuse further writes until reopening, rather than overwrite that record.
-        let renamed = fs::rename(&temporary, self.directory.join(name));
-        self.writable = renamed.as_ref().is_err_and(no_space);
-        if self.writable {
-            let _ = fs::remove_file(&temporary);
+        // A first rename refused for space changed nothing (a full disk can refuse a new directory block), so only
+        // this write fails (#211). Any other failed rename, or a failed directory fsync after one, has an uncertain
+        // outcome: refuse further writes until reopening, rather than overwrite that record.
+        for (i, (name, _)) in files.iter().enumerate() {
+            let renamed = fs::rename(temporary(i), self.directory.join(name));
+            self.writable = i == 0 && renamed.as_ref().is_err_and(no_space);
+            if self.writable {
+                cleanup(files.len());
+            }
+            renamed?;
         }
-        renamed?;
         File::open(&self.directory)?.sync_all()?;
         self.writable = true;
         Ok(())
