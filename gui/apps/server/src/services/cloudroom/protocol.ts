@@ -154,6 +154,7 @@ export const capabilitiesSchema = z.object({
   credits_usage: z.boolean().default(false),
   subagents: z.boolean().default(false),
   long_prompts: z.boolean().default(false),
+  project_copy: z.boolean().default(false),
   cloud_threads: z.boolean().default(false),
   room_ids: z.boolean().default(false),
   harnesses: z.array(z.object({

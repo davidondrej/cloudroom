@@ -2,6 +2,7 @@
 import concurrent.futures
 import http.client
 import json
+import os
 from pathlib import Path
 import secrets
 import time
@@ -228,6 +229,119 @@ class WorkspaceTests(unittest.TestCase):
         self.service.request('POST','/v1/sessions',{'request_id':'bad','workspace':'good'},401,token=None)
         self.service.request('POST','/v1/workspaces/old',{},405)
         self.service.request('POST','/v1/workspaces/old/prepare',{},404)
+
+    # A harness reads skills and AGENTS.md or CLAUDE.md as it starts, so it starts once the app's project copy lands
+    # (ADR 0209): `<folder>.cloudroom-files` says `copying`, then `ready` or `failed: REASON`.
+    LANDED = ['.agents','.claude','AGENTS.md','CLAUDE.md']
+
+    def copy_into(self, path):
+        for file in ['AGENTS.md','CLAUDE.md','.agents/skills/probe/SKILL.md','.claude/skills/probe/SKILL.md']:
+            (path/file).parent.mkdir(parents=True,exist_ok=True); (path/file).write_text('probe')
+
+    def started_with(self, sid):
+        native = until(lambda:self.service.session(sid)['native_id'],'harness '+sid,10)
+        return json.loads((Path(self.env['CLOUDROOM_CODEX_HOME'])/(native+'.started')).read_text())
+
+    def begin(self, key, **start):
+        sid = self.service.request('POST','/v1/sessions',{'request_id':key,**start},202)['session_id']
+        self.service.request('POST',f'/v1/sessions/{sid}/prompts',{'request_id':'hello','text':'hello'},202)
+        return sid
+
+    def test_harness_starts_once_a_running_project_copy_lands(self):
+        self.start()
+        root = self.state.resolve()/'code'
+        status = root/'project.cloudroom-files'; status.write_text('copying')
+        sid = self.begin('copied',workspace='copied',workspace_name='project')
+        time.sleep(1); waiting = self.service.session(sid)
+        self.copy_into(root/'project'); status.write_text('ready')
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','first turn after the copy',10)
+        self.assertEqual(self.started_with(sid),self.LANDED)
+        self.assertEqual((waiting['state'],waiting['native_id']),('pending',None))
+
+    def test_a_mark_left_by_a_dead_copy_holds_no_start(self):
+        # Say the Mac app quit mid-copy on a VM, where only a project's first thread copies: nothing clears its mark.
+        self.start()
+        status = self.state.resolve()/'code'/'project.cloudroom-files'; status.write_text('copying')
+        old = time.time()-6*60; os.utime(status,(old,old))
+        started = time.monotonic()
+        sid = self.begin('later',workspace='later',workspace_name='project')
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','start beside a stale mark',4)
+        self.assertLess(time.monotonic()-started,4)
+
+    def test_a_promised_copy_holds_the_harness_until_its_status_file_says_it_landed(self):
+        # The app marks the folder only after Core accepts the start, so the start says a copy is coming. Here a
+        # child in a Personal project, whose status file sits next to the sandbox root, as in the bug report.
+        self.start()
+        root = self.state.resolve()/'code'
+        status = self.state.resolve()/'code.cloudroom-files'
+        sid = self.begin('child',workspace='root',project_copy=True)
+        time.sleep(1); unmarked = self.service.session(sid)
+        status.write_text('copying'); time.sleep(.5)
+        self.copy_into(root); status.write_text('ready')
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','first turn after the copy',10)
+        self.assertEqual(self.started_with(sid),self.LANDED)
+        self.assertEqual((unmarked['state'],unmarked['native_id']),('pending',None))
+        # A retried start may plan its copy differently; it is still the same start.
+        self.assertEqual(self.service.request('POST','/v1/sessions',{'request_id':'child','workspace':'root'},202)['session_id'],sid)
+
+    def test_no_copy_or_a_failed_one_starts_the_harness_at_once(self):
+        # Well under the 10 s an empty folder with no status file gets in `room-cli files wait`.
+        self.start()
+        root = self.state.resolve()/'code'
+        for key, start in [('blank',{'workspace':'root'}),('blank-project',{'workspace':'blank','workspace_name':'blank'}),
+                           ('failed',{'workspace':'failed','workspace_name':'failed','project_copy':True})]:
+            if key == 'failed': (root/'failed.cloudroom-files').write_text('failed: the clone failed')
+            started = time.monotonic()
+            sid = self.begin(key,**start)
+            until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','start without a copy '+key,4)
+            self.assertLess(time.monotonic()-started,4)
+            self.assertEqual(self.started_with(sid),[])
+
+    def test_a_waiting_start_holds_up_no_other_start(self):
+        self.start()
+        root = self.state.resolve()/'code'
+        for n in range(os.cpu_count() or 2):
+            (root/f'held-{n}.cloudroom-files').write_text('copying')
+            self.begin(f'held-{n}',workspace=f'held-{n}',workspace_name=f'held-{n}')
+        sid = self.begin('free',workspace='free',workspace_name='free')
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','start beside waiting ones',4)
+        self.assertIsNone(self.service.session('cr_held-0')['native_id'])
+
+    def test_stop_and_close_during_the_wait(self):
+        self.start()
+        root = self.state.resolve()/'code'
+        for key in ['stopped','closed']: (root/f'{key}.cloudroom-files').write_text('copying')
+        stopped, closed = self.begin('stopped',workspace='stopped',workspace_name='stopped'), self.begin('closed',workspace='closed',workspace_name='closed')
+        self.service.request('POST',f'/v1/sessions/{stopped}/stop',{'request_id':'stop'},202)
+        self.service.request('POST',f'/v1/sessions/{closed}/close',{'request_id':'close'},202)
+        until(lambda:self.service.session(stopped)['receipts']['stop']['state']=='completed','stop during the wait',4)
+        until(lambda:self.service.session(closed)['state']=='closed','close during the wait',4)
+        for key in ['stopped','closed']: self.copy_into(root/key); (root/f'{key}.cloudroom-files').write_text('ready')
+        until(lambda:self.service.session(stopped)['state']=='idle','stopped start after the copy',10)
+        self.assertEqual(self.started_with(stopped),self.LANDED)
+        # A stop before the harness existed pauses the queue, as it does without a copy.
+        self.assertEqual(self.service.session(stopped)['receipts']['hello']['state'],'accepted')
+        time.sleep(1)
+        self.assertEqual(self.service.session(closed)['state'],'closed')
+        self.assertIsNone(self.service.session(closed)['native_id'])
+
+    def test_restart_during_the_wait_and_resume_after_the_copy(self):
+        self.start()
+        root = self.state.resolve()/'code'
+        status = root/'project.cloudroom-files'; status.write_text('copying')
+        sid = self.begin('copied',workspace='copied',workspace_name='project')
+        time.sleep(.5)
+        self.service.stop()
+        self.copy_into(root/'project'); status.write_text('ready')
+        self.start()
+        until(lambda:self.service.session(sid)['receipts']['hello']['state']=='completed','start after a restart',10)
+        self.assertEqual(self.started_with(sid),self.LANDED)
+        native = self.service.session(sid)['native_id']
+        # An agent that already started never waits again, even if its folder is marked as copying.
+        status.write_text('copying')
+        self.service.stop(); self.start()
+        until(lambda:self.service.session(sid)['state']=='idle','resume',4)
+        self.assertEqual(self.service.session(sid)['native_id'],native)
 
 
 if __name__ == '__main__': unittest.main()

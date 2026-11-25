@@ -86,8 +86,8 @@ pub struct Receipt {
     pub error: Option<String>,
 }
 
-/// A start's provider, command guard, co-author stripping, system prompt, parent thread in another sandbox, and the
-/// app's thread and project IDs.
+/// A start's provider, command guard, co-author stripping, system prompt, parent thread in another sandbox, the
+/// app's thread and project IDs, and whether the app is about to copy the project into its folder.
 type StartOptions = (
     Option<String>,
     Option<bool>,
@@ -95,6 +95,7 @@ type StartOptions = (
     Option<String>,
     Option<String>,
     (Option<String>, Option<String>),
+    Option<bool>,
 );
 
 /// A child start the website drives (ADR 20261104-015709): the request it
@@ -487,6 +488,10 @@ pub(crate) const PLAN_ONLY_REFUSED: &str = "extra credits are off for loops";
 pub(crate) const PLAN_ONLY_STOPPED: &str =
     "Stopped: this loop run would spend extra credits, and Stop at plan limit is on.";
 const JOURNAL_UNWRITABLE: &str = "session journal is not writable";
+/// How long a new agent waits to start for its project copy (ADR 0209). Most copies take seconds; this also covers an
+/// upload piece that stalls for its 2 minutes and is sent again. Past it the agent starts anyway, and its first message
+/// tells it to run `room-cli files wait`, which allows 10 minutes.
+const PROJECT_COPY_WAIT: Duration = Duration::from_secs(300);
 type Result<T> = std::result::Result<T, Error>;
 
 struct Local {
@@ -970,11 +975,19 @@ impl Manager {
 
     /// A request's content, as retries compare it. `plan_only` is guard metadata Core may add itself (an inherited
     /// resume), and `ended` when its turn ended (#217), not the request's content. The thread and project IDs aren't
-    /// either: a retry may add or drop them as the sender learns what Core knows (#199).
+    /// either: a retry may add or drop them as the sender learns what Core knows (#199). Nor is `project_copy`,
+    /// which a retried start may plan differently.
     fn content(input: &Value) -> Value {
         let mut input = input.clone();
         if let Some(fields) = input.as_object_mut() {
-            for key in ["plan_only", "ended", "thread_id", "project_id", "waiting"] {
+            for key in [
+                "plan_only",
+                "ended",
+                "thread_id",
+                "project_id",
+                "waiting",
+                "project_copy",
+            ] {
                 fields.remove(key);
             }
         }
@@ -1139,6 +1152,7 @@ impl Manager {
             system_prompt,
             parent_thread,
             (thread_id, project_id),
+            project_copy,
         ): StartOptions,
     ) -> Result<(String, Receipt)> {
         let id = format!("cr_{request}");
@@ -1182,6 +1196,9 @@ impl Manager {
             crate::workspace::valid_id(project)
                 .map_err(|_| Error::Conflict("invalid project_id"))?;
             input["project_id"] = json!(project);
+        }
+        if project_copy == Some(true) {
+            input["project_copy"] = json!(true);
         }
         if let Some(model) = &model {
             input["model"] = json!(model);
@@ -1392,6 +1409,7 @@ impl Manager {
                     thread_id.or_else(|| s.thread_id().map(str::to_owned)),
                     project_id.or_else(|| s.project_id().filter(|_| !moved).map(str::to_owned)),
                 ),
+                None,
             );
             let old = (
                 s.harness,
@@ -1933,6 +1951,26 @@ impl Manager {
     }
 
     async fn launch(self: Arc<Self>, id: String, request: String) {
+        // Harnesses read skills and AGENTS.md or CLAUDE.md only as they start, so a running project copy lands first.
+        // Without a startup slot, so a slow copy holds up only its own session.
+        let (folder, promised) = {
+            let local = self.local.lock().unwrap();
+            let session = &local.sessions[&id];
+            let promised = session
+                .receipts
+                .get(&request)
+                .is_some_and(|r| r.input["project_copy"] == true);
+            (session.workspace.as_ref().map(|w| w.path.clone()), promised)
+        };
+        if let Some(folder) = folder {
+            crate::workspace::files::landed(&folder, promised, PROJECT_COPY_WAIT, || {
+                self.is_stopping()
+                    || self.local.lock().unwrap().sessions[&id]
+                        .close_request
+                        .is_some()
+            })
+            .await;
+        }
         let started = Instant::now();
         let Ok(_startup) = self.startups.acquire().await else {
             return;

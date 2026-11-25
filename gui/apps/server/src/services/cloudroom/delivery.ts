@@ -302,8 +302,22 @@ export class CloudDelivery {
     if (target) syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
     const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
     // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
+    const planCopy = target ? planNewProjectCopy(this.rt.host.deps, client, threadId, target, plan).catch(failure) : Promise.resolve(null);
+    // Agents read skills and AGENTS.md or CLAUDE.md only as they start, and the folder is marked as copying only once
+    // Core has the session, so the start says a copy is coming and Core starts the agent once it lands (ADR 0209).
+    // A child's code always comes. A thread sandbox's folder is new, so its copy is planned first; on a VM only a
+    // project's first thread copies, so the others don't wait for planning. `acp-antigravity` awaits `startFailure`
+    // before the copy begins, so holding its launch would deadlock it.
+    const projectCopy = !capabilities.project_copy || harness === "acp-antigravity"
+      ? Promise.resolve(false)
+      : codeFrom
+        ? Promise.resolve(true)
+        : sandbox
+          ? planCopy.then((copy) => !(copy instanceof Error) && Boolean(copy?.clone || copy?.copyAll))
+          : Promise.resolve(false);
+    const startOptions = { model, reasoning: initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) };
     const [planned, started] = await Promise.all([
-      target ? planNewProjectCopy(this.rt.host.deps, client, threadId, target, plan).catch(failure) : null,
+      planCopy,
       sideChat
         ? this.lifecycle.startSideChat(client, threadId, saved, capabilities, harness, sideChat)
         : fork
@@ -318,7 +332,7 @@ export class CloudDelivery {
               const latest = command(this.rt.host.db, `first_${threadId}`)!;
               this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
             })
-          : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) }).then((accepted) => {
+          : projectCopy.then((coming) => client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { ...startOptions, ...(coming ? { project_copy: true } : {}) })).then((accepted) => {
               const transfer = `child_${threadId}`;
               return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
             }),

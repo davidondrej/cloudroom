@@ -658,6 +658,8 @@ struct Start {
     parent_session: Option<String>,
     /// The app's parent thread in another sandbox, which this session reports its turns to (relay.rs).
     parent_thread: Option<String>,
+    /// The app is about to copy the project into this session's folder, so the agent starts once it lands (ADR 0209).
+    project_copy: Option<bool>,
     /// The app's IDs for this thread and its project, exported to the agent's shells (#199).
     thread_id: Option<String>,
     project_id: Option<String>,
@@ -1040,6 +1042,7 @@ async fn start(
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
             || body.parent_thread.is_some()
+            || body.project_copy.is_some()
         {
             return Err(session::Error::Conflict(
                 "a continued session keeps the settings it continues",
@@ -1071,7 +1074,8 @@ async fn start(
             || body.command_guard_enabled.is_some()
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
-            || body.parent_thread.is_some();
+            || body.parent_thread.is_some()
+            || body.project_copy.is_some();
         let disallowed_copy = !fork.fresh
             && (body.model.is_some()
                 || body.reasoning.is_some()
@@ -1113,6 +1117,7 @@ async fn start(
             || body.strip_ai_co_authors.is_some()
             || body.system_prompt.is_some()
             || body.parent_thread.is_some()
+            || body.project_copy.is_some()
             || body.thread_id.is_some()
             || body.project_id.is_some()
             || title.as_ref().is_some_and(|t| {
@@ -1159,6 +1164,7 @@ async fn start(
                 body.system_prompt,
                 body.parent_thread,
                 (body.thread_id, body.project_id),
+                body.project_copy,
             ),
         )
         .await?;
