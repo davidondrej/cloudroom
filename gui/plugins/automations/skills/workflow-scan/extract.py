@@ -14,13 +14,27 @@ import glob, hashlib, io, json, locale, os, re, sqlite3, sys, time
 from collections import Counter, defaultdict
 
 H = os.path.expanduser("~")
-SECRET = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+# A PEM header or footer may wrap onto the next line ("-----BEGIN RSA\nPRIVATE KEY-----").
+SECRET = re.compile(r"-----BEGIN\s[A-Z\s]*PRIVATE\s+KEY-----.*?-----END\s[A-Z\s]*PRIVATE\s+KEY-----"
                     r"|(sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
                     r"|xox[abpr]-[A-Za-z0-9\-]{10,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}|\b[A-Za-z0-9_\-]{40,}\b)"
-                    r"|AIza[0-9A-Za-z_\-]{35}|\b[rsp]k_(?:live|test)_[0-9A-Za-z]{16,}|\bBearer\s+[A-Za-z0-9._~+/\-]{12,}=*")
+                    r"|AIza[0-9A-Za-z_\-]{35}|\b[rsp]k_(?:live|test)_[0-9A-Za-z]{16,}|\bBearer\s+[A-Za-z0-9._~+/\-]{12,}=*", re.S)
 URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(@)", re.I)
+# English labels; their value may still sit on the next line ("password:\nHunter22!"), as before #2478.
 SECRET_VALUE = re.compile(r"(?i)(\b[\w.\-]*(?:passw(?:or)?d|pwd|secret|token|api[_\-]?key|access[_\-]?key|auth|credential)s?[\w.\-]*[\"']?\s*[:=]\s*[\"']?)"
                           r"(?!\[masked\])[^\s\"'&,;]{6,}")
+# Password labels in common languages. LINE_VALUE and SPACED_PASSWORD mask a value on the label's own line only (#2478).
+PASSWORD = r"passw(?:or)?d|passwort|kennwort|(?<![a-z])pw(?![a-z])|mot de passe|contrase[ñn]a|(?:senha|has[łl]o|heslo)(?![a-z])|wachtwoord|пароль|密码|パスワード"
+VALUE = r"[^\s\"'&,;，。、；]"
+# A value that looks like a secret: it has a digit or a symbol inside a word.
+SHAPE = rf"{VALUE}*?(?:\d|\w[^\w\s\"'&,;，。、；./\-]\w)"
+# A whole word that holds a label and ends in : or =. Checking the : or = first keeps plain words fast.
+# Unquoted CJK text without that shape is a sentence ("密码：修改后无法登录"), not a secret.
+LINE_VALUE = re.compile(rf"(?i)((?<![\w.\-])(?=[\w.\-]*[\"']? ?[:=：])(?=[\w.\-]*?(?:{PASSWORD}|(?<![a-z])passe?(?![a-z])|pwd|secret|token|api[_\-]?key|access[_\-]?key|auth|credential))"
+                        rf"[\w.\-]*[\"']? ?[:=：] ?[\"']?)(?!\[masked\])(?!(?<![\"'])(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])(?!{SHAPE})){VALUE}{{6,}}")
+# A password label and a space, then a value with a digit or an inner symbol. Never a key ("pw DB2_PASS: x") or a word holding [masked].
+SPACED_PASSWORD = re.compile(rf"(?i)(\b(?:{PASSWORD}) [\"']?)(?={SHAPE})(?!{VALUE}*\[masked\])"
+                             rf"{VALUE}{{6,}}(?!{VALUE})(?<![:=：])(?![\"']? ?[:=：])")
 NOISE = re.compile(r"\[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT\]\s*Automatic Cloudroom note: this session has started or resumed\. Messages after this note come from the user\."
                    r"|<system-reminder>.*?</system-reminder>|<(local-)?command-[a-z-]+>.*?</(local-)?command-[a-z-]+>"
                    r"|<environment_context>.*?</environment_context>|<user_instructions>.*?</user_instructions>"
@@ -32,8 +46,16 @@ AUTO = ["Loop note", "room-cli loop report", "<webhook_events>", "[Local fork]",
 
 def clean(text):
     text = NOISE.sub(" ", text or "")
-    text = SECRET.sub("[masked]", re.sub(r"\s+", " ", text))
-    return SECRET_VALUE.sub(r"\1[masked]", URL_PASSWORD.sub(r"\1[masked]\2", text)).strip()
+    # One space per gap, but a line break stays a line break until the end, so a label's value never comes from the next line.
+    text = re.sub(r"\s+", lambda m: "\n" if "\n" in m.group() else " ", text)
+    text = URL_PASSWORD.sub(r"\1[masked]\2", SECRET.sub("[masked]", text))
+    # Every rule looks at the same text and all values they find are masked, so one rule's match can't hide another's value.
+    out, end = "", 0
+    for a, b in sorted((m.end(1), m.end()) for rule in (SECRET_VALUE, LINE_VALUE, SPACED_PASSWORD) for m in rule.finditer(text)):
+        if a >= end:
+            out += text[end:a] + "[masked]"
+        end = max(end, b)
+    return (out + text[end:]).replace("\n", " ").strip()
 
 
 def cut(text, n):

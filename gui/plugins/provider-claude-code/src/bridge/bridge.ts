@@ -2154,6 +2154,8 @@ function restoreApprovedPlanPermissionMode(threadSession: ThreadSession): void {
   void threadSession.session
     .setPermissionMode(threadSession.attachment.approvedPlanPermissionMode)
     .catch((error: unknown) => {
+      // Claude stayed out of bypass: stop waiving its removal checks.
+      threadSession.bypassDisabledByClaude = true;
       logBridgeError(
         `Failed to leave Plan mode: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -2173,21 +2175,30 @@ function describeUnsandboxedAsk(reason: string | undefined): string {
 // bash/zsh parser false positives like `declare -A`). Intentionally excludes
 // "A permission rule denies a command in this shell -c script" and non-removal
 // policy locks such as disableBypassPermissionsMode or outsideReadsBlocked.
-const CLAUDE_BYPASS_WAIVABLE_REMOVAL_CHECK_PATTERNS = [
+// claude-live.test.ts runs the latest real Claude nightly to catch rewording.
+export const CLAUDE_BYPASS_WAIVABLE_REMOVAL_CHECK_PATTERNS = [
   /^Claude Code can't be sure it read this command the way the shell will, so it can't rule out a dangerous removal\b/i,
   /^Dangerous rm(?:dir)? operation\b/i,
   /^This shell -c script runs rm and could not be checked\b/i,
 ];
 
-function isClaudeBypassWaivableRemovalCheck(args: {
+export function isClaudeBypassWaivableRemovalCheck(args: {
   toolName: string;
   decisionReason: string | undefined;
   matchedAskRule: unknown;
+  blockedPath: string | undefined;
 }): boolean {
   if (args.toolName !== "Bash" && args.toolName !== "PowerShell") {
     return false;
   }
-  if (args.matchedAskRule !== undefined || args.decisionReason === undefined) {
+  // A blocked path, or Claude's read-block note appended to the reason, means
+  // a second, non-removal lock rides on this ask.
+  if (
+    args.matchedAskRule !== undefined ||
+    args.blockedPath !== undefined ||
+    args.decisionReason === undefined ||
+    args.decisionReason.includes("blockReadsOutsideWorkingDirectories")
+  ) {
     return false;
   }
   const reason = args.decisionReason.trim();
@@ -2333,6 +2344,7 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
         toolName,
         decisionReason: options.decisionReason,
         matchedAskRule: options.matchedAskRule,
+        blockedPath: options.blockedPath,
       })
     ) {
       return {

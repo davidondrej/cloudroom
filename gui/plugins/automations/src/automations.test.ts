@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
+  closeRunForSignIn,
   createAutomation,
   createManualRun,
   decodeAutomationRow,
@@ -27,6 +28,7 @@ import {
   listAutomationRuns,
   migrations,
   addReviewThread,
+  releaseSignInHolds,
   setAutomationEnabled,
   setAutomationRunThread,
   retryPausedAutomations,
@@ -990,6 +992,51 @@ describe("automation data access", () => {
     expect(restored?.runCount).toBe(1);
     expect(restored?.consecutiveFailures).toBe(1);
     expect(restored?.lastRunStatus).toBe("failed");
+
+    // A failed login of a repeating loop's own agent holds it, uncounted, until a turn of that agent works; it goes on
+    // from its next slot. A one-time loop's run, or one on another agent, fails as above (#609).
+    const signIn = (id: string, once: boolean, providerId = "codex") => {
+      if (once) createOnceAutomation(db, 1000, id);
+      else createScheduledAutomation(db, 1000, id);
+      const run = claimAutomationScheduledRun(db, {
+        automationId: id,
+        expectedNextRunAt: 1000,
+        newNextRunAt: once ? null : 60_000,
+        now: 1000,
+      });
+      if (!run.advanced) throw new Error("claim failed");
+      closeRunForSignIn(db, {
+        runId: run.run.id,
+        threadId: "thr_1",
+        providerId,
+        error: "OAuth session expired",
+        now: 1001,
+      });
+    };
+    signIn("auto_signin", true);
+    signIn("auto_daily", false);
+    signIn("auto_fallback", false, "claude-code");
+    expect(getAutomation(db, "auto_signin")).toMatchObject({
+      enabled: false,
+      consecutiveFailures: 1,
+      lastRunStatus: "failed",
+    });
+    expect(getAutomation(db, "auto_fallback")).toMatchObject({
+      enabled: true,
+      consecutiveFailures: 1,
+      lastRunStatus: "failed",
+    });
+    expect(releaseSignInHolds(db, "claude-code", 1002)).toEqual([]);
+    expect(getAutomation(db, "auto_daily")).toMatchObject({
+      enabled: false,
+      consecutiveFailures: 0,
+    });
+    expect(releaseSignInHolds(db, "codex", 1002)).toEqual(["proj_test"]);
+    expect(getAutomation(db, "auto_daily")).toMatchObject({
+      enabled: true,
+      nextRunAt: 60_000,
+      lastError: null,
+    });
   });
 
   it("does not claim due agent automations when no host is connected", async () => {
@@ -2830,6 +2877,29 @@ describe("loop fallback", () => {
     // If it can't be stopped, this run stays on the last run's agent.
     stopped = false;
     expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(fable);
+    // A failed login fails the run as any other, never holding the loop: the next agent takes over (#609).
+    stopped = true;
+    createScheduledAutomation(db, 1000, "auto_turns");
+    db.prepare(
+      `UPDATE automations SET execution = json_set(execution, '$.providerId', 'claude-code', '$.agents', json(?))`,
+    ).run(JSON.stringify([fable, gemini]));
+    const claim = claimAutomationScheduledRun(db, {
+      automationId: "auto_turns",
+      expectedNextRunAt: 1000,
+      newNextRunAt: 60_000,
+      now: 1000,
+    });
+    if (!claim.advanced) throw new Error("claim failed");
+    closeRunForSignIn(db, {
+      runId: claim.run.id,
+      threadId: "thr_last",
+      providerId: "claude-code",
+      error: "OAuth session expired",
+      now: 1001,
+    });
+    const turns = getAutomation(db, "auto_turns")!;
+    expect(turns).toMatchObject({ enabled: true, lastRunStatus: "failed" });
+    expect(await loopAgent(sdk, db, turns, execution)).toEqual(gemini);
     // Usage is read again after its one-minute cache.
     claudeFull = true;
     vi.useFakeTimers({ toFake: ["Date"] });

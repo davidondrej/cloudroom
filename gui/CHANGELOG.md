@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 170
+
+Computer Use from anywhere (2026-11-26)
+
+### Changes
+
+- Cloud threads can now use your Mac's Computer Use, with the blue highlight and an approval card for each app.
+- Local agents that an app restart cut off now pick up where they left off.
+- The Get started checklist has clearer steps, including a new "Enable a skill" step.
+- Full Access threads that started in Plan mode no longer ask for permission.
+- Security fixes.
+
 ## 169
 
 Full Access stops interrupting (2026-11-26)

@@ -1,8 +1,9 @@
 // Risky local actions need a human click (ADR 0260, docs/scopes/security.md).
 // A click is a request the desktop app signed. A signed-in phone also counts,
 // but only for Mac access and app-only cards (GPU). Anyone else who asks for a
-// plugin install or update gets a request ID instead: the server checks the
-// request and says what it would do, the app shows that, and a click there runs it.
+// plugin or skill install, or a plugin update, gets a request ID instead: the
+// server checks the request and says what it would do, the app shows that, and
+// a click there runs it.
 import { randomUUID } from "node:crypto";
 import { CALLER_TOKEN_HEADER } from "@cloudroom/config/caller-proof";
 import {
@@ -18,6 +19,7 @@ import { pluginIdSchema } from "@cloudroom/domain";
 import {
   pluginCatalogInstallRequestSchema,
   pluginInstallRequestSchema,
+  registrySkillInstallRequestSchema,
   type PluginCatalogResolvedSource,
 } from "@cloudroom/server-contract";
 import type { Context, Hono } from "hono";
@@ -25,6 +27,8 @@ import { ApiError } from "./errors.js";
 import { getGateAuthKind } from "./request-context.js";
 import type { PluginCatalogService } from "./services/plugin-catalog/plugin-catalog-service.js";
 import type { PluginService } from "./services/plugins/plugin-service.js";
+import { packageRefForSource } from "./services/skills/registry-parse.js";
+import { resolveRegistrySkillById } from "./services/skills/registry-proxy.js";
 import type { ServerAppDeps } from "./types.js";
 
 const HUMAN_CLICK_CONTEXT_KEY = "cloudroomHumanClick";
@@ -147,6 +151,26 @@ async function describe(
       body: {},
     };
   }
+  if (action === "skill-registry-install") {
+    const input = registrySkillInstallRequestSchema.safeParse(body);
+    if (!input.success) throw new Error("expected { registrySkillId }");
+    const skill = await resolveRegistrySkillById(input.data.registrySkillId);
+    // A source the installer would refuse is never shown.
+    packageRefForSource(skill.source);
+    return {
+      title: "Install this skill?",
+      verb: "Install",
+      rows: rows([
+        ["skill", skill.name],
+        ["registry ID", skill.id],
+        ["source", skill.source],
+        ["reviewed", "no: anyone can publish to skills.sh"],
+      ]),
+      path,
+      // The source is part of the ID, so the ID shown is the source installed.
+      body: { registrySkillId: skill.id },
+    };
+  }
   if (action === "plugin-catalog-install") {
     const input = pluginCatalogInstallRequestSchema.safeParse(body);
     if (!input.success) throw new Error("expected { entryId, marketplace? }");
@@ -223,8 +247,8 @@ export function installHumanClick(
     !verifier.enabled
       ? "Human clicks: off, the desktop app did not start this server"
       : verifier.broken
-        ? "Human clicks: the desktop app's key is unreadable, so plugin installs and raising Mac access are refused"
-        : "Human clicks: plugin installs and raising Mac access need a click in the app",
+        ? "Human clicks: the desktop app's key is unreadable, so plugin and skill installs and raising Mac access are refused"
+        : "Human clicks: plugin and skill installs and raising Mac access need a click in the app",
   );
   const requests = new Map<string, ClickRequest>();
   const approved = new WeakSet<Request>();

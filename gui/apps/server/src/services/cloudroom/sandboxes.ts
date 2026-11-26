@@ -1055,13 +1055,6 @@ export class SandboxDirectory {
     return z.object({ sent: z.boolean() }).parse(await this.call({}, "usage-request"));
   }
 
-  /** The member's friend invite codes. `create` makes one more (ADR 0169). */
-  async invites(action: "list" | "create") {
-    const value = await this.call({ action }, "invites");
-    const joined = z.object({ name: z.string().nullable(), at: z.string() }).optional();
-    return z.object({ codes: z.array(z.object({ code: z.string(), used: z.boolean(), url: z.string().optional(), joined })), left: z.number(), created: z.string().nullable(), waiting: z.number().nullable().default(null) }).parse(value);
-  }
-
   popups(body: Record<string, string>): Promise<unknown> {
     return this.call(body, "popups");
   }
@@ -1280,9 +1273,11 @@ export class SandboxDirectory {
         const quick = tries <= 3 && error instanceof CloudroomError && error.status === null;
         // A thread moving to Cloud continues there in about a minute: keep checking.
         const moving = error instanceof CloudroomError && error.code === "sandbox_moving";
+        // Restores finish in ~15-120 s on a healthy server, so cap their backoff at 15 s instead of 60 s.
+        const restoring = error instanceof CloudroomError && error.code === "sandbox_restoring";
         // A server back from a restart takes it within a minute, not up to 5.
         const wait = error instanceof CloudroomError && WAIT_CODES.has(error.code ?? "");
-        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, wait ? 60_000 : 300_000);
+        const delay = quick ? 2_000 : moving ? 5_000 : Math.min(Math.max(previous?.delay ?? 0, 2_500) * 2, restoring ? 15_000 : wait ? 60_000 : 300_000);
         // Out of Cloud Credits: wait until the minute mode check sees credits again (checkMode clears it), not every 5 minutes.
         const held = error instanceof CloudroomError && error.code === USAGE_LIMIT;
         this.backoff.set(thread, { until: held ? Infinity : Date.now() + delay, delay, tries, refusal: error instanceof CloudroomError && (error.status !== null || wait) ? error : null });

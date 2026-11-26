@@ -16,20 +16,22 @@ import { createBooleanPreferenceAtom } from "@/lib/browser-storage";
 import { useChecklistHides, useHiddenUntil } from "@/lib/popups";
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { callPluginRpc } from "@/lib/plugin-sdk-hooks";
-import { getPluginConfigurationRoutePath, getRootComposeRoutePath, getThreadRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
+import { getPluginConfigurationRoutePath, getRootComposeRoutePath, getSkillsRoutePath, getThreadRoutePath, LEGACY_PROJECT_COMPOSE_ROUTE_PATH } from "@/lib/route-paths";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
 import { selectCloudForNewThreads } from "@/components/promptbox/NewThreadComposer";
 
-type Step = "cloud" | "subagents" | "second" | "phone" | "loop";
-type Activation = { steps: Record<Step, boolean>; second: "codex" | "claude-code"; started: number };
+type Step = "cloud" | "skill" | "loop" | "subagents" | "phone";
+type Activation = { steps: Record<Step, boolean>; started: number; completedStarted?: number | null };
 
-const STEPS: { id: Step; title: string; prompt?: (second: string) => string }[] = [
-  { id: "cloud", title: "Start a Cloud agent", prompt: () => "Check this repo for security issues found this week. Report only, don't change anything." },
-  { id: "subagents", title: "Run 3 agents at once", prompt: () => "Start 3 sub-agents. Tell each of them to check a different part of this repo for security vulnerabilities. Report only." },
-  { id: "second", title: "Get a second opinion", prompt: (second) => `Start a ${second} sub-agent to review the last commit on this branch. Report only.` },
-  { id: "phone", title: "Open Cloudroom on your phone" },
-  { id: "loop", title: "Set up a daily Loop", prompt: () => "Create a Cloud loop for this repo that runs every weekday at 9am: check for new security issues and only tell me if you find one." },
+const STEPS: { id: Step; title: string; route?: () => string; prompt?: string }[] = [
+  { id: "cloud", title: "Start a Cloud agent", prompt: "Check this repo for security issues found this week. Report only, don't change anything." },
+  { id: "skill", title: "Enable a skill", route: getSkillsRoutePath },
+  { id: "loop", title: "Set up a daily Loop", prompt: "Create a Cloud loop for this repo that runs every weekday at 9am: check for new security issues and only tell me if you find one." },
+  { id: "subagents", title: "Run 3 agents at once", prompt: "Start 3 sub-agents. Tell each of them to check a different part of this repo for security vulnerabilities. Report only." },
+  { id: "phone", title: "Open Cloudroom on your phone", route: () => getPluginConfigurationRoutePath({ pluginId: "connect" }) },
 ];
+const SCANS_WINDOW_THREADS = 10;
+const isChecklistCompleted = (data: Activation) => STEPS.every((step) => data.steps[step.id]);
 // Free plans: each Hide lasts longer, by the account's hides so far (8 hours, 3 days, then 7 days).
 const HIDES = [{ ms: 8 * 3_600_000, label: "8 hours" }, { ms: 3 * 86_400_000, label: "3 days" }, { ms: 7 * 86_400_000, label: "7 days" }];
 const hideFor = (hides: number | null) => HIDES[Math.min(hides ?? 0, HIDES.length - 1)];
@@ -75,7 +77,7 @@ export const ONE_CLICK_SCANS_SETTING_LABEL = "Always show one-click scans";
 export function OneClickScansSetting() {
   const [always, setAlways] = useAtom(alwaysShowScansAtom);
   return (
-    <SettingsWithControl label={ONE_CLICK_SCANS_SETTING_LABEL} description="Keep them under the new-thread box, even after 10 threads. Off: new users only.">
+    <SettingsWithControl label={ONE_CLICK_SCANS_SETTING_LABEL} description="Keep them under the new-thread box, even before the checklist is done or after 10 threads. Off: for 10 threads after the checklist is done.">
       <Switch checked={always} onCheckedChange={setAlways} aria-label={ONE_CLICK_SCANS_SETTING_LABEL} />
     </SettingsWithControl>
   );
@@ -95,11 +97,14 @@ function useScanState(enabled: boolean) {
 }
 
 /** `plan` is null until the website answers, up to 10 s after launch: no doors before it, so no one sees the
- *  wrong buttons. `onScreen`: the scan call runs only where the doors can show. */
+ *  wrong buttons. `onScreen`: the scan call runs only where the doors can show. Hidden until the onboarding
+ *  checklist is fully completed (David, 2026-11-26), then shown for the next 10 started threads. */
 function useScansShown(data: Activation | undefined, onScreen = true) {
   const always = useAtomValue(alwaysShowScansAtom);
   const plan = useCloudroomAccount().data?.plan;
-  const wanted = data !== undefined && plan != null && (always || data.started <= 10);
+  const checklistDone = data !== undefined && isChecklistCompleted(data);
+  const inScansWindow = data !== undefined && data.started <= (data.completedStarted ?? 0) + SCANS_WINDOW_THREADS;
+  const wanted = data !== undefined && plan != null && (always || (checklistDone && inScansWindow));
   const agents = useScanAgents(wanted && onScreen);
   const state = useScanState(wanted && onScreen);
   return { wanted, plan, agents: wanted ? agents.data : undefined, state: wanted ? state.data : undefined, failed: wanted && (agents.isError || state.isError) };
@@ -134,7 +139,7 @@ export function OneClickScans({ fallback }: { fallback?: ReactNode }) {
   const kinds: ScanKind[] = top ? ["workflow", "cyber"] : ["cyber"];
   const upgrade = (kind: ScanKind) => free && state !== undefined && state[kind].used && !state[kind].thread;
   useUpgradePromptViewed(shown && kinds.some(upgrade) ? "one_click_scan" : null);
-  if (!shown) return data === undefined || (wanted && !failed) ? null : fallback;
+  if (!shown) return data === undefined || (wanted && !failed) || data.started <= SCANS_WINDOW_THREADS ? null : fallback;
   const open = (threadId: string) => void navigate(getThreadRoutePath({ projectId: PERSONAL_PROJECT_ID, threadId }));
   const start = (kind: ScanKind) => {
     setStarting(kind);
@@ -217,18 +222,18 @@ export function ActivationChecklist() {
   };
   const start = (step: (typeof STEPS)[number]) => {
     void report(step.id, "clicked");
-    if (!step.prompt) return navigate(getPluginConfigurationRoutePath({ pluginId: "connect" }));
+    if (step.route) return navigate(step.route());
     selectCloudForNewThreads();
     void navigate(getRootComposeRoutePath(), {
-      state: { focusPrompt: true, initialPrompt: step.prompt(data.second === "codex" ? "Codex" : "Claude Code"), replaceInitialPrompt: true, executionTarget: "cloud" },
+      state: { focusPrompt: true, initialPrompt: step.prompt, replaceInitialPrompt: true, executionTarget: "cloud" },
     });
   };
   return (
-    <section aria-label="Get started" style={corner.style} className={cn(corner.className, "w-[320px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)]")}>
-      <div className="px-4 pt-4 pb-3">
+    <section aria-label="Get started" style={corner.style} className={cn(corner.className, "w-[344px] overflow-hidden rounded-[14px] border border-foreground/10 bg-surface-raised-solid shadow-[0_24px_60px_rgba(0,0,0,.45),0_4px_14px_rgba(0,0,0,.25)]")}>
+      <div className="px-4 pt-4 pb-3.5">
         <div className="flex items-baseline">
-          <p className="text-sm font-semibold text-foreground">Get started</p>
-          <p className="ml-auto text-xs text-muted-foreground">{done} of {STEPS.length}</p>
+          <p className="text-[17px] font-semibold tracking-[-0.02em] text-foreground">Get started</p>
+          <p className="ml-auto text-[13px] text-muted-foreground">{done} of {STEPS.length}</p>
         </div>
         <div className="mt-2.5 h-1 overflow-hidden rounded-full bg-foreground/10">
           <div className="h-full rounded-full bg-primary" style={{ width: `${(done / STEPS.length) * 100}%` }} />
@@ -240,13 +245,13 @@ export function ActivationChecklist() {
           return (
             <li key={step.id}>
               <button type="button" disabled={isDone} onClick={() => start(step)}
-                className={cn("group flex w-full items-center gap-2.5 rounded-[9px] p-2 text-left text-[13px]", isNext && "bg-foreground/[0.06]", !isDone && "hover:bg-foreground/[0.06]")}>
+                className={cn("group flex w-full items-center gap-2.5 rounded-[9px] text-left text-[13px]", isNext ? "bg-foreground/[0.06] px-2.5 py-2.5" : "p-2", !isDone && "cursor-pointer hover:bg-foreground/[0.06]")}>
                 <span className={cn("flex size-[18px] shrink-0 items-center justify-center rounded-full", isDone ? "bg-primary text-primary-foreground" : "ring-[1.5px] ring-inset", isNext ? "ring-primary" : "ring-foreground/25")}>
                   {isDone ? <Icon name="Check" className="size-3" aria-label="Done" /> : isNext ? <span className="size-1.5 rounded-full bg-primary" /> : null}
                 </span>
                 <span className={cn(isDone ? "text-muted-foreground/70 line-through decoration-foreground/25" : isNext ? "font-medium text-foreground" : "text-foreground/70")}>{step.title}</span>
                 {isDone ? null : (
-                  <span className={cn("ml-auto flex items-center gap-0.5 text-xs font-semibold text-primary-text", !isNext && "hidden group-hover:flex")}>
+                  <span className={cn("ml-auto flex shrink-0 items-center font-semibold", isNext ? "h-7 gap-1 rounded-[7px] bg-primary px-3 text-[13px] text-primary-foreground transition-colors group-hover:bg-primary/90" : "hidden gap-0.5 text-xs text-primary-text group-hover:flex")}>
                     Start<Icon name="ArrowRight" className="size-3.5" aria-hidden />
                   </span>
                 )}

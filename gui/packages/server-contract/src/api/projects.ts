@@ -20,7 +20,6 @@ import {
 
 const localProjectPathRequestSchema = z
   .string()
-  .trim()
   .min(1)
   .transform(normalizeProjectPathInput)
   .superRefine((path, ctx) => {

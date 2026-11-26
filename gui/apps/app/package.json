@@ -60,7 +60,6 @@
     "ghostty-web": "0.4.0",
     "jotai": "^2.19.0",
     "jotai-family": "^1.0.1",
-    "jszip": "^3.10.2",
     "katex": "^0.16.22",
     "mermaid": "^11.16.1",
     "pptx-preview": "^1.0.7",

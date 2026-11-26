@@ -294,8 +294,6 @@ describe("AutomationOverviewView", () => {
             { id: "proj_2", name: "notes", path: null, github: null },
           ],
           onAdd: async () => {},
-          locked: false,
-          onUpgrade: () => {},
         }}
       />,
     );
@@ -621,8 +619,6 @@ describe("AutomationOverviewView", () => {
             { id: "proj_1", name: "Repo one", path: "/repo-one", github: null },
           ],
           onAdd,
-          locked: false,
-          onUpgrade: () => {},
         }}
       />,
     );
@@ -634,6 +630,62 @@ describe("AutomationOverviewView", () => {
     await waitFor(() =>
       expect(onAdd).toHaveBeenCalledWith(
         expect.objectContaining({ name: "Security sweep", priority: 1 }),
+        ["proj_1"],
+        "cloud",
+      ),
+    );
+  });
+
+  it("defaults templates to Local on Free and warns before switching to Cloud", async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AutomationOverviewView
+        entries={[]}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={() => {}}
+        onEnabledChange={async () => {}}
+        onPriorityChange={async () => {}}
+        onCreateViaChat={() => {}}
+        activeMode="templates"
+        onModeChange={() => {}}
+        templates={{
+          projects: [
+            { id: "proj_1", name: "Repo one", path: "/repo-one", github: null },
+          ],
+          freePlan: true,
+          onAdd,
+        }}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    expect(
+      screen.queryByText(/10 free Cloud threads\/month/),
+    ).toBeNull();
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to 1 repo" }));
+    await waitFor(() =>
+      expect(onAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "Security sweep" }),
+        ["proj_1"],
+        "local",
+      ),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Cloud" }));
+    expect(
+      screen.getByText(/10 free Cloud threads\/month/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to 1 repo" }));
+    await waitFor(() =>
+      expect(onAdd).toHaveBeenLastCalledWith(
+        expect.objectContaining({ name: "Security sweep" }),
         ["proj_1"],
         "cloud",
       ),

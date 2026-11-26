@@ -103,7 +103,6 @@ import { KeyboardSettingsSection } from "@/components/settings/KeyboardSettingsS
 import { BrowserSettingsSection } from "@/components/settings/BrowserSettingsSection";
 import { AdvancedMachineSettings, MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
 import { CloudroomAccountSettings } from "@/components/settings/CloudroomAccountSettings";
-import { InviteSettingsCard } from "@/components/InviteOffer";
 import { ProjectsSettingsSection } from "@/components/settings/ProjectsSettingsSection";
 import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedThreadsSettingsSection";
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
@@ -1584,7 +1583,6 @@ export function SettingsView() {
   } else {
     content = (
       <>
-        <InviteSettingsCard />
         <GeneralSettingsSection
           desktopBrowserAvailable={desktopBrowserAvailable}
           generalSettingsDisabled={

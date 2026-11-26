@@ -9,12 +9,24 @@ import {
   type Thread,
 } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
-import type { AppDeps } from "../../types.js";
+import type {
+  AppDeps,
+  LoggedPendingInteractionWorkSessionDeps,
+} from "../../types.js";
 import { scrub } from "../cloudroom/setup-telemetry.js";
 import { dispatchEnvironmentAndHost } from "./dispatch-hooks.js";
+import {
+  buildParentSystemInputFromSegments,
+  buildParentSystemThreadMention,
+  parentSystemThreadLabel,
+  queueParentSystemMessage,
+} from "./parent-system-messages.js";
 import { parseStoredQueuedThreadMessageWaitingOn } from "./thread-queued-messages.js";
 
-type QueueDrainFailureDeps = Pick<AppDeps, "db" | "hub" | "telemetry">;
+type QueueDrainFailureDeps = LoggedPendingInteractionWorkSessionDeps;
+
+/** Failed rows whose sender was already told, so a repeat failure is quiet. */
+const sendersToldOfFailedRow = new Set<string>();
 
 /**
  * Tells us a queued message failed or a system notice was dropped, so the
@@ -123,10 +135,11 @@ export function recordQueuedMessageDrainFailure(
     return;
   }
 
-  setQueuedThreadMessageFailureReason(deps.db, deps.hub, {
+  const failureReason = describeDispatchFailure(args.error);
+  const failed = setQueuedThreadMessageFailureReason(deps.db, deps.hub, {
     id: args.row.id,
     threadId: args.row.threadId,
-    failureReason: describeDispatchFailure(args.error),
+    failureReason,
   });
   captureQueueDeliveryProblem(deps, {
     outcome: "failed",
@@ -134,4 +147,65 @@ export function recordQueuedMessageDrainFailure(
     queuedMessageId: args.row.id,
     threadId: args.row.threadId,
   });
+  if (failed?.senderThreadId && !sendersToldOfFailedRow.has(failed.id)) {
+    sendersToldOfFailedRow.add(failed.id);
+    void tellSenderOfFailedQueuedMessage(deps, {
+      failureReason,
+      queuedMessageId: failed.id,
+      recipient: args.thread,
+      senderThreadId: failed.senderThreadId,
+    });
+  }
+}
+
+/**
+ * The agent that queued this row was told it was accepted, and nobody was
+ * listening when the drain failed it, so it is told once here instead of
+ * finding out from the recipient's queue (#2662). A user's row shows its
+ * failure in the composer, and a Cloud sender can't get the notice.
+ */
+async function tellSenderOfFailedQueuedMessage(
+  deps: QueueDrainFailureDeps,
+  args: {
+    failureReason: string;
+    queuedMessageId: string;
+    recipient: Thread;
+    senderThreadId: string;
+  },
+): Promise<void> {
+  const { recipient, queuedMessageId: id } = args;
+  try {
+    await queueParentSystemMessage(deps, {
+      parentThreadId: args.senderThreadId,
+      input: buildParentSystemInputFromSegments({
+        segments: [
+          { kind: "text", text: "[system]\n\nYour queued message to " },
+          {
+            kind: "mention",
+            mention: buildParentSystemThreadMention({ thread: recipient }),
+          },
+          {
+            kind: "text",
+            text:
+              ` failed and was not sent: ${args.failureReason}\n` +
+              `It stays in that thread's queue as ${id}. Inspect it with ` +
+              `\`room-cli thread queue list ${recipient.id}\`, then retry ` +
+              `with \`room-cli thread queue send ${recipient.id} ${id}\` or ` +
+              `remove it with \`room-cli thread queue delete ${recipient.id} ${id}\`.`,
+          },
+        ],
+      }),
+      systemMessageKind: "unlabeled",
+      systemMessageSubject: {
+        kind: "thread",
+        threadId: recipient.id,
+        threadName: parentSystemThreadLabel(recipient),
+      },
+    });
+  } catch (error) {
+    deps.logger.warn(
+      { err: error, queuedMessageId: id, senderThreadId: args.senderThreadId },
+      "Could not tell a sender its queued message failed",
+    );
+  }
 }

@@ -15,7 +15,7 @@ const SKILL_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The last line of a pull request Claude opens, in place of its own "Generated with Claude Code" (ADR
 /// 20261117-113618). Never on commits. Local uses the same line: `PR_FOOTER` in the Claude Code plugin's bridge.
 const PR_FOOTER: &str = "Built with [Cloudroom](https://cloudroom.dev)";
-const INSTRUCTIONS: &str = "Cloudroom owns this cloud session. Ask clarifying questions in ordinary chat, not interactive tools. Start child threads with `room-cli thread spawn` (any harness and model; see `room-cli thread --help`); each gets its own sandbox with a copy of your code (add `--shared-sandbox` to run it in yours), shows under this thread, and Cloudroom messages you when it finishes. Do not use native subagents, workflows, or agent teams. Fast mode is unavailable. Rewinding changes conversation history only, never files.";
+const INSTRUCTIONS: &str = "Cloudroom owns this cloud session. Ask clarifying questions in ordinary chat, not interactive tools. Claude's built-in subagent and workflow tools are off here; use `room-cli thread spawn` for subagents and agent teams. Fast mode is unavailable. Rewinding changes conversation history only, never files.";
 
 /// User settings only and no MCP servers but Cloudroom's, as in `claude_login`.
 const PROBE_SOURCES: [&str; 3] = ["--setting-sources", "user", "--strict-mcp-config"];

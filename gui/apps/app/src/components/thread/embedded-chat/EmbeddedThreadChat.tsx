@@ -43,6 +43,7 @@ import {
   type PluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import {
   QueuedMessagesList,
   type QueuedMessageInlineEditor,
@@ -292,9 +293,13 @@ function EmbeddedThreadChatWithComposer({
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
   );
+  // Like the main thread: a plugin request (the Secrets form) replaces the composer; only a chat card (a GPU) keeps it.
   const hasComposerBlockingPendingInteraction =
     activePendingInteraction !== null &&
-    activePendingInteraction.payload.kind !== "plugin";
+    !(
+      activePendingInteraction.origin?.kind === "plugin" &&
+      isChatCardPluginInteraction(activePendingInteraction.origin.pluginId)
+    );
   const pendingInteractionsInitialLoading = isPendingInteractionStateUnknown(
     pendingInteractionsQuery.data,
     pendingInteractionsQuery.isFetching,
@@ -1416,8 +1421,7 @@ function EmbeddedThreadChatWithComposer({
     />
   ) : pendingInteractionsInitialLoading ? (
     <PendingInteractionsQueryBanner state="loading" />
-  ) : activePendingInteraction !== null &&
-    activePendingInteraction.payload.kind !== "plugin" ? (
+  ) : hasComposerBlockingPendingInteraction ? (
     <ThreadPendingInteractionBanner
       interaction={activePendingInteraction}
       threadId={threadId}

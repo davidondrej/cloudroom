@@ -10,7 +10,7 @@ Keep threads moving when a provider is overloaded or your subscription window is
 
 ## How it works
 
-The plugin reacts to each failed turn. It only retries app restarts, overload errors and subscription-window rate limits with a known reset time. Credit and spend limits are not retried. Each retry waits a little past the reset and adds a random spread. Many threads on one account then do not wake at the same instant.
+The plugin reacts to each failed turn. It only retries app restarts, overload errors and subscription-window rate limits with a known reset time. A limit still blocked more than 2 minutes after its reset is not retried. Credit and spend limits are not retried. Each retry waits a little past the reset and adds a random spread. Many threads on one account then do not wake at the same instant.
 
 ## Settings
 

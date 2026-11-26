@@ -345,7 +345,7 @@ export function CloudGithubLoginRow({
     }
   };
 
-  const startGithubLogin = async (repos: boolean) => {
+  const startGithubLogin = async () => {
     setEngaged(true);
     setStartingGithub(true);
     setActionError(null);
@@ -355,7 +355,7 @@ export function CloudGithubLoginRow({
     try {
       const id = crypto.randomUUID();
       requestId.current = id;
-      const result = await sdk.cloudroom.githubLogin(id, repos);
+      const result = await sdk.cloudroom.githubLogin(id);
       if (result.state === "waiting" && result.verification_url) {
         if (new URL(result.verification_url).origin !== "https://github.com") {
           throw new Error("Unexpected GitHub sign-in page.");
@@ -456,11 +456,8 @@ export function CloudGithubLoginRow({
             <Button type="button" size="sm" variant="default" onClick={() => void handleRetryOnly()}>
               Retry clone
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => void startGithubLogin(true)}>
-              Only specific repos
-            </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => void startGithubLogin(false)}>
-              Another account
+            <Button type="button" size="sm" variant="outline" onClick={() => void startGithubLogin()}>
+              Reconnect GitHub App
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => navigate("/settings/cloud-environment")}>
               Cloud settings
@@ -474,11 +471,8 @@ export function CloudGithubLoginRow({
             <Button type="button" size="sm" variant="default" onClick={() => void handleCopyMacAndRetry()}>
               Use {githubUser ? `@${githubUser}` : `${computerTitle} GitHub`} &amp; retry
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => void startGithubLogin(true)}>
-              Only specific repos
-            </Button>
-            <Button type="button" size="sm" variant="ghost" onClick={() => void startGithubLogin(false)}>
-              Another account
+            <Button type="button" size="sm" variant="outline" onClick={() => void startGithubLogin()}>
+              Connect GitHub App
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => navigate("/settings/cloud-environment")}>
               Cloud settings
@@ -489,12 +483,9 @@ export function CloudGithubLoginRow({
           </>
         ) : (
           <>
-            <Button type="button" size="sm" variant="default" onClick={() => void startGithubLogin(false)}>
+            <Button type="button" size="sm" variant="default" onClick={() => void startGithubLogin()}>
               <Icon name="Github" className="size-3.5" aria-hidden />
               Connect GitHub
-            </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => void startGithubLogin(true)}>
-              Only specific repos
             </Button>
             <Button type="button" size="sm" variant="ghost" onClick={() => navigate("/settings/cloud-environment")}>
               Cloud settings

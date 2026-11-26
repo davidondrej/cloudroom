@@ -48,7 +48,7 @@ import { getGateAuthKind } from "../../request-context.js";
 import { noteActiveMinute, timeInApp } from "./time-in-app.js";
 import { starPrompt, starRepo } from "./star-prompt.js";
 import { callTicket, cardsLeft, popupState, recordChecklistHide, recordCorner, recordPopup } from "./popups.js";
-import { activation } from "./activation.js";
+import { activation, noteSkillDone } from "./activation.js";
 import { copyMacGithub, disconnectGithub, githubAccount, githubAuth } from "./github-login.js";
 import { addGitlabRepo, addGithubRepo, projectBranches, macRepoSuggestions, repoSuggestions } from "./repo-suggestions.js";
 import { projectSuggestion } from "./project-nudge.js";
@@ -346,13 +346,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (!parsed.success) throw new ApiError(400, "invalid_request", "Feedback must be 1 to 4,000 characters. Send a longer report as several messages.");
     return context.json(await reportBug(deps, parsed.data));
   });
-  app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
   app.get("/api/v1/cloudroom/threads/:id/credits", async (context) => context.json(await threadCredits(deps, context.req.param("id"))));
-  app.post("/api/v1/cloudroom/account/invites", async (context) => {
-    z.object({}).strict().parse(await context.req.json());
-    return context.json(await cloudroom(deps).sandboxes.invites("create"));
-  });
   app.post("/api/v1/cloudroom/account/more-usage", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.requestMoreUsage().catch((error: unknown) => {
@@ -512,6 +507,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
         choice.auto = input.auto;
       } else for (const name of input.names) choice.chosen[name] = input.cloud;
       await setCloudSkills(deps, choice);
+      if ("cloud" in input && input.cloud) void noteSkillDone(deps).catch(() => {});
       void cloudroom(deps).sandboxes.copyMacConfig(skillInCloud(choice), true).catch((error: unknown) => deps.logger.warn({ error }, "Skills could not be copied to cloud sandboxes"));
     });
     skillChange = change.catch(() => {});
@@ -787,8 +783,9 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   });
   for (const action of ["login", "cancel"] as const) {
     app.post(`/api/v1/cloudroom/account/github/${action}`, async context => {
+      // `repos` stays accepted for older clients, though login always uses the GitHub App now.
       const input = z.object({ requestId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/), repos: z.boolean().optional() }).strict().parse(await context.req.json());
-      return context.json(await githubAuth(deps, action, input.requestId, input.repos));
+      return context.json(await githubAuth(deps, action, input.requestId));
     });
   }
   app.post("/api/v1/cloudroom/account/sign-in", async (context) => context.json(await cloudroomAccount(deps).signIn(await context.req.json())));

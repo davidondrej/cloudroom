@@ -21,11 +21,12 @@ const BUDGETED: readonly Popup[] = ["star_card", "cloud_card"];
 // The cards at the top right (ADR 20261115-004019, docs/scopes/corner-cards.md). The website holds the same rules and
 // the database enforces them. `quiet`: never shows in the QUIET_DAYS after any corner card was answered.
 // `everyDays`: may come back that long after its last showing. Without it, a card shows once per key.
-// `until`: never shows again once the user gave this answer. Only this server checks it, against the account's last
-// 12 showings: the website and the database don't know the rule (docs/scopes/corner-cards.md).
+// `afterOpenDays`: after the first `opened` answer, allow one more showing that many days later, then stop forever
+// (even if that second showing is closed). Only this server checks it, against the account's last 12 showings: the
+// website and the database don't know the rule (ADR 20261126-170245, docs/scopes/corner-cards.md).
 // The call ticket comes back 3 days after it was closed or clicked, while the website still says the account is owed one.
 // `build` is the note on the chat input: once per round, its key (docs/scopes/build-next.md).
-const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; until?: CornerAnswer }> = { invite: {}, call: { everyDays: 3 }, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { quiet: true, until: "opened" }, build: {} };
+const CORNER_RULES: Record<CornerCard, { quiet?: true; everyDays?: number; afterOpenDays?: number }> = { invite: {}, call: { everyDays: 3 }, checklist: {}, wrapped: {}, scan: { quiet: true, everyDays: 45 }, partner: { everyDays: 14, afterOpenDays: 30 }, build: {} };
 const QUIET_DAYS = 3;
 const CORNER_KEPT = 12;
 const RECHECK_MS = 10 * 60_000;
@@ -75,15 +76,22 @@ export function nextStarAsk(state: PopupState, due: { card: boolean; popup: bool
   return due.card && canAskStar(state, "card", now) ? "card" : null;
 }
 
-/** Whether a card at the top right may show now. A `quiet` card never shows in the quiet days after any answer, and
- *  an `until` card never after that answer. Then: a showing that is still open may, and a new one must pass the
- *  card's own rule. */
+/** Whether a card at the top right may show now. A `quiet` card never shows in the quiet days after any answer.
+ *  A showing that is still open may show. An `afterOpenDays` card shows once more that many days after its first
+ *  `opened` answer, then stops once that showing is answered. Otherwise a new showing must pass `everyDays` (or once per key). */
 export function cornerMay(log: CornerEntry[], card: CornerCard, key: string, now = Date.now()): boolean {
-  const { quiet, everyDays, until } = CORNER_RULES[card];
+  const { quiet, everyDays, afterOpenDays } = CORNER_RULES[card];
   if (quiet && log.some((entry) => entry.answeredAt !== null && now - entry.answeredAt < QUIET_DAYS * DAY)) return false;
   const mine = log.filter((entry) => entry.card === card), same = mine.filter((entry) => entry.key === key);
-  if (until && mine.some((entry) => entry.answer === until)) return false;
   if (same.some((entry) => entry.answer === null)) return true;
+  if (afterOpenDays !== undefined) {
+    const firstOpen = mine.findIndex((entry) => entry.answer === "opened");
+    if (firstOpen >= 0) {
+      if (mine.slice(firstOpen + 1).some((entry) => entry.answer !== null)) return false;
+      const openedAt = mine[firstOpen]!.answeredAt ?? mine[firstOpen]!.at;
+      if (now - openedAt < afterOpenDays * DAY) return false;
+    }
+  }
   return everyDays === undefined ? same.length === 0 : !mine.some((entry) => now - (entry.answeredAt ?? entry.at) < everyDays * DAY);
 }
 

@@ -199,11 +199,11 @@ function GithubCard({ synced }: { synced: number }) {
     void queryClient.invalidateQueries({ queryKey: ["cloudroom-github-repos"] });
   }, [connected, queryClient]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
-  // With `repos`, cloud agents get only the repos the user then picks on GitHub (#2084).
+  // Always connects through the Cloudroom Agents GitHub App (#2084), where users pick all or specific repos.
   const connect = useMutation({
-    mutationFn: async (repos: boolean) => {
+    mutationFn: async () => {
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
+      const result = await sdk.cloudroom.githubLogin(requestId.current);
       if (result.state === "waiting" && result.verification_url && new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
     },
     onSettled: refresh,
@@ -223,8 +223,6 @@ function GithubCard({ synced }: { synced: number }) {
     if (code) hadCode.current = true;
     else if (url && hadCode.current) { hadCode.current = false; if (new URL(url).origin === "https://github.com") openUrlInExternalBrowser(url); }
   }, [code, url]);
-  // The account says which kind of login is connected. Until it loads, a switch could start the wrong kind.
-  const loading = connected && account.isLoading;
   const copyAndOpen = async (value: string) => {
     await copyToClipboardWithToast(value, { successMessage: "Code copied. Paste it on github.com." });
     openGithub(url);
@@ -259,7 +257,7 @@ function GithubCard({ synced }: { synced: number }) {
                   <p className="truncate text-sm text-foreground">
                     {user ? <>@{user.login}{user.name && <span className="ml-1.5 text-xs text-subtle-foreground">{user.name}</span>}</> : "GitHub"}
                   </p>
-                  <p className="text-xs text-subtle-foreground">{!user ? "Connected" : user.reposUrl ? "Connected · only the repos you chose on GitHub" : "Connected · every repo this account can reach"}</p>
+                  <p className="text-xs text-subtle-foreground">{!user ? "Connected" : user.reposUrl ? "Connected · only the repos you chose on GitHub" : "Connected · every repo this account can reach (legacy login — switch to pick repos or change accounts)"}</p>
                 </div>
               </div>
             ) : (
@@ -271,20 +269,18 @@ function GithubCard({ synced }: { synced: number }) {
             )}
             {!status.isPending && !status.isError && (
               <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                {connected && user?.reposUrl
-                  ? <Button size="sm" variant="outline" onClick={() => openGithub(user.reposUrl)}>Change repos</Button>
-                  : <Button size="sm" variant={connected ? "outline" : "ghost"} className={connected ? undefined : "text-subtle-foreground"} disabled={busy || loading} onClick={() => { copyMac.reset(); connect.mutate(true); }}>{connected ? "Limit to specific repos" : "Only specific repos"}</Button>}
+                {connected && user?.reposUrl && <Button size="sm" variant="outline" onClick={() => openGithub(user.reposUrl)}>Change repos</Button>}
                 {!connected && localGithub ? (
                   <>
-                    <Button size="sm" variant="outline" disabled={busy} onClick={() => { copyMac.reset(); connect.mutate(false); }}>Another account</Button>
+                    <Button size="sm" variant="outline" disabled={busy} onClick={() => { copyMac.reset(); connect.mutate(); }}>Connect GitHub App</Button>
                     <Button size="sm" variant="default" disabled={busy} onClick={() => { connect.reset(); copyMac.mutate(localGithub.login); }}>
                       <Icon name="Github" className="size-3.5" />
                       {copyMac.isPending ? "Connecting…" : localGithub.login ? `Use @${localGithub.login}` : "Use GitHub CLI"}
                     </Button>
                   </>
                 ) : (
-                  <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy || loading} onClick={() => { copyMac.reset(); connect.mutate(Boolean(user?.reposUrl)); }}>
-                    {connected ? "Switch account" : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
+                  <Button size="sm" variant={connected ? "outline" : "default"} disabled={busy} onClick={() => { copyMac.reset(); connect.mutate(); }}>
+                    {connected ? (user && !user.reposUrl ? "Switch to GitHub App" : "Switch account") : <><Icon name="Github" className="size-3.5" />Connect GitHub</>}
                   </Button>
                 )}
                 {connected && <Button size="sm" variant="ghost" className="text-destructive-text" disabled={busy} onClick={() => disconnect.mutate()}>Disconnect</Button>}

@@ -7,7 +7,7 @@ description: 'See and control desktop apps on this Cloud sandbox’s virtual Lin
 
 This sandbox has a virtual Linux screen (Xvfb, 1440x900) and [Cua Driver](https://github.com/trycua/cua).
 It starts on first use. The sandbox is isolated, so apps need no approval here.
-To control apps on the user's computer instead, ask the user to use a Local thread.
+To control apps on the user's own computer (their logins, their browser), use `room-cli mac computer-use`; see the `user-computer` skill.
 
 ## Commands
 

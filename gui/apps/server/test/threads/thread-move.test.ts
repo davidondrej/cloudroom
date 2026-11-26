@@ -7,6 +7,7 @@ import {
   createThread,
   environments,
   getEnvironment,
+  getLatestThreadSequence,
   getThread,
   listEvents,
   threads,
@@ -628,7 +629,7 @@ describe("thread worktree", () => {
       .map((event) => JSON.parse(event.data) as { input: PromptInput[] });
   }
 
-  it("resumes an active thread automatically once its worktree move completes", async () => {
+  it("resumes an active thread automatically once its worktree move completes, holding its Goal meanwhile", async () => {
     await withTestHarness(async (harness) => {
       seedPrimaryHost(
         harness.deps,
@@ -648,7 +649,7 @@ describe("thread worktree", () => {
       const thread = seedThread(harness.deps, {
         projectId: project.id,
         environmentId: folder.id,
-        providerId: "claude-code",
+        providerId: "codex",
         status: "active",
       });
       seedStoredEvent(harness.deps, {
@@ -662,7 +663,7 @@ describe("thread worktree", () => {
           input: [{ type: "text", text: "Move to a worktree and redesign the chart", mentions: [] }],
           target: { kind: "thread-start" },
           execution: {
-            model: "claude-opus-4-6",
+            model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "high",
             permissionMode: "full",
@@ -674,6 +675,31 @@ describe("thread worktree", () => {
           source: "tell",
         },
       });
+      // An active Goal starts its next turn as soon as one ends, which would cancel the move every time (#2549).
+      const seedGoal = (status: "active" | "paused") =>
+        seedEvent(harness.deps, {
+          threadId: thread.id,
+          providerThreadId: "codex-resume",
+          sequence:
+            getLatestThreadSequence(harness.db, { threadId: thread.id }) + 1,
+          type: "thread/goal/updated",
+          scope: threadScope(),
+          data: {
+            providerThreadId: "codex-resume",
+            objective: "Redesign the chart",
+            status,
+            tokenBudget: null,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+          },
+        });
+      seedGoal("active");
+      const goalSet = (status: "active" | "paused") =>
+        waitForQueuedCommand(
+          harness,
+          ({ command }) =>
+            command.type === "thread.goal.set" && command.status === status,
+        );
       installFakeGitWorktreeProvider(() => ({
         action: "ready",
         environment: {
@@ -688,6 +714,8 @@ describe("thread worktree", () => {
       const moveResult = requestThreadWorktreeMove(harness.deps, thread.id, []);
       expect(moveResult.deferred).toBe(true);
       expect(hasPendingWorktreeAutoContinue(thread.id)).toBe(true);
+      await reportQueuedCommandSuccess(harness, await goalSet("paused"), {});
+      seedGoal("paused");
       harness.db
         .update(threads)
         .set({ status: "idle" })
@@ -705,6 +733,12 @@ describe("thread worktree", () => {
         folder.id,
         "/tmp/move-resume-worktree",
       );
+      // The Goal goes on in the new worktree, after the hidden turn below.
+      const resume = await goalSet("active");
+      expect(resume.command).toMatchObject({
+        environmentId: getThread(harness.db, thread.id)!.environmentId,
+      });
+      await reportQueuedCommandSuccess(harness, resume, {});
       await dispatch;
       expect(hasPendingWorktreeAutoContinue(thread.id)).toBe(false);
 

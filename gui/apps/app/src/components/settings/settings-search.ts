@@ -178,7 +178,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Cloudroom account", "sign in login email account sign out"],
     ["Plan & billing", "billing plan subscription invoices upgrade pro ultra payment cloud credits buy packs"],
     ["Connected", "github claude code codex logins connected"],
-    ["Invite friends", "invite friend referral share $400 credits"],
+    ["Partner program", "refer referral affiliate partner 40% earn commission link invite friend share"],
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("analytics", undefined, [

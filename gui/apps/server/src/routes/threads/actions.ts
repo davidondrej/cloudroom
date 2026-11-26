@@ -69,6 +69,7 @@ import {
   buildExecutionOptions,
   dispatchThreadUnarchiveCommand,
   prepareTurnSubmitCommandPayload,
+  setThreadGoal,
 } from "../../services/threads/thread-commands.js";
 import {
   appendThreadInterruptedEventInTransaction,
@@ -521,36 +522,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.setGoal, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     await requireGoalSupport(deps, thread);
-    const environment = await requireThreadCommandEnvironment(deps, {
-      thread,
-    });
-    requireConnectedHostSession(deps, environment.hostId);
-    const execution = await buildExecutionOptions(
-      deps,
-      {},
-      { threadId: thread.id },
-    );
-    const preparedRuntimeCommand = await prepareTurnSubmitCommandPayload(deps, {
-      environment,
-      execution,
-      input: [],
-      permissionEscalation: "ask",
-      target: { mode: "auto", expectedTurnId: null },
-      thread,
-    });
-    await runLiveHostCommand(deps, {
-      command: {
-        type: "thread.goal.set",
-        environmentId: environment.id,
-        threadId: thread.id,
-        ...payload,
-        options: preparedRuntimeCommand.options,
-        resumeContext: preparedRuntimeCommand.resumeContext,
-        bridgeLaunch: preparedRuntimeCommand.bridgeLaunch,
-      },
-      hostId: environment.hostId,
-      timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
-    });
+    await setThreadGoal(deps, thread, payload);
     return context.json({ ok: true });
   });
 

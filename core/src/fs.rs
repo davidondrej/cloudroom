@@ -1051,7 +1051,7 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 /// Like Node's `Buffer.from(text, "base64")`: either alphabet, padding optional, other characters skipped.
-fn unbase64(text: &str) -> Vec<u8> {
+pub(crate) fn unbase64(text: &str) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let (mut bits, mut count) = (0u32, 0);
     for byte in text.bytes() {

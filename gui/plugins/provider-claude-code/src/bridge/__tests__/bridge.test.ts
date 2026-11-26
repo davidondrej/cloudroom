@@ -1573,6 +1573,129 @@ describe("bridge", () => {
         bridge.restore();
       }
     });
+
+    // Full access means no card for Claude's bypass-immune removal checks (v169).
+    // Reasons copied from Claude Code 2.1.332; claude-live.test.ts re-checks
+    // them against the latest real Claude every night.
+    const CLAUDE_REMOVAL_REASONS = [
+      "Dangerous rm operation on working directory or its ancestor: /tmp/worktree",
+      "Dangerous rm operation on statically-unresolvable target: command substitution output",
+      "Dangerous rm operation not ruled out — the shell may read this command differently than it was parsed",
+      "Claude Code can't be sure it read this command the way the shell will, so it can't rule out a dangerous removal. Read the command, and don't go ahead if you can't tell what it does.",
+      "This shell -c script runs rm and could not be checked",
+    ];
+    const FULL_OPTIONS = {
+      ...FULL_POLICY,
+      instructions: "test",
+      providerOptions: { workflowsEnabled: false },
+    };
+
+    async function askRemovalCheck(args: {
+      options: Record<string, JsonValue>;
+      decisionReason: string;
+      toolName?: string;
+      matchedAskRule?: { source: string; toolName: string };
+      blockedPath?: string;
+      claudeInitPermissionMode?: string;
+    }): Promise<{ card: boolean; behavior: string | undefined }> {
+      const bridge = createBridgeJsonRpcTestHarness(handleLine);
+      const queries: ControlledClaudeQuery[] = [];
+      queryMock.mockImplementation(() => {
+        const query = createControlledClaudeQuery();
+        queries.push(query);
+        return query;
+      });
+      const threadId = "thread-claude-removal-check";
+      try {
+        bridge.sendRequest(1, "thread/start", {
+          threadId,
+          cwd: "/tmp/worktree",
+          instructionMode: "append",
+          options: args.options,
+        });
+        await bridge.waitForResponse(1);
+        if (args.claudeInitPermissionMode !== undefined) {
+          queries[0]?.emit({
+            type: "system",
+            subtype: "init",
+            permissionMode: args.claudeInitPermissionMode,
+            session_id: threadId,
+          } as unknown as SDKMessage);
+          await bridge.flushWork();
+        }
+        const pending = getLastCanUseTool()(
+          args.toolName ?? "Bash",
+          { command: "rm -rf ." },
+          {
+            decisionReason: args.decisionReason,
+            matchedAskRule: args.matchedAskRule,
+            blockedPath: args.blockedPath,
+            requestId: "control-request",
+            signal: new AbortController().signal,
+            toolUseID: "tool-claude-removal-check",
+          },
+        );
+        await bridge.flushWork();
+        const card = bridge.messages.find(isApprovalInteraction);
+        if (card?.id !== undefined) {
+          handleLine(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: card.id,
+              result: { decision: "deny", grantedPermissions: null },
+            }),
+          );
+        }
+        const result = await pending;
+        await stopBridgeThread({ bridge, queries, threadId });
+        return { card: card !== undefined, behavior: result?.behavior };
+      } finally {
+        bridge.restore();
+      }
+    }
+
+    it.each(CLAUDE_REMOVAL_REASONS)(
+      "full access allows Claude's removal check with no card: %s",
+      async (decisionReason) => {
+        await expect(
+          askRemovalCheck({ options: FULL_OPTIONS, decisionReason }),
+        ).resolves.toEqual({ card: false, behavior: "allow" });
+      },
+    );
+
+    it.each([
+      {
+        name: "the user's own ask rule",
+        options: FULL_OPTIONS,
+        matchedAskRule: { source: "userSettings", toolName: "Bash" },
+      },
+      {
+        name: "a deny rule inside a shell -c script",
+        options: FULL_OPTIONS,
+        decisionReason: "A permission rule denies a command in this shell -c script",
+      },
+      { name: "a non-shell tool", options: FULL_OPTIONS, toolName: "Write" },
+      { name: "a removal that also hits a blocked path", options: FULL_OPTIONS, blockedPath: "/etc" },
+      {
+        name: "a removal that also hits Claude's read block",
+        options: FULL_OPTIONS,
+        decisionReason:
+          "Dangerous rm operation not ruled out; under the read block (permissions.blockReadsOutsideWorkingDirectories) a command the shell parser cannot analyze asks the person",
+      },
+      {
+        name: "full access that Claude's settings turned off",
+        options: FULL_OPTIONS,
+        claudeInitPermissionMode: "default",
+      },
+      { name: "a removal check outside full access", options: canonicalOptions() },
+    ])("still shows a card for $name", async (testCase) => {
+      await expect(
+        askRemovalCheck({
+          decisionReason: CLAUDE_REMOVAL_REASONS[0] ?? "",
+          ...testCase,
+        }),
+      ).resolves.toEqual({ card: true, behavior: "deny" });
+    });
   });
 
   it("forwards unresolved high-risk auto-mode asks to bb", async () => {
@@ -2251,7 +2374,12 @@ describe("bridge", () => {
     },
   );
 
-  it("returns to the user's permission preset once a plan is approved", async () => {
+  // Full access in Plan mode: Claude only switches to bypass later if the
+  // session launched with it allowed. If it still refuses, removal checks ask.
+  it.each([
+    { name: "", switchFails: false },
+    { name: " and asks about removals when Claude refuses bypass", switchFails: true },
+  ])("returns to the user's permission preset once a plan is approved$name", async ({ switchFails }) => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     const queries: ControlledClaudeQuery[] = [];
     queryMock.mockImplementation(() => {
@@ -2279,6 +2407,15 @@ describe("bridge", () => {
         },
       });
       await bridge.waitForResponse(1);
+      expect(getLatestQueryCall().options).toMatchObject({
+        permissionMode: "plan",
+        allowDangerouslySkipPermissions: true,
+      });
+      if (switchFails) {
+        queries[0]?.setPermissionMode.mockRejectedValue(
+          new Error("session was not launched with --dangerously-skip-permissions"),
+        );
+      }
 
       const canUseTool = getLastCanUseTool();
       const planPromise = canUseTool(
@@ -2311,6 +2448,32 @@ describe("bridge", () => {
       expect(queries[0]?.setPermissionMode).toHaveBeenLastCalledWith(
         "bypassPermissions",
       );
+
+      const removal = canUseTool(
+        "Bash",
+        { command: "rm -rf ." },
+        {
+          decisionReason: "Dangerous rm operation on working directory or its ancestor: /tmp/worktree",
+          requestId: "control-request",
+          signal: new AbortController().signal,
+          toolUseID: "tool-plan-removal",
+        },
+      );
+      await bridge.flushWork();
+      const cards = bridge.messages.filter(isApprovalInteraction);
+      expect(cards).toHaveLength(switchFails ? 2 : 1);
+      if (switchFails) {
+        handleLine(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: cards[1]?.id,
+            result: { decision: "deny", grantedPermissions: null },
+          }),
+        );
+      }
+      await expect(removal).resolves.toMatchObject({
+        behavior: switchFails ? "deny" : "allow",
+      });
 
       await stopBridgeThread({ bridge, queries, threadId });
     } finally {

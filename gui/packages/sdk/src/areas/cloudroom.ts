@@ -314,8 +314,8 @@ export interface CloudroomArea {
   githubAuth(signal?: AbortSignal): Promise<CloudroomGithubAuth>;
   /** Copies this computer's local `gh` login to Cloud once after explicit user confirmation (ADR 20261124-215124). */
   copyMacGithub(expectedLogin?: string | null): Promise<CloudroomGithubAuth>;
-  /** With `repos`, Cloud gets only the repos the user then picks on GitHub. While they pick, the answer is `waiting` with GitHub's page and no code. */
-  githubLogin(requestId: string, repos?: boolean): Promise<CloudroomCodexAuth>;
+  /** Runs the GitHub App device flow, then waits for the user to pick repos on GitHub (all or selected) unless already installed. */
+  githubLogin(requestId: string): Promise<CloudroomCodexAuth>;
   cancelGithubLogin(requestId: string): Promise<CloudroomCodexAuth>;
   /** Null when GitHub can't tell right now. */
   githubAccount(signal?: AbortSignal): Promise<CloudroomGithubAccount | null>;
@@ -520,7 +520,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
     projectBranches: (projectId, signal) => transport.readJson(request(`/project-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{defaultBranch:string|null;branches:string[]}>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
-    githubLogin: (requestId, repos) => transport.readJson(request("/github/login", repos ? { requestId, repos } : { requestId })) as Promise<CloudroomCodexAuth>,
+    githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     githubAccount: (signal) => transport.readJson(request("/github/account", undefined, signal)) as Promise<CloudroomGithubAccount | null>,
     disconnectGithub: () => transport.readVoid(request("/github/disconnect", {})),

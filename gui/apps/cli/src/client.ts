@@ -114,7 +114,7 @@ const HUMAN_CLICK_WAIT_MS = 11 * 60_000;
 const refusal = (code: string, message: string): Response =>
   Response.json({ code, message, error: message }, { status: 403 });
 
-// A plugin install or update needs a click in the Cloudroom app (ADR 0260).
+// A plugin or skill install, or a plugin update, needs a click in the app (ADR 0260).
 // The server keeps the request and shows it there. Wait for the answer, then
 // reply as the action itself did, so callers need no code of their own.
 async function waitForHumanClick(

@@ -4,6 +4,7 @@ import {
   createQueuedThreadMessage,
   getQueuedThreadMessage,
   listEvents,
+  listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
 } from "@cloudroom/db";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
@@ -415,6 +416,48 @@ describe("recordQueuedMessageDrainFailure", () => {
         hostName: "M4",
       });
       expect(queued.failureReason).toBeNull();
+    });
+  });
+
+  it("tells an agent sender once that its accepted message failed (#2662)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedQueuedRow(harness, {
+        hostConnected: true,
+        hostName: "M4",
+      });
+      const sender = seedThread(harness.deps, {
+        environmentId: thread.environmentId,
+        projectId: thread.projectId,
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: thread.environmentId,
+        providerThreadId: "provider-sender",
+        threadId: sender.id,
+      });
+      const row = seedQueuedMessage(harness.deps, {
+        content: textInput("Run the build"),
+        senderThreadId: sender.id,
+        threadId: thread.id,
+      });
+      const notices = () =>
+        [
+          ...listQueuedThreadMessages(harness.db, sender.id).map(
+            (r) => r.content,
+          ),
+          ...listEvents(harness.db, { threadId: sender.id }).map((e) => e.data),
+        ].filter((text) => text.includes(`queue send ${thread.id} ${row.id}`));
+      const fail = () =>
+        recordQueuedMessageDrainFailure(harness.deps, {
+          error: new ApiError(409, "invalid_request", "Rejected"),
+          row,
+          thread,
+        });
+
+      fail();
+      fail();
+      await vi.waitFor(() => expect(notices()).toHaveLength(1));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(notices()).toHaveLength(1);
     });
   });
 });

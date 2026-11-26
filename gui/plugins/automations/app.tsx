@@ -456,7 +456,7 @@ function DeleteAutomationDialog({
   );
 }
 
-// Templates tab: the repos to pick from, and one Cloud (default) or Local loop per picked repo.
+// Templates tab: the repos to pick from, and one Cloud (or Local by default on Free) loop per picked repo.
 function useTemplates(onAdded: () => void): LoopTemplatesState {
   const rpc = useRpc<typeof automationRpcContract>();
   const sdk = useSdk();
@@ -465,13 +465,9 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
   const [projects, setProjects] = useState(lastLoaded.projects);
   const [plan, setPlan] = useState(lastLoaded.plan);
   const [usage, setUsage] = useState(lastLoaded.usage);
-  const paid = plan !== undefined && plan !== "free";
-  // A plan bought while this page is open: the pop-up after the purchase says so, and the paywall goes away.
   const [planAsked, setPlanAsked] = useState(0);
   usePlanLoopsChanged(() => setPlanAsked((count) => count + 1));
-  // Free never sees the templates, so it never pays for the estimate.
   useEffect(() => {
-    if (!paid) return;
     let cancelled = false;
     rpc.call("templates_usage", null).then(
       (result) => {
@@ -483,7 +479,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     return () => {
       cancelled = true;
     };
-  }, [rpc, paid]);
+  }, [rpc]);
   useEffect(() => {
     let cancelled = false;
     rpc.call("account_plan", null).then(
@@ -592,15 +588,10 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     },
     [navigate, providers, rpc, sdk, onAdded],
   );
-  const onUpgrade = useCallback(
-    () => navigate.openUrl("https://www.cloudroom.dev/billing"),
-    [navigate],
-  );
   return {
     projects,
     onAdd,
-    locked: plan === undefined ? null : plan === "free",
-    onUpgrade,
+    freePlan: plan === "free",
     usage,
   };
 }

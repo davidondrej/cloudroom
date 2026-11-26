@@ -565,7 +565,8 @@ export function createHostEntry() {
         const exits = driverExits;
         driverExits = 0;
         const shotsDir = join(tmpdir(), "cloudroom-computer-use", input.shotsKey);
-        return { ...result, stdout: await saveImages(result.stdout, shotsDir), driverExits: exits };
+        const stdout = input.inline ? result.stdout : await saveImages(result.stdout, shotsDir);
+        return { ...result, stdout, driverExits: exits };
       },
       async release({ session }) {
         if (!sessions.delete(session) || !daemon || !socket) return null;

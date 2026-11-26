@@ -1,4 +1,4 @@
-Let any agent in a Local thread see and control desktop apps, like a person would. Agents read each app's buttons and fields, click, type, and check the result, in the background with their own cursor.
+Let any agent in a Local thread, or a Cloud thread with Mac access, see and control desktop apps, like a person would. Agents read each app's buttons and fields, click, type, and check the result, in the background with their own cursor.
 
 ## What you get
 

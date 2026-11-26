@@ -100,6 +100,7 @@ import {
 } from "../threads/thread-data.js";
 import {
   buildTurnFailedEvent,
+  loadFailedTurn,
   describeFailedTurn,
 } from "../threads/turn-failed.js";
 import type {
@@ -563,6 +564,24 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     deps.artifactRetentionMs ?? DEFAULT_ARTIFACT_RETENTION_MS;
   const now = deps.now ?? Date.now;
   const usage = createPluginUsageTelemetry({ telemetry: deps.telemetry, list });
+  // Failed turns announced while plugins were still loading: thread id -> the request that failed. An app
+  // restart fails the Local turns it killed as soon as the host daemon reconnects, often before provider-retry
+  // listens, and an event with no listener is dropped: so they wait here and are announced once plugins load.
+  let heldTurnFailures: Map<string, string | null> | null = null;
+  let heldTurnFailuresSettled: Promise<void> | null = null;
+  // Built lazily inside the emitter: with no listener the failure path
+  // pays one map lookup and never touches the database.
+  const announceTurnFailed = (threadId: string) =>
+    emitThreadEvent("turn.failed", () =>
+      buildTurnFailedEvent(deps.db, threadId),
+    );
+  // A held failure is stale once its thread moved on while plugins loaded: a retry, a new message, or a Stop.
+  const announceHeldTurnFailure = (threadId: string, requestId: string | null) =>
+    emitThreadEvent("turn.failed", () => {
+      if (getThread(deps.db, threadId)?.status !== "error") return null;
+      const event = buildTurnFailedEvent(deps.db, threadId);
+      return event?.requestId === requestId ? event : null;
+    });
   const marketplaceManifestCache = new Map<
     string,
     { manifestJson: string; manifest: MarketplaceManifest | null }
@@ -1302,12 +1321,14 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         buildQueuedMessageEventEmitter("message.dispatched"),
       emitMessageCancelled: buildQueuedMessageEventEmitter("message.cancelled"),
       emitTurnFailed(threadId) {
-        // Built lazily inside the emitter: with no listener the failure path
-        // pays one map lookup and never touches the database.
-        emitThreadEvent("turn.failed", () =>
-          buildTurnFailedEvent(deps.db, threadId),
-        );
+        if (heldTurnFailures) {
+          heldTurnFailures.set(
+            threadId,
+            loadFailedTurn(deps.db, threadId)?.request.requestId ?? null,
+          );
+        } else void announceTurnFailed(threadId);
       },
+      turnFailuresSettled: () => heldTurnFailuresSettled,
     },
 
     hooks: {
@@ -1343,17 +1364,33 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     bindSdk: bindRuntimeSdk,
 
     async start() {
-      await backfillNormalizedPluginRegistrations();
-      await withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
-        for (const artifact of listPendingGitPluginArtifacts(deps.db)) {
-          await withArtifactLock(artifact.path, () =>
-            recoverInterruptedGitPluginPromotion(artifact.path),
-          );
-        }
-        await recoverIncompletePluginRollbacks();
-      });
-      await reconcileBundled();
-      await loadAll();
+      heldTurnFailures = new Map();
+      let settle = () => {};
+      heldTurnFailuresSettled = new Promise((resolve) => (settle = resolve));
+      try {
+        await backfillNormalizedPluginRegistrations();
+        await withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
+          for (const artifact of listPendingGitPluginArtifacts(deps.db)) {
+            await withArtifactLock(artifact.path, () =>
+              recoverInterruptedGitPluginPromotion(artifact.path),
+            );
+          }
+          await recoverIncompletePluginRollbacks();
+        });
+        await reconcileBundled();
+        await loadAll();
+      } finally {
+        const held = [...(heldTurnFailures ?? [])];
+        heldTurnFailures = null;
+        void Promise.all(
+          held.map(([threadId, requestId]) =>
+            announceHeldTurnFailure(threadId, requestId),
+          ),
+        ).then(() => {
+          heldTurnFailuresSettled = null;
+          settle();
+        });
+      }
       await withPluginOperationLock(REGISTRATION_MUTATION_KEY, runArtifactGc);
       if (deps.watchBuiltinPluginSources) {
         for (const bundled of bundledPlugins) {

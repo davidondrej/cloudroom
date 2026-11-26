@@ -1,4 +1,5 @@
-import { getLatestThreadSequence } from "@cloudroom/db";
+import { getLatestThreadSequence, threads } from "@cloudroom/db";
+import { eq } from "drizzle-orm";
 import { emitPluginThreadEvents } from "../../../src/services/plugins/plugin-thread-events.js";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +12,7 @@ import type { ThreadCreateServiceRequest } from "../../../src/services/threads/t
 import {
   seedEvent,
   seedThreadFixture,
+  seedThreadRuntimeState,
   seedTurnStarted,
 } from "../../helpers/seed.js";
 import { createUserQuestionPayload } from "../../helpers/pending-interactions.js";
@@ -19,6 +21,9 @@ import {
   testLogger,
   type TestAppHarness,
 } from "../../helpers/test-app.js";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
+import { createPluginService } from "../../../src/services/plugins/plugin-service.js";
+import { createNoopTelemetryService } from "../../../src/services/system/telemetry.js";
 
 interface RecordedThreadPayload {
   thread: {
@@ -211,6 +216,96 @@ describe("plugin thread lifecycle events", () => {
       delete globals.__failedEvents;
       await cleanup();
     }
+  });
+
+  // An app restart fails the Local turns it killed as soon as the host daemon reconnects, which can be
+  // before plugins load. provider-retry must still hear it, or the thread never auto-resumes.
+  async function failTurnWhilePluginsStart(
+    moveOn?: (harness: TestAppHarness, threadId: string) => void,
+  ): Promise<{ recorded: string[]; threadId: string }> {
+    const recorded: string[] = [];
+    globals.__turnFailedEvents = recorded;
+    const harness = await createTestAppHarness();
+    const rootDir = await mkdtemp(join(tmpdir(), "bb-plugin-restart-"));
+    const service = createPluginService({
+      aiServices: createAiServiceRegistry(),
+      telemetry: createNoopTelemetryService(),
+      db: harness.db,
+      hub: {
+        getDaemonSessionIdForHost: () => null,
+        notifyPluginSignal: () => 0,
+        notifySystem: () => {},
+      },
+      logger: testLogger,
+      dataDir: join(rootDir, "data"),
+      appVersion: "0.9.0",
+      bundledPlugins: [],
+    });
+    try {
+      const pluginDir = join(rootDir, "bb-plugin-retry-probe");
+      await mkdir(pluginDir, { recursive: true });
+      await writeFile(
+        join(pluginDir, "package.json"),
+        JSON.stringify({
+          name: "bb-plugin-retry-probe",
+          version: "0.1.0",
+          bb: {
+            name: "Retry probe",
+            description: "turn.failed fixture.",
+            branding: { icon: "Zap" },
+            server: "./server.ts",
+          },
+        }),
+      );
+      await writeFile(
+        join(pluginDir, "server.ts"),
+        `
+        export default function plugin(bb: any) {
+          bb.events.on("turn.failed", (payload: any) => {
+            (globalThis as any).__turnFailedEvents.push(payload.threadId);
+          });
+        }
+      `,
+      );
+      expect((await service.installPath(pluginDir)).status).toBe("running");
+      await service.stop();
+      const { environment, thread } = seedThreadFixture(harness, {
+        thread: { status: "error" },
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-restart",
+        threadId: thread.id,
+      });
+
+      const starting = service.start();
+      service.events.emitTurnFailed(thread.id);
+      moveOn?.(harness, thread.id);
+      await starting;
+      await service.events.turnFailuresSettled();
+      return { recorded: [...recorded], threadId: thread.id };
+    } finally {
+      delete globals.__turnFailedEvents;
+      await service.stop();
+      await rm(rootDir, { recursive: true, force: true });
+      await harness.cleanup();
+    }
+  }
+
+  it("delivers a turn.failed that fired while plugins were still starting", async () => {
+    const { recorded, threadId } = await failTurnWhilePluginsStart();
+    expect(recorded).toEqual([threadId]);
+  });
+
+  it("drops a held turn.failed whose thread left error before plugins loaded", async () => {
+    const { recorded } = await failTurnWhilePluginsStart((harness, threadId) =>
+      harness.db
+        .update(threads)
+        .set({ status: "idle" })
+        .where(eq(threads.id, threadId))
+        .run(),
+    );
+    expect(recorded).toEqual([]);
   });
 
   it("delivers interaction.pending after the interaction is committed", async () => {

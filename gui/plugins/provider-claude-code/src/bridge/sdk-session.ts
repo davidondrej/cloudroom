@@ -37,6 +37,8 @@ export interface SdkSessionOptions {
   effort?: Options["effort"];
   sessionId?: string;
   permissionMode?: ClaudePermissionMode;
+  /** The mode Plan mode returns to; Full access needs bypass allowed at launch. */
+  approvedPlanPermissionMode?: ClaudePermissionMode;
   /** Load the folder's own Claude settings (.claude/settings*.json, its hooks and MCP servers). Off: the user's only. */
   projectSettings?: boolean;
   sandbox?: Options["sandbox"];
@@ -85,6 +87,7 @@ interface SdkPermissionOptions {
 
 interface BuildSdkPermissionOptionsArgs {
   permissionMode: ClaudePermissionMode | undefined;
+  approvedPlanPermissionMode: ClaudePermissionMode | undefined;
 }
 
 interface AppendBoundedTextArgs {
@@ -288,16 +291,24 @@ export function claudeSpawnOptions(args: {
   };
 }
 
-function buildSdkPermissionOptions(
+export function buildSdkPermissionOptions(
   args: BuildSdkPermissionOptionsArgs,
 ): SdkPermissionOptions {
   const permissionMode = args.permissionMode ?? "default";
-  if (permissionMode !== "bypassPermissions") {
+  // Claude refuses a later switch to bypass unless the session launched with
+  // it allowed, so Plan mode in Full access allows it from the start.
+  if (
+    permissionMode !== "bypassPermissions" &&
+    args.approvedPlanPermissionMode !== "bypassPermissions"
+  ) {
     return { permissionMode };
   }
 
   if (isCurrentProcessRoot()) {
-    return { permissionMode: "default" };
+    return {
+      permissionMode:
+        permissionMode === "bypassPermissions" ? "default" : permissionMode,
+    };
   }
 
   return {
@@ -434,6 +445,7 @@ export class SdkSession {
     this.stderrTail = "";
     const permissionOptions = buildSdkPermissionOptions({
       permissionMode: this.options.permissionMode,
+      approvedPlanPermissionMode: this.options.approvedPlanPermissionMode,
     });
     const onStderr = (data: string): void => {
       this.stderrTail = appendBoundedText({

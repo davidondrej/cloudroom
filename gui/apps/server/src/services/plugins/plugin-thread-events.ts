@@ -68,6 +68,25 @@ export function emitPluginTurnFailed(threadId: string): void {
   emitter?.emitTurnFailed(threadId);
 }
 
+const HELD_TURN_FAILURES_WAIT_MS = 30_000;
+
+/**
+ * Waits, at most 30 s, until turns that failed while plugins were starting have reached their handlers, so a
+ * restart's retry is already queued when a parent hears that its child failed. Resolves at once otherwise.
+ */
+export async function waitForHeldTurnFailures(): Promise<void> {
+  const settled = emitter?.turnFailuresSettled();
+  if (!settled) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    settled,
+    new Promise<void>(
+      (resolve) => (timer = setTimeout(resolve, HELD_TURN_FAILURES_WAIT_MS)),
+    ),
+  ]);
+  clearTimeout(timer);
+}
+
 /**
  * Called with every lifecycle-event outcome; forwards applied transitions
  * into `active`/`idle`/`error` as their curated plugin lifecycle events.

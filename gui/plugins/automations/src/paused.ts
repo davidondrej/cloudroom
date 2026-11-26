@@ -22,13 +22,15 @@ export type PausedLoop = z.infer<typeof pausedLoopSchema>;
 // The website is read at most every 15 minutes: a loop pauses after 3 failed runs, so a later label loses little.
 const CLOUD_EVERY_MS = 15 * 60_000;
 
-/** The sweep pauses a local loop by turning it off and adding "(loop paused after N consecutive failures)". */
+/** The sweep pauses a local loop by turning it off and adding "(loop paused after N consecutive failures)". One waiting
+ *  for sign-in says "(loop waits for … sign-in)" and shows until its hold ends. */
 export function pausedLocal(db: Db, now: number): PausedLoop[] {
   const rows = db
     .prepare(
       `SELECT id, project_id AS projectId, name, last_error AS lastError, updated_at AS at
        FROM automations
-       WHERE enabled = 0 AND last_error LIKE '%(loop paused after % consecutive failures)' AND updated_at >= ?`,
+       WHERE enabled = 0 AND (last_error LIKE '%(loop paused after % consecutive failures)' AND updated_at >= ?
+         OR last_error LIKE '% (loop waits for % sign-in)')`,
     )
     .all(now - QUIET_AFTER_MS) as {
     id: string;

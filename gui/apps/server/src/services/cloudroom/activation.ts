@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { and, eq, isNotNull, isNull, ne, notExists, notInArray, sql } from "drizzle-orm";
 import { threadPluginMetadata, threads } from "@cloudroom/db";
@@ -10,33 +10,94 @@ import { cloudroom, importedThreadIds } from "./commands.js";
 
 const file = (deps: AppDeps) => join(deps.config.dataDir, "cloudroom-activation.json");
 const CHECK_MS = 15 * 60_000;
+const LEGACY_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
 
-interface ActivationState { done: Set<ActivationStep>; loopCheckedAt: number; phoneCheckedAt: number }
+interface ActivationState { done: Set<ActivationStep>; completedStarted: number | null; loopCheckedAt: number; phoneCheckedAt: number }
 const states = new Map<string, Promise<ActivationState>>();
 
 function load(deps: AppDeps): Promise<ActivationState> {
   let state = states.get(deps.config.dataDir);
   if (!state) {
-    state = readFile(file(deps), "utf8").then((text) => JSON.parse(text) as { done?: unknown }, () => ({ done: [] }))
-      .then((saved) => ({ done: new Set(ACTIVATION_STEPS.filter((step) => Array.isArray(saved.done) && saved.done.includes(step))), loopCheckedAt: 0, phoneCheckedAt: 0 }));
+    state = readFile(file(deps), "utf8").then((text) => JSON.parse(text) as { done?: unknown; completedStarted?: unknown }, () => ({ done: [], completedStarted: null }))
+      .then((saved) => {
+        const savedDone = Array.isArray(saved.done) ? saved.done : [];
+        const done = new Set<ActivationStep>(ACTIVATION_STEPS.filter((step) => savedDone.includes(step)));
+        // Installs that already completed the earlier 5-step checklist stay completed after `second` became `skill`.
+        if (LEGACY_STEPS.every((step) => savedDone.includes(step))) done.add("skill");
+        return {
+          done,
+          completedStarted: typeof saved.completedStarted === "number" && Number.isFinite(saved.completedStarted) ? saved.completedStarted : null,
+          loopCheckedAt: 0,
+          phoneCheckedAt: 0,
+        };
+      });
     states.set(deps.config.dataDir, state);
   }
   return state;
 }
 
-async function markDone(deps: AppDeps, state: ActivationState, steps: ActivationStep[]) {
+async function markDone(deps: AppDeps, state: ActivationState, steps: ActivationStep[], started?: number) {
   const fresh = steps.filter((step) => !state.done.has(step));
   if (!fresh.length) return;
   for (const step of fresh) {
     state.done.add(step);
     deps.telemetry.capture({ name: "activation_step", properties: { step, action: "done" } });
   }
-  await writeFile(file(deps), JSON.stringify({ done: [...state.done] }), { mode: 0o600 });
+  if (state.completedStarted === null && ACTIVATION_STEPS.every((step) => state.done.has(step))) {
+    const count = started ?? await startedThreads(deps);
+    if (state.completedStarted === null) state.completedStarted = count;
+  }
+  const saved = { done: [...state.done], ...(state.completedStarted !== null ? { completedStarted: state.completedStarted } : {}) };
+  await writeFile(file(deps), JSON.stringify(saved), { mode: 0o600 });
 }
 
 export async function notePhoneUse(deps: AppDeps): Promise<void> {
   const state = await load(deps);
   if (!state.done.has("phone")) await markDone(deps, state, ["phone"]);
+}
+
+export async function noteSkillDone(deps: AppDeps): Promise<void> {
+  const state = await load(deps);
+  if (!state.done.has("skill")) await markDone(deps, state, ["skill"]);
+}
+
+async function hasUserSkill(root: string): Promise<boolean> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
+    const exists = await stat(join(root, entry.name, "SKILL.md")).then((info) => info.isFile(), () => false);
+    if (exists) return true;
+  }
+  return false;
+}
+
+function hasSkillUse(deps: AppDeps): boolean {
+  const first = firstAgentThreadId(deps.db);
+  const skipThread = first ? sql`AND t.id != ${first}` : sql``;
+  const skipEvent = first ? sql`AND thread_id != ${first}` : sql``;
+  const row = deps.db.get<{ hit: number }>(sql`
+    SELECT 1 AS hit FROM (
+      SELECT 1 FROM threads AS t
+        CROSS JOIN events AS e ON e.thread_id = t.id AND e.type = 'client/turn/requested',
+        json_each(e.data, '$.input') AS item,
+        json_each(item.value, '$.mentions') AS mention
+      WHERE json_extract(e.data, '$.retryAttempt') IS NULL
+        ${skipThread}
+        AND json_extract(mention.value, '$.resource.kind') = 'command'
+        AND json_extract(mention.value, '$.resource.source') = 'skill'
+      UNION ALL
+      SELECT 1 FROM events
+      WHERE type = 'item/completed'
+        AND item_kind IN ('toolCall', 'fileRead', 'commandExecution')
+        ${skipEvent}
+        AND CASE item_kind
+          WHEN 'toolCall' THEN json_extract(data, '$.item.tool') = 'Skill'
+            OR (json_extract(data, '$.item.tool') IN ('Read', 'Bash') AND instr(data, 'SKILL.md') > 0)
+          ELSE instr(data, 'SKILL.md') > 0 END
+      LIMIT 1
+    ) LIMIT 1
+  `);
+  return row !== undefined;
 }
 
 /** Asks Cloudroom Connect, so a phone set up before this checklist, used only while this Mac sleeps, or pointed at another Mac counts. */
@@ -61,13 +122,16 @@ async function startedThreads(deps: AppDeps): Promise<number> {
   return row?.n ?? 0;
 }
 
-export async function activation(deps: AppDeps, plugins: PluginService): Promise<{ steps: Record<ActivationStep, boolean>; second: "codex" | "claude-code"; started: number }> {
+export async function activation(deps: AppDeps, plugins: PluginService): Promise<{ steps: Record<ActivationStep, boolean>; started: number; completedStarted: number | null }> {
   const state = await load(deps);
   const cloud = and(eq(threads.executionTarget, "cloud"), notFirstAgent(deps));
-  const providers = deps.db.selectDistinct({ id: threads.providerId }).from(threads).where(cloud).limit(3).all().map((row) => row.id);
   const found: ActivationStep[] = [];
-  if (providers.length) found.push("cloud");
-  if (providers.length > 1) found.push("second");
+  if (!state.done.has("cloud") && deps.db.select({ id: threads.id }).from(threads).where(cloud).limit(1).get()) {
+    found.push("cloud");
+  }
+  if (!state.done.has("skill") && (hasSkillUse(deps) || await hasUserSkill(deps.config.userSkillsRootPath))) {
+    found.push("skill");
+  }
   if (!state.done.has("subagents")) {
     const child = deps.db.select({ id: threads.id }).from(threads).where(and(cloud, isNotNull(threads.parentThreadId))).limit(1).get();
     const [count] = deps.db.select({ n: sql<number>`count(*)` }).from(threads).where(cloud).all();
@@ -90,10 +154,11 @@ export async function activation(deps: AppDeps, plugins: PluginService): Promise
     state.phoneCheckedAt = Date.now();
     void signedInPhone(plugins).then((phone) => (phone ? markDone(deps, state, ["phone"]) : undefined)).catch(() => {});
   }
-  await markDone(deps, state, found);
+  const started = await startedThreads(deps);
+  await markDone(deps, state, found, started);
   return {
     steps: Object.fromEntries(ACTIVATION_STEPS.map((step) => [step, state.done.has(step)])) as Record<ActivationStep, boolean>,
-    second: providers.includes("codex") && !providers.includes("claude-code") ? "claude-code" : "codex",
-    started: await startedThreads(deps),
+    started,
+    completedStarted: state.completedStarted,
   };
 }

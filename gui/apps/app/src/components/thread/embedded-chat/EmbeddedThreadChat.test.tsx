@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
         id: string;
         createdAt: number;
         payload: { kind: string };
+        origin?: { kind: string; pluginId: string };
       }>
     | undefined,
   pendingInteractionsIsError: false,
@@ -693,25 +694,39 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(true);
   });
 
-  it("keeps the composer for a plugin-owned interaction", () => {
+  it("shows a plugin request such as the Secrets form in place of the composer", () => {
     mocks.pendingInteractions = [
-      { id: "int_2", createdAt: 1, payload: { kind: "plugin" } },
+      {
+        id: "int_2",
+        createdAt: 1,
+        payload: { kind: "plugin" },
+        origin: { kind: "plugin", pluginId: "secrets" },
+      },
     ];
 
     renderEmbeddedChat({ threadId: "thr_side_chat" });
 
-    expect(screen.queryByTestId("pending-interaction-banner")).toBeNull();
-    expect(screen.getByTestId("embedded-chat-composer")).toBeTruthy();
+    expect(screen.getByTestId("pending-interaction-banner").textContent).toBe(
+      "thr_side_chat",
+    );
+    expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(true);
   });
 
-  it("keeps queued messages attached for a plugin-owned interaction", () => {
+  it("keeps the composer and attached queue for a chat-card plugin request", () => {
     mocks.pendingInteractions = [
-      { id: "int_2", createdAt: 1, payload: { kind: "plugin" } },
+      {
+        id: "int_2",
+        createdAt: 1,
+        payload: { kind: "plugin" },
+        origin: { kind: "plugin", pluginId: "gpu" },
+      },
     ];
     mocks.queuedMessages = [{ id: "q1" }];
 
     renderEmbeddedChat({ threadId: "thr_side_chat" });
 
+    expect(screen.queryByTestId("pending-interaction-banner")).toBeNull();
+    expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(false);
     expect(
       screen
         .getByTestId("embedded-chat-queued-messages")

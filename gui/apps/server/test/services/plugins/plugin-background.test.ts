@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CronExpressionParser } from "cron-parser";
@@ -13,6 +13,7 @@ import {
   type DbConnection,
 } from "@cloudroom/db";
 import type { Logger } from "@cloudroom/logger";
+import { installSafeProcessDiagnostics } from "@cloudroom/process-utils";
 import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
@@ -394,6 +395,7 @@ describe("plugin background services", () => {
         import { EventEmitter } from "node:events";
         export default function plugin(bb: any) {
           const g = globalThis as any;
+          g.__emitterBb = bb;
           g.__emitterStarts = 0;
           g.__emitterAborts = 0;
           bb.background.service("imap", {
@@ -437,6 +439,33 @@ describe("plugin background services", () => {
       expect(service.list().find((p) => p.id === "emitter")?.status).toBe(
         "running",
       );
+      // A factory timer that outlives a disable hits the stale handle every tick: contained, with one report and one warn.
+      await service.setEnabled("emitter", false);
+      const staleBb = globals.__emitterBb as { storage: { database(): void } };
+      const reportsDir = join(workDir, "reports");
+      const uninstall = installSafeProcessDiagnostics({
+        logsDir: reportsDir,
+        processName: "server",
+      });
+      const warn = vi.spyOn(logger, "warn");
+      let ticks = 0;
+      for (let tick = 0; tick < 3; tick += 1) {
+        setTimeout(() => {
+          ticks += 1;
+          staleBb.storage.database();
+        }, 0);
+      }
+      await vi.waitFor(async () => {
+        expect(ticks).toBe(3);
+        expect(await readdir(reportsDir)).toHaveLength(1);
+      });
+      uninstall();
+      expect(unclaimed).toEqual([]);
+      expect(
+        warn.mock.calls.filter(([line]) => String(line).includes("stale API")),
+      ).toHaveLength(1);
+      warn.mockRestore();
+      expect(service.handleUncaughtException(new Error("fault"))).toBe(false);
     } finally {
       process.removeAllListeners("uncaughtException");
       for (const listener of vitestListeners) {

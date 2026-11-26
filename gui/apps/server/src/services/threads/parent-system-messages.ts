@@ -214,7 +214,7 @@ function splitRenderedParentSystemSlot(
   };
 }
 
-function buildParentSystemInputFromSegments(
+export function buildParentSystemInputFromSegments(
   args: BuildParentSystemInputFromSegmentsArgs,
 ): PromptInput[] {
   let text = "";

@@ -42,7 +42,7 @@ type ThreadOwnershipTemplateId =
   | "systemMessageThreadOwnershipRemoved";
 
 interface QueueParentSystemMessageBestEffortArgs {
-  childThread: ThreadLabelSource;
+  childThread: ThreadLabelSource & Pick<Thread, "archivedAt">;
   input: PromptInput[];
   parentThreadId: string;
   reason: "assigned" | "removed";
@@ -117,6 +117,9 @@ async function queueParentSystemMessageBestEffort(
       }
       return;
     }
+    // An archived child needs nothing from its parent, so moving one (say, a
+    // retired parent's 50) tells neither parent; its own history keeps it (#2639).
+    if (args.childThread.archivedAt !== null) return;
     const subject: SystemMessageSubject = {
       kind: "thread",
       threadId: args.childThread.id,

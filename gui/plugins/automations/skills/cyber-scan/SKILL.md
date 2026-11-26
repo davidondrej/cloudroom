@@ -59,9 +59,6 @@ Cheap readers review GitHub repos in the cloud.
    Under it, write 2-3 short plain-English sentences: the biggest risk and the first fix.
 6. **Loops:** find the 2 biggest gaps. Pick the 2 loops that would prevent that class of problem from coming back.
    - Base each on the closest security template (`room-cli loop templates`). Tune its prompt to what you found.
-   - If it says templates need a paid plan, the scan still worked.
-     Write both loops from your findings instead. Don't look for the templates elsewhere.
-     Say templates need a paid plan, with its upgrade link.
    - Each runs on one repo's Cloudroom project. Give its schedule and what it checks.
    - End with: "Turn these on?"
 7. **On yes:** create each as a Cloud loop with `room-cli loop create` (see the automations skill). Then `rm -rf "$d"`.

@@ -1,5 +1,6 @@
-// Connect GitHub's device flow for cloud sandboxes: every repo (the OAuth app) or only picked repos (the GitHub App, #2084).
+// Connect GitHub's device flow for cloud sandboxes through the Cloudroom Agents GitHub App (#2084).
 // GitHub and the website are mocked.
+import { Hono } from "hono";
 import { beforeEach, expect, test, vi } from "vitest";
 
 const saved: string[] = [];
@@ -12,15 +13,14 @@ let userLogin = "davidondrej";
 let saveFails = false;
 let installStatus = 200;
 vi.mock("node:timers/promises", () => ({ setTimeout: (_ms: number, _v: unknown, o?: { signal?: AbortSignal }) => new Promise<void>((resolve, reject) => { if (o?.signal?.aborted) return reject(o.signal.reason); o?.signal?.addEventListener("abort", () => reject(o.signal!.reason)); setImmediate(resolve); }) }));
-vi.mock("../../src/services/cloudroom/commands.js", () => ({ cloudroom: () => ({ sandboxes: {
+vi.mock("../../src/services/cloudroom/commands.js", () => ({ cloudroom: () => ({ sync: {}, sandboxes: {
   account: async () => ({ id: "a" }), logins: async () => ({ github: loggedIn }), githubAccount: async () => null, removeLogin: async () => {},
   saveLogin: async (_name: string, entry: string, _only: unknown, _background: boolean, byHand: boolean) => { if (saveFails) throw new Error("website down"); saved.push(entry); chosen.push(byHand); loggedIn = true; },
 } }) }));
 vi.mock("../../src/services/cloudroom/sandboxes.js", async () => {
   const actual = await vi.importActual<typeof import("../../src/services/cloudroom/sandboxes.js")>("../../src/services/cloudroom/sandboxes.js");
   return {
-    ghHostsPath: actual.ghHostsPath,
-    parseGhHostsUser: actual.parseGhHostsUser,
+    ...actual,
     macGithubToken: async () => localToken,
     macGithubAccount: async () => localAccount,
     sandboxGithubLogin: async (token: string) => JSON.stringify({ token }),
@@ -57,10 +57,10 @@ beforeEach(() => {
   });
 });
 
-test("specific repos: the App's client ID, no scope, then waits for an install before saving", async () => {
+test("login uses the GitHub App's client ID with no scope, then waits for an install before saving", async () => {
   tokenAnswers = [{ error: "authorization_pending" }, { access_token: "ghu_test", token_type: "bearer", scope: "" }];
   installs = [0, 0, 0, 0, 0, 0];
-  const first = await githubAuth(deps, "login", "req1", true);
+  const first = await githubAuth(deps, "login", "req1");
   expect(first).toMatchObject({ state: "waiting", user_code: "ABCD-1234", verification_url: "https://github.com/login/device" });
   expect(calls[0].body).toEqual({ client_id: "Iv23lilRDA0DFyES7mNr" });
   await until(async () => (await githubAuth(deps)).user_code === null);
@@ -80,7 +80,7 @@ test("specific repos: the App's client ID, no scope, then waits for an install b
 test("a suspended install does not count as picked", async () => {
   tokenAnswers = [{ access_token: "ghu_test" }];
   installs = [-1];
-  await githubAuth(deps, "login", "req4", true);
+  await githubAuth(deps, "login", "req4");
   await until(async () => (await githubAuth(deps)).user_code === null && (await githubAuth(deps)).state === "waiting");
   await until(() => calls.filter((c) => c.url.includes("/user/installations")).length >= 3);
   expect(saved).toEqual([]);
@@ -90,7 +90,7 @@ test("a suspended install does not count as picked", async () => {
 test("a failed switch keeps the old login connected and says what failed", async () => {
   loggedIn = true;
   tokenAnswers = [{ error: "access_denied" }];
-  await githubAuth(deps, "login", "req5", true);
+  await githubAuth(deps, "login", "req5");
   await until(async () => (await githubAuth(deps)).state === "connected");
   expect((await githubAuth(deps)).message).toBe("GitHub sign-in was declined.");
   expect(saved).toEqual([]);
@@ -100,33 +100,35 @@ test("GitHub refusing the new token ends the wait at once", async () => {
   loggedIn = true;
   tokenAnswers = [{ access_token: "ghu_test" }];
   installStatus = 401;
-  await githubAuth(deps, "login", "req6", true);
+  await githubAuth(deps, "login", "req6");
   await until(async () => (await githubAuth(deps)).state === "connected");
   expect((await githubAuth(deps)).message).toContain("GitHub rejected the new login");
   expect(calls.filter((c) => c.url.includes("/user/installations")).length).toBe(1);
 });
 
 test("a failed save surfaces an error without marking connected", async () => {
-  tokenAnswers = [{ access_token: "gho_test" }];
+  tokenAnswers = [{ access_token: "ghu_test" }];
+  installs = [1];
   saveFails = true;
   await githubAuth(deps, "login", "req7");
   await until(async () => (await githubAuth(deps)).state === "error");
   expect((await githubAuth(deps)).message).toContain("website down");
 });
 
-test("every repo: the OAuth app and its scope, saved right away, no install check", async () => {
-  tokenAnswers = [{ access_token: "gho_test" }];
+test("already installed: saves right away without waiting on the install screen", async () => {
+  tokenAnswers = [{ access_token: "ghu_test" }];
+  installs = [1];
   await githubAuth(deps, "login", "req2");
-  expect(calls[0].body).toEqual({ client_id: "Ov23li9OTKaEYO6RAHos", scope: "repo read:org workflow" });
+  expect(calls[0].body).toEqual({ client_id: "Iv23lilRDA0DFyES7mNr" });
   await until(() => saved.length === 1);
-  expect(JSON.parse(saved[0]).token).toBe("gho_test");
-  expect(calls.some((c) => c.url.includes("/user/installations"))).toBe(false);
+  expect(JSON.parse(saved[0]).token).toBe("ghu_test");
+  expect(calls.filter((c) => c.url.includes("/user/installations")).length).toBe(1);
 });
 
 test("cancel while picking repos saves nothing", async () => {
   tokenAnswers = [{ access_token: "ghu_test" }];
   installs = [0];
-  await githubAuth(deps, "login", "req3", true);
+  await githubAuth(deps, "login", "req3");
   await until(async () => (await githubAuth(deps)).user_code === null && (await githubAuth(deps)).state === "waiting");
   await githubAuth(deps, "cancel", "req3");
   const polls = calls.length;
@@ -183,4 +185,21 @@ test("parseGhHostsUser and ghHostsPath handle multi-account hosts.yml and Window
   expect(ghHostsPath("win32", { XDG_CONFIG_HOME: "/xdg", APPDATA: "/appdata" })).toBe("/xdg/gh/hosts.yml");
   expect(ghHostsPath("win32", { APPDATA: "/appdata" })).toBe("/appdata/GitHub CLI/hosts.yml");
   expect(ghHostsPath("darwin", { GH_CONFIG_DIR: "/custom", XDG_CONFIG_HOME: "/xdg" })).toBe("/custom/hosts.yml");
+});
+
+test("route still accepts legacy repos flag and always uses the GitHub App", async () => {
+  const { installCloudroomRoutes } = await import("../../src/services/cloudroom/routes.js");
+  const app = new Hono();
+  installCloudroomRoutes(app, deps, {} as never);
+  for (const [requestId, repos] of [["legacy_true", true], ["legacy_false", false]] as const) {
+    calls = [];
+    const response = await app.request("/api/v1/cloudroom/account/github/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, repos }),
+    });
+    expect(response.status).toBe(200);
+    expect(calls[0]?.body).toEqual({ client_id: "Iv23lilRDA0DFyES7mNr" });
+    await githubAuth(deps, "cancel", requestId);
+  }
 });

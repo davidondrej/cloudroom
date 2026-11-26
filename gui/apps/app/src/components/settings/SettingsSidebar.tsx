@@ -15,7 +15,6 @@ import {
   SectionSidebarIcon,
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
-import { InviteSidebarRow } from "@/components/InviteOffer";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
@@ -52,14 +51,12 @@ type SettingsSidebarNavigation = Pick<
 
 interface SettingsSidebarContentProps extends SettingsSidebarProps {
   account?: ReactNode;
-  invite?: ReactNode;
   navigation: SettingsSidebarNavigation;
   testIdPrefix?: string;
 }
 
 export function SettingsSidebarContent({
   account,
-  invite,
   onResizeMouseDown,
   isResizing,
   appRoutePath,
@@ -234,7 +231,6 @@ export function SettingsSidebarContent({
               <SectionSidebarIcon name={group.icon} />
             </SectionSidebarRow>
           ))}
-          {invite}
         </div>
       )}
     </SectionSidebar>
@@ -254,7 +250,6 @@ export function SettingsSidebar({
   return (
     <SettingsSidebarContent
       account={<SettingsAccountMenu />}
-      invite={<InviteSidebarRow />}
       appRoutePath={appRoutePath}
       isResizing={isResizing}
       mobileHosted={mobileHosted}

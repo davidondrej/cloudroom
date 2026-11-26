@@ -761,15 +761,12 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
   const client = useQueryClient();
   const requestId = useRef<string | null>(null);
   const [copied, setCopied] = useState(false);
-  // "Only share specific repos": the GitHub App's login, then the user picks repos on GitHub (#2084).
-  const [picking, setPicking] = useState(false);
   const refresh = () => client.invalidateQueries({ queryKey: ["cloudroom-github-auth"] });
   const connect = useMutation({
-    mutationFn: async (repos: boolean) => {
-      setPicking(repos);
-      track("github", "started", repos ? "repos" : null);
+    mutationFn: async () => {
+      track("github", "started", "repos");
       requestId.current = crypto.randomUUID();
-      const result = await sdk.cloudroom.githubLogin(requestId.current, repos);
+      const result = await sdk.cloudroom.githubLogin(requestId.current);
       if (result.state === "waiting" && result.verification_url && result.user_code) {
         if (new URL(result.verification_url).origin !== "https://github.com") throw new Error("Unexpected GitHub sign-in page.");
         setCopied(await copyTextToClipboard(result.user_code));
@@ -823,12 +820,12 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
   };
   // Someone whose account or organization already has the app skips the picking screen, so the repos may not be the
   // ones they had in mind: the link opens GitHub's page for changing them.
-  const repos = useQuery({ queryKey: ["cloudroom-github-account"], enabled: connected && picking, retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal) }).data?.reposUrl;
+  const repos = useQuery({ queryKey: ["cloudroom-github-account"], enabled: connected && !onServer, retry: false, queryFn: ({ signal }) => sdk.cloudroom.githubAccount(signal) }).data?.reposUrl;
   const copyAgain = async () => {
     if (code && await copyToClipboardWithToast(code, { successMessage: "Code copied." })) setCopied(true);
   };
   const detail = connected
-    ? picking ? "Cloud agents can use the repos Cloudroom has on GitHub." : "Cloud agents can use your repos."
+    ? repos ? "Cloud agents can use the repos Cloudroom has on GitHub." : "Cloud agents can use your repos."
     : onServer ? "Your Core uses the GitHub login set up on its server."
     : !account.data?.account ? "Log in first" : offline ? "Cloud unreachable" : !ready ? "Starting your cloud…"
     : localGithub ? `Found ${localGithub.login ? `@${localGithub.login}` : "GitHub CLI"} on ${here}. Nothing is shared until you click below.`
@@ -887,7 +884,7 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
         </div>
         {left !== null && <CountdownBar seconds={GITHUB_COUNTDOWN} />}
         <p className="mt-6 text-sm text-(--ob-muted)">
-          On GitHub: choose your account, pick <b className="text-(--ob-ink)">Only select repositories</b>, then click <b className="text-(--ob-ink)">Install</b>. This screen moves on by itself.
+          On GitHub: choose your account, pick <b className="text-(--ob-ink)">All repositories</b> or <b className="text-(--ob-ink)">Only select repositories</b>, then click <b className="text-(--ob-ink)">Install</b>. Install on your organization too if needed. This screen moves on by itself.
         </p>
       </>
     );
@@ -904,7 +901,7 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
       {offline && <CloudOffline />}
       <div className="mt-8 flex items-center gap-5">
         {connected || onServer ? (
-          <Cta onClick={() => { track("github", "done", picking ? "repos" : null); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
+          <Cta onClick={() => { track("github", "done", repos ? "repos" : null); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>
         ) : localGithub ? (
           <Cta disabled={!ready || busy} onClick={() => { connect.reset(); copyMac.mutate(localGithub.login); }}>
             {copyMac.isPending ? (
@@ -914,7 +911,7 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
             )}
           </Cta>
         ) : (
-          <Cta disabled={!ready || busy} onClick={() => { copyMac.reset(); connect.mutate(false); }}>
+          <Cta disabled={!ready || busy} onClick={() => { copyMac.reset(); connect.mutate(); }}>
             <Icon name={connect.isPending ? "Loading" : "Github"} className={cn(connect.isPending && "animate-spin")} aria-hidden />
             {connect.isPending ? "Getting your code…" : "Connect GitHub"}
           </Cta>
@@ -924,10 +921,10 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
         )}
         {connected && repos && <Note><button type="button" className={LINK} onClick={() => openGithub(repos)}>Change repos</button> on GitHub.</Note>}
       </div>
-      {!connected && !onServer && <div className="mt-3.5 text-[12.5px] text-(--ob-muted)">
-        <button type="button" className={QUIET_LINK} disabled={!ready || busy} onClick={() => { copyMac.reset(); connect.mutate(true); }}>Only share specific repos</button>
-        {localGithub && <> · <button type="button" className={QUIET_LINK} disabled={!ready || busy} onClick={() => { copyMac.reset(); connect.mutate(false); }}>Sign in with another account</button></>}
-        {gitlab.state?.available && <> · <button type="button" className={QUIET_LINK} disabled={gitlab.busy || !ready || busy} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button></>}
+      {!connected && !onServer && (localGithub || gitlab.state?.available || gitlab.error) && <div className="mt-3.5 text-[12.5px] text-(--ob-muted)">
+        {localGithub && <button type="button" className={QUIET_LINK} disabled={!ready || busy} onClick={() => { copyMac.reset(); connect.mutate(); }}>Pick specific repos or another account</button>}
+        {localGithub && gitlab.state?.available && " · "}
+        {gitlab.state?.available && <button type="button" className={QUIET_LINK} disabled={gitlab.busy || !ready || busy} onClick={()=>{stay();track("github","started","gitlab");gitlab.change("start");}}>Use GitLab instead</button>}
         {gitlab.error && <p role="alert" className="text-xs text-(--ob-error)">{gitlab.error}</p>}
       </div>}
     </>

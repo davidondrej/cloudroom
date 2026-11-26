@@ -9,13 +9,16 @@ import {
 import { spawnSync } from "node:child_process";
 import {
   accessSync,
+  closeSync,
   constants,
+  fstatSync,
+  openSync,
   readFileSync,
+  readSync,
   realpathSync,
-  statSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import type {
@@ -216,21 +219,102 @@ const claudeConfigDir = (env: NodeJS.ProcessEnv): string =>
 
 const INSTRUCTION_FILE_MAX_BYTES = 200_000;
 
+function safeRealpath(target: string): string | null {
+  try {
+    return realpathSync.native(target);
+  } catch {
+    return null;
+  }
+}
+
+function isPathWithin(parentDir: string, childPath: string): boolean {
+  const rel = relative(parentDir, childPath);
+  return (
+    rel.length > 0 &&
+    rel !== ".." &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  );
+}
+
+function readBoundedRegularFile(realPath: string): string | null {
+  const flags =
+    constants.O_RDONLY |
+    (constants.O_NOFOLLOW ?? 0) |
+    (constants.O_NONBLOCK ?? 0);
+  let fd: number;
+  try {
+    fd = openSync(realPath, flags);
+  } catch {
+    return null;
+  }
+  try {
+    const info = fstatSync(fd, { bigint: true });
+    if (!info.isFile() || info.size > BigInt(INSTRUCTION_FILE_MAX_BYTES)) {
+      return null;
+    }
+    // A hard link can point anywhere, including Cloudroom private data files
+    // that a path check cannot see, so instruction files must have one link.
+    if (info.nlink !== 1n) return null;
+    const buffer = Buffer.alloc(INSTRUCTION_FILE_MAX_BYTES + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > INSTRUCTION_FILE_MAX_BYTES) return null;
+    return buffer.subarray(0, total).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * Outside Full access Claude skips the folder's own settings, which also
  * skips its CLAUDE.md. This hands Claude those instructions as plain text,
  * found the way Claude finds them: CLAUDE.md, .claude/CLAUDE.md and
  * CLAUDE.local.md in the folder and each parent, and AGENTS.md where a folder
  * has no CLAUDE.md. Imports (`@file`) and .claude/rules are not followed.
+ * Each file must resolve to a regular file inside its own directory and never
+ * to a Cloudroom private data path (#2191).
  */
 export function readProjectInstructions(
   cwd: string,
   env: NodeJS.ProcessEnv,
 ): string {
-  const userFiles = new Set([
+  const userFiles = new Set<string>();
+  for (const candidate of [
     join(claudeConfigDir(env), "CLAUDE.md"),
     join(env.HOME || homedir(), ".claude", "CLAUDE.md"),
-  ]);
+  ]) {
+    const resolved = resolve(candidate);
+    userFiles.add(resolved);
+    const real = safeRealpath(resolved);
+    if (real !== null) userFiles.add(real);
+  }
+  const deniedPaths = new Set<string>();
+  for (const rawPath of privateDataPaths(env.ROOM_DATA_DIR)) {
+    const resolved = resolve(rawPath);
+    deniedPaths.add(resolved);
+    const real = safeRealpath(resolved);
+    if (real !== null) deniedPaths.add(real);
+  }
+  const isDeniedPath = (realPath: string): boolean => {
+    if (deniedPaths.has(realPath)) return true;
+    for (const denied of deniedPaths) {
+      if (isPathWithin(denied, realPath)) return true;
+    }
+    return false;
+  };
   const dirs: string[] = [];
   for (let dir = resolve(cwd); ; dir = dirname(dir)) {
     dirs.unshift(dir);
@@ -239,16 +323,24 @@ export function readProjectInstructions(
   const found: string[] = [];
   const shared = "project instructions, checked into the codebase";
   for (const dir of dirs) {
+    const realDir = safeRealpath(dir);
+    if (realDir === null) continue;
     const read = (name: string, label: string): string | null => {
       const path = join(dir, name);
       if (userFiles.has(path)) return null;
-      try {
-        if (statSync(path).size > INSTRUCTION_FILE_MAX_BYTES) return null;
-        const text = readFileSync(path, "utf8").trim();
-        return text ? `Contents of ${path} (${label}):\n\n${text}` : null;
-      } catch {
+      const realPath = safeRealpath(path);
+      if (
+        realPath === null ||
+        userFiles.has(realPath) ||
+        !isPathWithin(realDir, realPath) ||
+        isDeniedPath(realPath)
+      ) {
         return null;
       }
+      const raw = readBoundedRegularFile(realPath);
+      if (raw === null) return null;
+      const text = raw.trim();
+      return text ? `Contents of ${path} (${label}):\n\n${text}` : null;
     };
     const claudeMd = [
       read("CLAUDE.md", shared),
@@ -318,7 +410,11 @@ export function buildPermissionSessionOptions(
   env: NodeJS.ProcessEnv,
 ): Pick<
   SdkSessionOptions,
-  "additionalDirectories" | "permissionMode" | "projectSettings" | "sandbox"
+  | "additionalDirectories"
+  | "approvedPlanPermissionMode"
+  | "permissionMode"
+  | "projectSettings"
+  | "sandbox"
 > {
   const sandbox = buildWorkspaceWriteSandbox(params, env);
   const additionalDirectories = usesWorkspaceSandbox(params)
@@ -326,6 +422,8 @@ export function buildPermissionSessionOptions(
     : [];
   return {
     permissionMode: params.permissionMode,
+    approvedPlanPermissionMode:
+      params.approvedPlanPermissionMode ?? params.permissionMode,
     // A folder's .claude settings can run hooks, helper commands and MCP
     // servers as the user, outside the sandbox and before any approval. Only
     // Full access, where the agent may run anything anyway, loads them.

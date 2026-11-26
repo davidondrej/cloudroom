@@ -42,9 +42,8 @@ export interface LoopTemplatesState {
     projectIds: string[],
     target: LoopTarget,
   ) => Promise<void>;
-  /** True on the Free plan, null while the plan loads. */
-  locked: boolean | null;
-  onUpgrade: () => void;
+  /** True on the Free plan: defaults templates to Local so scheduled runs don't burn the 10/month Cloud cap. */
+  freePlan?: boolean;
   /** Each template's rough share of the weekly Claude or Codex limit, by template ID. Templates it can't price are missing. */
   usage?: TemplateUsage;
 }
@@ -114,19 +113,22 @@ function TemplateRepoPicker({
   template,
   projects,
   activeIds,
+  freePlan,
   onAdd,
 }: {
   template: LoopTemplate;
   projects: readonly TemplateProject[] | null;
   activeIds: ReadonlySet<string>;
+  freePlan?: boolean;
   onAdd: LoopTemplatesState["onAdd"];
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [target, setTarget] = useState<LoopTarget>(
-    template.localOnly ? "local" : "cloud",
-  );
+  const [pickedTarget, setPickedTarget] = useState<LoopTarget | null>(null);
+  const target: LoopTarget = template.localOnly
+    ? "local"
+    : (pickedTarget ?? (freePlan ? "local" : "cloud"));
   const [pending, setPending] = useState(false);
   const on = activeIds.size > 0;
   const choosable = (projects ?? []).filter((p) => !activeIds.has(p.id));
@@ -264,7 +266,7 @@ function TemplateRepoPicker({
                       : `Runs on Cloudroom's servers, even while this ${COMPUTER} is off`
                     : `Runs on this ${COMPUTER}, only while it is awake`
                 }
-                onClick={() => setTarget(option)}
+                onClick={() => setPickedTarget(option)}
                 className={cn(
                   "flex h-6 cursor-pointer items-center gap-1 rounded-[5px] px-2 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40",
                   target === option && "bg-foreground/10 text-foreground",
@@ -294,6 +296,11 @@ function TemplateRepoPicker({
               : `Add to ${selected.size} repo${selected.size === 1 ? "" : "s"}`}
           </Button>
         </div>
+        {freePlan && target === "cloud" && !template.localOnly ? (
+          <p className="border-t border-foreground/10 px-3 py-2 text-2xs text-subtle-foreground">
+            Cloud runs count toward your 10 free Cloud threads/month.
+          </p>
+        ) : null}
       </PopoverContent>
     </Popover>
   );
@@ -425,6 +432,7 @@ function TemplateCard({
   activeIds,
   projects,
   usage,
+  freePlan,
   renderAgent,
   onAdd,
 }: {
@@ -433,6 +441,7 @@ function TemplateCard({
   activeIds: ReadonlySet<string>;
   projects: readonly TemplateProject[] | null;
   usage: TemplateUsage[string] | undefined;
+  freePlan?: boolean;
   renderAgent: (agent: AutomationAgentSummary) => ReactNode;
   onAdd: LoopTemplatesState["onAdd"];
 }) {
@@ -538,114 +547,10 @@ function TemplateCard({
           template={template}
           projects={projects}
           activeIds={activeIds}
+          freePlan={freePlan}
           onAdd={onAdd}
         />
       </div>
-    </div>
-  );
-}
-
-const SKELETON_TITLE_WIDTHS = ["w-1/2", "w-2/5", "w-3/5"] as const;
-
-function SkeletonCard({ index }: { index: number }) {
-  return (
-    <div className="grid grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-x-2.5 rounded-lg border border-border bg-surface-raised p-3.5">
-      <span className="size-4 rounded-[5px] bg-foreground/15" />
-      <span
-        className={cn(
-          "h-3 rounded bg-foreground/20",
-          SKELETON_TITLE_WIDTHS[index % 3],
-        )}
-      />
-      <span className="h-7 w-16 rounded-md border border-border" />
-      <span className="col-span-2 col-start-2 mt-3 flex flex-col gap-2">
-        <span className="h-2 w-11/12 rounded bg-foreground/12" />
-        <span
-          className={cn(
-            "h-2 rounded bg-foreground/12",
-            index % 2 ? "w-1/2" : "w-3/4",
-          )}
-        />
-      </span>
-      <span className="col-span-2 col-start-2 mt-4 flex gap-2">
-        <span className="h-1.5 w-16 rounded bg-foreground/10" />
-        <span className="h-1.5 w-10 rounded bg-foreground/10" />
-        <span className="h-1.5 w-20 rounded bg-foreground/10" />
-      </span>
-    </div>
-  );
-}
-
-function LockedTemplates({
-  checking,
-  onUpgrade,
-}: {
-  checking: boolean;
-  onUpgrade: () => void;
-}) {
-  return (
-    <div className="relative h-[44rem] overflow-hidden">
-      <div
-        aria-hidden
-        className="pointer-events-none select-none opacity-85 blur-[6px] [mask-image:linear-gradient(to_bottom,#000,rgb(0_0_0/0.55)_30%,transparent_62%)]"
-      >
-        {[0, 1, 2].map((group) => (
-          <div key={group}>
-            <div
-              className={cn(
-                "mb-2 flex items-center gap-2.5",
-                group > 0 && "mt-6",
-              )}
-            >
-              <span className="h-2 w-4 rounded bg-foreground/20" />
-              <span className="h-2 w-20 rounded bg-foreground/15" />
-              <span className="h-px flex-1 bg-border" />
-              <span className="h-1.5 w-28 rounded bg-foreground/10" />
-            </div>
-            <div className="grid grid-cols-3 gap-2">
-              {[0, 1, 2].map((card) => (
-                <SkeletonCard key={card} index={group + card} />
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
-      {checking ? null : (
-        <div className="absolute inset-x-0 top-60 flex flex-col items-center gap-3.5 px-6 text-center">
-          <Icon name="Zap" className="size-6 text-primary" aria-hidden />
-          <h2 className="text-2xl font-semibold text-foreground">
-            Unlock {LOOP_TEMPLATES.length} loop templates
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Ready-made loops that keep your repos secure, clean, and reviewed.
-          </p>
-          <div className="flex flex-wrap justify-center gap-1.5">
-            {TEMPLATE_CATEGORIES.map((category) => (
-              <span
-                key={category.id}
-                className="inline-flex h-6 items-center gap-1.5 rounded-full border border-border px-2.5 text-xs text-muted-foreground"
-              >
-                {category.label}
-                <span className="text-subtle-foreground">
-                  {
-                    LOOP_TEMPLATES.filter((t) => t.category === category.id)
-                      .length
-                  }
-                </span>
-              </span>
-            ))}
-          </div>
-          <Button
-            type="button"
-            className="mt-1 h-9 gap-1.5 px-4"
-            onClick={onUpgrade}
-          >
-            Upgrade to Pro
-            <span className="font-normal opacity-70">$50/mo</span>
-            <Icon name="ArrowRight" aria-hidden />
-          </Button>
-        </div>
-      )}
     </div>
   );
 }
@@ -741,13 +646,6 @@ export function LoopTemplatesView({
   const shown = LOOP_TEMPLATES.filter(
     (t) => category === "all" || t.category === category,
   );
-  if (templates.locked !== false)
-    return (
-      <LockedTemplates
-        checking={templates.locked === null}
-        onUpgrade={templates.onUpgrade}
-      />
-    );
 
   return (
     <div className="grid grid-cols-[10rem_minmax(0,1fr)] items-start gap-7">
@@ -799,6 +697,7 @@ export function LoopTemplatesView({
                       activeIds={new Set(active.keys())}
                       projects={templates.projects}
                       usage={templates.usage?.[template.id]}
+                      freePlan={templates.freePlan}
                       renderAgent={renderAgent}
                       onAdd={templates.onAdd}
                     />

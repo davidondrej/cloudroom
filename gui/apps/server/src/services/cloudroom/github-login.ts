@@ -6,13 +6,9 @@ import type { CodexAuthStatus } from "./client.js";
 import { cloudroom } from "./commands.js";
 import { macGithubAccount, macGithubToken, sandboxGithubLogin, type GithubAccount, type SandboxAccount } from "./sandboxes.js";
 
-// The public Client ID of Cloudroom's GitHub OAuth App, with Device Flow enabled. Sign-in stays off until it is set.
-const GITHUB_OAUTH_CLIENT_ID = "Ov23li9OTKaEYO6RAHos";
-// Sandboxes run `gh auth login --with-token`, which rejects tokens without read:org.
-const SCOPE = "repo read:org workflow";
-// Cloudroom's GitHub App "Cloudroom Agents" (docs/external/github.md), for people who give Cloud only the repos they
-// pick (#2084). Its login is the same device flow with this Client ID and no scope: the token reaches a repo only once
-// the app is installed on it, which the person does on `install`. An OAuth App's `repo` scope always means every repo.
+// Cloudroom's GitHub App "Cloudroom Agents" (docs/external/github.md, ADR 20261123-114456, #2084).
+// Its device flow uses this Client ID with no scope: the token reaches only the repos the user picks on `install`
+// (all repositories or selected ones). The old OAuth App stays only for website sign-in and already-saved logins.
 const GITHUB_APP = { clientId: "Iv23lilRDA0DFyES7mNr", install: "https://github.com/apps/cloudroom-agents/installations/new" };
 const PICK_REPOS_MS = 15 * 60_000;
 const idle: CodexAuthStatus = { state: "missing", email: null, plan: null, message: null, login_id: null, verification_url: null, user_code: null };
@@ -45,10 +41,10 @@ export function cancelGithubLogin(): void {
 export type GithubAuthStatus = CodexAuthStatus & { local_github?: { login: string | null } | null };
 
 /** GitHub login for cloud sandboxes. Cloud's saved login is the source of truth; local `gh` is detected locally
- *  and never uploaded until the user clicks Use @handle (ADR 20261124-215124). With `repos`, the login is the
- *  GitHub App's and waits for the user to pick repos on GitHub. */
-export async function githubAuth(deps: AppDeps, action?: "login" | "cancel", requestId = "", repos = false): Promise<GithubAuthStatus> {
-  if (action === "login") return start(deps, requestId, repos);
+ *  and never uploaded until the user clicks Use @handle (ADR 20261124-215124). Device login always uses the
+ *  Cloudroom Agents GitHub App and waits for the user to pick repos on GitHub (all or selected) unless installed. */
+export async function githubAuth(deps: AppDeps, action?: "login" | "cancel", requestId = ""): Promise<GithubAuthStatus> {
+  if (action === "login") return start(deps, requestId);
   if (action === "cancel" && login?.id === requestId) cancelGithubLogin();
   if (login?.status) return login.status;
   const connected: GithubAuthStatus = { ...idle, state: "connected", message: failure && Date.now() - failedAt < FAILURE_SHOWN_MS ? failure.message : null };
@@ -97,21 +93,19 @@ export async function disconnectGithub(deps: AppDeps): Promise<void> {
   });
 }
 
-async function start(deps: AppDeps, requestId: string, repos: boolean): Promise<CodexAuthStatus> {
-  if (GITHUB_OAUTH_CLIENT_ID.startsWith("REPLACE_WITH")) throw new ApiError(409, "github_auth_unsupported", "Connecting GitHub is not set up in this version of Cloudroom yet.");
+async function start(deps: AppDeps, requestId: string): Promise<CodexAuthStatus> {
   const account = await cloudroom(deps).sandboxes.account();
   if (!account) throw new ApiError(409, "github_auth_unavailable", "Sign in to Cloudroom first.");
   if (login?.id === requestId && login.status) return login.status;
   cancelGithubLogin();
   const current: Login = { id: requestId, abort: new AbortController(), status: null };
   login = current;
-  const clientId = repos ? GITHUB_APP.clientId : GITHUB_OAUTH_CLIENT_ID;
   let value: Record<string, unknown> | null = null;
   try {
-    value = await github("login/device/code", repos ? { client_id: clientId } : { client_id: clientId, scope: SCOPE }, current.abort.signal);
+    value = await github("login/device/code", { client_id: GITHUB_APP.clientId }, current.abort.signal);
     const code = codeSchema.parse(value);
     current.status = { ...idle, state: "waiting", login_id: requestId, verification_url: code.verification_uri, user_code: code.user_code };
-    void poll(deps, current, account, { clientId, repos, deviceCode: code.device_code, interval: code.interval, deadline: Date.now() + code.expires_in * 1000 });
+    void poll(deps, current, account, { deviceCode: code.device_code, interval: code.interval, deadline: Date.now() + code.expires_in * 1000 });
     return current.status;
   } catch {
     if (login === current) login = null;
@@ -139,22 +133,22 @@ async function reposPicked(current: Login, token: string): Promise<boolean> {
   return false;
 }
 
-type Flow = { clientId: string; repos: boolean; deviceCode: string; interval: number; deadline: number };
-async function poll(deps: AppDeps, current: Login, account: SandboxAccount, { clientId, repos, deviceCode, interval, deadline }: Flow): Promise<void> {
+type Flow = { deviceCode: string; interval: number; deadline: number };
+async function poll(deps: AppDeps, current: Login, account: SandboxAccount, { deviceCode, interval, deadline }: Flow): Promise<void> {
   const signal = current.abort.signal;
   const end = (status: CodexAuthStatus | null) => { if (login === current) { login = null; failure = status; failedAt = Date.now(); } };
   try {
     while (Date.now() < deadline) {
       await sleep(interval * 1000, undefined, { signal, ref: false });
       // A network blip only skips one check; the code stays valid until its deadline.
-      const value = await github("login/oauth/access_token", { client_id: clientId, device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }, signal).catch(() => null);
+      const value = await github("login/oauth/access_token", { client_id: GITHUB_APP.clientId, device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }, signal).catch(() => null);
       if (signal.aborted) return;
       if (!value || value.error === "authorization_pending") continue;
       if (value.error === "slow_down") { interval = Math.max(interval + 5, Number(value.interval) || 0); continue; }
       if (value.error === "expired_token") break;
       const token = typeof value.access_token === "string" && /^[\x21-\x7e]{1,4096}$/.test(value.access_token) ? value.access_token : null;
       if (!token) return end({ ...idle, state: "error", message: value.error === "access_denied" ? "GitHub sign-in was declined." : `GitHub sign-in failed${reason(value)}. Try again.` });
-      if (repos && !await reposPicked(current, token)) return end({ ...idle, state: "expired", message: "No repos were picked on GitHub. Try again. If your organization has to approve Cloudroom Agents, ask an owner first." });
+      if (!await reposPicked(current, token)) return end({ ...idle, state: "expired", message: "No repos were picked on GitHub. Try again. If your organization has to approve Cloudroom Agents, ask an owner first." });
       const entry = await sandboxGithubLogin(token);
       signal.throwIfAborted();
       await cloudroom(deps).sandboxes.saveLogin("github", entry, { account, signal }, false, true);

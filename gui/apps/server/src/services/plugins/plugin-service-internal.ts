@@ -235,6 +235,8 @@ export interface PluginThreadEventEmitter {
    * and only when a plugin is listening.
    */
   emitTurnFailed(threadId: string): void;
+  /** While plugins start, settles once the failed turns held meanwhile have reached their handlers; null otherwise. */
+  turnFailuresSettled(): Promise<void> | null;
 }
 
 export type PluginWireLookup<T> =

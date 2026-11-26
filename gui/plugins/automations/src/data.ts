@@ -1,4 +1,9 @@
 import type Database from "better-sqlite3";
+import {
+  cloudLoginName,
+  type CloudLoginProvider,
+} from "@cloudroom/domain/cloud-login";
+import { signInMark, waitsForSignIn } from "../lib/paused.js";
 import { createAutomationId, createAutomationRunId } from "./ids.js";
 import { computeNextScheduledTime } from "./schedule-helpers.js";
 import {
@@ -53,6 +58,8 @@ export const UNAVAILABLE = "Cloudroom unavailable: ";
 const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
 const STOP_RETRYING = 10;
 const PAUSE_MARK = "%(loop paused after % consecutive failures)";
+// A loop waiting for sign-in keeps its mark through other runs' ends, like an archive-paused one.
+const SIGN_IN_LIKE = `%${signInMark("%")}`;
 
 export interface AutomationRow {
   id: string;
@@ -889,12 +896,13 @@ function recordAutomationFailure(
        END,
        consecutive_failures = @consecutiveFailures,
        last_run_status = 'failed',
-       last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE @lastError END,
+       last_error = CASE WHEN enabled = 0 AND (last_error = @archivedError OR last_error LIKE @signIn) THEN last_error ELSE @lastError END,
        updated_at = @now
      WHERE id = @automationId`,
   ).run({
     automationId: args.automationId,
     archivedError: THREAD_ARCHIVED_ERROR,
+    signIn: SIGN_IN_LIKE,
     paused: boolToInt(paused),
     pausedRetryAt: paused ? pauseRetryAt : null,
     retryAt,
@@ -974,12 +982,13 @@ export function closeAutomationRun(
              WHEN @threadId IS NOT NULL THEN @threadId
              ELSE last_run_thread_id
            END,
-           last_error = CASE WHEN enabled = 0 AND last_error = @archivedError THEN last_error ELSE NULL END,
+           last_error = CASE WHEN enabled = 0 AND (last_error = @archivedError OR last_error LIKE @signIn) THEN last_error ELSE NULL END,
            updated_at = @now
          WHERE id = @automationId`,
       ).run({
         automationId: existing.automationId,
         archivedError: THREAD_ARCHIVED_ERROR,
+        signIn: SIGN_IN_LIKE,
         status: args.status,
         threadId: args.threadId ?? null,
         keep: args.keepFailureStreak ? 1 : 0,
@@ -990,6 +999,102 @@ export function closeAutomationRun(
     if (!run) return null;
     return { run, automationId: run.automationId };
   })();
+}
+
+/** A repeating loop's run whose own agent couldn't sign in is skipped, never counted: a login can't fix itself in
+ *  minutes (#609). The loop turns off with a mark until a turn of that agent works here (releaseSignInHolds). Turned off
+ *  by hand meanwhile, it stays off. A one-time loop's run fails as any other, as does one on agents that take turns or
+ *  on a fallback agent, so its next run or retry goes to another agent (fallback.ts). */
+export function closeRunForSignIn(
+  db: Db,
+  args: {
+    runId: string;
+    threadId: string;
+    providerId: string;
+    error: string;
+    now: number;
+  },
+): { run: AutomationRunRow; automationId: string } | null {
+  return db.transaction(() => {
+    const run = getAutomationRun(db, args.runId);
+    const before = run && getAutomation(db, run.automationId);
+    const execution =
+      before && parseRepairableAutomationExecution(before.execution);
+    const { runId, threadId, error, now } = args;
+    if (
+      !before ||
+      before.triggerType === "once" ||
+      execution?.mode !== "agent" ||
+      (execution.agents?.length ?? 0) > 1 ||
+      execution.providerId !== args.providerId
+    )
+      return closeAutomationRun(db, {
+        runId,
+        status: "failed",
+        error,
+        threadId,
+        now,
+      });
+    const closed = closeAutomationRun(db, {
+      runId,
+      status: "skipped",
+      skipReason: `sign-in: ${error}`,
+      threadId,
+      keepFailureStreak: true,
+      now,
+    });
+    if (!closed || !(before.enabled || waitsForSignIn(before.lastError)))
+      return closed;
+    const name =
+      cloudLoginName(args.providerId as CloudLoginProvider) ?? args.providerId;
+    db.prepare(
+      `UPDATE automations SET enabled = 0, last_error = @error, updated_at = @now WHERE id = @id`,
+    ).run({
+      id: before.id,
+      error: `Sign in to ${name} again. ${error}${signInMark(args.providerId)}`,
+      now,
+    });
+    noSignInHolds.delete(db);
+    return closed;
+  })();
+}
+
+// Databases known to hold no loop for sign-in, so a turn's end reads nothing (#609). A new hold drops its database.
+const noSignInHolds = new WeakSet<Db>();
+
+/** A Local turn of this agent worked, so its login does: loops waiting for it go on from their next slot, the missed
+ *  one skipped as a paused loop's are. One read, none while nothing waits. Returns the projects whose loops changed. */
+export function releaseSignInHolds(
+  db: Db,
+  providerId: string,
+  now: number,
+): string[] {
+  if (noSignInHolds.has(db)) return [];
+  const holds = db
+    .prepare(
+      `SELECT ${AUTOMATION_COLUMNS} FROM automations WHERE enabled = 0 AND last_error LIKE @signIn`,
+    )
+    .all({ signIn: SIGN_IN_LIKE })
+    .map(requiredAutomationRow);
+  const mark = signInMark(providerId);
+  const rows = holds.filter((row) => row.lastError?.endsWith(mark));
+  if (rows.length === holds.length) noSignInHolds.add(db);
+  for (const row of rows) {
+    const trigger = parseAutomationTrigger(row.triggerConfig);
+    db.prepare(
+      `UPDATE automations SET enabled = @enabled, next_run_at = @next, last_error = NULL, updated_at = @now WHERE id = @id`,
+    ).run({
+      id: row.id,
+      // One edited into a one-time loop while it waited just turns off.
+      enabled: boolToInt(trigger.triggerType !== "once"),
+      next:
+        trigger.triggerType === "schedule"
+          ? computeNextScheduledTime({ ...trigger, now })
+          : null,
+      now,
+    });
+  }
+  return [...new Set(rows.map((row) => row.projectId))];
 }
 
 /** A failed scheduled run whose thread came back and did its work (#1443) counts as succeeded, and its waiting retry
