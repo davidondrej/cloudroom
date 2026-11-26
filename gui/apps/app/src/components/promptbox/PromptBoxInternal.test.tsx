@@ -4099,6 +4099,22 @@ describe("PromptBoxInternal prompt actions", () => {
     expect(onAttachFiles).toHaveBeenCalledWith([image]);
   });
 
+  it("names a pasted image that arrives without a name", async () => {
+    const onAttachFiles = vi.fn().mockResolvedValue(undefined);
+    const { promptBoxRef } = renderPromptBox("", { onAttachFiles });
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({
+      files: [new File(["image"], "", { type: "image/png" })],
+    });
+
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalledTimes(1));
+    const [[pasted]] = onAttachFiles.mock.calls as [[File[]]];
+    expect(pasted.map(({ name, type }) => ({ name, type }))).toEqual([
+      { name: "image.png", type: "image/png" },
+    ]);
+  });
+
   it("pastes deeply nested clipboard html without overflowing the stack", async () => {
     const { changes, promptBoxRef } = renderPromptBox("");
     const depth = 2_000;
@@ -4201,6 +4217,51 @@ describe("PromptBoxInternal prompt actions", () => {
     await waitFor(() =>
       expect(screen.queryByRole("menu", { name: "Prompt actions" })).toBeNull(),
     );
+  });
+
+  it("opens an images-only picker from Photos on touch screens", async () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({ attachments: { onAttachFiles: vi.fn() } })}
+        />,
+      );
+      const photoInput = document.querySelector(
+        'input[type="file"][accept="image/*"]',
+      );
+      if (!(photoInput instanceof HTMLInputElement)) {
+        throw new Error("Photo input was not rendered");
+      }
+      const clickPhotoInput = vi
+        .spyOn(photoInput, "click")
+        .mockImplementation(() => {});
+
+      // Touch screens show the menu as a bottom drawer.
+      const trigger = screen.getByRole("button", { name: "Prompt actions" });
+      fireEvent.pointerDown(trigger, { button: 0 });
+      fireEvent.click(trigger);
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Photos" }));
+
+      expect(clickPhotoInput).toHaveBeenCalledOnce();
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
+  it("keeps Photos out of the menu with a mouse", async () => {
+    render(
+      <PromptBoxInternal
+        {...createPromptBoxProps({ attachments: { onAttachFiles: vi.fn() } })}
+      />,
+    );
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Prompt actions" }),
+      { button: 0 },
+    );
+    const menu = await screen.findByRole("menu", { name: "Prompt actions" });
+    expect(within(menu).getByRole("menuitem", { name: "Attach files" })).toBeTruthy();
+    expect(within(menu).queryByRole("menuitem", { name: "Photos" })).toBeNull();
   });
 
   it("inserts the skills trigger with no trailing space", async () => {

@@ -187,6 +187,7 @@ export function PromptBoxInternal({
   const formRef = useRef<HTMLFormElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const [expandedImageIndex, setExpandedImageIndex] = useState<number | null>(
     null,
   );
@@ -516,6 +517,18 @@ export function PromptBoxInternal({
             event.target.value = "";
           }}
         />
+        {/* Images only: phones then open their photo picker, newest screenshot first. */}
+        <input
+          ref={photoInputRef}
+          type="file"
+          accept="image/*"
+          multiple
+          className="hidden"
+          onChange={(event) => {
+            attachFiles(Array.from(event.target.files ?? []));
+            event.target.value = "";
+          }}
+        />
         <PromptDropOverlay
           direction={fileDrop.direction}
           isCompact={isCompact}
@@ -661,6 +674,11 @@ export function PromptBoxInternal({
                       onAttach={
                         onAttachFiles
                           ? () => fileInputRef.current?.click()
+                          : undefined
+                      }
+                      onAttachPhotos={
+                        onAttachFiles && isPointerCoarse
+                          ? () => photoInputRef.current?.click()
                           : undefined
                       }
                       onAction={typeahead.insertAction}

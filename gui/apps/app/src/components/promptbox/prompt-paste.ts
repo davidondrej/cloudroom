@@ -36,7 +36,19 @@ const unixNewlines = (text: string) => text.replace(/\r\n?/gu, "\n");
 export function clipboardFiles(clipboard: DataTransfer | null): File[] {
   return Array.from(clipboard?.items ?? [])
     .map((item) => (item.kind === "file" ? item.getAsFile() : null))
-    .filter((file): file is File => file !== null);
+    .filter((file): file is File => file !== null)
+    .map(withFileName);
+}
+
+// Chrome on Android pastes keyboard images with no name, and uploads need one.
+function withFileName(file: File): File {
+  if (file.name.trim().length > 0) return file;
+  const extension = /^[\w-]+\/([\w-]+)/u.exec(file.type)?.[1] ?? "bin";
+  const base = file.type.startsWith("image/") ? "image" : "file";
+  return new File([file], `${base}.${extension}`, {
+    type: file.type,
+    lastModified: file.lastModified,
+  });
 }
 
 export function trimTrailingPromptNewlines(
